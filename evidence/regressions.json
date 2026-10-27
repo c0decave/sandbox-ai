@@ -1,0 +1,52 @@
+{
+  "recorded_at_utc": "2026-10-27T14:00:50.591445+00:00",
+  "source_sha256": "7cf7de3eb7c0c01e2ac7faa63d0d05f816f05d79bf2a60c9e45af3e07366628a",
+  "observed_red_run": {
+    "command": "python3 -m pytest tests/test_agent_sandbox_contracts.py -q --tb=short",
+    "passed": 105,
+    "failed": 2,
+    "failure": "Both regression tests failed with DID NOT RAISE before implementation changes."
+  },
+  "observed_green_run": {
+    "command": "python3 -m pytest tests/test_agent_sandbox_contracts.py -q --tb=short",
+    "passed": 107,
+    "failed": 0,
+    "note": "Immediately after the two source fixes, before the additional manifest test was added."
+  },
+  "fixes": [
+    {
+      "bug": "Later parent bind hides an earlier child mount; validation inspected the historic child instead of the visible parent.",
+      "fix": "Inspect bindings in reverse creation order when checking destination symlinks.",
+      "test": "test_regression_later_parent_mount_hides_previous_child"
+    },
+    {
+      "bug": "A failure while allocating setup pipes left descriptors from earlier allocations open.",
+      "fix": "Initialize descriptors to -1 and allocate all pipes inside the cleanup try/finally scope.",
+      "test": "test_regression_partial_pipe_allocation_closes_owned_descriptors",
+      "additional_matrix": "test_pipe_allocation_failure_matrix: all four allocation positions"
+    }
+  ],
+  "existing_regression_guards": [
+    {
+      "behavior": "Codex uses external isolation by default so nested native UID mapping does not prevent file writes.",
+      "unit_test": "test_codex_uses_verified_external_sandbox_by_default",
+      "live_test": "test_practical_agent_tools: Codex on both backends"
+    },
+    {
+      "behavior": "Missing workspace created; existing data and permissions preserved.",
+      "unit_test": "test_missing_workspace_is_created_including_parents; test_existing_workspace_warns_and_preserves_content_and_permissions"
+    },
+    {
+      "behavior": "Default auth copied automatically without replacing refreshed sandbox state or mutating host originals.",
+      "unit_test": "test_default_auth_is_automatically_copied_for_each_agent; test_persistent_auth_refresh_reuse_matrix"
+    },
+    {
+      "behavior": "OpenCode Cloud allowed by default; explicit local-only mode removes cloud defaults.",
+      "unit_test": "test_opencode_cloud_endpoint_is_enabled_by_default_only_for_opencode; test_explicit_local_config_disables_cloud_and_is_copied_privately"
+    },
+    {
+      "behavior": "Firejail passthrough, remaining capabilities and missing security flags reject execution before config or agent access.",
+      "unit_test": "test_guard_rejects_firejail_passthrough; test_verify_inner; test_inner_guard[sad]"
+    }
+  ]
+}

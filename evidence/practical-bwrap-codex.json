@@ -1,0 +1,26 @@
+{
+  "agent": "codex",
+  "backend": "bwrap",
+  "model": "gpt-6.1-sol",
+  "status": "passed",
+  "checks": {
+    "read_unprompted_nonce": true,
+    "wrote_correct_result": true,
+    "shell_execution_verified": true
+  },
+  "completed_shell_tools": 2,
+  "reported_cost": null,
+  "input": {
+    "left": 15144,
+    "right": 36219,
+    "nonce": "3b288d7b472d4630b21596fd71f63ef0"
+  },
+  "result": {
+    "sum": 51363,
+    "nonce": "3b288d7b472d4630b21596fd71f63ef0"
+  },
+  "shell_marker": "SHELL_OK_3b288d7b472d4630b21596fd71f63ef0",
+  "codex_native_sandbox": "danger-full-access",
+  "codex_sandbox_selection": "launcher default, not a test-only override",
+  "external_isolation": "outer namespace + verified inner Firejail"
+}

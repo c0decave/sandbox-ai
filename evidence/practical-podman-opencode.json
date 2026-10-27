@@ -1,0 +1,23 @@
+{
+  "agent": "opencode",
+  "backend": "podman",
+  "model": "opencode/glm-5.3-flash-free",
+  "status": "passed",
+  "checks": {
+    "read_unprompted_nonce": true,
+    "wrote_correct_result": true,
+    "shell_execution_verified": true
+  },
+  "completed_shell_tools": 1,
+  "reported_cost": 0,
+  "input": {
+    "left": 12595,
+    "right": 29038,
+    "nonce": "3133716ee34c499da9fb7863c99cea8a"
+  },
+  "result": {
+    "sum": 41633,
+    "nonce": "3133716ee34c499da9fb7863c99cea8a"
+  },
+  "shell_marker": "SHELL_OK_3133716ee34c499da9fb7863c99cea8a"
+}

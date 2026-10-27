@@ -1,0 +1,26 @@
+{
+  "agent": "codex",
+  "backend": "podman",
+  "model": "gpt-6.1-sol",
+  "status": "passed",
+  "checks": {
+    "read_unprompted_nonce": true,
+    "wrote_correct_result": true,
+    "shell_execution_verified": true
+  },
+  "completed_shell_tools": 3,
+  "reported_cost": null,
+  "input": {
+    "left": 40171,
+    "right": 8179,
+    "nonce": "9ceb1ff370084795af4d8688f106b2b8"
+  },
+  "result": {
+    "sum": 48350,
+    "nonce": "9ceb1ff370084795af4d8688f106b2b8"
+  },
+  "shell_marker": "SHELL_OK_9ceb1ff370084795af4d8688f106b2b8",
+  "codex_native_sandbox": "danger-full-access",
+  "codex_sandbox_selection": "launcher default, not a test-only override",
+  "external_isolation": "outer namespace + verified inner Firejail"
+}

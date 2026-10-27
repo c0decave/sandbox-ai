@@ -1,0 +1,180 @@
+{
+  "recorded_at_utc": "2026-10-27T14:02:31.680471+00:00",
+  "unit_tests": {
+    "command": "python3 -m pytest tests/test_agent_sandbox.py tests/test_agent_sandbox_contracts.py tests/test_agent_sandbox_matrix.py tests/test_agent_sandbox_edges.py -q",
+    "passed": 314,
+    "subtests_passed": 64,
+    "failed": 0,
+    "skipped": 0,
+    "exit_code": 0,
+    "function_contracts": 35,
+    "coverage": {
+      "covered_lines": 548,
+      "num_statements": 549,
+      "percent_covered": 99.50920245398773,
+      "percent_covered_display": "99",
+      "missing_lines": 1,
+      "excluded_lines": 0,
+      "percent_statements_covered": 99.81785063752277,
+      "percent_statements_covered_display": "99",
+      "num_branches": 266,
+      "num_partial_branches": 3,
+      "covered_branches": 263,
+      "missing_branches": 3,
+      "percent_branches_covered": 98.87218045112782,
+      "percent_branches_covered_display": "99"
+    },
+    "matrix_report": "test-matrix.json",
+    "regressions": "regressions.json"
+  },
+  "practical_tests": {
+    "command": "python3 -m pytest tests/test_agent_sandbox_live.py --agent-live --agent-provider-tests -k practical_agent_tools -q --tb=short",
+    "passed_cases": 4,
+    "cases": [
+      {
+        "agent": "codex",
+        "backend": "podman",
+        "model": "gpt-6.1-sol",
+        "status": "passed",
+        "reported_cost": null,
+        "evidence": "practical-podman-codex.json",
+        "evidence_written_utc": "2026-10-27T13:59:53.476965+00:00"
+      },
+      {
+        "agent": "opencode",
+        "backend": "podman",
+        "model": "opencode/glm-5.3-flash-free",
+        "status": "passed",
+        "reported_cost": 0,
+        "evidence": "practical-podman-opencode.json",
+        "evidence_written_utc": "2026-10-27T14:00:21.126450+00:00"
+      },
+      {
+        "agent": "codex",
+        "backend": "bwrap",
+        "model": "gpt-6.1-sol",
+        "status": "passed",
+        "reported_cost": null,
+        "evidence": "practical-bwrap-codex.json",
+        "evidence_written_utc": "2026-10-27T14:00:48.562447+00:00"
+      },
+      {
+        "agent": "opencode",
+        "backend": "bwrap",
+        "model": "opencode/glm-5.3-flash-free",
+        "status": "passed",
+        "reported_cost": 0,
+        "evidence": "practical-bwrap-opencode.json",
+        "evidence_written_utc": "2026-10-27T14:01:07.241295+00:00"
+      }
+    ],
+    "checks": [
+      "random input read from workspace, absent from prompt",
+      "correct result.json persisted to host workspace",
+      "verified.txt persisted by successful model shell tool",
+      "successful structured tool and completion events"
+    ],
+    "codex_native_sandbox": "danger-full-access selected by launcher default; verified outer isolation and inner Firejail retained",
+    "codex_billing": "existing authenticated account; no zero-price claim",
+    "opencode_free_model": "opencode/glm-5.3-flash-free; catalog input/output price zero and reported test cost zero; no auth copied"
+  },
+  "versions_checked": {
+    "podman": "6.1.4",
+    "bubblewrap": "0.13.1",
+    "host_firejail": "0.9.80",
+    "image_firejail": "0.9.72",
+    "image_codex": "0.164.0",
+    "image_claude": "2.1.311",
+    "image_opencode": "1.18.32"
+  },
+  "source_sha256_at_report_generation": {
+    "sandbox/agent_sandbox.py": "7cf7de3eb7c0c01e2ac7faa63d0d05f816f05d79bf2a60c9e45af3e07366628a",
+    "tests/test_agent_sandbox_edges.py": "517c9723d44ea8dd3a44256956ceeadcb75bc828ba95c27dab281abad238a34e",
+    "tests/conftest.py": "cc57525b210dd1c8032ab7432de43874755e0093ff475e41026b2b7f03287351",
+    "tests/test_agent_sandbox_live.py": "2d7aab7307da15e0467f108cc7a40f2fd3dff42ba737c62a049b36f96759c0ae",
+    "tests/test_agent_sandbox.py": "96f663acc279966774727ef2a382460eed31366638edafd6e1df4f9c71e7e526",
+    "tests/test_agent_sandbox_matrix.py": "7bf36fc81675e55b38f2d158f6d0438f007deb24f84418a0ca5a38982a968f81",
+    "tests/test_agent_sandbox_contracts.py": "03f76fee13b1ea59da0e09b71adefb275a5528daf51e8095011aaa2278e369fe"
+  },
+  "limitations": [
+    "Claude authenticated model inference was not run",
+    "Token refresh and concurrent persistent-state sessions are not proven by these tests",
+    "Functional validation is not a kernel-escape audit",
+    "Model availability and free pricing may change"
+  ],
+  "remaining_work_by_urgency": [
+    {
+      "priority": "P1",
+      "work": "Reject dangerously broad workspaces and state/workspace overlap; harden concurrent state and path races"
+    },
+    {
+      "priority": "P2",
+      "work": "Add configurable CPU/RAM/PID bounds and real forced-interruption/concurrent-session checks; unit cleanup and abort paths are now covered"
+    },
+    {
+      "priority": "P2",
+      "work": "Test Claude model file writes, token refresh and subsequent sessions"
+    },
+    {
+      "priority": "P3",
+      "work": "Pin base image digest and system package versions"
+    }
+  ],
+  "bundle_scrub": {
+    "legacy_launcher_references": 0,
+    "operator_absolute_paths": 0,
+    "rfc1918_addresses": 0,
+    "credential_files": 0,
+    "generated_caches_removed": true
+  },
+  "live_tests": {
+    "command": "python3 -m pytest tests/test_agent_sandbox_live.py --agent-live --agent-provider-tests -k 'not real_authenticated_model_response' -q --tb=short",
+    "passed": 22,
+    "deselected": 4,
+    "failed": 0,
+    "skipped": 0,
+    "exit_code": 0,
+    "deselection_reason": "Older reply-only inference cases omitted in favor of four stronger practical file/tool cases.",
+    "test_cases": [
+      "test_real_probe[podman]",
+      "test_real_probe[bwrap]",
+      "test_image_node_supports_current_agents",
+      "test_real_cli_version[podman-codex]",
+      "test_real_cli_version[podman-claude]",
+      "test_real_cli_version[podman-opencode]",
+      "test_real_cli_version[bwrap-codex]",
+      "test_real_cli_version[bwrap-claude]",
+      "test_real_cli_version[bwrap-opencode]",
+      "test_real_auth_copy_and_mount_permissions[podman-codex-.codex/auth.json]",
+      "test_real_auth_copy_and_mount_permissions[podman-claude-.claude/.credentials.json]",
+      "test_real_auth_copy_and_mount_permissions[podman-opencode-.local/share/opencode/auth.json]",
+      "test_real_auth_copy_and_mount_permissions[bwrap-codex-.codex/auth.json]",
+      "test_real_auth_copy_and_mount_permissions[bwrap-claude-.claude/.credentials.json]",
+      "test_real_auth_copy_and_mount_permissions[bwrap-opencode-.local/share/opencode/auth.json]",
+      "test_real_allowed_https_and_blocked_egress[podman]",
+      "test_real_allowed_https_and_blocked_egress[bwrap]",
+      "test_real_named_network_static_ips_and_cidr_permissions",
+      "test_practical_agent_tools[podman-codex]",
+      "test_practical_agent_tools[podman-opencode]",
+      "test_practical_agent_tools[bwrap-codex]",
+      "test_practical_agent_tools[bwrap-opencode]"
+    ],
+    "coverage": [
+      "verified nested Firejail on both backends",
+      "all three CLI versions on both backends",
+      "private automatic JSON auth copies; host originals unchanged",
+      "read-only mounts reject writes; writable mounts persist host-side",
+      "missing workspace creation",
+      "allowed HTTPS works; unpermitted target, port and unpinned DNS blocked",
+      "Podman named network with static IPv4/IPv6 and CIDR access",
+      "four real model file-read, file-write and shell-verification cases"
+    ],
+    "owned_test_pods_remaining_after_run": 0
+  },
+  "documentation_checks": {
+    "local_links_valid": 25,
+    "shell_blocks_valid": 34,
+    "executable_scripts_syntax_valid": 4,
+    "cli_plans_valid": 3
+  }
+}

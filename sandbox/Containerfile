@@ -1,0 +1,18 @@
+FROM docker.io/library/node:22-bookworm-slim
+
+# Pin these build args to your reviewed CLI versions for reproducible installs.
+ARG CODEX_VERSION=latest
+ARG CLAUDE_VERSION=latest
+ARG OPENCODE_VERSION=latest
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates bash git curl python3 firejail nftables \
+    ripgrep less procps util-linux build-essential \
+    && rm -rf /var/lib/apt/lists/*
+RUN npm install --global \
+    "@openai/codex@${CODEX_VERSION}" \
+    "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
+    "opencode-ai@${OPENCODE_VERSION}" \
+    && npm cache clean --force
+RUN codex --version && claude --version && opencode --version
+ENV HOME=/root
+WORKDIR /work

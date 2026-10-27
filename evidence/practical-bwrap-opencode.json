@@ -1,0 +1,23 @@
+{
+  "agent": "opencode",
+  "backend": "bwrap",
+  "model": "opencode/glm-5.3-flash-free",
+  "status": "passed",
+  "checks": {
+    "read_unprompted_nonce": true,
+    "wrote_correct_result": true,
+    "shell_execution_verified": true
+  },
+  "completed_shell_tools": 1,
+  "reported_cost": 0,
+  "input": {
+    "left": 18406,
+    "right": 54915,
+    "nonce": "47e6d6831d9e4d7eaed817bbcb7c0a63"
+  },
+  "result": {
+    "sum": 73321,
+    "nonce": "47e6d6831d9e4d7eaed817bbcb7c0a63"
+  },
+  "shell_marker": "SHELL_OK_47e6d6831d9e4d7eaed817bbcb7c0a63"
+}
