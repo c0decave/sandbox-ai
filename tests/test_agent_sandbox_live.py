@@ -95,7 +95,7 @@ for name in ['codex','claude','opencode']:
 for name in ['python3','pip3','uv','uvx','firejail','nft','setpriv','git','rg',
              'vim','nc','host','dig','ping','curl','wget']:
     assert shutil.which(name), name
-for name in ['gcc','g++','make','less','ps']:
+for name in ['gcc','g++','make','less']:  # ps arrives with the tools added in 0.1.20
     assert not shutil.which(name), name
 """
     result = subprocess.run([*engine, "run", "--rm", "--pull=never", "--network=none",
@@ -120,7 +120,8 @@ def test_real_auth_copy_and_mount_permissions(request, backend, agent, relative,
     writable = tmp_path / "writable"
     writable.mkdir()
     source = Path.home() / relative
-    assert source.is_file(), "A real auth file is required for this test"
+    if not source.is_file():
+        pytest.skip(f"needs a real login of {agent} on this host ({source})")
     before = hashlib.sha256(source.read_bytes()).digest()
     script = '''
 import json,os,pathlib,stat,sys

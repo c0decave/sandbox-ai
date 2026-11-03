@@ -592,12 +592,35 @@ def test_read_ready(scenario):
 def test_stop_process(scenario):
     process = Mock()
     process.poll.return_value = 0 if scenario == "edge" else None
-    if scenario == "sad":
+    if scenario == "happy":
+        # The proxy: its stdin closes, it exits; no signal (it runs as another user, without CAP_KILL).
+        s.stop_process(process)
+        assert process.stdin.close.call_count == 1 and process.terminate.call_count == 0
+        # Still running after that and not ours to signal: left to the end of the PID namespace.
+        other = Mock()
+        other.poll.return_value = None
+        other.wait.side_effect = subprocess.TimeoutExpired("fixture", 2)
+        other.terminate.side_effect = PermissionError(1, "Operation not permitted")
+        s.stop_process(other)
+        assert other.kill.call_count == 0
+    elif scenario == "sad":
+        process.stdin = None
         process.wait.side_effect = [subprocess.TimeoutExpired("fixture", 5), 0]
-    s.stop_process(process)
-    assert process.terminate.call_count == (0 if scenario == "edge" else 1)
-    assert process.kill.call_count == (1 if scenario == "sad" else 0)
+        s.stop_process(process)
+        assert process.terminate.call_count == 1 and process.kill.call_count == 1
+    else:
+        s.stop_process(process)
+        assert process.terminate.call_count == 0 and process.kill.call_count == 0
     s.stop_process(None)
+
+
+def test_exit_on_eof(scenario):
+    import io
+    exits = []
+    stream = {"happy": io.BytesIO(b"x" * 10000), "sad": Mock(read=Mock(side_effect=OSError(9, "bad"))),
+              "edge": io.BytesIO(b"")}[scenario]
+    rt.exit_on_eof(stream, exit=exits.append)
+    assert exits == [0]
 
 
 def test_subordinate_range(scenario, monkeypatch):
@@ -772,13 +795,17 @@ def test_start_loggers(scenario, tmp_path, monkeypatch):
             s.start_loggers()
         assert started == []
         return
-    config.write_text(json.dumps({"pinned": ["api.openai.com"] if scenario == "happy" else [], "watch": ["/work"]}))
+    config.write_text(json.dumps({"pinned": ["api.openai.com"] if scenario == "happy" else [], "watch": ["/work"],
+                                  "env": {"API_KEY": "value-of-the-key", "PATH": "/usr/bin"},
+                                  "secret_names": ["API_KEY", "MISSING"] if scenario == "happy" else []}))
     stop = s.start_loggers()
     assert not stop.is_set() and stop.seen == set() and len(stop.threads) == 4
     targets = {target.__name__: args for target, args in started}
     assert targets["dns_logger"] == ({"api.openai.com"} if scenario == "happy" else set(), 53, stop, None, ())
     assert targets["file_logger"] == (["/work"], stop)
-    assert "denied_loop" in targets and targets["process_logger"] == (stop,)
+    # The process log redacts the values of --env and --secret-env variables by value.
+    assert "denied_loop" in targets and targets["process_logger"] == (
+        stop, 0.5, Path("/proc"), ["value-of-the-key"] if scenario == "happy" else [])
 
 
 def test_poll_denied(scenario, tmp_path, monkeypatch):
@@ -4541,7 +4568,7 @@ def test_limits_prefix(scenario, monkeypatch):
         monkeypatch.setattr(s.shutil, "which", lambda name: "/usr/bin/" + name)
         monkeypatch.setattr(s, "user_manager_running", lambda: True)
         assert s.limits_prefix(a) == ["systemd-run", "--user", "--scope", "--quiet", "--collect", "-p", "MemoryMax=8G",
-                                      "-p", "CPUQuota=400%", "-p", "TasksMax=4096", "--"]
+                                      "-p", "MemorySwapMax=8G", "-p", "CPUQuota=400%", "-p", "TasksMax=4096", "--"]
     elif scenario == "sad":
         monkeypatch.setattr(s.shutil, "which", lambda name: None)
         assert s.limits_prefix(a) == []
@@ -4889,3 +4916,128 @@ def test_browser_bindings_and_environment(tmp_path):
     env = s.agent_environment(a)
     assert env["BROWSER"] == "/sandbox/session/bin/xdg-open" and env["PATH"].startswith("/sandbox/session/bin:")
     assert "BROWSER" not in s.agent_environment(s.parse_args(["claude", "--ask", "off"]))
+
+
+def test_question_name(scenario):
+    if scenario == "happy":
+        assert rt.question_name("API.Example.org.") == "api.example.org"
+        assert rt.question_name("xn--bcher-kva.example") == "xn--bcher-kva.example"
+    elif scenario == "sad":
+        for bad in ("pypi.org\n1-1-1  x", "a b", "evil\x1b[8m.org", "b\u00fccher.example", "", "-x.org", "a..b"):
+            assert rt.question_name(bad) is None, bad
+    else:
+        assert rt.question_name(None) is None and rt.question_name("a" * 254) is None
+        assert rt.question_name("localhost") == "localhost"
+
+
+def test_printable_text(scenario):
+    if scenario == "happy":
+        assert rt.printable_text("https://github.com/a/b") == "https://github.com/a/b"
+    elif scenario == "sad":
+        assert rt.printable_text("x\n\x1b[31m\u202e") == "x%0A%1B[31m%E2%80%AE"
+        assert rt.printable_text("100%") == "100%25"  # unambiguous
+    else:
+        assert rt.printable_text("a" * 10, limit=4) == "aaaa" and rt.printable_text("") == ""
+
+
+def test_write_new(scenario, tmp_path):
+    target = tmp_path / "allow.json"
+    if scenario == "happy":
+        rt.write_new(target, "{}", 0o644)
+        assert target.read_text() == "{}" and stat.S_IMODE(target.stat().st_mode) == 0o644
+        rt.write_new(target, "[]", 0o600)
+        assert target.read_text() == "[]" and stat.S_IMODE(target.stat().st_mode) == 0o600
+    elif scenario == "sad":
+        # A planted symlink at any temporary name is removed, never followed.
+        victim = tmp_path / "victim"
+        victim.write_text("keep")
+        temporary = target.with_name(f".{target.name}.{os.getpid()}.{threading.get_ident()}")
+        temporary.symlink_to(victim)
+        rt.write_new(target, "new", 0o644)
+        assert victim.read_text() == "keep" and target.read_text() == "new" and not target.is_symlink()
+    else:
+        with pytest.raises(OSError):
+            rt.write_new(tmp_path / "missing" / "x.json", "{}", 0o644)
+        assert not (tmp_path / "missing").exists()
+
+
+def test_review_findings_after_0_1_20(tmp_path, monkeypatch):
+    """Findings of the review of approvals, secrets and browser requests, each kept closed."""
+    rules = []
+    network = rt.RuntimeNetwork({}, tmp_path / "allow.json", rules.append)
+    # Approved destinations never take SSH; what the human allows with sandbox-ai net does.
+    network.change({"op": "allow", "tcp": [["192.0.2.9", 443]]}, ssh=False)
+    assert json.loads((tmp_path / "allow.json").read_text())["ssh"] == []
+    network.change({"op": "allow", "tcp": [["192.0.2.9", 443]]})
+    assert json.loads((tmp_path / "allow.json").read_text())["ssh"] == ["192.0.2.9"]
+    network.change({"op": "allow", "tcp": [["192.0.2.10", 22]]}, ssh=False)
+    assert json.loads((tmp_path / "allow.json").read_text())["ssh"] == ["192.0.2.9"]
+    # IDs carry a random part: two sandboxes asking in the same second do not collide.
+    one = rt.ApprovalBroker(tmp_path / "a1", network, timeout=0.2, poll=0.02)
+    two = rt.ApprovalBroker(tmp_path / "a2", network, timeout=0.2, poll=0.02)
+    one.ask("dns", {"name": "a.example"}, wait=False)
+    two.ask("dns", {"name": "a.example"}, wait=False)
+    ids = [json.loads(next((tmp_path / d).glob("*.json")).read_text())["id"] for d in ("a1", "a2")]
+    assert ids[0] != ids[1]
+    # A deny counts for the run (no re-asking to wear the human down); "once" may be asked again.
+    broker = rt.ApprovalBroker(tmp_path / "a3", network, timeout=3, poll=0.02)
+    details = {"destination": "198.51.100.1:443", "address": "198.51.100.1", "port": 443}
+    results = []
+    thread = threading.Thread(target=lambda: results.append(broker.ask("connect", details)))
+    thread.start()
+    answer_file(tmp_path / "a3", "deny", "run")
+    thread.join(5)
+    assert results[0]["decision"] == "deny"
+    assert broker.ask("connect", details)["decision"] == "deny" and len(list((tmp_path / "a3").glob("*.json"))) == 1
+    # Open questions are capped; beyond that the agent is refused without asking.
+    capped = rt.ApprovalBroker(tmp_path / "a4", network, timeout=5, poll=0.05)
+    for n in range(rt.OPEN_QUESTIONS):
+        capped.ask("dns", {"name": f"n{n}.example"}, wait=False)
+    assert capped.ask("dns", {"name": "more.example"}, wait=False)["reason"] == "too many questions"
+    assert len(list((tmp_path / "a4").glob("*.json"))) == rt.OPEN_QUESTIONS
+    # A push answer covers the same warnings only; "always" is the run at most.
+    assert rt.ApprovalBroker.key("push", {"url": "u", "message": "a"}) != rt.ApprovalBroker.key("push", {"url": "u", "message": "b"})
+    # A name the agent controls opens only public addresses.
+    broker._apply("dns", {"name": "x.example"}, {"addresses": ["10.0.0.5", "127.0.0.1", "151.101.0.223"], "scope": "run"})
+    assert json.loads((tmp_path / "allow.json").read_text())["https"] == ["151.101.0.223/32"]
+    # Command lines: URL passwords, secret-named flags, curl -u.
+    for text in ("git clone https://oauth2:s3cr3t-value@git.example/x", "tool --api-key s3cr3t-value",
+                 "tool --password=s3cr3t-value", "curl -u admin:s3cr3t-value https://x"):
+        assert "s3cr3t-value" not in rt.redact_text(text), text
+    assert rt.redact_text("ls -la --color=auto /work") == "ls -la --color=auto /work"
+
+
+def test_remembered_approvals_inside_a_workspace_are_not_read(tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    (work / ".config/sandbox-ai").mkdir(parents=True)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(work / ".config"))
+    (work / ".config/sandbox-ai/approved.json").write_text(json.dumps({str(work.resolve()): {"hosts": ["evil.example"]}}))
+    a = s.parse_args(["claude", "--workspace", str(work)])
+    notes = s.apply_remembered_approvals(a)
+    assert "evil.example" not in a.allow_host and "not read" in notes[0]
+
+
+def test_firewall_accepts_what_it_redirects_to_the_proxy():
+    """Found by the e2e run on a real host: after the NAT redirect the filter hook still sees the original
+    output interface, so the redirected connection must be accepted by destination, before any drop."""
+    rules = s.firewall_rules([], ["192.0.2.1"], proxy={"port": 15001, "loopback": []})
+    output = rules.split(" chain output ")[1].split("\n }")[0].splitlines()
+    accepts = [i for i, line in enumerate(output) if "ct status dnat" in line]
+    assert [output[i].strip() for i in accepts] == ["ct status dnat ip daddr 127.0.0.1 tcp dport 15001 accept",
+                                                    "ct status dnat ip6 daddr ::1 tcp dport 15001 accept"]
+    assert accepts[-1] < next(i for i, line in enumerate(output) if "jump runtime" in line)
+    assert "ct status dnat" not in s.firewall_rules([], ["192.0.2.1"])  # without the proxy: no such door
+
+
+def test_stdin_is_pipe(scenario, tmp_path):
+    if scenario == "happy":
+        r, w = os.pipe()
+        try:
+            assert rt.stdin_is_pipe(r)
+        finally:
+            os.close(r), os.close(w)
+    elif scenario == "sad":
+        with open(tmp_path / "f", "w") as stream:
+            assert not rt.stdin_is_pipe(stream.fileno())  # /dev/null, a file, a terminal: never exits on its own
+    else:
+        assert not rt.stdin_is_pipe(987654)

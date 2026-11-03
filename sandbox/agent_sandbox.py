@@ -1564,6 +1564,8 @@ def check_host_sources(a):
         check_host_source(a, git_token_credential(value, "file")["file"], "--git-token-file")
     if a.git_credentials:
         check_host_source(a, a.git_credentials, "--git-credentials")
+    # The control socket and the approvals live there; the agent must not reach them through a mount.
+    check_host_source(a, runs_dir(), "The run directory (XDG_RUNTIME_DIR, else XDG_STATE_HOME)")
     if privacy_rules_dir(a):
         # The agent must neither read the rules (they name what is private) nor change them.
         check_host_source(a, privacy_rules_dir(a), "--privacy-rules")
@@ -1682,8 +1684,14 @@ def firewall_rules(networks, addresses, log=False, dns=(), allow_all=False, tcp=
              " chain runtime {", " }",
              " chain output { type filter hook output priority 0; policy drop;",
              '  oifname "lo" accept', "  ct state established,related accept",
-             "  ip6 hoplimit 255 icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept",
-             "  jump runtime"]
+             "  ip6 hoplimit 255 icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept"]
+    if proxy:
+        # Redirected to the proxy: after the NAT hook the packet goes to the proxy's port on loopback, but
+        # this hook still sees the original output interface, so "oifname lo" does not match it.
+        port = int(proxy["port"])
+        lines += [f"  ct status dnat ip daddr 127.0.0.1 tcp dport {port} accept",
+                  f"  ct status dnat ip6 daddr ::1 tcp dport {port} accept"]
+    lines += ["  jump runtime"]
     for raw in networks:
         net = ipaddress.ip_network(raw, strict=False)
         lines.append(f"  {'ip' if net.version == 4 else 'ip6'} daddr {net} accept")
@@ -2661,7 +2669,8 @@ def limits_prefix(a):
         return []
     properties = []
     if "memory" in limits:
-        properties += ["-p", f"MemoryMax={limits['memory'].upper()}"]
+        # Swap as much again, as Podman's --memory does (its default --memory-swap is twice --memory).
+        properties += ["-p", f"MemoryMax={limits['memory'].upper()}", "-p", f"MemorySwapMax={limits['memory'].upper()}"]
     if "cpus" in limits:
         properties += ["-p", f"CPUQuota={int(round(float(limits['cpus']) * 100))}%"]
     if "pids" in limits:
@@ -2717,7 +2726,13 @@ def asking(a):
 
 def apply_remembered_approvals(a):
     """Add what was approved "always" for this project (sandbox-ai approvals) to the options; the notes."""
-    remembered = load_approvals_module().approved_for(Path(a.workspaces[0]).expanduser())
+    approvals = load_approvals_module()
+    # The agent must not be able to write what widens its next start: such a file is not read.
+    try:
+        check_host_source(a, approvals.approved_file(), "Remembered approvals (XDG_CONFIG_HOME)")
+    except ValueError as exc:
+        return [f"{exc}; not read"]
+    remembered = approvals.approved_for(Path(a.workspaces[0]).expanduser())
     hosts = [h for h in remembered["hosts"] if h not in a.allow_host]
     tcp = [t for t in remembered["tcp"] if t not in a.allow_tcp]
     a.allow_host += hosts
@@ -3229,7 +3244,9 @@ def run_pod(a, session, home):
         return wait_child(subprocess.Popen(run))
     finally:
         if owned:
-            subprocess.run(podman_command(a, "pod", "rm", "--force", name), check=False, stdout=subprocess.DEVNULL)
+            # --time 0: the infra container's sleep ignores SIGTERM; waiting for it only costs 10 seconds.
+            subprocess.run(podman_command(a, "pod", "rm", "--force", "--time", "0", name), check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def bwrap_command(a, session, home):
@@ -3606,6 +3623,8 @@ def launch(argv):
             cleanup.callback(shutil.rmtree, a.browser_dir, True)
             write_browser_shims(session / "bin")
         cfg = {"command": agent_command(a, binary), "env": agent_environment(a), "probe": a.probe,
+               # Values the supervisor's process log redacts by value (--env and --secret-env).
+               "secret_names": sorted(set(a.env) | {v.partition("=")[0] for v in a.secret_env}),
                "tmux": "detached" if a.tmux_socket_dir else a.tmux,
                "proxy": {"log": log_name} if log_name else None,
                "ask": asking(a), "ask_quiet": list(ASK_QUIET),

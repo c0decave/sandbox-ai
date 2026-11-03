@@ -11,11 +11,13 @@ import base64
 import contextlib
 import ctypes
 import fcntl
+import hashlib
 import ipaddress
 import json
 import os
 from pathlib import Path
 import re
+import secrets
 import select
 import shlex
 import signal
@@ -169,6 +171,9 @@ def tool_call_record(line):
             "arguments": arguments[:2000] + ("..." if len(arguments) > 2000 else "")}
 
 
+MCP_LINE_LIMIT = 64 << 20  # one JSON-RPC message from the client
+
+
 def mcp_serve(socket_path, command, cwd="/work", out=None):
     """Server sandbox: one instance of the stdio MCP server per connection. Every tool call an agent makes
     is written as a line `sandbox-ai-mcp-call {json}` to OUT (stderr: the server's supervisor.log)."""
@@ -184,7 +189,15 @@ def mcp_serve(socket_path, command, cwd="/work", out=None):
                     print(f"agent-sandbox: MCP server failed: {exc}", file=sys.stderr)
                     return
                 try:
-                    for line in connection.makefile("rb"):
+                    stream = connection.makefile("rb")
+                    while True:
+                        line = stream.readline(MCP_LINE_LIMIT + 1)
+                        if not line:
+                            break
+                        if len(line) > MCP_LINE_LIMIT:
+                            print(f"agent-sandbox: MCP message over {MCP_LINE_LIMIT >> 20} MiB; connection closed",
+                                  file=sys.stderr)
+                            break
                         record = tool_call_record(line)
                         if record:
                             print("sandbox-ai-mcp-call " + json.dumps(record, ensure_ascii=False), file=out, flush=True)
@@ -354,7 +367,9 @@ def start_loggers(broker=None, quiet=()):
     def denied_loop():
         while not stop.wait(1):
             poll_denied(stop.seen)
-    loggers = [(denied_loop, ()), (dns_logger, (set(cfg["pinned"]), 53, stop, broker, quiet)), (process_logger, (stop,))]
+    loggers = [(denied_loop, ()), (dns_logger, (set(cfg["pinned"]), 53, stop, broker, quiet)), (process_logger, (stop, 0.5, Path("/proc"),
+                                                                     [cfg.get("env", {})[k] for k in cfg.get("secret_names", [])
+                                                                      if k in cfg.get("env", {})]))]
     if cfg["watch"]:  # file access only with an explicit --log-dir
         loggers.append((file_logger, (cfg["watch"], stop)))
     for target, args in loggers:
@@ -364,11 +379,23 @@ def start_loggers(broker=None, quiet=()):
     return stop
 
 
-def process_logger(stop, interval=0.5, proc=Path("/proc")):
+PROCESS_LOG_LIMIT = 256 << 20  # processes.jsonl per log directory
+
+
+def process_logger(stop, interval=0.5, proc=Path("/proc"), secret_values=(), limit=PROCESS_LOG_LIMIT):
     """processes.jsonl: every process that appears in the sandbox (polled: very short ones can be missed),
-    with its command line, redacted. Runs in PID 1 outside Firejail, which sees the agent's processes."""
+    with its command line, redacted (patterns, and the exact values of SECRET_VALUES: what --env and
+    --secret-env pass). Runs in PID 1 outside Firejail, which sees the agent's processes. Stops at LIMIT."""
     seen = set()
+    values = sorted({v for v in secret_values if isinstance(v, str) and len(v) >= 6}, key=len, reverse=True)
+    try:
+        written = (LOG_DIR / "processes.jsonl").stat().st_size
+    except OSError:
+        written = 0
     while not stop.wait(interval):
+        if written >= limit:
+            log_event("processes.jsonl", {"error": f"processes.jsonl reached {limit >> 20} MiB; no more entries"})
+            return
         try:
             pids = [int(entry.name) for entry in proc.iterdir() if entry.name.isdigit()]
         except OSError:
@@ -382,13 +409,19 @@ def process_logger(stop, interval=0.5, proc=Path("/proc")):
                 current.add(key)
                 if key in seen:
                     continue
-                argv = (proc / str(pid) / "cmdline").read_bytes().split(b"\0")
+                with open(proc / str(pid) / "cmdline", "rb") as stream:
+                    argv = stream.read(4096).split(b"\0")
             except (OSError, IndexError, ValueError):
                 continue
             seen.add(key)
-            command = redact_text(" ".join(part.decode("utf-8", "replace") for part in argv if part))
+            command = " ".join(part.decode("utf-8", "replace") for part in argv if part)
+            for value in values:
+                command = command.replace(value, "[redacted]")
+            command = redact_text(command)
             if command:
-                log_event("processes.jsonl", {"pid": pid, "ppid": int(stat_fields[1]), "command": command[:1000]})
+                entry = {"pid": pid, "ppid": int(stat_fields[1]), "command": command[:1000]}
+                log_event("processes.jsonl", entry)
+                written += len(json.dumps(entry)) + 32
         seen &= current
 
 
@@ -439,7 +472,7 @@ def dns_logger(pinned, port=53, stop=None, broker=None, quiet=()):
                                                        r"[a-z][a-z0-9-]{0,62}", name) and \
                         not any(name == q or name.endswith("." + q) for q in quiet):
                     broker.ask("dns", {"name": name}, wait=False)
-        except (OSError, ValueError, IndexError, struct.error):
+        except (OSError, ValueError, IndexError, struct.error, RuntimeError):
             continue
     sock.close()
 
@@ -605,6 +638,10 @@ SECRET_TEXT = [
     (re.compile(r"(\b(?:[a-z_]*token|secret|client_secret|password|api_?key|code|code_verifier|signature|sig)=)"
                 r"[^&\s\"']+", re.I), r"\1[redacted]"),
     (re.compile(r"\b(Bearer|Basic|token)\s+[A-Za-z0-9._~+/=-]{8,}", re.I), r"\1 [redacted]"),
+    (re.compile(r"(\b[a-z][a-z0-9+.-]{0,20}://[^/\s:@]{0,200}:)[^@\s/]{1,500}@", re.I), r"\1[redacted]@"),
+    (re.compile(r"(--?[a-z0-9_-]*(?:token|secret|password|passwd|api-?key|apikey|credential)[a-z0-9_-]*(?:=|\s+))"
+                r"[^\s\"'-][^\s\"']*", re.I), r"\1[redacted]"),
+    (re.compile(r"((?:^|\s)(?:-u|--user)\s+[^\s:]{1,200}:)\S+"), r"\1[redacted]"),
     (re.compile(r"\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}"
                 r"|glpat-[A-Za-z0-9_-]{16,}|xox[abpr]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}"
                 r"|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+)"), "[redacted]"),
@@ -659,6 +696,25 @@ def server_certificate(run_dir, host):
                      "-CA", str(run_dir / "ca.pem"), "-CAkey", str(run_dir / "ca.key")], san=san)
         os.replace(temporary, path)
     return path
+
+
+HOST_NAME = re.compile(r"(?=.{1,253}$)(?:[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?\.)*"
+                       r"[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?")
+
+
+def question_name(name):
+    """NAME as a question may show it: a plain host name (letters, digits, - and _, IDNs as punycode),
+    lower case; None for anything else (control characters, spaces, unicode: what could mislead)."""
+    if not isinstance(name, str):
+        return None
+    name = name.rstrip(".").lower()
+    return name if HOST_NAME.fullmatch(name) else None
+
+
+def printable_text(text, limit=4000):
+    """TEXT with everything but printable ASCII percent-escaped (URLs, refs and messages in questions)."""
+    data = str(text)[:limit].encode("utf-8", "replace")
+    return "".join(chr(b) if 0x20 <= b < 0x7f and b != 0x25 else f"%{b:02X}" for b in data)
 
 
 def client_hello_sni(data):
@@ -1228,8 +1284,13 @@ class ProxyServer:
                 if self.asker is not None:
                     # The question names what the agent wants: the server name it sends, if any.
                     first = self.peek(client)
-                    name = client_hello_sni(first)[1] or self.http_host(first)
-                    question = {"destination": record["destination"], "address": address, "port": port}
+                    # The name is what the agent sends: shown only if it is a plain host name, and never
+                    # verified (the human approves the address, which is what the firewall opens).
+                    name = question_name(client_hello_sni(first)[1] or self.http_host(first))
+                    protocol = ("ssh" if first.startswith(b"SSH-") else "tls" if first[:1] == b"\x16"
+                                else "http" if self.http_host(first) else "tcp")
+                    question = {"destination": record["destination"], "address": address, "port": port,
+                                "protocol": protocol}
                     answer = self.asker("connect", {**question, **({"host": name} if name else {})})
                     record["approval"] = {k: answer.get(k) for k in ("decision", "scope", "reason")}
                 if not answer or answer.get("decision") != "allow" or not allowed_destination(self.allow(), address, port):
@@ -1611,8 +1672,9 @@ class ProxyServer:
         except (OSError, ValueError) as exc:
             verdict = {"ok": False, "message": f"the privacy check is not available: {exc}"}
         if verdict.get("ok") and verdict.get("warnings") and self.asker is not None:
-            answer = self.asker("push", {"url": repository, "refs": [ref for _, _, ref in commands],
-                                         "message": str(verdict.get("message", ""))[:4000]})
+            answer = self.asker("push", {"url": printable_text(repository, 2000),
+                                         "refs": [printable_text(ref, 300) for _, _, ref in commands][:50],
+                                         "message": printable_text(verdict.get("message", ""))})
             verdict["approval"] = {k: answer.get(k) for k in ("decision", "scope", "reason")}
             if answer.get("decision") != "allow":
                 verdict = {**verdict, "ok": False, "message": "the push has privacy warnings and was not approved:\n"
@@ -1652,6 +1714,21 @@ def proxy_listeners(port=PROXY_PORT):
     return listeners
 
 
+def stdin_is_pipe(fd=0):
+    try:
+        return (os.fstat(fd).st_mode & 0o170000) == 0o010000  # S_IFIFO
+    except OSError:
+        return False
+
+
+def exit_on_eof(stream, exit=os._exit):
+    """Exit once STREAM (the proxy's stdin, a pipe from the supervisor) is closed or fails."""
+    with contextlib.suppress(OSError, ValueError):
+        while stream.read(4096):
+            pass
+    exit(0)
+
+
 def proxy_main(log_fd, ready_fd, ask_fd=None):
     """The proxy process: CA, listeners and push checker as root, then the proxy user for the rest. ASK_FD is
     the channel for questions to the supervisor (approvals), if there are any."""
@@ -1675,6 +1752,8 @@ def proxy_main(log_fd, ready_fd, ask_fd=None):
             os.chown(os.path.join(root, name), PROXY_UID, PROXY_UID)
     os.chown(PROXY_RUN, PROXY_UID, PROXY_UID)
     drop_to_proxy_user()
+    if stdin_is_pipe():  # started by the supervisor (start_proxy), which stops it by closing the pipe
+        threading.Thread(target=exit_on_eof, args=(sys.stdin.buffer,), daemon=True).start()
     asker = AskChannel(socket.socket(fileno=ask_fd)) if ask_fd is not None else None
     server = ProxyServer(config, log_fd, checker, asker=asker)
     server.serve(listeners)
@@ -1692,9 +1771,11 @@ def start_proxy(cfg, broker=None):
     mine, theirs = socket.socketpair() if broker is not None else (None, None)
     try:
         ask = [str(theirs.fileno())] if theirs else []
+        # stdin is how the proxy is stopped: it runs as its own user, which the supervisor may not signal
+        # (Podman gives it no CAP_KILL); it exits when the pipe closes.
         process = subprocess.Popen(["python3", "-I", "/sandbox/runtime.py", "--internal-proxy", str(log_fd),
                                     str(ready_w), *ask], pass_fds=(log_fd, ready_w, *([theirs.fileno()] if theirs else [])),
-                                   env=base_env(), stdin=subprocess.DEVNULL)
+                                   env=base_env(), stdin=subprocess.PIPE)
         os.close(ready_w)
         ready_w = -1
         deadline = time.monotonic() + 30
@@ -1778,15 +1859,34 @@ def runtime_change(state, request):
     return {key: state[key] - change[key] for key in state}
 
 
-def merged_allow(base, state):
+def merged_allow(base, state, no_ssh=()):
     """The proxy's allow-list: the launcher's plus what was allowed during the run."""
     allow = dict(base)
     allow["nets"] = [*base.get("nets", []), *sorted(state["nets"])]
     allow["https"] = [*base.get("https", []), *sorted(state["https"])]
     allow["tcp"] = [*base.get("tcp", []), *[[a, p] for a, p in sorted(state["tcp"])]]
-    # Explicit destinations may also take SSH, as at the start (--allow, --allow-tcp).
-    allow["ssh"] = sorted(state["nets"]) + sorted({a for a, _ in state["tcp"]})
+    # Explicit destinations may also take SSH, as at the start (--allow, --allow-tcp); approved ones
+    # (NO_SSH) may not.
+    allow["ssh"] = sorted(state["nets"]) + sorted({a for a, p in state["tcp"] if (a, p) not in set(no_ssh)})
     return allow
+
+
+def write_new(path, text, mode):
+    """Write PATH by replacing it with a new file; the temporary file is created exclusively and never
+    through a symlink (the directory may be writable by a less trusted user, such as the proxy's)."""
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}")
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(temporary)
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode)
+    try:
+        os.fchmod(fd, mode)  # whatever the umask
+        with os.fdopen(fd, "w") as stream:
+            stream.write(text)
+        os.replace(temporary, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
 
 
 class RuntimeNetwork:
@@ -1801,6 +1901,7 @@ class RuntimeNetwork:
         self.base, self.allow_file, self.apply_rules = base_allow, allow_file, apply or nft
         self.state = {"nets": set(), "https": set(), "tcp": set()}
         self.once = set()
+        self.no_ssh = set()  # approved destinations: no SSH to them
         self.lock = threading.Lock()
 
     def _commit(self, state, once):
@@ -1808,15 +1909,21 @@ class RuntimeNetwork:
         self.apply_rules(runtime_rules(effective))
         self.state, self.once = state, once
         if self.allow_file is not None:
-            temporary = self.allow_file.with_name(".allow.json")
-            temporary.write_text(json.dumps(merged_allow(self.base, effective)))
-            temporary.chmod(0o644)
-            os.replace(temporary, self.allow_file)
+            write_new(self.allow_file, json.dumps(merged_allow(self.base, effective, self.no_ssh | once)), 0o644)
 
-    def change(self, request):
-        """Apply an allow or revoke request ({"op", "nets", "https", "tcp"}); the new state."""
+    def change(self, request, ssh=True):
+        """Apply an allow or revoke request ({"op", "nets", "https", "tcp"}); the new state. SSH=False: the
+        destinations added may not take SSH (approvals)."""
         with self.lock:
-            self._commit(runtime_change(self.state, request), set(self.once))
+            state = runtime_change(self.state, request)
+            if request.get("op") == "allow":
+                requested = runtime_change({"nets": set(), "https": set(), "tcp": set()}, request)["tcp"]
+                if ssh:
+                    self.no_ssh -= requested  # the human allowed it explicitly (sandbox-ai net)
+                else:
+                    self.no_ssh |= requested - self.state["tcp"]  # newly approved; explicit ones keep SSH
+            self.no_ssh &= state["tcp"]
+            self._commit(state, set(self.once))
             return self.shown()
 
     def allow_once(self, address, port, timer=threading.Timer):
@@ -1874,6 +1981,8 @@ def control_server(path, network, stop=None):
 
 APPROVAL_SECONDS = 60
 SCOPES = ("once", "run", "always")
+OPEN_QUESTIONS = 20      # at a time; more are refused without asking
+RUN_QUESTIONS = 500      # per run; after that, nothing more is asked
 
 
 class ApprovalBroker:
@@ -1883,10 +1992,14 @@ class ApprovalBroker:
     def __init__(self, directory, network, timeout=APPROVAL_SECONDS, poll=0.2, clock=time.monotonic):
         self.directory, self.network, self.timeout, self.poll, self.clock = Path(directory), network, timeout, poll, clock
         self.lock, self.pending, self.decided, self.counter = threading.Lock(), {}, {}, 0
+        self.run_token = secrets.randbelow(10 ** 9)  # IDs differ between sandboxes asking in the same second
         self.directory.mkdir(mode=0o700, exist_ok=True)
 
     @staticmethod
     def key(kind, details):
+        if kind == "push":  # an answer covers this repository with these warnings, not later other ones
+            digest = hashlib.sha256(str(details.get("message", "")).encode("utf-8", "replace")).hexdigest()[:16]
+            return kind, f"{details.get('url', '')} {digest}"
         return kind, str(details.get("destination") or details.get("name") or details.get("url") or "")
 
     def ask(self, kind, details, wait=True):
@@ -1897,22 +2010,25 @@ class ApprovalBroker:
                 return self.decided[key]
             waiting = self.pending.get(key)
             if waiting is None:
+                if len(self.pending) >= OPEN_QUESTIONS or self.counter >= RUN_QUESTIONS:
+                    return {"decision": "deny", "scope": "once", "reason": "too many questions"}
                 self.counter += 1
-                ident = f"{int(time.time())}-{os.getpid()}-{self.counter}"
+                ident = f"{int(time.time())}-{self.run_token}-{self.counter}"
                 waiting = self.pending[key] = {"id": ident, "event": threading.Event(), "answer": None}
-                self._write(f"{ident}.json", {"id": ident, "kind": kind, "time": time.strftime(
-                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "timeout": self.timeout, **details})
-                threading.Thread(target=self._wait, args=(key, kind, details, waiting), daemon=True).start()
+                try:
+                    self._write(f"{ident}.json", {"id": ident, "kind": kind, "time": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "timeout": self.timeout, **details})
+                    threading.Thread(target=self._wait, args=(key, kind, details, waiting), daemon=True).start()
+                except (OSError, RuntimeError) as exc:  # no space, no more threads: refused, not asked
+                    self.pending.pop(key, None)
+                    return {"decision": "deny", "scope": "once", "reason": f"could not ask: {exc}"}
         if not wait:
             return None
         waiting["event"].wait(self.timeout + 5)
         return waiting["answer"] or {"decision": "deny", "scope": "once", "reason": "no answer"}
 
     def _write(self, name, data):
-        temporary = self.directory / f".{name}"
-        temporary.write_text(json.dumps(data))
-        temporary.chmod(0o600)
-        os.replace(temporary, self.directory / name)
+        write_new(self.directory / name, json.dumps(data), 0o600)
 
     def _read_answer(self, ident):
         path = self.directory / f"{ident}.answer"
@@ -1935,6 +2051,8 @@ class ApprovalBroker:
                 break
             time.sleep(self.poll)
         answer = answer or {"decision": "deny", "scope": "run", "reason": f"no answer within {self.timeout} s"}
+        if kind == "push" and answer["scope"] == "always":
+            answer = {**answer, "scope": "run"}  # pushes are never remembered beyond the run
         if answer["decision"] == "allow":
             try:
                 self._apply(kind, details, answer)
@@ -1943,7 +2061,7 @@ class ApprovalBroker:
         with self.lock:
             self.pending.pop(key, None)
             if answer["scope"] in ("run", "always") or answer["reason"].startswith("no answer"):
-                self.decided[key] = answer  # asked once per run
+                self.decided[key] = answer  # asked once per run (a deny counts for the run unless "once")
         self._write(f"{waiting['id']}.done", {**answer, "id": waiting["id"]})
         waiting["answer"] = answer
         waiting["event"].set()
@@ -1951,12 +2069,15 @@ class ApprovalBroker:
     def _apply(self, kind, details, answer):
         if kind == "connect":
             address, port = details["address"], int(details["port"])
+            # An approved destination never takes SSH: that would bypass the push check.
             if answer["scope"] == "once":
                 self.network.allow_once(address, port)
             else:
-                self.network.change({"op": "allow", "tcp": [[address, port]]})
+                self.network.change({"op": "allow", "tcp": [[address, port]]}, ssh=False)
         elif kind == "dns":
-            addresses = [str(ipaddress.ip_address(str(a))) for a in answer.get("addresses", [])][:32]
+            # Only public addresses: a name the agent controls must not open the LAN or this host.
+            addresses = [str(ip) for ip in (ipaddress.ip_address(str(a)) for a in answer.get("addresses", []))
+                         if ip.is_global][:32]
             if addresses:
                 self.network.change({"op": "allow", "https": addresses})
 
@@ -2016,7 +2137,7 @@ def open_request(arguments, socket_path=BROWSER_SOCKET, out=None):
     reached them. Nothing is opened without their answer."""
     out = out or sys.stderr
     urls = [a for a in arguments if not a.startswith("-")]
-    if len(urls) != 1 or not re.fullmatch(r"https?://[^\s\x00-\x1f\x7f]{1,4000}", urls[0]):
+    if len(urls) != 1 or not re.fullmatch(r"https?://[!-~]{1,4000}", urls[0]):
         print("sandbox-ai: only one http(s) URL can be opened in your browser", file=out)
         return 1
     try:
@@ -2033,13 +2154,27 @@ def open_request(arguments, socket_path=BROWSER_SOCKET, out=None):
 
 
 def stop_process(process):
-    if process and process.poll() is None:
+    """Stop PROCESS: close its stdin (the proxy exits on that), then signal it. A process of another user
+    may not be signalled without CAP_KILL: it ends with the sandbox's PID namespace at the latest."""
+    if not process or process.poll() is not None:
+        return
+    if process.stdin is not None:
+        with contextlib.suppress(OSError):
+            process.stdin.close()
+        try:
+            process.wait(timeout=2)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+    try:
         process.terminate()
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             process.kill()
-            process.wait()
+            process.wait(timeout=5)
+    except (PermissionError, subprocess.TimeoutExpired):
+        pass
 
 
 if __name__ == "__main__":

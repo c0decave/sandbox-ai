@@ -1081,7 +1081,7 @@ class SandboxTests(unittest.TestCase):
             return Mock()
         with patch.object(s.subprocess, "run", side_effect=run), self.assertRaises(SystemExit):
             s.run_pod(a, Path("/tmp/session"), Path("/tmp/home"))
-        self.assertTrue(any(cmd[-3:-1] == ["rm", "--force"] for cmd in calls))
+        self.assertTrue(any(cmd[-5:-1] == ["rm", "--force", "--time", "0"] for cmd in calls))
 
     def test_mount_with_spaces_and_ipv6_allow(self):
         with tempfile.TemporaryDirectory(prefix="space dir ") as d:

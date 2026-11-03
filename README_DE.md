@@ -1096,7 +1096,10 @@ werden dann nicht protokolliert):
 - `processes.jsonl`: jeder Prozess, der in der Sandbox auftaucht, mit PID,
   Elternprozess und Kommandozeile (zweimal pro Sekunde abgefragt, sehr kurze
   Prozesse können fehlen). Geschrieben, sobald ein Log-Verzeichnis benutzt
-  wird, auch das Standardverzeichnis.
+  wird, auch das Standardverzeichnis. Kommandozeilen werden geschwärzt wie
+  das Verbindungs-Log (Token-Formate, Passwörter in URLs, Optionen wie
+  `--token`/`--password`) und wörtlich für jede `--env`- und
+  `--secret-env`-Variable; die Datei endet bei 256 MiB.
 - `files.jsonl`: `read`, `write`, `create`, `delete`, `move-from`, `move-to`
   in den Workspaces, `/root`, `/tmp` und allen Mounts (inotify; Wiederholungen
   je Pfad zwei Sekunden zusammengefasst). inotify liefert keine Prozess-ID;
@@ -1286,12 +1289,16 @@ Mit Proxy fragt eine Sandbox nach, statt still zu scheitern (`--ask on`, der
 Standard):
 
 - eine **Verbindung** zu einem Ziel, das die Netzwerkoptionen nicht erlauben
-  (sie wartet auf die Antwort; die Frage nennt den Server aus TLS oder dem
-  `Host`-Header, wenn der Agent einen geschickt hat);
+  (sie wartet auf die Antwort). Die Frage zeigt Adresse, Protokoll und den
+  Servernamen, den der Agent in TLS oder im `Host`-Header geschickt hat.
+  Dieser Name ist eine Angabe des Agenten und nicht geprüft: Erlaubt wird die
+  Adresse, für jedes Protokoll außer SSH;
 - eine **Namensauflösung** eines nicht gepinnten Namens (sofort abgewiesen;
-  erlauben Sie ihn, löst sandbox-ai den Namen auf dem Host auf, pinnt die
-  Adressen und öffnet HTTPS zu ihnen, sodass der nächste Versuch des Agenten
-  klappt);
+  erlauben Sie ihn, löst sandbox-ai den Namen auf dem Host auf, pinnt seine
+  öffentlichen Adressen und öffnet HTTPS zu ihnen, sodass der nächste Versuch
+  des Agenten klappt; ein Name, der nur auf private, Loopback- oder
+  Link-Local-Adressen zeigt, wird abgewiesen, solche erlauben Sie ausdrücklich
+  mit `sandbox-ai net allow`);
 - ein **Push**, den die Datenschutzprüfung durchlässt, zu dem sie aber
   Warnungen hat (Pushes mit blockierenden Funden werden ohne Frage
   abgewiesen);
@@ -1307,15 +1314,22 @@ vorhanden), in der App und hier:
 ```sh
 sandbox-ai approvals list                     # ID  LAUF  was gefragt wird
 sandbox-ai approvals allow ID --scope run     # once (Standard), run, always
-sandbox-ai approvals deny ID
+sandbox-ai approvals deny ID [--scope once]   # Standard: in diesem Lauf nicht erneut gefragt
 sandbox-ai approvals history [LAUF]           # Fragen und ihre Antworten
 ```
 
-Eine Frage ohne Antwort wird nach 60 Sekunden abgewiesen und in diesem Lauf
-nicht erneut gestellt. `once` erlaubt diese eine Verbindung, `run` bis zum
-Ende der Sandbox, `always` zusätzlich jeden späteren Start desselben Projekts
-(gespeichert in `~/.config/sandbox-ai/approved.json`; Einträge dort löschen,
-um sie zu vergessen; der Launcher nennt die übernommenen). Telemetrie-Hosts,
+Eine Frage ohne Antwort wird nach 60 Sekunden abgewiesen und, wie eine
+Ablehnung, in diesem Lauf nicht erneut gestellt. `once` erlaubt diese eine
+Verbindung (die Adresse ist 30 Sekunden offen), `run` bis zum Ende der
+Sandbox, `always` zusätzlich jeden späteren Start desselben Projekts (die
+Adresse, bei einer Namensauflösung der Name, steht dann in
+`~/.config/sandbox-ai/approved.json`; Einträge dort löschen, um sie zu
+vergessen; der Launcher nennt die übernommenen). Eine mit `once` erlaubte
+Namensauflösung bleibt für den Lauf gepinnt; ein Push wird höchstens für den
+Lauf erlaubt. Höchstens 20 Fragen sind gleichzeitig offen und 500 je Lauf;
+darüber hinaus weist die Sandbox ohne Frage ab. Alles, was der Agent wählt
+(Namen, URLs, Refs), erscheint mit maskierten Steuerzeichen und Nicht-ASCII,
+sodass er keine Zeilen in der Liste vortäuschen kann. Telemetrie-Hosts,
 die die Agenten im Hintergrund ansprechen (`statsig.com`, `sentry.io` und
 ähnliche), werden ohne Frage abgewiesen. `--ask off` weist alles ab, was die
 Optionen nicht erlauben, wie bisher; `--no-proxy` und `--offline` fragen nichts.
@@ -1639,8 +1653,8 @@ zu jedem Problem den Befehl, der es behebt.
    noch auf echten Podman-/Bubblewrap-Hosts laufen müssen.
 3. **P2 – Betriebsgrenzen:** Ressourcenlimits brauchen eine
    systemd-Benutzersitzung; ohne sie starten Sandboxen unbegrenzt.
-   `files.jsonl`, `processes.jsonl` und `egress-denied.jsonl` sind nicht
-   größenbegrenzt (die Verbindungs-Logs schon).
+   `files.jsonl` und `egress-denied.jsonl` sind nicht größenbegrenzt (die
+   Verbindungs-Logs und `processes.jsonl` schon).
 4. **P2 – Claude-Lebenszyklus:** Token-Refresh und Zurückschreiben über eine
    lange Sitzung prüfen; die Kontozugehörigkeit zurückgeschriebener Tokens wird
    nicht geprüft.

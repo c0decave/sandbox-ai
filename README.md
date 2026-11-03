@@ -1040,7 +1040,10 @@ access is not logged):
 - `processes.jsonl`: every process that appears in the sandbox with its
   PID, parent and command line (polled twice a second, so very short-lived
   processes can be missed). Written whenever a log directory is in use,
-  including the default one.
+  including the default one. Command lines are redacted like the connection
+  log (token formats, passwords in URLs, `--token`/`--password`-style
+  options) and by value for every `--env` and `--secret-env` variable;
+  the file stops at 256 MiB.
 - `files.jsonl`: `read`, `write`, `create`, `delete`, `move-from`, `move-to`
   under the workspaces, `/root`, `/tmp` and every mount (inotify; repeats per
   path collapsed for two seconds). inotify has no process ID; `/usr` and
@@ -1213,11 +1216,15 @@ With the proxy on, a sandbox asks you instead of failing silently (`--ask on`,
 the default):
 
 - a **connection** to a destination the network options do not allow (held
-  until you answer; the question names the server from TLS or the `Host`
-  header when the agent sent one);
+  until you answer). The question shows the address, the protocol and the
+  server name the agent sent in TLS or the `Host` header. That name is the
+  agent's claim and is not verified: what you allow is the address, for any
+  protocol except SSH;
 - a **lookup** of a name that is not pinned (refused at once; once you allow
-  it, sandbox-ai resolves the name on the host, pins the addresses and opens
-  HTTPS to them, so the agent's next try works);
+  it, sandbox-ai resolves the name on the host, pins its public addresses and
+  opens HTTPS to them, so the agent's next try works; a name that resolves
+  only to private, loopback or link-local addresses is refused, allow those
+  explicitly with `sandbox-ai net allow`);
 - a **push** that the privacy check passes but has warnings about (pushes with
   blocking findings are refused without asking);
 - **opening a URL** in your browser: `xdg-open`, `sensible-browser`,
@@ -1232,15 +1239,20 @@ available), in the app, and in:
 ```sh
 sandbox-ai approvals list                     # ID  RUN  what is asked
 sandbox-ai approvals allow ID --scope run     # once (default), run, always
-sandbox-ai approvals deny ID
+sandbox-ai approvals deny ID [--scope once]   # default: not asked again in this run
 sandbox-ai approvals history [RUN]            # questions and their answers
 ```
 
-A question nobody answers is refused after 60 seconds and not asked again in
-that run. `once` allows this one connection, `run` until the sandbox ends,
-`always` also every later start of the same project (kept in
+A question nobody answers is refused after 60 seconds and, like a deny, not
+asked again in that run. `once` allows this one connection (the address is
+open for 30 seconds), `run` until the sandbox ends, `always` also every later
+start of the same project (the address, or for a lookup the name, is kept in
 `~/.config/sandbox-ai/approved.json`; remove entries there to forget them;
-the launcher names the ones it adds). Telemetry hosts the agents contact in
+the launcher names the ones it adds). A lookup allowed `once` stays pinned for
+the run; a push is approved for the run at most. At most 20 questions are open
+at a time and 500 are asked per run; beyond that the sandbox refuses without
+asking. Everything the agent chose (names, URLs, refs) is shown with control
+characters and non-ASCII escaped, so it cannot fake lines in the list. Telemetry hosts the agents contact in
 the background (`statsig.com`, `sentry.io` and similar) are refused without
 asking. `--ask off` refuses everything the options do not allow, as before;
 `--no-proxy` and `--offline` ask nothing.
@@ -1559,8 +1571,9 @@ command that fixes each problem.
    by unit, contract and end-to-end tests and by new live tests, which still
    have to run on real Podman/Bubblewrap hosts.
 3. **P2 — Operational bounds:** resource limits need a systemd user session;
-   without one sandboxes start unlimited. `files.jsonl`, `processes.jsonl`
-   and `egress-denied.jsonl` are not size-limited (the connection logs are).
+   without one sandboxes start unlimited. `files.jsonl` and
+   `egress-denied.jsonl` are not size-limited (the connection logs and
+   `processes.jsonl` are).
 4. **P2 — Claude lifecycle:** verify token refresh and write-back over a long
    session; account binding of written-back tokens is not verified.
 5. **P3 — Reproducible builds:** builds take the newest releases by design;

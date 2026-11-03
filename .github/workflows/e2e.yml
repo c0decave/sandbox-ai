@@ -42,6 +42,11 @@ jobs:
           for _ in $(seq 30); do [ -S "/run/user/$(id -u)/bus" ] && break; sleep 1; done
           echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
+      - name: Agent CLIs on the host (Bubblewrap runs the host's binaries)
+        if: matrix.backend == 'bwrap'
+        run: |
+          sudo npm install -g --prefix /usr/local @openai/codex @anthropic-ai/claude-code opencode-ai
+          printf '::notice title=agents::%s\n' "$(for c in node codex claude opencode; do printf '%s=%s ' "$c" "$(readlink -f "$(command -v $c)")"; done)"
       # The job log needs a login to read; what matters is also written as annotations.
       - name: Diagnostics
         run: |

@@ -39,7 +39,7 @@ def test_list_describe_and_history(run):
     (directory / "1-1-2.done").write_text(json.dumps({"decision": "deny", "reason": "no answer within 60 s"}))
     open_ = ap.questions(run)
     assert [q["id"] for _, _, q in open_] == ["1-1-1"]
-    assert ap.describe(open_[0][2]) == "connect to 192.0.2.7:443 (api.example.org)"
+    assert ap.describe(open_[0][2]) == "connect to 192.0.2.7:443, named api.example.org by the agent (not verified)"
     history = ap.questions(run, answered=True)
     assert history[1][2]["result"]["reason"] == "no answer within 60 s"
     (directory / "../x.json").resolve()  # names that are no question ids are never read
@@ -164,3 +164,137 @@ def test_desktop_notification_escapes_markup(monkeypatch):
     ap.desktop_notification("sandbox-ai asks", 'open https://x.example/<img src="http://evil.example/a">\x1b[31m\nline')
     body = calls[0][-1]
     assert "<img" not in body and "&lt;img" in body and "\x1b" not in body and "\nline" in body
+
+
+def test_questions_cannot_inject_lines_or_escapes(run, capsys):
+    """What the agent chose (a TLS name, a push URL, refs) is escaped wherever it is printed."""
+    ident = "1-1-1"
+    ask(run, ident, kind="connect", destination="203.0.113.7:443", address="203.0.113.7", port=443,
+        host="pypi.org\n1-1-2  claude-x  look up pypi.org\x1b[8m")
+    ask(run, "1-1-3", kind="push", url="https://x.example/%1b\x1b]0;t\x07", refs=["refs/heads/\u202emain"])
+    lines = []
+    for name, _, question in ap.questions(run):
+        lines.append(ap.describe(question))
+    text = "\n".join(lines)
+    assert "\x1b" not in text and "\u202e" not in text and "\x07" not in text
+    assert all("\n" not in ap.describe(q) for _, _, q in ap.questions(run))
+    assert "\\n1-1-2" in text and "\\x1b[8m" in text
+
+
+def test_answer_refuses_ambiguous_ids(run, tmp_path):
+    other = tmp_path / "runs" / "codex-2"
+    (other / "approvals").mkdir(parents=True)
+    runs = {**run, "codex-2": {**run["claude-1"], "run": "codex-2", "directory": str(other)}}
+    ask(run, "5-5-5", kind="dns", name="pypi.org")
+    (other / "approvals" / "5-5-5.json").write_text(json.dumps({"id": "5-5-5", "kind": "dns", "name": "evil.example"}))
+    with pytest.raises(ValueError, match="several sandboxes"):
+        ap.answer("5-5-5", "allow", "always", runs=runs, resolver=lambda n: ["151.101.0.223"], out=lambda line: None)
+    assert not list((other / "approvals").glob("*.answer"))
+
+
+def test_lookup_opens_only_public_addresses(run, tmp_path):
+    ask(run, "1-1-1", kind="dns", name="x.attacker.example")
+    with pytest.raises(ValueError, match="non-public"):
+        ap.answer("1-1-1", "allow", "run", runs=run, resolver=lambda n: ["10.0.0.5", "127.0.0.1"], out=lambda l: None)
+    assert "x.attacker.example" not in (tmp_path / "session/hosts").read_text()
+    lines = []
+    reply = ap.answer("1-1-1", "allow", "once", runs=run, resolver=lambda n: ["192.168.1.1", "151.101.0.223"],
+                      out=lines.append)
+    assert reply["addresses"] == ["151.101.0.223"] and reply["scope"] == "run"  # once means run for a name
+    assert "192.168.1.1" not in (tmp_path / "session/hosts").read_text() and "not public" in lines[0]
+
+
+def test_always_remembers_the_address_not_the_claimed_name(run, tmp_path):
+    ask(run, "1-1-1", kind="connect", destination="203.0.113.7:443", address="203.0.113.7", port=443,
+        host="registry.npmjs.org")
+    ap.answer("1-1-1", "allow", "always", runs=run, out=lambda line: None)
+    assert ap.approved_for(tmp_path / "app") == {"hosts": [], "tcp": ["203.0.113.7:443"]}
+    with pytest.raises(ValueError):
+        ap.remember(tmp_path / "app", host="a..b")
+    (tmp_path / "config/sandbox-ai/approved.json").write_text(json.dumps(
+        {str((tmp_path / "app").resolve()): {"hosts": ["-x", "a..b", "ok.example"], "tcp": ["999.1.1.1:80", "1.2.3.4:0"]}}))
+    assert ap.approved_for(tmp_path / "app") == {"hosts": ["ok.example"], "tcp": []}
+
+
+def test_push_always_is_only_for_the_run_and_deny_is_remembered(run):
+    ask(run, "1-1-1", kind="push", url="https://github.com/a/b", refs=["refs/heads/main"], message="warn")
+    assert ap.answer("1-1-1", "allow", "always", runs=run, out=lambda line: None)["scope"] == "run"
+    with pytest.raises(ValueError, match="at most for the run"):
+        ap.answer("1-1-1", "deny", "always", runs=run)
+    parsed = []
+    original = ap.answer
+    try:
+        ap.answer = lambda ident, decision, scope, out=None: parsed.append((decision, scope))
+        ap.main(["deny", "1-1-9"])
+        ap.main(["deny", "1-1-9", "--scope", "once"])
+    finally:
+        ap.answer = original
+    assert parsed == [("deny", "run"), ("deny", "once")]
+
+
+def test_open_browser_never_uses_open(monkeypatch):
+    found = []
+    monkeypatch.setattr(ap.shutil, "which", lambda name: found.append(name) or None)
+    with pytest.raises(ValueError):
+        ap.open_browser("https://example.org/")
+    assert "open" not in found
+
+
+def test_browser_listener_survives_nesting_and_slow_senders(run, tmp_path):
+    import socket as socket_module
+    import tempfile
+    spec = importlib.util.spec_from_file_location("runtime_for_browser_test3", ROOT / "sandbox/runtime.py")
+    runtime = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runtime)
+    short = Path(tempfile.mkdtemp(prefix="br-", dir="/tmp"))
+    approvals_dir = Path(run["claude-1"]["directory"]) / "approvals"
+    stop = threading.Event()
+    thread = threading.Thread(target=ap.serve_browser, args=(short / "open.sock", approvals_dir, stop),
+                              kwargs={"notify": lambda t, text: None, "listen": runtime.listen_unix})
+    thread.start()
+    deadline = time.monotonic() + 5
+    while not (short / "open.sock").exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    try:
+        with socket_module.socket(socket_module.AF_UNIX) as client:
+            client.settimeout(10)
+            client.connect(str(short / "open.sock"))
+            client.sendall(b"[" * 8000 + b"\n")
+            assert json.loads(client.makefile("r").readline())["ok"] is False
+        slow = socket_module.socket(socket_module.AF_UNIX)
+        slow.connect(str(short / "open.sock"))
+        slow.sendall(b"{")  # and nothing more
+        started = time.monotonic()
+        with socket_module.socket(socket_module.AF_UNIX) as client:
+            client.settimeout(15)
+            client.connect(str(short / "open.sock"))
+            client.sendall(b'{"url": "https://example.org/a"}\n')
+            assert json.loads(client.makefile("r").readline())["ok"] is True
+        assert time.monotonic() - started < 6  # the slow sender held the listener at most ~3 s
+        slow.close()
+        assert thread.is_alive()
+        with socket_module.socket(socket_module.AF_UNIX) as client:
+            client.settimeout(10)
+            client.connect(str(short / "open.sock"))
+            client.sendall(b'{"url": "https://ex\xc3\xa4mple.org/"}\n')  # not printable ASCII
+            assert json.loads(client.makefile("r").readline())["ok"] is False
+    finally:
+        stop.set()
+        thread.join(5)
+
+
+def test_watch_groups_bursts_and_leaves_browser_requests_to_their_listener(run):
+    directory = Path(run["claude-1"]["directory"]) / "approvals"
+    notes, stop = [], threading.Event()
+    for n in range(5):
+        ask(run, f"1-1-{n + 1}", kind="dns", name=f"a{n}.example")
+    ask(run, "1-1-9", kind="browser", url="https://example.org/")
+    thread = threading.Thread(target=ap.watch, args=(directory, stop, lambda t, text: notes.append(text), 0.05))
+    thread.start()
+    deadline = time.monotonic() + 5
+    while not notes and time.monotonic() < deadline:
+        time.sleep(0.05)
+    time.sleep(0.2)
+    stop.set()
+    thread.join(5)
+    assert notes == ["5 new questions\nsandbox-ai approvals list"]

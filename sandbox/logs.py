@@ -173,7 +173,9 @@ def tool_calls(state_root=None):
         return calls
     for server in servers:
         try:
-            lines = (server / "supervisor.log").read_text(errors="replace").splitlines()[-5000:]
+            with open(server / "supervisor.log", "rb") as stream:  # the newest 4 MiB: the log is not rotated
+                stream.seek(max(0, stream.seek(0, os.SEEK_END) - (4 << 20)))
+                lines = stream.read().decode("utf-8", "replace").splitlines()[-5000:]
         except OSError:
             continue
         for line in lines:

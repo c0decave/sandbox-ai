@@ -66,9 +66,11 @@ def test_live_push_is_checked_on_the_network(request, backend, tmp_path):
     if backend != "podman":
         pytest.skip("the host's loopback is reachable only through Podman's --allow-host-port")
     port, bare, server = git_server(tmp_path)
+    work = tmp_path / "work"  # the server's repository stays outside the workspace
+    work.mkdir()
     script = f'''
 set -u
-cd /tmp && git clone -q http://127.0.0.1:{port}/repo.git r 2>/dev/null || git init -q -b main r
+cd /work && git clone -q http://127.0.0.1:{port}/repo.git r 2>/dev/null || git init -q -b main r
 cd r && git config user.name Tester && git config user.email tester@example.org
 echo clean > clean.txt && git add . && git commit -q -m clean
 if git push -q http://127.0.0.1:{port}/repo.git HEAD:refs/heads/clean; then echo CLEAN_PUSHED; fi
@@ -78,7 +80,7 @@ then echo SECRET_PUSHED; else grep -q "sandbox-ai" err.txt && echo SECRET_REFUSE
 '''
     try:
         # --privacy-check always: the host's loopback is no public remote, but the check must run.
-        stdout, _ = launch(request.config, backend, "codex", tmp_path,
+        stdout, _ = launch(request.config, backend, "codex", work,
                            ["--no-auth", "--no-provider-defaults", "--allow-host-port", str(port),
                             "--privacy-check", "always", "--binary", "/bin/sh"], ["-c", script], timeout=240)
     finally:
@@ -161,7 +163,8 @@ def test_live_device_reaches_the_sandbox(request, backend, tmp_path):
 def test_live_workspace_trusted_and_builtin_skill(request, backend, tmp_path):
     if backend != "podman":
         pytest.skip("checks the sandbox HOME the Claude image gets")
-    script = "cat /root/.claude.json; echo; ls /root/.claude/skills"
+    script = ("python3 -I -c 'import json; print(json.dumps(json.load(open(\"/root/.claude.json\"))))'; "
+              "ls /root/.claude/skills")
     stdout, _ = launch(request.config, backend, "claude", tmp_path, ["--no-auth", "-o", "--binary", "/bin/sh"],
                        ["-c", script])
     state = json.loads(stdout.split("\n", 1)[0])
@@ -211,15 +214,29 @@ def test_live_mcp_server_from_the_catalog(request, backend, tmp_path):
 
 
 def test_live_resource_limits_reach_the_container(request, backend, tmp_path):
-    if backend != "podman":
-        pytest.skip("checked through the container's own cgroup")
-    script = "print(open('/sys/fs/cgroup/memory.max').read().strip(), open('/sys/fs/cgroup/pids.max').read().strip())"
+    """--pids and --memory are enforced: forks beyond the limit fail, an allocation beyond it is killed."""
+    script = """
+import subprocess
+started = []
+try:
+    for _ in range(200):
+        started.append(subprocess.Popen(["sleep", "20"]))
+except OSError as exc:
+    print("FORK_REFUSED", exc.errno)
+print("STARTED", len(started), flush=True)
+for p in started:
+    p.kill()
+"""
     stdout, stderr = launch(request.config, backend, "codex", tmp_path,
-                            ["--no-auth", "--offline", "--memory", "2g", "--pids", "512", "--binary", "/usr/bin/python3"],
-                            ["-I", "-c", script])
+                            ["--no-auth", "--offline", "--pids", "64", "--binary", "/usr/bin/python3"],
+                            ["-I", "-c", script], timeout=120)
     if "not enforced" in stderr:
         pytest.skip("this host gives the user no systemd session: " + stderr.strip().splitlines()[-1])
-    assert stdout.split()[-2:] == ["2147483648", "512"], stdout + stderr
+    assert "FORK_REFUSED" in stdout and int(stdout.split("STARTED")[1].split()[0]) < 64, stdout + stderr
+    hog = "data = bytearray(400 << 20)\nfor i in range(0, len(data), 4096): data[i] = 1\nprint('SURVIVED')"
+    process, _ = running_sandbox(request, backend, tmp_path, hog, ["--offline", "--memory", "128m"])
+    stdout, stderr = finished(process, 120)
+    assert "SURVIVED" not in stdout and process.returncode != 0, stdout + stderr[-3000:]
 
 
 def running_sandbox(request, backend, tmp_path, script, options=(), extra_env=None):
