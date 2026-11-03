@@ -122,3 +122,45 @@ def test_browser_request_round_trip(run, tmp_path):
     finally:
         stop.set()
         thread.join(5)
+
+
+def test_browser_request_too_long_or_not_an_object_is_refused(run, tmp_path):
+    import socket as socket_module
+    import tempfile
+    spec = importlib.util.spec_from_file_location("runtime_for_browser_test2", ROOT / "sandbox/runtime.py")
+    runtime = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runtime)
+    short = Path(tempfile.mkdtemp(prefix="br-", dir="/tmp"))
+    approvals_dir = Path(run["claude-1"]["directory"]) / "approvals"
+    stop = threading.Event()
+    thread = threading.Thread(target=ap.serve_browser, args=(short / "open.sock", approvals_dir, stop),
+                              kwargs={"notify": lambda t, text: None, "listen": runtime.listen_unix})
+    thread.start()
+    deadline = time.monotonic() + 5
+    while not (short / "open.sock").exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    def send(payload):
+        with socket_module.socket(socket_module.AF_UNIX) as client:
+            client.settimeout(10)
+            client.connect(str(short / "open.sock"))
+            client.sendall(payload)
+            return json.loads(client.makefile("r").readline())
+    try:
+        reply = send(b'{"url": "https://example.org/' + b"a" * (ap.REQUEST_LIMIT + 10) + b'"}\n')
+        assert reply["ok"] is False and "too long" in reply["message"]
+        assert send(b'["https://example.org/"]\n')["ok"] is False
+        assert ap.questions(run) == []
+        assert send(b'{"url": "https://example.org/ok"}\n')["ok"] is True
+    finally:
+        stop.set()
+        thread.join(5)
+
+
+def test_desktop_notification_escapes_markup(monkeypatch):
+    calls = []
+    monkeypatch.setattr(ap.shutil, "which", lambda name: "/usr/bin/notify-send")
+    monkeypatch.setattr(ap.subprocess, "run", lambda argv, **kw: calls.append(argv))
+    ap.desktop_notification("sandbox-ai asks", 'open https://x.example/<img src="http://evil.example/a">\x1b[31m\nline')
+    body = calls[0][-1]
+    assert "<img" not in body and "&lt;img" in body and "\x1b" not in body and "\nline" in body

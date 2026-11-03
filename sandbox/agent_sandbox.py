@@ -3106,7 +3106,10 @@ def mount_option(src, dest, mode):
 def pod_commands(a, name, session, home):
     create = podman_command(a, "pod", "create", "--name", name,
               "--infra-image", a.image, "--infra-command", "/usr/bin/sleep infinity",
-              "--userns=keep-id:uid=0,gid=0", "--share=net,ipc,uts",
+              # Rootless: the user namespace of rootless Podman itself, root in it = the host user, the
+              # rest = the delegated subuids (what keep-id:uid=0,gid=0 means; Podman before 5.2 writes a
+              # zero-length gid_map line for that and fails, e.g. 4.9 on Ubuntu 24.04).
+              "--userns=host", "--share=net,ipc,uts",
               "--network", pod_network(a))
     if a.gui or a.gui_wayland:
         # Chromium-based apps exhaust Podman's default 64 MB /dev/shm.

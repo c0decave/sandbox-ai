@@ -28,6 +28,7 @@ import time
 
 HERE = Path(__file__).resolve().parent
 ID = re.compile(r"[0-9]{1,12}-[0-9]{1,10}-[0-9]{1,10}")
+REQUEST_LIMIT = 8192  # one browser request from the sandbox: {"url": ...}
 
 
 def net():
@@ -196,6 +197,10 @@ def watch(directory, stop, notify=None, interval=1.0):
 
 
 def desktop_notification(title, text):
+    """notify-send; TEXT names what the agent asked for, so markup in it is escaped (some notification
+    daemons render <b>, <a> or <img> in the body) and control characters are dropped."""
+    import html
+    text = html.escape("".join(c if c == "\n" or c.isprintable() else "?" for c in text[:1000]), quote=False)
     if shutil.which("notify-send"):
         subprocess.run(["notify-send", "--app-name=sandbox-ai", "--urgency=critical", title, text],
                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
@@ -226,7 +231,11 @@ def serve_browser(socket_path, approvals_dir, stop, notify=None, limit=20, liste
         with connection:
             try:
                 connection.settimeout(5)
-                url = json.loads(connection.makefile("r").readline() or "{}").get("url", "")
+                line = connection.makefile("r", encoding="utf-8", errors="replace").readline(REQUEST_LIMIT + 1)
+                if len(line) > REQUEST_LIMIT:
+                    raise ValueError("request too long")
+                request = json.loads(line or "{}")
+                url = request.get("url", "") if isinstance(request, dict) else ""
                 if not isinstance(url, str) or not re.fullmatch(r"https?://[^\s\x00-\x1f\x7f]{1,4000}", url):
                     reply = {"ok": False, "message": "sandbox-ai: only http(s) URLs can be opened"}
                 elif len([p for p in Path(approvals_dir).glob("*.json") if not p.with_suffix(".done").exists()]) >= limit:

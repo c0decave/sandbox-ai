@@ -226,8 +226,9 @@ def running_sandbox(request, backend, tmp_path, script, options=(), extra_env=No
     """Start a sandbox in the background; (process, environment) with private state, config and data dirs."""
     work = tmp_path / "work"
     work.mkdir(exist_ok=True)
+    # XDG_DATA_HOME stays: rootless Podman keeps its images there.
     env = {**os.environ, "XDG_STATE_HOME": str(tmp_path / "state"), "XDG_CONFIG_HOME": str(tmp_path / "config"),
-           "XDG_DATA_HOME": str(tmp_path / "data"), "SANDBOX_AI_SECRETS": "file", **(extra_env or {})}
+           "SANDBOX_AI_SECRETS": "file", **(extra_env or {})}
     command = [str(ROOT / "codex-sandbox"), "--backend", backend, "--workspace", str(work), "--no-auth",
                *options, "--binary", "/usr/bin/python3", "--", "-I", "-c", script]
     if backend == "podman" and request.config.getoption("--agent-image"):
@@ -294,18 +295,24 @@ print("DIRECT=%s BEFORE=%s AFTER=%s OPEN=%s" % (direct, before, after, opened.re
 
 
 def test_live_secret_env_and_process_log(request, backend, tmp_path):
-    data = {"XDG_DATA_HOME": str(tmp_path / "data"), "SANDBOX_AI_SECRETS": "file"}
-    stored = subprocess.run([str(ROOT / "sandbox-ai"), "secrets", "set", "DEMO_KEY"], input="demo-secret-value\n",
+    name = f"E2E_DEMO_{os.getpid()}"
+    data = {"SANDBOX_AI_SECRETS": "file"}
+    secrets = [str(ROOT / "sandbox-ai"), "secrets"]
+    stored = subprocess.run(secrets + ["set", name], input="demo-secret-value\n",
                             capture_output=True, text=True, env={**os.environ, **data}, timeout=30)
     assert stored.returncode == 0, stored.stderr
     logs = tmp_path / "logs"
-    script = ("import os, subprocess; subprocess.run(['ls', '/work'], check=True); "
-              "print('KEY=%s' % (os.environ.get('DEMO_KEY') == 'demo-secret-value'), flush=True)")
-    process, _ = running_sandbox(request, backend, tmp_path, script,
-                                 ["--offline", "--secret-env", "DEMO_KEY", "--log-dir", str(logs)], data)
-    stdout, stderr = finished(process, 180)
+    # The process log polls twice a second: the marker process lives long enough to be seen.
+    script = ("import os, subprocess; subprocess.run(['sleep', '2.5'], check=True); "
+              f"print('KEY=%s' % (os.environ.get('DEMO_KEY') == 'demo-secret-value'), flush=True)")
+    try:
+        process, _ = running_sandbox(request, backend, tmp_path, script,
+                                     ["--offline", "--secret-env", f"DEMO_KEY={name}", "--log-dir", str(logs)], data)
+        stdout, stderr = finished(process, 180)
+    finally:
+        subprocess.run(secrets + ["delete", name], capture_output=True, env={**os.environ, **data}, timeout=30)
     assert process.returncode == 0 and "KEY=True" in stdout, stdout + stderr[-4000:]
     assert "demo-secret-value" not in stderr
     commands = [json.loads(line).get("command", "") for path in logs.rglob("processes.jsonl")
                 for line in path.read_text().splitlines() if line.strip()]
-    assert any(c.startswith("ls") for c in commands), commands
+    assert any("sleep 2.5" in c for c in commands), commands

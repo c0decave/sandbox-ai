@@ -66,10 +66,17 @@ jobs:
         run: |
           python3 - <<'PY'
           import xml.etree.ElementTree as ET
+          # GitHub shows ten errors per step: one summary line with every failure, then the details,
+          # each with the end of its text (where the sandbox's stderr is).
+          failed, cases = [], 0
           for case in ET.parse("live.xml").iter("testcase"):
+              cases += 1
               for bad in list(case.iter("failure")) + list(case.iter("error")):
-                  text = (bad.get("message") or bad.text or "").replace("\n", " ")[:900]
-                  print(f"::error title={case.get('name')}::{text}")
+                  failed.append((case.get("name"), bad.text or bad.get("message") or ""))
+          print(f"::error title=summary::{len(failed)} of {cases} failed: " + ", ".join(n for n, _ in failed))
+          for name, text in failed[:9]:
+              text = text.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+              print(f"::error title={name}::{text[-3500:]}")
           PY
       - uses: actions/upload-artifact@v4
         if: always()

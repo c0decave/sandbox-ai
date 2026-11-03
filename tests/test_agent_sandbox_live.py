@@ -66,6 +66,8 @@ def test_real_probe(request, backend, agent, tmp_path):
 
 @pytest.mark.parametrize("agent", ["codex", "claude", "opencode"])
 def test_image_node_supports_current_agents(request, agent):
+    if request.config.getoption("--agent-backend") == "bwrap":
+        pytest.skip("Podman images")
     cmd = ["podman"]
     url = request.config.getoption("--agent-podman-url")
     if url:
@@ -80,6 +82,8 @@ def test_image_node_supports_current_agents(request, agent):
 
 @pytest.mark.parametrize("agent", ["codex", "claude", "opencode"])
 def test_image_contains_only_selected_cli(request, agent):
+    if request.config.getoption("--agent-backend") == "bwrap":
+        pytest.skip("Podman images")
     engine = ["podman"]
     if request.config.getoption("--agent-podman-url"):
         engine += ["--remote", "--url", request.config.getoption("--agent-podman-url")]

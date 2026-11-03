@@ -1197,7 +1197,8 @@ class SandboxTests(unittest.TestCase):
     def test_pod_uses_owned_namespace_and_verified_bootstrap(self):
         a = s.parse_args(["codex", "--network", "research", "--ip", "198.51.100.2"])
         create, run = s.pod_commands(a, "owned-pod", Path("/tmp/session"), Path("/tmp/home"))
-        self.assertIn("--userns=keep-id:uid=0,gid=0", create)
+        self.assertIn("--userns=host", create)
+        self.assertFalse(any("keep-id" in token for token in create))  # Podman < 5.2: broken gid_map
         self.assertEqual(create[create.index("--infra-image") + 1], a.image)
         self.assertEqual(create[create.index("--infra-command") + 1], "/usr/bin/sleep infinity")
         self.assertEqual(create[create.index("--network") + 1], "research")
