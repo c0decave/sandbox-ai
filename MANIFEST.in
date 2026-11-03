@@ -1,0 +1,9 @@
+# Source distribution: the package plus everything a checkout has.
+include LICENSE README.md README_DE.md QUICKSTART.md QUICKSTART_DE.md SANDBOX.md TODO.md RELEASING.md
+include install.sh sandbox-ai claude-sandbox codex-sandbox opencode-sandbox sandbox-build-image sandbox-mcp sandbox-session sandbox-wizard
+recursive-include sandbox Containerfile.* build_image.sh
+graft sandbox/templates
+graft sandbox/marketplace
+recursive-include tests *.py
+recursive-include scripts *.py
+global-exclude __pycache__ *.py[cod]

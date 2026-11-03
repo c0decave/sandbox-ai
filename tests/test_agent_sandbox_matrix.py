@@ -12,8 +12,42 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("sandbox_matrix", ROOT / "sandbox/agent_sandbox.py")
 s = importlib.util.module_from_spec(SPEC)
+
+
+class Both:
+    """Patch target for names the launcher re-exports from runtime.py: sets them in both modules.
+
+    __dict__ is the launcher's, so pytest's monkeypatch records and restores the real old value."""
+    __slots__ = ("module",)
+
+    def __init__(self, module):
+        object.__setattr__(self, "module", module)
+
+    @property
+    def __dict__(self):
+        return vars(self.module)
+
+    def modules(self):
+        return (self.module, self.module.RUNTIME)
+
+    def __getattr__(self, name):
+        return getattr(self.module, name)
+
+    def __setattr__(self, name, value):
+        for module in self.modules():
+            setattr(module, name, value)
+
+    def __delattr__(self, name):
+        for module in self.modules():
+            if name in vars(module):
+                delattr(module, name)
+
+
+sr = Both(s)
 SPEC.loader.exec_module(s)
 AGENTS = ("codex", "claude", "opencode")
+CLAUDE_LOGIN = {"accessToken": "sk-ant-oat-fixture", "refreshToken": "sk-ant-ort-fixture",
+                "expiresAt": 4102444800000, "scopes": ["user:inference"], "subscriptionType": "max"}
 BACKENDS = ("podman", "bwrap")
 
 
@@ -48,7 +82,10 @@ def test_startup_matrix(agent, backend, auth, workspace_exists, tmp_path, monkey
         (workspace / "existing.txt").write_text("operator data")
     source = tmp_path / "fixture-auth.json"
     if auth != "auto-missing":
-        source.write_text('{"fixture":"host credentials"}')
+        # Claude's discovered file must hold a login: only that block is copied.
+        source.write_text(json.dumps({"claudeAiOauth": CLAUDE_LOGIN, "mcpOAuth": {"x": {"accessToken": "mcp"}}})
+                          if agent == "claude" else '{"fixture":"host credentials"}')
+    original = source.read_text() if source.exists() else None
     monkeypatch.setattr(s, "auth_sources", lambda name: [(source, s.AUTH_TARGETS[name])])
     monkeypatch.setattr(s.os, "geteuid", lambda: 1000)
     monkeypatch.setattr(s.shutil, "which", lambda name: fake_tool(tmp_path, name))
@@ -65,13 +102,21 @@ def test_startup_matrix(agent, backend, auth, workspace_exists, tmp_path, monkey
         config = json.loads((session / "config.json").read_text())
         target = home / s.AUTH_TARGETS[agent]
         assert target.exists() == (auth in ("auto-present", "explicit", "copy-required"))
-        if target.exists():
+        if target.exists() and agent == "claude" and auth != "explicit":
+            # The login crosses; tokens of the host's MCP servers do not.
+            assert json.loads(target.read_text()) == {"claudeAiOauth": CLAUDE_LOGIN}
+        elif target.exists():
             assert target.read_text() == source.read_text()
+        if target.exists():
             assert target.stat().st_mode & 0o777 == 0o600
             target.write_text('{"fixture":"sandbox refreshed copy"}')
         assert config["command"][0] == (agent if backend == "podman" else fake_tool(tmp_path, agent))
         assert (config["command"][1:3] == ["--sandbox", "danger-full-access"]) == (agent == "codex")
-        assert config["env"] == {} and not config["probe"]
+        # Only the privacy hooks: no variable of the host crosses by default.
+        assert config["env"] == {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath",
+                                 "GIT_CONFIG_VALUE_0": s.PRIVACY_HOOKS} and not config["probe"]
+        hooks = session / "privacy" / "hooks"
+        assert all(os.access(hooks / name, os.X_OK) for name in ("pre-commit", "pre-push"))
         # The workspace persists while the sandbox's private home does not.
         (workspace / "result.txt").write_text("persisted")
         return 0
@@ -80,11 +125,11 @@ def test_startup_matrix(agent, backend, auth, workspace_exists, tmp_path, monkey
     assert s.main(options) == 0
     runner.assert_called_once()
     assert (workspace / "result.txt").read_text() == "persisted"
-    assert ("Workspace existiert bereits" in capsys.readouterr().err) == workspace_exists
+    assert ("workspace exists already" in capsys.readouterr().err) == workspace_exists
     if workspace_exists:
         assert (workspace / "existing.txt").read_text() == "operator data"
     if source.exists():
-        assert json.loads(source.read_text()) == {"fixture": "host credentials"}
+        assert source.read_text() == original
     assert not recorded["home"].exists() and not recorded["session"].exists()
 
 
@@ -99,8 +144,11 @@ def test_network_policy_matrix(agent, backend, mode, tmp_path):
     s.validate(args)
     hosts = s.allowed_hosts(args)
     if mode == "defaults":
-        assert "api.openai.com" in hosts and "api.anthropic.com" in hosts
-        assert ("opencode.ai" in hosts) == (agent == "opencode")
+        assert hosts == {
+            "codex": ["api.openai.com", "chatgpt.com", "auth.openai.com"],
+            "claude": ["api.anthropic.com", "console.anthropic.com", "claude.ai", "claude.com", "platform.claude.com"],
+            "opencode": ["opencode.ai"],
+        }[agent]
     else:
         assert hosts == ([] if mode == "offline" else ["example.org"])
     rules = s.firewall_rules([], ["203.0.113.1"] if hosts else [])
@@ -145,7 +193,8 @@ def test_startup_failure_matrix(agent, backend, failure, tmp_path, monkeypatch):
     prepare.assert_not_called()
 
 
-@pytest.mark.parametrize("agent", AGENTS)
+# Claude's own newest-wins sync and write-back have dedicated contracts.
+@pytest.mark.parametrize("agent", ("codex", "opencode"))
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_persistent_auth_refresh_reuse_matrix(agent, backend, tmp_path, monkeypatch):
     """Refreshed private tokens survive restarts; host originals stay unchanged."""
@@ -198,7 +247,7 @@ def test_pod_failure_ownership_matrix(stage, tmp_path, monkeypatch):
     monkeypatch.setattr(s.subprocess, "run", run)
     popen = Mock(side_effect=OSError("spawn") if stage == "spawn" else None)
     monkeypatch.setattr(s.subprocess, "Popen", popen)
-    monkeypatch.setattr(s, "wait_child", Mock(side_effect=OSError("wait")))
+    monkeypatch.setattr(sr, "wait_child", Mock(side_effect=OSError("wait")))
     with pytest.raises((OSError, subprocess.CalledProcessError)):
         s.run_pod(s.parse_args(["codex", "--offline"]), tmp_path, tmp_path)
     cleaned = [c for c in run.call_args_list if c.args[0][1:4] == ["pod", "rm", "--force"]]
@@ -230,14 +279,14 @@ def test_bootstrap_failure_matrix(failure, monkeypatch):
     monkeypatch.setattr(s.os, "getpid", lambda: 1)
     libc = Mock()
     libc.prctl.return_value = -1 if failure == "prctl" else 0
-    monkeypatch.setattr(s.ctypes, "CDLL", lambda *a, **kw: libc)
+    monkeypatch.setattr(s.RUNTIME.ctypes, "CDLL", lambda *a, **kw: libc)
     run = Mock()
     if failure in ("nft-install", "nft-list"):
         run.side_effect = ([subprocess.CalledProcessError(1, "nft")] if failure == "nft-install"
                            else [Mock(), subprocess.CalledProcessError(1, "nft")])
     monkeypatch.setattr(s.subprocess, "run", run)
-    monkeypatch.setattr(s, "namespace_state", lambda: {})
-    monkeypatch.setattr(s, "firejail_command", Mock(side_effect=OSError("guard") if failure == "guard-command" else None))
+    monkeypatch.setattr(sr, "namespace_state", lambda: {})
+    monkeypatch.setattr(sr, "firejail_command", Mock(side_effect=OSError("guard") if failure == "guard-command" else None))
     popen = Mock(side_effect=OSError("spawn"))
     monkeypatch.setattr(s.subprocess, "Popen", popen)
     with pytest.raises((OSError, subprocess.CalledProcessError)):

@@ -1,0 +1,72 @@
+# Runs for a pushed tag vX.Y.Z: tests, builds dist/, publishes the release and, on github.com, PyPI.
+# Gitea/Forgejo Actions run it too: there the release is created with scripts/publish_release.py
+# and the secret RELEASE_TOKEN; the PyPI job is skipped.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install pytest build
+      - run: python -m pytest -q tests
+      - name: Tag matches the version
+        run: |
+          version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' sandbox/agent_sandbox.py)
+          test "v$version" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != v$version"; exit 1; }
+      - run: python scripts/make_dist.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: GitHub release
+        if: github.server_url == 'https://github.com'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "sandbox-ai ${GITHUB_REF_NAME#v}" --generate-notes
+      - name: Gitea/Forgejo release
+        if: github.server_url != 'https://github.com'
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: python3 scripts/publish_release.py --source "${{ github.server_url }}/${{ github.repository }}" --token-env RELEASE_TOKEN dist/*
+
+  pypi:
+    needs: build
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-latest
+    # Trusted publishing: register this repository, workflow release.yml and environment "pypi" on PyPI first.
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Only the Python package goes to PyPI
+        run: mkdir pypi && cp dist/*.whl dist/sandbox_ai-*.tar.gz pypi/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: pypi/

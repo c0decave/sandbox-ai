@@ -13,6 +13,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "sandbox/agent_sandbox.py"
+RUNTIME = ROOT / "sandbox/runtime.py"
 SPEC = importlib.util.spec_from_file_location("sandbox_edges", SOURCE)
 s = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(s)
@@ -106,30 +107,34 @@ def test_missing_agent_fails_before_workspace_or_auth_preparation(tmp_path, monk
 @pytest.mark.parametrize("mode", ("dry-run", "bad-bootstrap-pid", "bad-guard-namespace", "terminated-bootstrap"))
 def test_cli_entrypoint_exit_contract(mode, tmp_path, monkeypatch, capsys):
     if mode == "dry-run":
+        source = SOURCE
         argv = [str(SOURCE), "codex", "--dry-run", "--workspace", str(tmp_path / "not-created")]
         expected = 0
     elif mode == "bad-bootstrap-pid":
         monkeypatch.setattr(os, "getpid", lambda: 2)
-        argv = [str(SOURCE), "--internal-bootstrap"]
+        source = RUNTIME
+        argv = [str(RUNTIME), "--internal-bootstrap"]
         expected = 1
     elif mode == "bad-guard-namespace":
         same = {name: os.readlink("/proc/self/ns/" + name) for name in ("mnt", "pid")}
-        argv = [str(SOURCE), "--internal-guard", json.dumps(same)]
+        source = RUNTIME
+        argv = [str(RUNTIME), "--internal-guard", json.dumps(same)]
         expected = 1
     else:
         monkeypatch.setattr(os, "getpid", lambda: 1)
         libc = Mock()
         libc.prctl.return_value = 0
-        monkeypatch.setattr(s.ctypes, "CDLL", lambda *a, **kw: libc)
+        monkeypatch.setattr(s.RUNTIME.ctypes, "CDLL", lambda *a, **kw: libc)
         monkeypatch.setattr(subprocess, "run", Mock(return_value=Mock(stdout="--seccomp")))
         child = Mock()
         child.wait.return_value = -signal.SIGTERM
         monkeypatch.setattr(subprocess, "Popen", Mock(return_value=child))
-        argv = [str(SOURCE), "--internal-bootstrap"]
+        source = RUNTIME
+        argv = [str(RUNTIME), "--internal-bootstrap"]
         expected = 128 + signal.SIGTERM
     monkeypatch.setattr(sys, "argv", argv)
     with pytest.raises(SystemExit) as exc:
-        runpy.run_path(str(SOURCE), run_name="__main__")
+        runpy.run_path(str(source), run_name="__main__")
     assert exc.value.code == expected
     captured = capsys.readouterr()
     if mode == "dry-run":
@@ -137,3 +142,17 @@ def test_cli_entrypoint_exit_contract(mode, tmp_path, monkeypatch, capsys):
         assert not (tmp_path / "not-created").exists()
     elif mode != "terminated-bootstrap":
         assert "agent-sandbox:" in captured.err and "Traceback" not in captured.err
+
+
+def test_launcher_exit_code_after_signal(monkeypatch):
+    """Review finding: a child killed by SIGTERM made the launcher exit 241 instead of 143."""
+    import builtins
+    real_exec = builtins.exec
+    monkeypatch.setattr(sys, "argv", [str(SOURCE), "codex"])
+    namespace = runpy.run_path(str(SOURCE), run_name="not_main")
+    assert namespace["main"]  # loads without running
+    source = SOURCE.read_text().replace("result = main(sys.argv[1:])", "result = -15")
+    code = compile(source, str(SOURCE), "exec")
+    with pytest.raises(SystemExit) as exc:
+        real_exec(code, {"__name__": "__main__", "__file__": str(SOURCE)})
+    assert exc.value.code == 128 + 15

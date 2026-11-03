@@ -1,0 +1,4 @@
+{
+  "$comment": "npm packages OpenCode loads as plugins (\"plugin\" in opencode.json); they need --allow-host registry.npmjs.org",
+  "plugins": []
+}

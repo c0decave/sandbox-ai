@@ -6,14 +6,19 @@ The separate live suite proves the actual namespace and model boundaries.
 """
 import ast
 import base64
+import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import socket
 import stat
 import subprocess
+import sys
+import time
+import tempfile
 from unittest.mock import Mock
 
 import pytest
@@ -22,6 +27,38 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("sandbox_contracts", ROOT / "sandbox/agent_sandbox.py")
 s = importlib.util.module_from_spec(SPEC)
+
+
+class Both:
+    """Patch target for names the launcher re-exports from runtime.py: sets them in both modules.
+
+    __dict__ is the launcher's, so pytest's monkeypatch records and restores the real old value."""
+    __slots__ = ("module",)
+
+    def __init__(self, module):
+        object.__setattr__(self, "module", module)
+
+    @property
+    def __dict__(self):
+        return vars(self.module)
+
+    def modules(self):
+        return (self.module, self.module.RUNTIME)
+
+    def __getattr__(self, name):
+        return getattr(self.module, name)
+
+    def __setattr__(self, name, value):
+        for module in self.modules():
+            setattr(module, name, value)
+
+    def __delattr__(self, name):
+        for module in self.modules():
+            if name in vars(module):
+                delattr(module, name)
+
+
+sr = Both(s)
 SPEC.loader.exec_module(s)
 
 
@@ -35,7 +72,8 @@ def isolated_host(tmp_path, monkeypatch):
     host = tmp_path / "host"
     host.mkdir()
     monkeypatch.setenv("HOME", str(host))
-    for name in ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_DATA_HOME", "XDG_CACHE_HOME", "TERM"):
+    for name in ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME",
+                 "XDG_CONFIG_HOME", "TERM"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -66,7 +104,7 @@ def test_allowed_hosts(scenario):
         assert answer == []
     else:
         assert answer.count("opencode.ai") == 1
-        assert "api.anthropic.com" in answer and "api.openai.com" in answer
+        assert answer == ["opencode.ai"]
 
 
 def test_safe_dest(scenario):
@@ -96,7 +134,17 @@ def test_validate(scenario, tmp_path, monkeypatch):
         cases = [["--network", "research", "--ip", "2001:db8::1"],
                  ["--network", "research", "--ip6", "192.0.2.1"],
                  ["--runtime", "/usr/bin"], ["--env", "INVALID=VALUE"],
-                 ["--env", "UNSET_CONTRACT_VARIABLE"], ["--allow-host", "a..example.org"]]
+                 ["--env", "UNSET_CONTRACT_VARIABLE"], ["--allow-host", "a..example.org"],
+                 ["--offline", "--dns"], ["--offline", "--egress-all-allow"], ["--offline", "--nameserver", "1.1.1.1"],
+                 ["--nameserver", "dns.example"], ["--nameserver", "1.1.1.1; accept"], ["--nameserver", "10.0.0.0/8"],
+                 ["--allow-host-port", "3000", "--offline"], ["--allow-host-port", "3000", "--backend", "bwrap"],
+                 ["--allow-host-port", "3000", "--network", "research"], ["--allow-host-port", "3000,22"],
+                 ["--git-token-env", "https://github.com=UNSET_CONTRACT_VARIABLE"],
+                 ["--git-token-env", "https://github.com=PATH", "--offline"],
+                 ["--git-credentials", "/nonexistent/git-credentials"],
+                 ["--git-token-env", "http://localhost:3000=UNSET_CONTRACT_VARIABLE"],
+                 ["--git-token-env", "http://localhost:3000=PATH", "--backend", "bwrap"],
+                 ["--git-token-env", "https://git.example.org=PATH", "--offline"]]
         monkeypatch.delenv("UNSET_CONTRACT_VARIABLE", raising=False)
         for args in cases:
             with pytest.raises(ValueError):
@@ -230,10 +278,13 @@ def test_prepare_home(scenario, tmp_path):
         source.write_text('{"model":"fixture"}')
         args = s.parse_args(["opencode", "--no-auth", "--local-config", str(source)])
         s.prepare_home(args, home)
-        source.write_text('{"model":"changed"}')
-        with pytest.raises(ValueError, match="overwrite"):
-            s.prepare_home(args, home)
         assert (home / ".config/opencode/opencode.jsonc").read_text() == '{"model":"fixture"}'
+        # A reused HOME follows the host's config, even if the agent swapped its copy for a FIFO.
+        source.write_text('{"model":"changed"}')
+        (home / ".config/opencode/opencode.jsonc").unlink()
+        os.mkfifo(home / ".config/opencode/opencode.jsonc")
+        s.prepare_home(args, home)
+        assert (home / ".config/opencode/opencode.jsonc").read_text() == '{"model":"changed"}'
     else:
         s.prepare_home(s.parse_args(["codex", "--no-auth"]), home)
         assert (home / ".codex").is_dir()
@@ -315,13 +366,13 @@ def test_inner_bootstrap(scenario, monkeypatch):
     monkeypatch.setattr(s.os, "getpid", lambda: 1)
     libc = Mock()
     libc.prctl.return_value = 0
-    monkeypatch.setattr(s.ctypes, "CDLL", lambda *a, **kw: libc)
+    monkeypatch.setattr(s.RUNTIME.ctypes, "CDLL", lambda *a, **kw: libc)
     run, popen = Mock(), Mock()
     monkeypatch.setattr(s.subprocess, "run", run)
     monkeypatch.setattr(s.subprocess, "Popen", popen)
-    monkeypatch.setattr(s, "namespace_state", lambda: states()[0])
-    monkeypatch.setattr(s, "firejail_command", lambda state: ["firejail-fixture"])
-    monkeypatch.setattr(s, "wait_child", lambda child: 0)
+    monkeypatch.setattr(sr, "namespace_state", lambda: states()[0])
+    monkeypatch.setattr(sr, "firejail_command", lambda state: ["firejail-fixture"])
+    monkeypatch.setattr(sr, "wait_child", lambda child: 0)
     if scenario == "sad":
         run.side_effect = subprocess.CalledProcessError(1, "nft")
         with pytest.raises(subprocess.CalledProcessError):
@@ -395,7 +446,7 @@ def test_agent_command(scenario):
 
 def test_inner_guard(scenario, monkeypatch, capsys):
     before, current = states()
-    monkeypatch.setattr(s, "namespace_state", lambda: current)
+    monkeypatch.setattr(sr, "namespace_state", lambda: current)
     config = {"probe": scenario == "edge", "env": {"CONTRACT_VALUE": "fixture"}, "command": ["agent", "task"]}
     read = Mock(return_value=json.dumps(config))
     monkeypatch.setattr(s.Path, "read_text", read)
@@ -419,6 +470,11 @@ def test_inner_guard(scenario, monkeypatch, capsys):
         cmd, argv, env = execute.call_args.args
         assert cmd == "agent" and argv == ["agent", "task"]
         assert env["CONTRACT_VALUE"] == "fixture" and env["HOME"] == "/root"
+        config["tmux"] = True
+        read.return_value = json.dumps(config)
+        s.inner_guard(before)
+        cmd, argv, env = execute.call_args.args
+        assert cmd == "tmux" and argv == s.tmux_command(["agent", "task"])
 
 
 def test_mount_option(scenario):
@@ -440,8 +496,20 @@ def test_pod_commands(scenario, tmp_path, monkeypatch):
     monkeypatch.setattr(s.sys.stdout, "isatty", lambda: scenario == "edge")
     create, run = s.pod_commands(args, "owned-fixture", tmp_path / "session", tmp_path / "home")
     assert create[create.index("--network") + 1] == ("none" if scenario == "sad" else "research" if scenario == "edge" else s.POD_NETWORK)
+    if scenario == "happy":
+        forwarded = s.parse_args(["codex", "--workspace", str(tmp_path), "--allow-host-port", "3000"])
+        create, _ = s.pod_commands(forwarded, "owned-fixture", tmp_path / "session", tmp_path / "home")
+        assert create[create.index("--network") + 1] == s.pod_network(forwarded)
+        assert "-T,3000" in create[create.index("--network") + 1]
     assert ("--tty" in run) == (scenario == "edge")
     assert not any(v.startswith("--publish") for v in run)
+    assert "--label" not in create
+    if scenario == "happy":
+        # Session pods carry their session's tmux directory, so a stale one can be recognised.
+        session = s.parse_args(["codex", "--workspace", str(tmp_path), "--pod-name", "agent-session-x",
+                                "--tmux-socket-dir", str(tmp_path / "sess" / "tmux")])
+        create, _ = s.pod_commands(session, "agent-session-x", tmp_path / "session", tmp_path / "home")
+        assert create[create.index("--label") + 1] == f"{s.SESSION_LABEL}={(tmp_path / 'sess' / 'tmux').resolve()}"
     assert f"type=bind,src={tmp_path},dst=/work,{'ro' if scenario == 'edge' else 'rw'}" in run
 
 
@@ -450,7 +518,7 @@ def test_run_pod(scenario, tmp_path, monkeypatch):
     run, popen, wait = Mock(), Mock(), Mock(return_value=9 if scenario == "edge" else 0)
     monkeypatch.setattr(s.subprocess, "run", run)
     monkeypatch.setattr(s.subprocess, "Popen", popen)
-    monkeypatch.setattr(s, "wait_child", wait)
+    monkeypatch.setattr(sr, "wait_child", wait)
     if scenario == "sad":
         popen.side_effect = OSError("spawn failed")
         with pytest.raises(OSError, match="spawn failed"):
@@ -548,9 +616,9 @@ def test_run_bwrap(scenario, tmp_path, monkeypatch):
     monkeypatch.setattr(s, "read_ready", ready)
     maps = Mock(side_effect=RuntimeError("mapping failed") if scenario == "sad" else None)
     monkeypatch.setattr(s, "configure_user_maps", maps)
-    monkeypatch.setattr(s, "wait_child", lambda child: 0)
+    monkeypatch.setattr(sr, "wait_child", lambda child: 0)
     stop = Mock()
-    monkeypatch.setattr(s, "stop_process", stop)
+    monkeypatch.setattr(sr, "stop_process", stop)
     write = Mock()
     monkeypatch.setattr(s.os, "write", write)
     real_pipe, descriptors = os.pipe, []
@@ -639,11 +707,2650 @@ def test_regression_partial_pipe_allocation_closes_owned_descriptors(tmp_path, m
                 pass
 
 
+class StopLoop(BaseException):
+    """Ends an endless logger loop from a mocked boundary."""
+
+
+def claude_credentials(path, expires, refresh="refresh-fixture"):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"claudeAiOauth": {"accessToken": "access-fixture", "refreshToken": refresh,
+                                                  "expiresAt": expires, "scopes": ["user:inference"]}}))
+    return path
+
+
+def test_host_networks(scenario):
+    hosts = {"happy": ["api.anthropic.com"], "sad": ["api.openai.com"], "edge": []}[scenario]
+    assert s.host_networks(hosts) == (["160.79.104.0/23", "2607:6bc0::/48"] if scenario == "happy" else [])
+
+
+def test_log_event(scenario, tmp_path, monkeypatch):
+    monkeypatch.setattr(sr, "LOG_DIR", tmp_path / ("missing" if scenario == "sad" else "log"))
+    if scenario == "sad":
+        with pytest.raises(OSError):
+            s.log_event("files.jsonl", {"action": "read"})
+        return
+    (tmp_path / "log").mkdir()
+    for _ in range(2 if scenario == "edge" else 1):
+        s.log_event("files.jsonl", {"path": "/work/\u00e4 \"quoted\""})
+    lines = [json.loads(line) for line in (tmp_path / "log/files.jsonl").read_text().splitlines()]
+    assert len(lines) == (2 if scenario == "edge" else 1)
+    assert lines[0]["path"] == "/work/\u00e4 \"quoted\"" and lines[0]["time"].endswith("Z")
+
+
+def test_start_loggers(scenario, tmp_path, monkeypatch):
+    config = tmp_path / "config.json"
+    monkeypatch.setattr(s.RUNTIME, "Path", lambda value: config if value == "/sandbox/session/config.json" else Path(value))
+    started = []
+    monkeypatch.setattr(s.RUNTIME.threading, "Thread", lambda target, args, daemon: Mock(start=lambda: started.append((target, args))))
+    if scenario == "sad":
+        with pytest.raises(OSError):
+            s.start_loggers()
+        assert started == []
+        return
+    config.write_text(json.dumps({"pinned": ["api.openai.com"] if scenario == "happy" else [], "watch": ["/work"]}))
+    stop = s.start_loggers()
+    assert not stop.is_set() and stop.seen == set() and len(stop.threads) == 3
+    targets = {target.__name__: args for target, args in started}
+    assert targets["dns_logger"] == ({"api.openai.com"} if scenario == "happy" else set(), 53, stop)
+    assert targets["file_logger"] == (["/work"], stop)
+    assert "denied_loop" in targets
+
+
+def test_poll_denied(scenario, tmp_path, monkeypatch):
+    monkeypatch.setattr(sr, "LOG_DIR", tmp_path)
+    elements = {"happy": [{"concat": ["198.51.100.7", "tcp", 80]}],
+                "edge": [{"elem": {"val": {"concat": ["2001:db8::9", "udp", 123]}, "expires": 1}},
+                         {"concat": ["198.51.100.7", "tcp", 80]}]}.get(scenario, [])
+    output = json.dumps({"nftables": [{"metainfo": {}}, {"set": {"name": "denied4", "elem": elements}}]})
+    run = Mock(return_value=Mock(returncode=1 if scenario == "sad" else 0, stdout=output))
+    monkeypatch.setattr(s.subprocess, "run", run)
+    seen = {("198.51.100.7", "tcp", 80)} if scenario == "edge" else set()
+    s.poll_denied(seen)
+    s.poll_denied(seen)
+    log = tmp_path / "egress-denied.jsonl"
+    records = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+    assert [r.get("address") for r in records] == {"happy": ["198.51.100.7"], "sad": [], "edge": ["2001:db8::9"]}[scenario]
+    assert run.call_args_list[0].args[0] == ["nft", "-j", "list", "set", "inet", "agent_sandbox", "denied4"]
+
+
+def test_dns_reply(scenario):
+    question = (b"\x07example\x03org\x00" if scenario != "edge" else b"\x03API\x07Example\x03COM\x00") + b"\x00\x01\x00\x01"
+    query = b"\xbe\xef" + (b"\x01\x00" if scenario == "happy" else b"\x00\x00") + b"\x00\x01\x00\x00\x00\x00\x00\x00" + question
+    if scenario == "sad":
+        with pytest.raises(struct_error()):
+            s.dns_reply(b"\x00")
+        return
+    name, reply = s.dns_reply(query)
+    assert name == ("example.org" if scenario == "happy" else "api.example.com")
+    assert reply[:2] == b"\xbe\xef" and reply[12:] == question
+    flags = int.from_bytes(reply[2:4], "big")
+    assert flags & 0xF == 3 and flags & 0x8000 and bool(flags & 0x0100) == (scenario == "happy")
+
+
+def struct_error():
+    import struct
+    return struct.error
+
+
+def test_dns_logger(scenario, tmp_path, monkeypatch):
+    monkeypatch.setattr(sr, "LOG_DIR", tmp_path)
+    name = {"happy": b"\x04evil\x07example\x00", "edge": b"\x03api\x06openai\x03com\x00"}.get(scenario, b"")
+    packet = b"\x00\x01\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + name + b"\x00\x01\x00\x01"
+    sock = Mock()
+    sock.recvfrom.side_effect = [(b"\x01" if scenario == "sad" else packet, ("127.0.0.1", 5353)), StopLoop()]
+    monkeypatch.setattr(s.socket, "socket", lambda *a: sock)
+    with pytest.raises(StopLoop):
+        s.dns_logger({"api.openai.com"})
+    sock.bind.assert_called_once_with(("127.0.0.1", 53))
+    log = tmp_path / "egress-denied.jsonl"
+    hosts = [json.loads(line)["host"] for line in log.read_text().splitlines()] if log.exists() else []
+    assert hosts == (["evil.example"] if scenario == "happy" else [])
+    assert sock.sendto.called == (scenario != "sad")
+
+
+def test_file_logger(scenario, tmp_path, monkeypatch):
+    import struct
+    monkeypatch.setattr(sr, "LOG_DIR", tmp_path / "log")
+    (tmp_path / "log").mkdir()
+    root = tmp_path / "work"
+    (root / "sub").mkdir(parents=True)
+    libc = Mock()
+    libc.inotify_init1.return_value = -1 if scenario == "sad" else 7
+    watched = []
+    libc.inotify_add_watch.side_effect = lambda fd, path, mask: watched.append(os.fsdecode(path)) or len(watched)
+    monkeypatch.setattr(s.RUNTIME.ctypes, "CDLL", lambda *a, **kw: libc)
+    def event(wd, mask, name):
+        raw = name.encode() + b"\0" * (16 - len(name))
+        return struct.pack("iIII", wd, mask, 0, len(raw)) + raw
+    reads = {"happy": [event(1, 0x8, "a.txt") + event(1, 0x10, "a.txt") + event(1, 0x8, "a.txt")],
+             "edge": [event(1, 0x40000100, "newdir") + event(1, 0x40000010, "sub") + event(1, 0x4000, "")]}
+    monkeypatch.setattr(s.os, "read", Mock(side_effect=[*reads.get(scenario, []), StopLoop()]))
+    if scenario == "edge":
+        (root / "newdir").mkdir()
+    if scenario == "sad":
+        s.file_logger([str(root)])
+    else:
+        with pytest.raises(StopLoop):
+            s.file_logger([str(root)])
+    records = [json.loads(line) for line in (tmp_path / "log/files.jsonl").read_text().splitlines()]
+    if scenario == "happy":
+        assert sorted(watched) == [str(root), str(root / "sub")]
+        assert [(r["action"], r["path"]) for r in records] == [("write", str(root / "a.txt")), ("read", str(root / "a.txt"))]
+    elif scenario == "edge":
+        assert str(root / "newdir") in watched
+        assert [r.get("action") for r in records] == ["create", None]
+        assert "overflow" in records[1]["error"]
+    else:
+        assert records == [{"time": records[0]["time"], "error": "inotify unavailable"}]
+
+
+def test_oauth_fields(scenario):
+    oauth = {"happy": {"accessToken": "a", "expiresAt": 5, "scopes": ["x"]},
+             "sad": {"accessToken": 1, "expiresAt": True, "scopes": ["x", 2], "evil": "y"},
+             "edge": {"expiresAt": 1.5, "refreshTokenExpiresAt": 0, "subscriptionType": "max"}}[scenario]
+    fields = {**s.OAUTH_TOKEN_FIELDS, **s.OAUTH_INFO_FIELDS}
+    expected = {"happy": oauth, "sad": {}, "edge": oauth}[scenario]
+    assert s.oauth_fields(oauth, fields) == expected
+
+
+def test_claude_oauth(scenario, tmp_path):
+    path = tmp_path / "credentials.json"
+    if scenario == "sad":
+        path.write_text('{"claudeAiOauth": {"accessToken": "", "refreshToken": "x", "expiresAt": 1}}')
+        assert s.claude_oauth(path) is None
+        assert s.claude_oauth(tmp_path / "missing.json") is None
+    else:
+        claude_credentials(path, 2.5e12 if scenario == "edge" else 2000)
+        assert s.claude_oauth(path)["refreshToken"] == "refresh-fixture"
+
+
+def test_sync_claude_credentials(scenario, tmp_path):
+    source = claude_credentials(tmp_path / "sandbox/.credentials.json", 3000, "rotated")
+    target = tmp_path / "host/.credentials.json"
+    if scenario == "sad":
+        claude_credentials(target, 4000, "host-newer")
+        assert s.sync_claude_credentials(source, target) is False
+        assert s.claude_oauth(target)["refreshToken"] == "host-newer"
+        assert s.sync_claude_credentials(tmp_path / "missing.json", target) is False
+    else:
+        claude_credentials(target, 1000, "stale")
+        if scenario == "edge":
+            document = json.loads(target.read_text())
+            target.write_text(json.dumps({**document, "mcpOAuth": {"keep": True}}))
+        assert s.sync_claude_credentials(source, target) is True
+        document = json.loads(target.read_text())
+        assert document["claudeAiOauth"]["refreshToken"] == "rotated"
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+        assert (document.get("mcpOAuth") == {"keep": True}) == (scenario == "edge")
+        assert sorted(p.name for p in target.parent.iterdir()) == [".credentials.json"]
+
+
+def test_claude_credential_pair(scenario, tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    if scenario == "sad":
+        assert s.claude_credential_pair(s.parse_args(["claude", "--no-auth"]), home) is None
+        assert s.claude_credential_pair(s.parse_args(["codex"]), home) is None
+    else:
+        options = ["claude"] + (["--copy-auth"] if scenario == "edge" else [])
+        if scenario == "edge":
+            monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "custom"))
+        host, sandbox = s.claude_credential_pair(s.parse_args(options), home)
+        expected = tmp_path / "custom" if scenario == "edge" else tmp_path / "host/.claude"
+        assert host == expected / ".credentials.json"
+        assert sandbox == home / ".claude/.credentials.json"
+
+
+def test_nameservers(scenario):
+    if scenario == "sad":
+        assert s.nameservers(s.parse_args(["codex"])) == []
+        assert s.nameservers(s.parse_args(["codex", "--offline"])) == []
+    elif scenario == "happy":
+        assert s.nameservers(s.parse_args(["codex", "--dns"])) == ["1.1.1.1", "8.8.8.8"]
+        assert s.nameservers(s.parse_args(["codex", "--egress-all-allow"])) == ["1.1.1.1", "8.8.8.8"]
+    else:
+        args = s.parse_args(["codex", "--nameserver", "9.9.9.9", "--nameserver", "2620:fe::fe", "--nameserver", "9.9.9.9"])
+        assert s.nameservers(args) == ["9.9.9.9", "2620:fe::fe"]
+
+
+def test_resolver_files(scenario):
+    options = {"happy": ["--dns"], "sad": [], "edge": ["--log-dir", "/tmp/contract-logs"]}[scenario]
+    resolv, nsswitch = s.resolver_files(s.parse_args(["codex", *options]))
+    if scenario == "happy":
+        assert resolv == "nameserver 1.1.1.1\nnameserver 8.8.8.8\n"
+    elif scenario == "edge":
+        assert resolv == "nameserver 127.0.0.1\n"
+    else:
+        assert "nameserver" not in resolv
+    assert nsswitch.endswith("hosts: files dns\n" if scenario != "sad" else "hosts: files\n")
+
+
+def test_workspace_targets(scenario, tmp_path):
+    main, lib = tmp_path / "main", tmp_path / "lib"
+    if scenario == "sad":
+        args = s.parse_args(["codex", "--workspace", str(main)])
+        assert s.workspace_targets(args) == [(str(main), "/work")]
+    elif scenario == "happy":
+        args = s.parse_args(["codex", "--workspace", f"{main},{lib}"])
+        assert s.workspace_targets(args) == [(str(main), "/work"), (str(lib), "/workspaces/lib")]
+    else:
+        other = tmp_path / "other" / "lib"
+        args = s.parse_args(["codex", "--workspace", str(main), "--workspace", f"{lib},{other}", "--workspace", str(tmp_path / "x y")])
+        assert s.workspace_targets(args) == [(str(main), "/work"), (str(lib), "/workspaces/lib"),
+                                             (str(other), "/workspaces/lib-2"), (str(tmp_path / "x y"), "/workspaces/x y")]
+
+
+def test_check_private_dir(scenario, tmp_path):
+    work = tmp_path / "work"
+    args = s.parse_args(["codex", "--workspace", f"{work},{tmp_path / 'lib'}"])
+    if scenario == "sad":
+        for inside in (work / "logs", tmp_path / "lib", tmp_path):
+            with pytest.raises(ValueError, match="--gui-vnc must lie outside"):
+                s.check_private_dir(args, inside, "--gui-vnc")
+    elif scenario == "edge":
+        with pytest.raises(ValueError, match="control characters"):
+            s.check_private_dir(args, tmp_path / "a,b", "--log-dir")
+    else:
+        s.check_private_dir(args, tmp_path / "private", "--log-dir")
+
+
+def test_wayland_socket(scenario, tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    if scenario == "sad":
+        monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+        with pytest.raises(ValueError, match="WAYLAND_DISPLAY"):
+            s.wayland_socket()
+        monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-9")
+        (runtime / "wayland-9").write_text("not a socket")
+        with pytest.raises(ValueError, match="not found"):
+            s.wayland_socket()
+        return
+    server = socket.socket(socket.AF_UNIX)
+    path = runtime / "wayland-1" if scenario == "happy" else tmp_path / "abs-wayland"
+    server.bind(str(path))
+    try:
+        monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-1" if scenario == "happy" else str(path))
+        assert s.wayland_socket() == path
+    finally:
+        server.close()
+
+
+def test_gui_config(scenario, tmp_path):
+    options = {"happy": ["--gui"], "sad": [], "edge": ["--gui-vnc", str(tmp_path / "vnc"), "--gui-screen", "1280x720x16"]}[scenario]
+    config = s.gui_config(s.parse_args(["codex", *options]))
+    if scenario == "sad":
+        assert config is None
+    else:
+        assert config == {"display": ":99", "screen": "1920x1080x24" if scenario == "happy" else "1280x720x16",
+                          "vnc": scenario == "edge"}
+
+
+def test_start_gui(scenario, tmp_path, monkeypatch):
+    socket_path = tmp_path / "X99"
+    monkeypatch.setattr(sr, "x_socket", lambda display: socket_path)
+    started = []
+    def popen(cmd, **kwargs):
+        started.append(cmd)
+        if cmd[-1] != "-quiet" and scenario != "sad":
+            socket_path.write_text("")
+        return Mock(poll=Mock(return_value=1 if scenario == "sad" else None))
+    monkeypatch.setattr(s.subprocess, "Popen", popen)
+    stopped = []
+    monkeypatch.setattr(sr, "stop_process", stopped.append)
+    monkeypatch.setattr(s.time, "sleep", lambda _: None)
+    config = {"display": ":99", "screen": "1920x1080x24", "vnc": scenario == "edge"}
+    if scenario == "sad":
+        with pytest.raises(RuntimeError, match="Xvfb exited"):
+            s.start_gui(config)
+        assert len(stopped) == 1
+        return
+    processes = s.start_gui(config)
+    assert len(processes) == (2 if scenario == "edge" else 1)
+    drop = ["setpriv", "--bounding-set=-all", "--inh-caps=-all", "--ambient-caps=-all", "--no-new-privs", "--"]
+    assert started[0] == drop + ["Xvfb", ":99", "-screen", "0", "1920x1080x24", "-nolisten", "tcp"]
+    if scenario == "edge":
+        assert started[1] == drop + ["x11vnc", "-display", ":99", "-unixsock", "/sandbox/vnc/vnc.sock",
+                                     "-rfbport", "0", "-forever", "-shared", "-nopw", "-quiet", "-nosel"]
+
+
+def test_x_socket(scenario):
+    display = {"happy": ":99", "sad": ":0", "edge": ":1234"}[scenario]
+    assert s.x_socket(display) == Path("/tmp/.X11-unix/X" + display[1:])
+
+
+def test_auth_plan(scenario, tmp_path, monkeypatch):
+    monkeypatch.setattr(s, "auth_sources", lambda name: [(tmp_path / "primary.json", s.AUTH_TARGETS[name]),
+                                                         (tmp_path / "meta.json", ".claude.json")])
+    if scenario == "sad":
+        monkeypatch.setattr(s, "auth_sources", Mock(side_effect=AssertionError("no discovery")))
+        assert s.auth_plan(s.parse_args(["claude"])).startswith("automatic")
+        assert s.auth_plan(s.parse_args(["claude", "--no-auth"])) == []
+    elif scenario == "happy":
+        assert s.auth_plan(s.parse_args(["claude", "--copy-auth"])) == [
+            {"source": str(tmp_path / "primary.json"), "target": "/root/.claude/.credentials.json"}]
+        (tmp_path / "meta.json").write_text("{}")
+        assert len(s.auth_plan(s.parse_args(["claude", "--copy-auth"]))) == 2
+    else:
+        plan = s.auth_plan(s.parse_args(["opencode", "--copy", f"{tmp_path}/x.json:./.local/share/opencode/auth.json",
+                                         "--copy", f"{tmp_path}/y:.config/other"]))
+        assert plan == [{"source": f"{tmp_path}/x.json", "target": "/root/.local/share/opencode/auth.json"}]
+        assert s.auth_plan(s.parse_args(["opencode", "--import-codex-auth", f"{tmp_path}/c.json"])) == [
+            {"source": f"{tmp_path}/c.json", "target": "/root/.local/share/opencode/auth.json"}]
+
+
+def test_tmux_command(scenario):
+    import shlex
+    command = {"happy": ["claude"], "sad": ["codex", "exec", "a b; rm -rf / $(x) && echo x"], "edge": ["opencode", "run", "it's"]}[scenario]
+    cmd = s.tmux_command(command)
+    assert cmd[:8] == ["tmux", "-u", "new-session", "-s", "sandbox", "-n", "agent", "-c"]
+    assert shlex.split(cmd[9]) == command
+    assert cmd[10:] == [";", "new-window", "-d", "-n", "shell", "-c", "/work", "bash"]
+    # Detached sessions: the guard keeps running while the tmux session exists.
+    detached = s.tmux_command(command, detached=True)
+    assert detached[:2] == ["sh", "-c"]
+    tmux_part, _, loop = detached[2].rpartition(" && ")
+    assert shlex.split(tmux_part)[:4] == ["tmux", "-u", "new-session", "-d"]
+    assert shlex.split(shlex.split(tmux_part)[10]) == command
+    assert loop == "while tmux has-session -t sandbox 2>/dev/null; do sleep 1; done"
+    # The relay that terminals attach through starts inside the same confinement.
+    assert "--internal-attach-relay /sandbox/tmux/attach.sock" in tmux_part
+
+
+def test_claude_token_status(scenario, tmp_path):
+    path = tmp_path / "credentials.json"
+    expires = {"happy": time.time() + 3600, "sad": 0, "edge": time.time() - 60}[scenario] * 1000
+    claude_credentials(path, expires)
+    status = s.claude_token_status(path)
+    assert "access-fixture" not in status and "refresh-fixture" not in status
+    assert status.startswith({"happy": "Claude access token valid", "sad": "Claude access token expired",
+                              "edge": "Claude access token expired"}[scenario])
+
+
+def test_load_sessions_module(scenario, monkeypatch, tmp_path):
+    if scenario == "sad":
+        monkeypatch.setattr(s, "HERE", tmp_path)
+        with pytest.raises(FileNotFoundError):
+            s.load_sessions_module()
+    else:
+        module = s.load_sessions_module()
+        assert callable(module.start) and callable(module.cli)
+        if scenario == "edge":
+            assert s.load_sessions_module() is not module
+
+
+def test_tcp_targets(scenario):
+    values = {"happy": ["10.0.0.5:11434"], "sad": ["10.0.0.5:99999"], "edge": ["[fe80::1]:1", "10.0.0.5:65535"]}[scenario]
+    args = s.parse_args(["opencode", *[x for v in values for x in ("--allow-tcp", v)]])
+    if scenario == "sad":
+        with pytest.raises(ValueError, match="range"):
+            s.tcp_targets(args)
+    else:
+        expected = {"happy": [("10.0.0.5", 11434)], "edge": [("fe80::1", 1), ("10.0.0.5", 65535)]}[scenario]
+        assert s.tcp_targets(args) == expected
+
+
+def test_host_ports(scenario):
+    values = {"happy": ["3000"], "sad": ["0"], "edge": ["8080", "3000", "8080", "65535"]}[scenario]
+    args = s.parse_args(["claude", *[x for v in values for x in ("--allow-host-port", v)]])
+    if scenario == "sad":
+        for bad in ["0", "65536", "-1", "3000,22", "3000:22", " 22", "２２", "1e3"]:
+            args.allow_host_port = [bad]
+            with pytest.raises(ValueError, match="allow-host-port"):
+                s.host_ports(args)
+    else:
+        assert s.host_ports(args) == {"happy": [3000], "edge": [3000, 8080, 65535]}[scenario]
+
+
+def test_pod_network(scenario):
+    options = {"happy": ["--allow-host-port", "3000"], "sad": ["--offline"],
+               "edge": ["--allow-host-port", "8080", "--allow-host-port", "3000"]}[scenario]
+    network = s.pod_network(s.parse_args(["claude", *options]))
+    if scenario == "sad":
+        assert network == "none"
+        assert s.pod_network(s.parse_args(["claude", "--network", "research"])) == "research"
+        # No host ports: the default stays fully closed towards the host.
+        assert s.pod_network(s.parse_args(["claude"])) == s.POD_NETWORK
+        return
+    expected = {"happy": "-T,3000", "edge": "-T,3000,-T,8080"}[scenario]
+    assert network == f"pasta:--no-map-gw,-t,none,-u,none,{expected},-U,none"
+    # Only namespace-to-host TCP forwards change; inbound and UDP stay off.
+    assert "-t,none" in network and "-u,none" in network and "-U,none" in network and "-T,none" not in network
+
+
+TOKEN = "github_pat_" + "A1b2" * 10
+
+
+def test_github_token(scenario, monkeypatch):
+    """A token for https://github.com opens the GitHub preset and becomes GH_TOKEN; the former
+    --github-token-env/-file aliases are gone."""
+    monkeypatch.setenv("CONTRACT_GH", TOKEN)
+    if scenario == "happy":
+        args = s.parse_args(["claude", "--git-token-env", "https://github.com=CONTRACT_GH"])
+        assert "github" in args.presets
+        assert args.allow_host == []  # the preset covers github.com, api.github.com and the download hosts
+        env = s.git_environment(args)
+        assert env["GH_TOKEN"] == TOKEN == env["SANDBOX_GIT_TOKEN_0"]
+    elif scenario == "sad":
+        for removed in (["--github-token-env", "CONTRACT_GH"], ["--github-token-file", "/x"]):
+            with pytest.raises(SystemExit):
+                s.parse_args(["claude", *removed])
+        assert "--github-token" not in s.build_parser().format_help()
+    else:
+        # The same URL with and without a trailing slash counts once.
+        args = s.parse_args(["claude", "--git-token-env", "https://github.com=CONTRACT_GH",
+                             "--git-token-env", "https://github.com/=CONTRACT_GH"])
+        assert len(s.git_tokens(args)) == 1
+
+
+def test_network_profiles(scenario):
+    if scenario == "happy":
+        args = s.parse_args(["claude", "--profile", "development"])
+        assert args.presets == ["pypi", "github"] and args.frontier
+        assert "pypi.org" in s.allowed_hosts(args) and "api.openai.com" in s.allowed_hosts(args)
+    elif scenario == "sad":
+        # offline cannot be combined with destinations
+        with pytest.raises(ValueError, match="offline"):
+            s.validate(s.parse_args(["claude", "--no-auth", "--profile", "offline", "--profile", "development"]))
+        # Git tokens need their server: a clear message instead of a generic conflict.
+        with pytest.raises(ValueError, match="Git tokens need network"):
+            s.validate(s.parse_args(["claude", "--no-auth", "--profile", "offline",
+                                     "--git-token-env", "https://github.com=PATH"]))
+    else:
+        args = s.parse_args(["claude", "--profile", "egress-all", "--allow-pypi", "--profile", "development"])
+        assert args.egress_all_allow and args.presets == ["pypi", "github"] and s.nameservers(args)
+
+
+GIT_TOKEN = "0123456789abcdef" * 2 + "01234567"
+
+
+def test_git_token_credential(scenario):
+    if scenario == "happy":
+        assert s.git_token_credential("http://alice@localhost:3000=GITEA") == {
+            "url": "http://localhost:3000", "user": "alice", "host": "localhost", "port": 3000,
+            "loopback": True, "env": "GITEA"}
+        assert s.git_token_credential("https://Git.Example.org:443/=T")["url"] == "https://git.example.org"
+    elif scenario == "sad":
+        # Plain http leaves the host only on loopback; paths, quotes in the user and bad names are refused.
+        for bad in ["http://git.example.org=T", "http://localhost:3000/owner=T", "http://localhost:3000",
+                    "http://a'b@localhost:3000=T", "ssh://localhost:22=T", "http://localhost:70000=T",
+                    "https://a..example.org=T", "http://localhost:3000=T=x"]:
+            with pytest.raises(ValueError):
+                s.git_token_credential(bad)
+    else:
+        credential = s.git_token_credential("https://[::1]:8443=T")
+        assert credential["loopback"] and credential["port"] == 8443 and credential["user"] == "x-access-token"
+
+
+def test_git_tokens(scenario, monkeypatch):
+    monkeypatch.setenv("CONTRACT_GIT", GIT_TOKEN)
+    if scenario == "happy":
+        args = s.parse_args(["claude", "--git-token-env", "http://localhost:3000=CONTRACT_GIT",
+                             "--git-token-env", "https://git.example.org=CONTRACT_GIT"])
+        # Loopback is reached through pasta's host forward, a remote host through its pinned name.
+        assert args.allow_host_port == ["3000"] and args.allow_host == ["git.example.org"]
+        assert [(c["url"], token) for c, token in s.git_tokens(args)] == [
+            ("http://localhost:3000", GIT_TOKEN), ("https://git.example.org", GIT_TOKEN)]
+        # The same entry from the command line and the project file counts once.
+        twice = s.parse_args(["claude", "--git-token-env", "http://localhost:3000=CONTRACT_GIT",
+                              "--git-token-env", "http://localhost:3000/=CONTRACT_GIT"])
+        assert len(s.git_tokens(twice)) == 1
+    elif scenario == "sad":
+        monkeypatch.delenv("UNSET_CONTRACT_VARIABLE", raising=False)
+        for options in [["http://localhost:3000=UNSET_CONTRACT_VARIABLE"],
+                        ["http://localhost:3000=CONTRACT_GIT", "http://localhost:3000/=OTHER_GIT"]]:
+            with pytest.raises(ValueError):
+                s.git_tokens(s.parse_args(["claude", *(f"--git-token-env={o}" for o in options)]))
+        with pytest.raises(ValueError, match="loopback"):
+            s.git_tokens(s.parse_args(["claude", "--backend", "bwrap", "--git-token-env",
+                                       "http://localhost:3000=CONTRACT_GIT"]))
+    else:
+        # Tokens that could add credential protocol fields are refused, and never echoed.
+        for bad in [GIT_TOKEN + "\npassword=evil", GIT_TOKEN + " x", "short", "x" * 600]:
+            monkeypatch.setenv("CONTRACT_GIT", bad)
+            with pytest.raises(ValueError) as error:
+                s.git_tokens(s.parse_args(["claude", "--git-token-env", "http://localhost:3000=CONTRACT_GIT"]))
+            assert bad not in str(error.value)
+
+
+def test_git_token_values(scenario):
+    options = {"happy": ["--git-token-env", "http://localhost:3000=A", "--git-token-file", "https://h.example=/t"],
+               "sad": [], "edge": ["--git-token-file", "http://localhost:3000=/x=y"]}[scenario]
+    expected = {"happy": [("env", "http://localhost:3000=A"), ("file", "https://h.example=/t")], "sad": [],
+                "edge": [("file", "http://localhost:3000=/x=y")]}[scenario]
+    assert s.git_token_values(s.parse_args(["claude", *options])) == expected
+
+
+def test_read_token_file(scenario, tmp_path):
+    path = tmp_path / "token"
+    if scenario == "happy":
+        path.write_text(GIT_TOKEN + "\n")
+        path.chmod(0o600)
+        assert s.read_token_file(path, s.GIT_TOKEN, "--git-token-file") == GIT_TOKEN
+    elif scenario == "sad":
+        # Readable by others, a symlink, a directory, or not a token: refused without showing the content.
+        path.write_text(GIT_TOKEN)
+        path.chmod(0o644)
+        with pytest.raises(ValueError, match="chmod 600"):
+            s.read_token_file(path, s.GIT_TOKEN, "--git-token-file")
+        (tmp_path / "link").symlink_to(path)
+        with pytest.raises(ValueError, match="symlink"):
+            s.read_token_file(tmp_path / "link", s.GIT_TOKEN, "--git-token-file")
+        with pytest.raises(ValueError, match="not a regular file"):
+            s.read_token_file(tmp_path, s.GIT_TOKEN, "--git-token-file")
+        secret = tmp_path / "secret"
+        # Assembled at run time, so that secret scanners do not take the fixture for a real key.
+        secret.write_text("-----BEGIN " + "PRIVATE KEY-----\nabc\n")
+        secret.chmod(0o600)
+        with pytest.raises(ValueError) as error:
+            s.read_token_file(secret, s.GIT_TOKEN, "--git-token-file")
+        assert "PRIVATE" not in str(error.value)
+    else:
+        with pytest.raises(ValueError, match="cannot read"):
+            s.read_token_file(tmp_path / "missing", s.GIT_TOKEN, "--git-token-file")
+        path.write_bytes(b"x" * 5000)
+        path.chmod(0o600)
+        with pytest.raises(ValueError, match="does not hold a token"):
+            s.read_token_file(path, s.GIT_TOKEN, "--git-token-file")
+
+
+def test_token_files_in_launcher(scenario, tmp_path, monkeypatch):
+    token = tmp_path / "private" / "t"
+    token.parent.mkdir()
+    token.write_text(GIT_TOKEN + "\n")
+    token.chmod(0o600)
+    work = tmp_path / "work"
+    if scenario == "happy":
+        gh = tmp_path / "private" / "gh"
+        gh.write_text(TOKEN)
+        gh.chmod(0o600)
+        args = s.parse_args(["claude", "--workspace", str(work), "--git-token-file", f"http://localhost:3000={token}",
+                             "--git-token-file", f"https://github.com={gh}"])
+        s.validate(args)
+        assert args.allow_host_port == ["3000"] and "github" in args.presets
+        env = s.git_environment(args)
+        assert env["SANDBOX_GIT_TOKEN_0"] == GIT_TOKEN and env["GH_TOKEN"] == TOKEN
+    elif scenario == "sad":
+        # A token file inside the workspace could be swapped by the agent for any host file.
+        inside = work / "t"
+        work.mkdir()
+        inside.write_text(GIT_TOKEN)
+        inside.chmod(0o600)
+        with pytest.raises(ValueError, match="agent can change"):
+            s.validate(s.parse_args(["claude", "--workspace", str(work),
+                                     "--git-token-file", f"http://localhost:3000={inside}"]))
+        monkeypatch.setenv("CONTRACT_GH", TOKEN)
+        with pytest.raises(ValueError, match="given twice"):
+            s.validate(s.parse_args(["claude", "--workspace", str(work),
+                                     "--git-token-env", "https://github.com=CONTRACT_GH",
+                                     "--git-token-file", f"https://github.com={token}"]))
+    else:
+        # The same URL from the command line and the project file, once as a file and once as a variable: refused.
+        monkeypatch.setenv("CONTRACT_GIT", GIT_TOKEN)
+        with pytest.raises(ValueError, match="given twice"):
+            s.git_tokens(s.parse_args(["claude", "--git-token-file", f"http://localhost:3000={token}",
+                                       "--git-token-env", "http://localhost:3000=CONTRACT_GIT"]))
+
+
+def test_git_credential_helper(scenario):
+    # Users from --git-credentials may hold any printable character: they reach the helper as a variable.
+    user = {"happy": "alice", "sad": "x-access-token", "edge": "first.last@example.org'; echo pwned"}[scenario]
+    helper = s.git_credential_helper("SANDBOX_GIT_USER_0", "SANDBOX_GIT_TOKEN_0")
+    assert helper.startswith("!f() {") and '"$SANDBOX_GIT_USER_0"' in helper and '"$SANDBOX_GIT_TOKEN_0"' in helper
+    if not shutil.which("sh"):
+        pytest.skip("sh not installed")
+    run = subprocess.run(["sh", "-c", helper[1:] + ' "$@"', "helper", "get" if scenario != "sad" else "store"],
+                         env={"SANDBOX_GIT_TOKEN_0": GIT_TOKEN, "SANDBOX_GIT_USER_0": user},
+                         capture_output=True, text=True)
+    expected = "" if scenario == "sad" else f"username={user}\npassword={GIT_TOKEN}\n"
+    assert run.stdout == expected
+
+
+def test_read_private_file(scenario, tmp_path):
+    path = tmp_path / "private"
+    path.write_bytes(b"line one\nline two\n")
+    path.chmod(0o600)
+    if scenario == "happy":
+        assert s.read_private_file(path, "--git-credentials", 100) == b"line one\nline two\n"
+    elif scenario == "sad":
+        path.chmod(0o640)
+        with pytest.raises(ValueError, match="chmod 600") as error:
+            s.read_private_file(path, "--git-credentials", 100)
+        assert "line" not in str(error.value)
+        (tmp_path / "link").symlink_to(path)
+        with pytest.raises(ValueError, match="symlink"):
+            s.read_private_file(tmp_path / "link", "--git-credentials", 100)
+    else:
+        # A longer file shows as LIMIT + 1 bytes, never more.
+        assert s.read_private_file(path, "--git-credentials", 4) == b"line "
+
+
+def test_git_server(scenario):
+    if scenario == "happy":
+        assert s.git_server("http://localhost:3000", "--x") == {
+            "url": "http://localhost:3000", "user": None, "host": "localhost", "port": 3000, "loopback": True}
+        assert s.git_server("https://alice@Git.Example.org:443/", "--x")["url"] == "https://git.example.org"
+    elif scenario == "sad":
+        for bad in ["http://git.example.org", "https://git.example.org/owner", "ftp://localhost", "https://a_b.org"]:
+            with pytest.raises(ValueError, match="--x"):
+                s.git_server(bad, "--x")
+    else:
+        server = s.git_server("https://[::1]:8443", "--x")
+        assert server["loopback"] and server["port"] == 8443 and server["url"] == "https://[::1]:8443"
+
+
+def test_loopback_reachable(scenario):
+    options = {"happy": [["--podman-url", "unix:///run/podman.sock"], []],
+               "sad": [["--backend", "bwrap"], ["--network", "research"], ["--offline"]],
+               "edge": [["--profile", "offline"]]}[scenario]
+    expected = scenario == "happy"
+    assert [s.loopback_reachable(s.parse_args(["claude", *o])) for o in options] == [expected] * len(options)
+
+
+GIT_LOGIN = "p@ss w'rd\"$(id);\\%"  # every character the credential store percent-encodes and a shell would expand
+
+
+def credential_line(user, password, server):
+    quote = __import__("urllib.parse").parse.quote
+    return f"{server.split('://')[0]}://{quote(user, safe='')}:{quote(password, safe='')}@{server.split('://')[1]}"
+
+
+def test_git_credentials_line(scenario):
+    if scenario == "happy":
+        server, user, password = s.git_credentials_line(credential_line("alice", GIT_LOGIN, "http://localhost:3000"))
+        assert (server["url"], user, password) == ("http://localhost:3000", "alice", GIT_LOGIN)
+        # A path, as git stores it with credential.useHttpPath, does not narrow the server.
+        server, user, _ = s.git_credentials_line("https://me%40example.org:tok@GitHub.com/owner/repo.git")
+        assert server["url"] == "https://github.com" and user == "me@example.org"
+    elif scenario == "sad":
+        cases = {"no-url": "not a login", "ssh://u:secret@host": "not a login",
+                 "https://u@host": "not a login", "https://:secret@host": "empty",
+                 "https://u:se%0Acret@host": "control characters", "https://u:%FFsecret@host": "UTF-8",
+                 "http://u:secret@git.example.org": "unencrypted"}
+        for line, reason in cases.items():
+            with pytest.raises(ValueError, match=reason) as error:
+                s.git_credentials_line(line)
+            assert "secret" not in str(error.value)
+    else:
+        server, user, password = s.git_credentials_line("http://u:%3A%40%2F@[::1]:3000")
+        assert server["loopback"] and server["url"] == "http://[::1]:3000" and password == ":@/"
+        with pytest.raises(ValueError, match="too long"):
+            s.git_credentials_line("https://u:" + "x" * 5000 + "@host")
+
+
+def credentials_file(directory, *lines, newline="\n"):
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "git-credentials"
+    path.write_text(newline.join(lines) + newline)
+    path.chmod(0o600)
+    return path
+
+
+def test_git_credentials_file(scenario, tmp_path, monkeypatch, capsys):
+    work = tmp_path / "work"
+    if scenario == "happy":
+        path = credentials_file(tmp_path / "private",
+                                credential_line("x-access-token", TOKEN, "https://github.com"),
+                                credential_line("alice", GIT_TOKEN, "http://localhost:3000"),
+                                credential_line("me@example.org", GIT_LOGIN, "https://git.example.org"))
+        args = s.parse_args(["claude", "--workspace", str(work), "--git-credentials", str(path)])
+        s.validate(args)
+        # Each server is reached as with --git-token-*: loopback forward, GitHub preset, pinned name.
+        assert args.allow_host_port == ["3000"] and "github" in args.presets and args.allow_host == ["git.example.org"]
+        entries, notes = s.git_credentials_file(args)
+        assert notes == [] and [(c["url"], c["user"], c["line"], password) for c, password in entries] == [
+            ("https://github.com", "x-access-token", 1, TOKEN), ("http://localhost:3000", "alice", 2, GIT_TOKEN),
+            ("https://git.example.org", "me@example.org", 3, GIT_LOGIN)]
+        assert s.git_tokens(args) == entries
+        env = s.git_environment(args)
+        assert env["GH_TOKEN"] == TOKEN and env["SANDBOX_GIT_USER_2"] == "me@example.org"
+        # Logins reach only their own variables, never the git configuration.
+        config = {k: v for k, v in env.items() if k.startswith("GIT_CONFIG_")}
+        assert not any(secret in json.dumps(config) for secret in (TOKEN, GIT_TOKEN, GIT_LOGIN, "me@example.org"))
+    elif scenario == "sad":
+        # Nothing usable: refused, with the line numbers and reasons but no secret.
+        path = credentials_file(tmp_path / "private", "https://u:secret1@host.example:99999",
+                                "http://u:secret2@git.example.org", "garbage-secret3")
+        with pytest.raises(ValueError, match="no login the sandbox can use") as error:
+            s.validate(s.parse_args(["claude", "--workspace", str(work), "--git-credentials", str(path)]))
+        assert "line 1" in str(error.value) and "line 3" in str(error.value) and "unencrypted" in str(error.value)
+        assert "secret" not in str(error.value)
+        # A loopback server needs the Podman default network.
+        local = credentials_file(tmp_path / "local", credential_line("u", GIT_TOKEN, "http://localhost:3000"))
+        with pytest.raises(ValueError, match="loopback"):
+            s.validate(s.parse_args(["claude", "--workspace", str(work), "--backend", "bwrap",
+                                     "--git-credentials", str(local)]))
+        with pytest.raises(ValueError, match="Git tokens need network"):
+            s.validate(s.parse_args(["claude", "--workspace", str(work), "--offline", "--git-credentials", str(local)]))
+        # Inside a workspace the agent could swap the file; readable by others it is not private.
+        inside = credentials_file(work, credential_line("u", GIT_TOKEN, "https://github.com"))
+        with pytest.raises(ValueError, match="agent can change"):
+            s.validate(s.parse_args(["claude", "--workspace", str(work), "--git-credentials", str(inside)]))
+        local.chmod(0o644)
+        with pytest.raises(ValueError, match="chmod 600"):
+            s.validate(s.parse_args(["claude", "--workspace", str(work), "--git-credentials", str(local)]))
+        # The MCP server sandboxes never get Git logins.
+        assert "--git-credentials" in load_module("sandbox_mcp_contracts", "sandbox/mcp.py").forbidden()
+    else:
+        # CRLF, blank and malformed lines; the first line per server wins; a token option wins over the file;
+        # notes name lines only, and the launcher prints them.
+        monkeypatch.setenv("CONTRACT_GH", TOKEN)
+        path = credentials_file(tmp_path / "private", "", "broken-secret",
+                                credential_line("first", GIT_TOKEN, "http://localhost:3000"),
+                                credential_line("second", "secret-second", "http://localhost:3000/other/repo"),
+                                credential_line("x", "secret-gh", "https://github.com"), newline="\r\n")
+        args = s.parse_args(["claude", "--workspace", str(work), "--git-credentials", str(path),
+                             "--git-token-env", "https://github.com=CONTRACT_GH"])
+        entries, notes = s.git_credentials_file(args)
+        assert [(c["user"], password) for c, password in entries] == [("first", GIT_TOKEN)]
+        assert [note.split(" skipped: ")[0].rsplit(" ", 1)[1] for note in notes] == ["2", "4", "5"]
+        assert "earlier line" in notes[1] and "--git-token-*" in notes[2]
+        assert not any("secret" in note or "second" in note for note in notes)
+        assert [(c["url"], token) for c, token in s.git_tokens(args)] == [
+            ("https://github.com", TOKEN), ("http://localhost:3000", GIT_TOKEN)]
+        monkeypatch.setattr(s, "load_project_config", lambda a: (None, None))
+        monkeypatch.setattr(s, "check_login", lambda a: None)
+        assert s.launch(["claude", "--workspace", str(work), "--no-auth", "--dry-run", "--git-credentials", str(path),
+                         "--git-token-env", "https://github.com=CONTRACT_GH"]) in (0, None)
+        out, err = capsys.readouterr()
+        plan = json.loads(out)
+        assert plan["git_credentials"] == [
+            {"url": "https://github.com", "user": "x-access-token", "env": "CONTRACT_GH"},
+            {"url": "http://localhost:3000", "user": "first", "credentials": str(path), "line": 3}]
+        assert plan["host_ports"] == [3000] and f"{path} line 4 skipped" in err
+        assert not any(secret in out + err for secret in (TOKEN, GIT_TOKEN, "secret"))
+
+
+def load_module(name, relative):
+    spec = importlib.util.spec_from_file_location(name, ROOT / relative)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_git_credentials_real_git(tmp_path):
+    """Real git against a Git server on loopback that demands the login (HTTP Basic, git-http-backend):
+    with only the launcher's GIT_CONFIG_* variables and a planted helper in HOME, clone and push work
+    with the right login and fail with a wrong one."""
+    import base64 as b64
+    import http.server
+    import threading
+    git = shutil.which("git")
+    if not git:
+        pytest.skip("git not installed")
+    backend = Path(subprocess.run([git, "--exec-path"], capture_output=True, text=True).stdout.strip()) / "git-http-backend"
+    if not backend.exists():
+        pytest.skip("git-http-backend not installed")
+    root = tmp_path / "srv"
+    subprocess.run([git, "init", "--bare", "-q", "-b", "main", str(root / "repo.git")], check=True)
+    expected = "Basic " + b64.b64encode(f"me@example.org:{GIT_LOGIN}".encode()).decode()
+    seen = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def handle_backend(self):
+            seen.append(self.headers.get("Authorization"))
+            if self.headers.get("Authorization") != expected:
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="git"')
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            path, _, query = self.path.partition("?")
+            body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            env = {"GIT_PROJECT_ROOT": str(root), "GIT_HTTP_EXPORT_ALL": "1", "PATH_INFO": path,
+                   "QUERY_STRING": query, "REQUEST_METHOD": self.command, "REMOTE_USER": "me",
+                   "CONTENT_TYPE": self.headers.get("Content-Type", ""), "CONTENT_LENGTH": str(len(body)),
+                   "PATH": os.environ["PATH"]}
+            if self.headers.get("Content-Encoding"):
+                env["HTTP_CONTENT_ENCODING"] = self.headers["Content-Encoding"]
+            out = subprocess.run([str(backend)], input=body, env=env, capture_output=True).stdout
+            head, _, payload = out.partition(b"\r\n\r\n")
+            status = 200
+            headers = []
+            for line in head.decode().split("\r\n"):
+                name, _, value = line.partition(": ")
+                if name.lower() == "status":
+                    status = int(value.split()[0])
+                elif name:
+                    headers.append((name, value))
+            self.send_response(status)
+            for name, value in headers:
+                self.send_header(name, value)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        do_GET = do_POST = handle_backend
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = server.server_address[1]
+    try:
+        def attempt(password, name):
+            path = credentials_file(tmp_path / name, credential_line("me@example.org", password,
+                                                                     f"http://localhost:{port}"))
+            args = s.parse_args(["claude", "--workspace", str(tmp_path / "work"), "--git-credentials", str(path)])
+            s.validate(args)
+            assert args.allow_host_port == [str(port)]
+            home = tmp_path / f"home-{name}"
+            home.mkdir()
+            # A helper the agent planted in the sandbox HOME is dropped for this server.
+            (home / ".gitconfig").write_text("[credential]\n\thelper = !echo username=evil; echo password=planted #\n")
+            env = {"HOME": str(home), "PATH": os.environ["PATH"], "GIT_TERMINAL_PROMPT": "0",
+                   "GIT_AUTHOR_NAME": "A", "GIT_AUTHOR_EMAIL": "a@example.org", "GIT_COMMITTER_NAME": "A",
+                   "GIT_COMMITTER_EMAIL": "a@example.org", **s.git_environment(args)}
+            clone = home / "clone"
+            url = f"http://localhost:{port}/repo.git"
+            result = subprocess.run([git, "clone", "-q", url, str(clone)], env=env, capture_output=True, text=True)
+            if result.returncode:
+                return result
+            (clone / "file.txt").write_text(name)
+            subprocess.run([git, "-C", str(clone), "add", "file.txt"], env=env, check=True)
+            subprocess.run([git, "-C", str(clone), "commit", "-qm", name], env=env, check=True)
+            return subprocess.run([git, "-C", str(clone), "push", "-q", "origin", "HEAD:main"],
+                                  env=env, capture_output=True, text=True)
+
+        good = attempt(GIT_LOGIN, "good")
+        assert good.returncode == 0, good.stderr
+        log = subprocess.run([git, "--git-dir", str(root / "repo.git"), "log", "--format=%s", "main"],
+                             capture_output=True, text=True).stdout
+        assert log.split() == ["good"]
+        assert expected in seen and not any("planted" in b64.b64decode(h.split()[1]).decode()
+                                            for h in seen if h)
+        bad = attempt("wrong", "bad")
+        assert bad.returncode != 0 and "Authentication failed" in bad.stderr
+    finally:
+        server.shutdown()
+
+
+def test_host_git_identity(scenario, monkeypatch):
+    answers = {"happy": {"user.name": "Ada Lovelace\n", "user.email": "ada@example.org\n"},
+               "sad": {"user.name": "Ada\n"},
+               "edge": {"user.name": "Ada\x1b]0;pwn\x07\n", "user.email": "ada@example.org\n"}}[scenario]
+
+    def run(cmd, **kwargs):
+        # Global scope only, from HOME, without GIT_* overrides: never the workspace's .git/config.
+        assert cmd[:4] == ["git", "config", "--global", "--get"]
+        assert kwargs["cwd"] == Path.home() and not any(k.startswith("GIT_") for k in kwargs["env"])
+        value = answers.get(cmd[4])
+        return Mock(returncode=0 if value else 1, stdout=value or "")
+    monkeypatch.setattr(s.subprocess, "run", run)
+    if scenario == "happy":
+        assert s.host_git_identity() == ("Ada Lovelace", "ada@example.org")
+    else:
+        # Missing values and control characters (terminal escapes) are refused.
+        with pytest.raises(ValueError, match="user.email" if scenario == "sad" else "user.name"):
+            s.host_git_identity()
+
+
+def test_git_environment(scenario, monkeypatch, tmp_path):
+    monkeypatch.setenv("CONTRACT_GH", TOKEN)
+    monkeypatch.setattr(s, "host_git_identity", lambda: ("Ada", "ada@example.org"))
+    monkeypatch.setenv("CONTRACT_GIT", GIT_TOKEN)
+    options = {"happy": ["--git-identity", "--git-token-env", "https://github.com=CONTRACT_GH"], "sad": [],
+               "edge": ["--git-token-env", "https://github.com=CONTRACT_GH",
+                        "--git-token-env", "http://alice@localhost:3000=CONTRACT_GIT"]}[scenario]
+    env = s.git_environment(s.parse_args(["claude", *options]))
+    if scenario == "sad":
+        # Only the privacy hooks, unless they are switched off.
+        assert env == {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath",
+                       "GIT_CONFIG_VALUE_0": s.PRIVACY_HOOKS}
+        assert s.git_environment(s.parse_args(["claude", "--privacy-check", "off"])) == {}
+        return
+    count = int(env["GIT_CONFIG_COUNT"])
+    assert (env[f"GIT_CONFIG_KEY_{count - 1}"], env[f"GIT_CONFIG_VALUE_{count - 1}"]) == \
+        ("core.hooksPath", s.PRIVACY_HOOKS)
+    if scenario == "happy":
+        assert env["GIT_CONFIG_KEY_0"] == "user.name" and env["GIT_CONFIG_VALUE_0"] == "Ada"
+        assert env["GIT_CONFIG_KEY_1"] == "user.email" and env["GIT_CONFIG_VALUE_1"] == "ada@example.org"
+    assert env["GH_TOKEN"] == TOKEN == env["SANDBOX_GIT_TOKEN_0"]
+    assert TOKEN not in json.dumps({k: v for k, v in env.items() if k not in ("GH_TOKEN", "SANDBOX_GIT_TOKEN_0")})
+    if not shutil.which("git"):
+        pytest.skip("git not installed")
+    # Real git: a helper the agent planted in ~/.gitconfig is dropped for github.com,
+    # the token answers only for https://github.com and nothing else.
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".gitconfig").write_text("[credential]\n\thelper = !echo password=planted #\n")
+    run_env = {"HOME": str(home), "PATH": os.environ["PATH"], "GIT_TERMINAL_PROMPT": "0", **env}
+
+    def fill(url):
+        return subprocess.run(["git", "credential", "fill"], input=f"url={url}\n\n", env=run_env,
+                              capture_output=True, text=True).stdout
+    answer = fill("https://github.com/owner/repo.git")
+    assert f"password={TOKEN}" in answer and "username=x-access-token" in answer and "planted" not in answer
+    for other in ["https://github.com.evil.example/x.git", "http://github.com/x.git", "https://gitlab.com/x.git"]:
+        assert TOKEN not in fill(other)
+    local = fill("http://localhost:3000/alice/sandbox-ai.git")
+    if scenario == "edge":
+        assert env["SANDBOX_GIT_TOKEN_1"] == GIT_TOKEN and GIT_TOKEN not in json.dumps(
+            {k: v for k, v in env.items() if k != "SANDBOX_GIT_TOKEN_1"})
+        assert f"password={GIT_TOKEN}" in local and "username=alice" in local and "planted" not in local
+        for other in ["http://localhost:3001/x.git", "http://127.0.0.1:3000/x.git", "https://localhost:3000/x.git"]:
+            assert GIT_TOKEN not in fill(other)
+    else:
+        assert GIT_TOKEN not in local
+
+
+def test_config_store(scenario, tmp_path, monkeypatch):
+    if scenario == "sad":
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        assert s.config_store() == Path.home() / ".config/sandbox-ai/trusted.json"
+    else:
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ("x" if scenario == "happy" else "with space")))
+        assert s.config_store().parent.parent == tmp_path / ("x" if scenario == "happy" else "with space")
+
+
+def test_trusted_configs(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    store = tmp_path / "sandbox-ai/trusted.json"
+    if scenario != "sad":
+        store.parent.mkdir(parents=True)
+        store.write_text('{"/p/.sandbox-ai.json": "abc"}' if scenario == "happy" else "not json")
+    assert s.trusted_configs() == ({"/p/.sandbox-ai.json": "abc"} if scenario == "happy" else {})
+
+
+def test_trust_config(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    path = tmp_path / ".sandbox-ai.json"
+    if scenario == "sad":
+        with pytest.raises(OSError):
+            s.trust_config(path)
+        return
+    path.write_text("{}")
+    s.trust_config(path)
+    if scenario == "edge":
+        path.write_text('{"changed": 1}')
+        s.trust_config(path)
+    import hashlib
+    assert s.trusted_configs() == {str(path): hashlib.sha256(path.read_bytes()).hexdigest()}
+    assert (tmp_path / "cfg/sandbox-ai").stat().st_mode & 0o777 == 0o700
+
+
+def test_load_project_config(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    path = tmp_path / ".sandbox-ai.json"
+    args = s.parse_args(["codex", "--workspace", str(tmp_path)])
+    if scenario == "sad":
+        assert s.load_project_config(args) == (None, None)
+        with pytest.raises(ValueError, match="not found"):
+            s.load_project_config(s.parse_args(["codex", "--config", str(tmp_path / "missing.json")]))
+        return
+    document = {"version": 1, "agent": "codex", "options": ["--dns"]}
+    path.write_text(json.dumps(document))
+    s.trust_config(path)
+    if scenario == "edge":
+        assert s.load_project_config(s.parse_args(["codex", "--workspace", str(tmp_path), "--no-config"])) == (None, None)
+    else:
+        assert s.load_project_config(args) == (path, document)
+
+
+def test_merge_config(scenario):
+    document = {"options": ["--dns", "--log-dir", "/l"], "agent_args": ["run"], "workspaces": ["/extra"]}
+    argv = {"happy": ["codex"], "sad": ["codex", "--workspace", "/main", "--", "own"],
+            "edge": ["codex", "--workspace=/main,/extra", "--log-dir", "/mine"]}[scenario]
+    args = s.parse_args(argv)
+    merged = s.merge_config(argv, args, document)
+    expected_workspaces = {"happy": f"{os.getcwd()},/extra", "sad": "/main,/extra", "edge": "/main,/extra"}[scenario]
+    assert merged[merged.index("--workspace") + 1] == expected_workspaces
+    assert merged[merged.index("--") + 1:] == (["own"] if scenario == "sad" else ["run"])
+    final = s.parse_args(merged)
+    assert final.log_dir == Path("/mine" if scenario == "edge" else "/l")
+    assert final.workspaces[0] == ("/main" if scenario != "happy" else os.getcwd())
+
+
+def test_claude_default_settings(scenario, tmp_path):
+    home = tmp_path / "home"
+    settings = home / ".claude/settings.json"
+    if scenario == "sad":
+        settings.parent.mkdir(parents=True)
+        settings.write_text("{broken")
+        s.claude_default_settings(home)
+        assert settings.read_text() == "{broken"
+        return
+    if scenario == "edge":
+        settings.parent.mkdir(parents=True)
+        settings.write_text(json.dumps({"model": "sonnet", "theme": "dark",
+                                        "modelSettings": {"claude-opus-5-5": {"effortLevel": "max"}}}))
+    s.claude_default_settings(home)
+    document = json.loads(settings.read_text())
+    if scenario == "happy":
+        assert document == {"model": "claude-opus-5-5", "modelSettings": {"claude-opus-5-5": {"effortLevel": "high"}}}
+        assert settings.stat().st_mode & 0o777 == 0o600
+    else:
+        # Existing choices win; only missing keys are added.
+        assert document["model"] == "sonnet" and document["theme"] == "dark"
+        assert document["modelSettings"]["claude-opus-5-5"]["effortLevel"] == "max"
+
+
+def test_update_json_defaults(scenario, tmp_path):
+    home = tmp_path / "home"
+    target = home / "sub/state.json"
+    target.parent.mkdir(parents=True)
+
+    def add_k(document):
+        changed = "k" not in document
+        document.setdefault("k", 1)
+        return changed
+
+    if scenario == "sad":
+        # A planted symlink is refused, never followed or replaced.
+        outside = tmp_path / "outside.json"
+        outside.write_text("{}")
+        target.symlink_to(outside)
+        with pytest.raises(ValueError):
+            s.update_json_defaults(home, "sub/state.json", add_k)
+        assert outside.read_text() == "{}" and target.is_symlink()
+        return
+    if scenario == "edge":
+        target.write_text("[1, 2]")  # Valid JSON but not an object: untouched, with a reason.
+        assert "JSON object" in s.update_json_defaults(home, "sub/state.json", add_k)
+        assert target.read_text() == "[1, 2]"
+        big = json.dumps({"pad": "x" * 64})
+        target.write_text(big)  # Over the given limit: refused, file kept, reason names the limit.
+        assert "16 bytes" in s.update_json_defaults(home, "sub/state.json", add_k, limit=16)
+        assert target.read_text() == big
+        # Nothing to add: the bytes and the inode stay, so concurrent writers keep their data.
+        original = '{"k": 2,   "x": "\\u00e4"}'
+        target.write_text(original)
+        inode = target.stat().st_ino
+        assert s.update_json_defaults(home, "sub/state.json", add_k) is None
+        assert target.read_text() == original and target.stat().st_ino == inode
+        return
+    assert s.update_json_defaults(home, "sub/state.json", add_k) is None
+    assert json.loads(target.read_text()) == {"k": 1}
+    assert target.stat().st_mode & 0o777 == 0o600
+    assert [p.name for p in target.parent.iterdir()] == ["state.json"]
+    # Non-ASCII text is kept as written, not turned into escapes.
+    target.write_text(json.dumps({"projects": {"/home/jörg": {}}}, ensure_ascii=False), encoding="utf-8")
+    assert s.update_json_defaults(home, "sub/state.json", add_k) is None
+    assert "/home/jörg" in target.read_text(encoding="utf-8")
+
+
+def test_claude_default_state(scenario, tmp_path):
+    home = tmp_path / "home"
+    state = home / ".claude.json"
+    credentials = home / ".claude/.credentials.json"
+    credentials.parent.mkdir(parents=True)
+    oauth = {"accessToken": "a", "refreshToken": "r", "expiresAt": int(time.time() * 1000) + 3600_000}
+    if scenario == "sad":
+        # No usable login: leave onboarding (and its login step) to Claude.
+        credentials.write_text("{}")
+        s.claude_default_state(home)
+        assert not state.exists()
+        # A planted ~/.claude symlink is refused before anything is read through it.
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / ".credentials.json").write_text(json.dumps({"claudeAiOauth": oauth}))
+        shutil.rmtree(home / ".claude")
+        (home / ".claude").symlink_to(outside)
+        with pytest.raises(ValueError):
+            s.claude_default_state(home)
+        assert not state.exists()
+        return
+    if scenario == "edge":
+        # A refresh token past its expiry cannot log in: keep onboarding's login step.
+        expired = {**oauth, "refreshTokenExpiresAt": int(time.time() * 1000) - 1000}
+        credentials.write_text(json.dumps({"claudeAiOauth": expired}))
+        s.claude_default_state(home)
+        assert not state.exists()
+    credentials.write_text(json.dumps({"claudeAiOauth": oauth}))
+    if scenario == "edge":
+        # Real host files grow past CONFIG_LIMIT through project history.
+        projects = {f"/p{i}": {"history": ["x" * 100] * 10} for i in range(s.CONFIG_LIMIT // 1000 + 1)}
+        state.write_text(json.dumps({"theme": "light", "hasCompletedOnboarding": False,
+                                     "oauthAccount": {"emailAddress": "x"}, "projects": projects}))
+        assert state.stat().st_size > s.CONFIG_LIMIT
+    s.claude_default_state(home)
+    document = json.loads(state.read_text())
+    if scenario == "happy":
+        assert document == {"hasCompletedOnboarding": True, "theme": "dark"}
+        assert state.stat().st_mode & 0o777 == 0o600
+    else:
+        assert document["hasCompletedOnboarding"] is True and document["theme"] == "light"
+        assert document["oauthAccount"] == {"emailAddress": "x"} and document["projects"] == projects
+
+
+def test_printable(scenario):
+    text = {"happy": "plain ä text\n\tok", "sad": "\x1b]52;c;cGF5\x07\r", "edge": "a‮b\x9bc"}[scenario]
+    expected = {"happy": text, "sad": "\\x1b]52;c;cGF5\\x07\\x0d", "edge": "a\\u202eb\\x9bc"}[scenario]
+    assert s.printable(text) == expected
+
+
+def exposure_args(tmp_path, *options):
+    for name in ("work", "rw", "ro", "state", "outside"):
+        (tmp_path / name).mkdir(exist_ok=True)
+    return s.parse_args(["opencode", "--workspace", str(tmp_path / "work"), "--mount", f"{tmp_path / 'rw'}:/mnt/rw:rw",
+                         "--mount", f"{tmp_path / 'ro'}:/mnt/ro:ro", "--state-dir", str(tmp_path / "state"), *options])
+
+
+def test_exposed_trees(scenario, tmp_path):
+    options = {"happy": [], "sad": [], "edge": []}[scenario]
+    args = exposure_args(tmp_path, *options)
+    if scenario == "sad":
+        args.state_dir = None
+    trees = s.exposed_trees(args)
+    expected = [tmp_path / "work", tmp_path / "rw"] + ([] if scenario == "sad" else [tmp_path / "state"])
+    assert trees == expected  # read-only mounts are not writable by the agent
+    assert tmp_path / "ro" not in trees
+
+
+def test_check_host_source(scenario, tmp_path):
+    args = exposure_args(tmp_path)
+    (tmp_path / "outside/config.json").write_text("{}")
+    if scenario == "happy":
+        s.check_host_source(args, tmp_path / "outside/config.json", "--local-config")
+        return
+    if scenario == "sad":
+        # Inside the workspace, the rw mount or the persistent HOME: refused even before it exists.
+        for path in [tmp_path / "work/cfg.json", tmp_path / "rw/x", tmp_path / "state/.ssh/id",
+                     tmp_path / "outside/../work/cfg.json"]:
+            with pytest.raises(ValueError, match="agent can change"):
+                s.check_host_source(args, path, "--copy")
+        return
+    # A host symlink outside that leads into the workspace is refused by its target.
+    (tmp_path / "outside/link.json").symlink_to(tmp_path / "work/cfg.json")
+    with pytest.raises(ValueError, match="agent can change"):
+        s.check_host_source(args, tmp_path / "outside/link.json", "--auth-file")
+
+
+def test_check_host_sources(scenario, tmp_path):
+    (tmp_path / "outside").mkdir()
+    (tmp_path / "outside/auth.json").write_text("{}")
+    if scenario == "happy":
+        s.validate(exposure_args(tmp_path, "--auth-file", str(tmp_path / "outside/auth.json")))
+        return
+    if scenario == "sad":
+        (tmp_path / "work").mkdir()
+        (tmp_path / "work/data").mkdir()
+        cases = [["--local-config", str(tmp_path / "work/x.json")],
+                 ["--copy", f"{tmp_path / 'work/x.json'}:.config/x"],
+                 ["--mount", f"{tmp_path / 'work/data'}:/mnt/data:ro"],
+                 ["--mount", f"{tmp_path / 'rw'}:/mnt/again:ro"]]
+        (tmp_path / "work/x.json").write_text("{}")
+        for options in cases:
+            with pytest.raises(ValueError, match="agent can change"):
+                s.validate(exposure_args(tmp_path, *options))
+        return
+    # The persistent HOME must not lie in a workspace, where it could be committed or swapped.
+    (tmp_path / "work").mkdir()
+    (tmp_path / "work/.state").mkdir(mode=0o700)
+    with pytest.raises(ValueError, match="agent can change"):
+        s.validate(s.parse_args(["codex", "--workspace", str(tmp_path / "work"),
+                                 "--state-dir", str(tmp_path / "work/.state")]))
+
+
+def test_check_tiocsti(scenario, tmp_path, monkeypatch):
+    sysctl = tmp_path / "legacy_tiocsti"
+    monkeypatch.setattr(s, "TIOCSTI_SYSCTL", sysctl)
+    if scenario == "happy":
+        sysctl.write_text("0\n")
+        s.check_tiocsti()
+        return
+    if scenario == "sad":
+        sysctl.write_text("1\n")
+    # edge: no sysctl at all means a kernel before 6.2, which always allows TIOCSTI.
+    with pytest.raises(ValueError, match="TIOCSTI"):
+        s.check_tiocsti()
+
+
+def test_claude_state_subset(scenario, tmp_path):
+    source = tmp_path / ".claude.json"
+    if scenario == "sad":
+        source.write_text("[1]")
+        assert s.claude_state_subset(source) is None
+        source.write_text("{broken")
+        assert s.claude_state_subset(source) is None
+        return
+    document = {"oauthAccount": {"emailAddress": "a@example.org"}, "userID": "u", "theme": "dark",
+                "mcpServers": {"db": {"env": {"TOKEN": "secret"}}}, "projects": {"/home/me/x": {}}}
+    source.write_text(json.dumps(document))
+    if scenario == "edge":
+        # A host file managed as a symlink (dotfiles) is followed on the host side.
+        real = tmp_path / "dotfiles.json"
+        source.rename(real)
+        source.symlink_to(real)
+    subset = json.loads(s.claude_state_subset(source))
+    assert subset == {"oauthAccount": {"emailAddress": "a@example.org"}, "userID": "u", "theme": "dark"}
+
+
+def test_copy_auth_file(scenario, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    source = tmp_path / "source.json"
+    source.write_text(json.dumps({"oauthAccount": {"x": 1}, "mcpServers": {"a": {}}}))
+    if scenario == "happy":
+        s.copy_auth_file(source, home, ".codex/auth.json")
+        assert (home / ".codex/auth.json").read_bytes() == source.read_bytes()
+    elif scenario == "sad":
+        source.write_text("{broken")
+        assert s.copy_auth_file(source, home, ".claude.json") is None
+        assert not (home / ".claude.json").exists()
+    else:
+        s.copy_auth_file(source, home, ".claude.json")
+        assert json.loads((home / ".claude.json").read_text()) == {"oauthAccount": {"x": 1}}
+        assert (home / ".claude.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_replace_private(scenario, tmp_path):
+    home = tmp_path / "home"
+    target = home / ".config/app/config.json"
+    if scenario == "sad":
+        target.parent.mkdir(parents=True)
+        outside = tmp_path / "outside"
+        outside.write_text("keep")
+        target.symlink_to(outside)
+        with pytest.raises(ValueError):
+            s.replace_private(b"new", home, ".config/app/config.json")
+        assert outside.read_text() == "keep"
+        return
+    home.mkdir()
+    assert s.replace_private(b"one", home, ".config/app/config.json") is True
+    assert target.read_bytes() == b"one" and target.stat().st_mode & 0o777 == 0o600
+    if scenario == "edge":
+        inode = target.stat().st_ino
+        assert s.replace_private(b"one", home, ".config/app/config.json") is False
+        assert target.stat().st_ino == inode
+        target.unlink()
+        os.mkfifo(target)  # A planted FIFO is replaced without being opened.
+        assert s.replace_private(b"two", home, ".config/app/config.json") is True
+        assert target.read_bytes() == b"two"
+
+
+def test_timestamp_ms(scenario):
+    values = {"happy": [0, 1, time.time() * 1000, 2 ** 53 - 1],
+              "sad": [-1, 2 ** 53, 10 ** 400, float("inf"), float("nan"), True, "1", None],
+              "edge": [0.5, 1e15]}[scenario]
+    assert all(bool(s.timestamp_ms(v)) == (scenario != "sad") for v in values)
+
+
+def test_credential_digest(scenario, tmp_path):
+    path = tmp_path / "credentials.json"
+    if scenario == "sad":
+        assert s.credential_digest(path) is None
+        return
+    path.write_text("a" if scenario == "happy" else "")
+    digest = s.credential_digest(path)
+    assert digest == hashlib.sha256(path.read_bytes()).hexdigest()
+    path.write_text("b")
+    assert s.credential_digest(path) != digest
+
+
+def test_claude_writeback_state(scenario, tmp_path):
+    host, sandbox = tmp_path / "host.json", tmp_path / "home/.claude/.credentials.json"
+    soon = (time.time() + 3600) * 1000
+    if scenario != "sad":
+        claude_credentials(host, soon)
+        claude_credentials(sandbox, soon)
+    state = s.claude_writeback_state((host, sandbox))
+    if scenario == "sad":
+        assert state == {"host": None, "host_login": False, "tokens": None}
+        return
+    assert state["host"] == s.oauth_token_digest(s.claude_oauth(host)) and state["host_login"] is True
+    assert state["tokens"] == {"accessToken": "access-fixture", "refreshToken": "refresh-fixture", "expiresAt": soon}
+    if scenario == "edge":
+        assert "access-fixture" not in state["host"]
+
+
+def test_claude_writeback(scenario, tmp_path):
+    home = tmp_path / "home"
+    host, sandbox = tmp_path / "host/.claude/.credentials.json", home / ".claude/.credentials.json"
+    soon, later = (time.time() + 3600) * 1000, (time.time() + 7200) * 1000
+    claude_credentials(sandbox, soon)
+    if scenario == "sad":
+        # No host login before: the sandbox never creates one; the agent's tokens stay inside.
+        before = s.claude_writeback_state((host, sandbox))
+        claude_credentials(sandbox, later, refresh="forged")
+        assert s.claude_writeback(home, (host, sandbox), before) is None
+        assert not host.exists()
+        # Review finding: a host file without a login (e.g. only MCP OAuth tokens) must not receive one either.
+        host.parent.mkdir(parents=True)
+        host.write_text(json.dumps({"mcpOAuth": {"srv": {"accessToken": "m"}}}))
+        before = s.claude_writeback_state((host, sandbox))
+        claude_credentials(sandbox, later, refresh="forged-again")
+        assert s.claude_writeback(home, (host, sandbox), before) is None
+        assert "claudeAiOauth" not in json.loads(host.read_text())
+        return
+    claude_credentials(host, soon)
+    before = s.claude_writeback_state((host, sandbox))
+    if scenario == "happy":
+        assert s.claude_writeback(home, (host, sandbox), before) is None  # nothing refreshed, nothing written
+    # Regression: Claude on the host rewrote its file for another reason (an MCP OAuth token) while the
+    # sandbox refreshed the login. The login itself is unchanged, so the rotated tokens must still go back;
+    # dropping them left the host with a used-up refresh token and the next start with "Login expired".
+    claude_credentials(sandbox, later, refresh="rotated")
+    document = json.loads(host.read_text())
+    document["mcpOAuth"] = {"srv": {"accessToken": "m"}}
+    host.write_text(json.dumps(document))
+    if scenario == "happy":
+        assert "written back" in s.claude_writeback(home, (host, sandbox), before)
+        written = json.loads(host.read_text())
+        assert written["claudeAiOauth"]["refreshToken"] == "rotated" and written["mcpOAuth"]["srv"]["accessToken"] == "m"
+        return
+    # edge: the user logged in again on the host during the run; the host's login wins.
+    claude_credentials(sandbox, later, refresh="rotated")
+    claude_credentials(host, soon, refresh="host-relogin")
+    assert "changed during the run; kept that one" in s.claude_writeback(home, (host, sandbox), before)
+    assert json.loads(host.read_text())["claudeAiOauth"]["refreshToken"] == "host-relogin"
+    # A symlinked ~/.claude in the sandbox is refused before anything is read through it.
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    shutil.rmtree(home / ".claude")
+    (home / ".claude").symlink_to(target)
+    with pytest.raises(ValueError, match="symlink"):
+        s.claude_writeback(home, (host, sandbox), before)
+
+
+def test_load_mcp_module(scenario, monkeypatch, tmp_path):
+    if scenario == "sad":
+        monkeypatch.setattr(s, "HERE", tmp_path)
+        with pytest.raises(FileNotFoundError):
+            s.load_mcp_module()
+    else:
+        module = s.load_mcp_module()
+        assert callable(module.ensure_running) and "demo" in module.BUILTIN
+        if scenario == "edge":
+            assert s.load_mcp_module() is not module
+
+
+def test_mcp_socket_dir(scenario, tmp_path, monkeypatch):
+    if scenario == "sad":
+        monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+        assert s.mcp_socket_dir("x") == Path.home() / ".local/state/sandbox-ai/mcp/x/sock"
+    else:
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / ("s" if scenario == "happy" else "with space")))
+        name = "demo" if scenario == "happy" else "a_b-1"
+        assert s.mcp_socket_dir(name) == tmp_path / ("s" if scenario == "happy" else "with space") / f"sandbox-ai/mcp/{name}/sock"
+
+
+def test_mcp_bridge_args(scenario):
+    name = {"happy": "demo", "sad": "x", "edge": "a_b-1"}[scenario]
+    assert s.mcp_bridge_args(name) == ["-I", "/sandbox/runtime.py", "--internal-mcp-bridge",
+                                       f"/sandbox/mcp/{name}/server.sock"]
+
+
+def test_mcp_agent_args(scenario):
+    if scenario == "sad":
+        assert s.mcp_agent_args(s.parse_args(["claude"])) == []
+        assert s.mcp_agent_args(s.parse_args(["opencode", "--mcp", "demo"])) == []
+    elif scenario == "happy":
+        args = s.mcp_agent_args(s.parse_args(["claude", "--mcp", "demo"]))
+        assert args[0] == "--mcp-config" and "demo" in json.loads(args[1])["mcpServers"]
+    else:
+        args = s.mcp_agent_args(s.parse_args(["codex", "--mcp", "a", "--mcp", "a", "--mcp", "b"]))
+        assert args.count("-c") == 4 and 'mcp_servers.b.command="python3"' in args
+
+
+def test_mcp_serve(scenario, tmp_path):
+    import threading, time as clock
+    sock = tmp_path / "s.sock"
+    if scenario == "sad":
+        with pytest.raises(OSError):
+            s.mcp_serve(str(tmp_path / "missing-dir" / "s.sock"), ["cat"])
+        return
+    if scenario == "edge":
+        sock.write_text("stale")  # A stale socket file is replaced.
+    command = ["cat"] if scenario == "happy" else ["/nonexistent/server"]
+    threading.Thread(target=s.mcp_serve, args=(str(sock), command), kwargs={"cwd": str(tmp_path)}, daemon=True).start()
+    for _ in range(100):
+        if sock.exists() and sock.is_socket():
+            break
+        clock.sleep(0.05)
+    def exchange():
+        client = socket.socket(socket.AF_UNIX)
+        client.settimeout(10)
+        client.connect(str(sock))
+        client.sendall(b"echo\n")
+        client.shutdown(socket.SHUT_WR)
+        received = b""
+        try:
+            while chunk := client.recv(100):
+                received += chunk
+        except ConnectionResetError:
+            pass  # a failed server closes with unread input
+        return received
+    assert exchange() == (b"echo\n" if scenario == "happy" else b"")
+    # One failing or finished instance never takes the listener down.
+    assert exchange() == (b"echo\n" if scenario == "happy" else b"")
+
+
+def test_mcp_bridge(scenario, tmp_path, monkeypatch):
+    if scenario == "sad":
+        with pytest.raises(RuntimeError, match="unavailable"):
+            s.mcp_bridge(str(tmp_path / "absent.sock"))
+        return
+    import threading
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(str(tmp_path / "b.sock"))
+    server.listen(1)
+    payload = b"x" * (300000 if scenario == "edge" else 5)
+    def answer():
+        connection, _ = server.accept()
+        with connection:
+            while connection.recv(65536):
+                pass
+            connection.sendall(payload)
+    threading.Thread(target=answer, daemon=True).start()
+    read_r, read_w = os.pipe()
+    write_r, write_w = os.pipe()
+    os.write(read_w, b"request")
+    os.close(read_w)
+    saved = os.dup(0), os.dup(1)
+    os.dup2(read_r, 0)
+    os.dup2(write_w, 1)
+    received = []
+    reader = threading.Thread(target=lambda: received.append(b"".join(iter(lambda: os.read(write_r, 65536), b""))))
+    reader.start()
+    try:
+        assert s.mcp_bridge(str(tmp_path / "b.sock")) == 0
+    finally:
+        os.dup2(saved[0], 0)
+        os.dup2(saved[1], 1)
+        os.close(write_w)
+        reader.join(10)
+    assert received == [payload]
+
+
+def test_config_key(scenario, tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    if scenario == "happy":
+        assert s.config_key(real / ".sandbox-ai.json") == real / ".sandbox-ai.json"
+    elif scenario == "sad":
+        # The file name itself is never followed, even when it is a link.
+        (real / "target.json").write_text("{}")
+        (real / ".sandbox-ai.json").symlink_to(real / "target.json")
+        assert s.config_key(real / ".sandbox-ai.json").name == ".sandbox-ai.json"
+    else:
+        (tmp_path / "alias").symlink_to(real)
+        assert s.config_key(tmp_path / "alias" / ".sandbox-ai.json") == real / ".sandbox-ai.json"
+
+
+def test_read_config_bytes(scenario, tmp_path):
+    path = tmp_path / "c.json"
+    if scenario == "happy":
+        path.write_bytes(b'{"a": 1}')
+        assert s.read_config_bytes(path) == b'{"a": 1}'
+    elif scenario == "sad":
+        (tmp_path / "t.json").write_text("{}")
+        path.symlink_to(tmp_path / "t.json")
+        with pytest.raises(ValueError, match="symlink"):
+            s.read_config_bytes(path)
+        os.mkfifo(tmp_path / "fifo")
+        with pytest.raises(ValueError, match="regular file"):
+            s.read_config_bytes(tmp_path / "fifo")
+    else:
+        path.write_bytes(b"x" * (s.CONFIG_LIMIT + 1))
+        with pytest.raises(ValueError, match="larger"):
+            s.read_config_bytes(path)
+
+
+def test_attach_frame(scenario):
+    import struct as st
+    kind, payload = {"happy": (b"d", b"ls\r"), "sad": (b"r", st.pack("!HH", 40, 120)), "edge": (b"d", b"")}[scenario]
+    frame = s.attach_frame(kind, payload)
+    assert frame[:1] == kind and st.unpack("!I", frame[1:5])[0] == len(payload) and frame[5:] == payload
+
+
+def test_read_frames(scenario):
+    import struct as st
+    data = s.attach_frame(b"d", b"abc") + s.attach_frame(b"r", st.pack("!HH", 30, 100))
+    if scenario == "happy":
+        frames, rest = s.read_frames(data)
+        assert frames == [(b"d", b"abc"), (b"r", st.pack("!HH", 30, 100))] and rest == b""
+    elif scenario == "sad":
+        frames, rest = s.read_frames(data[:10])  # an incomplete second header stays buffered
+        assert frames == [(b"d", b"abc")] and rest == data[8:10]
+    else:
+        frames, rest = s.read_frames(data[:3])
+        assert frames == [] and rest == data[:3]
+
+
+def relay_round_trip(tmp_path, child_script, frames):
+    import threading, time as clock
+    sock = tmp_path / "attach.sock"
+    command = [sys.executable, "-c", child_script]
+    threading.Thread(target=s.attach_relay, args=(str(sock), command), daemon=True).start()
+    for _ in range(200):
+        if sock.exists():
+            break
+        clock.sleep(0.02)
+    client = socket.socket(socket.AF_UNIX)
+    client.settimeout(15)
+    client.connect(str(sock))
+    for frame in frames:
+        client.sendall(frame)
+    received = b""
+    try:
+        while chunk := client.recv(4096):
+            received += chunk
+    except ConnectionResetError:
+        pass
+    return received
+
+
+def test_attach_relay(scenario, tmp_path):
+    import struct as st
+    script = ("import os,sys; r,c=os.get_terminal_size(0).lines,os.get_terminal_size(0).columns; "
+              "print('SIZE',r,c,flush=True); line=sys.stdin.readline(); print('GOT',line.strip(),flush=True)")
+    if scenario == "sad":
+        out = relay_round_trip(tmp_path, "import sys; sys.exit(3)", [])
+        assert out == b""  # the attach client ended: connection closed, relay keeps serving
+        return
+    size = (30, 100) if scenario == "happy" else (12, 345)
+    out = relay_round_trip(tmp_path, script, [s.attach_frame(b"r", st.pack("!HH", *size)),
+                                              s.attach_frame(b"d", b"hello\r")])
+    assert f"SIZE {size[0]} {size[1]}".encode() in out and b"GOT hello" in out
+
+
+def test_attach_client(scenario, tmp_path):
+    import threading
+    sock = tmp_path / "c.sock"
+    if scenario == "sad":
+        with pytest.raises(RuntimeError, match="not reachable"):
+            s.attach_client(str(sock), os.open(os.devnull, os.O_RDONLY), os.open(os.devnull, os.O_WRONLY))
+        # The sandbox swaps attach.sock for a symlink to another host socket of the user:
+        # the client refuses instead of sending keystrokes there.
+        victim = socket.socket(socket.AF_UNIX)
+        victim.bind(str(tmp_path / "victim.sock"))
+        victim.listen(1)
+        victim.settimeout(0.5)
+        sock.symlink_to(tmp_path / "victim.sock")
+        with pytest.raises(RuntimeError, match="not reachable"):
+            s.attach_client(str(sock), os.open(os.devnull, os.O_RDONLY), os.open(os.devnull, os.O_WRONLY))
+        with pytest.raises(OSError):
+            victim.accept()
+        sock.unlink()
+        (tmp_path / "plain").write_text("")  # not a socket at all
+        with pytest.raises(RuntimeError, match="not a socket"):
+            s.attach_client(str(tmp_path / "plain"), os.open(os.devnull, os.O_RDONLY), os.open(os.devnull, os.O_WRONLY))
+        return
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(str(sock))
+    server.listen(1)
+    got = []
+    # A hostile relay sends a tmux-style exec request: the client only ever writes bytes out.
+    hostile = b"\x00\x00\x00\x0cMSG_EXEC rm -rf ~" if scenario == "edge" else b"screen output"
+    def serve():
+        connection, _ = server.accept()
+        with connection:
+            data = b""
+            while b"typed" not in data:
+                chunk = connection.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            got.append(data)
+            connection.sendall(hostile)
+    threading.Thread(target=serve, daemon=True).start()
+    stdin_r, stdin_w = os.pipe()
+    os.write(stdin_w, b"typed")
+    os.close(stdin_w)
+    out_r, out_w = os.pipe()
+    assert s.attach_client(str(sock), stdin_r, out_w) == 0
+    os.close(out_w)
+    assert os.read(out_r, 4096) == hostile
+    frames, _ = s.read_frames(got[0])
+    assert (b"d", b"typed") in frames
+
+
+def test_check_home_path(scenario, tmp_path):
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    if scenario == "happy":
+        assert s.check_home_path(home, home / ".claude/x.json") == home / ".claude/x.json"
+    elif scenario == "sad":
+        (tmp_path / "outside").mkdir()
+        (home / "link").symlink_to(tmp_path / "outside")
+        with pytest.raises(ValueError, match="symlink"):
+            s.check_home_path(home, home / "link/x.json")
+    else:
+        with pytest.raises(ValueError, match="outside"):
+            s.check_home_path(home, tmp_path / "elsewhere.json")
+
+
+def test_save_trusted(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    data = {"happy": {"/p/.sandbox-ai.json": "ab"}, "sad": {}, "edge": {"/ü ñ/x": "cd"}}[scenario]
+    s.save_trusted(data)
+    assert s.trusted_configs() == data
+    assert (tmp_path / "cfg/sandbox-ai").stat().st_mode & 0o777 == 0o700
+
+
+def test_forget_config(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    path = tmp_path / ".sandbox-ai.json"
+    path.write_text("{}")
+    if scenario == "sad":
+        assert s.forget_config(path) is False
+        return
+    s.trust_config(path)
+    if scenario == "edge":
+        path.unlink()
+    assert s.forget_config(path) is True and s.trusted_configs() == {}
+
+
+def test_listen_unix(scenario, tmp_path):
+    path = tmp_path / "l.sock"
+    if scenario == "sad":
+        with pytest.raises(OSError):
+            s.listen_unix(tmp_path / "missing" / "l.sock")
+        return
+    if scenario == "edge":
+        path.write_text("stale")
+    server = s.listen_unix(path)
+    try:
+        assert path.is_socket() and not [p for p in tmp_path.iterdir() if p.name.startswith(".l.sock")]
+        client = socket.socket(socket.AF_UNIX)
+        client.connect(str(path))  # accepted at once: listening before the name appeared
+        client.close()
+    finally:
+        server.close()
+
+
+def test_relay_terminal(scenario, tmp_path):
+    import struct as st, threading
+    left, right = socket.socketpair()
+    if scenario == "sad":
+        right.close()  # the client vanishes before sending a size: nothing is started
+        s.relay_terminal(left, ["/nonexistent"])
+        return
+    command = ([sys.executable, "-c", "import os; print(os.get_terminal_size(0).columns, flush=True)"]
+               if scenario == "happy" else ["/nonexistent/attach"])
+    thread = threading.Thread(target=s.relay_terminal, args=(left, command), daemon=True)
+    thread.start()
+    right.sendall(s.attach_frame(b"r", st.pack("!HH", 20, 77)))
+    right.settimeout(10)
+    received = b""
+    try:
+        while chunk := right.recv(4096):
+            received += chunk
+    except (ConnectionResetError, socket.timeout):
+        pass
+    thread.join(10)
+    assert not thread.is_alive()
+    assert (b"77" in received) if scenario == "happy" else received == b""
+
+
+def test_terminate(scenario):
+    signum = {"happy": signal.SIGTERM, "sad": signal.SIGHUP, "edge": signal.SIGINT}[scenario]
+    with pytest.raises(SystemExit) as raised:
+        s.terminate(signum, None)
+    assert raised.value.code == 128 + signum
+
+
+def test_launch(scenario, tmp_path, monkeypatch, capsys):
+    if scenario == "sad":
+        with pytest.raises(ValueError):
+            s.launch(["codex", "--workspace", str(tmp_path), "--offline", "--dns", "--dry-run"])
+    else:
+        options = ["--dry-run"] + (["--gui"] if scenario == "edge" else [])
+        assert s.launch(["codex", "--workspace", str(tmp_path / "w"), *options]) == 0
+        plan = json.loads(capsys.readouterr().out)
+        assert plan["agent"] == "codex" and (plan["gui"] is not None) == (scenario == "edge")
+
+
+def test_check_workspace_scope(scenario, tmp_path, monkeypatch):
+    """Review finding: HOME, /, the temp directory or the launcher's own checkout must not become the workspace."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    if scenario == "happy":
+        s.check_workspace_scope(tmp_path / "home" / "src" / "app")
+    elif scenario == "sad":
+        for risky in [Path("/"), tmp_path / "home", s.HERE, s.HERE.parent, Path(tempfile.gettempdir())]:
+            with pytest.raises(ValueError, match="Workspace"):
+                s.check_workspace_scope(risky.resolve())
+    else:
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
+        (tmp_path / "run").mkdir()
+        with pytest.raises(ValueError, match="XDG_RUNTIME_DIR"):
+            s.check_workspace_scope(tmp_path / "run")
+        s.check_workspace_scope(tmp_path / "run-not")
+
+
+def test_auth_source_candidates(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for key in ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_DATA_HOME"):
+        monkeypatch.delenv(key, raising=False)
+    store = tmp_path / ".local/share/sandbox-ai/auth"
+    if scenario == "happy":
+        assert s.auth_source_candidates("claude") == [store / "claude/.claude/.credentials.json",
+                                                      store / "claude/.claude.json",
+                                                      tmp_path / ".claude/.credentials.json",
+                                                      tmp_path / ".claude/.claude.json", tmp_path / ".claude.json"]
+        # The login store feeds every sandbox: a workspace that contains it is refused.
+        (tmp_path / ".local/share").mkdir(parents=True)
+        with pytest.raises(ValueError, match="agent can change"):
+            s.validate(s.parse_args(["claude", "--workspace", str(tmp_path / ".local")]))
+    elif scenario == "sad":
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "work/.codex"))
+        assert s.auth_source_candidates("codex") == [store / "codex/.codex/auth.json", tmp_path / "work/.codex/auth.json"]
+        # A credential directory inside the workspace is refused before anything is read.
+        with pytest.raises(ValueError, match="agent can change"):
+            s.validate(s.parse_args(["codex", "--workspace", str(tmp_path / "work")]))
+    else:
+        # Set but empty counts as unset (XDG): never a path relative to the current directory.
+        monkeypatch.setenv("XDG_DATA_HOME", "")
+        monkeypatch.setenv("CODEX_HOME", "")
+        assert all(path.is_absolute() for agent in ("codex", "opencode")
+                   for path in s.auth_source_candidates(agent) + [src for src, _ in s.auth_sources(agent)])
+        monkeypatch.delenv("CODEX_HOME")
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+        assert s.auth_source_candidates("opencode") == [tmp_path / "data/sandbox-ai/auth/opencode/.local/share/opencode/auth.json",
+                                                        tmp_path / "data/opencode/auth.json"]
+
+
+def test_opencode_catalog(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    if scenario == "sad":
+        monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+        assert s.opencode_catalog() == tmp_path / ".cache/opencode/models.json"
+    else:
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "c"))
+        assert s.opencode_catalog() == tmp_path / "c/opencode/models.json"
+
+
+def test_has_controlling_terminal(scenario, monkeypatch):
+    if scenario == "sad":
+        monkeypatch.setattr(s.os, "open", Mock(side_effect=OSError(6, "No such device or address")))
+        assert s.has_controlling_terminal() is False
+    elif scenario == "happy":
+        monkeypatch.setattr(s.os, "open", Mock(return_value=99))
+        monkeypatch.setattr(s.os, "close", Mock())
+        assert s.has_controlling_terminal() is True
+    else:
+        # bwrap with every standard stream redirected still checks TIOCSTI when a controlling terminal exists.
+        monkeypatch.setattr(s, "has_controlling_terminal", lambda: True)
+        monkeypatch.setattr(s, "check_tiocsti", Mock(side_effect=ValueError("TIOCSTI")))
+        monkeypatch.setattr(s.os, "geteuid", lambda: 1000)
+        monkeypatch.setattr(s.shutil, "which", lambda name: "/usr/bin/" + name)
+        monkeypatch.setattr(s.os, "isatty", lambda fd: False)
+        with pytest.raises(ValueError, match="TIOCSTI"):
+            s.main(["codex", "--backend", "bwrap", "--offline", "--binary", "/usr/bin/true"])
+
+
+def test_pod_owner(scenario, tmp_path):
+    options = {"happy": ["--pod-name", "agent-session-x", "--tmux-socket-dir", str(tmp_path / "t")],
+               "sad": ["--tmux-socket-dir", str(tmp_path / "t")],
+               "edge": ["--pod-name", "agent-mcp-x", "--mcp-socket-dir", str(tmp_path / "m")]}[scenario]
+    owner = s.pod_owner(s.parse_args(["codex", *options]))
+    assert owner == {"happy": str((tmp_path / "t").resolve()), "sad": None, "edge": str((tmp_path / "m").resolve())}[scenario]
+
+
+def test_remove_stale_pod(scenario, monkeypatch):
+    calls = []
+    labels = {"happy": {s.SESSION_LABEL: "/own"}, "sad": {s.SESSION_LABEL: "/other"}, "edge": None}[scenario]
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[1:3] == ["pod", "inspect"]:
+            return Mock(returncode=0 if labels is not None else 125, stdout=json.dumps(labels))
+        return Mock(returncode=0)
+    monkeypatch.setattr(s.subprocess, "run", run)
+    engine = Mock(podman_url=None)
+    if scenario == "happy":
+        assert s.remove_stale_pod(engine, "agent-mcp-x", "/own") is True
+        assert calls[-1] == ["podman", "pod", "rm", "--force", "agent-mcp-x"]
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="not created here"):
+            s.remove_stale_pod(engine, "agent-mcp-x", "/own")
+        assert len(calls) == 1
+    else:
+        assert s.remove_stale_pod(engine, "agent-mcp-x", "/own") is False
+
+
+def test_relative_paths(scenario):
+    options = {"happy": ["--mount", "/a:/mnt/a:ro", "--state-dir=~/s", "--git-token-file", "http://x=/t"],
+               "sad": ["--mount", "data:/mnt/d:rw", "--local-config=c.json", "--git-token-file", "https://h=t",
+                       "--copy", "f:.x"],
+               "edge": ["--dns", "--allow-tcp", "1.2.3.4:5", "--workspace", "."]}[scenario]
+    expected = {"happy": [], "sad": ["--mount data:/mnt/d:rw", "--local-config c.json", "--git-token-file https://h=t",
+                                     "--copy f:.x"], "edge": ["--workspace ."]}[scenario]
+    assert s.relative_paths(options) == expected
+
+
+def test_review_workspace_inside_rw_mount_or_state_dir_is_refused(scenario, tmp_path):
+    """Review finding: the agent could swap a directory on the way to the workspace for a symlink."""
+    data = tmp_path / "data"
+    workspace = data / "a" / "b" / "proj"
+    workspace.mkdir(parents=True)
+    options = {"happy": ["--mount", f"{tmp_path / 'other'}:/mnt/o:rw"],
+               "sad": ["--mount", f"{data}:/mnt/data:rw"], "edge": ["--state-dir", str(data)]}[scenario]
+    (tmp_path / "other").mkdir()
+    args = s.parse_args(["codex", "--workspace", str(workspace), "--no-auth", *options])
+    if scenario == "happy":
+        s.validate(args)
+    else:
+        with pytest.raises(ValueError, match="agent can change"):
+            s.validate(args)
+
+
+def test_review_allow_refuses_scope_ids(scenario):
+    value = {"happy": "2001:db8::/32", "sad": "fe80::1%x y", "edge": "fe80::1%eth0"}[scenario]
+    args = s.parse_args(["codex", "--no-auth", "--allow", value])
+    if scenario == "happy":
+        s.validate(args)
+    else:
+        with pytest.raises(ValueError, match="scope ID"):
+            s.validate(args)
+
+
+def test_default_log_dir(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    a, b = tmp_path / "x" / "app", tmp_path / "y" / "app"
+    if scenario == "happy":
+        assert s.default_log_dir(a).parent == tmp_path / "state/sandbox-ai/logs"
+        assert s.default_log_dir(a).name.startswith("app-")
+    elif scenario == "sad":
+        # Same directory name, different projects: different log directories.
+        assert s.default_log_dir(a) != s.default_log_dir(b)
+    else:
+        assert s.default_log_dir(Path("/")).name.startswith("root-")
+
+
+def test_load_runtime(scenario):
+    """The launcher and the in-sandbox runtime share helpers; the runtime never loads the launcher."""
+    runtime = s.load_runtime()
+    if scenario == "happy":
+        assert runtime.base_env().keys() == s.base_env().keys() and s.LOG_DIR == runtime.LOG_DIR
+    elif scenario == "sad":
+        source = (ROOT / "sandbox/runtime.py").read_text()
+        code = source.split('"""', 2)[2]
+        # Standalone inside the sandbox: it never loads the launcher or any other sibling.
+        assert "agent_sandbox.py" not in code and "spec_from_file_location" not in code
+    else:
+        assert runtime is not s.RUNTIME and runtime.ATTACH_SOCKET == s.ATTACH_SOCKET
+
+
 def test_contract_manifest_covers_every_launcher_function():
     """New production functions must get the same three contract scenarios."""
-    tree = ast.parse((ROOT / "sandbox/agent_sandbox.py").read_text())
-    functions = {node.name for node in tree.body if isinstance(node, ast.FunctionDef)}
+    functions = set()
+    for source in ("sandbox/agent_sandbox.py", "sandbox/runtime.py"):
+        tree = ast.parse((ROOT / source).read_text())
+        functions |= {node.name for node in tree.body if isinstance(node, ast.FunctionDef)}
     for function in sorted(functions):
         contract = globals().get("test_" + function)
         assert callable(contract), "Missing happy/sad/edge contract for " + function
         assert "scenario" in contract.__code__.co_varnames[:contract.__code__.co_argcount]
+
+
+# --- tmux by default, login store, write-back by token digest -------------------------------------
+
+
+def test_build_parser(scenario):
+    parser = s.build_parser()
+    actions = parser._option_string_actions
+    if scenario == "happy":
+        assert actions["--tmux"].nargs == 0 and actions["--mount"].nargs is None
+    elif scenario == "sad":
+        with pytest.raises(SystemExit):
+            parser.parse_args(["codex", "--tmu"])  # no abbreviations
+    else:
+        assert parser.parse_args(["codex", "--tmux", "--no-tmux"]).tmux is False  # the last one wins
+        assert parser.parse_args(["codex"]).tmux is None
+
+
+def test_resolve_tmux(scenario, monkeypatch):
+    monkeypatch.setattr(s.sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(s.sys.stdout, "isatty", lambda: True, raising=False)
+    if scenario == "happy":
+        assert s.resolve_tmux(s.parse_args(["claude"])) is True
+        assert s.resolve_tmux(s.parse_args(["claude", "--", "--model", "opus"])) is True
+        assert s.resolve_tmux(s.parse_args(["claude", "--no-tmux"])) is False
+    elif scenario == "sad":
+        monkeypatch.setattr(s.sys.stdin, "isatty", lambda: False, raising=False)
+        assert s.resolve_tmux(s.parse_args(["claude"])) is False
+        assert s.resolve_tmux(s.parse_args(["claude", "--tmux"])) is True  # insisted on: checked later
+    else:
+        assert s.resolve_tmux(s.parse_args(["claude", "--", "-p", "task"])) is False
+        assert s.resolve_tmux(s.parse_args(["claude", "--", "mcp", "list"])) is False
+        assert s.resolve_tmux(s.parse_args(["claude", "--binary", "python3"])) is False
+        assert s.resolve_tmux(s.parse_args(["codex", "--probe"])) is False
+        assert s.resolve_tmux(s.parse_args(["codex", "--session", "x"])) is False
+        monkeypatch.setattr(s.shutil, "which", lambda name: None)
+        assert s.resolve_tmux(s.parse_args(["codex", "--backend", "bwrap"])) is False
+
+
+def test_auth_store(scenario, monkeypatch, tmp_path):
+    if scenario == "happy":
+        assert s.auth_store("claude") == Path.home() / ".local/share/sandbox-ai/auth/claude"
+    elif scenario == "sad":
+        monkeypatch.setenv("XDG_DATA_HOME", "")
+        assert s.auth_store() == Path.home() / ".local/share/sandbox-ai/auth"
+    else:
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "d"))
+        assert s.auth_store("codex") == tmp_path / "d/sandbox-ai/auth/codex"
+
+
+def test_store_login(scenario, tmp_path):
+    store = s.auth_store("claude")
+    if scenario == "happy":
+        claude_credentials(store / ".claude/.credentials.json", 4102444800000)
+        assert s.store_login("claude")
+        (s.auth_store("codex") / ".codex").mkdir(parents=True)
+        (s.auth_store("codex") / ".codex/auth.json").write_text('{"OPENAI_API_KEY": "sk"}')
+        assert s.store_login("codex")
+        # Without the agent's structure it is no login, and the host's is used instead.
+        (s.auth_store("codex") / ".codex/auth.json").write_text('{"x": 1}')
+        assert not s.store_login("codex")
+    elif scenario == "sad":
+        assert not s.store_login("claude") and not s.store_login("opencode")
+        (store / ".claude").mkdir(parents=True)
+        (store / ".claude/.credentials.json").write_text('{"other": 1}')
+        assert not s.store_login("claude")
+    else:
+        # A link in the store is never followed.
+        claude_credentials(tmp_path / "elsewhere.json", 4102444800000)
+        (store / ".claude").mkdir(parents=True)
+        (store / ".claude/.credentials.json").symlink_to(tmp_path / "elsewhere.json")
+        assert not s.store_login("claude")
+
+
+def test_store_sources(scenario):
+    store = s.auth_store({"happy": "claude", "sad": "codex", "edge": "opencode"}[scenario])
+    expected = {"happy": [(store / ".claude/.credentials.json", ".claude/.credentials.json"),
+                          (store / ".claude.json", ".claude.json")],
+                "sad": [(store / ".codex/auth.json", ".codex/auth.json")],
+                "edge": [(store / ".local/share/opencode/auth.json", ".local/share/opencode/auth.json")]}[scenario]
+    assert s.store_sources(store.name) == expected
+
+
+def test_oauth_token_digest(scenario):
+    login = {"accessToken": "a", "refreshToken": "r", "expiresAt": 1}
+    if scenario == "happy":
+        digest = s.oauth_token_digest(login)
+        assert len(digest) == 64 and "a" * 2 not in digest[:0]
+        # Fields other than the tokens do not count.
+        assert s.oauth_token_digest({**login, "scopes": ["x"]}) == digest
+    elif scenario == "sad":
+        assert s.oauth_token_digest(None) is None
+    else:
+        assert s.oauth_token_digest(login) != s.oauth_token_digest({**login, "refreshToken": "rotated"})
+
+
+def test_claude_recover_writeback(scenario, tmp_path):
+    home = tmp_path / "home"
+    source, sandbox = tmp_path / "host/.credentials.json", home / ".claude/.credentials.json"
+    soon, later = (time.time() + 3600) * 1000, (time.time() + 7200) * 1000
+    claude_credentials(source, soon)
+    claude_credentials(sandbox, soon)
+    s.remember_sync("claude", home, s.oauth_token_digest(s.claude_oauth(source)))
+    if scenario == "happy":
+        # The earlier run refreshed (rotating the refresh token) and was killed before writing back.
+        claude_credentials(sandbox, later, refresh="rotated")
+        assert s.claude_recover_writeback(home, (source, sandbox)) is True
+        assert json.loads(source.read_text())["claudeAiOauth"]["refreshToken"] == "rotated"
+    elif scenario == "sad":
+        # The host logged in again since: its login wins, nothing is written back.
+        claude_credentials(sandbox, later, refresh="rotated")
+        claude_credentials(source, soon, refresh="host-relogin")
+        assert s.claude_recover_writeback(home, (source, sandbox)) is False
+        assert json.loads(source.read_text())["claudeAiOauth"]["refreshToken"] == "host-relogin"
+    else:
+        # Nothing refreshed, or tokens claiming an implausible lifetime: nothing written.
+        assert s.claude_recover_writeback(home, (source, sandbox)) is False
+        claude_credentials(sandbox, (time.time() + 365 * 86400) * 1000, refresh="forged")
+        assert s.claude_recover_writeback(home, (source, sandbox)) is False
+        assert json.loads(source.read_text())["claudeAiOauth"]["refreshToken"] == "refresh-fixture"
+
+
+def test_sandbox_digest(scenario, tmp_path):
+    home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True)
+    if scenario == "happy":
+        (home / ".codex/auth.json").write_text("{}")
+        assert s.sandbox_digest(home, ".codex/auth.json") == hashlib.sha256(b"{}").hexdigest()
+    elif scenario == "sad":
+        assert s.sandbox_digest(home, ".codex/auth.json") is None
+    else:
+        (tmp_path / "x").write_text("{}")
+        (home / ".codex/auth.json").symlink_to(tmp_path / "x")
+        assert s.sandbox_digest(home, ".codex/auth.json") is None
+
+
+def test_write_private_file(scenario, tmp_path):
+    path = tmp_path / "f.json"
+    if scenario == "sad":
+        path.symlink_to(tmp_path / "target")
+        with pytest.raises(ValueError, match="symlink"):
+            s.write_private_file(path, b"x")
+        assert not (tmp_path / "target").exists()
+        return
+    if scenario == "edge":
+        path.write_text("old")
+        path.chmod(0o644)
+    s.write_private_file(path, b"new")
+    assert path.read_bytes() == b"new" and stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert not list(tmp_path.glob(".auth-*"))  # no temporary file left
+
+
+def test_login_state(scenario, monkeypatch):
+    host = Path.home() / ".claude/.credentials.json"
+    if scenario == "happy":
+        claude_credentials(host, 4102444800000)
+        assert s.login_state("claude") == ("host", None)
+        claude_credentials(s.auth_store("claude") / ".claude/.credentials.json", 4102444800000)
+        assert s.login_state("claude") == ("store", None)
+    elif scenario == "sad":
+        assert s.login_state("claude") == ("host", "missing") and s.login_state("codex") == ("host", "missing")
+        store_codex_login()
+        assert s.login_state("codex") == ("store", None)
+    else:
+        host.parent.mkdir(parents=True)
+        login = {"accessToken": "a", "refreshToken": "r", "expiresAt": 1000, "refreshTokenExpiresAt": 2000}
+        host.write_text(json.dumps({"claudeAiOauth": login}))
+        assert s.login_state("claude") == ("host", "expired")
+
+
+def test_check_login(scenario, monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(s.sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(s.sys.stdout, "isatty", lambda: True, raising=False)
+    host = Path.home() / ".claude/.credentials.json"
+    login = Mock(return_value=0)
+    monkeypatch.setattr(s, "load_login_module", lambda: Mock(login=login))
+    if scenario == "happy":
+        claude_credentials(host, 4102444800000)
+        s.check_login(s.parse_args(["claude"]))
+        assert capsys.readouterr().err == "" and not login.called
+        # Missing: a hint only, no question.
+        s.check_login(s.parse_args(["codex"]))
+        assert "sandbox-ai login codex" in capsys.readouterr().err and not login.called
+        return
+    host.parent.mkdir(parents=True)
+    expired = {"accessToken": "a", "refreshToken": "r", "expiresAt": 1000, "refreshTokenExpiresAt": 2000}
+    host.write_text(json.dumps({"claudeAiOauth": expired}))
+    if scenario == "sad":
+        # Expired in a terminal: the user is asked and the login runs inside a sandbox.
+        monkeypatch.setattr("builtins.input", lambda prompt: "")
+        s.check_login(s.parse_args(["claude", "--backend", "bwrap"]))
+        assert login.call_args[0] == ("claude", ["--backend", "bwrap"])
+        login.return_value = 1
+        with pytest.raises(ValueError, match="Login failed"):
+            s.check_login(s.parse_args(["claude"]))
+    else:
+        # No question without a terminal, for --no-auth, dry runs or a HOME that has a login.
+        monkeypatch.setattr("builtins.input", Mock(side_effect=AssertionError("asked")))
+        for args in (["claude", "--no-auth"], ["claude", "--dry-run"]):
+            s.check_login(s.parse_args(args))
+        state = tmp_path / "state"
+        claude_credentials(state / ".claude/.credentials.json", 4102444800000)
+        s.check_login(s.parse_args(["claude", "--state-dir", str(state)]))
+        monkeypatch.setattr(s.sys.stdin, "isatty", lambda: False, raising=False)
+        s.check_login(s.parse_args(["claude"]))
+        assert "expired claude login" in capsys.readouterr().err and not login.called
+
+
+def test_load_login_module(scenario, monkeypatch, tmp_path):
+    if scenario == "sad":
+        monkeypatch.setattr(s, "HERE", tmp_path)
+        with pytest.raises(FileNotFoundError):
+            s.load_login_module()
+    else:
+        module = s.load_login_module()
+        assert callable(module.login) and module.LOGIN_ARGS["claude"] == ["auth", "login"]
+        if scenario == "edge":
+            assert s.load_login_module() is not module
+
+
+def test_interactive_args(scenario):
+    if scenario == "happy":
+        assert s.interactive_args("claude", []) and s.interactive_args("claude", ["--model", "opus", "--continue"])
+        assert s.interactive_args("codex", ["-m", "gpt-5", "--search"])
+    elif scenario == "sad":
+        for agent, args in (("claude", ["-p", "x"]), ("claude", ["--version"]), ("claude", ["mcp", "list"]),
+                            ("codex", ["exec", "x"]), ("codex", ["login", "status"]), ("opencode", ["run", "x"]),
+                            ("opencode", ["models"])):
+            assert not s.interactive_args(agent, args), (agent, args)
+    else:
+        # An option we do not know, followed by a word: that word may be a subcommand; no tmux.
+        assert not s.interactive_args("claude", ["--unknown", "value"])
+        assert not s.interactive_args("claude", ["first message"])
+
+
+def store_codex_login(refresh="r1", account="acct-1", **extra):
+    path = s.auth_store("codex") / ".codex/auth.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"OPENAI_API_KEY": None, "tokens": {"id_token": "i", "access_token": "a",
+                                                                  "refresh_token": refresh, "account_id": account},
+                                "last_refresh": "t0", **extra}))
+    return path
+
+
+def test_login_document_ok(scenario):
+    if scenario == "happy":
+        assert s.login_document_ok("codex", {"tokens": {"access_token": "a", "refresh_token": "r", "account_id": "x"}})
+        assert s.login_document_ok("codex", {"OPENAI_API_KEY": "sk-1"})
+        assert s.login_document_ok("opencode", {"anthropic": {"type": "oauth", "refresh": "r"}})
+    elif scenario == "sad":
+        for agent, document in (("codex", {"x": 1}), ("codex", []), ("opencode", {}), ("opencode", {"a": "b"}),
+                                ("codex", {"tokens": {"refresh_token": "r"}})):
+            assert not s.login_document_ok(agent, document)
+    else:
+        assert not s.login_document_ok("codex", {"OPENAI_API_KEY": ""})
+
+
+def test_stored_document(scenario, tmp_path):
+    path = tmp_path / "auth.json"
+    if scenario == "happy":
+        path.write_text('{"OPENAI_API_KEY": "sk"}')
+        assert s.stored_document("codex", path) == {"OPENAI_API_KEY": "sk"}
+    elif scenario == "sad":
+        path.write_text("{broken")
+        assert s.stored_document("codex", path) is None
+        assert s.stored_document("codex", tmp_path / "missing") is None
+    else:
+        (tmp_path / "real").write_text('{"OPENAI_API_KEY": "sk"}')
+        path.symlink_to(tmp_path / "real")
+        assert s.stored_document("codex", path) is None
+
+
+def test_merge_refreshed(scenario):
+    stored = {"OPENAI_API_KEY": None, "last_refresh": "t0",
+              "tokens": {"id_token": "i", "access_token": "a", "refresh_token": "r1", "account_id": "acct"}}
+    if scenario == "happy":
+        sandbox = {"OPENAI_API_KEY": None, "last_refresh": "t1",
+                   "tokens": {"id_token": "i2", "access_token": "a2", "refresh_token": "r2", "account_id": "acct"}}
+        merged = s.merge_refreshed("codex", stored, sandbox)
+        assert merged["tokens"]["refresh_token"] == "r2" and merged["last_refresh"] == "t1"
+        oc = {"anthropic": {"type": "oauth", "refresh": "r1", "access": "a1", "expires": 1, "accountId": "x"}}
+        new = {"anthropic": {"type": "oauth", "refresh": "r2", "access": "a2", "expires": 2, "accountId": "x"}}
+        assert s.merge_refreshed("opencode", oc, new)["anthropic"]["refresh"] == "r2"
+    elif scenario == "sad":
+        # Review finding: the agent must not plant an API key or another account for every later sandbox.
+        planted = {"OPENAI_API_KEY": "sk-attacker", "x": 1,
+                   "tokens": {"access_token": "evil", "refresh_token": "evil", "account_id": "attacker"}}
+        assert s.merge_refreshed("codex", stored, planted) is None
+        assert s.merge_refreshed("codex", stored, {"OPENAI_API_KEY": "sk-attacker", "tokens": stored["tokens"]}) is None
+        oc = {"openai": {"type": "api", "key": "sk-real"}}
+        assert s.merge_refreshed("opencode", oc, {"openai": {"type": "api", "key": "sk-evil"},
+                                                  "evil": {"type": "api", "key": "x"}}) is None
+        assert s.merge_refreshed("codex", stored, "not a dict") is None
+    else:
+        assert s.merge_refreshed("codex", stored, json.loads(json.dumps(stored))) is None  # nothing new
+        assert s.merge_refreshed("codex", {"OPENAI_API_KEY": "sk"}, {"OPENAI_API_KEY": "sk2"}) is None
+
+
+def test_login_sync_store(scenario, monkeypatch, tmp_path):
+    if scenario == "edge":
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "st"))
+        assert s.login_sync_store() == tmp_path / "st/sandbox-ai/login-sync.json"
+    else:
+        assert s.login_sync_store() == Path.home() / ".local/state/sandbox-ai/login-sync.json"
+
+
+def test_load_login_sync(scenario):
+    store = s.login_sync_store()
+    if scenario == "sad":
+        assert s.load_login_sync() == {}
+        return
+    store.parent.mkdir(parents=True)
+    store.write_text('{"claude:/x": "d"}' if scenario == "happy" else "[1]")
+    assert s.load_login_sync() == ({"claude:/x": "d"} if scenario == "happy" else {})
+
+
+def test_sync_key(scenario, tmp_path):
+    home = tmp_path / {"happy": "h", "sad": "x/../h", "edge": "a:b"}[scenario]
+    assert s.sync_key("codex", home) == f"codex:{home.resolve()}"
+
+
+def test_remember_sync(scenario, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    if scenario == "sad":
+        s.remember_sync("claude", home, None)  # nothing to forget: no file is created
+        assert not s.login_sync_store().exists()
+        return
+    s.remember_sync("claude", home, "d1")
+    assert s.load_login_sync() == {s.sync_key("claude", home): "d1"}
+    if scenario == "happy":
+        s.remember_sync("claude", home, None)
+        assert s.load_login_sync() == {}
+    else:
+        # Entries of HOMEs that no longer exist are dropped.
+        shutil.rmtree(home)
+        other = tmp_path / "other"
+        other.mkdir()
+        s.remember_sync("codex", other, "d2")
+        assert s.load_login_sync() == {s.sync_key("codex", other): "d2"}
+
+
+def test_claude_recover_writeback_never_after_an_unshared_run(tmp_path):
+    """Review finding: a --no-auth run on the HOME (another account) must not be taken for a missed
+    write-back on the next start."""
+    home, host = tmp_path / "home", Path.home() / ".claude/.credentials.json"
+    soon = (time.time() + 3600) * 1000
+    claude_credentials(host, soon)
+    a = s.parse_args(["claude", "--state-dir", str(home)])
+    home.mkdir(mode=0o700)
+    s.prepare_home(a, home)
+    assert s.sync_key("claude", home) in s.load_login_sync()
+    s.prepare_home(s.parse_args(["claude", "--no-auth", "--state-dir", str(home)]), home)
+    assert s.sync_key("claude", home) not in s.load_login_sync()
+    claude_credentials(home / ".claude/.credentials.json", soon + 3600_000, refresh="other-account")
+    s.prepare_home(a, home)
+    assert json.loads(host.read_text())["claudeAiOauth"]["refreshToken"] == "refresh-fixture"
+
+
+def test_store_writeback_state(scenario, tmp_path):
+    home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True)
+    a = s.parse_args(["codex"])
+    if scenario == "sad":
+        assert s.store_writeback_state(a, home) is None  # no stored login
+        return
+    source = store_codex_login()
+    if scenario == "happy":
+        shutil.copy(source, home / ".codex/auth.json")
+        before = s.store_writeback_state(a, home)
+        assert before["source"] == source and before["store"] == before["sandbox"]
+        assert s.store_writeback_state(s.parse_args(["codex", "--no-auth"]), home) is None
+    else:
+        # A persistent HOME with a login of its own never writes it into the store.
+        (home / ".codex/auth.json").write_text('{"tokens": {"refresh_token": "own"}}')
+        assert s.store_writeback_state(a, home) is None
+
+
+def test_store_writeback(scenario, tmp_path):
+    home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True)
+    source = store_codex_login()
+    shutil.copy(source, home / ".codex/auth.json")
+    a = s.parse_args(["codex"])
+    before = s.store_writeback_state(a, home)
+    refreshed = json.loads(source.read_text())
+    refreshed["tokens"]["refresh_token"] = "r2"
+    if scenario == "happy":
+        assert s.store_writeback(home, a, before) is None  # unchanged
+        (home / ".codex/auth.json").write_text(json.dumps(refreshed))
+        assert "written back" in s.store_writeback(home, a, before)
+        assert json.loads(source.read_text())["tokens"]["refresh_token"] == "r2"
+        assert stat.S_IMODE(source.stat().st_mode) == 0o600
+    elif scenario == "sad":
+        # Review finding: a planted API key or another account never reaches the store.
+        (home / ".codex/auth.json").write_text('{"OPENAI_API_KEY": "sk-attacker", "x": 1}')
+        assert s.store_writeback(home, a, before) is None
+        assert "sk-attacker" not in source.read_text() and s.store_login("codex")
+        store_codex_login(refresh="other-run")
+        (home / ".codex/auth.json").write_text(json.dumps(refreshed))
+        assert "kept the stored one" in s.store_writeback(home, a, before)
+        assert "other-run" in source.read_text()
+    else:
+        shutil.rmtree(home / ".codex")
+        (home / ".codex").symlink_to(tmp_path)
+        with pytest.raises(ValueError, match="symlink"):
+            s.store_writeback(home, a, before)
+
+
+def test_sync_store_login(scenario, tmp_path, capsys):
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    a = s.parse_args(["codex", "--state-dir", str(home)])
+    if scenario == "sad":
+        s.sync_store_login(a, home)  # no stored login: nothing recorded
+        assert s.load_login_sync() == {}
+        return
+    store_codex_login()
+    s.prepare_home(a, home)  # copied from the store and recorded
+    assert s.load_login_sync()[s.sync_key("codex", home)] == s.credential_digest(s.auth_store("codex") / ".codex/auth.json")
+    if scenario == "happy":
+        # Another sandbox refreshed into the store: this HOME's tokens are used up, take over the new ones.
+        store_codex_login(refresh="r2")
+        s.sync_store_login(a, home)
+        assert json.loads((home / ".codex/auth.json").read_text())["tokens"]["refresh_token"] == "r2"
+        assert "took over the newer stored login" in capsys.readouterr().err
+    else:
+        # The HOME changed its login itself: kept, and no longer followed.
+        (home / ".codex/auth.json").write_text('{"OPENAI_API_KEY": "sk-own"}')
+        store_codex_login(refresh="r2")
+        s.sync_store_login(a, home)
+        assert "sk-own" in (home / ".codex/auth.json").read_text()
+        assert s.sync_key("codex", home) not in s.load_login_sync()
+
+
+def test_check_login_prompt_keys(scenario, monkeypatch, capsys):
+    """Review finding: Ctrl-D or Ctrl-C at the question gave a traceback; commands that print and exit
+    are never asked."""
+    monkeypatch.setattr(s.sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(s.sys.stdout, "isatty", lambda: True, raising=False)
+    host = Path.home() / ".claude/.credentials.json"
+    host.parent.mkdir(parents=True)
+    host.write_text(json.dumps({"claudeAiOauth": {"accessToken": "a", "refreshToken": "r", "expiresAt": 1000,
+                                                  "refreshTokenExpiresAt": 2000}}))
+    login = Mock(return_value=0)
+    monkeypatch.setattr(s, "load_login_module", lambda: Mock(login=login))
+    if scenario == "happy":
+        monkeypatch.setattr("builtins.input", Mock(side_effect=EOFError))
+        s.check_login(s.parse_args(["claude"]))  # Ctrl-D: no, start anyway with the hint
+        assert "sandbox-ai login claude" in capsys.readouterr().err
+    elif scenario == "sad":
+        monkeypatch.setattr("builtins.input", Mock(side_effect=KeyboardInterrupt))
+        with pytest.raises(SystemExit) as exc:
+            s.check_login(s.parse_args(["claude"]))
+        assert exc.value.code == 130
+    else:
+        monkeypatch.setattr("builtins.input", Mock(side_effect=AssertionError("asked")))
+        s.check_login(s.parse_args(["claude", "--", "-p", "task"]))
+    assert not login.called
+
+
+# --- kits, project memory and plugins ---------------------------------------------------------------
+
+def make_kit(root, files):
+    """Files below ROOT from {relative path: text}; returns ROOT."""
+    for relative, text in files.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    return root
+
+
+def kit_args(tmp_path, agent="claude", *options):
+    a = s.parse_args([agent, "--workspace", str(tmp_path / "work"), "--no-auth", *options])
+    s.validate(a)
+    return a
+
+
+def data_home():
+    return Path(os.environ["HOME"]) / ".local/share/sandbox-ai"
+
+
+def test_load_kits_module(scenario, monkeypatch, tmp_path):
+    if scenario == "sad":
+        monkeypatch.setattr(s, "HERE", tmp_path)
+        with pytest.raises(FileNotFoundError):
+            s.load_kits_module()
+    else:
+        module = s.load_kits_module()
+        assert module.LAYOUT["claude"]["skills"] == ".claude/skills" and callable(module.scan)
+        if scenario == "edge":
+            assert s.load_kits_module() is not module
+
+
+def test_load_privacy_module(scenario, monkeypatch, tmp_path):
+    if scenario == "sad":
+        monkeypatch.setattr(s, "HERE", tmp_path)
+        with pytest.raises(FileNotFoundError):
+            s.load_privacy_module()
+    else:
+        module = s.load_privacy_module()
+        assert callable(module.scan_repository) and module.builtin_rules().patterns
+        if scenario == "edge":
+            assert s.load_privacy_module() is not module
+
+
+def test_privacy_hooks_apply(scenario, tmp_path):
+    if scenario == "happy":
+        assert s.privacy_hooks_apply(s.parse_args(["claude", "--workspace", str(tmp_path)]))
+    elif scenario == "sad":
+        assert not s.privacy_hooks_apply(s.parse_args(["claude", "--workspace", str(tmp_path),
+                                                       "--privacy-check", "off"]))
+    else:
+        # Probes and MCP servers commit nothing.
+        assert not s.privacy_hooks_apply(s.parse_args(["claude", "--workspace", str(tmp_path), "--probe"]))
+        assert s.privacy_hooks_apply(s.parse_args(["claude", "--workspace", str(tmp_path),
+                                                   "--privacy-check", "always"]))
+
+
+def test_privacy_rules_dir(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    if scenario == "happy":
+        rules = tmp_path / "rules"
+        args = s.parse_args(["claude", "--workspace", str(tmp_path / "w"), "--privacy-rules", str(rules)])
+        assert s.privacy_rules_dir(args) == rules
+    elif scenario == "sad":
+        assert s.privacy_rules_dir(s.parse_args(["claude", "--workspace", str(tmp_path / "w")])) is None
+    else:
+        default = tmp_path / "config" / "sandbox-ai" / "privacy"
+        default.mkdir(parents=True)
+        assert s.privacy_rules_dir(s.parse_args(["claude", "--workspace", str(tmp_path / "w")])) == default
+        # Rules the agent could change or read would be no rules: refused inside a workspace.
+        args = s.parse_args(["claude", "--workspace", str(tmp_path / "w"), "--privacy-rules",
+                             str(tmp_path / "w" / "r")])
+        with pytest.raises(ValueError, match="--privacy-rules"):
+            s.check_host_sources(args)
+
+
+def test_privacy_context(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("CONTRACT_GIT", GIT_TOKEN)
+    options = {"happy": ["--allow-tcp", "192.168.50.10:1234", "--git-token-env",
+                         "http://alice@localhost:3000=CONTRACT_GIT"],
+               "sad": [], "edge": ["--allow-tcp", "[fd00::5]:11434"]}[scenario]
+    context = s.privacy_context(s.parse_args(["claude", "--workspace", str(tmp_path), *options]))
+    assert str(Path.home()) in context["homes"]
+    if scenario == "happy":
+        assert context["addresses"] == ["192.168.50.10"]
+        assert context["servers"] == [{"host": "localhost", "port": 3000, "user": "alice"}]
+        assert context["tokens"] == [GIT_TOKEN]
+    elif scenario == "sad":
+        assert context["addresses"] == context["servers"] == context["tokens"] == []
+    else:
+        assert context["addresses"] == ["fd00::5"]
+
+
+def test_privacy_workspaces(scenario, tmp_path):
+    first, second = tmp_path / "first", tmp_path / "second"
+    if scenario == "happy":
+        args = s.parse_args(["claude", "--workspace", f"{first},{second}"])
+        assert s.privacy_workspaces(args) == [(first, "first"), (second, "second")]
+    elif scenario == "sad":
+        # A read-only workspace cannot have changed.
+        assert s.privacy_workspaces(s.parse_args(["claude", "--workspace", str(first), "--workspace-ro"])) == []
+    else:
+        (tmp_path / "link").symlink_to(first)
+        assert s.privacy_workspaces(s.parse_args(["claude", "--workspace", str(tmp_path / "link")])) == \
+            [(first.resolve(), "first")]
+
+
+def test_prepare_privacy(scenario, tmp_path, monkeypatch):
+    workspace, session = tmp_path / "proj", tmp_path / "session"
+    workspace.mkdir()
+    session.mkdir()
+    rules = tmp_path / "rules"
+    rules.mkdir()
+    options = ["claude", "--workspace", str(workspace), "--privacy-rules", str(rules)]
+    if scenario == "sad":
+        (rules / "proj.rules.json").write_text('{"pattern": [{"id": "x", "regex": "(", "severity": "block", '
+                                               '"reason": "r"}]}')
+        with pytest.raises(ValueError, match="uncompilable"):
+            s.prepare_privacy(s.parse_args(options), session)
+        assert s.prepare_privacy(s.parse_args([*options, "--privacy-check", "off"]), session) is None
+        return
+    (rules / "global.rules.json").write_text(json.dumps({"pattern": [
+        {"id": "codename", "regex": r"\bbluefin\b", "severity": "block", "reason": "internal codename"}]}))
+    monkeypatch.setenv("CONTRACT_GIT", GIT_TOKEN)
+    check = s.prepare_privacy(s.parse_args([*options, "--git-token-env", "http://alice@localhost:3000=CONTRACT_GIT"]),
+                              session)
+    hook = json.loads((session / "privacy" / "hook.json").read_text())
+    # Your own rules and the tokens stay on the host; the agent's hooks know the rest.
+    assert "bluefin" not in json.dumps(hook) and GIT_TOKEN not in json.dumps(hook)
+    assert {p["id"] for p in hook["rules"]["pattern"]} >= {"host-home", "own-git-account"}
+    assert hook["own_hosts"] == ["localhost"]
+    assert (session / "privacy" / "privacy.py").read_bytes() == (ROOT / "sandbox/privacy.py").read_bytes()
+    if scenario == "edge" and shutil.which("git"):
+        # After the run: a workspace with a public remote and an unpushed secret is reported.
+        subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+        subprocess.run(["git", "-C", str(workspace), "remote", "add", "origin", "https://github.com/o/r.git"],
+                       check=True)
+        (workspace / "notes.txt").write_text("project bluefin\n")
+        printed = []
+        monkeypatch.setattr(sys, "stderr", Mock(write=printed.append))
+        check()
+        text = "".join(printed)
+        assert "1 blocking" in text and "notes.txt:1 (untracked) [codename]" in text
+
+
+def test_kits_apply(scenario, tmp_path):
+    if scenario == "happy":
+        assert s.kits_apply(s.parse_args(["claude", "--workspace", str(tmp_path)]))
+    elif scenario == "sad":
+        assert not s.kits_apply(s.parse_args(["claude", "--workspace", str(tmp_path), "--probe"]))
+    else:
+        # MCP server sandboxes run a server, not an agent: no skills, memory or plugins.
+        assert not s.kits_apply(s.parse_args(["codex", "--workspace", str(tmp_path),
+                                              "--mcp-socket-dir", str(tmp_path / "sock")]))
+
+
+def test_kit_managed_paths(scenario, tmp_path):
+    from pathlib import PurePosixPath as P
+    if scenario == "happy":
+        paths = s.kit_managed_paths(s.parse_args(["claude", "--workspace", str(tmp_path)]))
+        assert {P(".claude/skills"), P(".claude/CLAUDE.md"), P(".claude/projects/-work/memory"),
+                P(".claude/plugins/cache")} <= set(paths)
+    elif scenario == "sad":
+        assert s.kit_managed_paths(s.parse_args(["codex", "--workspace", str(tmp_path), "--no-default-kit",
+                                                 "--no-memory", "--no-plugins"])) == []
+        assert s.kit_managed_paths(s.parse_args(["codex", "--workspace", str(tmp_path), "--probe"])) == []
+    else:
+        # Without the default kit, a --kit still fills the agent's directories; memory alone otherwise.
+        assert P(".agents/skills") in s.kit_managed_paths(
+            s.parse_args(["codex", "--workspace", str(tmp_path), "--no-default-kit", "--kit", "x"]))
+        assert s.kit_managed_paths(s.parse_args(["opencode", "--workspace", str(tmp_path), "--no-default-kit"])) \
+            == [P(".config/opencode/AGENTS.md")]
+
+
+def test_kit_plan(scenario, tmp_path):
+    make_kit(data_home() / "kits/review/claude", {"skills/review/SKILL.md": "---\nname: review\n---\n",
+                                                   "commands/check.md": "check"})
+    if scenario == "happy":
+        plan = s.kit_plan(kit_args(tmp_path, "claude", "--kit", "review"))
+        assert plan["entries"] == {"skills": ["review"], "commands": ["check.md"]}
+        assert plan["memory"].startswith(str(Path(os.environ["HOME"]) / ".local/state/sandbox-ai/memory/work-"))
+        assert any("created with examples on the first start" in note for note in plan["notes"])
+        assert not (data_home() / "home").exists()  # planning changes nothing
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="--kit missing: .* does not exist .*kits for claude: review"):
+            s.kit_plan(kit_args(tmp_path, "claude", "--kit", "missing"))
+        assert s.kit_plan(kit_args(tmp_path, "claude", "--probe")) is None
+    else:
+        make_kit(data_home() / "kits/other/claude", {"skills/review/SKILL.md": "x"})
+        with pytest.raises(ValueError, match="skill 'review' comes from both kit review and kit other"):
+            s.kit_plan(kit_args(tmp_path, "claude", "--kit", "review", "--kit", "other"))
+        plan = s.kit_plan(kit_args(tmp_path, "claude", "--kit", "review", "--no-memory", "--no-plugins"))
+        assert plan["memory"] is None and "plugins" not in plan
+
+
+def test_ensure_mount_point(scenario, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    if scenario == "happy":
+        s.ensure_mount_point(home, ".claude/skills")
+        assert (home / ".claude/skills").is_dir()
+    elif scenario == "sad":
+        (tmp_path / "elsewhere").mkdir()
+        (home / ".claude").symlink_to(tmp_path / "elsewhere")
+        with pytest.raises(ValueError, match="symlink"):
+            s.ensure_mount_point(home, ".claude/skills")
+        assert not (tmp_path / "elsewhere/skills").exists()
+    else:
+        (home / ".codex").mkdir()
+        (home / ".codex/prompts").write_text("a file the agent left")
+        with pytest.raises(ValueError, match="not a directory"):
+            s.ensure_mount_point(home, ".codex/prompts")
+        s.ensure_mount_point(home, ".codex")  # existing directory: fine
+
+
+def plugin_store_fixture(installed=("sandcastle@sandbox-ai",), known=("sandbox-ai",)):
+    store = data_home() / "plugins/claude/.claude/plugins"
+    (store / "cache/sandbox-ai/sandcastle/1.0.0").mkdir(parents=True)
+    (store / "marketplaces").mkdir()
+    (store / "known_marketplaces.json").write_text(json.dumps(
+        {name: {"source": {"source": "directory", "path": "/sandbox/marketplace"},
+                "installLocation": "/sandbox/marketplace"} for name in known}))
+    (store / "installed_plugins.json").write_text(json.dumps({"version": 2, "plugins": {
+        plugin: [{"scope": "user", "installPath": "/root/.claude/plugins/cache/x", "version": "1.0.0"}]
+        for plugin in installed}}))
+    return store
+
+
+def test_claude_plugins(scenario, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    marketplace = {"sandbox-ai": {"source": "directory", "path": "/sandbox/marketplace"}}
+    notes = []
+    if scenario == "happy":
+        store = plugin_store_fixture(installed=("sandcastle@sandbox-ai", "other@sandbox-ai"))
+        mounts = s.claude_plugins(home, marketplace, ["sandcastle@sandbox-ai"], notes)
+        assert mounts == [(store / "cache", "/root/.claude/plugins/cache", "ro"),
+                          (store / "marketplaces", "/root/.claude/plugins/marketplaces", "ro")]
+        settings = json.loads((home / ".claude/settings.json").read_text())
+        # Installed for another kit, so off in this run.
+        assert settings["enabledPlugins"] == {"sandcastle@sandbox-ai": True, "other@sandbox-ai": False}
+        assert settings["extraKnownMarketplaces"] == {"sandbox-ai": {"source": marketplace["sandbox-ai"]}}
+        known = json.loads((home / ".claude/plugins/known_marketplaces.json").read_text())
+        assert known["sandbox-ai"]["autoUpdate"] is False
+        assert notes == []
+    elif scenario == "sad":
+        # Nothing installed yet: nothing mounted or enabled, and a hint how to install.
+        assert s.claude_plugins(home, marketplace, ["sandcastle@sandbox-ai"], notes) == []
+        assert "sandbox-ai plugins claude" in notes[0] and "sandcastle@sandbox-ai" in notes[0]
+        assert json.loads((home / ".claude/settings.json").read_text())["enabledPlugins"] == {}
+    else:
+        plugin_store_fixture()
+        # A reused HOME whose settings are not JSON is left alone, with a note.
+        (home / ".claude").mkdir()
+        (home / ".claude/settings.json").write_text("{broken")
+        s.claude_plugins(home, marketplace, ["sandcastle@sandbox-ai"], notes)
+        assert (home / ".claude/settings.json").read_text() == "{broken"
+        assert any(note.startswith("plugins not enabled") for note in notes)
+
+
+def test_prepare_kits(scenario, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    if scenario == "happy":
+        a = kit_args(tmp_path, "claude")
+        mounts, notes, memory = s.prepare_kits(a, home, tmp_path / "staging")
+        # First start: the default kit is created from the templates, its skill mounted read-only.
+        assert (data_home() / "home/claude/skills/sandbox-example/SKILL.md").is_file()
+        assert ((tmp_path / "staging/skills"), "/root/.claude/skills", "ro") in mounts
+        assert (s.load_kits_module().MARKETPLACE, "/sandbox/marketplace", "ro") in mounts
+        assert (tmp_path / "staging/skills/sandbox-example/SKILL.md").is_file()
+        assert (home / ".claude/skills").is_dir()  # the mount point
+        # The memory template was taken once into the new project memory and the HOME.
+        assert (home / ".claude/CLAUDE.md").read_text().startswith("# Project notes")
+        assert set(memory) == {".claude/CLAUDE.md"}
+        assert any(note.startswith("created the default kit") for note in notes)
+        assert any(note.startswith("new project memory") for note in notes)
+    elif scenario == "sad":
+        make_kit(data_home() / "kits/bad/claude", {"marketplaces.json": json.dumps(
+            {"marketplaces": {"x": {"source": {"source": "directory", "path": "/etc"}}}})})
+        a = kit_args(tmp_path, "claude", "--kit", "bad")
+        with pytest.raises(ValueError, match="directory source can only be sandbox-ai's own"):
+            s.prepare_kits(a, home, tmp_path / "staging")
+        assert s.prepare_kits(kit_args(tmp_path, "claude", "--probe"), home, tmp_path / "s2") == ([], [], None)
+    else:
+        # OpenCode: npm plugins go into OPENCODE_CONFIG_CONTENT, with a note about the npm registry.
+        make_kit(data_home() / "home/opencode", {"marketplaces.json": json.dumps({"plugins": ["opencode-foo@1.2.3"]})})
+        a = kit_args(tmp_path, "opencode", "--no-memory")
+        mounts, notes, memory = s.prepare_kits(a, home, tmp_path / "staging")
+        assert mounts == [] and memory is None
+        assert json.loads(s.agent_environment(a)["OPENCODE_CONFIG_CONTENT"]) == {"plugin": ["opencode-foo@1.2.3"]}
+        assert any("registry.npmjs.org" in note for note in notes)
+
+
+def test_save_memory(scenario, tmp_path, capsys):
+    home = tmp_path / "home"
+    home.mkdir()
+    a = kit_args(tmp_path, "claude", "--no-default-kit")
+    manifest, _, store, _ = s.load_kits_module().memory_prepare("claude", a.workspaces[0], home)
+    memory = home / ".claude/projects/-work/memory"
+    if scenario == "happy":
+        memory.mkdir(parents=True)
+        (memory / "MEMORY.md").write_text("- builds with make")
+        s.save_memory(a, home, manifest)
+        assert (store / ".claude/projects/-work/memory/MEMORY.md").read_text() == "- builds with make"
+        assert "1 file(s) kept" in capsys.readouterr().err
+    elif scenario == "sad":
+        memory.mkdir(parents=True)
+        (memory / "leak").symlink_to("/etc/passwd")
+        s.save_memory(a, home, manifest)
+        assert not (store / ".claude/projects/-work/memory/leak").exists()
+        assert "leak skipped: symlink" in capsys.readouterr().err
+    else:
+        # Nothing changed: nothing written, nothing printed.
+        s.save_memory(a, home, manifest)
+        assert capsys.readouterr().err == ""
+        assert sorted(p.name for p in store.rglob("*")) == []
+        assert not list(store.parent.glob(".pending-*"))  # the run is recorded as saved

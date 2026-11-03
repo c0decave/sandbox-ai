@@ -7,6 +7,10 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
+import threading
+import signal
+import socket
 import unittest
 from unittest.mock import patch
 from unittest.mock import Mock
@@ -14,6 +18,38 @@ from unittest.mock import Mock
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("agent_sandbox", ROOT / "sandbox/agent_sandbox.py")
 s = importlib.util.module_from_spec(SPEC)
+
+
+class Both:
+    """Patch target for names the launcher re-exports from runtime.py: sets them in both modules.
+
+    __dict__ is the launcher's, so pytest's monkeypatch records and restores the real old value."""
+    __slots__ = ("module",)
+
+    def __init__(self, module):
+        object.__setattr__(self, "module", module)
+
+    @property
+    def __dict__(self):
+        return vars(self.module)
+
+    def modules(self):
+        return (self.module, self.module.RUNTIME)
+
+    def __getattr__(self, name):
+        return getattr(self.module, name)
+
+    def __setattr__(self, name, value):
+        for module in self.modules():
+            setattr(module, name, value)
+
+    def __delattr__(self, name):
+        for module in self.modules():
+            if name in vars(module):
+                delattr(module, name)
+
+
+sr = Both(s)
 SPEC.loader.exec_module(s)
 
 
@@ -36,8 +72,8 @@ class SandboxTests(unittest.TestCase):
             previous_mode = workspace.stat().st_mode
             with contextlib.redirect_stderr(io.StringIO()) as stderr:
                 s.prepare_workspace(workspace)
-            self.assertIn("Warnung", stderr.getvalue())
-            self.assertIn("existiert bereits", stderr.getvalue())
+            self.assertIn("warning", stderr.getvalue())
+            self.assertIn("exists already", stderr.getvalue())
             self.assertEqual(marker.read_text(), "operator content")
             self.assertEqual(workspace.stat().st_mode, previous_mode)
 
@@ -45,11 +81,16 @@ class SandboxTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             file = Path(d) / "file"
             file.write_text("keep")
-            for workspace in [file, Path(d) / "invalid,path"]:
+            for workspace in [file, Path(d) / "invalid\npath"]:
                 with self.subTest(workspace=str(workspace)), self.assertRaises(ValueError):
                     s.validate(s.parse_args(["codex", "--workspace", str(workspace)]))
             self.assertEqual(file.read_text(), "keep")
-            self.assertFalse((Path(d) / "invalid,path").exists())
+            self.assertFalse((Path(d) / "invalid\npath").exists())
+            # A comma separates workspaces; validation alone creates nothing.
+            a = s.parse_args(["codex", "--workspace", f"{d}/one,{d}/two"])
+            s.validate(a)
+            self.assertEqual(a.workspaces, [f"{d}/one", f"{d}/two"])
+            self.assertFalse((Path(d) / "one").exists() or (Path(d) / "two").exists())
 
     def test_workspace_permission_error_aborts(self):
         with tempfile.TemporaryDirectory() as d, patch.object(s.Path, "mkdir", side_effect=PermissionError("denied")):
@@ -81,15 +122,15 @@ class SandboxTests(unittest.TestCase):
                     self.assertEqual(s.main(argv), 0)
                     self.assertEqual(s.main(argv), 0)
                     self.assertEqual(runner.call_count, 2)
-                    self.assertIn("existiert bereits", stderr.getvalue())
+                    self.assertIn("exists already", stderr.getvalue())
                     self.assertEqual((workspace / "keep").read_text(), "preserved")
 
     def test_provider_defaults_and_no_host_network(self):
         a = s.parse_args(["codex", "--dry-run"])
         self.assertIn("api.openai.com", s.allowed_hosts(a))
-        self.assertIn("api.anthropic.com", s.allowed_hosts(a))
+        self.assertNotIn("api.anthropic.com", s.allowed_hosts(a))
         self.assertIn("chatgpt.com", s.allowed_hosts(a))
-        self.assertIn("platform.claude.com", s.allowed_hosts(a))
+        self.assertNotIn("platform.claude.com", s.allowed_hosts(a))
         self.assertEqual(a.backend, "podman")
 
     def test_opencode_cloud_endpoint_is_enabled_by_default_only_for_opencode(self):
@@ -151,6 +192,872 @@ class SandboxTests(unittest.TestCase):
             with self.subTest(agent=agent):
                 a = s.parse_args([agent, *options, "--", "--version"])
                 self.assertEqual(s.agent_command(a, binary), [binary, "--version"])
+
+    def test_dangerously_skip_permissions_per_agent(self):
+        expected = {"codex": ["codex", "--dangerously-bypass-approvals-and-sandbox", "exec", "task"],
+                    "claude": ["claude", "--dangerously-skip-permissions", "exec", "task"],
+                    "opencode": ["opencode", "exec", "task"]}
+        for agent, command in expected.items():
+            with self.subTest(agent=agent):
+                a = s.parse_args([agent, "--dangerously-skip-permissions", "--", "exec", "task"])
+                self.assertEqual(s.agent_command(a, agent), command)
+        self.assertEqual(s.agent_environment(s.parse_args(["claude", "--dangerously-skip-permissions", "--privacy-check", "off"])),
+                         {"IS_SANDBOX": "1"})
+        env = s.agent_environment(s.parse_args(["opencode", "--dangerously-skip-permissions"]))
+        self.assertEqual(json.loads(env["OPENCODE_PERMISSION"]), {"*": "allow"})
+        self.assertEqual(s.agent_environment(s.parse_args(["claude", "--privacy-check", "off"])), {})
+
+    def test_dangerously_skip_permissions_not_duplicated_or_used_in_probe(self):
+        a = s.parse_args(["claude", "--dangerously-skip-permissions", "--", "--dangerously-skip-permissions", "-p", "x"])
+        self.assertEqual(s.agent_command(a, "claude"), ["claude", "--dangerously-skip-permissions", "-p", "x"])
+        a = s.parse_args(["claude", "--dangerously-skip-permissions", "--probe"])
+        self.assertEqual(s.agent_command(a, "claude"), ["claude"])
+
+    def test_frontier_allows_openai_and_anthropic_only(self):
+        hosts = s.allowed_hosts(s.parse_args(["opencode", "--frontier"]))
+        self.assertEqual(hosts, ["opencode.ai", *s.PROVIDERS["codex"], *s.PROVIDERS["claude"]])
+        self.assertEqual(s.allowed_hosts(s.parse_args(["opencode", "--frontier", "--no-provider-defaults"])),
+                         [*s.PROVIDERS["codex"], *s.PROVIDERS["claude"]])
+        with self.assertRaises(ValueError):
+            s.validate(s.parse_args(["codex", "--offline", "--frontier"]))
+
+    def test_anthropic_ingress_ranges_are_https_only(self):
+        self.assertEqual(s.host_networks(s.allowed_hosts(s.parse_args(["claude"]))), ["160.79.104.0/23", "2607:6bc0::/48"])
+        self.assertEqual(s.host_networks(s.allowed_hosts(s.parse_args(["codex"]))), [])
+        rules = s.firewall_rules([], ["203.0.113.4", "160.79.104.0/23", "2607:6bc0::/48"])
+        self.assertIn("ip daddr 203.0.113.4 tcp dport 443 accept", rules)
+        self.assertIn("ip daddr 160.79.104.0/23 tcp dport 443 accept", rules)
+        self.assertIn("ip6 daddr 2607:6bc0::/48 tcp dport 443 accept", rules)
+        self.assertIn("policy drop", rules)
+
+    def test_log_dir_must_stay_outside_agent_visible_trees(self):
+        with tempfile.TemporaryDirectory() as d:
+            for log in [d, str(Path(d) / "logs"), str(Path(d).parent)]:
+                with self.subTest(log=log), self.assertRaisesRegex(ValueError, "outside"):
+                    s.validate(s.parse_args(["codex", "--workspace", d, "--log-dir", log]))
+            with tempfile.TemporaryDirectory() as other:
+                s.validate(s.parse_args(["codex", "--workspace", d, "--log-dir", other]))
+
+    def test_logging_adds_denied_sets_and_local_dns_stub(self):
+        rules = s.firewall_rules([], ["203.0.113.4"], log=True)
+        self.assertIn("set denied4 { type ipv4_addr . inet_proto . inet_service; flags dynamic;", rules)
+        self.assertIn("add @denied6 { ip6 daddr . meta l4proto . th dport }", rules)
+        self.assertLess(rules.index("tcp dport 443 accept"), rules.index("add @denied4"))
+        self.assertNotIn("denied", s.firewall_rules([], ["203.0.113.4"]))
+        with tempfile.TemporaryDirectory() as d:
+            seen = {}
+            def inspect(a, session, home):
+                seen.update({name: (session / name).read_text() for name in ("resolv.conf", "nsswitch.conf", "config.json")})
+                return 0
+            with patch.object(s.os, "geteuid", return_value=1000), patch.object(s.shutil, "which", side_effect=lambda n: "/usr/bin/" + n), \
+                    patch.object(s, "run_pod", side_effect=inspect):
+                s.main(["codex", "--workspace", str(Path(d) / "w"), "--offline", "--no-auth", "--log-dir", str(Path(d) / "logs")])
+            self.assertEqual(seen["resolv.conf"], "nameserver 127.0.0.1\n")
+            self.assertIn("hosts: files dns", seen["nsswitch.conf"])
+            self.assertEqual(json.loads(seen["config.json"])["watch"], ["/work", "/root", "/tmp"])
+            self.assertEqual((Path(d) / "logs").stat().st_mode & 0o777, 0o700)
+
+    def test_log_dir_mounted_for_both_backends(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = s.parse_args(["codex", "--workspace", str(Path(d) / "w"), "--log-dir", str(Path(d) / "logs")])
+            _, run = s.pod_commands(a, "pod", Path(d), Path(d) / "home")
+            self.assertIn(f"type=bind,src={Path(d).resolve() / 'logs'},dst=/sandbox/log,rw", run)
+            self.assertIn("NET_BIND_SERVICE", run)
+            self.assertNotIn("NET_BIND_SERVICE", s.pod_commands(s.parse_args(["codex"]), "pod", Path(d), Path(d))[1])
+            a.backend = "bwrap"
+            cmd = s.bwrap_command(a, Path(d), Path(d) / "home")
+            index = cmd.index("/sandbox/log")
+            self.assertEqual(cmd[index - 2:index], ["--bind", str(Path(d).resolve() / "logs")])
+
+    def test_claude_credentials_written_back_after_sandbox_refresh(self):
+        with tempfile.TemporaryDirectory() as d:
+            host = Path(d) / "host"
+            (host / ".claude").mkdir(parents=True)
+            creds = host / ".claude/.credentials.json"
+            creds.write_text(json.dumps({"claudeAiOauth": {"accessToken": "a", "refreshToken": "old", "expiresAt": 1000}}))
+            def refresh(a, session, home):
+                (home / ".claude/.credentials.json").write_text(json.dumps(
+                    {"claudeAiOauth": {"accessToken": "b", "refreshToken": "rotated", "expiresAt": 2000}}))
+                return 0
+            with patch.dict(os.environ, {"HOME": str(host)}), patch.object(s.os, "geteuid", return_value=1000), \
+                    patch.object(s.shutil, "which", side_effect=lambda n: "/usr/bin/" + n), patch.object(s, "run_pod", side_effect=refresh), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                os.environ.pop("CLAUDE_CONFIG_DIR", None)
+                s.main(["claude", "--workspace", str(Path(d) / "w"), "--offline"])
+            self.assertEqual(json.loads(creds.read_text())["claudeAiOauth"]["refreshToken"], "rotated")
+
+    def test_newer_host_claude_credentials_refresh_reused_state(self):
+        with tempfile.TemporaryDirectory() as d:
+            host, state = Path(d) / "host", Path(d) / "state"
+            for root, token, expires in [(host, "host-new", 5000), (state, "state-old", 1000)]:
+                (root / ".claude").mkdir(parents=True)
+                (root / ".claude/.credentials.json").write_text(json.dumps(
+                    {"claudeAiOauth": {"accessToken": "a", "refreshToken": token, "expiresAt": expires}}))
+            for options in [[], ["--copy-auth"]]:
+                with self.subTest(options=options), patch.dict(os.environ, {"HOME": str(host)}):
+                    os.environ.pop("CLAUDE_CONFIG_DIR", None)
+                    a = s.parse_args(["claude", *options])
+                    s.prepare_home(a, state)
+                    self.assertEqual(json.loads((state / ".claude/.credentials.json").read_text())["claudeAiOauth"]["refreshToken"], "host-new")
+
+    def test_dns_rules_open_only_port_53_to_selected_nameservers(self):
+        rules = s.firewall_rules([], [], dns=["1.1.1.1", "2001:4860:4860::8888"])
+        for line in ["ip daddr 1.1.1.1 udp dport 53 accept", "ip daddr 1.1.1.1 tcp dport 53 accept",
+                     "ip6 daddr 2001:4860:4860::8888 udp dport 53 accept", "ip6 daddr 2001:4860:4860::8888 tcp dport 53 accept"]:
+            self.assertIn(line, rules)
+        self.assertNotIn("dport 53 accept", s.firewall_rules([], []))
+        with self.assertRaises(ValueError):
+            s.firewall_rules([], [], dns=["1.1.1.1; accept"])
+
+    def test_egress_all_allow_accepts_output_but_keeps_input_closed(self):
+        rules = s.firewall_rules([], [], log=True, allow_all=True)
+        output = rules[rules.index("chain output"):]
+        self.assertIn("\n  accept\n", output)
+        self.assertNotIn("add @denied", rules)
+        self.assertIn("chain input { type filter hook input priority 0; policy drop;", rules)
+        self.assertIn("chain forward { type filter hook forward priority 0; policy drop; }", rules)
+        self.assertNotIn("\n  accept\n", s.firewall_rules([], []))
+
+    def test_main_writes_dns_and_allow_all_into_session(self):
+        for options, resolv, accept_all in [(["--egress-all-allow"], "nameserver 1.1.1.1\nnameserver 8.8.8.8\n", True),
+                                            (["--dns", "--nameserver", "9.9.9.9"], "nameserver 9.9.9.9\n", False),
+                                            (["--egress-all-allow", "--nameserver", "9.9.9.9"], "nameserver 9.9.9.9\n", True)]:
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as d:
+                seen = {}
+                def inspect(a, session, home):
+                    seen.update({name: (session / name).read_text() for name in ("resolv.conf", "nsswitch.conf", "firewall.nft")})
+                    return 0
+                with patch.object(s.os, "geteuid", return_value=1000), patch.object(s.shutil, "which", side_effect=lambda n: "/usr/bin/" + n), \
+                        patch.object(s, "run_pod", side_effect=inspect), patch.object(s, "resolve_pod_hosts", return_value={}):
+                    s.main(["codex", "--workspace", str(Path(d) / "w"), "--no-auth", "--no-provider-defaults", *options])
+                self.assertEqual(seen["resolv.conf"], resolv)
+                self.assertIn("hosts: files dns", seen["nsswitch.conf"])
+                self.assertEqual("\n  accept\n" in seen["firewall.nft"], accept_all)
+
+    def test_dry_run_reports_dns_and_egress_mode(self):
+        with contextlib.redirect_stdout(io.StringIO()) as stdout:
+            s.main(["codex", "--egress-all-allow", "--dry-run"])
+        plan = json.loads(stdout.getvalue())
+        self.assertEqual(plan["nameservers"], ["1.1.1.1", "8.8.8.8"])
+        self.assertTrue(plan["egress_all_allow"])
+
+    def test_dry_run_reports_host_ports(self):
+        with contextlib.redirect_stdout(io.StringIO()) as stdout:
+            s.main(["claude", "--allow-host-port", "3000", "--allow-host-port", "3000", "--dry-run", "--no-config"])
+        self.assertEqual(json.loads(stdout.getvalue())["host_ports"], [3000])
+
+    def test_real_inotify_records_write_and_read(self):
+        # Order matters: the watched tree is removed while LOG_DIR still points
+        # at a live directory, so the daemon thread never writes elsewhere.
+        with tempfile.TemporaryDirectory() as logs, patch.object(sr, "LOG_DIR", Path(logs)), tempfile.TemporaryDirectory() as d:
+            root, log = Path(d) / "work", Path(logs)
+            root.mkdir()
+            stop = threading.Event()
+            logger = threading.Thread(target=s.file_logger, args=([str(root)], stop), daemon=True)
+            logger.start()
+            time.sleep(0.3)
+            (root / "a.txt").write_text("x")
+            (root / "a.txt").read_text()
+            (root / "sub").mkdir()
+            time.sleep(0.3)
+            (root / "sub/b.txt").write_text("y")
+            deadline = time.time() + 5
+            records = []
+            while time.time() < deadline:
+                path = log / "files.jsonl"
+                records = [json.loads(l) for l in path.read_text().splitlines()] if path.exists() else []
+                if ("write", str(root / "sub/b.txt")) in {(r.get("action"), r.get("path")) for r in records}:
+                    break
+                time.sleep(0.1)
+            stop.set()
+            logger.join(5)
+            self.assertFalse(logger.is_alive())
+            seen = {(r.get("action"), r.get("path")) for r in records}
+            for expected in [("create", str(root / "a.txt")), ("write", str(root / "a.txt")),
+                             ("read", str(root / "a.txt")), ("write", str(root / "sub/b.txt"))]:
+                self.assertIn(expected, seen)
+
+    def test_real_inotify_drains_events_queued_before_stop(self):
+        with tempfile.TemporaryDirectory() as logs, patch.object(sr, "LOG_DIR", Path(logs)), tempfile.TemporaryDirectory() as root:
+            stop = threading.Event()
+            logger = threading.Thread(target=s.file_logger, args=([root], stop), daemon=True)
+            logger.start()
+            time.sleep(0.3)
+            (Path(root) / "last.txt").write_text("x")
+            stop.set()
+            logger.join(5)
+            self.assertFalse(logger.is_alive())
+            records = [json.loads(l) for l in (Path(logs) / "files.jsonl").read_text().splitlines()]
+            self.assertIn(("write", str(Path(root) / "last.txt")), {(r.get("action"), r.get("path")) for r in records})
+
+    def test_bootstrap_stops_joins_and_flushes_loggers(self):
+        stop = threading.Event()
+        stop.seen, stop.threads = {"seen"}, [Mock(), Mock()]
+        with tempfile.TemporaryDirectory() as logs, patch.object(sr, "LOG_DIR", Path(logs)), \
+                patch.object(s.os, "getpid", return_value=1), patch.object(s.RUNTIME.ctypes, "CDLL", return_value=Mock(prctl=Mock(return_value=0))), \
+                patch.object(s.subprocess, "run"), patch.object(s.subprocess, "Popen"), patch.object(sr, "namespace_state", return_value={}), \
+                patch.object(sr, "firejail_command", return_value=["fj"]), patch.object(sr, "wait_child", return_value=7), \
+                patch.object(sr, "start_loggers", return_value=stop), patch.object(sr, "poll_denied") as poll:
+            self.assertEqual(s.inner_bootstrap(), 7)
+        self.assertTrue(stop.is_set())
+        for thread in stop.threads:
+            thread.join.assert_called_once_with(3)
+        poll.assert_called_once_with({"seen"})
+
+    def test_real_dns_stub_answers_nxdomain_and_logs_unpinned(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(sr, "LOG_DIR", Path(d)):
+            probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+            probe.close()
+            stop = threading.Event()
+            logger = threading.Thread(target=s.dns_logger, args=({"api.openai.com"}, port, stop), daemon=True)
+            logger.start()
+            time.sleep(0.2)
+            client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            client.settimeout(3)
+            for name in ("evil.example", "api.openai.com"):
+                question = b"".join(bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\0\0\1\0\1"
+                client.sendto(b"\xab\xcd\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + question, ("127.0.0.1", port))
+                reply = client.recv(512)
+                self.assertEqual(reply[:2], b"\xab\xcd")
+                self.assertEqual(reply[3] & 0xF, 3)
+            hosts = [json.loads(l)["host"] for l in (Path(d) / "egress-denied.jsonl").read_text().splitlines()]
+            self.assertEqual(hosts, ["evil.example"])
+            stop.set()
+            logger.join(5)
+            self.assertFalse(logger.is_alive())
+
+    def test_credential_sync_copies_only_whitelisted_typed_fields(self):
+        with tempfile.TemporaryDirectory() as d:
+            source, target = Path(d) / "sandbox.json", Path(d) / "host.json"
+            source.write_text(json.dumps({"claudeAiOauth": {
+                "accessToken": "new-a", "refreshToken": "new-r", "expiresAt": 2000, "refreshTokenExpiresAt": 9000,
+                "scopes": ["user:inference", 7], "subscriptionType": "max", "evil": {"injected": True}}, "other": 1}))
+            target.write_text(json.dumps({"claudeAiOauth": {"accessToken": "a", "refreshToken": "r", "expiresAt": 1000,
+                                                            "subscriptionType": "pro", "scopes": ["user:inference"]},
+                                          "mcpOAuth": {"keep": True}}))
+            self.assertTrue(s.sync_claude_credentials(source, target))
+            document = json.loads(target.read_text())
+            self.assertEqual(document["claudeAiOauth"], {"accessToken": "new-a", "refreshToken": "new-r", "expiresAt": 2000,
+                                                         "refreshTokenExpiresAt": 9000, "subscriptionType": "pro",
+                                                         "scopes": ["user:inference"]})
+            self.assertEqual(document["mcpOAuth"], {"keep": True})
+            self.assertNotIn("other", document)
+
+    def test_credential_sync_skips_missing_target_directory(self):
+        with tempfile.TemporaryDirectory() as d:
+            source = Path(d) / "sandbox.json"
+            source.write_text(json.dumps({"claudeAiOauth": {"accessToken": "a", "refreshToken": "r", "expiresAt": 1}}))
+            self.assertFalse(s.sync_claude_credentials(source, Path(d) / "absent/dir/.credentials.json"))
+
+    def test_write_back_failure_keeps_agent_exit_code(self):
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {"HOME": str(Path(d) / "host")}):
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            with patch.object(s.os, "geteuid", return_value=1000), patch.object(s.shutil, "which", side_effect=lambda n: "/usr/bin/" + n), \
+                    patch.object(s, "run_pod", return_value=5), patch.object(s, "claude_writeback", side_effect=OSError("disk full")), \
+                    contextlib.redirect_stderr(io.StringIO()) as stderr:
+                self.assertEqual(s.main(["claude", "--workspace", str(Path(d) / "w"), "--offline"]), 5)
+            self.assertIn("could not write back Claude credentials: disk full", stderr.getvalue())
+
+    def test_existing_log_dir_is_tightened_to_0700(self):
+        with tempfile.TemporaryDirectory() as d:
+            logs = Path(d) / "logs"
+            logs.mkdir(mode=0o755)
+            logs.chmod(0o755)
+            with patch.object(s.os, "geteuid", return_value=1000), patch.object(s.shutil, "which", side_effect=lambda n: "/usr/bin/" + n), \
+                    patch.object(s, "run_pod", return_value=0), contextlib.redirect_stderr(io.StringIO()):
+                s.main(["codex", "--workspace", str(Path(d) / "w"), "--offline", "--no-auth", "--log-dir", str(logs)])
+            self.assertEqual(logs.stat().st_mode & 0o777, 0o700)
+
+    def test_inotify_watch_exhaustion_is_logged_once(self):
+        with tempfile.TemporaryDirectory() as logs, patch.object(sr, "LOG_DIR", Path(logs)), tempfile.TemporaryDirectory() as root:
+            for name in "abcde":
+                (Path(root) / name).mkdir()
+            libc = Mock(inotify_init1=Mock(return_value=7), inotify_add_watch=Mock(return_value=-1))
+            with patch.object(s.RUNTIME.ctypes, "CDLL", return_value=libc), patch.object(s.RUNTIME.ctypes, "get_errno", return_value=28), \
+                    patch.object(s.os, "read", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    s.file_logger([root])
+            records = [json.loads(l) for l in (Path(logs) / "files.jsonl").read_text().splitlines()]
+            self.assertEqual(len(records), 1)
+            self.assertIn("watch limit", records[0]["error"])
+
+    def test_multiple_workspaces_first_is_always_work(self):
+        with tempfile.TemporaryDirectory() as d:
+            main, lib, docs = Path(d) / "main", Path(d) / "lib", Path(d) / "docs"
+            a = s.parse_args(["codex", "--workspace", f"{main},{lib}", "--workspace", str(docs)])
+            s.validate(a)
+            self.assertEqual(a.workspace, str(main))
+            self.assertEqual(a.workspaces, [str(main), str(lib), str(docs)])
+            _, run = s.pod_commands(a, "pod", Path(d), Path(d) / "home")
+            binds = [value for value in run if value.startswith("type=bind")]
+            self.assertIn(f"type=bind,src={main},dst=/work,rw", binds)
+            self.assertIn(f"type=bind,src={lib},dst=/workspaces/lib,rw", binds)
+            self.assertLess(binds.index(f"type=bind,src={main},dst=/work,rw"), binds.index(f"type=bind,src={lib},dst=/workspaces/lib,rw"))
+            a.backend = "bwrap"
+            cmd = s.bwrap_command(a, Path(d), Path(d) / "home")
+            index = cmd.index("/workspaces/docs")
+            self.assertEqual(cmd[index - 2:index], ["--bind", str(docs)])
+
+    def test_workspace_ro_applies_to_every_workspace(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = s.parse_args(["codex", "--workspace-ro", "--workspace", f"{d}/a,{d}/b"])
+            s.validate(a)
+            _, run = s.pod_commands(a, "pod", Path(d), Path(d) / "home")
+            self.assertIn(f"type=bind,src={d}/b,dst=/workspaces/b,ro", run)
+            a.backend = "bwrap"
+            cmd = s.bwrap_command(a, Path(d), Path(d) / "home")
+            self.assertEqual(cmd[cmd.index("/workspaces/b") - 2], "--ro-bind")
+
+    def test_overlapping_or_duplicate_workspaces_are_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            for value in [f"{d}/a,{d}/a", f"{d}/a,{d}/a/sub", f"{d}/a/sub,{d}/a", f"{d}/a,", f",{d}/a"]:
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    s.validate(s.parse_args(["codex", "--workspace", value]))
+
+    def test_main_creates_every_workspace_and_watches_them(self):
+        with tempfile.TemporaryDirectory() as d:
+            seen = {}
+            def inspect(a, session, home):
+                seen.update(json.loads((session / "config.json").read_text()))
+                return 0
+            with patch.object(s.os, "geteuid", return_value=1000), patch.object(s.shutil, "which", side_effect=lambda n: "/usr/bin/" + n), \
+                    patch.object(s, "run_pod", side_effect=inspect), contextlib.redirect_stderr(io.StringIO()):
+                s.main(["codex", "--workspace", f"{d}/main,{d}/new/lib", "--offline", "--no-auth"])
+            self.assertTrue((Path(d) / "new/lib").is_dir())
+            self.assertEqual(seen["watch"][:2], ["/work", "/workspaces/lib"])
+
+    def test_dry_run_lists_workspace_targets(self):
+        with tempfile.TemporaryDirectory() as d, contextlib.redirect_stdout(io.StringIO()) as stdout:
+            s.main(["codex", "--workspace", f"{d}/main,{d}/lib", "--dry-run"])
+        plan = json.loads(stdout.getvalue())
+        self.assertEqual(plan["workspace"], f"{d}/main")
+        self.assertEqual(plan["workspaces"], [{"host": f"{d}/main", "sandbox": "/work"}, {"host": f"{d}/lib", "sandbox": "/workspaces/lib"}])
+        self.assertFalse((Path(d) / "main").exists())
+
+    def test_log_dir_inside_extra_workspace_is_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaisesRegex(ValueError, "outside"):
+                s.validate(s.parse_args(["codex", "--workspace", f"{d}/main,{d}/lib", "--log-dir", f"{d}/lib/logs"]))
+
+    def test_gui_options_validate(self):
+        with tempfile.TemporaryDirectory() as d:
+            for options in [["--gui-screen", "1920x1080"], ["--gui-screen", "0x0x24"], ["--gui-screen", "99999x1x24"],
+                            ["--gui-vnc", d + "/w/vnc"]]:
+                with self.subTest(options=options), self.assertRaises(ValueError):
+                    s.validate(s.parse_args(["codex", "--workspace", d + "/w", "--gui", *options]))
+            a = s.parse_args(["codex", "--workspace", d + "/w", "--gui-vnc", d + "/vnc"])
+            s.validate(a)
+            self.assertTrue(a.gui)
+
+    def test_gui_environment_and_mounts(self):
+        with tempfile.TemporaryDirectory() as d:
+            runtime = Path(d) / "runtime"
+            runtime.mkdir()
+            server = socket.socket(socket.AF_UNIX)
+            server.bind(str(runtime / "wayland-1"))
+            try:
+                with patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(runtime), "WAYLAND_DISPLAY": "wayland-1"}):
+                    a = s.parse_args(["codex", "--workspace", d + "/w", "--gui-vnc", d + "/vnc", "--gui-wayland"])
+                    s.validate(a)
+                    env = s.agent_environment(a)
+                    self.assertEqual(env["DISPLAY"], ":99")
+                    self.assertEqual(env["WAYLAND_DISPLAY"], "wayland-0")
+                    self.assertEqual(env["XDG_RUNTIME_DIR"], "/run/user/0")
+                    create, run = s.pod_commands(a, "pod", Path(d), Path(d) / "home")
+                    self.assertIn("--shm-size=1g", create)
+                    self.assertIn(f"type=bind,src={Path(d).resolve() / 'vnc'},dst=/sandbox/vnc,rw", run)
+                    self.assertIn(f"type=bind,src={runtime / 'wayland-1'},dst=/run/user/0/wayland-0,rw", run)
+                    a.backend = "bwrap"
+                    cmd = s.bwrap_command(a, Path(d), Path(d) / "home")
+                    self.assertEqual(cmd[cmd.index("/dev/shm") - 1], "--tmpfs")
+                    index = cmd.index("/run/user/0/wayland-0")
+                    self.assertEqual(cmd[index - 2:index], ["--bind", str(runtime / "wayland-1")])
+                    self.assertLess(cmd.index("/run/user/0"), index)
+            finally:
+                server.close()
+        plain = s.parse_args(["codex"])
+        self.assertNotIn("DISPLAY", s.agent_environment(plain))
+        self.assertNotIn("--shm-size=1g", s.pod_commands(plain, "pod", Path("/tmp"), Path("/tmp"))[0])
+
+    def test_gui_wayland_requires_host_socket(self):
+        with patch.dict(os.environ, {"WAYLAND_DISPLAY": ""}):
+            with self.assertRaisesRegex(ValueError, "WAYLAND_DISPLAY"):
+                s.validate(s.parse_args(["codex", "--gui-wayland"]))
+
+    def test_main_writes_gui_config_and_warns_for_wayland(self):
+        with tempfile.TemporaryDirectory() as d:
+            seen = {}
+            def inspect(a, session, home):
+                seen["gui"] = json.loads((session / "gui.json").read_text()) if (session / "gui.json").exists() else None
+                return 0
+            for options, expected in [(["--gui", "--gui-vnc", d + "/vnc"], {"display": ":99", "screen": "1920x1080x24", "vnc": True}), ([], None)]:
+                with self.subTest(options=options), patch.object(s.os, "geteuid", return_value=1000), \
+                        patch.object(s.shutil, "which", side_effect=lambda n: "/usr/bin/" + n), patch.object(s, "run_pod", side_effect=inspect), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    s.main(["codex", "--workspace", d + "/w", "--offline", "--no-auth", *options])
+                    self.assertEqual(seen["gui"], expected)
+            self.assertEqual((Path(d) / "vnc").stat().st_mode & 0o777, 0o700)
+
+    def test_bootstrap_starts_and_stops_gui(self):
+        with tempfile.TemporaryDirectory() as d:
+            config = Path(d) / "gui.json"
+            config.write_text(json.dumps({"display": ":99", "screen": "1x1x24", "vnc": False}))
+            processes = [Mock(), Mock()]
+            with patch.object(sr, "GUI_CONFIG", config), patch.object(sr, "LOG_DIR", Path(d) / "absent"), \
+                    patch.object(s.os, "getpid", return_value=1), patch.object(s.RUNTIME.ctypes, "CDLL", return_value=Mock(prctl=Mock(return_value=0))), \
+                    patch.object(s.subprocess, "run"), patch.object(s.subprocess, "Popen"), patch.object(sr, "namespace_state", return_value={}), \
+                    patch.object(sr, "firejail_command", return_value=["fj"]), patch.object(sr, "wait_child", return_value=3), \
+                    patch.object(sr, "start_gui", return_value=processes) as start, patch.object(sr, "stop_process") as stop:
+                self.assertEqual(s.inner_bootstrap(), 3)
+            start.assert_called_once_with({"display": ":99", "screen": "1x1x24", "vnc": False})
+            self.assertEqual([c.args[0] for c in stop.call_args_list], processes)
+
+    def test_firejail_hides_vnc_directory(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(sr, "VNC_DIR", Path(d)), \
+                patch.object(s.subprocess, "run", return_value=Mock(stdout="")):
+            self.assertIn(f"--blacklist={d}", s.firejail_command({}))
+
+    def test_dry_run_reports_gui(self):
+        with contextlib.redirect_stdout(io.StringIO()) as stdout:
+            s.main(["codex", "--gui", "--dry-run"])
+        plan = json.loads(stdout.getvalue())
+        self.assertEqual(plan["gui"], {"display": ":99", "screen": "1920x1080x24", "vnc": False})
+        self.assertFalse(plan["gui_wayland"])
+
+    def test_dry_run_lists_planned_auth_copies_by_path_only(self):
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {"HOME": d}):
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            (Path(d) / ".claude").mkdir()
+            (Path(d) / ".claude/.credentials.json").write_text('{"claudeAiOauth": {"accessToken": "secret-value"}}')
+            (Path(d) / ".claude.json").write_text("{}")
+            with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                s.main(["claude", "--copy-auth", "--dry-run"])
+            plan = json.loads(stdout.getvalue())
+            self.assertEqual(plan["auth_copies"], [
+                {"source": f"{d}/.claude/.credentials.json", "target": "/root/.claude/.credentials.json"},
+                {"source": f"{d}/.claude.json", "target": "/root/.claude.json"}])
+            self.assertNotIn("secret-value", stdout.getvalue())
+            with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                s.main(["claude", "--auth-file", f"{d}/.claude/.credentials.json", "--dry-run"])
+            self.assertEqual(json.loads(stdout.getvalue())["auth_copies"],
+                             [{"source": f"{d}/.claude/.credentials.json", "target": "/root/.claude/.credentials.json"}])
+
+    def test_start_reports_each_auth_copy_on_stderr(self):
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {"HOME": d + "/host"}):
+            os.environ.pop("CODEX_HOME", None)
+            (Path(d) / "host/.codex").mkdir(parents=True)
+            (Path(d) / "host/.codex/auth.json").write_text('{"tokens": {"access_token": "secret-value"}}')
+            with patch.object(s.os, "geteuid", return_value=1000), patch.object(s.shutil, "which", side_effect=lambda n: "/usr/bin/" + n), \
+                    patch.object(s, "run_pod", return_value=0), contextlib.redirect_stderr(io.StringIO()) as stderr:
+                s.main(["codex", "--workspace", d + "/w", "--offline", "--copy-auth"])
+            self.assertIn(f"agent-sandbox: auth copied: {d}/host/.codex/auth.json -> /root/.codex/auth.json", stderr.getvalue())
+            self.assertNotIn("secret-value", stderr.getvalue())
+
+    def test_tmux_mode_requires_terminal_and_host_tmux_for_bwrap(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = ["codex", "--workspace", d + "/w", "--offline", "--no-auth", "--tmux"]
+            common = [patch.object(s.os, "geteuid", return_value=1000), patch.object(s, "run_pod", return_value=0),
+                      patch.object(s, "run_bwrap", return_value=0), contextlib.redirect_stderr(io.StringIO())]
+            with contextlib.ExitStack() as stack:
+                for item in common:
+                    stack.enter_context(item)
+                stack.enter_context(patch.object(s.shutil, "which", side_effect=lambda n: "/usr/bin/" + n))
+                stack.enter_context(patch.object(s.sys.stdin, "isatty", return_value=False))
+                with self.assertRaisesRegex(ValueError, "terminal"):
+                    s.main(base)
+            with contextlib.ExitStack() as stack:
+                for item in common:
+                    stack.enter_context(item)
+                stack.enter_context(patch.object(s.shutil, "which", side_effect=lambda n: None if n == "tmux" else "/usr/bin/" + n))
+                stack.enter_context(patch.object(s.sys.stdin, "isatty", return_value=True))
+                with self.assertRaisesRegex(ValueError, "tmux"):
+                    s.main([*base, "--backend", "bwrap"])
+
+    def test_tmux_flag_reaches_session_config_and_dry_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            seen = {}
+            def inspect(a, session, home):
+                seen.update(json.loads((session / "config.json").read_text()))
+                return 0
+            with patch.object(s.os, "geteuid", return_value=1000), patch.object(s.shutil, "which", side_effect=lambda n: "/usr/bin/" + n), \
+                    patch.object(s, "run_pod", side_effect=inspect), patch.object(s.sys.stdin, "isatty", return_value=True), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                s.main(["claude", "--workspace", d + "/w", "--offline", "--no-auth", "--tmux"])
+            self.assertTrue(seen["tmux"])
+            with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                s.main(["claude", "--tmux", "--dry-run"])
+            self.assertTrue(json.loads(stdout.getvalue())["tmux"])
+
+    def test_claude_can_reach_its_oauth_refresh_endpoints(self):
+        hosts = s.allowed_hosts(s.parse_args(["claude"]))
+        for host in ("api.anthropic.com", "console.anthropic.com", "platform.claude.com", "claude.ai"):
+            self.assertIn(host, hosts)
+        self.assertIn("console.anthropic.com", s.FRONTIER)
+
+    def test_claude_token_validity_is_reported_without_contents(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "creds.json"
+            path.write_text(json.dumps({"claudeAiOauth": {"accessToken": "secret-a", "refreshToken": "secret-r",
+                                                          "expiresAt": (time.time() + 2.5 * 3600) * 1000}}))
+            self.assertEqual(s.claude_token_status(path), "Claude access token valid for 2.5 h")
+            path.write_text(json.dumps({"claudeAiOauth": {"accessToken": "a", "refreshToken": "r", "expiresAt": 1000}}))
+            self.assertIn("expired; Claude refreshes it on first use", s.claude_token_status(path))
+            path.write_text(json.dumps({"claudeAiOauth": {"accessToken": "", "refreshToken": "", "expiresAt": 0}}))
+            self.assertIn("no usable Claude login", s.claude_token_status(path))
+            self.assertNotIn("secret", s.claude_token_status(path))
+
+    def test_session_internal_options_bind_tmux_and_name_container(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmux = Path(d) / "tmux"
+            a = s.parse_args(["codex", "--workspace", d + "/w", "--tmux-socket-dir", str(tmux), "--pod-name", "agent-session-x"])
+            s.validate(a)
+            self.assertEqual(s.agent_environment(a)["TMUX_TMPDIR"], "/sandbox/tmux")
+            _, run = s.pod_commands(a, "agent-session-x", Path(d), Path(d) / "home")
+            self.assertIn(f"type=bind,src={tmux.resolve()},dst=/sandbox/tmux,rw", run)
+            self.assertEqual(run[run.index("--name") + 1], "agent-session-x-agent")
+            a.backend = "bwrap"
+            cmd = s.bwrap_command(a, Path(d), Path(d) / "home")
+            index = cmd.index("/sandbox/tmux")
+            self.assertEqual(cmd[index - 2:index], ["--bind", str(tmux.resolve())])
+            with patch.object(s.subprocess, "run"), patch.object(s.subprocess, "Popen"), patch.object(sr, "wait_child", return_value=0):
+                a.backend = "podman"
+                s.run_pod(a, Path(d), Path(d) / "home")
+                create = s.subprocess.run.call_args_list[1].args[0]
+                self.assertEqual(create[create.index("--name") + 1], "agent-session-x")
+        plain = s.parse_args(["codex"])
+        self.assertNotIn("TMUX_TMPDIR", s.agent_environment(plain))
+        self.assertNotIn("--name", s.pod_commands(plain, "pod", Path("/tmp"), Path("/tmp"))[1])
+
+    def test_session_internal_config_selects_detached_tmux(self):
+        with tempfile.TemporaryDirectory() as d:
+            seen = {}
+            def inspect(a, session, home):
+                seen.update(json.loads((session / "config.json").read_text()))
+                return 0
+            with patch.object(s.os, "geteuid", return_value=1000), patch.object(s.shutil, "which", side_effect=lambda n: "/usr/bin/" + n), \
+                    patch.object(s, "run_pod", side_effect=inspect), patch.object(s.sys.stdin, "isatty", return_value=False), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                s.main(["claude", "--workspace", d + "/w", "--offline", "--no-auth", "--tmux-socket-dir", d + "/tmux"])
+            self.assertEqual(seen["tmux"], "detached")
+
+    def test_session_option_validation_and_delegation(self):
+        with tempfile.TemporaryDirectory() as d:
+            for options in [["--session", "bad name"], ["--session", "x" * 41], ["--session", "ok", "--state-dir", d],
+                            ["--session", "ok", "--probe"], ["--session", "../x"]]:
+                with self.subTest(options=options), self.assertRaises(ValueError):
+                    s.validate(s.parse_args(["codex", "--workspace", d + "/w", *options]))
+            with patch.object(s, "load_sessions_module") as load:
+                load.return_value.start.return_value = 0
+                self.assertEqual(s.main(["codex", "--workspace", d + "/w", "--session", "demo-1", "--", "exec", "x"]), 0)
+            load.return_value.start.assert_called_once()
+            args, argv = load.return_value.start.call_args.args
+            self.assertEqual(args.session, "demo-1")
+            self.assertEqual(argv, ["codex", "--workspace", d + "/w", "--session", "demo-1", "--", "exec", "x"])
+
+    def test_allow_tcp_opens_exactly_one_port(self):
+        a = s.parse_args(["opencode", "--allow-tcp", "192.168.1.20:11434", "--allow-tcp", "[2001:db8::5]:8000"])
+        s.validate(a)
+        rules = s.firewall_rules([], [], tcp=s.tcp_targets(a))
+        self.assertIn("ip daddr 192.168.1.20 tcp dport 11434 accept", rules)
+        self.assertIn("ip6 daddr 2001:db8::5 tcp dport 8000 accept", rules)
+        for bad in ["192.168.1.20", "192.168.1.20:0", "192.168.1.20:70000", "host.example:80", "1.2.3.4:80; accept"]:
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                s.validate(s.parse_args(["opencode", "--allow-tcp", bad]))
+        with self.assertRaises(ValueError):
+            s.validate(s.parse_args(["opencode", "--offline", "--allow-tcp", "192.168.1.20:11434"]))
+
+    def write_project_config(self, directory, document, trust=True):
+        path = Path(directory) / ".sandbox-ai.json"
+        path.write_text(json.dumps(document))
+        if trust:
+            s.trust_config(path)
+        return path
+
+    def test_project_config_is_loaded_from_main_workspace(self):
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {"XDG_CONFIG_HOME": d + "/cfg"}):
+            work = Path(d) / "proj"
+            work.mkdir()
+            self.write_project_config(work, {"version": 1, "agent": "opencode",
+                                              "options": ["--frontier", "--log-dir", d + "/logs"], "agent_args": ["run", "x"]})
+            with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                s.main(["opencode", "--workspace", str(work), "--dry-run"])
+            plan = json.loads(stdout.getvalue())
+            self.assertIn("api.anthropic.com", plan["https_hosts"])
+            self.assertEqual(plan["log_dir"], d + "/logs")
+            self.assertEqual(plan["agent_args"], ["run", "x"])
+            self.assertEqual(plan["project_config"], str(work / ".sandbox-ai.json"))
+            # Command-line arguments win over the file; explicit agent args replace the saved ones.
+            with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                s.main(["opencode", "--workspace", str(work), "--log-dir", d + "/other", "--dry-run", "--", "run", "y"])
+            plan = json.loads(stdout.getvalue())
+            self.assertEqual((plan["log_dir"], plan["agent_args"]), (d + "/other", ["run", "y"]))
+            with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                s.main(["opencode", "--workspace", str(work), "--no-config", "--dry-run"])
+            self.assertIsNone(json.loads(stdout.getvalue())["project_config"])
+
+    def test_untrusted_or_changed_project_config_is_refused(self):
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {"XDG_CONFIG_HOME": d + "/cfg"}):
+            path = self.write_project_config(d, {"version": 1, "agent": "codex", "options": ["--egress-all-allow"]}, trust=False)
+            with self.assertRaisesRegex(ValueError, "not trusted"):
+                s.main(["codex", "--workspace", d, "--dry-run"])
+            s.trust_config(path)
+            path.write_text(json.dumps({"version": 1, "agent": "codex", "options": ["--egress-all-allow", "--gui-wayland"]}))
+            with self.assertRaisesRegex(ValueError, "changed since it was trusted"):
+                s.main(["codex", "--workspace", d, "--dry-run"])
+
+    def test_project_config_content_is_validated(self):
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {"XDG_CONFIG_HOME": d + "/cfg"}):
+            for document, message in [({"version": 1, "agent": "claude", "options": []}, "for claude"),
+                                      ({"version": 2, "agent": "codex", "options": []}, "version"),
+                                      ({"version": 1, "agent": "codex", "options": ["--pod-name", "agent-x"]}, "not allowed"),
+                                      ({"version": 1, "agent": "codex", "options": ["--config", "x"]}, "not allowed"),
+                                      ({"version": 1, "agent": "codex", "options": [1]}, "strings"),
+                                      ({"version": 1, "agent": "codex", "options": ["--", "x"]}, "not allowed")]:
+                with self.subTest(document=document):
+                    self.write_project_config(d, document)
+                    with self.assertRaisesRegex(ValueError, message):
+                        s.main(["codex", "--workspace", d, "--dry-run"])
+
+    def test_explicit_config_path(self):
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {"XDG_CONFIG_HOME": d + "/cfg"}):
+            path = Path(d) / "elsewhere.json"
+            path.write_text(json.dumps({"version": 1, "agent": "codex", "options": ["--dns"]}))
+            s.trust_config(path)
+            with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                s.main(["codex", "--workspace", d + "/w", "--config", str(path), "--dry-run"])
+            self.assertEqual(json.loads(stdout.getvalue())["nameservers"], ["1.1.1.1", "8.8.8.8"])
+
+    def test_session_accepts_tmux_from_project_config(self):
+        # A session is tmux already; --tmux (e.g. from the wizard) is redundant, not an error.
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {"XDG_CONFIG_HOME": d + "/cfg"}):
+            work = Path(d) / "w"
+            work.mkdir()
+            self.write_project_config(work, {"version": 1, "agent": "claude", "options": ["--tmux"]})
+            with patch.object(s, "load_sessions_module") as load:
+                load.return_value.start.return_value = 0
+                self.assertEqual(s.main(["claude", "--workspace", str(work), "--session", "demo"]), 0)
+            # The supervisor runs without a terminal: --tmux plus the session socket means detached tmux.
+            seen = {}
+            def inspect(a, session, home):
+                seen.update(json.loads((session / "config.json").read_text()))
+                return 0
+            with patch.object(s.os, "geteuid", return_value=1000), patch.object(s.shutil, "which", side_effect=lambda n: "/usr/bin/" + n), \
+                    patch.object(s, "run_pod", side_effect=inspect), patch.object(s.sys.stdin, "isatty", return_value=False), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                s.main(["claude", "--workspace", str(work), "--offline", "--no-auth", "--tmux-socket-dir", d + "/tmux",
+                        "--state-dir", d + "/home"])
+            self.assertEqual(seen["tmux"], "detached")
+
+    def test_allow_presets_add_only_their_hosts(self):
+        expected = {"--allow-pypi": ["pypi.org", "files.pythonhosted.org"],
+                    "--allow-github": ["github.com", "api.github.com", "codeload.github.com", "raw.githubusercontent.com",
+                                       "objects.githubusercontent.com", "release-assets.githubusercontent.com"],
+                    "--allow-gitlab": ["gitlab.com", "registry.gitlab.com"],
+                    "--allow-kernel-org": ["kernel.org", "www.kernel.org", "git.kernel.org", "cdn.kernel.org",
+                                           "mirrors.kernel.org", "lore.kernel.org"],
+                    "--allow-duckduckgo": ["duckduckgo.com", "html.duckduckgo.com", "lite.duckduckgo.com",
+                                           "links.duckduckgo.com", "api.duckduckgo.com"]}
+        base = s.allowed_hosts(s.parse_args(["codex"]))
+        for flag, hosts in expected.items():
+            with self.subTest(flag=flag):
+                self.assertEqual(s.allowed_hosts(s.parse_args(["codex", flag])), base + hosts)
+        both = s.allowed_hosts(s.parse_args(["codex", "--no-provider-defaults", "--allow-pypi", "--allow-gitlab"]))
+        self.assertEqual(both, expected["--allow-pypi"] + expected["--allow-gitlab"])
+        with self.assertRaises(ValueError):
+            s.validate(s.parse_args(["codex", "--offline", "--allow-github"]))
+        with contextlib.redirect_stdout(io.StringIO()) as stdout:
+            s.main(["codex", "--allow-duckduckgo", "--dry-run"])
+        self.assertIn("duckduckgo.com", json.loads(stdout.getvalue())["https_hosts"])
+
+    def test_prepare_home_sets_claude_defaults_only_for_claude(self):
+        for agent, expected in [("claude", True), ("codex", False), ("opencode", False)]:
+            with self.subTest(agent=agent), tempfile.TemporaryDirectory() as d:
+                home = Path(d) / "home"
+                home.mkdir()
+                s.prepare_home(s.parse_args([agent, "--no-auth"]), home)
+                self.assertEqual((home / ".claude/settings.json").exists(), expected)
+
+    def test_review_abbreviated_options_are_rejected(self):
+        # argparse prefix matching must not reach internal or forbidden options.
+        for argv in (["codex", "--tmux-s", "/x"], ["codex", "--sess", "x"], ["codex", "--no-conf"],
+                     ["codex", "--pod-n", "agent-x"], ["codex", "--dry"], ["codex", "--gui-w"]):
+            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                s.parse_args(argv)
+        self.assertIn("--mcp-socket-dir", s.CONFIG_FORBIDDEN)
+
+    def test_review_symlinked_project_config_is_refused(self):
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {"XDG_CONFIG_HOME": d + "/cfg"}):
+            trusted_project, attacker = Path(d) / "b", Path(d) / "a"
+            trusted_project.mkdir()
+            attacker.mkdir()
+            self.write_project_config(trusted_project, {"version": 1, "agent": "codex", "options": ["--egress-all-allow"]})
+            (attacker / ".sandbox-ai.json").symlink_to(trusted_project / ".sandbox-ai.json")
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                s.main(["codex", "--workspace", str(attacker), "--dry-run"])
+
+    def test_review_config_is_hashed_and_parsed_from_the_same_bytes(self):
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {"XDG_CONFIG_HOME": d + "/cfg"}):
+            path = self.write_project_config(d, {"version": 1, "agent": "codex", "options": ["--dns"]})
+            evil = json.dumps({"version": 1, "agent": "codex", "options": ["--egress-all-allow"]})
+            real_read = s.os.read
+            def swap_after_first_read(swap):
+                calls = []
+                def read(fd, size):
+                    data = real_read(fd, size)
+                    if not calls:
+                        calls.append(1)
+                        swap()
+                    return data
+                return read
+            def atomic():
+                (Path(d) / "evil.tmp").write_text(evil)
+                os.replace(Path(d) / "evil.tmp", path)
+            # Atomic swap (the reviewed attack): the checked bytes are the ones applied.
+            with patch.object(s.os, "read", side_effect=swap_after_first_read(atomic)):
+                _, document = s.load_project_config(s.parse_args(["codex", "--workspace", d]))
+            self.assertEqual(document["options"], ["--dns"])
+            # In-place rewrite mixes contents mid-read: the hash no longer matches, so it is refused.
+            path.write_text(json.dumps({"version": 1, "agent": "codex", "options": ["--dns"]}))
+            s.trust_config(path)
+            with patch.object(s.os, "read", side_effect=swap_after_first_read(lambda: path.write_text(evil + " " * 70000))):
+                with self.assertRaisesRegex(ValueError, "changed since it was trusted"):
+                    s.load_project_config(s.parse_args(["codex", "--workspace", d]))
+
+    def test_review_missing_trusted_config_is_an_error(self):
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {"XDG_CONFIG_HOME": d + "/cfg"}):
+            path = self.write_project_config(d, {"version": 1, "agent": "codex", "options": ["--offline"]})
+            path.unlink()
+            with self.assertRaisesRegex(ValueError, "trusted project configuration .* is missing"):
+                s.main(["codex", "--workspace", d, "--dry-run"])
+            with contextlib.redirect_stdout(io.StringIO()):
+                s.main(["codex", "--workspace", d, "--no-config", "--dry-run"])
+
+    def test_review_cli_auth_choice_replaces_config_auth_choice(self):
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {"XDG_CONFIG_HOME": d + "/cfg"}):
+            self.write_project_config(d, {"version": 1, "agent": "codex", "options": ["--no-auth", "--dns"]})
+            with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                s.main(["codex", "--workspace", d, "--copy-auth", "--dry-run"])
+            plan = json.loads(stdout.getvalue())
+            self.assertEqual(plan["auth_mode"], "copy")
+            self.assertEqual(plan["nameservers"], ["1.1.1.1", "8.8.8.8"])
+
+    def test_review_mcp_socket_appears_only_once_listening(self):
+        # Regression: bind() creates the file before listen(); an early client was refused.
+        refused = 0
+        base = Path(tempfile.mkdtemp())  # kept: server threads outlive each iteration
+        for index in range(60):
+            sock = base / f"s{index}.sock"
+            threading.Thread(target=s.mcp_serve, args=(str(sock), ["true"]), kwargs={"cwd": str(base)}, daemon=True).start()
+            while not sock.exists():
+                pass
+            client = socket.socket(socket.AF_UNIX)
+            try:
+                client.connect(str(sock))
+            except ConnectionRefusedError:
+                refused += 1
+            finally:
+                client.close()
+        self.assertEqual(refused, 0)
+
+    def claude_host(self, d, expires=1000):
+        host = Path(d) / "host"
+        (host / ".claude").mkdir(parents=True)
+        (host / ".claude/.credentials.json").write_text(json.dumps(
+            {"claudeAiOauth": {"accessToken": "a", "refreshToken": "host", "expiresAt": expires}}))
+        return host
+
+    def run_claude(self, d, host, agent_writes, options=()):
+        def run(a, session, home):
+            agent_writes(home)
+            return 5
+        with patch.dict(os.environ, {"HOME": str(host)}), patch.object(s.os, "geteuid", return_value=1000), \
+                patch.object(s.shutil, "which", side_effect=lambda n: "/usr/bin/" + n), patch.object(s, "run_pod", side_effect=run), \
+                contextlib.redirect_stderr(io.StringIO()) as stderr:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            code = s.main(["claude", "--workspace", str(Path(d) / "w"), "--offline", *options])
+        return code, stderr.getvalue()
+
+    def test_review_writeback_survives_hostile_sandbox_files(self):
+        hostile = {"nested": lambda c: c.write_text("[" * 100000),
+                   "fifo": lambda c: (c.unlink(), os.mkfifo(c)),
+                   "huge": lambda c: c.write_text('{"claudeAiOauth": {"x": "' + "y" * (2 << 20) + '"}}')}
+        for name, plant in hostile.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as d:
+                host = self.claude_host(d)
+                before = (host / ".claude/.credentials.json").read_text()
+                code, _ = self.run_claude(d, host, lambda home: plant(home / ".claude/.credentials.json"))
+                self.assertEqual(code, 5)
+                self.assertEqual((host / ".claude/.credentials.json").read_text(), before)
+
+    def test_review_sandbox_symlinks_never_reach_host_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            host = self.claude_host(d)
+            other = Path(d) / "other.json"
+            other.write_text(json.dumps({"claudeAiOauth": {"accessToken": "x", "refreshToken": "stolen", "expiresAt": 2000}}))
+            def plant(home):
+                creds = home / ".claude/.credentials.json"
+                creds.unlink()
+                creds.symlink_to(other)
+            self.run_claude(d, host, plant)
+            self.assertEqual(json.loads((host / ".claude/.credentials.json").read_text())["claudeAiOauth"]["refreshToken"], "host")
+
+    def test_review_symlinked_claude_dir_in_reused_state_is_not_written(self):
+        with tempfile.TemporaryDirectory() as d:
+            host = self.claude_host(d, expires=9000)
+            state, outside = Path(d) / "state", Path(d) / "outside"
+            state.mkdir(mode=0o700)
+            outside.mkdir()
+            (state / ".claude").symlink_to(outside)
+            with patch.dict(os.environ, {"HOME": str(host)}):
+                os.environ.pop("CLAUDE_CONFIG_DIR", None)
+                with self.assertRaises(ValueError):
+                    s.prepare_home(s.parse_args(["claude", "--state-dir", str(state)]), state)
+            self.assertEqual(list(outside.iterdir()), [])
+
+    def test_review_implausible_expiry_is_not_written_back(self):
+        with tempfile.TemporaryDirectory() as d:
+            host = self.claude_host(d, expires=1000)
+            def plant(home):
+                (home / ".claude/.credentials.json").write_text(json.dumps(
+                    {"claudeAiOauth": {"accessToken": "a", "refreshToken": "forged", "expiresAt": 1e18}}))
+            self.run_claude(d, host, plant)
+            self.assertEqual(json.loads((host / ".claude/.credentials.json").read_text())["claudeAiOauth"]["refreshToken"], "host")
+            # A genuine refresh is still written back.
+            def refresh(home):
+                (home / ".claude/.credentials.json").write_text(json.dumps(
+                    {"claudeAiOauth": {"accessToken": "a", "refreshToken": "rotated", "expiresAt": (time.time() + 3600) * 1000}}))
+            self.run_claude(d, host, refresh)
+            self.assertEqual(json.loads((host / ".claude/.credentials.json").read_text())["claudeAiOauth"]["refreshToken"], "rotated")
+
+    def test_review_sigterm_during_startup_still_cleans_up(self):
+        with tempfile.TemporaryDirectory() as d:
+            seen = {}
+            def run(a, session, home):
+                seen["session"] = session
+                os.kill(os.getpid(), signal.SIGTERM)  # stop arrives before wait_child installs its handler
+                return 0
+            previous = signal.getsignal(signal.SIGTERM)
+            with patch.object(s.os, "geteuid", return_value=1000), patch.object(s.shutil, "which", side_effect=lambda n: "/usr/bin/" + n), \
+                    patch.object(s, "run_pod", side_effect=run), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    s.main(["codex", "--workspace", d + "/w", "--offline", "--no-auth"])
+            self.assertEqual(raised.exception.code, 143)
+            self.assertFalse(seen["session"].exists(), "temporary session directory leaked")
+            self.assertIs(signal.getsignal(signal.SIGTERM), previous)
+
+    def test_review_pod_is_removed_even_if_creation_is_interrupted(self):
+        a = s.parse_args(["codex", "--offline"])
+        calls = []
+        def run(cmd, **kwargs):
+            calls.append(cmd)
+            if "create" in cmd:
+                raise SystemExit(143)
+            return Mock()
+        with patch.object(s.subprocess, "run", side_effect=run), self.assertRaises(SystemExit):
+            s.run_pod(a, Path("/tmp/session"), Path("/tmp/home"))
+        self.assertTrue(any(cmd[-3:-1] == ["rm", "--force"] for cmd in calls))
 
     def test_mount_with_spaces_and_ipv6_allow(self):
         with tempfile.TemporaryDirectory(prefix="space dir ") as d:
@@ -279,7 +1186,7 @@ class SandboxTests(unittest.TestCase):
 
     def test_pod_cleanup_after_failed_agent(self):
         a = s.parse_args(["codex", "--offline"])
-        with patch.object(s.subprocess, "run") as run, patch.object(s.subprocess, "Popen") as popen, patch.object(s, "wait_child", return_value=7):
+        with patch.object(s.subprocess, "run") as run, patch.object(s.subprocess, "Popen") as popen, patch.object(sr, "wait_child", return_value=7):
             self.assertEqual(s.run_pod(a, Path("/tmp/session"), Path("/tmp/home")), 7)
         self.assertEqual(run.call_args_list[-1].args[0][:4], ["podman", "pod", "rm", "--force"])
         name = run.call_args_list[1].args[0][4]
@@ -330,7 +1237,7 @@ class SandboxTests(unittest.TestCase):
         with patch.object(s.subprocess, "Popen", side_effect=[child, slirp]) as popen, \
              patch.object(s, "read_ready", side_effect=[{"child-pid": 12345}, RuntimeError("network failed")]), \
              patch.object(s, "configure_user_maps", create=True), \
-             patch.object(s.os, "write") as write, patch.object(s, "stop_process") as stop:
+             patch.object(s.os, "write") as write, patch.object(sr, "stop_process") as stop:
             with self.assertRaisesRegex(RuntimeError, "network failed"):
                 s.run_bwrap(a, Path("/tmp/session"), Path("/tmp/home"))
         # Only the UID/GID gate may open; the network gate must stay closed.
@@ -417,7 +1324,7 @@ class SandboxTests(unittest.TestCase):
     def test_podman_socket_applies_to_create_run_and_cleanup(self):
         a = s.parse_args(["codex", "--podman-url", "unix:///example/podman.sock", "--offline"])
         prefix = ["podman", "--remote", "--url", a.podman_url]
-        with patch.object(s.subprocess, "run") as run, patch.object(s.subprocess, "Popen") as popen, patch.object(s, "wait_child", return_value=0):
+        with patch.object(s.subprocess, "run") as run, patch.object(s.subprocess, "Popen") as popen, patch.object(sr, "wait_child", return_value=0):
             s.run_pod(a, Path("/tmp/session"), Path("/tmp/home"))
         for call in run.call_args_list + popen.call_args_list:
             self.assertEqual(call.args[0][:4], prefix)
@@ -504,17 +1411,32 @@ class SandboxTests(unittest.TestCase):
             with self.subTest(agent=agent), tempfile.TemporaryDirectory() as d:
                 root = Path(d)
                 source = root / "host-auth.json"
-                source.write_text('{"fixture":"host credentials"}')
+                login = {"accessToken": "a", "refreshToken": "r", "expiresAt": 4102444800000}
+                source.write_text(json.dumps({"claudeAiOauth": login, "mcpOAuth": {"srv": {"accessToken": "m"}}})
+                                  if agent == "claude" else '{"fixture":"host credentials"}')
                 home = root / "home"
                 home.mkdir()
                 sources = [(source, s.AUTH_TARGETS[agent])]
                 if agent == "claude":
                     metadata = root / "metadata.json"
-                    metadata.write_text('{"fixture":"account metadata"}')
+                    metadata.write_text(json.dumps({"oauthAccount": {"emailAddress": "a@example.org"},
+                                                    "mcpServers": {"db": {"env": {"API_KEY": "secret"}}},
+                                                    "projects": {"/home/me/secret-project": {}}}))
                     sources.append((metadata, ".claude.json"))
                 with patch.object(s, "auth_sources", return_value=sources):
                     s.prepare_home(s.parse_args([agent]), home)
                 for src, dest in sources:
+                    if dest == ".claude.json":
+                        # Only the account part crosses; MCP secrets and host project paths stay home.
+                        copied = json.loads((home / dest).read_text())
+                        self.assertEqual(copied["oauthAccount"], {"emailAddress": "a@example.org"})
+                        self.assertNotIn("mcpServers", copied)
+                        self.assertNotIn("projects", copied)
+                        continue
+                    if agent == "claude":
+                        # The login crosses; OAuth tokens of the host's MCP servers do not.
+                        self.assertEqual(json.loads((home / dest).read_text()), {"claudeAiOauth": login})
+                        continue
                     self.assertEqual((home / dest).read_bytes(), src.read_bytes())
                     self.assertEqual((home / dest).stat().st_mode & 0o777, 0o600)
 

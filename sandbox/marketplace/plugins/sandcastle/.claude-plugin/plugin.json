@@ -1,0 +1,8 @@
+{
+  "name": "sandcastle",
+  "version": "1.0.0",
+  "description": "Demo plugin of sandbox-ai: a robot building sandcastles in its sandbox",
+  "author": {
+    "name": "sandbox-ai"
+  }
+}

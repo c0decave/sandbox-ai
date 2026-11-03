@@ -1,0 +1,17 @@
+{
+  "name": "sandbox-ai",
+  "owner": {
+    "name": "sandbox-ai"
+  },
+  "metadata": {
+    "description": "Plugins that come with sandbox-ai"
+  },
+  "plugins": [
+    {
+      "name": "sandcastle",
+      "source": "./plugins/sandcastle",
+      "version": "1.0.0",
+      "description": "Demo: /sandcastle shows a robot building sandcastles in its sandbox"
+    }
+  ]
+}

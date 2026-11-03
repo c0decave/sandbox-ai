@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sandbox-ai"
+dynamic = ["version"]
+description = "Run Codex, Claude Code and OpenCode in a verified rootless Podman/Bubblewrap sandbox with an egress firewall"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+authors = [{ name = "sandbox-ai contributors" }]
+keywords = ["sandbox", "podman", "bubblewrap", "firejail", "ai-agents", "claude", "codex", "opencode"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Security",
+    "Topic :: Software Development",
+]
+# No runtime dependencies: the launcher uses the standard library only.
+
+[project.urls]
+Homepage = "https://github.com/c0decave/sandbox-ai"
+Source = "https://github.com/c0decave/sandbox-ai"
+Issues = "https://github.com/c0decave/sandbox-ai/issues"
+
+[project.scripts]
+sandbox-ai = "sandbox_ai.cli:main"
+claude-sandbox = "sandbox_ai.cli:claude"
+codex-sandbox = "sandbox_ai.cli:codex"
+opencode-sandbox = "sandbox_ai.cli:opencode"
+sandbox-session = "sandbox_ai.cli:session"
+sandbox-mcp = "sandbox_ai.cli:mcp"
+sandbox-wizard = "sandbox_ai.cli:wizard"
+sandbox-build-image = "sandbox_ai.cli:build_image"
+
+[tool.setuptools]
+# The checkout keeps its directory name "sandbox"; installed it is "sandbox_ai".
+package-dir = { "sandbox_ai" = "sandbox" }
+packages = ["sandbox_ai"]
+
+[tool.setuptools.package-data]
+sandbox_ai = ["Containerfile.*", "build_image.sh", "templates/*/*.md", "templates/*/*.json",
+              "templates/*/skills/*/SKILL.md", "marketplace/.claude-plugin/*",
+              "marketplace/plugins/*/.claude-plugin/*", "marketplace/plugins/*/commands/*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "sandbox_ai.agent_sandbox.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

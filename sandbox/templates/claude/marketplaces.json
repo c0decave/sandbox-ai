@@ -1,0 +1,20 @@
+{
+  "$comment": "Claude plugin marketplaces and the plugins every sandbox of this kit enables. Install them with: sandbox-ai plugins claude",
+  "marketplaces": {
+    "claude-plugins-official": {
+      "source": {
+        "source": "github",
+        "repo": "anthropics/claude-plugins-official"
+      }
+    },
+    "sandbox-ai": {
+      "source": {
+        "source": "directory",
+        "path": "/sandbox/marketplace"
+      }
+    }
+  },
+  "plugins": [
+    "sandcastle@sandbox-ai"
+  ]
+}
