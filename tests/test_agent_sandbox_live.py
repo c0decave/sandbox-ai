@@ -447,7 +447,9 @@ else: raise AssertionError('agent can write the log directory')
 print('LOG_SCENARIO_OK')
 '''
     stdout, _ = launch(request.config, backend, "codex", work,
-                       ["--no-auth", "--log-dir", str(logs), "--binary", "/usr/bin/python3"], ["-I", "-c", script])
+                       # --ask off: refused at once and logged (with questions it would wait for an answer)
+                       ["--no-auth", "--ask", "off", "--log-dir", str(logs), "--binary", "/usr/bin/python3"],
+                       ["-I", "-c", script])
     assert "LOG_SCENARIO_OK" in stdout
     denied = [json.loads(line) for line in (logs / "egress-denied.jsonl").read_text().splitlines()]
     assert any(r.get("host") == "blocked.example" for r in denied), denied  # the DNS stub
@@ -560,7 +562,14 @@ def test_real_gui_vnc_unix_socket_serves_rfb(request, backend, tmp_path):
             time.sleep(0.2)
         client = socket.socket(socket.AF_UNIX)
         client.settimeout(10)
-        client.connect(str(vnc / "vnc.sock"))
+        for attempt in range(50):  # the socket file appears before x11vnc listens on it
+            try:
+                client.connect(str(vnc / "vnc.sock"))
+                break
+            except ConnectionRefusedError:
+                if attempt == 49:
+                    raise
+                time.sleep(0.2)
         assert client.recv(12).startswith(b"RFB 003.")
         client.close()
         assert (vnc.stat().st_mode & 0o777) == 0o700
@@ -696,7 +705,7 @@ def test_real_session_restarts_after_supervisor_was_killed(request, tmp_path):
 def test_real_tmux_mode_has_agent_and_shell_windows(request, backend, tmp_path, flag):
     if backend == "bwrap" and not shutil.which("tmux"):
         pytest.skip("bwrap tmux mode needs tmux on the host")
-    import fcntl, pty, struct, termios, threading
+    import fcntl, pty, struct, termios, threading, time
     # The agent drives the shell window, then exits; ending the shell ends the sandbox.
     script = ("import pathlib,subprocess,time\n"
               "pathlib.Path('/work/agent.txt').write_text('agent')\n"
@@ -710,15 +719,21 @@ def test_real_tmux_mode_has_agent_and_shell_windows(request, backend, tmp_path, 
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
     process = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
     os.close(slave)
+    seen = []
     def drain():
         try:
-            while os.read(master, 4096):
-                pass
+            while True:
+                data = os.read(master, 4096)
+                if not data:
+                    break
+                seen.append(data)
         except OSError:
             pass
     threading.Thread(target=drain, daemon=True).start()
     try:
-        assert process.wait(timeout=120) == 0
+        status = process.wait(timeout=120)
+        time.sleep(0.5)
+        assert status == 0, b"".join(seen)[-4000:].decode("utf-8", "replace")
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGTERM)

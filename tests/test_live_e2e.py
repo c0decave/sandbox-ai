@@ -81,7 +81,7 @@ then echo SECRET_PUSHED; else grep -q "sandbox-ai" err.txt && echo SECRET_REFUSE
     try:
         # --privacy-check always: the host's loopback is no public remote, but the check must run.
         stdout, _ = launch(request.config, backend, "codex", work,
-                           ["--no-auth", "--no-provider-defaults", "--allow-host-port", str(port),
+                           ["--no-auth", "--no-provider-defaults", "--allow-host-port", str(port), "--ask", "off",
                             "--privacy-check", "always", "--binary", "/bin/sh"], ["-c", script], timeout=240)
     finally:
         server.shutdown()
@@ -227,9 +227,9 @@ print("STARTED", len(started), flush=True)
 for p in started:
     p.kill()
 """
-    stdout, stderr = launch(request.config, backend, "codex", tmp_path,
-                            ["--no-auth", "--offline", "--pids", "64", "--binary", "/usr/bin/python3"],
-                            ["-I", "-c", script], timeout=120)
+    process, _ = running_sandbox(request, backend, tmp_path, script, ["--offline", "--pids", "64"])
+    stdout, stderr = finished(process, 120)
+    assert process.returncode == 0, f"exit {process.returncode}\n{stdout}\n{stderr[-5000:]}"
     if "not enforced" in stderr:
         pytest.skip("this host gives the user no systemd session: " + stderr.strip().splitlines()[-1])
     assert "FORK_REFUSED" in stdout and int(stdout.split("STARTED")[1].split()[0]) < 64, stdout + stderr
@@ -306,8 +306,11 @@ print("DIRECT=%s BEFORE=%s AFTER=%s OPEN=%s" % (direct, before, after, opened.re
         answer_when_asked(env, "connect to 1.1.1.1:443", "allow", "once")
         answer_when_asked(env, "look up example.org", "allow", "run")
         answer_when_asked(env, "open https://example.org/login", "deny")
-    finally:
-        stdout, stderr = finished(process, 240)
+    except AssertionError as exc:
+        process.kill()
+        stdout, stderr = finished(process, 30)
+        raise AssertionError(f"{exc}\n{stdout[-3000:]}\n{stderr[-5000:]}") from None
+    stdout, stderr = finished(process, 240)
     assert "DIRECT=True BEFORE=False AFTER=True OPEN=0" in stdout, stdout + stderr[-4000:]
 
 

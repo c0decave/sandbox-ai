@@ -5,6 +5,7 @@ first and checks afterwards that none was touched.
 Run on a machine with the images built:
     pytest tests/test_escape_live.py --agent-live [--agent-backend podman|bwrap]
 """
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -57,6 +58,8 @@ class Listener:
             except OSError:
                 continue
             self.accepted.append(peer)
+            with contextlib.suppress(OSError):
+                connection.sendall(b"L")  # an answer: what reaches it exchanges data
             connection.close()
 
     def close(self):
@@ -105,7 +108,7 @@ def run_probe(request, backend, tmp_path, canaries, options=(), allowed=()):
         "allowed_tcp": [["127.0.0.1", port] for _, port in allowed],
         "abstract_socket": token}))
     stdout, stderr = launch(request.config, backend, "codex", workspace,
-                            ["--no-auth", "--binary", "/usr/bin/python3", *options],
+                            ["--no-auth", "--ask", "off", "--binary", "/usr/bin/python3", *options],
                             ["-I", "/work/probe.py", "/work/probe.json"], timeout=180)
     return json.loads(stdout.strip().splitlines()[-1])
 

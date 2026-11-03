@@ -3125,6 +3125,9 @@ def pod_commands(a, name, session, home):
               # rest = the delegated subuids (what keep-id:uid=0,gid=0 means; Podman before 5.2 writes a
               # zero-length gid_map line for that and fails, e.g. 4.9 on Ubuntu 24.04).
               "--userns=host", "--share=net,ipc,uts",
+              # ping without CAP_NET_RAW (ICMP datagram sockets) for the sandbox's root group, as Podman
+              # sets for single containers; a pod's network namespace does not get it on Podman 4.
+              "--sysctl=net.ipv4.ping_group_range=0 0",
               "--network", pod_network(a))
     if a.gui or a.gui_wayland:
         # Chromium-based apps exhaust Podman's default 64 MB /dev/shm.
