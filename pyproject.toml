@@ -46,7 +46,7 @@ packages = ["sandbox_ai"]
 
 [tool.setuptools.package-data]
 sandbox_ai = ["Containerfile.*", "build_image.sh", "templates/*/*.md", "templates/*/*.json",
-              "templates/*/skills/*/SKILL.md", "marketplace/.claude-plugin/*",
+              "templates/*/skills/*/SKILL.md", "builtin/*/skills/*/SKILL.md", "marketplace/.claude-plugin/*",
               "marketplace/plugins/*/.claude-plugin/*", "marketplace/plugins/*/commands/*"]
 
 [tool.setuptools.dynamic]

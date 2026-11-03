@@ -234,6 +234,7 @@ def option_groups(options):
     """OPTIONS (a list as on the command line) as [(name, value or None, tokens)] by the launcher's own
     parser: "--x=v" counts as ("--x", "v"); tokens it does not know stay single entries."""
     actions = launcher().build_parser()._option_string_actions
+    options = launcher().canonical_options(list(options))  # short forms as their long names
     groups, index = [], 0
     while index < len(options):
         token = options[index]
@@ -651,7 +652,7 @@ def ask_extra(p, a, project, state, current=None):
 def check_free_options(agent, text):
     """Launcher options typed as one command line: allowed in a project file, accepted by the launcher,
     with absolute paths only."""
-    values = shlex.split(text)
+    values = launcher().canonical_options(shlex.split(text))  # short forms are checked (and saved) as long ones
     forbidden = launcher().CONFIG_FORBIDDEN
     bad = [v for v in values if any(v == flag or v.startswith(flag + "=") for flag in forbidden)]
     if bad:
@@ -1209,7 +1210,7 @@ def forget(path, out=print):
 
 def cli(argv):
     parser = argparse.ArgumentParser(prog="sandbox-wizard", description="Create and trust sandbox project configurations.")
-    parser.add_argument("--version", action="version", version=f"sandbox-ai {launcher().__version__}")
+    parser.add_argument("-V", "--version", action="version", version=f"sandbox-ai {launcher().__version__}")
     commands = parser.add_subparsers(dest="command")
     commands.add_parser("new", help="Interactive setup (default); offers to edit an existing configuration")
     edit_parser = commands.add_parser("edit", help="Change the existing configuration of a project")
@@ -1217,14 +1218,14 @@ def cli(argv):
                              help=f"Project directory or its {launcher().CONFIG_NAME} (default: current directory)")
     trust_parser = commands.add_parser("trust", help="Review and trust a project configuration")
     trust_parser.add_argument("path", type=Path)
-    trust_parser.add_argument("--yes", action="store_true", help="Trust without asking")
+    trust_parser.add_argument("-y", "--yes", action="store_true", help="Trust without asking")
     forget_parser = commands.add_parser("forget", help="Remove a configuration from the trusted list")
     forget_parser.add_argument("path", type=Path)
     models = commands.add_parser("models", help="List the models of a local LLM server")
-    models.add_argument("--kind", choices=list(SERVERS), required=True)
-    models.add_argument("--host", required=True)
-    models.add_argument("--port", type=int)
-    models.add_argument("--sort", choices=["name", "size", "loaded"], default="loaded")
+    models.add_argument("-k", "--kind", choices=list(SERVERS), required=True)
+    models.add_argument("-H", "--host", required=True)
+    models.add_argument("-p", "--port", type=int)
+    models.add_argument("-s", "--sort", choices=["name", "size", "loaded"], default="loaded")
     a = parser.parse_args(argv)
     if a.command in (None, "new", "edit", "trust"):
         enable_line_editing()

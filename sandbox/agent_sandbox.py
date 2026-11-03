@@ -2,6 +2,7 @@
 """Rootless agent launchers; standard library only. See SANDBOX.md."""
 import argparse
 import base64
+import contextlib
 import errno
 import hashlib
 import importlib.util
@@ -9,6 +10,7 @@ import ipaddress
 import json
 import os
 from pathlib import Path, PurePosixPath
+import grp
 import pwd
 import re
 import select
@@ -69,6 +71,17 @@ base_env = RUNTIME.base_env
 tmux_command = RUNTIME.tmux_command
 inner_guard = RUNTIME.inner_guard
 stop_process = RUNTIME.stop_process
+PROXY_DIR = RUNTIME.PROXY_DIR
+PROXY_PORT = RUNTIME.PROXY_PORT
+PROXY_UID = RUNTIME.PROXY_UID
+CA_DIR = RUNTIME.CA_DIR
+CONTROL_DIR = RUNTIME.CONTROL_DIR
+host_matches = RUNTIME.host_matches
+# Environment variables that point TLS libraries and tools at the bundle with the session CA.
+CA_BUNDLE_VARIABLES = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO", "PIP_CERT",
+                       "CARGO_HTTP_CAINFO", "AWS_CA_BUNDLE", "DENO_CERT", "NIX_SSL_CERT_FILE", "CODEX_CA_CERTIFICATE")
+PROXY_BODY_LIMIT = 64 << 10
+CONNECTION_LOGS_LIMIT = 1 << 30   # bytes of connections-*.jsonl kept per log directory
 PROVIDERS = {
     "codex": ["api.openai.com", "chatgpt.com", "auth.openai.com"],
     # console.anthropic.com serves OAuth token refresh for many Claude Code versions.
@@ -103,11 +116,39 @@ AUTH_TARGETS = {"codex": ".codex/auth.json", "claude": ".claude/.credentials.jso
                 "opencode": ".local/share/opencode/auth.json"}
 CAPS = ["SYS_ADMIN", "NET_ADMIN", "SETUID", "SETGID", "SYS_CHROOT",
         "CHOWN", "DAC_OVERRIDE", "FOWNER", "SETPCAP"]
+DEV = Path("/dev")
+# Directories (below /dev) passed whole as bind mounts: devices plugged in later appear inside too.
+DEVICE_DIRS = ("bus/usb", "dri", "snd")
+# Never passed to an agent: (pattern for the path below /dev, what it would give the agent).
+DEVICE_REFUSED = [
+    (r"mem|kmem|port|kcore", "raw access to the host's memory and I/O ports"),
+    (r"console|tty|tty[0-9]+|vcsa?u?[0-9]*|fb[0-9]+", "your consoles and screens (their contents, typing into them)"),
+    (r"input(/.*)?|uinput|uhid|hidraw[0-9]+|usb/hiddev[0-9]+|usbmon[0-9]+",
+     "keyboards, security keys and other input devices (reading or faking keystrokes, all USB traffic)"),
+    (r"kmsg|ttyprintk|snapshot|watchdog[0-9]*|tpm(rm)?[0-9]*|mei[0-9]*|cpu(/.*)?|mtd.*|nvram|hpet|userfaultfd",
+     "host internals (kernel log, watchdog, TPM, management engine, CPU registers, firmware)"),
+    (r"loop-control|mapper(/.*)?|btrfs-control|sg[0-9]+|bsg(/.*)?|nvme[0-9]+|ng[0-9]+n[0-9]+|vfio(/.*)?|iommu",
+     "your disks or direct hardware access"),
+    (r"vsock|vhost-.*", "channels to the host or virtual machines that bypass the network firewall"),
+    (r"null|zero|full|random|urandom|ptmx|pts(/.*)?|shm(/.*)?|fd(/.*)?|mqueue(/.*)?|std(in|out|err)",
+     "nothing: every sandbox has it already"),
+]
+# Passed, with a warning at the start.
+DEVICE_WARN = [
+    (r"video[0-9]+|media[0-9]+|v4l(/.*)?", "a camera: the agent can take pictures and videos"),
+    (r"snd(/.*)?", "audio: the agent can record through your microphones"),
+    (r"bus/usb(/.*)?", "raw USB: the agent can use every USB device your user may open, security keys and "
+                       "smart-card readers included"),
+]
+GPU_KINDS = ("nvidia", "dri", "rocm")
+NVIDIA_NODES = r"nvidia[0-9]+|nvidiactl|nvidia-uvm|nvidia-uvm-tools|nvidia-modeset"
+# Where nvidia-ctk writes Container Device Interface specifications.
+CDI_DIRS = (Path("/etc/cdi"), Path("/var/run/cdi"), Path("/run/cdi"))
 # pasta without gateway mapping or any port forwarding (-t/-u inbound, -T/-U to the host).
 PASTA_OPTIONS = ("--no-map-gw", "-t", "none", "-u", "none", "-T", "none", "-U", "none")
 POD_NETWORK = "pasta:" + ",".join(PASTA_OPTIONS)
 SESSION_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}"
-__version__ = "0.1.19"
+__version__ = "0.1.20"
 CONFIG_NAME = ".sandbox-ai.json"
 # Label on session pods: the session's tmux directory, so a stale pod can be told apart from someone else's.
 SESSION_LABEL = "sandbox-ai.session"
@@ -138,11 +179,60 @@ PROFILES = {
 }
 
 
+# Short forms of the options: one letter for the frequent ones (these can be bundled, e.g. -Dn),
+# two letters for the rest. A two-letter form is an option of its own: -gl is --allow-gitlab, not -g -l.
+SHORT_OPTIONS = {
+    "--version": "-V", "--backend": "-b", "--workspace": "-w", "--workspace-ro": "-W", "--mount": "-m",
+    "--device": "-d", "--gpu": "-G", "--profile": "-p", "--allow": "-a", "--allow-host": "-A",
+    "--allow-pypi": "-y", "--allow-github": "-g", "--allow-gitlab": "-gl", "--allow-kernel-org": "-ak",
+    "--allow-duckduckgo": "-dd", "--allow-tcp": "-t", "--allow-host-port": "-P", "--git-token-env": "-ge",
+    "--git-token-file": "-gf", "--git-credentials": "-gc", "--git-identity": "-I", "--privacy-check": "-pc",
+    "--privacy-rules": "-pr", "--no-proxy": "-X", "--no-inspect": "-x", "--no-provider-defaults": "-nd",
+    "--frontier": "-f", "--dangerously-skip-permissions": "-D", "--local-config": "-L", "--offline": "-o",
+    "--egress-all-allow": "-E", "--dns": "-R", "--nameserver": "-ns", "--network": "-nw", "--ip": "-ip",
+    "--ip6": "-i6", "--image": "-i", "--podman-url": "-pu", "--binary": "-B", "--runtime": "-rt",
+    "--copy-auth": "-ca", "--no-auth": "-na", "--auth-file": "-af", "--import-codex-auth": "-ic",
+    "--copy": "-cp", "--state-dir": "-S", "--kit": "-k", "--kit-dir": "-K", "--no-default-kit": "-nk",
+    "--no-memory": "-nm", "--no-plugins": "-np", "--env": "-e", "--log-dir": "-l", "--gui": "-gu",
+    "--gui-screen": "-gs", "--gui-vnc": "-gv", "--gui-wayland": "-gw", "--tmux": "-T", "--no-tmux": "-nt",
+    "--mcp": "-M", "--session": "-s", "--config": "-c", "--no-config": "-nc", "--dry-run": "-n",
+    "--probe": "-pb",
+}
+HELP_EPILOG = """\
+Agent arguments follow --. Examples: see SANDBOX.md.
+
+Every option has a short form (shown above). One-letter forms can be bundled
+(-Dn = --dangerously-skip-permissions --dry-run) and take a value directly
+(-w~/src/app); two-letter forms such as -gl are options of their own.
+
+Hardware for the agent, safest first:
+  1. A service on the host, reached over the network: ser2net or socat
+     (serial ports, RFC 2217), openocd or gdbserver (debug probes), the adb
+     server (Android devices), an inference server such as Ollama or
+     llama.cpp (GPU), allowed with --allow-host-port PORT (Podman) or
+     --allow-tcp IP:PORT. No host driver is exposed and replugging does not
+     matter, but you run and set up the service.
+  2. --device PATH: the device itself. Often works out of the box (GPU
+     render nodes, /dev/kvm, cameras, sound, devices your desktop session
+     grants you through udev's uaccess tag), but the agent reaches the
+     device's driver in your host's kernel. Access through groups such as
+     dialout, uucp or plugdev is not kept: allow your user with a udev rule.
+  3. --gpu nvidia|dri|rocm: the GPU devices in one option, with the same
+     trade-off as --device.
+"""
+
+
 def build_parser():
     """The launcher's option parser (also used by the wizard to split option lists)."""
     # No prefix matching: abbreviations must not reach internal or forbidden options.
     p = argparse.ArgumentParser(description="Agent in rootless Podman/Bubblewrap + verified Firejail.",
-                                epilog="Agent arguments follow --. Examples: see SANDBOX.md.", allow_abbrev=False)
+                                epilog=HELP_EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter,
+                                allow_abbrev=False)
+    add = p.add_argument
+
+    def add_with_short_form(*names, **kwargs):
+        return add(*[SHORT_OPTIONS[name] for name in names if name in SHORT_OPTIONS], *names, **kwargs)
+    p.add_argument = add_with_short_form
     p.add_argument("agent", choices=AUTH_TARGETS)
     p.add_argument("--version", action="version", version=f"sandbox-ai {__version__}")
     p.add_argument("--backend", choices=["podman", "bwrap"], default="podman")
@@ -151,6 +241,18 @@ def build_parser():
                         "comma-separated, appear at /workspaces/<name>")
     p.add_argument("--workspace-ro", action="store_true", help="Mount every workspace read-only")
     p.add_argument("--mount", action="append", default=[], metavar="SRC:DEST:ro|rw", help="Repeatable; DEST under /work, /mnt or /opt")
+    p.add_argument("--device", action="append", default=[], metavar="PATH",
+                   help="Hand a host device to the agent: a character device under /dev (symlinks such as "
+                        "/dev/serial/by-id/... are resolved) or one of the directories "
+                        + ", ".join("/dev/" + d for d in DEVICE_DIRS) + " (devices plugged in later appear "
+                        "there too). Its driver runs in your host's kernel, so this weakens isolation; a "
+                        "service on the host reached over the network is safer (see below). The agent can "
+                        "open it only if your user may without supplementary groups; repeatable")
+    p.add_argument("--gpu", choices=GPU_KINDS,
+                   help="Hand the GPU to the agent: nvidia (Podman: through CDI, after `sudo nvidia-ctk cdi "
+                        "generate --output=/etc/cdi/nvidia.yaml`; bwrap: /dev/nvidia*), dri (Intel/AMD render "
+                        "nodes in /dev/dri; Mesa, Vulkan or VA-API come from your own image) or rocm (dri plus "
+                        "/dev/kfd). Weakens isolation like --device")
     p.add_argument("--profile", action="append", default=[], choices=PROFILES, metavar="NAME",
                    help="Network profile: " + "; ".join(f"{name}: {value['help']}" for name, value in PROFILES.items())
                         + "; repeatable")
@@ -188,6 +290,16 @@ def build_parser():
                    help="Your own rules for the privacy check: DIR/global.rules.toml and DIR/PROJECT.rules.toml "
                         "(or .json), PROJECT being the workspace's directory name; outside every workspace, never "
                         "shown to the agent (default: ~/.config/sandbox-ai/privacy if it exists)")
+    p.add_argument("--no-proxy", action="store_true",
+                   help="No connection proxy: connections are neither logged nor opened, Git pushes are checked "
+                        "only by the agent's hooks. By default every TCP connection of the agent passes a proxy "
+                        "that opens TLS with a CA made for the run, logs each HTTP request with headers and "
+                        "bodies (redacted, 64 KiB each) to connections-*.jsonl in the log directory, refuses "
+                        "pushes the privacy check stops and SSH except to destinations allowed with --allow or "
+                        "--allow-tcp")
+    p.add_argument("--no-inspect", action="append", default=[], metavar="HOST",
+                   help="Pass TLS to HOST (or *.DOMAIN) through unopened, for programs that do not accept the "
+                        "session CA; only the name is logged, and pushes there are not checked; repeatable")
     p.add_argument("--no-provider-defaults", action="store_true")
     p.add_argument("--frontier", action="store_true", help="Also allow OpenAI and Anthropic API/auth hosts (TCP/443); everything else stays denied")
     p.add_argument("--dangerously-skip-permissions", action="store_true",
@@ -222,14 +334,18 @@ def build_parser():
     p.add_argument("--kit-dir", action="append", default=[], metavar="DIR",
                    help="Also use the kit in DIR/AGENT; repeatable")
     p.add_argument("--no-default-kit", action="store_true",
-                   help="Leave out the default kit ~/.local/share/sandbox-ai/home/AGENT")
+                   help="Leave out the default kit ~/.local/share/sandbox-ai/home/AGENT and the built-in "
+                        "skill sandbox-ai")
     p.add_argument("--no-memory", action="store_true",
                    help="No project memory: the agent's memory file and Claude's auto memory are neither "
                         "loaded nor kept")
     p.add_argument("--no-plugins", action="store_true",
                    help="No plugins from sandbox-ai's plugin store (Claude) or the kits (OpenCode)")
     p.add_argument("--env", action="append", default=[], metavar="NAME", help="Pass named host variable to agent only; values never printed")
-    p.add_argument("--log-dir", type=Path, help="Write egress-denied.jsonl and files.jsonl here (outside workspace; hidden from the agent)")
+    p.add_argument("--log-dir", type=Path,
+                   help="Write egress-denied.jsonl, files.jsonl and the proxy's connections-*.jsonl here (outside "
+                        "workspaces; hidden from the agent). Without it the connection log goes to "
+                        "~/.local/state/sandbox-ai/logs/PROJECT-HASH and file access is not logged")
     p.add_argument("--gui", action="store_true", help=f"Virtual X display {GUI_DISPLAY} (Xvfb) for GUI apps and headed browsers")
     p.add_argument("--gui-screen", default="1920x1080x24", metavar="WxHxDEPTH", help="Virtual screen size (default: 1920x1080x24)")
     p.add_argument("--gui-vnc", type=Path, metavar="DIR",
@@ -256,6 +372,60 @@ def build_parser():
     p.add_argument("--dry-run", action="store_true", help="Print plan; no DNS, auth reads, copies, pods or processes")
     p.add_argument("--probe", action="store_true", help="Verify both sandbox layers and firewall, then exit without agent")
     return p
+
+
+def long_option(action):
+    """The long name of an argparse action (its first --option)."""
+    return next((name for name in action.option_strings if name.startswith("--")), action.option_strings[0])
+
+
+def canonical_options(tokens):
+    """TOKENS (options as on the command line, up to an optional --) with every short form written as its
+    long option, a value attached to a one-letter form (-w/path) split off and bundled flags (-Dn) taken
+    apart. Code that looks for options by name (project files, MCP definitions, merging) sees only
+    long names; argparse reads both forms the same way."""
+    actions = build_parser()._option_string_actions
+    result, index, value_next = [], 0, False
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
+        if value_next or token == "--":
+            result += [token] if value_next else tokens[index - 1:]
+            if not value_next:
+                break
+            value_next = False
+            continue
+        if token.startswith("--") or not token.startswith("-") or token == "-":
+            result.append(token)
+            name = token.split("=", 1)[0]
+            value_next = name in actions and actions[name].nargs != 0 and "=" not in token
+            continue
+        action = actions.get(token)
+        if action is not None:  # an exact short form: -w, -gl
+            result.append(long_option(action))
+            value_next = action.nargs != 0
+            continue
+        name, equals, value = token.partition("=")
+        if equals and name in actions and actions[name].nargs != 0:  # -w=/dir, -pr=/rules (as argparse reads them)
+            result += [long_option(actions[name]), value]
+            continue
+        expanded, rest = [], token[1:]
+        while rest:
+            action = actions.get("-" + rest[0])
+            if action is None:
+                expanded = None
+                break
+            if action.nargs == 0:
+                expanded.append(long_option(action))
+                rest = rest[1:]
+            elif rest[1:]:
+                expanded += [long_option(action), rest[1:]]
+                rest = ""
+            else:  # -Dw DIR: the bundle's last option takes the next word
+                expanded.append(long_option(action))
+                value_next, rest = True, ""
+        result += [token] if expanded is None else expanded
+    return result
 
 
 def parse_args(argv):
@@ -720,6 +890,8 @@ def load_project_config(a):
         values = document.get(key, [])
         if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
             raise ValueError(f"{path}: {key} must be a list of strings")
+    # Short forms (-S/dir, -Dn) are checked as what they are.
+    document["options"] = canonical_options(document.get("options", []))
     for value in document.get("options", []):
         if any(value == flag or value.startswith(flag + "=") for flag in CONFIG_FORBIDDEN):
             raise ValueError(f"{path}: option {value} is not allowed in a project configuration")
@@ -998,12 +1170,174 @@ def parse_mount(value):
         raise ValueError(f"Mount source unavailable: {exc}") from None
     if mode not in ("ro", "rw") or not (source.is_dir() or source.is_file()):
         raise ValueError("Mount must be a regular file/directory with ro or rw mode")
+    if any(source == base or base in source.parents for base in (DEV, Path("/proc"), Path("/sys"))):
+        raise ValueError(f"--mount {source}: device and kernel trees are not mounted; use --device for devices")
     # Socket files are never accepted as individual mounts. Directory contents
     # remain the operator's responsibility (see documentation).
     safe_dest(dest)
     if any(c in str(source) + dest for c in (",", "\n", "\r", "\0")):
         raise ValueError("Mount paths cannot contain commas or control characters")
     return str(source), dest, mode
+
+
+def device_mode(path):
+    """st_mode of PATH (a separate function, so that tests can present files as devices)."""
+    return os.stat(path).st_mode
+
+
+def parse_device(value, option="--device"):
+    """(path, kind) of a host device for the agent, symlinks resolved: kind "node" for a character
+    device, "dir" for one of DEVICE_DIRS (or a directory below one). Refuses DEVICE_REFUSED."""
+    if not value or any(c in value for c in (",", ":", "=", "\n", "\r", "\0")):
+        raise ValueError(f"{option} expects a path under /dev without commas, colons or control characters: "
+                         f"{printable(value)!r}")
+    path = Path(value)
+    if not path.is_absolute() or DEV not in path.parents:
+        raise ValueError(f"{option} expects a path under {DEV}: {value!r}")
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"{option} {value}: {exc.strerror or exc}") from None
+    if DEV not in resolved.parents or any(c in str(resolved) for c in (",", ":", "=", "\n", "\r", "\0")):
+        raise ValueError(f"{option} {value} leads to {printable(resolved)}, not to a device under {DEV}")
+    below = resolved.relative_to(DEV).as_posix()
+    for pattern, reason in DEVICE_REFUSED:
+        if re.fullmatch(pattern, below):
+            raise ValueError(f"{option} {value}: refused; {resolved} would give the agent {reason}")
+    mode = device_mode(resolved)
+    if stat.S_ISDIR(mode):
+        if not any(below == d or below.startswith(d + "/") for d in DEVICE_DIRS):
+            raise ValueError(f"{option} {value}: of directories only "
+                             + ", ".join(f"{DEV}/{d}" for d in DEVICE_DIRS)
+                             + " (or one below them) can be passed whole; name single devices otherwise")
+        return str(resolved), "dir"
+    if stat.S_ISBLK(mode):
+        raise ValueError(f"{option} {value}: block devices (disks, partitions) are never passed to an agent")
+    if not stat.S_ISCHR(mode):
+        raise ValueError(f"{option} {value}: {resolved} is not a device")
+    return str(resolved), "node"
+
+
+def nvidia_cdi_available():
+    """True if a CDI specification (from nvidia-ctk cdi generate) names NVIDIA GPUs."""
+    for directory in CDI_DIRS:
+        try:
+            files = sorted(directory.iterdir())
+        except OSError:
+            continue
+        for path in files:
+            if path.suffix not in (".yaml", ".yml", ".json"):
+                continue
+            try:
+                with open(path, "rb") as stream:
+                    if b"nvidia.com/gpu" in stream.read(CONFIG_LIMIT):
+                        return True
+            except OSError:
+                continue
+    return False
+
+
+def gpu_devices(a):
+    """[(path, kind)] of --gpu; kind "cdi" is a CDI device name (Podman's way to NVIDIA GPUs)."""
+    if not a.gpu:
+        return []
+    if a.gpu == "nvidia":
+        if a.backend == "podman":
+            # A remote Podman (--podman-url) has its own CDI specifications, so only a local one is checked.
+            if not a.podman_url and not nvidia_cdi_available():
+                raise ValueError("--gpu nvidia: no CDI specification for NVIDIA GPUs in "
+                                 + ", ".join(map(str, CDI_DIRS)) + "; install the NVIDIA Container Toolkit and "
+                                 "run: sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml")
+            return [("nvidia.com/gpu=all", "cdi")]
+        try:
+            names = sorted(path.name for path in DEV.iterdir() if re.fullmatch(NVIDIA_NODES, path.name))
+        except OSError:
+            names = []
+        if not any(re.fullmatch(r"nvidia[0-9]+", name) for name in names):
+            raise ValueError(f"--gpu nvidia: no {DEV}/nvidia0; is the NVIDIA driver loaded?")
+        return [parse_device(str(DEV / name), "--gpu nvidia") for name in names]
+    if not (DEV / "dri").is_dir():
+        raise ValueError(f"--gpu {a.gpu}: no {DEV}/dri; is a graphics driver loaded?")
+    found = [parse_device(str(DEV / "dri"), f"--gpu {a.gpu}")]
+    if a.gpu == "rocm":
+        if not (DEV / "kfd").exists():
+            raise ValueError(f"--gpu rocm: no {DEV}/kfd; is the amdgpu driver with ROCm support loaded?")
+        found.append(parse_device(str(DEV / "kfd"), "--gpu rocm"))
+    return found
+
+
+def devices(a):
+    """[(path, kind)] of every device for the agent (--device, then --gpu), without repeats and
+    without single devices inside a directory that is passed whole."""
+    found = list(dict.fromkeys([parse_device(value) for value in a.device] + gpu_devices(a)))
+    directories = [Path(path) for path, kind in found if kind == "dir"]
+    return [(path, kind) for path, kind in found
+            if not any(directory in Path(path).parents for directory in directories)]
+
+
+def device_access(path):
+    """True if this user may open PATH for reading and writing as owner, through its primary group,
+    as anyone or through a POSIX ACL entry (udev's uaccess): the sandbox keeps no supplementary groups."""
+    info = os.stat(path)
+    uid, gid = os.getuid(), os.getgid()
+    try:
+        raw = os.getxattr(path, "system.posix_acl_access")
+    except OSError:
+        raw = b""
+    entries = []
+    if len(raw) >= 4 and struct.unpack_from("<I", raw)[0] == 2:
+        entries = [struct.unpack_from("<HHI", raw, offset) for offset in range(4, len(raw) - 7, 8)]
+    if not entries:
+        bits = info.st_mode >> 6 if info.st_uid == uid else info.st_mode >> 3 if info.st_gid == gid else info.st_mode
+        return bits & 6 == 6
+    mask = next((perm for tag, perm, _ in entries if tag == 0x10), 7)
+    if info.st_uid == uid:
+        return any(tag == 0x01 and perm & 6 == 6 for tag, perm, _ in entries)
+    named = [perm for tag, perm, ident in entries if tag == 0x02 and ident == uid]
+    if named:
+        return named[0] & mask & 6 == 6
+    groups = [perm for tag, perm, ident in entries
+              if (tag == 0x04 and info.st_gid == gid) or (tag == 0x08 and ident == gid)]
+    if groups:
+        return any(perm & mask & 6 == 6 for perm in groups)
+    return any(tag == 0x20 and perm & 6 == 6 for tag, perm, _ in entries)
+
+
+def group_name(gid):
+    try:
+        return grp.getgrgid(gid).gr_name
+    except KeyError:
+        return str(gid)
+
+
+def device_notes(a):
+    """Messages for the start: which devices the agent gets, what they expose, and which it cannot open."""
+    found = devices(a)
+    if not found:
+        return []
+    notes = ["devices for the agent (their drivers run in your host's kernel): " + ", ".join(
+        "NVIDIA GPUs (CDI)" if kind == "cdi" else f"{path} (directory: devices plugged in later appear too)"
+        if kind == "dir" else path for path, kind in found)]
+    for path, kind in found:
+        if kind == "cdi":
+            continue
+        below = Path(path).relative_to(DEV).as_posix()
+        for pattern, reason in DEVICE_WARN:
+            if re.fullmatch(pattern, below):
+                notes.append(f"warning: {path} is {reason}")
+        if kind == "dir":
+            nodes = [Path(root) / name for root, _, names in os.walk(path) for name in names]
+            nodes = [node for node in nodes if not node.is_symlink() and stat.S_ISCHR(device_mode(node))]
+            if nodes and not any(device_access(node) for node in nodes):
+                notes.append(f"warning: your user cannot open any device in {path} without supplementary "
+                             "groups, so the agent cannot either; see the README (Hardware) for a udev rule")
+        elif not device_access(path):
+            group = os.stat(path).st_gid
+            via = f" (only through group {group_name(group)})" if os.stat(path).st_mode & 0o060 else ""
+            notes.append(f"warning: your user cannot open {path} directly{via}; the sandbox keeps no "
+                         "supplementary groups, so the agent cannot either; see the README (Hardware) for a "
+                         "udev rule")
+    return notes
 
 
 def validate(a):
@@ -1062,6 +1396,10 @@ def validate(a):
             raise ValueError(f"Sandbox-owned variable cannot be overridden: {name}")
     for mount in a.mount:
         parse_mount(mount)
+    if a.podman_url and (a.device or a.gpu in ("dri", "rocm")):
+        raise ValueError("--device and --gpu dri|rocm name devices of this host; with --podman-url only "
+                         "--gpu nvidia (the remote's CDI) is possible")
+    devices(a)
     for name in a.kit:
         load_kits_module().kit_path(name, a.agent)
     for value in a.copy:
@@ -1082,6 +1420,17 @@ def validate(a):
             raise ValueError(f"--mcp NAME: 1-32 letters, digits, '_' or '-': {name!r}")
     if a.pod_name and not re.fullmatch(r"agent-[A-Za-z0-9_.-]{1,60}", a.pod_name):
         raise ValueError("Invalid pod name")
+    for value in a.no_inspect:
+        name = value[2:] if value.startswith("*.") else value
+        if len(name) > 253 or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", name) or any(
+                not re.fullmatch(r"[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?", part) for part in name.split(".")):
+            raise ValueError(f"--no-inspect expects a host name or *.DOMAIN: {value!r}")
+        bare = name.lower().rstrip(".")
+        public = sorted(host for host in load_privacy_module().PUBLIC_GIT_HOSTS
+                        if bare == host or bare.endswith("." + host) or host.endswith("." + bare))
+        if public and a.privacy_check != "off":
+            raise ValueError(f"--no-inspect {value} would let pushes to {', '.join(public)} pass unchecked; the "
+                             "privacy check needs to see them (or start with --privacy-check off)")
     # Inside an agent-visible tree the Firejail blacklist would not hide them.
     for path, option in [(a.log_dir, "--log-dir"), (a.gui_vnc, "--gui-vnc"), (a.tmux_socket_dir, "--tmux-socket-dir"),
                          (a.mcp_socket_dir, "--mcp-socket-dir")]:
@@ -1130,6 +1479,11 @@ def validate(a):
                 break
         bindings.append((Path(src), dest))
     check_host_sources(a)
+    a.log_explicit = bool(a.log_dir)
+    if a.log_dir is None and proxy_enabled(a):
+        # The connection log is always kept; a workspace containing this directory needs --log-dir elsewhere.
+        a.log_dir = default_log_dir(workspace)
+        check_private_dir(a, a.log_dir, "The default log directory (set --log-dir)")
 
 
 def default_log_dir(project):
@@ -1275,7 +1629,10 @@ def resolve_pod_hosts(a, hosts):
     return answer
 
 
-def firewall_rules(networks, addresses, log=False, dns=(), allow_all=False, tcp=()):
+def firewall_rules(networks, addresses, log=False, dns=(), allow_all=False, tcp=(), proxy=None):
+    """The sandbox's nftables table. PROXY ({"port", "loopback"}) redirects every TCP connection of the agent
+    to the connection proxy, except the proxy's own (PROXY_UID) and those to loopback ports other than
+    LOOPBACK (the host's forwarded ports). The chain "runtime" holds what `sandbox-ai net` allows later."""
     lines = ["table inet agent_sandbox {"]
     if log:
         # Dropped destinations are collected here and polled by the bootstrap;
@@ -1287,9 +1644,11 @@ def firewall_rules(networks, addresses, log=False, dns=(), allow_all=False, tcp=
              '  iifname "lo" accept', "  ct state established,related accept",
              "  ip6 hoplimit 255 icmpv6 type { nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept", " }",
              " chain forward { type filter hook forward priority 0; policy drop; }",
+             " chain runtime {", " }",
              " chain output { type filter hook output priority 0; policy drop;",
              '  oifname "lo" accept', "  ct state established,related accept",
-             "  ip6 hoplimit 255 icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept"]
+             "  ip6 hoplimit 255 icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept",
+             "  jump runtime"]
     for raw in networks:
         net = ipaddress.ip_network(raw, strict=False)
         lines.append(f"  {'ip' if net.version == 4 else 'ip6'} daddr {net} accept")
@@ -1309,7 +1668,16 @@ def firewall_rules(networks, addresses, log=False, dns=(), allow_all=False, tcp=
     elif log:
         lines += ["  meta nfproto ipv4 meta l4proto { tcp, udp } add @denied4 { ip daddr . meta l4proto . th dport }",
                   "  meta nfproto ipv6 meta l4proto { tcp, udp } add @denied6 { ip6 daddr . meta l4proto . th dport }"]
-    return "\n".join(lines + [" }", "}", ""])
+    lines.append(" }")
+    if proxy:
+        ports = sorted({int(port) for port in proxy.get("loopback", [])})
+        lines += [" chain proxy { type nat hook output priority -100; policy accept;",
+                  f"  meta skuid {PROXY_UID} return",
+                  f"  ip daddr 127.0.0.0/8 tcp dport != {{ {', '.join(map(str, ports))} }} return" if ports
+                  else "  ip daddr 127.0.0.0/8 return",
+                  "  ip6 daddr ::1 return",
+                  f"  meta l4proto tcp redirect to :{int(proxy['port'])}", " }"]
+    return "\n".join(lines + ["}", ""])
 
 
 def copy_private(source, home, relative, content=None):
@@ -1587,6 +1955,9 @@ def prepare_home(a, home):
     if a.agent == "claude":
         claude_default_settings(home)
         claude_default_state(home)
+        claude_trusted_workspaces(a, home)
+    if a.agent == "codex":
+        codex_trusted_workspaces(a, home)
     if a.agent == "opencode":
         catalog = opencode_catalog()
         target = home / ".cache/opencode/models.json"
@@ -1719,6 +2090,60 @@ def claude_default_state(home):
     if problem:
         print(f"agent-sandbox: left sandbox ~/.claude.json unchanged ({problem}); "
               "Claude may ask to log in again", file=sys.stderr)
+
+
+def claude_trusted_workspaces(a, home):
+    """Mark the sandbox paths of the workspaces as trusted, so Claude does not ask on every start:
+    you chose these directories yourself. Other projects in ~/.claude.json stay as they are."""
+    def apply(document):
+        projects = document.setdefault("projects", {})
+        if not isinstance(projects, dict):
+            return False
+        changed = False
+        for _, dest in workspace_targets(a):
+            project = projects.setdefault(dest, {})
+            if isinstance(project, dict) and project.get("hasTrustDialogAccepted") is not True:
+                project["hasTrustDialogAccepted"] = changed = True
+        return changed
+    problem = update_json_defaults(home, ".claude.json", apply, CLAUDE_STATE_LIMIT)
+    if problem:
+        print(f"agent-sandbox: left sandbox ~/.claude.json unchanged ({problem}); "
+              "Claude may ask whether you trust the workspace", file=sys.stderr)
+
+
+def codex_trusted_workspaces(a, home):
+    """The same for Codex: [projects."PATH"] trust_level = "trusted" in ~/.codex/config.toml for every
+    workspace without an entry; an entry already there (also "untrusted") is kept."""
+    path = check_home_path(home, home / ".codex/config.toml")
+    try:
+        text = read_config_bytes(path).decode() if path.exists() else ""
+    except (OSError, ValueError) as exc:
+        print(f"agent-sandbox: left sandbox ~/.codex/config.toml unchanged ({exc}); "
+              "Codex may ask whether you trust the workspace", file=sys.stderr)
+        return
+    toml = load_privacy_module()._toml_module()
+    dests = [dest for _, dest in workspace_targets(a) if not any(c in dest for c in '"\\\n\r')]
+    if toml is not None:
+        try:
+            projects = toml.loads(text).get("projects", {})
+        except ValueError:
+            print("agent-sandbox: left sandbox ~/.codex/config.toml unchanged (it is not valid TOML); "
+                  "Codex may ask whether you trust the workspace", file=sys.stderr)
+            return
+        missing = [dest for dest in dests if not (isinstance(projects, dict) and dest in projects)]
+    else:
+        # Without a TOML parser (Python before 3.11, no tomli): only a file that never mentions projects.
+        missing = [] if "projects" in text else dests
+    if not missing:
+        return
+    addition = "".join(f'\n[projects."{dest}"]\ntrust_level = "trusted"\n' for dest in missing)
+    new = (text.rstrip("\n") + "\n" + addition).lstrip("\n")
+    if toml is not None:
+        try:
+            toml.loads(new)
+        except ValueError:  # e.g. projects written as an inline table: a table cannot be added to it
+            return
+    replace_private(new.encode(), home, ".codex/config.toml")
 
 
 def claude_oauth(path, follow=True):
@@ -2121,6 +2546,148 @@ def prepare_privacy(a, session):
         lambda line: print(f"agent-sandbox: privacy: {printable(line)}", file=sys.stderr))
 
 
+def proxy_enabled(a):
+    """The connection proxy runs unless switched off or there is no network."""
+    return not a.no_proxy and not a.offline
+
+
+def proxy_allow(a, hosts):
+    """What the proxy may connect to: the firewall's permissions, as proxy.json's "allow"."""
+    addresses = [addr for values in hosts.values() for addr in values] + host_networks(hosts)
+    return {"all": a.egress_all_allow, "nets": [str(ipaddress.ip_network(n, strict=False)) for n in a.allow],
+            "https": sorted({str(ipaddress.ip_network(n, strict=False)) for n in addresses}),
+            "tcp": [[addr, port] for addr, port in tcp_targets(a)] + [[ns, 53] for ns in nameservers(a)],
+            "loopback": host_ports(a)}
+
+
+def proxy_config(a, hosts, log_name):
+    """proxy.json: allow-list, hosts that stay unopened, SSH policy, body limit."""
+    privacy = load_privacy_module()
+    public_git = sorted({addr for name, values in hosts.items() for addr in values
+                         if any(name == h or name.endswith("." + h) for h in privacy.PUBLIC_GIT_HOSTS)})
+    explicit = [str(ipaddress.ip_network(n, strict=False)) for n in a.allow] + [addr for addr, _ in tcp_targets(a)]
+    return {"port": PROXY_PORT, "log": log_name, "body_limit": PROXY_BODY_LIMIT,
+            "no_inspect": [value.lower() for value in a.no_inspect], "allow": proxy_allow(a, hosts),
+            "ssh": {"block": a.privacy_check != "off", "allowed": explicit, "public_git": public_git},
+            "push_check": a.privacy_check != "off"}
+
+
+def write_proxy_files(a, directory, hosts, log_name):
+    """The proxy's private directory (mounted at PROXY_DIR, hidden from the agent): proxy.json, and for the
+    push check push.json (the full rules, your own included) and privacy.py."""
+    config = proxy_config(a, hosts, log_name)
+    files = {"proxy.json": json.dumps(config)}
+    if config["push_check"]:
+        privacy = load_privacy_module()
+        context = privacy_context(a)
+        derived = privacy.derived_rules(context)
+        workspaces = []
+        try:
+            for (src, dest), (_, project) in zip(workspace_targets(a), privacy_workspaces(a) or
+                                                  [(None, None)] * len(workspace_targets(a))):
+                rules = privacy.builtin_rules().add(derived).add(privacy.user_rules(privacy_rules_dir(a), project
+                                                                                    or Path(src).name))
+                workspaces.append({"path": dest, "rules": privacy.rules_document(rules)})
+        except privacy.RulesUnavailable as exc:
+            raise ValueError(f"--privacy-rules: {exc}") from None
+        files["push.json"] = json.dumps({"mode": a.privacy_check, "own_hosts": privacy.private_hosts(context),
+                                         "workspaces": workspaces})
+        files["privacy.py"] = (HERE / "privacy.py").read_text()
+    for name, content in files.items():
+        (directory / name).write_text(content)
+        (directory / name).chmod(0o600)
+    return config
+
+
+def rotate_connection_logs(directory, limit=CONNECTION_LOGS_LIMIT):
+    """Delete the oldest connections-*.jsonl while they hold more than LIMIT bytes; the names deleted."""
+    try:
+        logs = sorted((p for p in Path(directory).glob("connections-*.jsonl") if p.is_file() and not p.is_symlink()),
+                      key=lambda p: p.name)
+    except OSError:
+        return []
+    total, removed = sum(p.stat().st_size for p in logs), []
+    recent = time.time() - 3600  # written within the hour: possibly a sandbox that still runs
+    for oldest in logs:
+        if total <= limit:
+            break
+        if oldest.stat().st_mtime > recent:
+            continue
+        total -= oldest.stat().st_size
+        oldest.unlink()
+        removed.append(oldest.name)
+    return removed
+
+
+def connection_summary(path):
+    """Lines about one run's connection log: how much was logged, refused pushes, TLS that failed."""
+    counts, refused, tls = {"http": 0, "other": 0, "denied": 0}, [], {}
+    try:
+        with open(path, encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                event = record.get("event")
+                if event == "http":
+                    counts["http"] += 1
+                    push = record.get("push")
+                    if isinstance(push, dict) and not push.get("ok"):
+                        refused.append(", ".join(push.get("refs") or []) or record.get("url", "?"))
+                elif event == "denied":
+                    counts["denied"] += 1
+                elif event in ("tls-refused", "tls-upstream-failed"):
+                    tls[str(record.get("host") or record.get("destination"))] = event
+                else:
+                    counts["other"] += 1
+    except OSError:
+        return []
+    lines = [f"proxy: {counts['http']} HTTP request(s), {counts['other']} other connection(s), "
+             f"{counts['denied']} refused; log: {path}"]
+    if refused:
+        lines.append(f"proxy: refused {len(refused)} push(es) the privacy check stopped: {'; '.join(refused[:5])}")
+    for host, event in sorted(tls.items())[:10]:
+        lines.append(f"proxy: TLS to {host} failed ({'the program rejected the session CA' if event == 'tls-refused' else 'the server certificate is not trusted'}); "
+                     f"--no-inspect {host} passes it through unopened")
+    return lines
+
+
+def runs_dir():
+    """Where running sandboxes register (for sandbox-ai net)."""
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    base = Path(runtime) / "sandbox-ai" if runtime and Path(runtime).is_dir() else \
+        Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "sandbox-ai"
+    return base / "runs"
+
+
+def register_run(a, run, session):
+    """Directory of this run in runs_dir(): run.json for `sandbox-ai net`, and the supervisor's control
+    socket (the directory is mounted at CONTROL_DIR, hidden from the agent)."""
+    directory = runs_dir() / run
+    directory.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        directory.mkdir(mode=0o700)
+    except FileExistsError:
+        # Left by a run that was killed (sessions and MCP servers keep their name): reuse it unless that
+        # run is still alive.
+        try:
+            pid = int(json.loads((directory / "run.json").read_text()).get("pid"))
+            os.kill(pid, 0)
+            alive = pid != os.getpid()
+        except (OSError, ValueError, TypeError, AttributeError):
+            alive = False
+        if alive:
+            raise ValueError(f"A sandbox named {run} is already running (see sandbox-ai net list)") from None
+        shutil.rmtree(directory)
+        directory.mkdir(mode=0o700)
+    (directory / "run.json").write_text(json.dumps({
+        "run": run, "agent": a.agent, "backend": a.backend, "workspace": a.workspaces[0], "pid": os.getpid(),
+        "session": a.session or (a.pod_name if a.tmux_socket_dir else None), "session_dir": str(session),
+        "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "proxy": proxy_enabled(a)}))
+    return directory
+
+
 def kits_apply(a):
     """Kits, project memory and plugins are for agent sandboxes, not for probes or MCP servers."""
     return not a.probe and not a.mcp_socket_dir
@@ -2309,6 +2876,11 @@ def agent_environment(a):
         content["plugin"] = list(a.opencode_plugins)
     if content:
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(content)
+    if proxy_enabled(a):
+        env.update({name: str(CA_DIR / "bundle.pem") for name in CA_BUNDLE_VARIABLES})
+        env["NODE_EXTRA_CA_CERTS"] = str(CA_DIR / "ca.pem")
+    if getattr(a, "run_id", None):
+        env["SANDBOX_AI_RUN"] = a.run_id
     if a.gui:
         env["DISPLAY"] = GUI_DISPLAY
     if a.gui_wayland:
@@ -2340,7 +2912,8 @@ def agent_command(a, binary):
 def mount_option(src, dest, mode):
     if any(c in str(src) + dest for c in (",", "\n", "\r")):
         raise ValueError("Podman bind paths cannot contain commas or newlines")
-    return ["--mount", f"type=bind,src={src},dst={dest},{'ro' if mode == 'ro' else 'rw'}"]
+    # nodev: device files inside a mounted tree stay unusable (devices only through --device).
+    return ["--mount", f"type=bind,src={src},dst={dest},{'ro' if mode == 'ro' else 'rw'},nodev"]
 
 
 def pod_commands(a, name, session, home):
@@ -2393,8 +2966,15 @@ def pod_commands(a, name, session, home):
         bindings.append((mcp_socket_dir(name), f"{MCP_AGENT_DIR}/{name}", "ro"))
     if a.gui_wayland:
         bindings.append((wayland_socket(), WAYLAND_TARGET, "rw"))
+    if getattr(a, "proxy_dir", None):
+        bindings.append((a.proxy_dir, str(PROXY_DIR), "ro"))
+    if getattr(a, "control_dir", None):
+        bindings.append((a.control_dir, str(CONTROL_DIR), "rw"))
     for src, dest, mode in bindings:
         run += mount_option(src, dest, mode)
+    for path, kind in devices(a):
+        # A directory as a bind mount, not --device: Podman would copy only the devices present now.
+        run += ["--mount", f"type=bind,src={path},dst={path},rw,dev"] if kind == "dir" else ["--device", path]
     for key, value in base_env().items():
         run += ["--env", f"{key}={value}"]
     run += ["--entrypoint=/usr/bin/python3", a.image, "-I", "/sandbox/runtime.py", "--internal-bootstrap"]
@@ -2494,6 +3074,14 @@ def bwrap_command(a, session, home):
     if a.gui_wayland:
         runtime = str(PurePosixPath(WAYLAND_TARGET).parent)
         cmd += ["--perms", "0700", "--dir", runtime, "--bind", str(wayland_socket()), WAYLAND_TARGET]
+    if getattr(a, "proxy_dir", None):
+        cmd += ["--ro-bind", str(a.proxy_dir), str(PROXY_DIR)]
+    if getattr(a, "control_dir", None):
+        cmd += ["--bind", str(a.control_dir), str(CONTROL_DIR)]
+    for path, kind in devices(a):
+        if kind == "cdi":
+            raise ValueError("CDI devices need the Podman backend")
+        cmd += ["--dev-bind", path, path]
     for directory in a.runtime:
         path = Path(directory).expanduser().resolve(strict=True)
         if not path.is_dir() or not any(base in path.parents for base in
@@ -2678,6 +3266,7 @@ def main(argv):
 
 
 def launch(argv):
+    argv = canonical_options(list(argv))
     a = parse_args(argv)
     config_path, document = load_project_config(a)
     if document:
@@ -2685,9 +3274,12 @@ def launch(argv):
     # The checked document is passed on; nothing re-reads the file later.
     a.project_config, a.project_document = (str(config_path) if config_path else None), document
     validate(a)
+    a.run_id = (a.pod_name[len("agent-"):] if a.pod_name else f"{a.agent}-{uuid.uuid4().hex[:8]}")
     resolve_tmux(a)
     check_login(a)
     for note in git_credentials_file(a)[1]:
+        print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
+    for note in device_notes(a):
         print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
     if a.session is not None and not a.dry_run:
         return load_sessions_module().start(a, argv)
@@ -2695,6 +3287,7 @@ def launch(argv):
         print(json.dumps({"agent": a.agent, "backend": a.backend, "workspace": str(Path(a.workspace).resolve()),
                           "workspaces": [{"host": src, "sandbox": dest} for src, dest in workspace_targets(a)],
                           "workspace_mode": "ro" if a.workspace_ro else "rw", "mounts": a.mount,
+                          "devices": [{"path": path, "kind": kind} for path, kind in devices(a)], "gpu": a.gpu,
                           "allow": a.allow, "https_hosts": allowed_hosts(a),
                           "https_networks": host_networks(allowed_hosts(a)), "offline": a.offline,
                           "dangerously_skip_permissions": a.dangerously_skip_permissions,
@@ -2706,6 +3299,8 @@ def launch(argv):
                           "network_profiles": a.profile,
                           "git_identity": a.git_identity,
                           "privacy_check": a.privacy_check,
+                          "proxy": {"enabled": proxy_enabled(a), "no_inspect": a.no_inspect,
+                                    "log_dir": str(Path(a.log_dir).expanduser()) if proxy_enabled(a) else None},
                           "privacy_rules": str(privacy_rules_dir(a)) if privacy_rules_dir(a) else None,
                           "git_credentials": [{key: c[key] for key in ("url", "user", "env", "file", "credentials",
                                                                        "line") if key in c}
@@ -2760,7 +3355,7 @@ def launch(argv):
         for name in dict.fromkeys(a.mcp):
             mcp.ensure_running(name, a)
     hosts = resolve_pod_hosts(a, allowed_hosts(a)) if a.backend == "podman" else resolve_hosts(allowed_hosts(a))
-    with tempfile.TemporaryDirectory(prefix="agent-sandbox-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="agent-sandbox-") as tmp, contextlib.ExitStack() as cleanup:
         session = Path(tmp)
         home = a.state_dir.expanduser().absolute() if a.state_dir else session / "home"
         if home.is_symlink():
@@ -2782,10 +3377,22 @@ def launch(argv):
             host = "the Podman machine at --podman-url" if a.podman_url else "the host"
             print(f"agent-sandbox: 127.0.0.1:{port} in the sandbox reaches port {port} on the loopback of {host}; "
                   "the sandbox cannot listen on that port itself", file=sys.stderr)
+        log_name = None
+        if proxy_enabled(a):
+            for name in rotate_connection_logs(a.log_dir.expanduser()):
+                print(f"agent-sandbox: proxy: deleted the old connection log {name} (logs over "
+                      f"{CONNECTION_LOGS_LIMIT >> 30} GiB)", file=sys.stderr)
+            log_name = f"connections-{time.strftime('%Y%m%d-%H%M%S')}-{a.run_id}.jsonl"
+            a.proxy_dir = Path(tempfile.mkdtemp(prefix="agent-sandbox-proxy-"))
+            cleanup.callback(shutil.rmtree, a.proxy_dir, True)
+            write_proxy_files(a, a.proxy_dir, hosts, log_name)
+        a.control_dir = register_run(a, a.run_id, session)
+        cleanup.callback(shutil.rmtree, a.control_dir, True)
         cfg = {"command": agent_command(a, binary), "env": agent_environment(a), "probe": a.probe,
                "tmux": "detached" if a.tmux_socket_dir else a.tmux,
+               "proxy": {"log": log_name} if log_name else None,
                "pinned": list(hosts), "watch": [*(dest for _, dest in workspace_targets(a)), "/root", "/tmp",
-                         *(parse_mount(m)[1] for m in a.mount)]}
+                         *(parse_mount(m)[1] for m in a.mount)] if a.log_explicit else []}
         resolv, nsswitch = resolver_files(a)
         files = {"config.json": json.dumps(cfg), "hosts": hosts_file(hosts),
                  "resolv.conf": resolv, "nsswitch.conf": nsswitch,
@@ -2793,7 +3400,9 @@ def launch(argv):
                  "firewall.nft": firewall_rules(a.allow, [addr for values in hosts.values() for addr in values]
                                                 + host_networks(hosts), log=bool(a.log_dir),
                                                 dns=nameservers(a), allow_all=a.egress_all_allow,
-                                                tcp=tcp_targets(a))}
+                                                tcp=tcp_targets(a),
+                                                proxy={"port": PROXY_PORT, "loopback": host_ports(a)}
+                                                if log_name else None)}
         if gui_config(a):
             files["gui.json"] = json.dumps(gui_config(a))
         for name, content in files.items():
@@ -2826,6 +3435,9 @@ def launch(argv):
                 except Exception as exc:  # noqa: BLE001 - as above
                     print(f"agent-sandbox: privacy: the check after the run failed: {printable(exc)}",
                           file=sys.stderr)
+            if log_name:
+                for line in connection_summary(a.log_dir.expanduser() / log_name):
+                    print(f"agent-sandbox: {printable(line)}", file=sys.stderr)
 
 
 if __name__ == "__main__":

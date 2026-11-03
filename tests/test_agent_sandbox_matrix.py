@@ -1,6 +1,7 @@
 """Cross-product tests of public launcher behavior, with no real credentials."""
 import importlib.util
 import json
+import re
 import os
 from pathlib import Path
 import subprocess
@@ -112,9 +113,13 @@ def test_startup_matrix(agent, backend, auth, workspace_exists, tmp_path, monkey
             target.write_text('{"fixture":"sandbox refreshed copy"}')
         assert config["command"][0] == (agent if backend == "podman" else fake_tool(tmp_path, agent))
         assert (config["command"][1:3] == ["--sandbox", "danger-full-access"]) == (agent == "codex")
-        # Only the privacy hooks: no variable of the host crosses by default.
+        # Only the privacy hooks and the run's name: no variable of the host crosses by default.
+        assert re.fullmatch(rf"{agent}-[0-9a-f]{{8}}", config["env"]["SANDBOX_AI_RUN"])
         assert config["env"] == {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath",
-                                 "GIT_CONFIG_VALUE_0": s.PRIVACY_HOOKS} and not config["probe"]
+                                 "GIT_CONFIG_VALUE_0": s.PRIVACY_HOOKS,
+                                 "SANDBOX_AI_RUN": config["env"]["SANDBOX_AI_RUN"]} and not config["probe"]
+        # Registered for `sandbox-ai net` while it runs.
+        assert json.loads((s.runs_dir() / config["env"]["SANDBOX_AI_RUN"] / "run.json").read_text())["agent"] == agent
         hooks = session / "privacy" / "hooks"
         assert all(os.access(hooks / name, os.X_OK) for name in ("pre-commit", "pre-push"))
         # The workspace persists while the sandbox's private home does not.

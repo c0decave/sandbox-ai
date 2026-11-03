@@ -35,13 +35,15 @@ Agenten beschränkt, solange Sie ihn nicht erweitern.
 13. [Sessions: lösen, pausieren, fortsetzen, stoppen](#sessions-lösen-pausieren-fortsetzen-stoppen)
 14. [tmux-Modus](#tmux-modus)
 15. [GUI-Programme und Browser](#gui-programme-und-browser)
-16. [Agenten ohne Rückfragen](#agenten-ohne-rückfragen)
-17. [Egress- und Dateizugriffs-Logs](#egress--und-dateizugriffs-logs)
-18. [Datenschutzprüfung vor dem Veröffentlichen](#datenschutzprüfung-vor-dem-veröffentlichen)
-19. [Optionsübersicht](#optionsübersicht)
-20. [Tests](#tests)
-21. [Fehlersuche](#fehlersuche)
-22. [Grenzen und offene Arbeiten](#grenzen-und-offene-arbeiten)
+16. [Hardware: Geräte und GPUs](#hardware-geräte-und-gpus)
+17. [Agenten ohne Rückfragen](#agenten-ohne-rückfragen)
+18. [Egress- und Dateizugriffs-Logs](#egress--und-dateizugriffs-logs)
+19. [Datenschutzprüfung vor dem Veröffentlichen](#datenschutzprüfung-vor-dem-veröffentlichen)
+20. [Verbindungs-Proxy](#verbindungs-proxy)
+21. [Optionsübersicht](#optionsübersicht)
+22. [Tests](#tests)
+23. [Fehlersuche](#fehlersuche)
+24. [Grenzen und offene Arbeiten](#grenzen-und-offene-arbeiten)
 
 ## Voraussetzungen
 
@@ -154,7 +156,7 @@ angeben.
 
 **Inhalt der Images.** Bash, Git, die GitHub-CLI `gh`, Vim, Python 3 mit pip
 und venv, uv/uvx, ripgrep, curl, wget, `nc` (netcat-traditional),
-`host`/`dig`, `ping`, `traceroute`, `ss`/`ip` (iproute2), tmux, Firejail und
+`host`/`dig`, `ping`, `traceroute`, `ss`/`ip` (iproute2), `ssh` (openssh-client), jq, openssl, tmux, Firejail und
 nftables; für `--gui` zusätzlich Xvfb, x11vnc, x11-utils, Schriften
 und die Laufzeitbibliotheken der Playwright-Builds von Chromium und Firefox.
 Keine Compiler-Toolchain; Projektwerkzeuge im Rezept ergänzen. `gh` kommt aus
@@ -236,9 +238,15 @@ Arbeitsverzeichnisses erst nach Freigabe: `-- --add-dir /workspaces/<name>`
 
 **Weitere Mounts:** `--mount QUELLE:ZIEL:ro|rw`, mehrfach möglich. Quellen
 müssen existieren; Ziele müssen unter `/work`, `/mnt` oder `/opt` liegen.
-Kommas, Socket- und Gerätedateien werden abgelehnt. Sockets in eingebundenen
+Kommas, Socket- und Gerätedateien werden abgelehnt (Geräte siehe [Hardware](#hardware-geräte-und-gpus)). Sockets in eingebundenen
 Verzeichnissen können weiterhin Hostdienste erreichbar machen; nur Nötiges
 einbinden.
+
+Claude und Codex fragen beim ersten Start in einem Verzeichnis, ob Sie ihm
+vertrauen. Die Workspaces haben Sie selbst gewählt, daher trägt sandbox-ai
+`/work` und jedes `/workspaces/NAME` im Sandbox-HOME als vertraut ein
+(`hasTrustDialogAccepted` in `~/.claude.json`, `trust_level = "trusted"` in
+`~/.codex/config.toml`); eine dort schon gespeicherte Entscheidung bleibt.
 
 ## Anmeldung und Zustand
 
@@ -260,12 +268,12 @@ gemeldet, nie mit Inhalt, und `--dry-run` listet geplante Kopien unter
 
 | Option | Wirkung |
 |---|---|
-| `--copy-auth` | Kopie verlangen; fehlt die Hauptdatei, ist das ein Fehler. Ein Login in einem wiederverwendeten Sandbox-HOME bleibt erhalten. |
-| `--no-auth` | Nichts kopieren. |
-| `--auth-file DATEI` | Diese Datei an das Auth-Ziel des Agenten kopieren. |
-| `--import-codex-auth DATEI` | Nur OpenCode: Codex-ChatGPT-OAuth in eine OpenCode-Anmeldung umwandeln. |
-| `--copy QUELLE:ZIEL` | Beliebige Datei nach `ZIEL` relativ zum Sandbox-HOME kopieren. |
-| `--state-dir VERZ` | Dauerhaftes Sandbox-HOME (Ihnen gehörend, Modus `0700`, außerhalb des Workspace). |
+| `-ca`, `--copy-auth` | Kopie verlangen; fehlt die Hauptdatei, ist das ein Fehler. Ein Login in einem wiederverwendeten Sandbox-HOME bleibt erhalten. |
+| `-na`, `--no-auth` | Nichts kopieren. |
+| `-af`, `--auth-file DATEI` | Diese Datei an das Auth-Ziel des Agenten kopieren. |
+| `-ic`, `--import-codex-auth DATEI` | Nur OpenCode: Codex-ChatGPT-OAuth in eine OpenCode-Anmeldung umwandeln. |
+| `-cp`, `--copy QUELLE:ZIEL` | Beliebige Datei nach `ZIEL` relativ zum Sandbox-HOME kopieren. |
+| `-S`, `--state-dir VERZ` | Dauerhaftes Sandbox-HOME (Ihnen gehörend, Modus `0700`, außerhalb des Workspace). |
 
 OS-Schlüsselbunde werden nicht exportiert: Ein Agent, der seine Anmeldung nur
 im Schlüsselbund hält, braucht zuerst eine dateibasierte Anmeldung.
@@ -377,6 +385,13 @@ Anthropic-Marketplace und dem Demo-Plugin von sandbox-ai. Ändere oder lösche
 sie; ein vorhandenes Standard-Kit wird nie wieder verändert, ein gelöschtes
 Beispiel bleibt gelöscht.
 
+Jede Sandbox bekommt außerdem den **eingebauten Skill** `sandbox-ai`
+(in `sandbox/builtin/AGENT`, wird mit sandbox-ai aktualisiert): wie der Agent
+in der Sandbox arbeitet, was geteilt ist, wie Netz, Proxy,
+Datenschutzprüfung, Hardware, Displays und Sessions sich verhalten und welche
+Startoption oder welchen `sandbox-ai net`-Befehl der Mensch wofür braucht.
+Ein Skill namens `sandbox-ai` in einem Ihrer Kits ersetzt ihn.
+
 ```bash
 claude-sandbox                             # nur das Standard-Kit
 claude-sandbox --kit review --kit python   # dazu zwei benannte Kits
@@ -484,23 +499,23 @@ veröffentlicht keine festen Netze; diese Ziele bleiben per DNS festgeschrieben.
 
 | Option | Wirkung |
 |---|---|
-| `--profile NAME` | Ein benanntes Bündel (mehrfach): `development` = Anbieter + PyPI + GitHub + APIs von OpenAI und Anthropic; `frontier` = `--frontier`; `dns`, `egress-all`, `offline` = die Optionen unten. Der Wizard nutzt dieselben Profile. |
-| `--frontier` | Zusätzlich alle OpenAI- und Anthropic-Ziele oben erlauben, für jeden Agenten. |
-| `--allow-pypi` | `pypi.org`, `files.pythonhosted.org` |
-| `--allow-github` | `github.com`, `api.github.com`, `codeload.github.com`, `raw.githubusercontent.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com` |
-| `--allow-gitlab` | `gitlab.com`, `registry.gitlab.com` |
-| `--allow-kernel-org` | `kernel.org`, `www.kernel.org`, `git.kernel.org`, `cdn.kernel.org`, `mirrors.kernel.org`, `lore.kernel.org` |
-| `--allow-duckduckgo` | `duckduckgo.com`, `html.duckduckgo.com`, `lite.duckduckgo.com`, `links.duckduckgo.com`, `api.duckduckgo.com` |
-| `--allow-host NAME` | Namen auflösen und festschreiben; TCP/443 erlauben. |
-| `--allow IP_ODER_CIDR` | Alle Protokolle und Ports zu diesem Ziel. |
-| `--allow-tcp IP:PORT` | Genau einen TCP-Port auf einer Adresse (IPv6: `[ADR]:PORT`). |
-| `--allow-host-port PORT` | Podman: `127.0.0.1:PORT` in der Sandbox erreicht denselben Port am Host-Loopback (mehrfach). |
-| `--dns` | Echtes DNS über `1.1.1.1` und `8.8.8.8` (nur UDP/TCP 53 zu diesen). |
-| `--nameserver IP` | Stattdessen diesen Resolver nutzen (mehrfach; impliziert `--dns`). |
-| `--egress-all-allow` | Jedes ausgehende Ziel und jeden Port erlauben; impliziert `--dns`. |
-| `--no-provider-defaults` | Standardziele des Agenten entfernen. |
-| `--offline` | Überhaupt kein externes Netz. |
-| `--network NAME`, `--ip`, `--ip6` | Podman: bestehendes privates Netz, statische Adressen. |
+| `-p`, `--profile NAME` | Ein benanntes Bündel (mehrfach): `development` = Anbieter + PyPI + GitHub + APIs von OpenAI und Anthropic; `frontier` = `--frontier`; `dns`, `egress-all`, `offline` = die Optionen unten. Der Wizard nutzt dieselben Profile. |
+| `-f`, `--frontier` | Zusätzlich alle OpenAI- und Anthropic-Ziele oben erlauben, für jeden Agenten. |
+| `-y`, `--allow-pypi` | `pypi.org`, `files.pythonhosted.org` |
+| `-g`, `--allow-github` | `github.com`, `api.github.com`, `codeload.github.com`, `raw.githubusercontent.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com` |
+| `-gl`, `--allow-gitlab` | `gitlab.com`, `registry.gitlab.com` |
+| `-ak`, `--allow-kernel-org` | `kernel.org`, `www.kernel.org`, `git.kernel.org`, `cdn.kernel.org`, `mirrors.kernel.org`, `lore.kernel.org` |
+| `-dd`, `--allow-duckduckgo` | `duckduckgo.com`, `html.duckduckgo.com`, `lite.duckduckgo.com`, `links.duckduckgo.com`, `api.duckduckgo.com` |
+| `-A`, `--allow-host NAME` | Namen auflösen und festschreiben; TCP/443 erlauben. |
+| `-a`, `--allow IP_ODER_CIDR` | Alle Protokolle und Ports zu diesem Ziel. |
+| `-t`, `--allow-tcp IP:PORT` | Genau einen TCP-Port auf einer Adresse (IPv6: `[ADR]:PORT`). |
+| `-P`, `--allow-host-port PORT` | Podman: `127.0.0.1:PORT` in der Sandbox erreicht denselben Port am Host-Loopback (mehrfach). |
+| `-R`, `--dns` | Echtes DNS über `1.1.1.1` und `8.8.8.8` (nur UDP/TCP 53 zu diesen). |
+| `-ns`, `--nameserver IP` | Stattdessen diesen Resolver nutzen (mehrfach; impliziert `--dns`). |
+| `-E`, `--egress-all-allow` | Jedes ausgehende Ziel und jeden Port erlauben; impliziert `--dns`. |
+| `-nd`, `--no-provider-defaults` | Standardziele des Agenten entfernen. |
+| `-o`, `--offline` | Überhaupt kein externes Netz. |
+| `-nw`, `--network NAME`, `-ip`, `--ip`, `-i6`, `--ip6` | Podman: bestehendes privates Netz, statische Adressen. |
 
 `--dns` löst Namen auf, öffnet aber nicht die aufgelösten Adressen; über
 Anfragenamen können Daten hinausgelangen, daher ist das eine bewusste
@@ -600,6 +615,31 @@ Logins anlegen, die die Sandbox braucht.
 ./claude-sandbox --git-credentials ~/.git-credentials --git-identity
 ```
 
+### Netzwerk einer laufenden Sandbox ändern
+
+Die Netzwerkoptionen gelten ab dem Start, aber einer laufenden Sandbox lässt
+sich ohne Neustart mehr (oder weniger) erlauben:
+
+```bash
+sandbox-ai net list                                    # laufende Sandboxes
+sandbox-ai net allow --allow-host pypi.org --allow-github
+sandbox-ai net allow claude-1a2b3c4d --allow-tcp 192.0.2.10:5432
+sandbox-ai net show                                    # was während des Laufs dazukam
+sandbox-ai net revoke --allow-host pypi.org
+```
+
+Den Namen eines Laufs zeigt `list`; der Agent bekommt ihn als
+`$SANDBOX_AI_RUN` und kann so den genauen Befehl nennen. Er darf fehlen, wenn
+nur eine Sandbox läuft (oder nur eine für das aktuelle Verzeichnis).
+Namen aus `--allow-host` werden auf dem Host aufgelöst und in `/etc/hosts`
+der Sandbox eingetragen; der Supervisor trägt die Adressen in Firewall und
+Proxy ein. Änderungen gelten bis zum Ende der Sandbox; der Befehl nennt die
+Optionen, mit denen sie dauerhaft werden. Nur Sie können das: Der
+Steuer-Socket liegt in `$XDG_RUNTIME_DIR/sandbox-ai/runs/LAUF` (Modus `0700`)
+und ist für den Agenten unsichtbar. Bereits offene Verbindungen bleiben nach
+`revoke` offen. Echtes DNS (`--dns`) und `--allow-host-port` brauchen weiter
+einen Neustart.
+
 ## Lokale LLMs mit OpenCode
 
 OpenCode kann einen lokalen **Ollama**-, **LM-Studio**- oder **vLLM**-Server
@@ -677,6 +717,34 @@ nicht erlaubt. Ein Server, der sein Paket beim Start lädt (`npx`, `uvx`),
 braucht die passende Registry-Freigabe. Pfade in einer Definition (`workspace`,
 `--mount` ...) müssen absolut sein oder mit `~` beginnen: Ein laufender Server
 wird von allen Agenten geteilt, die ihn nutzen.
+
+### Server aus einem MCP-Katalog
+
+Fertige Server gibt es als Container-Images aus
+[sandbox-ai-mcp](https://github.com/c0decave/sandbox-ai-mcp) (Suche und Web: DuckDuckGo, Brave
+Search, Webseiten als Text; Ghidra und Playwright vorbereitet) und
+[axross-mcp-hub](https://github.com/c0decave/axross-mcp-hub) (Sicherheitswerkzeuge: radare2,
+capa, binwalk, YARA, tshark, Nmap, nuclei und mehr). Beide sind auditiert und per Digest fixiert.
+
+```bash
+sandbox-ai mcp catalog                               # Einträge beider Kataloge
+sandbox-ai mcp add duckduckgo --network full         # per Digest holen, Definition schreiben
+sandbox-ai mcp add brave-search --network full --env BRAVE_API_KEY
+sandbox-ai mcp add hub:binwalk --mount /work=~/firmware:ro --mount /out=~/entpackt:rw
+sandbox-ai claude --mcp duckduckgo --mcp binwalk
+```
+
+`add` lehnt einen Eintrag ohne Digest ab, holt `IMAGE@DIGEST` und schreibt eine Definition mit
+`"image"`, dem Netz, den Ordnern (`-m ZIEL=HOST[:ro|rw]`) und den Namen der durchzureichenden
+Variablen (`-e NAME`; der Wert kommt beim Start aus Ihrer Umgebung und wird nie gespeichert).
+Jede Verbindung eines Agenten startet einen Container mit der gehärteten Run-Line, mit der beide
+Projekte ihre Images testen: `podman run --rm -i --init --pull=never --cap-drop=ALL
+--security-opt=no-new-privileges --read-only`, ein kleines `noexec`-/tmp, `--memory=512m`
+(`-M` ändert es), `--pids-limit=128` (`-p`), `--network=none` oder dasselbe private
+pasta-Netz wie die Agenten. Ein Katalogeintrag, der nur einige Hosts braucht (*Allowlist*),
+bekommt das volle äußere Netz nur, wenn Sie ihn mit `--network full` hinzufügen: sandbox-ai kann
+einen Server noch nicht auf Hosts beschränken. Die Sandbox Ihres Agenten bleibt so geschlossen
+wie zuvor: Der Server hat das Netz oder die Ordner, der Agent nur den Socket.
 
 ## Projektkonfiguration und Wizard
 
@@ -855,10 +923,10 @@ Wiederverbinden Sessions verwenden.
 
 | Option | Wirkung |
 |---|---|
-| `--gui` | Virtuelles X-Display `:99` (Xvfb); `DISPLAY` gesetzt, `/dev/shm` für Chromium vergrößert. |
-| `--gui-screen BxHxT` | Bildschirmgröße, Standard `1920x1080x24`. |
-| `--gui-vnc VERZ` | Impliziert `--gui`; VNC auf dem Unix-Socket `VERZ/vnc.sock` (Modus `0700`, kein TCP). |
-| `--gui-wayland` | Wayland-Socket des Hosts freigeben: Fenster erscheinen auf Ihrem Desktop. |
+| `-gu`, `--gui` | Virtuelles X-Display `:99` (Xvfb); `DISPLAY` gesetzt, `/dev/shm` für Chromium vergrößert. |
+| `-gs`, `--gui-screen BxHxT` | Bildschirmgröße, Standard `1920x1080x24`. |
+| `-gv`, `--gui-vnc VERZ` | Impliziert `--gui`; VNC auf dem Unix-Socket `VERZ/vnc.sock` (Modus `0700`, kein TCP). |
+| `-gw`, `--gui-wayland` | Wayland-Socket des Hosts freigeben: Fenster erscheinen auf Ihrem Desktop. |
 
 Xvfb und x11vnc laufen im Supervisor ohne jede Capability; das VNC-Verzeichnis
 ist für den Agenten ausgeblendet und muss außerhalb der Workspaces liegen. Das
@@ -879,6 +947,124 @@ Browser sind nicht im Image; Playwright lädt sie (Netz nötig):
 #        uv run --with playwright python mein_browsertest.py   # headless=False funktioniert
 ```
 
+## Hardware: Geräte und GPUs
+
+Ohne weitere Optionen sieht eine Sandbox keine Hardware des Hosts: Podman und
+Bubblewrap geben ihr ein eigenes, minimales `/dev`, und `--mount` lehnt
+Gerätedateien ab. Es gibt drei Wege, dem Agenten Hardware zu geben, der
+sicherste zuerst:
+
+| Weg | Wie | Isolation | Funktioniert ohne Vorarbeit? |
+|---|---|---|---|
+| 1. Dienst auf dem Host | Das Gerät bleibt auf dem Host; ein Programm dort bietet es über TCP an, die Sandbox darf diesen Port erreichen | Kein Treiber des Hosts erreichbar, Ab- und Anstecken stört nicht | Sie starten und richten den Dienst ein |
+| 2. `--device PFAD` | Die Gerätedatei selbst | Der Agent spricht mit dem Treiber des Geräts im Kernel Ihres Hosts | Oft (siehe Tabelle unten) |
+| 3. `--gpu nvidia\|dri\|rocm` | Alle GPU-Geräte mit einer Option | Wie `--device` | Ja für NVIDIA mit CDI; Intel/AMD brauchen GPU-Bibliotheken im Image |
+
+`sandbox-ai claude --help` fasst das am Ende zusammen.
+
+### 1. Ein Dienst auf dem Host (am sichersten)
+
+Der Agent bekommt einen Netzwerkport, kein Gerät. Mit Podman sorgt
+`--allow-host-port PORT` dafür, dass `127.0.0.1:PORT` in der Sandbox denselben
+Port auf dem Loopback des Hosts erreicht; mit Bubblewrap
+`--allow-tcp HOST_IP:PORT`.
+
+| Hardware | Auf dem Host | In der Sandbox |
+|---|---|---|
+| Serielle Schnittstelle (Mikrocontroller) | `ser2net` mit RFC 2217 oder `socat TCP-LISTEN:4000,bind=127.0.0.1,fork,reuseaddr FILE:/dev/ttyACM0,raw,echo=0` | `--allow-host-port 4000`; esptool und pyserial sprechen `rfc2217://127.0.0.1:4000` (ser2net) oder `socket://127.0.0.1:4000` (socat) |
+| Debug-Probe (JTAG/SWD) | `openocd` (GDB-Port 3333) oder ein GDB-Server | `--allow-host-port 3333`; `target extended-remote 127.0.0.1:3333` |
+| Android-Gerät | `adb start-server` (Port 5037) | `--allow-host-port 5037`; `adb -H 127.0.0.1 -P 5037 ...` |
+| GPU für Modelle | Ollama, llama.cpp oder vLLM | `--allow-host-port 11434` o. ä., siehe [Lokale LLMs](#lokale-llms-mit-opencode) |
+
+Nur das Protokoll dieses Dienstes erreicht den Host. Das Gerät kann beliebig
+ab- und angesteckt werden, weil der Dienst es öffnet, nicht die Sandbox.
+
+### 2. `--device PFAD`
+
+```bash
+sandbox-ai claude --device /dev/serial/by-id/usb-Raspberry_Pi_Pico_E660-if00
+sandbox-ai claude --device /dev/kvm            # Emulatoren, QEMU
+sandbox-ai claude --device /dev/bus/usb        # USB direkt, später angesteckte Geräte erscheinen mit
+```
+
+- Angenommen werden zeichenorientierte Geräte unter `/dev` und die
+  Verzeichnisse `/dev/bus/usb`, `/dev/dri` und `/dev/snd` (oder eines darunter).
+  Symlinks wie `/dev/serial/by-id/...` werden aufgelöst; der Agent sieht den
+  echten Namen (`/dev/ttyACM0`).
+- Immer abgelehnt: Block-Geräte (Festplatten), `/dev/mem`, `/dev/kmem`,
+  `/dev/port`, Konsolen (`/dev/console`, `/dev/tty`, `/dev/tty1`, `/dev/vcs*`),
+  Eingabegeräte (`/dev/input/*`, `/dev/uinput`, `/dev/hidraw*`, darunter auch
+  Security-Keys), direkter Plattenzugriff (`/dev/sg*`, `/dev/nvme0`,
+  `/dev/vfio`, `/dev/mapper/control`, `/dev/loop-control`), Interna des Hosts
+  (`/dev/kmsg`, Watchdog, TPM, Intel ME, `/dev/cpu`, MTD-Flash) und Kanäle an
+  der Firewall vorbei (`/dev/vsock`, `/dev/vhost-*`).
+- Kameras (`/dev/video*`) und Sound (`/dev/snd`) werden mit Warnung
+  durchgereicht: Der Agent kann Bilder aufnehmen und über Ihre Mikrofone
+  mithören.
+- Der Start listet jedes Gerät auf. Mit Podman werden einzelne Geräte zu
+  `--device`, Verzeichnisse zu Bind-Mounts; mit Bubblewrap beides zu
+  `--dev-bind`.
+
+**Zugriffsrechte.** Die Sandbox behält keine Ihrer Zusatzgruppen (Firejail
+verwirft sie). Der Agent kann ein Gerät nur öffnen, wenn Ihr Benutzer es als
+Eigentümer, über seine primäre Gruppe, als „alle“ oder über einen ACL-Eintrag
+darf; letzteren setzt eine Desktop-Sitzung für Geräte, die udev mit `uaccess`
+markiert. Der Launcher prüft das und warnt sonst.
+
+| Gerät | Übliche Rechte | Ohne Vorarbeit? |
+|---|---|---|
+| `/dev/kvm` | `0666` (systemd) | Ja |
+| `/dev/dri/renderD*`, `/dev/kfd` | `0666` (systemd, `kfd` in neueren Versionen) | Ja |
+| `/dev/nvidia*` | `0666` (NVIDIA-Treiber) | Ja |
+| `/dev/video*`, `/dev/snd/*` | ACL für den Benutzer am Desktop (`uaccess`) | Am Desktop, nicht über SSH |
+| `/dev/ttyUSB*`, `/dev/ttyACM*` | Gruppe `dialout` oder `uucp` | Nein: udev-Regel |
+| `/dev/bus/usb/...` | `0664` root, ACL für manche Geräte | Hängt von den udev-Regeln des Geräts ab |
+
+Eine udev-Regel gibt Ihrem Benutzer ein einzelnes Gerät (die IDs zeigt `lsusb`):
+
+```bash
+# /etc/udev/rules.d/70-sandbox-ai.rules (vor 73-seat-late.rules, das uaccess anwendet)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="000a", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="3748", TAG+="uaccess"
+# auf einem Server ohne Desktop-Sitzung stattdessen: ..., OWNER="ihrbenutzer"
+```
+
+Danach `sudo udevadm control --reload && sudo udevadm trigger` und das Gerät
+neu anstecken.
+
+**Ab- und Anstecken.** Ein einzelnes Gerät wird beim Start einmal eingebunden.
+Kommt es nach dem Neuanstecken unter demselben Namen zurück, hat es dieselbe
+Gerätenummer und funktioniert meist wieder; unter einem neuen Namen
+(`ttyACM1`, ein Bootloader-Modus) sieht die Sandbox es nicht. Verzeichnisse
+(`/dev/bus/usb`, `/dev/dri`, `/dev/snd`) werden als Ganzes eingebunden, später
+angesteckte Geräte erscheinen darin.
+
+**Was es kostet.** Jedes Gerät ist Kernelcode Ihres Hosts, den der Agent an
+beiden Sandbox-Schichten vorbei aufrufen kann. USB direkt (`/dev/bus/usb`)
+erreicht jedes USB-Gerät, das Ihr Benutzer öffnen darf, auch später
+angesteckte. Ein Modem, WLAN-Adapter oder SDR kann außerdem Daten an der
+Egress-Firewall vorbei senden. Geben Sie nur, was die Aufgabe braucht, und
+bevorzugen Sie Weg 1.
+
+### 3. `--gpu`
+
+| Wert | Podman | Bubblewrap | GPU-Bibliotheken |
+|---|---|---|---|
+| `nvidia` | CDI-Gerät `nvidia.com/gpu=all`; vorher `sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml` (NVIDIA Container Toolkit) | `/dev/nvidia0...`, `/dev/nvidiactl`, `/dev/nvidia-uvm*`, `/dev/nvidia-modeset` | CDI bringt die Bibliotheken des Treibers und `nvidia-smi` mit; mit Bubblewrap kommen sie aus `/usr` des Hosts |
+| `dri` | `/dev/dri` (Render-Knoten von Intel/AMD) | wie Podman | Mesa, Vulkan, VA-API oder OpenCL sind nicht in den Images: eigenes Image darauf bauen und mit `--image` starten |
+| `rocm` | `/dev/dri` und `/dev/kfd` | wie Podman | ROCm ebenso im eigenen Image |
+
+```dockerfile
+# Containerfile.gpu, gebaut mit: podman build -t localhost/claude-gpu -f Containerfile.gpu .
+FROM localhost/claude-sandbox:latest
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      mesa-vulkan-drivers mesa-opencl-icd vainfo && rm -rf /var/lib/apt/lists/*
+```
+
+`sandbox-ai claude --gpu dri --image localhost/claude-gpu`. Mit `--podman-url`
+geht nur `--gpu nvidia` (das CDI der Gegenseite); `--device` und
+`--gpu dri|rocm` benennen Geräte dieses Hosts.
+
 ## Agenten ohne Rückfragen
 
 `--dangerously-skip-permissions` startet den Agenten ohne Freigabedialoge:
@@ -889,7 +1075,11 @@ Rückfragen des Agenten; Podman/Bubblewrap, Firejail und Firewall bleiben.
 
 ## Egress- und Dateizugriffs-Logs
 
-`--log-dir VERZ` (Modus `0700`, außerhalb der Workspaces) schreibt JSON-Zeilen:
+`--log-dir VERZ` (Modus `0700`, außerhalb der Workspaces) schreibt JSON-Zeilen
+(das `connections-*.jsonl` des Proxys beschreibt
+[Verbindungs-Proxy](#verbindungs-proxy); ohne `--log-dir` landen es und das
+Egress-Log in `~/.local/state/sandbox-ai/logs/PROJEKT-HASH`, Dateizugriffe
+werden dann nicht protokolliert):
 
 - `egress-denied.jsonl`: jedes verworfene Ziel (Adresse, TCP/UDP, Port; erstes
   Auftreten) und jede Auflösung eines nicht erlaubten Namens. Mit Logging gehen
@@ -994,6 +1184,82 @@ kein Programm aus der Konfiguration des Repositorys starten (keine Hooks,
 kein fsmonitor, keine Filter, kein textconv), und liest Dateien des
 Arbeitsbaums, ohne Symlinks zu folgen.
 
+## Verbindungs-Proxy
+
+Jede TCP-Verbindung des Agenten läuft durch einen Proxy, den sandbox-ai mit
+der Sandbox startet. Er ist standardmäßig an; `--no-proxy` schaltet ihn ab
+(und mit `--offline` gibt es nichts weiterzuleiten).
+
+- **Transparent:** Die Firewall leitet jede Verbindung um (nftables-NAT im
+  Netzwerk-Namespace der Sandbox). Programme brauchen keine
+  Proxy-Einstellungen. Der Proxy verbindet sich selbst mit dem ursprünglichen
+  Ziel, weiterhin hinter der Freigabeliste der Firewall, und lehnt sofort ab,
+  was die Netzwerkoptionen nicht erlauben.
+- **TLS wird aufgebrochen** mit einer CA nur für diesen Lauf (Schlüssel und
+  Zertifikate bleiben im privaten Verzeichnis des Proxys und verschwinden mit
+  dem Lauf). Der Agent vertraut dieser CA über das System-Bundle und über
+  `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`,
+  `PIP_CERT`, `CARGO_HTTP_CAINFO`, `NODE_EXTRA_CA_CERTS` und ähnliche
+  Variablen. Der Proxy prüft den echten Server gegen die CAs des Systems. Nur
+  HTTP/1.1 wird angeboten; WebSockets funktionieren, QUIC/HTTP3 (UDP) läuft
+  nicht über den Proxy.
+- **Protokolliert:** jede HTTP-Anfrage mit Methode, voller URL, Status,
+  Headern und Bodies (jeweils die ersten 64 KiB, gzip/deflate entpackt), jede
+  andere Verbindung mit Ziel, Bytes und Dauer, und alles Abgelehnte.
+  Zugangsdaten werden geschwärzt: `Authorization`, Cookies, Header mit Namen
+  wie Key, Token oder Secret, tokenartige Query-Parameter und JSON-Felder sowie
+  bekannte Token-Formate. Das Log ist `connections-ZEIT-LAUF.jsonl` im
+  Logverzeichnis: `--log-dir`, sonst
+  `~/.local/state/sandbox-ai/logs/PROJEKT-HASH`. Jeder Lauf schreibt eine
+  eigene Datei; die ältesten werden gelöscht, sobald sie zusammen 1 GiB
+  übersteigen. Nach dem Lauf zeigt sandbox-ai eine Zusammenfassung.
+- **Push-Prüfung im Netz:** Ein Git-Push über HTTP(S) wird angehalten, bis die
+  Datenschutzprüfung ihn gesehen hat. Der Proxy liest die Ref-Updates, ein
+  Prüfprozess (ohne jede Capability, außerhalb von Firejail) sucht die Commits
+  in den Workspaces und prüft, was die Gegenseite noch nicht hat, mit allen
+  Regeln einschließlich Ihrer eigenen (die der Agent nie sieht). Ein
+  blockierender Fund lehnt den Push so ab, wie es ein Git-Server tut; die Funde
+  erscheinen als `remote:`-Zeilen. Hooks, `--no-verify` oder ein anderer
+  `core.hooksPath` ändern daran nichts. Ein Push, den der Prüfprozess nicht
+  prüfen kann (Commits aus einem Klon außerhalb der Workspaces, unbekanntes
+  Format), wird ebenfalls abgelehnt.
+- **SSH** wird abgelehnt, außer zu Zielen, die mit `--allow` oder
+  `--allow-tcp IP:PORT` erlaubt sind (und nie zu einem öffentlichen
+  Git-Host), weil ein Push über SSH die Prüfung umginge. Mit
+  `--privacy-check off` werden weder Pushes noch SSH geprüft.
+
+Die Push-Prüfung findet, was ihre Regeln beschreiben; sie verhindert
+versehentliches Veröffentlichen, nicht einen entschlossenen Agenten: absichtlich
+kodierte Daten (base64, ein Archiv, Verschlüsselung) kommen an jeder
+Musterprüfung vorbei. Das Verbindungslog hält in jedem Fall fest, was gesendet
+wurde.
+
+Programme mit Certificate Pinning oder eigener CA-Liste lehnen die
+Sitzungs-CA ab; der Proxy loggt so eine Verbindung als `tls-refused` mit
+Hinweis. Mit `--no-inspect HOST` (oder `--no-inspect '*.example.org'`)
+läuft TLS zu diesem Host ungeöffnet durch: Geloggt werden nur Name und Bytes,
+Pushes dorthin werden nicht geprüft; öffentliche Git-Hosts lassen sich daher
+nicht ausnehmen, solange die Datenschutzprüfung an ist. Dasselbe gilt für
+Server, deren Zertifikat das System nicht kennt (ein interner Server mit
+eigener CA): `tls-upstream-failed` im Log.
+
+| Im Log als | Bedeutung |
+|---|---|
+| `http` | Eine Anfrage mit Antwort (`push` enthält das Urteil der Prüfung) |
+| `tls-passthrough` | TLS ungeöffnet durchgereicht (`--no-inspect`) |
+| `tls`, `tcp` | Andere Protokolle, in TLS oder unverschlüsselt |
+| `upgraded` | Ein WebSocket nach dem Upgrade |
+| `denied` | Von den Netzwerkoptionen nicht erlaubt, oder SSH abgelehnt |
+| `tls-refused`, `tls-upstream-failed` | Das Programm lehnte die Sitzungs-CA ab, oder dem Zertifikat des Servers wird nicht vertraut |
+
+Der Proxy läuft als eigener Benutzer in der Sandbox, ohne Capabilities und mit
+`no_new_privs`; nur diesen Benutzer nimmt die Umleitung der Firewall aus. Er
+verarbeitet, was der Agent sendet, bleibt dabei aber in den Namespaces der
+Sandbox. Er braucht die nftables-NAT-Module auf dem Host (`nft_chain_nat`,
+`nft_redir`; auf den meisten Systemen geladen, sonst
+`sudo modprobe nft_chain_nat nft_redir`) und `openssl` im Image (enthalten)
+bzw. mit Bubblewrap auf dem Host.
+
 ## Optionsübersicht
 
 `codex-sandbox`, `claude-sandbox` und `opencode-sandbox` haben alle folgenden
@@ -1001,32 +1267,40 @@ Optionen gemeinsam; `./claude-sandbox --help` zeigt sie ebenfalls. Argumente
 nach `--` gehen unverändert an den Agenten. Mit *mehrfach* markierte Optionen
 dürfen wiederholt werden.
 
+Jede Option hat eine Kurzform. Einbuchstabige lassen sich bündeln und nehmen
+ihren Wert direkt: `claude-sandbox -Dn -w~/src/app` ist
+`--dangerously-skip-permissions --dry-run --workspace ~/src/app`.
+Zweibuchstabige wie `-gl` (`--allow-gitlab`) sind eigene Optionen, keine zwei
+gebündelten Buchstaben. Auch Projektdateien und MCP-Definitionen dürfen
+Kurzformen enthalten. Die anderen Befehle haben ebenfalls Kurzformen (`-V`
+Version, `-j` JSON, `-y` Ja, `-b` Backend; siehe deren `--help`).
+
 ### Die wichtigsten Optionen
 
 | Option | Zweck |
 |---|---|
-| `--workspace DIR` | Projekt unter `/work` (Standard: aktuelles Verzeichnis) |
-| `--session NAME` | Lösbare Session; Verwaltung mit `sandbox-session` |
-| `--dangerously-skip-permissions` | Agent ohne Rückfragen; die Sandbox bleibt in Kraft |
-| `--allow-github`, `--allow-pypi`, `--allow-host HOST` | Einzelne HTTPS-Ziele öffnen |
-| `--allow-host-port PORT` | Dienst am Loopback des Hosts erreichen, etwa einen lokalen Git-Server |
-| `--git-token-env URL=NAME`, `--git-token-file URL=DATEI`, `--git-identity` | Aus der Sandbox per HTTP(S) pushen, auch nach github.com |
-| `--profile development` | Anbieter, PyPI, GitHub und die APIs von OpenAI und Anthropic |
-| `--state-dir DIR` | Sandbox-HOME zwischen Läufen behalten |
-| `--offline`, `--egress-all-allow` | Gar kein Netz / jedes ausgehende Ziel |
-| `--gui`, `--gui-vnc DIR` | Virtuelles Display für GUI-Programme und Browser |
-| `--log-dir DIR` | Blockierte Verbindungen und Dateizugriffe protokollieren |
-| `--dry-run`, `--probe` | Plan zeigen / Isolation ohne Agent prüfen |
+| `-w`, `--workspace DIR` | Projekt unter `/work` (Standard: aktuelles Verzeichnis) |
+| `-s`, `--session NAME` | Lösbare Session; Verwaltung mit `sandbox-session` |
+| `-D`, `--dangerously-skip-permissions` | Agent ohne Rückfragen; die Sandbox bleibt in Kraft |
+| `-g`, `--allow-github`, `-y`, `--allow-pypi`, `-A`, `--allow-host HOST` | Einzelne HTTPS-Ziele öffnen |
+| `-P`, `--allow-host-port PORT` | Dienst am Loopback des Hosts erreichen, etwa einen lokalen Git-Server |
+| `-ge`, `--git-token-env URL=NAME`, `-gf`, `--git-token-file URL=DATEI`, `-I`, `--git-identity` | Aus der Sandbox per HTTP(S) pushen, auch nach github.com |
+| `-p`, `--profile development` | Anbieter, PyPI, GitHub und die APIs von OpenAI und Anthropic |
+| `-S`, `--state-dir DIR` | Sandbox-HOME zwischen Läufen behalten |
+| `-o`, `--offline`, `-E`, `--egress-all-allow` | Gar kein Netz / jedes ausgehende Ziel |
+| `-gu`, `--gui`, `-gv`, `--gui-vnc DIR` | Virtuelles Display für GUI-Programme und Browser |
+| `-l`, `--log-dir DIR` | Blockierte Verbindungen und Dateizugriffe protokollieren |
+| `-n`, `--dry-run`, `-pb`, `--probe` | Plan zeigen / Isolation ohne Agent prüfen |
 
 ### Backend und Image
 
 | Option | Bedeutung |
 |---|---|
-| `--backend podman\|bwrap` | Sandbox-Backend (Standard: `podman`) |
-| `--image IMAGE` | Fertiges Podman-Image (Standard: `localhost/<agent>-sandbox:latest`); wird nie implizit gezogen |
-| `--podman-url URL` | URL des Podman-Dienstes, z. B. `unix:///example/podman.sock` |
-| `--binary PFAD` | Agent-Programm (Host-Pfad bei bwrap, Image-Pfad bei Podman) |
-| `--runtime DIR` | bwrap: Laufzeitverzeichnis schreibgeschützt am selben Pfad einblenden; mehrfach |
+| `-b`, `--backend podman\|bwrap` | Sandbox-Backend (Standard: `podman`) |
+| `-i`, `--image IMAGE` | Fertiges Podman-Image (Standard: `localhost/<agent>-sandbox:latest`); wird nie implizit gezogen |
+| `-pu`, `--podman-url URL` | URL des Podman-Dienstes, z. B. `unix:///example/podman.sock` |
+| `-B`, `--binary PFAD` | Agent-Programm (Host-Pfad bei bwrap, Image-Pfad bei Podman) |
+| `-rt`, `--runtime DIR` | bwrap: Laufzeitverzeichnis schreibgeschützt am selben Pfad einblenden; mehrfach |
 
 Siehe [Agent starten](#agent-starten) und [Voraussetzungen](#voraussetzungen).
 
@@ -1034,9 +1308,9 @@ Siehe [Agent starten](#agent-starten) und [Voraussetzungen](#voraussetzungen).
 
 | Option | Bedeutung |
 |---|---|
-| `--workspace DIR[,DIR...]` | Erstes Verzeichnis unter `/work`, weitere unter `/workspaces/<name>`; mehrfach |
-| `--workspace-ro` | Alle Workspaces schreibgeschützt einbinden |
-| `--mount SRC:DEST:ro\|rw` | Zusätzlicher Mount; `DEST` unter `/work`, `/mnt` oder `/opt`; mehrfach |
+| `-w`, `--workspace DIR[,DIR...]` | Erstes Verzeichnis unter `/work`, weitere unter `/workspaces/<name>`; mehrfach |
+| `-W`, `--workspace-ro` | Alle Workspaces schreibgeschützt einbinden |
+| `-m`, `--mount SRC:DEST:ro\|rw` | Zusätzlicher Mount; `DEST` unter `/work`, `/mnt` oder `/opt`; mehrfach |
 
 Siehe [Workspaces und Mounts](#workspaces-und-mounts).
 
@@ -1044,13 +1318,13 @@ Siehe [Workspaces und Mounts](#workspaces-und-mounts).
 
 | Option | Bedeutung |
 |---|---|
-| `--copy-auth` | Kopie der Anmeldedateien dieses Agenten verlangen (Login-Speicher, sonst Host); ohne die Option: kopiert, wenn vorhanden und das Sandbox-HOME noch kein Login hat |
-| `--no-auth` | Keine Anmeldedaten des Hosts kopieren |
-| `--auth-file DATEI` | Diese JSON-Datei an den Standard-Anmeldepfad des Agenten kopieren |
-| `--import-codex-auth DATEI` | Nur OpenCode: eine Codex-ChatGPT-`auth.json` als private OAuth-Kopie importieren |
-| `--copy SRC:ZIEL_RELATIV_ZU_HOME` | Einzelne Konfigurations- oder Anmeldedatei ins Sandbox-HOME kopieren; mehrfach |
-| `--state-dir DIR` | Privates, dauerhaftes Sandbox-HOME (Modus 0700); Standard: nach dem Ende gelöscht |
-| `--env NAME` | Eine Host-Variable nur an den Agenten geben; Werte werden nie ausgegeben; mehrfach |
+| `-ca`, `--copy-auth` | Kopie der Anmeldedateien dieses Agenten verlangen (Login-Speicher, sonst Host); ohne die Option: kopiert, wenn vorhanden und das Sandbox-HOME noch kein Login hat |
+| `-na`, `--no-auth` | Keine Anmeldedaten des Hosts kopieren |
+| `-af`, `--auth-file DATEI` | Diese JSON-Datei an den Standard-Anmeldepfad des Agenten kopieren |
+| `-ic`, `--import-codex-auth DATEI` | Nur OpenCode: eine Codex-ChatGPT-`auth.json` als private OAuth-Kopie importieren |
+| `-cp`, `--copy SRC:ZIEL_RELATIV_ZU_HOME` | Einzelne Konfigurations- oder Anmeldedatei ins Sandbox-HOME kopieren; mehrfach |
+| `-S`, `--state-dir DIR` | Privates, dauerhaftes Sandbox-HOME (Modus 0700); Standard: nach dem Ende gelöscht |
+| `-e`, `--env NAME` | Eine Host-Variable nur an den Agenten geben; Werte werden nie ausgegeben; mehrfach |
 
 Siehe [Anmeldung und Zustand](#anmeldung-und-zustand).
 
@@ -1058,11 +1332,11 @@ Siehe [Anmeldung und Zustand](#anmeldung-und-zustand).
 
 | Option | Bedeutung |
 |---|---|
-| `--kit NAME` | Zusätzlich das Kit `~/.local/share/sandbox-ai/kits/NAME/AGENT`; wiederholbar |
-| `--kit-dir DIR` | Zusätzlich das Kit in `DIR/AGENT`; wiederholbar |
-| `--no-default-kit` | Ohne das Standard-Kit `~/.local/share/sandbox-ai/home/AGENT` |
-| `--no-memory` | Kein Projekt-Memory (Memory-Datei und Claudes Auto-Memory werden weder geladen noch behalten) |
-| `--no-plugins` | Keine Plugins aus dem Plugin-Store (Claude) bzw. den Kits (OpenCode) |
+| `-k`, `--kit NAME` | Zusätzlich das Kit `~/.local/share/sandbox-ai/kits/NAME/AGENT`; wiederholbar |
+| `-K`, `--kit-dir DIR` | Zusätzlich das Kit in `DIR/AGENT`; wiederholbar |
+| `-nk`, `--no-default-kit` | Ohne das Standard-Kit `~/.local/share/sandbox-ai/home/AGENT` |
+| `-nm`, `--no-memory` | Kein Projekt-Memory (Memory-Datei und Claudes Auto-Memory werden weder geladen noch behalten) |
+| `-np`, `--no-plugins` | Keine Plugins aus dem Plugin-Store (Claude) bzw. den Kits (OpenCode) |
 
 Siehe [Kits, Projekt-Memory und Plugins](#kits-projekt-memory-und-plugins).
 
@@ -1070,32 +1344,34 @@ Siehe [Kits, Projekt-Memory und Plugins](#kits-projekt-memory-und-plugins).
 
 | Option | Bedeutung |
 |---|---|
-| `--profile NAME` | `development`, `frontier`, `dns`, `egress-all` oder `offline`; mehrfach |
-| `--frontier` | Zusätzlich API- und Anmelde-Hosts von OpenAI und Anthropic (TCP/443) |
-| `--no-provider-defaults` | Standard-Hosts des Agenten weglassen |
-| `--allow-pypi`, `--allow-github`, `--allow-gitlab`, `--allow-kernel-org`, `--allow-duckduckgo` | Host-Vorlagen (TCP/443) |
-| `--allow-host HOST` | Hostnamen pinnen und TCP/443 erlauben; mehrfach |
-| `--allow IP_ODER_CIDR` | Alle Protokolle und Ports zu diesem Ziel; mehrfach |
-| `--allow-tcp IP:PORT` | Genau ein TCP-Port auf einer Adresse (IPv6: `[ADDR]:PORT`); mehrfach |
-| `--allow-host-port PORT` | Podman: `127.0.0.1:PORT` in der Sandbox erreicht denselben Port am Host-Loopback; mehrfach |
-| `--dns` | Echtes DNS über `1.1.1.1` und `8.8.8.8` (UDP/TCP 53 nur zu diesen) |
-| `--nameserver IP` | Stattdessen diesen Resolver nutzen; impliziert `--dns`; mehrfach |
-| `--egress-all-allow` | Jedes ausgehende Ziel erlauben; impliziert `--dns`; eingehend bleibt zu |
-| `--offline` | Kein Netz nach außen, auch nicht zum Anbieter |
-| `--network NAME`, `--ip IP`, `--ip6 IP` | Podman: vorhandenes privates Netz und feste Adressen |
+| `-p`, `--profile NAME` | `development`, `frontier`, `dns`, `egress-all` oder `offline`; mehrfach |
+| `-f`, `--frontier` | Zusätzlich API- und Anmelde-Hosts von OpenAI und Anthropic (TCP/443) |
+| `-nd`, `--no-provider-defaults` | Standard-Hosts des Agenten weglassen |
+| `-y`, `--allow-pypi`, `-g`, `--allow-github`, `-gl`, `--allow-gitlab`, `-ak`, `--allow-kernel-org`, `-dd`, `--allow-duckduckgo` | Host-Vorlagen (TCP/443) |
+| `-A`, `--allow-host HOST` | Hostnamen pinnen und TCP/443 erlauben; mehrfach |
+| `-a`, `--allow IP_ODER_CIDR` | Alle Protokolle und Ports zu diesem Ziel; mehrfach |
+| `-t`, `--allow-tcp IP:PORT` | Genau ein TCP-Port auf einer Adresse (IPv6: `[ADDR]:PORT`); mehrfach |
+| `-P`, `--allow-host-port PORT` | Podman: `127.0.0.1:PORT` in der Sandbox erreicht denselben Port am Host-Loopback; mehrfach |
+| `-R`, `--dns` | Echtes DNS über `1.1.1.1` und `8.8.8.8` (UDP/TCP 53 nur zu diesen) |
+| `-ns`, `--nameserver IP` | Stattdessen diesen Resolver nutzen; impliziert `--dns`; mehrfach |
+| `-E`, `--egress-all-allow` | Jedes ausgehende Ziel erlauben; impliziert `--dns`; eingehend bleibt zu |
+| `-o`, `--offline` | Kein Netz nach außen, auch nicht zum Anbieter |
+| `-nw`, `--network NAME`, `-ip`, `--ip IP`, `-i6`, `--ip6 IP` | Podman: vorhandenes privates Netz und feste Adressen |
+| `-X`, `--no-proxy` | Kein Verbindungs-Proxy: kein Verbindungslog, Pushes prüfen nur die Hooks |
+| `-x`, `--no-inspect HOST` | TLS zu HOST (oder `*.DOMAIN`) ungeöffnet durchreichen; mehrfach |
 
-Siehe [Netzwerkregeln](#netzwerkregeln).
+Siehe [Netzwerkregeln](#netzwerkregeln) und [Verbindungs-Proxy](#verbindungs-proxy).
 
 ### Git
 
 | Option | Bedeutung |
 |---|---|
-| `--git-token-env URL=NAME` | Token aus der Host-Variable `NAME` für Git unter `URL` (`http(s)://[USER@]HOST[:PORT]`); Loopback-URLs implizieren `--allow-host-port`, andere `--allow-host`; mehrfach |
-| `--git-token-file URL=DATEI` | Wie `--git-token-env`, Token aus einer privaten Datei (Modus `0600`, außerhalb der Workspaces); mehrfach |
-| `--git-credentials DATEI` | Alle Logins aus `DATEI` (Format von Gits Credential-Store, z. B. `~/.git-credentials`; privat, außerhalb der Workspaces), jeweils mit den Netzwerkregeln von `--git-token-env` |
-| `--git-identity` | Als globaler `user.name` und `user.email` des Hosts committen |
-| `--privacy-check public\|always\|off` | Nach dem Lauf zeigen, was der nächste Push veröffentlichen würde und privat bleiben sollte: bei Workspaces mit öffentlichem Remote (Standard), bei jedem Git-Workspace oder nie; außer bei `off` warnt der `pre-commit`-Hook des Agenten und `pre-push` zu einem öffentlichen Remote verweigert |
-| `--privacy-rules VERZ` | Eigene Regeln: `VERZ/global.rules.toml` und `VERZ/PROJEKT.rules.toml` (oder `.json`); außerhalb der Workspaces, nie für den Agenten sichtbar; Standard `~/.config/sandbox-ai/privacy`, falls vorhanden |
+| `-ge`, `--git-token-env URL=NAME` | Token aus der Host-Variable `NAME` für Git unter `URL` (`http(s)://[USER@]HOST[:PORT]`); Loopback-URLs implizieren `--allow-host-port`, andere `--allow-host`; mehrfach |
+| `-gf`, `--git-token-file URL=DATEI` | Wie `--git-token-env`, Token aus einer privaten Datei (Modus `0600`, außerhalb der Workspaces); mehrfach |
+| `-gc`, `--git-credentials DATEI` | Alle Logins aus `DATEI` (Format von Gits Credential-Store, z. B. `~/.git-credentials`; privat, außerhalb der Workspaces), jeweils mit den Netzwerkregeln von `--git-token-env` |
+| `-I`, `--git-identity` | Als globaler `user.name` und `user.email` des Hosts committen |
+| `-pc`, `--privacy-check public\|always\|off` | Nach dem Lauf zeigen, was der nächste Push veröffentlichen würde und privat bleiben sollte: bei Workspaces mit öffentlichem Remote (Standard), bei jedem Git-Workspace oder nie; außer bei `off` warnt der `pre-commit`-Hook des Agenten und `pre-push` zu einem öffentlichen Remote verweigert |
+| `-pr`, `--privacy-rules VERZ` | Eigene Regeln: `VERZ/global.rules.toml` und `VERZ/PROJEKT.rules.toml` (oder `.json`); außerhalb der Workspaces, nie für den Agenten sichtbar; Standard `~/.config/sandbox-ai/privacy`, falls vorhanden |
 
 Siehe [Netzwerkregeln](#netzwerkregeln) (Pushen nach GitHub und auf einen eigenen Git-Server) und
 [Datenschutzprüfung vor dem Veröffentlichen](#datenschutzprüfung-vor-dem-veröffentlichen).
@@ -1104,9 +1380,9 @@ Siehe [Netzwerkregeln](#netzwerkregeln) (Pushen nach GitHub und auf einen eigene
 
 | Option | Bedeutung |
 |---|---|
-| `--dangerously-skip-permissions` | Agent ohne Rückfragen starten |
-| `--local-config DATEI` | OpenCode: rein lokale Konfiguration, Cloud-Zugriff abgeschaltet |
-| `--mcp NAME` | Lokalen MCP-Server in eigener Sandbox anbinden; wird bei Bedarf gestartet; mehrfach |
+| `-D`, `--dangerously-skip-permissions` | Agent ohne Rückfragen starten |
+| `-L`, `--local-config DATEI` | OpenCode: rein lokale Konfiguration, Cloud-Zugriff abgeschaltet |
+| `-M`, `--mcp NAME` | Lokalen MCP-Server in eigener Sandbox anbinden; wird bei Bedarf gestartet; mehrfach |
 
 Siehe [Agenten ohne Rückfragen](#agenten-ohne-rückfragen),
 [Lokale LLMs](#lokale-llms-mit-opencode) und [Lokale MCP-Server](#lokale-mcp-server).
@@ -1115,27 +1391,37 @@ Siehe [Agenten ohne Rückfragen](#agenten-ohne-rückfragen),
 
 | Option | Bedeutung |
 |---|---|
-| `--session NAME` | Benannte, lösbare Session in tmux |
-| `--tmux`, `--no-tmux` | tmux in der Sandbox (Fenster `agent` und `shell`) ist im Terminal Standard; `--tmux` besteht darauf, `--no-tmux` schaltet es ab |
-| `--gui` | Virtuelles X-Display `:99` (Xvfb) |
-| `--gui-screen BxHxTIEFE` | Größe des virtuellen Bildschirms (Standard: `1920x1080x24`) |
-| `--gui-vnc DIR` | Impliziert `--gui`; VNC über den Unix-Socket `DIR/vnc.sock` |
-| `--gui-wayland` | Wayland-Socket des Hosts freigeben (schwächt die Isolation) |
+| `-s`, `--session NAME` | Benannte, lösbare Session in tmux |
+| `-T`, `--tmux`, `-nt`, `--no-tmux` | tmux in der Sandbox (Fenster `agent` und `shell`) ist im Terminal Standard; `--tmux` besteht darauf, `--no-tmux` schaltet es ab |
+| `-gu`, `--gui` | Virtuelles X-Display `:99` (Xvfb) |
+| `-gs`, `--gui-screen BxHxTIEFE` | Größe des virtuellen Bildschirms (Standard: `1920x1080x24`) |
+| `-gv`, `--gui-vnc DIR` | Impliziert `--gui`; VNC über den Unix-Socket `DIR/vnc.sock` |
+| `-gw`, `--gui-wayland` | Wayland-Socket des Hosts freigeben (schwächt die Isolation) |
 
 Siehe [Sessions](#sessions-lösen-pausieren-fortsetzen-stoppen), [tmux](#tmux-modus)
 und [GUI](#gui-programme-und-browser).
+
+### Hardware
+
+| Option | Bedeutung |
+|---|---|
+| `-d`, `--device PFAD` | Ein Gerät des Hosts an den Agenten geben: zeichenorientiertes Gerät unter `/dev` oder `/dev/bus/usb`, `/dev/dri`, `/dev/snd` als Ganzes; mehrfach (schwächt die Isolation) |
+| `-G`, `--gpu nvidia\|dri\|rocm` | Die GPU-Geräte (NVIDIA mit Podman über CDI) |
+
+Siehe [Hardware](#hardware-geräte-und-gpus); ein Dienst auf dem Host, erreicht
+über `--allow-host-port`, ist sicherer.
 
 ### Konfiguration, Logs und Prüfungen
 
 | Option | Bedeutung |
 |---|---|
-| `--config DATEI` | Projektkonfiguration (Standard: vertrauenswürdige `.sandbox-ai.json` im Haupt-Workspace) |
-| `--no-config` | `.sandbox-ai.json` ignorieren |
-| `--log-dir DIR` | `egress-denied.jsonl` und `files.jsonl` dorthin schreiben (für den Agenten unsichtbar) |
-| `--dry-run` | Plan ausgeben; kein DNS, kein Lesen von Anmeldedaten, keine Kopien, Pods oder Prozesse |
-| `--probe` | Beide Sandbox-Schichten und die Firewall prüfen, dann ohne Agent beenden |
+| `-c`, `--config DATEI` | Projektkonfiguration (Standard: vertrauenswürdige `.sandbox-ai.json` im Haupt-Workspace) |
+| `-nc`, `--no-config` | `.sandbox-ai.json` ignorieren |
+| `-l`, `--log-dir DIR` | `egress-denied.jsonl`, `files.jsonl` und `connections-*.jsonl` dorthin schreiben (für den Agenten unsichtbar); Verbindungslog sonst in `~/.local/state/sandbox-ai/logs/PROJEKT-HASH` |
+| `-n`, `--dry-run` | Plan ausgeben; kein DNS, kein Lesen von Anmeldedaten, keine Kopien, Pods oder Prozesse |
+| `-pb`, `--probe` | Beide Sandbox-Schichten und die Firewall prüfen, dann ohne Agent beenden |
 | `-h`, `--help` | Vollständige Hilfe |
-| `--version` | Version (jeder Befehl hat sie) |
+| `-V`, `--version` | Version (jeder Befehl hat sie) |
 
 Siehe [Projektkonfiguration](#projektkonfiguration-und-wizard) und
 [Logs](#egress--und-dateizugriffs-logs).
@@ -1146,11 +1432,13 @@ Siehe [Projektkonfiguration](#projektkonfiguration-und-wizard) und
 |---|---|
 | `sandbox-ai BEFEHL …` | ein Befehl für alles Folgende, dazu `doctor`, `logs [VERZ\|--project P] [--json]`, `update [--check]`, `version` |
 | `sandbox-ai privacy-check [PFAD ...]` | `[--rules-dir VERZ] [--project NAME] [--all] [--json]`: was der nächste Push jedes Repositorys veröffentlichen würde und privat bleiben sollte; Exit 1 bei blockierenden Funden, 2 wenn nicht prüfbar |
+| `sandbox-ai net list\|show\|allow\|revoke [LAUF] [--allow-host H] [--allow-tcp IP:PORT] [--allow NETZ] [--allow-PRESET]` | Ändern, was eine laufende Sandbox erreichen darf (siehe [Netzwerkregeln](#netzwerk-einer-laufenden-sandbox-ändern)) |
 | `sandbox-build-image` | `[--podman-url URL] [--pin VERSION] [--uv VERSION] [--node IMAGE] AGENT\|all [podman-build-Optionen]`; neueste Versionen, sofern nicht fixiert |
 | `sandbox-session list` | Sessions und ihr Status |
 | `sandbox-session attach\|pause\|resume\|stop NAME` | Verbinden (lösen mit `Ctrl-b d`), einfrieren, fortsetzen bzw. neu starten, stoppen |
 | `sandbox-session delete NAME [--yes]` | Gestoppte Session samt HOME entfernen |
 | `sandbox-mcp list` | Definierte MCP-Server und ihr Status |
+| `sandbox-mcp catalog`, `sandbox-mcp add NAME [-m ZIEL=HOST[:ro\|rw]] [-e VAR] [-n none\|full] [-M GRÖSSE] [-p N]` | Server der MCP-Kataloge; einen als Container-Server hinzufügen (siehe [Lokale MCP-Server](#server-aus-einem-mcp-katalog)) |
 | `sandbox-mcp start NAME [--backend podman\|bwrap]`, `sandbox-mcp stop NAME` | MCP-Server-Sandbox starten oder stoppen |
 | `sandbox-wizard [new]` | Interaktive Projekteinrichtung; bietet an, eine vorhandene Konfiguration zu bearbeiten |
 | `sandbox-wizard edit [VERZ\|DATEI]` | Vorhandene Konfiguration eines Projekts ändern (Menü, Änderungen vor dem Schreiben) |
@@ -1200,10 +1488,11 @@ zu jedem Problem den Befehl, der es behebt.
 | Symptom | Prüfen |
 |---|---|
 | Claude „not logged in“ / „Login expired · Please run /login“ | `sandbox-ai login --status` zeigt, welches Login die Sandboxes bekommen. `sandbox-ai login claude` gibt ihnen ein eigenes, unabhängig vom Host (empfohlen, wenn Claude auch auf dem Host läuft: Erneuern beide dasselbe Login, ist einer abgemeldet). Der Refresh braucht `console.anthropic.com`/`platform.claude.com`, standardmäßig erlaubt. |
+| Login-Code oder OAuth-Token abgelehnt, obwohl richtig kopiert | In tmux übernimmt die Oberfläche des Agenten die Maus; eine normale Auswahl kopiert nichts oder nur ein umbrochenes Stück: beim Markieren Shift gedrückt halten (in manchen macOS-Terminals Option/Alt) und den Code als eine Zeile einfügen. `sandbox-ai login claude` meldet ohne tmux an. |
 | `Project configuration … is not trusted` | Datei prüfen, dann `./sandbox-wizard trust DATEI`, oder mit `--no-config` starten. |
 | Lokales LLM nicht erreichbar | Server ans LAN gebunden, LAN-IP des Hosts verwendet, `--allow-tcp IP:PORT` passt. |
 | `Unknown MCP server` / Server startet nicht | `./sandbox-mcp list`; `~/.local/state/sandbox-ai/mcp/NAME/supervisor.log` lesen. |
-| `--tmux needs an interactive terminal` | `--tmux` weglassen (im Terminal ist tmux ohnehin Standard) oder für Hintergrundläufe `--session` verwenden. |
+| `-T`, `--tmux needs an interactive terminal` | `--tmux` weglassen (im Terminal ist tmux ohnehin Standard) oder für Hintergrundläufe `--session` verwenden. |
 | `The trusted project configuration … is missing` | Datei wiederherstellen, mit `--no-config` starten oder `./sandbox-wizard forget DATEI`. |
 | `… is a symlink; refusing` | Projektdateien und Sandbox-Anmeldedaten müssen reguläre Dateien sein; den Link ersetzen. |
 | `inotify watch limit reached` | `fs.inotify.max_user_watches` erhöhen oder weniger Verzeichnisse beobachten. |
@@ -1217,7 +1506,7 @@ zu jedem Problem den Befehl, der es behebt.
 1. **P1 – Pfad- und Zustandstrennung:** HOME oder `/` werden als Workspace nicht
    abgelehnt; gemeinsam genutzte Zustandsverzeichnisse haben keine Sperren.
 2. **P2 – Live-Nachweise für neue Funktionen:** Sessions, tmux, GUI/VNC/Wayland,
-   Projektkonfiguration, lokale LLMs, MCP-Server, Logs, DNS- und Egress-Modi sind durch
+   Projektkonfiguration, lokale LLMs, MCP-Server, Logs, DNS- und Egress-Modi, Geräte und GPUs, der Verbindungs-Proxy (NAT-Umleitung) und `sandbox-ai net` sind durch
    Unit-, Contract- und End-to-End-Tests sowie neue Live-Tests abgedeckt, die
    noch auf echten Podman-/Bubblewrap-Hosts laufen müssen.
 3. **P2 – Betriebsgrenzen:** keine Optionen für CPU-/RAM-/PID-Limits; Logs sind

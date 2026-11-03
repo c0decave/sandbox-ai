@@ -2,7 +2,7 @@
 set -euo pipefail
 script_path=$(readlink -f -- "${BASH_SOURCE[0]}")
 script_dir=$(dirname -- "$script_path")
-usage='Usage: sandbox-build-image [--podman-url URL] [--pin VERSION] [--uv VERSION] [--node IMAGE]
+usage='Usage: sandbox-build-image [-pu|--podman-url URL] [-p|--pin VERSION] [-u|--uv VERSION] [-n|--node IMAGE]
                            codex|claude|opencode|all [podman build options]
 
 Every build uses the newest releases unless you pin them: the newest npm release
@@ -21,14 +21,14 @@ die_usage() { echo "$usage" >&2; exit 2; }
 podman_cmd=(podman) pin="" uv="" node="" agents=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --version)
+    -V|--version)
       version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' "$script_dir/agent_sandbox.py")
       echo "sandbox-ai $version"; exit 0 ;;
     -h|--help) echo "$usage"; exit 0 ;;
-    --podman-url) [[ $# -ge 2 && -n "$2" ]] || die_usage; podman_cmd+=(--remote --url "$2"); shift 2 ;;
-    --pin) [[ $# -ge 2 && -n "$2" ]] || die_usage; pin=$2; shift 2 ;;
-    --uv) [[ $# -ge 2 && -n "$2" ]] || die_usage; uv=$2; shift 2 ;;
-    --node) [[ $# -ge 2 && -n "$2" ]] || die_usage; node=$2; shift 2 ;;
+    -pu|--podman-url) [[ $# -ge 2 && -n "$2" ]] || die_usage; podman_cmd+=(--remote --url "$2"); shift 2 ;;
+    -p|--pin) [[ $# -ge 2 && -n "$2" ]] || die_usage; pin=$2; shift 2 ;;
+    -u|--uv) [[ $# -ge 2 && -n "$2" ]] || die_usage; uv=$2; shift 2 ;;
+    -n|--node) [[ $# -ge 2 && -n "$2" ]] || die_usage; node=$2; shift 2 ;;
     codex|claude|opencode) agents=("$1"); shift; break ;;
     all) agents=(codex claude opencode); shift; break ;;
     *) die_usage ;;

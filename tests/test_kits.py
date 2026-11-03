@@ -140,9 +140,9 @@ def test_sources_order_and_errors(tmp_path):
     make(data() / "kits/b/claude", {"skills/one/SKILL.md": "x"})
     make(tmp_path / "mine/claude", {"commands/c.md": "x"})
     a = args(tmp_path, "claude", "--kit", "b", "--kit-dir", str(tmp_path / "mine"), "--kit", "b")
-    assert [label for label, _ in k.sources(a)] == ["home", "kit b", f"kit-dir {tmp_path / 'mine'}"]
+    assert [label for label, _ in k.sources(a)] == ["built-in", "home", "kit b", f"kit-dir {tmp_path / 'mine'}"]
     a = args(tmp_path, "claude", "--no-default-kit", "--kit", "b")
-    assert [label for label, _ in k.sources(a)] == ["kit b"]
+    assert [label for label, _ in k.sources(a)] == ["kit b"]  # without the built-in skill too
     with pytest.raises(ValueError, match="no codex/ directory"):
         k.sources(s.parse_args(["codex", "--kit-dir", str(tmp_path / "mine")]))
     with pytest.raises(ValueError, match="--kit NAME"):
@@ -607,7 +607,7 @@ def test_run_mounts_kits_read_only_and_keeps_project_memory(backend, tmp_path, m
         mounts = {dest: (Path(src), mode) for src, dest, mode in a.kit_mounts}
         assert all(mode == "ro" for _, mode in mounts.values())
         skills = mounts["/root/.claude/skills"][0]
-        assert sorted(p.name for p in skills.iterdir()) == ["review", "sandbox-example"]
+        assert sorted(p.name for p in skills.iterdir()) == ["review", "sandbox-ai", "sandbox-example"]
         assert (mounts["/root/.claude/agents"][0] / "reviewer.md").read_text() == "r"
         assert mounts["/sandbox/marketplace"][0] == k.MARKETPLACE
         # The backend gets the same mounts on its command line.
@@ -645,7 +645,7 @@ def test_run_without_kits_and_memory(tmp_path, monkeypatch):
     monkeypatch.setattr(s.shutil, "which", lambda name: str(tool / name) if name == "podman" else None)
 
     def run(a, session, home):
-        assert a.kit_mounts == []  # Codex: no default kit, no kits, no own marketplace
+        assert a.kit_mounts == []  # Codex: no default kit (nor the built-in skill), no kits, no marketplace
         assert not (home / ".codex/AGENTS.md").exists()
         return 0
     monkeypatch.setattr(s, "run_pod", run)
@@ -669,12 +669,13 @@ def test_login_and_mcp_sandboxes_get_no_kits(tmp_path, monkeypatch):
 def test_dry_run_shows_the_plan_and_creates_nothing(tmp_path, capsys):
     assert s.launch(["claude", "--workspace", str(tmp_path / "work"), "--no-auth", "--dry-run"]) == 0
     plan = json.loads(capsys.readouterr().out)["kits"]
-    assert plan["sources"] == [] and plan["plugins"] == {"marketplaces": [], "enabled": [], "missing": []}
+    assert [source["kit"] for source in plan["sources"]] == ["built-in"]
+    assert plan["plugins"] == {"marketplaces": [], "enabled": [], "missing": []}
     assert not (data() / "home").exists()
     k.ensure_default_home("claude")
     assert s.launch(["claude", "--workspace", str(tmp_path / "work"), "--no-auth", "--dry-run"]) == 0
     plan = json.loads(capsys.readouterr().out)["kits"]
-    assert plan["entries"] == {"skills": ["sandbox-example"]} and plan["memory_template"] == "home"
+    assert plan["entries"] == {"skills": ["sandbox-ai", "sandbox-example"]} and plan["memory_template"] == "home"
     assert plan["plugins"]["missing"] == ["sandcastle@sandbox-ai"]
     assert not (Path(os.environ["HOME"]) / ".local/state/sandbox-ai/memory").exists()
 
@@ -874,3 +875,16 @@ def test_review_small_ones(tmp_path):
         k.check_source("m", {"source": "github", "repo": "../.."})
     long = tmp_path / ("x" * 250)
     assert len(k.memory_store(long, "claude").parent.name) <= 255
+
+
+
+def test_builtin_skill_ships_for_every_agent_and_a_kit_can_replace_it(tmp_path):
+    for agent in k.AGENTS:
+        text = (k.BUILTIN / agent / "skills/sandbox-ai/SKILL.md").read_text()
+        assert text.startswith("---\nname: sandbox-ai\ndescription: ") and "sandbox-ai net allow" in text
+        assert k.MEMORY_FILE[agent][1] in text
+    make(tmp_path / "mine/claude", {"skills/sandbox-ai/SKILL.md": "---\nname: sandbox-ai\n---\nmine"})
+    plan = k.scan("claude", k.sources(args(tmp_path, "claude", "--kit-dir", str(tmp_path / "mine"))))
+    label, path = plan["entries"]["skills"]["sandbox-ai"]
+    assert label.startswith("kit-dir") and (path / "SKILL.md").read_text().endswith("mine")
+    assert any("replaces the built-in one" in note for note in plan["notes"])

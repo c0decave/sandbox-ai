@@ -150,6 +150,24 @@ def check_tiocsti(sysctl=Path("/proc/sys/dev/tty/legacy_tiocsti")):
     return "ok", "TIOCSTI (bwrap)", "disabled", ""
 
 
+def check_proxy_nat(modules=Path("/sys/module"), builtin=None):
+    """The connection proxy redirects with nftables NAT: a loaded module shows in /sys/module, a built-in
+    one in modules.builtin. A module that is only installed may still be loaded on demand: a warning."""
+    if builtin is None:
+        builtin = Path("/lib/modules") / os.uname().release / "modules.builtin"
+    try:
+        built_in = builtin.read_text()
+    except OSError:
+        built_in = ""
+    missing = [name for name in ("nft_chain_nat", "nft_redir")
+               if not (modules / name).exists() and f"/{name}.ko" not in built_in]
+    if missing:
+        return ("warn", "Connection proxy", "nftables NAT not loaded: " + ", ".join(missing) + " (the kernel may "
+                "still load it on demand)", "sudo modprobe nft_chain_nat nft_redir (persist in "
+                "/etc/modules-load.d/), or start with --no-proxy")
+    return "ok", "Connection proxy", "nftables NAT available", ""
+
+
 def check_login(agent):
     """The login the agent's sandboxes get (sandbox-ai's login store first, else the host's);
     never prints token contents."""
@@ -280,7 +298,7 @@ def check_project(cwd=None):
 
 
 def checks(backend="podman", podman_url=None, cwd=None):
-    result = [check_user(), check_python(), check_installation(), check_userns()]
+    result = [check_user(), check_python(), check_installation(), check_userns(), check_proxy_nat()]
     if backend in ("podman", "both"):
         result += [check_podman(podman_url), check_pasta(podman_url)]
         if not podman_url:
@@ -314,9 +332,9 @@ def report(results, out=print):
 
 def cli(argv):
     parser = argparse.ArgumentParser(prog="sandbox-ai doctor", description="Check the host for sandbox-ai.")
-    parser.add_argument("--backend", choices=["podman", "bwrap", "both"], default="podman")
-    parser.add_argument("--podman-url")
-    parser.add_argument("--json", action="store_true", help="Machine-readable output")
+    parser.add_argument("-b", "--backend", choices=["podman", "bwrap", "both"], default="podman")
+    parser.add_argument("-pu", "--podman-url")
+    parser.add_argument("-j", "--json", action="store_true", help="Machine-readable output")
     a = parser.parse_args(argv)
     results = checks(a.backend, a.podman_url)
     if a.json:

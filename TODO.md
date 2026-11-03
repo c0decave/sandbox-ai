@@ -1,6 +1,6 @@
 # TODO
 
-## Future: GitHub push proxy on the host
+## Future: GitHub push proxy on the host (token kept outside)
 
 `--git-token-env`/`--git-token-file` put the token into the sandbox, where the agent can read
 it. A push proxy would give the agent the ability to push without the secret:
@@ -17,11 +17,10 @@ it. A push proxy would give the agent the ability to push without the secret:
   branch. A fine-grained token cannot express this.
 - **Audit log**: one JSON line per push with repository, ref, old and new
   object IDs, next to `egress-denied.jsonl`.
-- **Privacy check in the proxy**: run `privacy.py`'s commit check on the
-  objects of each push with the full rule set (your own rule files and the
-  tokens included) before forwarding it. Unlike the hooks in the sandbox,
-  the agent cannot skip it (`--no-verify`, `-c core.hooksPath=`), and the
-  rules never enter the sandbox.
+- ~~Privacy check in the proxy~~: done in 0.1.20 by the connection proxy in
+  the sandbox (every push over HTTP(S) is checked with the full rules before
+  the server sees it). What remains here is keeping the token out of the
+  sandbox.
 - Without `--allow-github`: the sandbox reaches only the proxy, never
   github.com directly.
 
@@ -111,3 +110,11 @@ store (`sandbox-ai login AGENT`). Open:
 - **Online check of a login.** Expiry is checked offline only (Claude's
   `refreshTokenExpiresAt`); a refresh token revoked or used up elsewhere shows
   only when the agent refreshes.
+
+## Connection proxy: next steps
+
+- HTTP/2 towards clients that insist on it (gRPC); today only HTTP/1.1 is offered.
+- QUIC/HTTP3 is not proxied; UDP stays with the firewall rules.
+- The push check finds what its rules describe. An agent that deliberately encodes data (base64,
+  archives, encryption) gets past any pattern check; the connection log records what was sent.
+- Live tests of the NAT redirect on real Podman and Bubblewrap hosts.

@@ -39,3 +39,11 @@ def neutral_working_directory(tmp_path_factory, monkeypatch):
     """The default workspace is the current directory; the checkout itself is refused as a workspace
     (the agent could rewrite the launcher), so tests start from an empty directory."""
     monkeypatch.chdir(tmp_path_factory.mktemp("cwd"))
+
+
+@pytest.fixture(autouse=True)
+def private_runtime_state(tmp_path_factory, monkeypatch):
+    """Run registrations (sandbox-ai net) and default log directories of launches under test stay in
+    temporary directories, never in the HOME of whoever runs the tests."""
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path_factory.mktemp("xdg-runtime")))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("xdg-state")))

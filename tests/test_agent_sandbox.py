@@ -201,11 +201,18 @@ class SandboxTests(unittest.TestCase):
             with self.subTest(agent=agent):
                 a = s.parse_args([agent, "--dangerously-skip-permissions", "--", "exec", "task"])
                 self.assertEqual(s.agent_command(a, agent), command)
-        self.assertEqual(s.agent_environment(s.parse_args(["claude", "--dangerously-skip-permissions", "--privacy-check", "off"])),
+        self.assertEqual(s.agent_environment(s.parse_args(["claude", "--dangerously-skip-permissions", "--privacy-check", "off",
+                                                           "--no-proxy"])),
                          {"IS_SANDBOX": "1"})
         env = s.agent_environment(s.parse_args(["opencode", "--dangerously-skip-permissions"]))
         self.assertEqual(json.loads(env["OPENCODE_PERMISSION"]), {"*": "allow"})
-        self.assertEqual(s.agent_environment(s.parse_args(["claude", "--privacy-check", "off"])), {})
+        self.assertEqual(s.agent_environment(s.parse_args(["claude", "--privacy-check", "off", "--no-proxy"])), {})
+        # With the proxy (the default) TLS libraries are pointed at the bundle with the session CA.
+        env = s.agent_environment(s.parse_args(["claude", "--privacy-check", "off"]))
+        self.assertEqual(env["SSL_CERT_FILE"], "/run/sandbox-ca/bundle.pem")
+        self.assertEqual(env["GIT_SSL_CAINFO"], "/run/sandbox-ca/bundle.pem")
+        self.assertEqual(env["NODE_EXTRA_CA_CERTS"], "/run/sandbox-ca/ca.pem")
+        self.assertEqual(s.agent_environment(s.parse_args(["claude", "--privacy-check", "off", "--offline"])), {})
 
     def test_dangerously_skip_permissions_not_duplicated_or_used_in_probe(self):
         a = s.parse_args(["claude", "--dangerously-skip-permissions", "--", "--dangerously-skip-permissions", "-p", "x"])
@@ -261,7 +268,7 @@ class SandboxTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             a = s.parse_args(["codex", "--workspace", str(Path(d) / "w"), "--log-dir", str(Path(d) / "logs")])
             _, run = s.pod_commands(a, "pod", Path(d), Path(d) / "home")
-            self.assertIn(f"type=bind,src={Path(d).resolve() / 'logs'},dst=/sandbox/log,rw", run)
+            self.assertIn(f"type=bind,src={Path(d).resolve() / 'logs'},dst=/sandbox/log,rw,nodev", run)
             self.assertIn("NET_BIND_SERVICE", run)
             self.assertNotIn("NET_BIND_SERVICE", s.pod_commands(s.parse_args(["codex"]), "pod", Path(d), Path(d))[1])
             a.backend = "bwrap"
@@ -492,9 +499,9 @@ class SandboxTests(unittest.TestCase):
             self.assertEqual(a.workspaces, [str(main), str(lib), str(docs)])
             _, run = s.pod_commands(a, "pod", Path(d), Path(d) / "home")
             binds = [value for value in run if value.startswith("type=bind")]
-            self.assertIn(f"type=bind,src={main},dst=/work,rw", binds)
-            self.assertIn(f"type=bind,src={lib},dst=/workspaces/lib,rw", binds)
-            self.assertLess(binds.index(f"type=bind,src={main},dst=/work,rw"), binds.index(f"type=bind,src={lib},dst=/workspaces/lib,rw"))
+            self.assertIn(f"type=bind,src={main},dst=/work,rw,nodev", binds)
+            self.assertIn(f"type=bind,src={lib},dst=/workspaces/lib,rw,nodev", binds)
+            self.assertLess(binds.index(f"type=bind,src={main},dst=/work,rw,nodev"), binds.index(f"type=bind,src={lib},dst=/workspaces/lib,rw,nodev"))
             a.backend = "bwrap"
             cmd = s.bwrap_command(a, Path(d), Path(d) / "home")
             index = cmd.index("/workspaces/docs")
@@ -505,7 +512,7 @@ class SandboxTests(unittest.TestCase):
             a = s.parse_args(["codex", "--workspace-ro", "--workspace", f"{d}/a,{d}/b"])
             s.validate(a)
             _, run = s.pod_commands(a, "pod", Path(d), Path(d) / "home")
-            self.assertIn(f"type=bind,src={d}/b,dst=/workspaces/b,ro", run)
+            self.assertIn(f"type=bind,src={d}/b,dst=/workspaces/b,ro,nodev", run)
             a.backend = "bwrap"
             cmd = s.bwrap_command(a, Path(d), Path(d) / "home")
             self.assertEqual(cmd[cmd.index("/workspaces/b") - 2], "--ro-bind")
@@ -524,9 +531,15 @@ class SandboxTests(unittest.TestCase):
                 return 0
             with patch.object(s.os, "geteuid", return_value=1000), patch.object(s.shutil, "which", side_effect=lambda n: "/usr/bin/" + n), \
                     patch.object(s, "run_pod", side_effect=inspect), contextlib.redirect_stderr(io.StringIO()):
-                s.main(["codex", "--workspace", f"{d}/main,{d}/new/lib", "--offline", "--no-auth"])
+                s.main(["codex", "--workspace", f"{d}/main,{d}/new/lib", "--offline", "--no-auth",
+                        "--log-dir", f"{d}/logs"])
             self.assertTrue((Path(d) / "new/lib").is_dir())
             self.assertEqual(seen["watch"][:2], ["/work", "/workspaces/lib"])
+            # Without --log-dir nothing watches file access.
+            with patch.object(s.os, "geteuid", return_value=1000), patch.object(s.shutil, "which", side_effect=lambda n: "/usr/bin/" + n), \
+                    patch.object(s, "run_pod", side_effect=inspect), contextlib.redirect_stderr(io.StringIO()):
+                s.main(["codex", "--workspace", f"{d}/main", "--offline", "--no-auth"])
+            self.assertEqual(seen["watch"], [])
 
     def test_dry_run_lists_workspace_targets(self):
         with tempfile.TemporaryDirectory() as d, contextlib.redirect_stdout(io.StringIO()) as stdout:
@@ -567,8 +580,8 @@ class SandboxTests(unittest.TestCase):
                     self.assertEqual(env["XDG_RUNTIME_DIR"], "/run/user/0")
                     create, run = s.pod_commands(a, "pod", Path(d), Path(d) / "home")
                     self.assertIn("--shm-size=1g", create)
-                    self.assertIn(f"type=bind,src={Path(d).resolve() / 'vnc'},dst=/sandbox/vnc,rw", run)
-                    self.assertIn(f"type=bind,src={runtime / 'wayland-1'},dst=/run/user/0/wayland-0,rw", run)
+                    self.assertIn(f"type=bind,src={Path(d).resolve() / 'vnc'},dst=/sandbox/vnc,rw,nodev", run)
+                    self.assertIn(f"type=bind,src={runtime / 'wayland-1'},dst=/run/user/0/wayland-0,rw,nodev", run)
                     a.backend = "bwrap"
                     cmd = s.bwrap_command(a, Path(d), Path(d) / "home")
                     self.assertEqual(cmd[cmd.index("/dev/shm") - 1], "--tmpfs")
@@ -625,6 +638,17 @@ class SandboxTests(unittest.TestCase):
         plan = json.loads(stdout.getvalue())
         self.assertEqual(plan["gui"], {"display": ":99", "screen": "1920x1080x24", "vnc": False})
         self.assertFalse(plan["gui_wayland"])
+        self.assertEqual((plan["devices"], plan["gpu"]), ([], None))
+
+    def test_dry_run_reports_devices(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(s, "CDI_DIRS", (Path(d),)), \
+                contextlib.redirect_stdout(io.StringIO()) as stdout, \
+                contextlib.redirect_stderr(io.StringIO()) as stderr:
+            (Path(d) / "nvidia.yaml").write_text("kind: nvidia.com/gpu\n")
+            s.main(["codex", "--gpu", "nvidia", "--dry-run"])
+        plan = json.loads(stdout.getvalue())
+        self.assertEqual((plan["devices"], plan["gpu"]), ([{"path": "nvidia.com/gpu=all", "kind": "cdi"}], "nvidia"))
+        self.assertIn("NVIDIA GPUs (CDI)", stderr.getvalue())
 
     def test_dry_run_lists_planned_auth_copies_by_path_only(self):
         with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {"HOME": d}):
@@ -715,7 +739,7 @@ class SandboxTests(unittest.TestCase):
             s.validate(a)
             self.assertEqual(s.agent_environment(a)["TMUX_TMPDIR"], "/sandbox/tmux")
             _, run = s.pod_commands(a, "agent-session-x", Path(d), Path(d) / "home")
-            self.assertIn(f"type=bind,src={tmux.resolve()},dst=/sandbox/tmux,rw", run)
+            self.assertIn(f"type=bind,src={tmux.resolve()},dst=/sandbox/tmux,rw,nodev", run)
             self.assertEqual(run[run.index("--name") + 1], "agent-session-x-agent")
             a.backend = "bwrap"
             cmd = s.bwrap_command(a, Path(d), Path(d) / "home")
@@ -1431,7 +1455,8 @@ class SandboxTests(unittest.TestCase):
                         copied = json.loads((home / dest).read_text())
                         self.assertEqual(copied["oauthAccount"], {"emailAddress": "a@example.org"})
                         self.assertNotIn("mcpServers", copied)
-                        self.assertNotIn("projects", copied)
+                        # Host project paths stay home; only the sandbox's own workspace is marked trusted.
+                        self.assertEqual(copied["projects"], {"/work": {"hasTrustDialogAccepted": True}})
                         continue
                     if agent == "claude":
                         # The login crosses; OAuth tokens of the host's MCP servers do not.

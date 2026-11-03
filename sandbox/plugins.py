@@ -158,8 +158,8 @@ def cli(argv):
                                      epilog="Launcher options (e.g. --backend bwrap) are passed on to the "
                                             "plugin store's sandbox.")
     parser.add_argument("agent", nargs="?", choices=["claude", "codex", "opencode"])
-    parser.add_argument("--status", action="store_true", help="Show declared and installed plugins")
-    parser.add_argument("--update", action="store_true", help="Also update marketplaces and installed plugins")
+    parser.add_argument("-s", "--status", action="store_true", help="Show declared and installed plugins")
+    parser.add_argument("-u", "--update", action="store_true", help="Also update marketplaces and installed plugins")
     a, options = parser.parse_known_args(argv)
     if a.status or not a.agent:
         return status()

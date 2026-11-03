@@ -31,6 +31,10 @@ import tempfile
 HERE = Path(__file__).resolve().parent
 AGENTS = ("claude", "codex", "opencode")
 TEMPLATES = HERE / "templates"
+# Shipped with sandbox-ai and part of every sandbox: the sandbox-ai skill. An entry of the same name in
+# a kit replaces it (unlike two kits, which may not share a name).
+BUILTIN = HERE / "builtin"
+BUILTIN_LABEL = "built-in"
 # sandbox-ai's own Claude plugin marketplace, mounted read-only at the same place in every Claude sandbox.
 MARKETPLACE = HERE / "marketplace"
 MARKETPLACE_TARGET = "/sandbox/marketplace"
@@ -107,8 +111,10 @@ def available_kits(agent=None):
 
 
 def sources(a):
-    """[(label, directory)] of the kits for this run, the default kit first."""
+    """[(label, directory)] of the kits for this run: the built-in one, then the default kit and the others."""
     agent, result = a.agent, []
+    if not a.no_default_kit and (BUILTIN / agent).is_dir():
+        result.append((BUILTIN_LABEL, BUILTIN / agent))
     if not a.no_default_kit and default_home(agent).is_dir():
         result.append(("home", default_home(agent)))
     for name in dict.fromkeys(a.kit):
@@ -150,7 +156,9 @@ def scan(agent, kit_sources):
                     if problem:
                         notes.append(f"{label}: {name}/ entry skipped: {problem}")
                         continue
-                    if item.name in entries[name]:
+                    if item.name in entries[name] and entries[name][item.name][0] == BUILTIN_LABEL:
+                        notes.append(f"{label}: {name[:-1]} {item.name} replaces the built-in one")
+                    elif item.name in entries[name]:
                         raise ValueError(f"{name[:-1]} {item.name!r} comes from both {entries[name][item.name][0]} "
                                          f"and {label}; remove or rename one")
                     if name == "skills" and not (Path(item.path) / "SKILL.md").is_file():

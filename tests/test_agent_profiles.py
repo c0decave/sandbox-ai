@@ -101,7 +101,7 @@ def test_builder_selects_one_recipe_and_image(agent, remote, fake_podman):
     for package in ("xvfb", "x11vnc", "x11-utils", "fonts-liberation", "libnss3", "libgbm1", "libgtk-3-0", "libasound2"):
         assert f" {package} " in recipe, package
     for package in ("git", "vim", "netcat-traditional", "bind9-dnsutils", "iputils-ping", "iproute2", "traceroute",
-                    "python3", "curl", "wget"):
+                    "python3", "curl", "wget", "openssh-client", "jq", "openssl"):
         assert f" {package} " in recipe, package
     # gh from GitHub's signed apt repository, checked at build time.
     assert "signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages" in recipe

@@ -340,3 +340,184 @@ def test_module_parses_as_python_3_9():
     """The launcher supports Python 3.9; the engine also runs inside the agent's image."""
     import ast
     ast.parse((ROOT / "sandbox/privacy.py").read_text(), feature_version=(3, 9))
+
+
+# --- push check for the connection proxy ------------------------------------------------------------
+
+def repo_with_commits(tmp_path, *files):
+    repo = tmp_path / "work"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    ids_ = []
+    for name, content in files:
+        (repo / name).write_text(content)
+        git(repo, "add", name)
+        git(repo, "commit", "-q", "-m", f"add {name}")
+        ids_.append(git(repo, "rev-parse", "HEAD").stdout.strip())
+    return repo, ids_
+
+
+def config_for(repo, mode="public"):
+    return {"mode": mode, "own_hosts": ["git.home.example"],
+            "workspaces": [{"path": str(repo), "rules": p.rules_document(p.Rules())}]}
+
+
+@needs_git
+def test_push_verdict_checks_only_what_the_remote_lacks(tmp_path):
+    repo, (first, second) = repo_with_commits(tmp_path, ("old.txt", f"token {GH_TOKEN}\n"), ("new.txt", "fine\n"))
+    url, zero = "https://github.com/ada/x.git", "0" * 40
+    # The remote has the first commit already (advertised): only the second, clean one is new.
+    verdict = p.push_verdict(config_for(repo), {"url": url, "commands": [[first, second, "refs/heads/main"]],
+                                                 "advertised": [first]})
+    assert verdict["ok"], verdict
+    # A new branch on an empty remote publishes both.
+    verdict = p.push_verdict(config_for(repo), {"url": url, "commands": [[zero, second, "refs/heads/main"]]})
+    assert not verdict["ok"] and "old.txt" in verdict["message"] and GH_TOKEN not in verdict["message"]
+    # Own and private servers are not publications (mode public), unless the mode is always.
+    for own in ("https://git.home.example/x.git", "http://127.0.0.1:3000/x.git"):
+        assert p.push_verdict(config_for(repo), {"url": own, "commands": [[zero, second, "refs/heads/main"]]})["ok"]
+    assert not p.push_verdict(config_for(repo, "always"), {"url": "http://127.0.0.1:3000/x.git",
+                                                            "commands": [[zero, second, "refs/heads/main"]]})["ok"]
+
+
+@needs_git
+def test_push_verdict_refuses_what_it_cannot_check(tmp_path):
+    repo, (first,) = repo_with_commits(tmp_path, ("a.txt", "a\n"))
+    url = "https://github.com/ada/x.git"
+    unknown = p.push_verdict(config_for(repo), {"url": url, "commands": [["0" * 40, "c" * 40, "refs/heads/x"]]})
+    assert not unknown["ok"] and "in no workspace" in unknown["message"]
+    bad = p.push_verdict(config_for(repo), {"url": url, "commands": [["0" * 40, "not-an-id", "refs/heads/x"]]})
+    assert not bad["ok"]
+    assert p.push_verdict(config_for(repo), {"url": url, "commands": [[first, "0" * 40, "refs/heads/x"]]})["ok"]
+    # An annotated tag is peeled to its commit.
+    git(repo, "tag", "-a", "-m", "v1", "v1")
+    tag = git(repo, "rev-parse", "v1").stdout.strip()
+    assert p.present(p.Git(repo), [tag, "d" * 40]) == {tag: first}
+
+
+@needs_git
+def test_serve_answers_line_by_line_and_fails_closed(tmp_path):
+    import io
+    repo, (first,) = repo_with_commits(tmp_path, ("a.txt", "a\n"))
+    (tmp_path / "push.json").write_text(json.dumps(config_for(repo)))
+    requests = io.StringIO(json.dumps({"url": "https://github.com/a/b", "commands": [["0" * 40, first, "refs/heads/m"]]})
+                           + "\nnot json\n")
+    out = io.StringIO()
+    assert p.serve(tmp_path / "push.json", requests, out) == 0
+    answers = [json.loads(line) for line in out.getvalue().splitlines()]
+    assert answers[0]["ok"] and not answers[1]["ok"] and "failed" in answers[1]["message"]
+
+
+@needs_git
+def test_replace_objects_cannot_hide_a_commit_from_the_check(tmp_path):
+    """`git replace` would show the check a clean commit while the push sends the real one."""
+    repo, (secret, clean) = repo_with_commits(tmp_path, ("leak.txt", f"token {GH_TOKEN}\n"), ("ok.txt", "fine\n"))
+    git(repo, "replace", secret, clean)
+    verdict = p.push_verdict(config_for(repo), {"url": "https://github.com/a/b",
+                                                 "commands": [["0" * 40, secret, "refs/heads/main"]]})
+    assert not verdict["ok"] and "leak.txt" in verdict["message"]
+
+
+@needs_git
+@pytest.mark.parametrize("host", [True, False])
+def test_repository_config_cannot_run_a_program_through_a_lazy_fetch(tmp_path, host, monkeypatch):
+    """A partial clone fetches missing objects by running the promisor remote's upload-pack command,
+    which the (agent-written) repository configuration names."""
+    repo, (first,) = repo_with_commits(tmp_path, ("a.txt", "a\n"))
+    marker = tmp_path / "PWNED"
+    for key, value in (("core.repositoryformatversion", "1"), ("extensions.partialclone", "evil"),
+                       ("remote.evil.promisor", "true"), ("remote.evil.url", str(tmp_path)),
+                       ("remote.evil.uploadpack", f"touch {marker}; git-upload-pack")):
+        git(repo, "config", key, value)
+    monkeypatch.chdir(repo)  # the hooks' Git (host=False) works in the current directory
+    g = p.Git(repo, host=host)
+    assert p.present(g, ["e" * 40, first]) == {first: first}
+    p.read_blobs(g, ["f" * 40], [1 << 20])
+    assert not marker.exists()
+    verdict = p.push_verdict(config_for(repo), {"url": "https://github.com/a/b",
+                                                 "commands": [["0" * 40, "e" * 40, "refs/heads/x"]]})
+    assert not verdict["ok"] and not marker.exists()
+
+
+@needs_git
+def test_push_check_reads_merges_and_tags_and_refuses_what_it_cannot_read(tmp_path, monkeypatch):
+    repo, (base,) = repo_with_commits(tmp_path, ("a.txt", "a\n"))
+    url = "https://github.com/a/b"
+    # A token that only a merge commit brings in.
+    git(repo, "checkout", "-q", "-b", "side")
+    (repo / "b.txt").write_text("b\n")
+    git(repo, "add", "b.txt")
+    git(repo, "commit", "-q", "-m", "side")
+    git(repo, "checkout", "-q", "main")
+    git(repo, "merge", "-q", "--no-commit", "--no-ff", "side")
+    (repo / "merge.txt").write_text(f"token {GH_TOKEN}\n")
+    git(repo, "add", "merge.txt")
+    git(repo, "commit", "-q", "-m", "merge")
+    merge = git(repo, "rev-parse", "HEAD").stdout.strip()
+    verdict = p.push_verdict(config_for(repo), {"url": url, "commands": [["0" * 40, merge, "refs/heads/main"]],
+                                                 "advertised": [base]})
+    assert not verdict["ok"] and "merge.txt" in verdict["message"]
+    # A token in an annotated tag's message.
+    git(repo, "tag", "-a", "-m", f"release {GH_TOKEN}", "v2", base)
+    tag = git(repo, "rev-parse", "v2").stdout.strip()
+    verdict = p.push_verdict(config_for(repo), {"url": url, "commands": [["0" * 40, tag, "refs/tags/v2"]],
+                                                 "advertised": [base]})
+    assert not verdict["ok"] and "tag" in verdict["message"]
+    # More than it reads: refused, not waved through.
+    monkeypatch.setattr(p, "COMMITS_LIMIT", 1)
+    verdict = p.push_verdict(config_for(repo), {"url": url, "commands": [["0" * 40, merge, "refs/heads/main"]]})
+    assert not verdict["ok"]
+
+
+@needs_git
+def test_large_binary_files_do_not_block_but_large_text_does(tmp_path, monkeypatch):
+    monkeypatch.setattr(p, "PUSH_FILE_LIMIT", 100)
+    repo, (binary,) = repo_with_commits(tmp_path, ("image.png", "\x89PNG\x00" + "x" * 500))
+    url = "https://github.com/a/b"
+    assert p.push_verdict(config_for(repo), {"url": url, "commands": [["0" * 40, binary, "refs/heads/main"]]})["ok"]
+    (repo / "big.txt").write_text("text\n" * 100)
+    git(repo, "add", "big.txt")
+    git(repo, "commit", "-q", "-m", "big")
+    text = git(repo, "rev-parse", "HEAD").stdout.strip()
+    verdict = p.push_verdict(config_for(repo), {"url": url, "commands": [[binary, text, "refs/heads/main"]],
+                                                 "advertised": [binary]})
+    assert not verdict["ok"] and "cannot be checked completely" in verdict["message"] and "big.txt" in verdict["message"]
+
+
+@needs_git
+def test_push_check_reads_nested_tags_extra_headers_and_file_names(tmp_path):
+    repo, (base,) = repo_with_commits(tmp_path, ("a.txt", "a\n"))
+    url = "https://github.com/a/b"
+    # A tag of a tag: the inner message is published as well.
+    git(repo, "tag", "-a", "-m", f"inner {GH_TOKEN}", "inner", base)
+    git(repo, "tag", "-a", "-m", "outer", "outer", "inner")
+    outer = git(repo, "rev-parse", "outer").stdout.strip()
+    verdict = p.push_verdict(config_for(repo), {"url": url, "commands": [["0" * 40, outer, "refs/tags/outer"]],
+                                                 "advertised": [base]})
+    assert not verdict["ok"] and "tag" in verdict["message"]
+    # An extra header line in a commit object.
+    tree = git(repo, "rev-parse", "HEAD^{tree}").stdout.strip()
+    raw = (f"tree {tree}\nparent {base}\nauthor Ada <ada@example.org> 0 +0000\ncommitter Ada <ada@example.org> 0 +0000\n"
+           f"x-note {GH_TOKEN}\n\nplain message\n")
+    odd = subprocess.run(["git", "-C", str(repo), "hash-object", "-t", "commit", "-w", "--literally", "--stdin"],
+                         input=raw, capture_output=True, text=True, check=True).stdout.strip()
+    verdict = p.push_verdict(config_for(repo), {"url": url, "commands": [[base, odd, "refs/heads/x"]],
+                                                 "advertised": [base]})
+    assert not verdict["ok"] and "header" in verdict["message"]
+    # A token in a file name.
+    (repo / f"key-{GH_TOKEN}.txt").write_text("x\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "named")
+    named = git(repo, "rev-parse", "HEAD").stdout.strip()
+    verdict = p.push_verdict(config_for(repo), {"url": url, "commands": [[base, named, "refs/heads/main"]],
+                                                 "advertised": [base]})
+    assert not verdict["ok"] and "file name" in verdict["message"]
+
+
+@needs_git
+def test_many_advertised_refs_do_not_break_the_check(tmp_path):
+    repo, (first, second) = repo_with_commits(tmp_path, ("a.txt", "a\n"), ("b.txt", "b\n"))
+    advertised = [first] * 60000 + ["9" * 40] * 60000  # more than a command line holds
+    verdict = p.push_verdict(config_for(repo), {"url": "https://github.com/a/b",
+                                                 "commands": [[first, second, "refs/heads/main"]], "advertised": advertised})
+    assert verdict["ok"], verdict

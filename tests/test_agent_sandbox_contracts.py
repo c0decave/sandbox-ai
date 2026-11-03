@@ -4,9 +4,12 @@ Only OS/process boundaries are mocked. Filesystem copies, pipes, validation,
 configuration serialization and security decisions use the implementation.
 The separate live suite proves the actual namespace and model boundaries.
 """
+import argparse
 import ast
 import base64
+import contextlib
 import hashlib
+import gzip
 import importlib.util
 import json
 import os
@@ -15,8 +18,11 @@ import signal
 import shutil
 import socket
 import stat
+import struct
 import subprocess
 import sys
+import ssl
+import threading
 import time
 import tempfile
 from unittest.mock import Mock
@@ -144,7 +150,9 @@ def test_validate(scenario, tmp_path, monkeypatch):
                  ["--git-credentials", "/nonexistent/git-credentials"],
                  ["--git-token-env", "http://localhost:3000=UNSET_CONTRACT_VARIABLE"],
                  ["--git-token-env", "http://localhost:3000=PATH", "--backend", "bwrap"],
-                 ["--git-token-env", "https://git.example.org=PATH", "--offline"]]
+                 ["--git-token-env", "https://git.example.org=PATH", "--offline"],
+                 ["--device", "/dev/console"], ["--device", "/dev/null"],
+                 ["--gpu", "dri", "--podman-url", "unix:///example/podman.sock"]]
         monkeypatch.delenv("UNSET_CONTRACT_VARIABLE", raising=False)
         for args in cases:
             with pytest.raises(ValueError):
@@ -484,7 +492,7 @@ def test_mount_option(scenario):
                 s.mount_option(source, "/work", "rw")
     else:
         mode = "ro" if scenario == "edge" else "rw"
-        assert s.mount_option("/tmp/space dir", "/work", mode) == ["--mount", f"type=bind,src=/tmp/space dir,dst=/work,{mode}"]
+        assert s.mount_option("/tmp/space dir", "/work", mode) == ["--mount", f"type=bind,src=/tmp/space dir,dst=/work,{mode},nodev"]
 
 
 def test_pod_commands(scenario, tmp_path, monkeypatch):
@@ -510,7 +518,15 @@ def test_pod_commands(scenario, tmp_path, monkeypatch):
                                 "--tmux-socket-dir", str(tmp_path / "sess" / "tmux")])
         create, _ = s.pod_commands(session, "agent-session-x", tmp_path / "session", tmp_path / "home")
         assert create[create.index("--label") + 1] == f"{s.SESSION_LABEL}={(tmp_path / 'sess' / 'tmux').resolve()}"
-    assert f"type=bind,src={tmp_path},dst=/work,{'ro' if scenario == 'edge' else 'rw'}" in run
+    assert f"type=bind,src={tmp_path},dst=/work,{'ro' if scenario == 'edge' else 'rw'},nodev" in run
+    assert "--device" not in run
+    if scenario == "happy":
+        # Single devices and CDI names through --device; directories as bind mounts, so replugged devices show.
+        monkeypatch.setattr(s, "devices", lambda a: [("/dev/ttyACM0", "node"), ("/dev/bus/usb", "dir"),
+                                                     ("nvidia.com/gpu=all", "cdi")])
+        _, run = s.pod_commands(args, "owned-fixture", tmp_path / "session", tmp_path / "home")
+        assert [run[i + 1] for i, v in enumerate(run) if v == "--device"] == ["/dev/ttyACM0", "nvidia.com/gpu=all"]
+        assert "type=bind,src=/dev/bus/usb,dst=/dev/bus/usb,rw,dev" in run
 
 
 def test_run_pod(scenario, tmp_path, monkeypatch):
@@ -542,6 +558,15 @@ def test_bwrap_command(scenario, tmp_path, monkeypatch):
         assert "--share-net" not in cmd and "--clearenv" in cmd
         position = cmd.index("/work")
         assert cmd[position - 2] == ("--ro-bind" if scenario == "edge" else "--bind")
+        assert "--dev-bind" not in cmd
+        monkeypatch.setattr(s, "devices", lambda a: [("/dev/kvm", "node"), ("/dev/dri", "dir")])
+        cmd = s.bwrap_command(args, tmp_path, tmp_path)
+        assert [cmd[i + 1:i + 3] for i, v in enumerate(cmd) if v == "--dev-bind"] == [["/dev/kvm", "/dev/kvm"],
+                                                                                     ["/dev/dri", "/dev/dri"]]
+        assert cmd.index("--dev-bind") > cmd.index("--dev")  # on top of the sandbox's own /dev
+        monkeypatch.setattr(s, "devices", lambda a: [("nvidia.com/gpu=all", "cdi")])
+        with pytest.raises(ValueError, match="CDI"):
+            s.bwrap_command(args, tmp_path, tmp_path)
 
 
 def test_read_ready(scenario):
@@ -3215,7 +3240,7 @@ def test_kit_plan(scenario, tmp_path):
                                                    "commands/check.md": "check"})
     if scenario == "happy":
         plan = s.kit_plan(kit_args(tmp_path, "claude", "--kit", "review"))
-        assert plan["entries"] == {"skills": ["review"], "commands": ["check.md"]}
+        assert plan["entries"] == {"skills": ["review", "sandbox-ai"], "commands": ["check.md"]}
         assert plan["memory"].startswith(str(Path(os.environ["HOME"]) / ".local/state/sandbox-ai/memory/work-"))
         assert any("created with examples on the first start" in note for note in plan["notes"])
         assert not (data_home() / "home").exists()  # planning changes nothing
@@ -3325,7 +3350,7 @@ def test_prepare_kits(scenario, tmp_path):
         make_kit(data_home() / "home/opencode", {"marketplaces.json": json.dumps({"plugins": ["opencode-foo@1.2.3"]})})
         a = kit_args(tmp_path, "opencode", "--no-memory")
         mounts, notes, memory = s.prepare_kits(a, home, tmp_path / "staging")
-        assert mounts == [] and memory is None
+        assert [dest for _, dest, _ in mounts] == ["/root/.config/opencode/skills"] and memory is None
         assert json.loads(s.agent_environment(a)["OPENCODE_CONFIG_CONTENT"]) == {"plugin": ["opencode-foo@1.2.3"]}
         assert any("registry.npmjs.org" in note for note in notes)
 
@@ -3354,3 +3379,1100 @@ def test_save_memory(scenario, tmp_path, capsys):
         assert capsys.readouterr().err == ""
         assert sorted(p.name for p in store.rglob("*")) == []
         assert not list(store.parent.glob(".pending-*"))  # the run is recorded as saved
+
+
+# --- host devices (--device, --gpu) ---------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_dev(tmp_path, monkeypatch):
+    """A /dev of regular files that device_mode presents as devices: "sda*" as block devices,
+    everything else as character devices."""
+    dev = tmp_path / "dev"
+    for name in ("ttyACM0", "kvm", "kfd", "video0", "console", "null", "hidraw0", "sda", "nvidia0", "nvidiactl",
+                 "nvidia-uvm", "bus/usb/001/004", "dri/renderD128", "snd/pcmC0D0c", "input/event0"):
+        (dev / name).parent.mkdir(parents=True, exist_ok=True)
+        (dev / name).write_text("")
+        (dev / name).chmod(0o666)
+    (dev / "serial/by-id").mkdir(parents=True)
+    (dev / "serial/by-id/usb-Board").symlink_to("../../ttyACM0")
+    (dev / "escape").symlink_to(tmp_path)
+    real_mode = s.device_mode
+
+    def mode(path):
+        path = Path(path)
+        if path.is_dir():
+            return stat.S_IFDIR | 0o755
+        if path.name.startswith("sda"):
+            return stat.S_IFBLK | 0o660
+        if dev in path.parents:
+            return stat.S_IFCHR | 0o666
+        return real_mode(path)
+
+    monkeypatch.setattr(s, "DEV", dev)
+    monkeypatch.setattr(s, "device_mode", mode)
+    monkeypatch.setattr(s, "CDI_DIRS", (tmp_path / "cdi",))
+    return dev
+
+
+def test_device_mode(scenario, tmp_path):
+    if scenario == "happy":
+        assert stat.S_ISCHR(s.device_mode("/dev/null"))
+    elif scenario == "sad":
+        with pytest.raises(OSError):
+            s.device_mode(tmp_path / "missing")
+    else:
+        assert stat.S_ISDIR(s.device_mode(tmp_path))
+
+
+def test_parse_device(scenario, fake_dev, tmp_path):
+    if scenario == "happy":
+        assert s.parse_device(str(fake_dev / "ttyACM0")) == (str(fake_dev / "ttyACM0"), "node")
+        # Symlinks are resolved: the agent sees the device under its real name.
+        assert s.parse_device(str(fake_dev / "serial/by-id/usb-Board")) == (str(fake_dev / "ttyACM0"), "node")
+        assert s.parse_device(str(fake_dev / "bus/usb")) == (str(fake_dev / "bus/usb"), "dir")
+        assert s.parse_device(str(fake_dev / "bus/usb/001")) == (str(fake_dev / "bus/usb/001"), "dir")
+    elif scenario == "sad":
+        cases = {"console": "consoles", "null": "already", "hidraw0": "keyboards", "input/event0": "keyboards",
+                 "sda": "block devices", "serial": "directories", "escape": "not to a device",
+                 "missing": "No such file"}
+        for name, message in cases.items():
+            with pytest.raises(ValueError, match=message):
+                s.parse_device(str(fake_dev / name))
+        for value in ("", "relative/ttyACM0", "/etc/passwd", f"{fake_dev}/ttyACM0:rw", f"{fake_dev}/a,b"):
+            with pytest.raises(ValueError, match="--device expects"):
+                s.parse_device(value)
+    else:
+        # The option name in messages follows the caller; a file outside /dev is no device.
+        (fake_dev / "plain").write_text("")
+        with pytest.raises(ValueError, match="--gpu dri"):
+            s.parse_device(str(fake_dev / "console"), "--gpu dri")
+        assert s.parse_device(str(fake_dev / "dri")) == (str(fake_dev / "dri"), "dir")
+
+
+def test_nvidia_cdi_available(scenario, fake_dev, tmp_path):
+    cdi = tmp_path / "cdi"
+    if scenario == "happy":
+        cdi.mkdir()
+        (cdi / "nvidia.yaml").write_text("cdiVersion: 0.5.0\nkind: nvidia.com/gpu\n")
+        assert s.nvidia_cdi_available()
+    elif scenario == "sad":
+        assert not s.nvidia_cdi_available()  # no directory at all
+    else:
+        cdi.mkdir()
+        (cdi / "notes.txt").write_text("nvidia.com/gpu")  # not a specification
+        (cdi / "other.json").write_text('{"kind": "vendor.example/fpga"}')
+        assert not s.nvidia_cdi_available()
+
+
+def test_gpu_devices(scenario, fake_dev, tmp_path):
+    if scenario == "happy":
+        assert s.gpu_devices(s.parse_args(["codex"])) == []
+        assert s.gpu_devices(s.parse_args(["codex", "--gpu", "dri"])) == [(str(fake_dev / "dri"), "dir")]
+        assert s.gpu_devices(s.parse_args(["codex", "--gpu", "rocm"])) == [(str(fake_dev / "dri"), "dir"),
+                                                                          (str(fake_dev / "kfd"), "node")]
+        (tmp_path / "cdi").mkdir()
+        (tmp_path / "cdi" / "nvidia.yaml").write_text("kind: nvidia.com/gpu\n")
+        assert s.gpu_devices(s.parse_args(["codex", "--gpu", "nvidia"])) == [("nvidia.com/gpu=all", "cdi")]
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="nvidia-ctk cdi generate"):
+            s.gpu_devices(s.parse_args(["codex", "--gpu", "nvidia"]))
+        (fake_dev / "kfd").unlink()
+        with pytest.raises(ValueError, match="kfd"):
+            s.gpu_devices(s.parse_args(["codex", "--gpu", "rocm"]))
+        for name in ("nvidia0", "nvidiactl", "nvidia-uvm"):
+            (fake_dev / name).unlink()
+        with pytest.raises(ValueError, match="NVIDIA driver"):
+            s.gpu_devices(s.parse_args(["codex", "--backend", "bwrap", "--gpu", "nvidia"]))
+    else:
+        # bwrap gets the device nodes (the host's /usr brings the libraries); a remote Podman its own CDI.
+        assert s.gpu_devices(s.parse_args(["codex", "--backend", "bwrap", "--gpu", "nvidia"])) == [
+            (str(fake_dev / name), "node") for name in ("nvidia-uvm", "nvidia0", "nvidiactl")]
+        remote = s.parse_args(["codex", "--gpu", "nvidia", "--podman-url", "unix:///example/podman.sock"])
+        assert s.gpu_devices(remote) == [("nvidia.com/gpu=all", "cdi")]
+
+
+def test_devices(scenario, fake_dev):
+    if scenario == "happy":
+        a = s.parse_args(["codex", "--device", str(fake_dev / "ttyACM0"), "--device", str(fake_dev / "kvm")])
+        assert s.devices(a) == [(str(fake_dev / "ttyACM0"), "node"), (str(fake_dev / "kvm"), "node")]
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="consoles"):
+            s.devices(s.parse_args(["codex", "--device", str(fake_dev / "kvm"), "--device", str(fake_dev / "console")]))
+    else:
+        # Repeats and devices inside a directory passed whole are dropped.
+        a = s.parse_args(["codex", "--device", str(fake_dev / "serial/by-id/usb-Board"), "--device",
+                          str(fake_dev / "ttyACM0"), "--device", str(fake_dev / "dri/renderD128"), "--gpu", "dri"])
+        assert s.devices(a) == [(str(fake_dev / "ttyACM0"), "node"), (str(fake_dev / "dri"), "dir")]
+
+
+def acl(*entries):
+    return struct.pack("<I", 2) + b"".join(struct.pack("<HHI", *entry) for entry in entries)
+
+
+def test_device_access(scenario, tmp_path, monkeypatch):
+    device = tmp_path / "ttyACM0"
+    device.write_text("")
+    uid = os.getuid()
+
+    def getxattr(path, name, value=None):
+        if value is None:
+            raise OSError(61, "No data available")
+        return value
+
+    if scenario == "happy":
+        device.chmod(0o600)
+        assert s.device_access(device)
+        # udev's uaccess: a named ACL entry for this user, limited by the mask.
+        device.chmod(0o000)
+        monkeypatch.setattr(os, "getxattr", lambda path, name: acl((1, 0, 0xFFFFFFFF), (2, 6, uid), (4, 0, 0xFFFFFFFF),
+                                                                  (0x10, 6, 0xFFFFFFFF), (0x20, 0, 0xFFFFFFFF)))
+        monkeypatch.setattr(os, "stat", lambda path: Mock(st_uid=uid + 1, st_gid=os.getgid() + 1, st_mode=0o20000))
+        assert s.device_access(device)
+    elif scenario == "sad":
+        # Only the group could open it, and the sandbox keeps no supplementary groups.
+        monkeypatch.setattr(os, "getxattr", lambda path, name: getxattr(path, name))
+        monkeypatch.setattr(os, "stat", lambda path: Mock(st_uid=uid + 1, st_gid=os.getgid() + 1, st_mode=0o20660))
+        assert not s.device_access(device)
+        # A named entry masked down to read only.
+        monkeypatch.setattr(os, "getxattr", lambda path, name: acl((1, 6, 0xFFFFFFFF), (2, 6, uid), (4, 0, 0xFFFFFFFF),
+                                                                  (0x10, 4, 0xFFFFFFFF), (0x20, 0, 0xFFFFFFFF)))
+        assert not s.device_access(device)
+    else:
+        # Others may: the device is open to everyone; an ACL in an unknown version counts as none.
+        monkeypatch.setattr(os, "getxattr", lambda path, name: struct.pack("<I", 9))
+        monkeypatch.setattr(os, "stat", lambda path: Mock(st_uid=uid + 1, st_gid=os.getgid() + 1, st_mode=0o20666))
+        assert s.device_access(device)
+
+
+def test_group_name(scenario):
+    if scenario == "happy":
+        assert s.group_name(0) == "root"
+    elif scenario == "sad":
+        assert s.group_name(2 ** 31 - 7) == str(2 ** 31 - 7)
+    else:
+        assert s.group_name(os.getgid()) == s.grp.getgrgid(os.getgid()).gr_name
+
+
+def test_device_notes(scenario, fake_dev, monkeypatch):
+    if scenario == "happy":
+        notes = s.device_notes(s.parse_args(["codex", "--device", str(fake_dev / "ttyACM0"), "--device",
+                                             str(fake_dev / "bus/usb")]))
+        assert notes[0] == (f"devices for the agent (their drivers run in your host's kernel): {fake_dev}/ttyACM0, "
+                            f"{fake_dev}/bus/usb (directory: devices plugged in later appear too)")
+        assert len(notes) == 2 and "security keys" in notes[1]
+        assert s.device_notes(s.parse_args(["codex"])) == []
+    elif scenario == "sad":
+        monkeypatch.setattr(s, "device_access", lambda path: False)
+        notes = s.device_notes(s.parse_args(["codex", "--device", str(fake_dev / "ttyACM0"), "--device",
+                                             str(fake_dev / "dri")]))
+        assert "cannot open" in notes[1] and "ttyACM0" in notes[1] and "only through group" in notes[1]
+        assert "any device in" in notes[2] and "udev rule" in notes[2]
+    else:
+        notes = s.device_notes(s.parse_args(["codex", "--device", str(fake_dev / "video0"), "--device",
+                                             str(fake_dev / "snd")]))
+        assert any("camera" in note for note in notes) and any("microphones" in note for note in notes)
+
+
+# --- workspaces trusted without asking -------------------------------------------------------------
+
+
+def test_claude_trusted_workspaces(scenario, tmp_path, capsys):
+    home = tmp_path / "home"
+    home.mkdir()
+    a = s.parse_args(["claude", "--workspace", f"{tmp_path / 'app'},{tmp_path / 'lib'}"])
+    if scenario == "happy":
+        s.claude_trusted_workspaces(a, home)
+        projects = json.loads((home / ".claude.json").read_text())["projects"]
+        assert projects == {"/work": {"hasTrustDialogAccepted": True},
+                            "/workspaces/lib": {"hasTrustDialogAccepted": True}}
+    elif scenario == "sad":
+        (home / ".claude.json").write_text("{not json")
+        s.claude_trusted_workspaces(a, home)
+        assert (home / ".claude.json").read_text() == "{not json"
+        assert "may ask whether you trust" in capsys.readouterr().err
+    else:
+        # Other keys of a project and other projects stay; a second run changes nothing.
+        (home / ".claude.json").write_text(json.dumps({"projects": {"/work": {"history": [1]}, "/old": {}}}))
+        s.claude_trusted_workspaces(a, home)
+        before = (home / ".claude.json").stat().st_mtime_ns
+        s.claude_trusted_workspaces(a, home)
+        projects = json.loads((home / ".claude.json").read_text())["projects"]
+        assert projects["/work"] == {"history": [1], "hasTrustDialogAccepted": True} and projects["/old"] == {}
+        assert (home / ".claude.json").stat().st_mtime_ns == before
+
+
+def test_codex_trusted_workspaces(scenario, tmp_path, capsys):
+    home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True)
+    a = s.parse_args(["codex", "--workspace", f"{tmp_path / 'app'},{tmp_path / 'lib'}"])
+    config = home / ".codex/config.toml"
+    if scenario == "happy":
+        s.codex_trusted_workspaces(a, home)
+        assert config.read_text() == ('[projects."/work"]\ntrust_level = "trusted"\n\n'
+                                      '[projects."/workspaces/lib"]\ntrust_level = "trusted"\n')
+        assert stat.S_IMODE(config.stat().st_mode) == 0o600
+    elif scenario == "sad":
+        config.symlink_to(tmp_path / "elsewhere.toml")
+        with pytest.raises(ValueError, match="symlink"):
+            s.codex_trusted_workspaces(a, home)
+        assert not (tmp_path / "elsewhere.toml").exists()
+    else:
+        # Existing settings and an explicit decision for a workspace are kept.
+        config.write_text('model = "gpt-5"\n\n[projects.\'/work\']\ntrust_level = "untrusted"\n')
+        s.codex_trusted_workspaces(a, home)
+        assert config.read_text() == ('model = "gpt-5"\n\n[projects.\'/work\']\ntrust_level = "untrusted"\n\n'
+                                      '[projects."/workspaces/lib"]\ntrust_level = "trusted"\n')
+        s.codex_trusted_workspaces(a, home)
+        assert config.read_text().count("/workspaces/lib") == 1
+
+
+# --- connection proxy (runtime.py) and its launcher side -------------------------------------------
+
+rt = s.RUNTIME
+needs_openssl = pytest.mark.skipif(not shutil.which("openssl"), reason="needs openssl")
+OID_A, OID_B = "a" * 40, "b" * 40
+
+
+def client_hello(name):
+    """A real ClientHello with SNI NAME, taken from Python's TLS client."""
+    context = ssl.create_default_context()
+    incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+    tls = context.wrap_bio(incoming, outgoing, server_hostname=name)
+    with pytest.raises(ssl.SSLWantReadError):
+        tls.do_handshake()
+    return outgoing.read()
+
+
+def test_run_openssl(scenario, tmp_path):
+    if not shutil.which("openssl"):
+        pytest.skip("needs openssl")
+    if scenario == "happy":
+        rt.run_openssl(["genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256", "-out",
+                        str(tmp_path / "k.pem")])
+        assert (tmp_path / "k.pem").read_text().startswith("-----BEGIN PRIVATE KEY")
+    elif scenario == "sad":
+        with pytest.raises(RuntimeError, match="openssl genpkey failed"):
+            rt.run_openssl(["genpkey", "-algorithm", "NOPE"])
+    else:
+        # The configuration's $ENV::SAN comes from the san argument.
+        (tmp_path / "c.cnf").write_text("x = $ENV::SAN\n[req]\ndistinguished_name=dn\n[dn]\n")
+        rt.run_openssl(["req", "-new", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout",
+                        str(tmp_path / "k"), "-subj", "/CN=x", "-config", str(tmp_path / "c.cnf"), "-out",
+                        str(tmp_path / "r")], san="DNS:x")
+
+
+@needs_openssl
+def test_create_ca(scenario, tmp_path):
+    bundle = tmp_path / "system.crt"
+    bundle.write_bytes(b"-----BEGIN CERTIFICATE-----\nSYSTEM\n-----END CERTIFICATE-----\n")
+    if scenario == "happy":
+        rt.create_ca(tmp_path / "run", tmp_path / "ca", bundles=(str(tmp_path / "missing"), str(bundle)))
+        ca = (tmp_path / "ca" / "ca.pem").read_bytes()
+        assert (tmp_path / "ca" / "bundle.pem").read_bytes() == bundle.read_bytes() + ca
+        assert (tmp_path / "run" / "system.pem").read_bytes() == bundle.read_bytes()
+        assert stat.S_IMODE((tmp_path / "run").stat().st_mode) == 0o700
+        assert stat.S_IMODE((tmp_path / "ca" / "bundle.pem").stat().st_mode) == 0o644
+        text = subprocess.run(["openssl", "x509", "-in", str(tmp_path / "ca" / "ca.pem"), "-noout", "-text"],
+                              capture_output=True, text=True).stdout
+        assert "CA:TRUE, pathlen:0" in text and "this run only" in text
+    elif scenario == "sad":
+        (tmp_path / "run").write_text("a file")
+        with pytest.raises(OSError):
+            rt.create_ca(tmp_path / "run", tmp_path / "ca", bundles=())
+    else:
+        # Without a system bundle the agent's bundle is the session CA alone.
+        rt.create_ca(tmp_path / "run", tmp_path / "ca", bundles=())
+        assert (tmp_path / "ca" / "bundle.pem").read_bytes() == (tmp_path / "ca" / "ca.pem").read_bytes()
+
+
+@needs_openssl
+def test_server_certificate(scenario, tmp_path):
+    rt.create_ca(tmp_path / "run", tmp_path / "ca", bundles=())
+    run = tmp_path / "run"
+    if scenario == "happy":
+        path = rt.server_certificate(run, "API.Example.org.")
+        assert path.name == "api.example.org.pem"
+        assert rt.server_certificate(run, "api.example.org") == path  # made once
+        verify = subprocess.run(["openssl", "verify", "-CAfile", str(tmp_path / "ca" / "ca.pem"), str(path)],
+                                capture_output=True, text=True)
+        assert verify.returncode == 0
+    elif scenario == "sad":
+        for name in ("../../etc/passwd", "a b", "x" * 300, "-subj"):
+            with pytest.raises(ValueError, match="not a host name"):
+                rt.server_certificate(run, name)
+    else:
+        path = rt.server_certificate(run, "2001:db8::1")
+        text = subprocess.run(["openssl", "x509", "-in", str(path), "-noout", "-ext", "subjectAltName"],
+                              capture_output=True, text=True).stdout
+        assert "IP Address:2001:DB8:0:0:0:0:0:1" in text.upper().replace("IP ADDRESS", "IP Address")
+
+
+def test_client_hello_sni(scenario):
+    hello = client_hello("api.example.org")
+    if scenario == "happy":
+        assert rt.client_hello_sni(hello) == ("tls", "api.example.org")
+    elif scenario == "sad":
+        assert rt.client_hello_sni(b"GET / HTTP/1.1\r\n") == ("other", None)
+        assert rt.client_hello_sni(b"SSH-2.0-x") == ("other", None)
+        assert rt.client_hello_sni(b"\x16\x03\x01\x00\x05\x02\x00\x00\x01\x00") == ("tls", None)  # not a ClientHello
+    else:
+        assert rt.client_hello_sni(hello[:3]) == ("partial", None)
+        assert rt.client_hello_sni(hello[:-1]) == ("partial", None)
+        assert rt.client_hello_sni(b"") == ("other", None)
+
+
+def test_original_destination(scenario):
+    if scenario == "happy":
+        sock = Mock(family=socket.AF_INET)
+        sock.getsockopt.return_value = struct.pack("!HH4s8x", socket.AF_INET, 443, socket.inet_aton("192.0.2.7"))
+        assert rt.original_destination(sock) == ("192.0.2.7", 443)
+        assert sock.getsockopt.call_args.args == (socket.SOL_IP, 80, 16)
+    elif scenario == "sad":
+        sock = Mock(family=socket.AF_INET)
+        sock.getsockopt.side_effect = OSError(2, "No such file or directory")  # not redirected
+        with pytest.raises(OSError):
+            rt.original_destination(sock)
+    else:
+        sock = Mock(family=socket.AF_INET6)
+        sock.getsockopt.return_value = (struct.pack("!HHI", socket.AF_INET6, 8443, 0)
+                                        + socket.inet_pton(socket.AF_INET6, "2001:db8::5") + b"\0" * 4)
+        assert rt.original_destination(sock) == ("2001:db8::5", 8443)
+
+
+def test_allowed_destination(scenario):
+    allow = {"nets": ["192.0.2.0/24"], "https": ["198.51.100.4/32"], "tcp": [["203.0.113.9", 5432]],
+             "loopback": [3000]}
+    if scenario == "happy":
+        assert rt.allowed_destination(allow, "192.0.2.200", 22)
+        assert rt.allowed_destination(allow, "198.51.100.4", 443)
+        assert rt.allowed_destination(allow, "203.0.113.9", 5432)
+        assert rt.allowed_destination(allow, "127.0.0.1", 3000)
+    elif scenario == "sad":
+        assert not rt.allowed_destination(allow, "198.51.100.4", 80)
+        assert not rt.allowed_destination(allow, "203.0.113.9", 5433)
+        assert not rt.allowed_destination(allow, "127.0.0.1", 15001)  # the proxy itself
+        assert not rt.allowed_destination({}, "192.0.2.1", 443)
+    else:
+        # Everything outside, but loopback only where forwarded.
+        assert rt.allowed_destination({"all": True}, "2001:db8::1", 1)
+        assert not rt.allowed_destination({"all": True}, "::1", 22)
+
+
+def test_redact_headers(scenario):
+    if scenario == "happy":
+        assert rt.redact_headers([["Authorization", "Bearer x"], ["X-Api-Key", "k"], ["Accept", "*/*"]]) == [
+            ["Authorization", "[redacted]"], ["X-Api-Key", "[redacted]"], ["Accept", "*/*"]]
+    elif scenario == "sad":
+        assert rt.redact_headers([["Cookie", "a=b"], ["Set-Cookie", "s=1"], ["Proxy-Authorization", "x"]]) == [
+            ["Cookie", "[redacted]"], ["Set-Cookie", "[redacted]"], ["Proxy-Authorization", "[redacted]"]]
+    else:
+        # Other headers keep their value, minus anything that looks like a token.
+        assert rt.redact_headers([["Referer", "https://x/?access_token=abc"]]) == [
+            ["Referer", "https://x/?access_token=[redacted]"]]
+        assert rt.redact_headers([]) == []
+
+
+def test_redact_text(scenario):
+    if scenario == "happy":
+        text = '{"refreshToken": "r-1", "api_key": "k", "model": "m"}'
+        assert rt.redact_text(text) == '{"refreshToken": "[redacted]", "api_key": "[redacted]", "model": "m"}'
+        assert rt.redact_text("grant_type=x&code=abc&client_secret=s") == "grant_type=x&code=[redacted]&client_secret=[redacted]"
+    elif scenario == "sad":
+        token = "ghp_" + "Z" * 36
+        assert token not in rt.redact_text(f"push with {token} now")
+        key = "sk-" + "ant-api03-" + "abcdefghijklmnop"  # assembled, so that no scanner takes the file for a leak
+        assert key not in rt.redact_text(f"key {key}")
+        assert rt.redact_text("Authorization: Bearer abcdefghijkl") == "Authorization: Bearer [redacted]"
+    else:
+        assert rt.redact_text("") == "" and rt.redact_text("plain words") == "plain words"
+        assert rt.redact_text('{"password": "a\\"b"}') == '{"password": "[redacted]"}'
+
+
+def test_body_record(scenario):
+    if scenario == "happy":
+        assert rt.body_record(b'{"a": 1}', 8, [], 100) == {"size": 8, "truncated": False, "text": '{"a": 1}'}
+        packed = gzip.compress(b"hello world")
+        assert rt.body_record(packed, len(packed), [["Content-Encoding", "gzip"]], 100)["text"] == "hello world"
+    elif scenario == "sad":
+        record = rt.body_record(b"\x00\x01\xff", 3, [], 100)
+        assert record["base64"] == base64.b64encode(b"\x00\x01\xff").decode()
+        assert rt.body_record(b"xx", 2, [["Content-Encoding", "br"]], 100)["encoding"] == "br"
+        assert rt.body_record(b"", 0, [], 100) is None
+    else:
+        # Cut in the middle of a character: the text ends before it; the size is the whole body's.
+        record = rt.body_record("aé".encode()[:2], 3, [], 2)
+        assert record == {"size": 3, "truncated": True, "text": "a"}
+
+
+def test_pkt_lines(scenario):
+    if scenario == "happy":
+        assert rt.pkt_lines(b"0009hello0000PACK") == ([b"hello"], True)
+    elif scenario == "sad":
+        with pytest.raises(ValueError):
+            rt.pkt_lines(b"zzzzhello")
+        with pytest.raises(ValueError):
+            rt.pkt_lines(b"0002")
+    else:
+        assert rt.pkt_lines(b"0009hel") == ([], False)
+        assert rt.pkt_lines(b"0009hello") == ([b"hello"], False)
+        assert rt.pkt_lines(b"0000") == ([], True)
+
+
+def test_push_commands(scenario):
+    first = f"{OID_A} {OID_B} refs/heads/main\0report-status side-band-64k\n".encode()
+    if scenario == "happy":
+        assert rt.push_commands([first, f"{'0' * 40} {OID_A} refs/tags/v1\n".encode()]) == (
+            [(OID_A, OID_B, "refs/heads/main"), ("0" * 40, OID_A, "refs/tags/v1")], {"report-status", "side-band-64k"})
+    elif scenario == "sad":
+        for lines in ([], [b"push-cert\0report-status\n"], [f"{OID_A} xyz refs/heads/main\n".encode()]):
+            with pytest.raises(ValueError):
+                rt.push_commands(lines)
+    else:
+        assert rt.push_commands([b"shallow " + OID_A.encode(), first])[0] == [(OID_A, OID_B, "refs/heads/main")]
+
+
+def test_advertised_refs(scenario):
+    if scenario == "happy":
+        body = (rt.pkt(b"# service=git-receive-pack\n") + b"0000" + rt.pkt(f"{OID_A} refs/heads/main\0caps\n".encode())
+                + rt.pkt(f"{OID_B} refs/tags/v1\n".encode()) + b"0000")
+        assert rt.advertised_refs(body) == {OID_A, OID_B}
+    elif scenario == "sad":
+        assert rt.advertised_refs(b"<html>not git</html>") == set()
+    else:
+        # An empty repository advertises the zero id.
+        empty = rt.pkt(f"{'0' * 40} capabilities^{{}}\0report-status\n".encode()) + b"0000"
+        assert rt.advertised_refs(empty) == set()
+
+
+def test_pkt(scenario):
+    if scenario == "happy":
+        assert rt.pkt(b"hello") == b"0009hello"
+    elif scenario == "sad":
+        assert rt.pkt(b"") == b"0004"
+    else:
+        assert rt.pkt(b"x" * 65516)[:4] == b"fff0"
+
+
+def test_push_rejection(scenario):
+    commands = [(OID_A, OID_B, "refs/heads/main")]
+    if scenario == "happy":
+        response = rt.push_rejection(commands, "line one\nline two", {"report-status", "side-band-64k"})
+        head, _, body = response.partition(b"\r\n\r\n")
+        assert b"application/x-git-receive-pack-result" in head and b"Content-Length: %d" % len(body) in head
+        assert b"\x02sandbox-ai: line one\n" in body and b"\x02sandbox-ai: line two\n" in body
+        assert b"ng refs/heads/main refused by the sandbox-ai privacy check" in body and body.endswith(b"0000")
+    elif scenario == "sad":
+        body = rt.push_rejection(commands, "why", {"report-status"}).partition(b"\r\n\r\n")[2]
+        assert body.startswith(rt.pkt(b"unpack ok\n")) and b"why" not in body  # no side band for messages
+    else:
+        body = rt.push_rejection(commands * 3, "m", {"side-band"}).partition(b"\r\n\r\n")[2]
+        assert body.count(b"ng refs/heads/main") == 3
+
+
+def test_parse_head(scenario):
+    if scenario == "happy":
+        assert rt.parse_head(b"GET /x HTTP/1.1\r\nHost: a\r\nX-Y:  z \r\n\r\n") == ("GET /x HTTP/1.1",
+                                                                                 [["Host", "a"], ["X-Y", "z"]])
+    elif scenario == "sad":
+        for head in (b"GET / HTTP/1.1\r\nno colon\r\n\r\n", b"GET / HTTP/1.1\r\n Folded: x\r\n\r\n"):
+            with pytest.raises(ValueError):
+                rt.parse_head(head)
+    else:
+        assert rt.parse_head(b"HTTP/1.1 204 No Content\r\n\r\n") == ("HTTP/1.1 204 No Content", [])
+
+
+def test_header(scenario):
+    headers = [["Content-Length", "1"], ["X", "a"], ["x", "b"]]
+    if scenario == "happy":
+        assert rt.header(headers, "content-length") == "1"
+    elif scenario == "sad":
+        assert rt.header(headers, "missing") is None
+    else:
+        assert rt.header(headers, "x") == "b"  # the last one
+
+
+def test_send_all(scenario):
+    left, right = socket.socketpair()
+    try:
+        if scenario == "happy":
+            rt.send_all(left, b"x" * 100000)
+            data = b""
+            while len(data) < 100000:
+                data += right.recv(65536)
+            assert data == b"x" * 100000
+        elif scenario == "sad":
+            right.close()
+            with pytest.raises(OSError):
+                for _ in range(100):
+                    rt.send_all(left, b"x" * 65536)
+        else:
+            # A non-blocking socket with a full buffer waits instead of failing.
+            left.setblocking(False)
+            reader = threading.Thread(target=lambda: [right.recv(1 << 20) for _ in range(40)], daemon=True)
+            reader.start()
+            rt.send_all(left, b"y" * (2 << 20))
+    finally:
+        left.close()
+        right.close()
+
+
+def test_relay(scenario):
+    a1, a2 = socket.socketpair()
+    b1, b2 = socket.socketpair()
+    counts = [0, 0]
+    thread = threading.Thread(target=rt.relay, args=(a2, b1, counts), kwargs={"grace": 1}, daemon=True)
+    thread.start()
+    try:
+        if scenario == "happy":
+            a1.sendall(b"ping")
+            assert b2.recv(10) == b"ping"
+            b2.sendall(b"pong!")
+            assert a1.recv(10) == b"pong!"
+            a1.close()
+            b2.close()
+            thread.join(5)
+            assert counts == [4, 5] and not thread.is_alive()
+        elif scenario == "sad":
+            # One side ends, the other stays quiet: the relay stops after the grace time.
+            a1.close()
+            thread.join(5)
+            assert not thread.is_alive()
+        else:
+            # Half-close travels: the far side sees the end and still answers.
+            a1.shutdown(socket.SHUT_WR)
+            assert b2.recv(10) == b""
+            b2.sendall(b"late")
+            assert a1.recv(10) == b"late"
+            b2.close()
+            thread.join(5)
+            assert counts == [0, 4]
+    finally:
+        for sock in (a1, b2, a2, b1):
+            sock.close()
+
+
+def test_request_framing(scenario):
+    if scenario == "happy":
+        assert rt.request_framing([["Content-Length", "12"]]) == ("length", 12)
+        assert rt.request_framing([["Transfer-Encoding", "Chunked "]]) == ("chunked",)
+    elif scenario == "sad":
+        # Anything a server could frame differently is refused (request smuggling).
+        for headers in ([["Content-Length", "-1"]], [["Transfer-Encoding", "gzip, chunked"]],
+                        [["Transfer-Encoding", "chunked"], ["Content-Length", "5"]],
+                        [["Content-Length", "5"], ["Content-Length", "6"]], [["Transfer-Encoding", "xchunked"]]):
+            with pytest.raises(ValueError):
+                rt.request_framing(headers)
+    else:
+        assert rt.request_framing([]) is None and rt.request_framing([["Content-Length", "0"]]) is None
+
+
+def test_response_framing(scenario):
+    if scenario == "happy":
+        assert rt.response_framing("GET", 200, [["Content-Length", "3"]]) == ("length", 3)
+        assert rt.response_framing("GET", 200, [["Transfer-Encoding", "chunked"]]) == ("chunked",)
+    elif scenario == "sad":
+        assert rt.response_framing("GET", 200, []) == ("close",)
+    else:
+        for method, status in (("HEAD", 200), ("GET", 204), ("GET", 304), ("GET", 101)):
+            assert rt.response_framing(method, status, [["Content-Length", "9"]]) is None
+
+
+def test_host_matches(scenario):
+    if scenario == "happy":
+        assert rt.host_matches("API.example.org.", ["api.example.org"])
+        assert rt.host_matches("a.b.example.org", ["*.example.org"])
+    elif scenario == "sad":
+        assert not rt.host_matches("example.org", ["*.example.org"])
+        assert not rt.host_matches("evilexample.org", ["*.example.org"])
+    else:
+        assert not rt.host_matches(None, ["*.example.org"]) and not rt.host_matches("x", [])
+
+
+def test_drop_to_proxy_user(scenario, monkeypatch):
+    calls = []
+    for name in ("setgroups", "setresgid", "setresuid"):
+        monkeypatch.setattr(rt.os, name, lambda *args, n=name: calls.append((n, args)))
+    libc = Mock()
+    libc.prctl.return_value = -1 if scenario == "sad" else 0
+    monkeypatch.setattr(rt.ctypes, "CDLL", lambda *a, **kw: libc)
+    if scenario == "sad":
+        with pytest.raises(OSError, match="no_new_privs"):
+            rt.drop_to_proxy_user()
+    else:
+        rt.drop_to_proxy_user()
+        # Groups first, then the group, the user last (afterwards nothing could be changed).
+        assert calls == [("setgroups", ([],)), ("setresgid", (1, 1, 1)), ("setresuid", (1, 1, 1))]
+        assert libc.prctl.call_args.args[:2] == (38, 1)
+
+
+def test_proxy_listeners(scenario):
+    if scenario == "happy":
+        listeners = rt.proxy_listeners(0)
+        try:
+            assert listeners[0].getsockname()[0] == "127.0.0.1"
+        finally:
+            for sock in listeners:
+                sock.close()
+    elif scenario == "sad":
+        taken = socket.socket()
+        taken.bind(("127.0.0.1", 0))
+        taken.listen()
+        try:
+            with pytest.raises(OSError):
+                rt.proxy_listeners(taken.getsockname()[1])
+        finally:
+            taken.close()
+    else:
+        listeners = rt.proxy_listeners(0)
+        try:
+            assert all(sock.type == socket.SOCK_STREAM for sock in listeners) and 1 <= len(listeners) <= 2
+        finally:
+            for sock in listeners:
+                sock.close()
+
+
+@needs_openssl
+def test_proxy_main(scenario, tmp_path, monkeypatch):
+    proxy_dir, run = tmp_path / "proxy", tmp_path / "run"
+    proxy_dir.mkdir()
+    (proxy_dir / "proxy.json").write_text(json.dumps({"port": 0, "allow": {"all": True},
+                                                      "push_check": scenario == "edge"}))
+    monkeypatch.setattr(rt, "PROXY_DIR", proxy_dir)
+    monkeypatch.setattr(rt, "PROXY_RUN", run)
+    monkeypatch.setattr(rt, "CA_DIR", tmp_path / "ca")
+    chowned, popen, real_popen = [], Mock(), subprocess.Popen
+    monkeypatch.setattr(rt.os, "chown", lambda path, uid, gid: chowned.append((str(path), uid, gid)))
+    # openssl really runs (through subprocess.run); only the checker process is recorded.
+    monkeypatch.setattr(rt.subprocess, "Popen",
+                        lambda command, *a, **kw: real_popen(command, *a, **kw) if command[0] == "openssl"
+                        else popen(command, *a, **kw))
+    monkeypatch.setattr(rt, "drop_to_proxy_user", Mock(side_effect=OSError("drop") if scenario == "sad" else None))
+    monkeypatch.setattr(rt.ProxyServer, "wait", lambda self: 0)
+    served = Mock()
+    monkeypatch.setattr(rt.ProxyServer, "serve", served)
+    ready_r, ready_w = os.pipe()
+    log = os.open(tmp_path / "log", os.O_WRONLY | os.O_CREAT)
+    try:
+        if scenario == "sad":
+            with pytest.raises(OSError, match="drop"):
+                rt.proxy_main(log, ready_w)
+            assert not served.called  # nothing is served with root's rights
+            return
+        assert rt.proxy_main(log, ready_w) == 0
+        assert os.read(ready_r, 1) == b"1"
+        assert (str(run), 1, 1) in chowned and (str(run / "ca.key"), 1, 1) in chowned
+        assert json.loads((run / "allow.json").read_text()) == {"all": True}
+        if scenario == "edge":
+            command = popen.call_args.args[0]
+            assert command[:len(rt.DROP_ALL)] == rt.DROP_ALL and command[-2:] == ["serve", str(proxy_dir / "push.json")]
+            assert popen.call_args.kwargs["env"]["HOME"] == "/nonexistent"
+        else:
+            popen.assert_not_called()
+    finally:
+        os.close(ready_r)
+        os.close(log)
+        with contextlib.suppress(OSError):
+            os.close(ready_w)
+        for sock in served.call_args.args[0] if served.called else []:
+            sock.close()
+
+
+def test_start_proxy(scenario, tmp_path, monkeypatch):
+    monkeypatch.setattr(rt, "LOG_DIR", tmp_path)
+    trusted = Mock()
+    monkeypatch.setattr(rt, "trust_session_ca", trusted)
+    started = []
+
+    def popen(command, pass_fds, **kwargs):
+        log_fd, ready_fd = pass_fds
+        started.append(command)
+        process = Mock()
+        process.poll.return_value = None if scenario != "sad" else 1
+        if scenario == "happy":
+            os.write(ready_fd, b"1")
+        elif scenario == "edge":
+            os.write(ready_fd, b"x")
+        return process
+    monkeypatch.setattr(rt.subprocess, "Popen", popen)
+    monkeypatch.setattr(rt, "stop_process", Mock())
+    if scenario == "happy":
+        rt.start_proxy({"log": "connections-x.jsonl"})
+        assert started[0][2:4] == ["/sandbox/runtime.py", "--internal-proxy"]
+        assert (tmp_path / "connections-x.jsonl").exists() and trusted.called
+        assert stat.S_IMODE((tmp_path / "connections-x.jsonl").stat().st_mode) == 0o600
+    else:
+        with pytest.raises(RuntimeError, match="did not start"):
+            rt.start_proxy({"log": "connections-x.jsonl"})
+        assert not trusted.called and rt.stop_process.called
+
+
+def test_trust_session_ca(scenario, tmp_path):
+    bundle = tmp_path / "certs" / "ca-certificates.crt"
+    bundle.parent.mkdir()
+    bundle.write_text("system")
+    (tmp_path / "cert.pem").symlink_to(bundle)
+    mounts = []
+    if scenario == "happy":
+        done = rt.trust_session_ca((str(bundle), str(tmp_path / "cert.pem")), mount=lambda s, t: mounts.append((s, t)))
+        # A link to the same file is bound once.
+        assert done == [str(bundle)] and mounts == [(str(rt.CA_DIR / "bundle.pem"), str(bundle))]
+    elif scenario == "sad":
+        def fail(source, target):
+            raise OSError(1, "no")
+        with pytest.raises(OSError):
+            rt.trust_session_ca((str(bundle),), mount=fail)
+    else:
+        assert rt.trust_session_ca((str(tmp_path / "missing"),), mount=lambda s, t: mounts.append(t)) == []
+        assert mounts == []
+
+
+def test_runtime_rules(scenario):
+    if scenario == "happy":
+        script = rt.runtime_rules({"nets": {"192.0.2.0/24"}, "https": {"198.51.100.4/32"},
+                                   "tcp": {("203.0.113.9", 5432)}})
+        assert script.splitlines() == [
+            "flush chain inet agent_sandbox runtime",
+            "add rule inet agent_sandbox runtime ip daddr 192.0.2.0/24 accept",
+            "add rule inet agent_sandbox runtime ip daddr 198.51.100.4/32 tcp dport 443 accept",
+            "add rule inet agent_sandbox runtime ip daddr 203.0.113.9 tcp dport 5432 accept"]
+    elif scenario == "sad":
+        with pytest.raises(ValueError):
+            rt.runtime_rules({"nets": {"not-an-address"}, "https": set(), "tcp": set()})
+    else:
+        assert rt.runtime_rules({"nets": set(), "https": {"2001:db8::/32"}, "tcp": set()}).splitlines()[1] == \
+            "add rule inet agent_sandbox runtime ip6 daddr 2001:db8::/32 tcp dport 443 accept"
+
+
+def test_runtime_change(scenario):
+    empty = {"nets": set(), "https": set(), "tcp": set()}
+    if scenario == "happy":
+        state = rt.runtime_change(empty, {"op": "allow", "https": ["192.0.2.7"], "tcp": [["192.0.2.8", 22]]})
+        assert state == {"nets": set(), "https": {"192.0.2.7/32"}, "tcp": {("192.0.2.8", 22)}}
+        assert rt.runtime_change(state, {"op": "revoke", "https": ["192.0.2.7/32"]})["https"] == set()
+    elif scenario == "sad":
+        for request in ({"op": "drop"}, {"op": "allow", "nets": ["192.0.2.1; flush ruleset"]},
+                        {"op": "allow", "tcp": [["192.0.2.1", 0]]}, {"op": "allow", "tcp": [["192.0.2.1", True]]},
+                        {"op": "allow", "tcp": [["192.0.2.1", "22"]]}, {"op": "allow", "nets": ["fe80::1%eth0"]}):
+            with pytest.raises(ValueError):
+                rt.runtime_change(empty, request)
+    else:
+        # Revoking what was never allowed changes nothing; networks are normalised.
+        assert rt.runtime_change(empty, {"op": "revoke", "nets": ["10.0.0.0/8"]}) == empty
+        assert rt.runtime_change(empty, {"op": "allow", "nets": ["10.1.2.3/8"]})["nets"] == {"10.0.0.0/8"}
+
+
+def test_merged_allow(scenario):
+    base = {"all": False, "nets": ["192.0.2.0/24"], "https": ["198.51.100.1/32"], "tcp": [["203.0.113.1", 22]],
+            "loopback": [3000]}
+    empty = {"nets": set(), "https": set(), "tcp": set()}
+    if scenario == "happy":
+        merged = rt.merged_allow(base, {"nets": set(), "https": {"198.51.100.2/32"}, "tcp": {("203.0.113.2", 5432)}})
+        assert merged["https"] == ["198.51.100.1/32", "198.51.100.2/32"]
+        assert merged["tcp"] == [["203.0.113.1", 22], ["203.0.113.2", 5432]] and merged["loopback"] == [3000]
+    elif scenario == "sad":
+        assert rt.merged_allow({}, empty) == {"nets": [], "https": [], "tcp": [], "ssh": []}
+    else:
+        assert rt.merged_allow(base, empty) == {**base, "ssh": []} and base["nets"] == ["192.0.2.0/24"]
+        # What `net allow` opened explicitly may also take SSH, as --allow and --allow-tcp at the start.
+        assert rt.merged_allow(base, {"nets": {"10.0.0.0/8"}, "https": set(), "tcp": {("192.0.2.9", 22)}})["ssh"] == [
+            "10.0.0.0/8", "192.0.2.9"]
+
+
+def test_control_server(scenario, tmp_path):
+    socket_path, allow = tmp_path / "control.sock", tmp_path / "allow.json"
+    applied, stop = [], threading.Event()
+    apply = (lambda script: applied.append(script)) if scenario != "sad" else Mock(
+        side_effect=subprocess.CalledProcessError(1, "nft"))
+    thread = threading.Thread(target=rt.control_server, args=(socket_path, {"loopback": [3000]},
+                                                              allow if scenario != "edge" else None, stop, apply),
+                              daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 5
+    while not socket_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    def ask(request):
+        with socket.socket(socket.AF_UNIX) as client:
+            client.connect(str(socket_path))
+            client.sendall(json.dumps(request).encode() + b"\n")
+            return json.loads(client.makefile().readline())
+    try:
+        if scenario == "happy":
+            answer = ask({"op": "allow", "https": ["192.0.2.7"]})
+            assert answer == {"ok": True, "nets": [], "https": ["192.0.2.7/32"], "tcp": []}
+            assert "tcp dport 443 accept" in applied[-1]
+            assert json.loads(allow.read_text())["https"] == ["192.0.2.7/32"]
+            assert ask({"op": "show"})["https"] == ["192.0.2.7/32"]
+        elif scenario == "sad":
+            # The firewall refused: nothing is recorded as allowed.
+            answer = ask({"op": "allow", "https": ["192.0.2.7"]})
+            assert not answer["ok"] and ask({"op": "show"})["https"] == [] and not allow.exists()
+            assert not ask({"op": "allow", "nets": ["x"]})["ok"]
+        else:
+            assert ask({"op": "allow", "tcp": [["192.0.2.9", 22]]})["tcp"] == [["192.0.2.9", 22]]
+            assert ask({"op": "revoke", "tcp": [["192.0.2.9", 22]]})["tcp"] == []
+            assert applied[-1] == "flush chain inet agent_sandbox runtime\n"
+    finally:
+        stop.set()
+        thread.join(5)
+
+
+def test_proxy_enabled(scenario):
+    if scenario == "happy":
+        assert s.proxy_enabled(s.parse_args(["codex"]))
+    elif scenario == "sad":
+        assert not s.proxy_enabled(s.parse_args(["codex", "--no-proxy"]))
+    else:
+        assert not s.proxy_enabled(s.parse_args(["codex", "--offline"]))
+
+
+def test_proxy_allow(scenario):
+    hosts = {"api.openai.com": ["192.0.2.10"]}
+    if scenario == "happy":
+        a = s.parse_args(["codex", "--allow", "198.51.100.0/24", "--allow-tcp", "203.0.113.5:5432"])
+        allow = s.proxy_allow(a, hosts)
+        assert allow == {"all": False, "nets": ["198.51.100.0/24"], "https": ["192.0.2.10/32"],
+                         "tcp": [["203.0.113.5", 5432]], "loopback": []}
+    elif scenario == "sad":
+        assert s.proxy_allow(s.parse_args(["codex"]), {}) == {"all": False, "nets": [], "https": [], "tcp": [],
+                                                              "loopback": []}
+    else:
+        allow = s.proxy_allow(s.parse_args(["codex", "--egress-all-allow", "--allow-host-port", "3000"]), hosts)
+        assert allow["all"] and allow["loopback"] == [3000]
+        assert ["1.1.1.1", 53] in allow["tcp"]  # resolvers over TCP
+
+
+def test_proxy_config(scenario):
+    hosts = {"github.com": ["192.0.2.20"], "api.github.com": ["192.0.2.21"], "pypi.org": ["192.0.2.30"]}
+    if scenario == "happy":
+        config = s.proxy_config(s.parse_args(["codex", "--allow-tcp", "203.0.113.5:22"]), hosts, "connections-x.jsonl")
+        assert config["ssh"] == {"block": True, "allowed": ["203.0.113.5"], "public_git": ["192.0.2.20", "192.0.2.21"]}
+        assert config["push_check"] and config["log"] == "connections-x.jsonl" and config["body_limit"] == 65536
+    elif scenario == "sad":
+        config = s.proxy_config(s.parse_args(["codex", "--privacy-check", "off"]), hosts, "l")
+        assert not config["ssh"]["block"] and not config["push_check"]
+    else:
+        config = s.proxy_config(s.parse_args(["codex", "--no-inspect", "Login.Example.org"]), {}, "l")
+        assert config["no_inspect"] == ["login.example.org"] and config["port"] == s.PROXY_PORT
+
+
+def test_write_proxy_files(scenario, tmp_path):
+    work = tmp_path / "app"
+    work.mkdir()
+    out = tmp_path / "proxy"
+    out.mkdir()
+    if scenario == "happy":
+        a = s.parse_args(["codex", "--workspace", str(work)])
+        s.write_proxy_files(a, out, {}, "connections-x.jsonl")
+        assert sorted(p.name for p in out.iterdir()) == ["privacy.py", "proxy.json", "push.json"]
+        push = json.loads((out / "push.json").read_text())
+        assert push["mode"] == "public" and push["workspaces"][0]["path"] == "/work"
+        assert any(p["id"] for p in push["workspaces"][0]["rules"]["pattern"])
+        assert all(stat.S_IMODE(p.stat().st_mode) == 0o600 for p in out.iterdir())
+    elif scenario == "sad":
+        rules = tmp_path / "rules"
+        rules.mkdir()
+        (rules / "global.rules.json").write_text("{broken")
+        with pytest.raises(ValueError, match="--privacy-rules"):
+            s.write_proxy_files(s.parse_args(["codex", "--workspace", str(work), "--privacy-rules", str(rules)]),
+                                out, {}, "l")
+    else:
+        s.write_proxy_files(s.parse_args(["codex", "--workspace", str(work), "--privacy-check", "off"]), out, {}, "l")
+        assert [p.name for p in out.iterdir()] == ["proxy.json"]
+
+
+def test_rotate_connection_logs(scenario, tmp_path):
+    for index in range(3):
+        (tmp_path / f"connections-2026110{index}-x.jsonl").write_bytes(b"x" * 100)
+        os.utime(tmp_path / f"connections-2026110{index}-x.jsonl", (time.time() - 7200, time.time() - 7200))
+    (tmp_path / "files.jsonl").write_bytes(b"y" * 1000)
+    if scenario == "happy":
+        assert s.rotate_connection_logs(tmp_path, limit=150) == ["connections-20261100-x.jsonl",
+                                                                  "connections-20261101-x.jsonl"]
+        assert (tmp_path / "files.jsonl").exists() and (tmp_path / "connections-20261102-x.jsonl").exists()
+    elif scenario == "sad":
+        assert s.rotate_connection_logs(tmp_path / "missing") == []
+    else:
+        assert s.rotate_connection_logs(tmp_path, limit=300) == []
+        # A log written within the hour may belong to a sandbox that still runs: kept.
+        os.utime(tmp_path / "connections-20261100-x.jsonl", None)
+        assert s.rotate_connection_logs(tmp_path, limit=150) == ["connections-20261101-x.jsonl",
+                                                                  "connections-20261102-x.jsonl"]
+
+
+def test_connection_summary(scenario, tmp_path):
+    log = tmp_path / "connections.jsonl"
+    if scenario == "happy":
+        log.write_text("\n".join(json.dumps(r) for r in [
+            {"event": "http", "url": "https://a/"}, {"event": "denied"}, {"event": "tcp"},
+            {"event": "http", "push": {"ok": False, "refs": ["refs/heads/main"]}},
+            {"event": "tls-refused", "host": "pinned.example.org"}]) + "\nnot json\n")
+        lines = s.connection_summary(log)
+        assert lines[0].startswith("proxy: 2 HTTP request(s), 1 other connection(s), 1 refused")
+        assert "refs/heads/main" in lines[1] and "--no-inspect pinned.example.org" in lines[2]
+    elif scenario == "sad":
+        assert s.connection_summary(tmp_path / "missing") == []
+    else:
+        log.write_text("")
+        assert s.connection_summary(log) == [f"proxy: 0 HTTP request(s), 0 other connection(s), 0 refused; log: {log}"]
+
+
+def test_runs_dir(scenario, tmp_path, monkeypatch):
+    if scenario == "happy":
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+        assert s.runs_dir() == tmp_path / "sandbox-ai" / "runs"
+    elif scenario == "sad":
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "missing"))
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+        assert s.runs_dir() == tmp_path / "state" / "sandbox-ai" / "runs"
+    else:
+        monkeypatch.delenv("XDG_RUNTIME_DIR")
+        monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+        assert s.runs_dir() == Path.home() / ".local/state/sandbox-ai/runs"
+
+
+def test_register_run(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    a = s.parse_args(["claude", "--workspace", str(tmp_path / "app")])
+    s.validate(a)
+    if scenario == "happy":
+        directory = s.register_run(a, "claude-1234abcd", tmp_path / "session")
+        record = json.loads((directory / "run.json").read_text())
+        assert record["run"] == "claude-1234abcd" and record["workspace"] == str(tmp_path / "app")
+        assert record["session_dir"] == str(tmp_path / "session") and record["proxy"]
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+    elif scenario == "sad":
+        # A run of that name that still lives (another process) stops the start; a dead one is replaced.
+        directory = s.register_run(a, "session-x", tmp_path / "session")
+        record = json.loads((directory / "run.json").read_text())
+        (directory / "run.json").write_text(json.dumps({**record, "pid": os.getppid()}))
+        with pytest.raises(ValueError, match="already running"):
+            s.register_run(a, "session-x", tmp_path / "session")
+        (directory / "run.json").write_text(json.dumps({**record, "pid": 2 ** 22 + 9}))
+        (directory / "control.sock").write_text("stale")
+        assert s.register_run(a, "session-x", tmp_path / "other") == directory and not (directory / "control.sock").exists()
+    else:
+        assert json.loads((s.register_run(a, "x", tmp_path) / "run.json").read_text())["session"] is None
+
+
+def test_first_bytes_state(scenario):
+    hello = client_hello("example.org")
+    if scenario == "happy":
+        for data in (hello, b"GET / HTTP/1.1\r\n", b"SSH-2.0-x", b"\x00\x01binary"):
+            assert rt.first_bytes_state(data) == "complete", data
+    elif scenario == "sad":
+        # Pieces that would change meaning with the next byte: waited for, never classified early.
+        for data in (b"", hello[:10], b"S", b"SS", b"SSH", b"POS", b"PRI"):
+            assert rt.first_bytes_state(data) == "more", data
+    else:
+        assert rt.first_bytes_state(b"POSTXXXXXXX") == "complete"  # longer than any method: not HTTP
+        assert rt.first_bytes_state(b"SS1") == "complete"  # (SSX could still begin a method)
+
+
+def test_review_regressions_launcher(tmp_path, monkeypatch):
+    """Findings of the review before 0.1.20, each kept closed."""
+    # --mount never of device or kernel trees (Podman would keep device nodes usable).
+    for source in ("/dev", "/proc/self", "/sys"):
+        if Path(source).exists():
+            with pytest.raises(ValueError, match="device and kernel trees"):
+                s.parse_mount(f"{source}:/mnt/x:ro")
+    # --no-inspect neither for public Git hosts nor for names below them.
+    for value in ("github.com", "*.github.com", "www.github.com", "*.com"):
+        with pytest.raises(ValueError, match="pass unchecked"):
+            s.validate(s.parse_args(["codex", "--workspace", str(tmp_path / "w"), "--no-inspect", value]))
+    s.validate(s.parse_args(["codex", "--workspace", str(tmp_path / "w"), "--no-inspect", "*.github.com",
+                             "--privacy-check", "off"]))
+
+
+@pytest.mark.parametrize("existing", [
+    '[projects]\n"/work" = { trust_level = "untrusted" }\n',
+    'projects."/work".trust_level = "untrusted"\n',
+    '[ projects."/work" ]\ntrust_level = "untrusted"\n',
+    'projects = { "/other" = { trust_level = "trusted" } }\n',
+    'not = valid = toml\n',
+])
+def test_codex_trust_never_breaks_config_toml(tmp_path, existing):
+    toml = s.load_privacy_module()._toml_module()
+    if toml is None:
+        pytest.skip("no TOML parser (Python < 3.11 without tomli)")
+    home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True)
+    (home / ".codex/config.toml").write_text(existing)
+    s.codex_trusted_workspaces(s.parse_args(["codex", "--workspace", str(tmp_path / "app")]), home)
+    after = (home / ".codex/config.toml").read_text()
+    if existing.startswith("not"):
+        assert after == existing
+    else:
+        document = toml.loads(after)  # still valid
+        assert "/work" in document["projects"] or after == existing
+        if "untrusted" in existing:
+            assert after == existing  # the decision stored there is kept
+
+
+def test_new_device_refusals(fake_dev):
+    for name in ("fb0", "usbmon0", "snapshot", "iommu", "usb/hiddev0"):
+        (fake_dev / name).parent.mkdir(parents=True, exist_ok=True)
+        (fake_dev / name).write_text("")
+        with pytest.raises(ValueError, match="refused"):
+            s.parse_device(str(fake_dev / name))
+
+
+def test_long_option(scenario):
+    actions = s.build_parser()._option_string_actions
+    if scenario == "happy":
+        assert s.long_option(actions["-D"]) == "--dangerously-skip-permissions"
+    elif scenario == "sad":
+        assert s.long_option(actions["-h"]) == "--help"
+    else:
+        assert s.long_option(actions["-gl"]) == "--allow-gitlab"
+
+
+def test_canonical_options(scenario):
+    if scenario == "happy":
+        assert s.canonical_options(["claude", "-Dn", "-w/tmp/a", "-gl", "-S", "/x", "-V"]) == [
+            "claude", "--dangerously-skip-permissions", "--dry-run", "--workspace", "/tmp/a", "--allow-gitlab",
+            "--state-dir", "/x", "--version"]
+    elif scenario == "sad":
+        # Values are never read as options; unknown tokens stay as they are for argparse to refuse.
+        assert s.canonical_options(["--env", "-D", "-e", "-S", "-Qz", "--", "-D"]) == [
+            "--env", "-D", "--env", "-S", "-Qz", "--", "-D"]
+    else:
+        assert s.canonical_options(["--mount=a:/mnt/a:ro", "-d/dev/kvm", "-x", "*.example.org"]) == [
+            "--mount=a:/mnt/a:ro", "--device", "/dev/kvm", "--no-inspect", "*.example.org"]
+
+
+def test_short_forms_cover_every_option_and_reach_every_check(tmp_path):
+    parser = s.build_parser()
+    visible = [a for a in parser._actions if a.option_strings and a.help != argparse.SUPPRESS]
+    assert all(any(not o.startswith("--") for o in a.option_strings) for a in visible)
+    shorts = [o for a in parser._actions for o in a.option_strings if not o.startswith("--")]
+    assert len(shorts) == len(set(shorts))
+    # A short form in a project file is checked like the long one.
+    work = tmp_path / "w"
+    work.mkdir()
+    config = work / s.CONFIG_NAME
+    config.write_text(json.dumps({"version": 1, "agent": "codex", "options": ["-S/tmp/x"]}))
+    s.trust_config(config)
+    _, document = s.load_project_config(s.parse_args(["codex", "--workspace", str(work)]))
+    assert document["options"] == ["--state-dir", "/tmp/x"]
+    config.write_text(json.dumps({"version": 1, "agent": "codex", "options": ["-s", "x"]}))  # --session: forbidden
+    s.trust_config(config)
+    with pytest.raises(ValueError, match="not allowed in a project configuration"):
+        s.load_project_config(s.parse_args(["codex", "--workspace", str(work)]))
+    mcp = s.load_mcp_module()
+    with pytest.raises(ValueError, match="not allowed for an MCP server"):
+        mcp.validated({"x": {"command": ["true"], "options": ["-S/tmp/state"]}}, "test")
+
+
+def test_short_forms_like_argparse_reads_them():
+    assert s.canonical_options(["-Dw", "/tmp/a", "-w=/tmp/b", "-pr=/rules", "-ne", "A"]) == [
+        "--dangerously-skip-permissions", "--workspace", "/tmp/a", "--workspace", "/tmp/b", "--privacy-rules",
+        "/rules", "--dry-run", "--env", "A"]
+    wizard = s.load_wizard_module() if hasattr(s, "load_wizard_module") else None
+    spec = importlib.util.spec_from_file_location("wizard_short", ROOT / "sandbox/wizard.py")
+    wizard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(wizard)
+    with pytest.raises(ValueError, match="Not allowed in a project configuration"):
+        wizard.check_free_options("codex", "-s name")
+    assert wizard.check_free_options("codex", "-g -A example.org") == ["--allow-github", "--allow-host", "example.org"]

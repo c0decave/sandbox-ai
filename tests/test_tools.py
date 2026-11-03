@@ -368,3 +368,12 @@ def test_login_write_store_replaces_in_place(scenario, private_home, tmp_path):
         with pytest.raises(ValueError, match="symlink"):
             login.write_store("claude", files)
         assert not (tmp_path / ".credentials.json").exists()
+
+
+def test_check_proxy_nat(scenario, tmp_path):
+    for name in {"happy": ["nft_chain_nat", "nft_redir"], "sad": [], "edge": ["nft_chain_nat"]}[scenario]:
+        (tmp_path / name).mkdir()
+    status, _, detail, fix = doctor.check_proxy_nat(tmp_path)
+    assert status == ("ok" if scenario == "happy" else "warn")
+    if scenario == "edge":
+        assert "nft_redir" in detail and "nft_chain_nat" not in detail and "modprobe" in fix

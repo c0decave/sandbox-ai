@@ -11,6 +11,7 @@
   sandbox-ai doctor [--backend podman|bwrap|both]                    check the host
   sandbox-ai logs [DIR|--project PATH]                               blocked egress and file access, with suggestions
   sandbox-ai privacy-check [PATH ...]                                what the next push would publish that should stay private
+  sandbox-ai net list|show|allow|revoke ...                          change what a running sandbox may reach
   sandbox-ai update [--check]                                        update an installation made by install.sh
   sandbox-ai version
 
@@ -25,7 +26,7 @@ HERE = Path(__file__).resolve().parent
 PYTHON_COMMANDS = {"claude": ("agent_sandbox.py", "claude"), "codex": ("agent_sandbox.py", "codex"),
                    "opencode": ("agent_sandbox.py", "opencode"), "session": ("sessions.py",),
                    "mcp": ("mcp.py",), "wizard": ("wizard.py",), "login": ("login.py",), "plugins": ("plugins.py",), "doctor": ("doctor.py",), "logs": ("logs.py",),
-                   "privacy-check": ("privacy.py", "check")}
+                   "privacy-check": ("privacy.py", "check"), "net": ("net.py",)}
 
 
 def version():
@@ -47,7 +48,7 @@ def main(argv):
         print(__doc__.strip())
         return 0 if argv else 2
     command, rest = argv[0], argv[1:]
-    if command in ("version", "--version"):
+    if command in ("version", "--version", "-V"):
         print(f"sandbox-ai {version()}")
         return 0
     if command in PYTHON_COMMANDS:

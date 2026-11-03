@@ -42,6 +42,7 @@ import socket
 import stat
 import subprocess
 import sys
+import threading
 from typing import Optional
 import urllib.parse
 
@@ -50,6 +51,7 @@ BLOCK, WARN = "block", "warn"
 EXIT_CLEAN, EXIT_FINDINGS, EXIT_REFUSED = 0, 1, 2
 
 FILE_LIMIT = 1 << 20       # bytes per file or blob; larger ones are named as skipped
+PUSH_FILE_LIMIT = 32 << 20 # the same for the proxy's push check, which refuses what it skips
 TOTAL_LIMIT = 256 << 20    # bytes read per repository
 FILES_LIMIT = 50000        # work tree files per repository
 COMMITS_LIMIT = 1000       # commits per check
@@ -413,14 +415,25 @@ class Git:
     def __init__(self, repo, host=True):
         self.repo, self.host = Path(os.path.abspath(repo)), host
 
-    def __call__(self, *args, data=None, check=True):
+    def command(self):
+        """(git command prefix, environment) for this repository."""
         env = dict(os.environ)
         if self.host:
             env = {k: v for k, v in env.items() if not k.startswith("GIT_")}
-        env.update({"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C"})
-        command = ["git", "--no-pager", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
+        # Replacement objects and grafts would let the repository show the check other commits than a push
+        # sends. No transport at all: a missing object must never make Git fetch it (partial clones run the
+        # remote's configured upload-pack command, a program the repository names).
+        env.update({"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C", "GIT_GRAFT_FILE": os.devnull,
+                    "GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "sandbox-ai-none"})
+        command = ["git", "--no-pager", "--no-replace-objects", "-c", "core.fsmonitor=false",
+                   "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never",
+                   "-c", "core.alternateRefsCommand=", "-c", "core.sshCommand=false"]
         if self.host:
             command += ["-C", str(self.repo), "--work-tree", str(self.repo)]
+        return command, env
+
+    def __call__(self, *args, data=None, check=True):
+        command, env = self.command()
         try:
             result = subprocess.run([*command, *args], input=data, capture_output=True, env=env,
                                     timeout=GIT_TIMEOUT, stdin=None if data is not None else subprocess.DEVNULL)
@@ -481,7 +494,18 @@ def tree_entries(git, *args):
 
 def commits(git, revisions):
     """Commit ids of REVISIONS (rev-list arguments), newest first; (ids, truncated)."""
-    ids = git.out("rev-list", f"--max-count={COMMITS_LIMIT + 1}", *revisions).decode().split()
+    # Commit ids on stdin (^id for excluded ones): a remote with tens of thousands of refs would not fit on a
+    # command line. Options such as --remotes stay there, wrapped in --not when they exclude.
+    options, ids_in, excluded = [], [], False
+    for revision in revisions:
+        if revision == "--not":
+            excluded = not excluded
+        elif revision.startswith("-"):
+            options += ["--not", revision, "--not"] if excluded else [revision]
+        else:
+            ids_in.append(("^" if excluded else "") + revision)
+    ids = git.out("rev-list", f"--max-count={COMMITS_LIMIT + 1}", *options, "--stdin",
+                  data="".join(f"{r}\n" for r in ids_in).encode()).decode().split()
     return ids[:COMMITS_LIMIT], len(ids) > COMMITS_LIMIT
 
 
@@ -503,11 +527,11 @@ def lines_of(contents, oid):
 
 
 def changed_blobs(git, ids):
-    """[(blob id, previous blob id or None, path, commit id)] that the commits IDS add or change
-    (no merges, no submodules)."""
+    """[(blob id, previous blob id or None, path, commit id)] that the commits IDS add or change (merges
+    against each parent, so that what a merge itself brings in is seen; no submodules)."""
     if not ids:
         return []
-    raw = git.out("diff-tree", "--stdin", "-r", "-z", "--root", "--no-renames",
+    raw = git.out("diff-tree", "--stdin", "-r", "-m", "-z", "--root", "--no-renames",
                   data="\n".join(ids).encode() + b"\n")
     tokens, found, current, index = raw.split(b"\0"), [], None, 0
     while index < len(tokens):
@@ -526,8 +550,10 @@ def changed_blobs(git, ids):
     return found
 
 
-def read_blobs(git, ids, budget):
-    """{blob id: bytes} for IDS up to FILE_LIMIT each; (contents, skipped ids). BUDGET is a [bytes left] list."""
+def read_blobs(git, ids, budget, limit=None):
+    """{blob id: bytes} for IDS up to LIMIT (default FILE_LIMIT) each; (contents, skipped ids). BUDGET is a
+    [bytes left] list. A larger blob that starts like binary data is given as its start only."""
+    limit = FILE_LIMIT if limit is None else limit
     ids = list(dict.fromkeys(ids))
     if not ids:
         return {}, []
@@ -536,17 +562,20 @@ def read_blobs(git, ids, budget):
         parts = line.split()
         if len(parts) == 3 and parts[1] == b"blob":
             sizes[parts[0].decode()] = int(parts[2])
-    wanted, skipped = [], []
+    wanted, skipped, contents = [], [], {}
     for oid in ids:
         size = sizes.get(oid)
         if size is None:
             continue
-        if size > FILE_LIMIT or size > budget[0]:
-            skipped.append(oid)
+        if size > limit or size > budget[0]:
+            head = blob_head(git, oid)
+            if b"\0" in head:
+                contents[oid] = head  # binary: nothing to read in it (decode() skips it)
+            else:
+                skipped.append(oid)
             continue
         budget[0] -= size
         wanted.append(oid)
-    contents = {}
     if wanted:
         raw, position = git.out("cat-file", "--batch", data="\n".join(wanted).encode() + b"\n"), 0
         while position < len(raw):
@@ -556,6 +585,26 @@ def read_blobs(git, ids, budget):
             contents[header[0].decode()] = raw[end + 1:end + 1 + size]
             position = end + 1 + size + 1
     return contents, skipped
+
+
+def blob_head(git, oid, size=8000):
+    """The first SIZE bytes of blob OID (enough to tell binary from text, as Git does), without reading
+    the rest of a large blob."""
+    command, env = git.command()
+    try:
+        process = subprocess.Popen([*command, "cat-file", "blob", oid], stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, env=env)
+    except FileNotFoundError:
+        raise RulesUnavailable("git is not installed") from None
+    timer = threading.Timer(GIT_TIMEOUT, process.kill)  # an object swapped for a FIFO must not hang the check
+    timer.start()
+    try:
+        head = process.stdout.read(size)
+    finally:
+        timer.cancel()
+        process.kill()
+        process.wait()
+    return head
 
 
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
@@ -657,8 +706,9 @@ class Report:
         return [f for f in self.findings if f.pattern.severity == BLOCK]
 
 
-def scan_commits(git, rules, revisions, report, budget):
+def scan_commits(git, rules, revisions, report, budget, limit=None):
     """Author, committer, message and changed files of the commits REVISIONS selects."""
+    limit = FILE_LIMIT if limit is None else limit
     ids, truncated = commits(git, revisions)
     if truncated:
         report.notes.append(f"only the newest {COMMITS_LIMIT} commits were checked")
@@ -667,15 +717,31 @@ def scan_commits(git, rules, revisions, report, budget):
         labels = {1: f"commit {short} author", 2: f"commit {short} committer"}
         text = f"{author}\n{committer}\n{message}"
         report.add(scan_text(text, rules, "", lambda n, s=short, l=labels: l.get(n, f"commit {s} message")))
+    if ids:
+        # Header lines beyond author and committer (extra headers, mergetag, gpgsig) are published too.
+        raw = git.out("cat-file", "--batch", data="".join(f"{oid}\n" for oid in ids).encode())
+        position = 0
+        while position < len(raw):
+            end = raw.index(b"\n", position)
+            oid, _, size = raw[position:end].decode().split()
+            body = raw[end + 1:end + 1 + int(size)]
+            position = end + 1 + int(size) + 1
+            headers = body.split(b"\n\n", 1)[0].decode("utf-8", "replace").splitlines()
+            extra = [line for line in headers if not line.startswith(("tree ", "parent ", "author ", "committer "))]
+            if extra:
+                report.add(scan_text("\n".join(extra), rules, "", lambda n, s=oid[:10]: f"commit {s} header"))
     changes = changed_blobs(git, ids)
-    contents, skipped = read_blobs(git, [oid for change in changes for oid in change[:2] if oid], budget)
+    names = sorted({(path, commit) for _, _, path, commit in changes})
+    for path, commit in names:
+        report.add(scan_text(path, rules, path, lambda n, c=commit[:10], p=path: f"file name {p} (commit {c})"))
+    contents, skipped = read_blobs(git, [oid for change in changes for oid in change[:2] if oid], budget, limit)
     seen = set()
     for oid, before, path, commit in changes:
         if (oid, before) in seen:
             continue
         seen.add((oid, before))
         if oid in skipped:
-            report.notes.append(f"{path} (commit {commit[:10]}) not checked: larger than {FILE_LIMIT >> 20} MiB "
+            report.notes.append(f"{path} (commit {commit[:10]}) not checked: larger than {limit >> 20} MiB "
                                 "or over the size budget")
             continue
         text = decode(contents.get(oid, b""))
@@ -906,6 +972,93 @@ def check_push(git, rules, args, data, config, err):
     return 0
 
 
+# --- push check in the sandbox's connection proxy --------------------------------------------------
+#
+# The proxy sees every Git push over HTTP(S), also one that skips the hooks (--no-verify, another
+# core.hooksPath). It sends the push's ref updates here; this process finds the pushed commits in the
+# workspaces and checks what the remote does not have yet. Whatever cannot be checked is refused.
+
+def push_verdict(config, request):
+    """{"ok": bool, "message": str} for one push: REQUEST holds the remote's "url", the "commands"
+    [[old, new, ref]] and the commit ids the remote "advertised" (it has those already)."""
+    url = str(request.get("url", ""))
+    if config.get("mode") != "always" and not remote_is_public(url, config.get("own_hosts", [])):
+        return {"ok": True, "message": "not a public remote"}
+    updates = [(str(new), str(ref)) for old, new, ref in request.get("commands", []) if not ZERO.fullmatch(str(new))]
+    if not updates:
+        return {"ok": True, "message": "nothing but deletions"}
+    if any(not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", new) for new, _ in updates):
+        return {"ok": False, "message": "the push names commits in an unknown format"}
+    advertised = [str(oid) for oid in request.get("advertised", []) if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", str(oid))]
+    remaining, lines, blocking, incomplete = dict(updates), [], False, []
+    for workspace in config.get("workspaces", []):
+        if not remaining:
+            break
+        git = Git(workspace["path"])
+        if not is_repository(workspace["path"]):
+            continue
+        found = present(git, list(remaining))
+        if not found:
+            continue
+        rules = builtin_rules().add(parse_rules(workspace["rules"], "derived"))
+        report = Report(workspace["path"])
+        known = sorted(set(present(git, advertised).values()))
+        scan_commits(git, rules, [*sorted(set(found.values())), "--not", *known], report, [TOTAL_LIMIT],
+                     PUSH_FILE_LIMIT)
+        for oid, commit in found.items():
+            tag, depth = oid, 0
+            while tag != commit and depth < 32:  # annotated tags, also tags of tags: every message is published
+                text = decode(git.out("cat-file", "tag", tag)) or ""
+                report.add(scan_text(text, rules, "", lambda n, o=tag: f"tag {o[:10]}"))
+                target = re.match(r"object ([0-9a-f]+)\ntype (\w+)", text)
+                if not target or target[2] != "tag":
+                    break
+                tag, depth = target[1], depth + 1
+            remaining.pop(oid, None)
+        if report.notes:
+            # What was not read cannot be called clean.
+            incomplete += [f"{workspace['path']}: {note}" for note in report.notes]
+        if report.findings:
+            blocking |= bool(report.blocking)
+            lines += [f"{workspace['path']}: {line}" for line in format_report(report, rules)]
+    if remaining:
+        refs = ", ".join(sorted(set(remaining.values())))
+        return {"ok": False, "message": f"the commits for {refs} are in no workspace, so they cannot be checked; "
+                                        "push from /work or /workspaces/NAME"}
+    if incomplete and not blocking:
+        return {"ok": False, "message": "\n".join(["this push cannot be checked completely, so it is refused:",
+                                                   *incomplete, "Push it from the host after checking it with "
+                                                   "`sandbox-ai privacy-check`, or ask the user."])}
+    if blocking:
+        return {"ok": False, "message": "\n".join([f"this push to {remote_host(url)} would publish what must stay "
+                                                   "private:", *lines, "Remove these from the commits (rewrite "
+                                                   "them), or ask the user whether they are meant to be "
+                                                   "published."])}
+    return {"ok": True, "message": "\n".join(lines) if lines else "clean"}
+
+
+def present(git, oids):
+    """{oid: commit id} of the OIDS this repository has, annotated tags peeled to their commit."""
+    if not oids:
+        return {}
+    data = "".join(f"{oid}^{{commit}}\n" for oid in oids).encode()
+    answer = git.out("cat-file", "--batch-check=%(objectname) %(objecttype)", data=data).decode().splitlines()
+    return {oid: line.split()[0] for oid, line in zip(oids, answer) if line.endswith(" commit")}
+
+
+def serve(config_path, stdin=sys.stdin, stdout=sys.stdout):
+    """Answer push checks, one JSON request per line, until stdin closes."""
+    config = json.loads(Path(config_path).read_text())
+    for line in stdin:
+        try:
+            answer = push_verdict(config, json.loads(line))
+        except Exception as exc:  # noqa: BLE001 - a check that cannot run refuses the push
+            answer = {"ok": False, "message": f"the privacy check failed: {exc}"}
+        stdout.write(json.dumps(answer) + "\n")
+        stdout.flush()
+    return 0
+
+
 # --- command line ----------------------------------------------------------------------------------
 
 def project_context(path, notes):
@@ -936,11 +1089,11 @@ def check_command(argv):
                                      description="Show what the next push of a repository would publish that "
                                                  "should stay private.")
     parser.add_argument("paths", nargs="*", default=["."], metavar="PATH", help="Git repositories (default: .)")
-    parser.add_argument("--rules-dir", type=Path, help="your own rules (default: --privacy-rules of the project, "
+    parser.add_argument("-r", "--rules-dir", type=Path, help="your own rules (default: --privacy-rules of the project, "
                                                        f"else {default_rules_dir()} if it exists)")
-    parser.add_argument("--project", help="name of the project rule file (default: the directory name)")
-    parser.add_argument("--all", action="store_true", help="every tracked and untracked file, also unchanged ones")
-    parser.add_argument("--json", action="store_true", help="findings as JSON")
+    parser.add_argument("-p", "--project", help="name of the project rule file (default: the directory name)")
+    parser.add_argument("-a", "--all", action="store_true", help="every tracked and untracked file, also unchanged ones")
+    parser.add_argument("-j", "--json", action="store_true", help="findings as JSON")
     args = parser.parse_args(argv)
     status, results = EXIT_CLEAN, []
     for value in args.paths:
@@ -978,6 +1131,8 @@ def main(argv):
         return run_hook(argv[1], argv[2:])
     if argv[:1] == ["check"]:
         return check_command(argv[1:])
+    if argv[:1] == ["serve"] and len(argv) == 2:
+        return serve(argv[1])
     return check_command(argv)
 
 

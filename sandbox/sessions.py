@@ -530,7 +530,7 @@ def list_sessions():
 def cli(argv):
     p = argparse.ArgumentParser(prog="sandbox-session", description="Manage named sandbox sessions. "
                                 "Start one with: <agent>-sandbox --session NAME [options]")
-    p.add_argument("--version", action="version", version=f"sandbox-ai {launcher().__version__}")
+    p.add_argument("-V", "--version", action="version", version=f"sandbox-ai {launcher().__version__}")
     commands = p.add_subparsers(dest="command", required=True)
     commands.add_parser("list", help="Show sessions and their status")
     for command, text in [("attach", "Attach this terminal (detach again with Ctrl-b d)"),
@@ -540,7 +540,7 @@ def cli(argv):
         sub = commands.add_parser(command, help=text)
         sub.add_argument("name")
         if command == "delete":
-            sub.add_argument("--yes", action="store_true", help="Confirm removal of the session's HOME")
+            sub.add_argument("-y", "--yes", action="store_true", help="Confirm removal of the session's HOME")
     a = p.parse_args(argv)
     if a.command == "list":
         return list_sessions()

@@ -156,8 +156,8 @@ def report(summary, out=print):
 def cli(argv):
     parser = argparse.ArgumentParser(prog="sandbox-ai logs", description="Summarize a sandbox log directory.")
     parser.add_argument("directory", nargs="?", type=Path)
-    parser.add_argument("--project", type=Path, help="Project whose wizard log directory to read")
-    parser.add_argument("--json", action="store_true")
+    parser.add_argument("-p", "--project", type=Path, help="Project whose wizard log directory to read")
+    parser.add_argument("-j", "--json", action="store_true")
     a = parser.parse_args(argv)
     directory = a.directory or launcher().default_log_dir(Path(a.project or os.getcwd()).expanduser().absolute())
     if not directory.is_dir():

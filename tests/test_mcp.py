@@ -163,14 +163,14 @@ def test_mcp_socket_dirs_are_mounted_read_only(tmp_path):
     s.validate(a)
     host = s.mcp_socket_dir("demo")
     _, run = s.pod_commands(a, "pod", tmp_path, tmp_path / "home")
-    assert f"type=bind,src={host},dst=/sandbox/mcp/demo,ro" in run
+    assert f"type=bind,src={host},dst=/sandbox/mcp/demo,ro,nodev" in run
     a.backend = "bwrap"
     cmd = s.bwrap_command(a, tmp_path, tmp_path / "home")
     index = cmd.index("/sandbox/mcp/demo")
     assert cmd[index - 2:index] == ["--ro-bind", str(host)]
     server = s.parse_args(["codex", "--workspace", str(tmp_path / "w"), "--mcp-socket-dir", str(tmp_path / "sock")])
     s.validate(server)
-    assert f"type=bind,src={tmp_path / 'sock'},dst=/sandbox/mcp-sock,rw" in s.pod_commands(server, "p", tmp_path, tmp_path)[1]
+    assert f"type=bind,src={tmp_path / 'sock'},dst=/sandbox/mcp-sock,rw,nodev" in s.pod_commands(server, "p", tmp_path, tmp_path)[1]
 
 
 def test_mcp_names_validated():
@@ -416,3 +416,115 @@ def test_server_lock_serializes_starts(scenario, tmp_path, monkeypatch):
                 pass
     finally:
         os.close(held)
+
+
+# --- catalog servers (container images) -------------------------------------------------------------
+
+DIGEST = "sha256:" + "a" * 64
+
+
+def catalog(tmp_path, entries):
+    path = tmp_path / "catalog.json"
+    path.write_text(json.dumps({"schema": "axross-mcp-catalog", "version": 1, "entries": entries}))
+    return [("t", str(path))]
+
+
+ENTRY = {"id": "mcp:duckduckgo", "name": "duckduckgo", "title": "DuckDuckGo search", "kind": "oci",
+         "image": "ghcr.io/c0decave/sandbox-ai-mcp-duckduckgo", "digest": DIGEST, "network": "allowlist",
+         "hosts": ["html.duckduckgo.com:443"]}
+BINWALK = {"id": "hub:binwalk", "name": "binwalk", "title": "binwalk", "kind": "oci",
+           "image": "ghcr.io/c0decave/axross-mcp-binwalk", "digest": DIGEST, "network": "none",
+           "mounts": [{"target": "/work", "required": True}, {"target": "/out"}]}
+BRAVE = {"id": "mcp:brave-search", "name": "brave-search", "title": "Brave", "kind": "oci",
+         "image": "ghcr.io/c0decave/sandbox-ai-mcp-brave-search", "digest": DIGEST, "network": "allowlist",
+         "hosts": ["api.search.brave.com:443"], "env": [{"name": "BRAVE_API_KEY", "required": True, "secret": True}]}
+
+
+def test_catalog_entry_becomes_a_checked_definition(tmp_path):
+    sources = catalog(tmp_path, [ENTRY, BINWALK, BRAVE, {**ENTRY, "name": "pending", "digest": None}])
+    firmware = tmp_path / "firmware"
+    firmware.mkdir()
+    out = []
+    # An allowlist entry needs the full network granted explicitly.
+    with pytest.raises(ValueError, match="add --network full"):
+        m.add("duckduckgo", catalogs=sources, pull=False, out=out.append)
+    definition = m.add("duckduckgo", network="full", catalogs=sources, pull=False, out=out.append)
+    assert definition["image"] == f"ghcr.io/c0decave/sandbox-ai-mcp-duckduckgo@{DIGEST}" and definition["network"] == "full"
+    assert any("html.duckduckgo.com:443" in line for line in out)
+    with pytest.raises(ValueError, match="needs --mount /work"):
+        m.add("t:binwalk", catalogs=sources, pull=False, out=out.append)
+    m.add("binwalk", mounts=[f"/work={firmware}"], catalogs=sources, pull=False, out=out.append)
+    with pytest.raises(ValueError, match="needs --env BRAVE_API_KEY"):
+        m.add("brave-search", network="full", catalogs=sources, pull=False, out=out.append)
+    with pytest.raises(ValueError, match="not published"):
+        m.add("pending", network="full", catalogs=sources, pull=False, out=out.append)
+    servers = m.definitions()
+    assert servers["binwalk"]["mounts"] == [{"target": "/work", "host": str(firmware), "mode": "ro"}]
+    assert m.config_file().stat().st_mode & 0o077 == 0
+
+
+def test_image_command_is_the_hardened_run_line(tmp_path):
+    work = tmp_path / "w"
+    work.mkdir()
+    definition = m.validated_image({"image": f"ghcr.io/a/b@{DIGEST}", "network": "none", "env": ["KEY"],
+                                    "mounts": [{"target": "/work", "host": str(work), "mode": "rw"}],
+                                    "memory": "2g", "pids": 256}, "t")
+    command = m.image_command(definition)
+    assert command[:2] == ["podman", "run"] and command[-1] == f"ghcr.io/a/b@{DIGEST}"
+    for flag in ("--cap-drop=ALL", "--security-opt=no-new-privileges", "--read-only", "--pull=never",
+                 "--network=none", "--env=KEY", "--memory=2g", "--pids-limit=256", "--user=0:0",
+                 f"--volume={work.resolve()}:/work:rw"):
+        assert flag in command, flag
+    full = m.image_command({**definition, "network": "full", "env": [], "mounts": []})
+    assert f"--network={s.POD_NETWORK}" in full and "--user=0:0" not in full
+
+
+@pytest.mark.parametrize("bad", [
+    {"image": "ghcr.io/a/b:latest"}, {"image": f"ghcr.io/a/b@{DIGEST}", "network": "allowlist"},
+    {"image": f"ghcr.io/a/b@{DIGEST}", "mounts": [{"target": "/work/../etc", "host": "/x"}]},
+    {"image": f"ghcr.io/a/b@{DIGEST}", "mounts": [{"target": "/work", "host": "relative"}]},
+    {"image": f"ghcr.io/a/b@{DIGEST}", "mounts": [{"target": "/work", "host": "/x,y"}]},
+    {"image": f"ghcr.io/a/b@{DIGEST}", "env": ["A=B"]}, {"image": f"ghcr.io/a/b@{DIGEST}", "memory": "1t"},
+    {"image": f"ghcr.io/a/b@{DIGEST}", "pids": 1}, {"image": f"ghcr.io/a/b@{DIGEST}", "command": ["sh"]},
+    {"image": f"ghcr.io/a/b@{DIGEST}; rm -rf /"},
+])
+def test_image_definitions_are_refused_unless_every_value_is_safe(bad):
+    with pytest.raises(ValueError):
+        m.validated({"x": bad}, "test")
+
+
+def test_image_server_starts_as_a_bridge_on_the_host(tmp_path, monkeypatch):
+    config = m.config_file()
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"ddg": {"image": f"ghcr.io/a/b@{DIGEST}", "network": "full", "env": ["KEY"]}}))
+    started = []
+
+    class Process:
+        pid = os.getpid()
+
+        def poll(self):
+            return None
+    monkeypatch.setattr(m.subprocess, "Popen", lambda cmd, **kw: started.append((cmd, kw)) or Process())
+    monkeypatch.setattr(m, "wait_for_socket", lambda *a, **kw: None)
+    a = s.parse_args(["codex"])
+    monkeypatch.delenv("KEY", raising=False)
+    with pytest.raises(ValueError, match="needs the variable KEY"):
+        m.ensure_running("ddg", a)
+    monkeypatch.setenv("KEY", "value")
+    assert m.ensure_running("ddg", a) == "started"
+    cmd, kwargs = started[-1]
+    assert cmd[2:4] == [str(ROOT / "sandbox/runtime.py"), "--internal-mcp-serve"]
+    assert cmd[4] == str(s.mcp_socket_dir("ddg") / "server.sock") and cmd[5] == "--"
+    assert cmd[6:8] == ["podman", "run"] and "--env=KEY" in cmd and "value" not in " ".join(cmd)
+
+
+def test_catalog_command_lists_both_catalogs(tmp_path, capsys):
+    first = tmp_path / "a.json"
+    first.write_text(json.dumps({"schema": "axross-mcp-catalog", "version": 1, "entries": [ENTRY]}))
+    second = tmp_path / "b.json"
+    second.write_text(json.dumps({"schema": "axross-mcp-catalog", "version": 1, "entries": [{**BINWALK, "digest": None}]}))
+    assert m.cli(["catalog", "-c", str(first), "-c", str(second), "-c", str(tmp_path / "missing.json")]) == 0
+    captured = capsys.readouterr()
+    assert "c0:duckduckgo  [allowlist html.duckduckgo.com:443]  DuckDuckGo search" in captured.out
+    assert "c1:binwalk  [none]  binwalk  (not published yet)" in captured.out
+    assert "catalog not read" in captured.err

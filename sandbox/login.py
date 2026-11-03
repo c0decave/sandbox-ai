@@ -112,7 +112,7 @@ def login(agent, options=(), login_args=None, out=None):
             path.mkdir(mode=0o700)
         # --binary keeps the launcher from adding agent options in front of the login subcommand.
         cmd = [sys.executable, "-I", str(HERE / "agent_sandbox.py"), agent, *LOGIN_OPTIONS.get(agent, []), *options,
-               "--no-auth", "--no-config", "--no-tmux", "--no-default-kit", "--no-memory", "--no-plugins",
+               "--no-auth", "--no-config", "--no-tmux", "--no-proxy", "--no-default-kit", "--no-memory", "--no-plugins",
                "--binary", agent, "--state-dir", str(home),
                "--workspace", str(work), "--", *(login_args or LOGIN_ARGS[agent])]
         out(f"sandbox-ai login: running `{agent} {' '.join(login_args or LOGIN_ARGS[agent])}` in a sandbox; "
@@ -173,10 +173,10 @@ def cli(argv):
     parser = argparse.ArgumentParser(prog="sandbox-ai login", description=__doc__.split("\n\n")[0],
                                      epilog="Launcher options (e.g. --backend bwrap, --podman-url URL) are "
                                             "passed on to the login sandbox.")
-    parser.add_argument("--version", action="version", version=f"sandbox-ai {launcher().__version__}")
+    parser.add_argument("-V", "--version", action="version", version=f"sandbox-ai {launcher().__version__}")
     parser.add_argument("agent", nargs="?", choices=AGENTS)
-    parser.add_argument("--status", action="store_true", help="Show which login each agent's sandboxes get")
-    parser.add_argument("--logout", action="store_true", help="Forget the stored login of AGENT")
+    parser.add_argument("-s", "--status", action="store_true", help="Show which login each agent's sandboxes get")
+    parser.add_argument("-L", "--logout", action="store_true", help="Forget the stored login of AGENT")
     a, options = parser.parse_known_args(argv)
     if a.status:
         return status()
