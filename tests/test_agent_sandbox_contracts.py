@@ -1051,6 +1051,8 @@ def test_start_gui(scenario, tmp_path, monkeypatch):
     stopped = []
     monkeypatch.setattr(sr, "stop_process", stopped.append)
     monkeypatch.setattr(s.time, "sleep", lambda _: None)
+    waited = []
+    monkeypatch.setattr(rt, "wait_for_unix_listener", lambda path, process, errors, name: waited.append((str(path), name)))
     config = {"display": ":99", "screen": "1920x1080x24", "vnc": scenario == "edge"}
     if scenario == "sad":
         with pytest.raises(RuntimeError, match="Xvfb exited"):
@@ -1064,6 +1066,7 @@ def test_start_gui(scenario, tmp_path, monkeypatch):
     if scenario == "edge":
         assert started[1] == drop + ["x11vnc", "-display", ":99", "-unixsock", "/sandbox/vnc/vnc.sock",
                                      "-rfbport", "0", "-forever", "-shared", "-nopw", "-quiet", "-nosel"]
+        assert waited == [("/sandbox/vnc/vnc.sock", "x11vnc")]  # started only once it listens
 
 
 def test_x_socket(scenario):
@@ -5041,3 +5044,25 @@ def test_stdin_is_pipe(scenario, tmp_path):
             assert not rt.stdin_is_pipe(stream.fileno())  # /dev/null, a file, a terminal: never exits on its own
     else:
         assert not rt.stdin_is_pipe(987654)
+
+
+def test_wait_for_unix_listener(scenario, tmp_path):
+    import tempfile as tempfile_module
+    path = tmp_path / "s.sock"
+    errors = tempfile_module.TemporaryFile()
+    if scenario == "happy":
+        server = socket.socket(socket.AF_UNIX)
+        server.bind(str(path))
+        server.listen(1)
+        rt.wait_for_unix_listener(path, Mock(poll=Mock(return_value=None)), errors, "x11vnc", timeout=5)
+        server.close()
+    elif scenario == "sad":
+        errors.write(b"x11vnc: cannot open display\n")
+        with pytest.raises(RuntimeError, match="exited with status 1: x11vnc: cannot open display"):
+            rt.wait_for_unix_listener(path, Mock(poll=Mock(return_value=1)), errors, "x11vnc", timeout=5)
+    else:
+        bound = socket.socket(socket.AF_UNIX)
+        bound.bind(str(path))  # the file is there, nobody listens yet
+        with pytest.raises(RuntimeError, match="did not listen"):
+            rt.wait_for_unix_listener(path, Mock(poll=Mock(return_value=None)), errors, "x11vnc", timeout=0.5)
+        bound.close()

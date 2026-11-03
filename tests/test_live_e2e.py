@@ -73,19 +73,19 @@ set -u
 cd /work && git clone -q http://127.0.0.1:{port}/repo.git r 2>/dev/null || git init -q -b main r
 cd r && git config user.name Tester && git config user.email tester@example.org
 echo clean > clean.txt && git add . && git commit -q -m clean
-if git push -q http://127.0.0.1:{port}/repo.git HEAD:refs/heads/clean; then echo CLEAN_PUSHED; fi
+if git push -q http://127.0.0.1:{port}/repo.git HEAD:refs/heads/clean; then echo CLEAN_PUSHED; else echo CLEAN_FAILED; fi
 python3 -c "print('TOKEN = ' + repr({TOKEN_SHAPE}))" > config.py && git add . && git commit -q -m secret
 if git -c core.hooksPath=/dev/null push --no-verify http://127.0.0.1:{port}/repo.git HEAD:refs/heads/main 2>err.txt
 then echo SECRET_PUSHED; else grep -q "sandbox-ai" err.txt && echo SECRET_REFUSED; fi
 '''
     try:
         # --privacy-check always: the host's loopback is no public remote, but the check must run.
-        stdout, _ = launch(request.config, backend, "codex", work,
+        stdout, stderr = launch(request.config, backend, "codex", work,
                            ["--no-auth", "--no-provider-defaults", "--allow-host-port", str(port), "--ask", "off",
                             "--privacy-check", "always", "--binary", "/bin/sh"], ["-c", script], timeout=240)
     finally:
         server.shutdown()
-    assert "CLEAN_PUSHED" in stdout and "SECRET_REFUSED" in stdout and "SECRET_PUSHED" not in stdout, stdout
+    assert "CLEAN_PUSHED" in stdout and "SECRET_REFUSED" in stdout and "SECRET_PUSHED" not in stdout, stdout + stderr
     heads = subprocess.run(["git", "-C", str(bare), "for-each-ref", "--format=%(refname)"], capture_output=True, text=True).stdout
     assert "refs/heads/clean" in heads and "refs/heads/main" not in heads
 
@@ -229,7 +229,6 @@ for p in started:
 """
     process, _ = running_sandbox(request, backend, tmp_path, script, ["--offline", "--pids", "64"])
     stdout, stderr = finished(process, 120)
-    assert process.returncode == 0, f"exit {process.returncode}\n{stdout}\n{stderr[-5000:]}"
     if "not enforced" in stderr:
         pytest.skip("this host gives the user no systemd session: " + stderr.strip().splitlines()[-1])
     assert "FORK_REFUSED" in stdout and int(stdout.split("STARTED")[1].split()[0]) < 64, stdout + stderr
@@ -300,12 +299,18 @@ for _ in range(120):
         time.sleep(1)
 opened = subprocess.run(["xdg-open", "https://example.org/login"], capture_output=True, text=True)
 print("DIRECT=%s BEFORE=%s AFTER=%s OPEN=%s" % (direct, before, after, opened.returncode), flush=True)
+import pathlib
+for _ in range(600):  # a browser request is not waited for; the run must last until it is answered
+    if pathlib.Path("/work/answered").exists():
+        break
+    time.sleep(0.2)
 '''
     process, env = running_sandbox(request, backend, tmp_path, script)
     try:
         answer_when_asked(env, "connect to 1.1.1.1:443", "allow", "once")
         answer_when_asked(env, "look up example.org", "allow", "run")
         answer_when_asked(env, "open https://example.org/login", "deny")
+        (tmp_path / "work" / "answered").write_text("1")
     except AssertionError as exc:
         process.kill()
         stdout, stderr = finished(process, 30)

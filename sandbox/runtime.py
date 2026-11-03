@@ -26,6 +26,7 @@ import ssl
 import struct
 import subprocess
 import sys
+import tempfile
 import termios
 import threading
 import time
@@ -340,16 +341,39 @@ def start_gui(cfg):
                 raise RuntimeError("Timed out waiting for Xvfb")
             time.sleep(0.1)
         if cfg["vnc"]:
-            # -rfbport 0: no TCP listener; only the private Unix socket.
+            # -rfbport 0: no TCP listener; only the private Unix socket. Started only once it accepts
+            # connections; otherwise the run stops with x11vnc's own message.
+            errors = tempfile.TemporaryFile()
             processes.append(subprocess.Popen(DROP_ALL + ["x11vnc", "-display", cfg["display"], "-unixsock",
                                                           str(VNC_DIR / "vnc.sock"), "-rfbport", "0", "-forever",
                                                           "-shared", "-nopw", "-quiet", "-nosel"],
-                                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+                                              stdout=subprocess.DEVNULL, stderr=errors))
+            wait_for_unix_listener(VNC_DIR / "vnc.sock", processes[-1], errors, "x11vnc")
     except BaseException:
         for process in processes:
             stop_process(process)
         raise
     return processes
+
+
+def wait_for_unix_listener(path, process, errors, name, timeout=15.0):
+    """Wait until PROCESS accepts connections on the Unix socket PATH; RuntimeError with what it wrote to
+    ERRORS (a file) if it exits or does not get there within TIMEOUT."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if process.poll() is not None or time.monotonic() > deadline:
+            errors.seek(0)
+            text = errors.read()[-2000:].decode("utf-8", "replace").strip()
+            state = f"exited with status {process.poll()}" if process.poll() is not None else "did not listen"
+            raise RuntimeError(f"{name} {state}" + (f": {text}" if text else ""))
+        with socket.socket(socket.AF_UNIX) as probe:
+            probe.settimeout(1)
+            try:
+                probe.connect(str(path))
+                return
+            except OSError:
+                pass
+        time.sleep(0.1)
 
 
 def log_event(name, record):

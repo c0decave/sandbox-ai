@@ -493,7 +493,8 @@ def test_real_default_tools_work_through_open_egress(request, backend, tmp_path)
         "dig +short example.org | grep -q .; "
         "host example.org >/dev/null; "
         "nc -z -w 5 example.org 443; "
-        "ping -c 1 -W 5 1.1.1.1 >/dev/null; "
+        "ping -c 1 -W 5 1.1.1.1 >/dev/null || { echo \"ping_group_range=$(cat /proc/sys/net/ipv4/ping_group_range) "
+        "id=$(id)\" >&2; exit 3; }; "
         "vim --version >/dev/null; git --version >/dev/null; "
         "echo TOOLS_OK"
     )
@@ -706,11 +707,15 @@ def test_real_tmux_mode_has_agent_and_shell_windows(request, backend, tmp_path, 
     if backend == "bwrap" and not shutil.which("tmux"):
         pytest.skip("bwrap tmux mode needs tmux on the host")
     import fcntl, pty, struct, termios, threading, time
-    # The agent drives the shell window, then exits; ending the shell ends the sandbox.
-    script = ("import pathlib,subprocess,time\n"
+    # The agent drives the shell window, then exits; ending the shell ends the sandbox. By default an
+    # other binary (--binary) runs without tmux even in a terminal: then there is no tmux to drive.
+    script = ("import os,pathlib,subprocess,time\n"
               "pathlib.Path('/work/agent.txt').write_text('agent')\n"
-              "subprocess.run(['tmux','send-keys','-t','sandbox:shell','echo shell > /work/shell.txt; exit','Enter'],check=True)\n"
-              "time.sleep(1)\n")
+              "if os.environ.get('TMUX'):\n"
+              "    subprocess.run(['tmux','send-keys','-t','sandbox:shell','echo shell > /work/shell.txt; exit','Enter'],check=True)\n"
+              "    time.sleep(1)\n"
+              "else:\n"
+              "    pathlib.Path('/work/no-tmux.txt').write_text('direct')\n")
     command = [str(ROOT / "codex-sandbox"), "--backend", backend, "--workspace", str(tmp_path), "--offline", "--no-auth",
                *flag, "--binary", "/usr/bin/python3", "--", "-I", "-c", script]
     if backend == "podman" and request.config.getoption("--agent-image"):
@@ -739,7 +744,10 @@ def test_real_tmux_mode_has_agent_and_shell_windows(request, backend, tmp_path, 
             os.killpg(process.pid, signal.SIGTERM)
         os.close(master)
     assert (tmp_path / "agent.txt").read_text() == "agent"
-    assert (tmp_path / "shell.txt").read_text().strip() == "shell"
+    if flag:  # --tmux: the agent in window 0 drove the shell in window 1
+        assert (tmp_path / "shell.txt").read_text().strip() == "shell"
+    else:     # default with --binary: no tmux, the program runs directly in the terminal
+        assert (tmp_path / "no-tmux.txt").read_text() == "direct" and not (tmp_path / "shell.txt").exists()
 
 
 def test_real_opencode_uses_local_llm_only(request, backend, tmp_path, monkeypatch):
