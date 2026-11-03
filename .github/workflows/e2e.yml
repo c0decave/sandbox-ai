@@ -1,0 +1,65 @@
+name: e2e
+
+# Real sandboxes on a real host: the images are built, then the live tests run with rootless
+# Podman and with Bubblewrap + Firejail (nftables firewall, the connection proxy's NAT redirect,
+# pushes to a Git server on the host, network changes while a sandbox runs, MCP catalog containers).
+# Failed tests are reported as annotations of the job.
+
+on:
+  push:
+    branches: [e2e]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [podman, bwrap]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q podman passt bubblewrap firejail slirp4netns uidmap nftables tmux python3-pytest
+      - name: Host settings (user namespaces, terminal injection, NAT modules)
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo sysctl -w dev.tty.legacy_tiocsti=0 || true
+          sudo modprobe nft_chain_nat nft_redir || true
+          grep "^$(id -un):" /etc/subuid /etc/subgid || sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$(id -un)"
+          podman info --format '{{.Host.CgroupVersion}} {{.Host.OCIRuntime.Name}} {{.Host.NetworkBackend}}'
+      - name: sandbox-ai doctor
+        run: ./sandbox-ai doctor --backend ${{ matrix.backend }} || true
+      - name: Build the images
+        if: matrix.backend == 'podman'
+        run: ./sandbox-build-image all
+      - name: Live tests
+        run: |
+          python3 -m pytest -q -p no:cacheprovider -rfE --junitxml=live.xml --agent-live \
+            --agent-backend ${{ matrix.backend }} \
+            tests/test_live_e2e.py tests/test_agent_sandbox_live.py tests/test_escape_live.py
+      - name: Failures as annotations
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          for case in ET.parse("live.xml").iter("testcase"):
+              for bad in list(case.iter("failure")) + list(case.iter("error")):
+                  text = (bad.get("message") or bad.text or "").replace("\n", " ")[:900]
+                  print(f"::error title={case.get('name')}::{text}")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-${{ matrix.backend }}
+          path: live.xml

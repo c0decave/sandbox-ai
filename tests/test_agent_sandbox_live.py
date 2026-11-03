@@ -157,12 +157,14 @@ assert foreign not in pathlib.Path('/etc/hosts').read_text()
 with socket.create_connection((host,443),timeout=15) as tcp:
     with ssl.create_default_context().wrap_socket(tcp,server_hostname=host) as tls:
         assert tls.version()
+# The connection proxy accepts every connection and refuses a forbidden one right away: no
+# TLS session (no data at all) may come about.
 for host,port in [('1.1.1.1',443),(host,80)]:
-    try: connection=socket.create_connection((host,port),timeout=2)
-    except OSError: pass
-    else:
-        connection.close()
-        raise AssertionError('forbidden destination reachable')
+    try:
+        with socket.create_connection((host,port),timeout=5) as connection:
+            ssl.create_default_context().wrap_socket(connection,server_hostname=host).close()
+    except (OSError, ssl.SSLError): pass
+    else: raise AssertionError('forbidden destination reachable')
 for name in ['example.org',foreign]:
     try: socket.getaddrinfo(name,443)
     except OSError: pass
@@ -356,14 +358,27 @@ def test_real_dangerously_skip_permissions_flags_are_accepted(request, backend, 
     assert any(char.isdigit() for char in stdout), stdout
 
 
+# In scripts that run inside a sandbox: can data flow to HOST:PORT? The connection proxy accepts every
+# connection and resets a forbidden one at once.
+EXCHANGES = '''
+import socket, ssl
+def exchanges(host, port, timeout=5):
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as connection:
+            ssl.create_default_context().wrap_socket(connection, server_hostname=host).close()
+        return True
+    except (OSError, ssl.SSLError):
+        return False
+'''
+
+
 def test_real_dns_resolves_but_does_not_open_egress(request, backend, tmp_path):
-    script = '''
+    script = EXCHANGES + '''
 import socket
 assert socket.getaddrinfo('example.org', 443, type=socket.SOCK_STREAM)
 for host, port in [('example.org', 443), ('1.1.1.1', 443)]:
-    try: socket.create_connection((host, port), timeout=3).close()
-    except OSError: pass
-    else: raise AssertionError('egress open with --dns only: %s:%d' % (host, port))
+    if exchanges(host, port):
+        raise AssertionError('egress open with --dns only: %s:%d' % (host, port))
 query = b'\\x12\\x34\\x01\\x00\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x07example\\x03org\\x00\\x00\\x01\\x00\\x01'
 udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 udp.settimeout(2)
@@ -414,12 +429,11 @@ print('FRONTIER_OK')
 def test_real_logs_denied_egress_and_file_access(request, backend, tmp_path):
     work, logs = tmp_path / "work", tmp_path / "logs"
     work.mkdir()
-    script = '''
+    script = EXCHANGES + '''
 import pathlib, socket
 for target in [('192.0.2.1', 8443), ('blocked.example', 443)]:
-    try: socket.create_connection(target, timeout=2).close()
-    except OSError: pass
-    else: raise AssertionError('denied target reachable: %r' % (target,))
+    if exchanges(*target):
+        raise AssertionError('denied target reachable: %r' % (target,))
 pathlib.Path('/work/logged.txt').write_text('logged')
 assert pathlib.Path('/work/logged.txt').read_text() == 'logged'
 try: open('/sandbox/log/files.jsonl', 'a').write('{"forged": true}\\n')
@@ -431,9 +445,10 @@ print('LOG_SCENARIO_OK')
                        ["--no-auth", "--log-dir", str(logs), "--binary", "/usr/bin/python3"], ["-I", "-c", script])
     assert "LOG_SCENARIO_OK" in stdout
     denied = [json.loads(line) for line in (logs / "egress-denied.jsonl").read_text().splitlines()]
-    assert {"address": "192.0.2.1", "protocol": "tcp", "port": 8443}.items() <= next(
-        (r for r in denied if r.get("address") == "192.0.2.1"), {}).items(), denied
-    assert any(r.get("host") == "blocked.example" for r in denied), denied
+    assert any(r.get("host") == "blocked.example" for r in denied), denied  # the DNS stub
+    # A forbidden address is refused by the connection proxy, which logs it with the destination.
+    connections = [json.loads(line) for path in logs.glob("connections-*.jsonl") for line in path.read_text().splitlines()]
+    assert any(r.get("event") == "denied" and r.get("destination") == "192.0.2.1:8443" for r in connections), connections
     files = [json.loads(line) for line in (logs / "files.jsonl").read_text().splitlines()]
     actions = {(r.get("action"), r.get("path")) for r in files}
     assert ("write", "/work/logged.txt") in actions and ("read", "/work/logged.txt") in actions, files
