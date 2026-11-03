@@ -11,8 +11,19 @@ FROM ${NODE_IMAGE}
 ARG OPENCODE_VERSION=latest
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates bash git python3 python3-pip python3-venv firejail nftables ripgrep util-linux \
-    vim netcat-traditional bind9-dnsutils iputils-ping curl wget tmux \
+    vim netcat-traditional bind9-dnsutils iputils-ping iproute2 traceroute curl wget tmux \
     && rm -rf /var/lib/apt/lists/*
+# GitHub CLI from GitHub's own apt repository (Debian's gh is years behind),
+# the newest release at build time like the agent; the key comes over HTTPS.
+RUN mkdir -p -m 755 /etc/apt/keyrings \
+    && wget -nv -O /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+       https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+RUN gh --version
 # GUI base (--gui): virtual display, VNC over a Unix socket, fonts and the
 # runtime libraries Playwright's Chromium and Firefox builds need. Browsers
 # themselves are fetched at runtime, e.g. `uvx playwright install chromium`.

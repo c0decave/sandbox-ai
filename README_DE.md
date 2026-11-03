@@ -152,14 +152,19 @@ Jedes Image trägt das Label `sandbox-ai.agent-version`, das
 `sandbox-ai doctor` anzeigt. Für eine entfernte Engine `--podman-url URL`
 angeben.
 
-**Inhalt der Images.** Bash, Git, Vim, Python 3 mit pip und venv, uv/uvx,
-ripgrep, curl, wget, `nc` (netcat-traditional), `host`/`dig`, `ping`, tmux,
-Firejail und nftables; für `--gui` zusätzlich Xvfb, x11vnc, x11-utils, Schriften
+**Inhalt der Images.** Bash, Git, die GitHub-CLI `gh`, Vim, Python 3 mit pip
+und venv, uv/uvx, ripgrep, curl, wget, `nc` (netcat-traditional),
+`host`/`dig`, `ping`, `traceroute`, `ss`/`ip` (iproute2), tmux, Firejail und
+nftables; für `--gui` zusätzlich Xvfb, x11vnc, x11-utils, Schriften
 und die Laufzeitbibliotheken der Playwright-Builds von Chromium und Firefox.
-Keine Compiler-Toolchain; Projektwerkzeuge im Rezept ergänzen.
+Keine Compiler-Toolchain; Projektwerkzeuge im Rezept ergänzen. `gh` kommt aus
+GitHubs eigenem apt-Repository (`cli.github.com`, neueste Version zum
+Build-Zeitpunkt); in der Sandbox braucht es `--allow-github` und ein Token,
+z. B. `--git-token-env https://github.com=NAME`, das auch `GH_TOKEN` setzt.
 
 Netzwerkwerkzeuge unterliegen der Firewall: `dig`/`host` brauchen `--dns`,
-`ping` braucht ICMP (`--allow IP` oder `--egress-all-allow`). Das
+`ping` braucht ICMP und `traceroute` seine UDP-Proben (`--allow IP` oder
+`--egress-all-allow`); `ss` zeigt nur die Sockets der Sandbox. Das
 Root-Dateisystem ist schreibgeschützt und das System-Python ist als extern
 verwaltet markiert; Pakete daher in eine virtuelle Umgebung installieren
 (`python3 -m venv .venv`, `uv venv`) oder `uvx`/`uv tool` nutzen. Paketindizes

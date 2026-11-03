@@ -100,8 +100,12 @@ def test_builder_selects_one_recipe_and_image(agent, remote, fake_podman):
     assert "python3-pip python3-venv" in recipe
     for package in ("xvfb", "x11vnc", "x11-utils", "fonts-liberation", "libnss3", "libgbm1", "libgtk-3-0", "libasound2"):
         assert f" {package} " in recipe, package
-    for package in ("git", "vim", "netcat-traditional", "bind9-dnsutils", "iputils-ping", "python3", "curl", "wget"):
+    for package in ("git", "vim", "netcat-traditional", "bind9-dnsutils", "iputils-ping", "iproute2", "traceroute",
+                    "python3", "curl", "wget"):
         assert f" {package} " in recipe, package
+    # gh from GitHub's signed apt repository, checked at build time.
+    assert "signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages" in recipe
+    assert "apt-get install -y --no-install-recommends gh " in recipe and "RUN gh --version" in recipe
     assert "FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv" in recipe
     assert "COPY --from=uv /uv /uvx /usr/local/bin/" in recipe
     assert "RUN python3 -m pip --version && uv --version" in recipe

@@ -107,7 +107,7 @@ CAPS = ["SYS_ADMIN", "NET_ADMIN", "SETUID", "SETGID", "SYS_CHROOT",
 PASTA_OPTIONS = ("--no-map-gw", "-t", "none", "-u", "none", "-T", "none", "-U", "none")
 POD_NETWORK = "pasta:" + ",".join(PASTA_OPTIONS)
 SESSION_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}"
-__version__ = "0.1.18"
+__version__ = "0.1.19"
 CONFIG_NAME = ".sandbox-ai.json"
 # Label on session pods: the session's tmux directory, so a stale pod can be told apart from someone else's.
 SESSION_LABEL = "sandbox-ai.session"

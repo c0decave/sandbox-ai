@@ -149,14 +149,19 @@ fails, nothing is built. To pin instead:
 Each image carries the label `sandbox-ai.agent-version`, which
 `sandbox-ai doctor` shows. For a remote engine add `--podman-url URL`.
 
-**Image contents.** Bash, Git, Vim, Python 3 with pip and venv, uv/uvx,
-ripgrep, curl, wget, `nc` (netcat-traditional), `host`/`dig`, `ping`, tmux,
-Firejail and nftables; for `--gui` also Xvfb, x11vnc, x11-utils, fonts and the
+**Image contents.** Bash, Git, the GitHub CLI `gh`, Vim, Python 3 with pip
+and venv, uv/uvx, ripgrep, curl, wget, `nc` (netcat-traditional),
+`host`/`dig`, `ping`, `traceroute`, `ss`/`ip` (iproute2), tmux, Firejail and
+nftables; for `--gui` also Xvfb, x11vnc, x11-utils, fonts and the
 runtime libraries of Playwright's Chromium and Firefox. No compiler toolchain;
-extend the recipe for project tools.
+extend the recipe for project tools. `gh` comes from GitHub's own apt
+repository (`cli.github.com`, newest release at build time); in the sandbox it
+needs `--allow-github` and a token, e.g. `--git-token-env
+https://github.com=NAME`, which also sets `GH_TOKEN`.
 
 Network tools obey the sandbox firewall: `dig`/`host` need `--dns`, `ping`
-needs ICMP (`--allow IP` or `--egress-all-allow`). The root filesystem is
+needs ICMP and `traceroute` its UDP probes (`--allow IP` or
+`--egress-all-allow`); `ss` shows the sandbox's own sockets only. The root filesystem is
 read-only and Debian marks the system Python as externally managed, so install
 packages into a virtual environment (`python3 -m venv .venv`, `uv venv`) or use
 `uvx`/`uv tool`. Package indexes are blocked by default; allow them with
