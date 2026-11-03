@@ -35,8 +35,13 @@ jobs:
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           sudo sysctl -w dev.tty.legacy_tiocsti=0 || true
-          sudo modprobe nft_chain_nat nft_redir || true
+          sudo modprobe -a nft_chain_nat nft_redir || true
           grep "^$(id -un):" /etc/subuid /etc/subgid || sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$(id -un)"
+          # A systemd user session, as on a desktop: rootless Podman's cgroup manager and systemd-run --user.
+          sudo loginctl enable-linger "$(id -un)"
+          for _ in $(seq 30); do [ -S "/run/user/$(id -u)/bus" ] && break; sleep 1; done
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
       # The job log needs a login to read; what matters is also written as annotations.
       - name: Diagnostics
         run: |

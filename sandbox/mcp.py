@@ -425,13 +425,22 @@ def ensure_running_locked(name, a):
         # isolation (see image_command); the bridge only connects the socket with podman's stdio.
         cmd = [sys.executable, "-I", str(HERE / "runtime.py"), "--internal-mcp-serve", str(sock / "server.sock"),
                "--", *image_command(definition)]
+        environment = dict(os.environ)
         for variable in definition.get("env", []):
-            if variable not in os.environ:
-                raise ValueError(f"MCP server {name} needs the variable {variable} in your environment")
+            if variable not in environment:
+                # Not in your environment: the secret of that name (sandbox-ai secrets), if there is one.
+                spec = importlib.util.spec_from_file_location("secret_store_for_mcp", HERE / "secret_store.py")
+                store = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(store)
+                value = store.get(variable)
+                if value is None:
+                    raise ValueError(f"MCP server {name} needs the variable {variable}: set it, or keep it with "
+                                     f"sandbox-ai secrets set {variable}")
+                environment[variable] = value
         log = directory / "supervisor.log"
         with open(log, "ab") as stream:
             process = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
-                                       start_new_session=True, cwd=str(directory))
+                                       start_new_session=True, cwd=str(directory), env=environment)
         save_state(name, {"pid": process.pid, "image": definition["image"], "backend": "podman",
                           "definition": digest, "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
         wait_for_socket(sock / "server.sock", log, process)

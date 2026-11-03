@@ -12,6 +12,9 @@
   sandbox-ai logs [DIR|--project PATH]                               blocked egress and file access, with suggestions
   sandbox-ai privacy-check [PATH ...]                                what the next push would publish that should stay private
   sandbox-ai net list|show|allow|revoke ...                          change what a running sandbox may reach
+  sandbox-ai approvals list|allow|deny|history ...                   answer what running sandboxes ask
+  sandbox-ai secrets list|set|delete|backend ...                     API keys and tokens in your keyring
+  sandbox-ai images [packages AGENT] [--json]                        the agent images and their contents
   sandbox-ai update [--check]                                        update an installation made by install.sh
   sandbox-ai version
 
@@ -26,7 +29,9 @@ HERE = Path(__file__).resolve().parent
 PYTHON_COMMANDS = {"claude": ("agent_sandbox.py", "claude"), "codex": ("agent_sandbox.py", "codex"),
                    "opencode": ("agent_sandbox.py", "opencode"), "session": ("sessions.py",),
                    "mcp": ("mcp.py",), "wizard": ("wizard.py",), "login": ("login.py",), "plugins": ("plugins.py",), "doctor": ("doctor.py",), "logs": ("logs.py",),
-                   "privacy-check": ("privacy.py", "check"), "net": ("net.py",)}
+                   "privacy-check": ("privacy.py", "check"), "net": ("net.py",),
+                   "approvals": ("approvals.py",), "secrets": ("secret_store.py",),
+                   "images": ("images.py",)}
 
 
 def version():

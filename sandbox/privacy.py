@@ -1034,7 +1034,7 @@ def push_verdict(config, request):
                                                    "private:", *lines, "Remove these from the commits (rewrite "
                                                    "them), or ask the user whether they are meant to be "
                                                    "published."])}
-    return {"ok": True, "message": "\n".join(lines) if lines else "clean"}
+    return {"ok": True, "message": "\n".join(lines) if lines else "clean", "warnings": bool(lines)}
 
 
 def present(git, oids):

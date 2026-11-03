@@ -40,10 +40,14 @@ widen it.
 18. [Egress and file access logs](#egress-and-file-access-logs)
 19. [Privacy check before publishing](#privacy-check-before-publishing)
 20. [Connection proxy](#connection-proxy)
-21. [Option reference](#option-reference)
-22. [Testing](#testing)
-23. [Troubleshooting](#troubleshooting)
-24. [Limits and remaining work](#limits-and-remaining-work)
+21. [Approvals and browser requests](#approvals-and-browser-requests)
+22. [Secrets](#secrets)
+23. [Resource limits](#resource-limits)
+24. [Desktop app](#desktop-app)
+25. [Option reference](#option-reference)
+26. [Testing](#testing)
+27. [Troubleshooting](#troubleshooting)
+28. [Limits and remaining work](#limits-and-remaining-work)
 
 ## Requirements
 
@@ -115,8 +119,12 @@ published is in [RELEASING.md](RELEASING.md).
 | `sandbox-ai build [--pin V] AGENT\|all` | `sandbox-build-image` | build the images |
 | `sandbox-ai doctor [--backend podman\|bwrap\|both] [--json]` | | check the host: user, Python, user namespaces, Podman (rootless), pasta, subuid/subgid, images with agent versions, Bubblewrap tools, TIOCSTI, host logins (expiry only), the default kit and the kits with their skills, agents, commands and prompts, Claude plugins declared vs. installed, the memory of the project in the current directory, Git identity, project trust; each problem with the command that fixes it; exit 1 on a failure |
 | `sandbox-ai logs [DIR\|--project P] [--json]` | | summarize blocked egress and file access of a `--log-dir` and suggest the option for each blocked target (`--allow-pypi`, `--allow-host`, `--allow-tcp`, `--allow-host-port` …) |
+| `sandbox-ai net list\|show\|allow\|revoke …` | | change what a running sandbox may reach ([network changes](#changing-the-network-of-a-running-sandbox)) |
+| `sandbox-ai approvals list\|allow\|deny\|history …` | | answer what running sandboxes ask ([approvals](#approvals-and-browser-requests)) |
+| `sandbox-ai secrets list\|set\|delete\|backend` | | API keys and tokens in your system keyring ([secrets](#secrets)) |
+| `sandbox-ai images [packages AGENT] [--json]` | | the agent images with agent version, age and size; the Debian and npm packages in one |
 | `sandbox-ai update [--check]` | `sandbox-ai-update` | update an installation made by `install.sh` |
-| `sandbox-ai version` | `--version` | version |
+| `sandbox-ai version` | `-V`, `--version` | version |
 
 ## Images: build and update
 
@@ -1029,6 +1037,10 @@ access is not logged):
   first occurrence) and each lookup of a name that is not allowed. With
   logging, lookups go to a stub on `127.0.0.1:53` inside the sandbox that
   records the name and answers NXDOMAIN.
+- `processes.jsonl`: every process that appears in the sandbox with its
+  PID, parent and command line (polled twice a second, so very short-lived
+  processes can be missed). Written whenever a log directory is in use,
+  including the default one.
 - `files.jsonl`: `read`, `write`, `create`, `delete`, `move-from`, `move-to`
   under the workspaces, `/root`, `/tmp` and every mount (inotify; repeats per
   path collapsed for two seconds). inotify has no process ID; `/usr` and
@@ -1047,6 +1059,13 @@ for model APIs, `--allow-host` for other names, `--allow-tcp IP:PORT`,
 suggestion widens the sandbox, so review it first. Names and paths come from
 the agent: they are shown with every control character escaped, and a name
 that is not a valid host name gets no suggestion.
+
+It also summarizes what the connection log and `processes.jsonl` recorded:
+HTTP requests per host, pushes checked and refused, model API calls with the
+token usage they reported (Anthropic and OpenAI-style responses, streamed or
+not), which credential headers went to which host (names only; values are
+redacted in the log), refused connections, the programs started, and the tool
+calls of the MCP servers started with `sandbox-mcp`.
 
 ## Privacy check before publishing
 
@@ -1185,8 +1204,97 @@ The proxy runs as its own user in the sandbox, without capabilities and with
 `no_new_privs`; the firewall's redirect skips only that user. It parses what
 the agent sends but stays inside the sandbox's namespaces. It needs the
 nftables NAT modules on the host (`nft_chain_nat`, `nft_redir`; loaded on most
-systems, otherwise `sudo modprobe nft_chain_nat nft_redir`) and `openssl` in
+systems, otherwise `sudo modprobe -a nft_chain_nat nft_redir`) and `openssl` in
 the image (included) or, with Bubblewrap, on the host.
+
+## Approvals and browser requests
+
+With the proxy on, a sandbox asks you instead of failing silently (`--ask on`,
+the default):
+
+- a **connection** to a destination the network options do not allow (held
+  until you answer; the question names the server from TLS or the `Host`
+  header when the agent sent one);
+- a **lookup** of a name that is not pinned (refused at once; once you allow
+  it, sandbox-ai resolves the name on the host, pins the addresses and opens
+  HTTPS to them, so the agent's next try works);
+- a **push** that the privacy check passes but has warnings about (pushes with
+  blocking findings are refused without asking);
+- **opening a URL** in your browser: `xdg-open`, `sensible-browser`,
+  `x-www-browser`, `www-browser`, `open` and `$BROWSER` in the sandbox ask the
+  host to open http(s) URLs, one question per URL (for example the login page
+  of a tool). Nothing opens without your answer; the program in the sandbox
+  only learns that you were asked.
+
+Every question shows up as a desktop notification (`notify-send`, when
+available), in the app, and in:
+
+```sh
+sandbox-ai approvals list                     # ID  RUN  what is asked
+sandbox-ai approvals allow ID --scope run     # once (default), run, always
+sandbox-ai approvals deny ID
+sandbox-ai approvals history [RUN]            # questions and their answers
+```
+
+A question nobody answers is refused after 60 seconds and not asked again in
+that run. `once` allows this one connection, `run` until the sandbox ends,
+`always` also every later start of the same project (kept in
+`~/.config/sandbox-ai/approved.json`; remove entries there to forget them;
+the launcher names the ones it adds). Telemetry hosts the agents contact in
+the background (`statsig.com`, `sentry.io` and similar) are refused without
+asking. `--ask off` refuses everything the options do not allow, as before;
+`--no-proxy` and `--offline` ask nothing.
+
+The questions live in the run's control directory (under `$XDG_RUNTIME_DIR`),
+which the agent cannot see; only processes of your own user can answer.
+
+## Secrets
+
+`sandbox-ai secrets` keeps API keys and tokens in your system keyring (Secret
+Service: GNOME Keyring, KWallet, KeePassXC; through `secret-tool`), or, when
+there is none, in private files (`0600`) under
+`~/.local/share/sandbox-ai/secrets` (`SANDBOX_AI_SECRETS=file` forces the
+files).
+
+```sh
+sandbox-ai secrets set OPENROUTER_API_KEY        # value from stdin, never an argument
+sandbox-ai secrets set GH_PUSH --from-env GH_TOKEN
+sandbox-ai secrets list                          # names and where they are kept, never values
+claude-sandbox --secret-env OPENROUTER_API_KEY    # the agent gets the variable
+claude-sandbox --secret-env API_KEY=OPENROUTER_API_KEY --git-token-secret https://github.com=GH_PUSH
+```
+
+A sandbox gets a secret only when it is named: `--secret-env NAME[=SECRET]`
+(an environment variable for the agent), `--git-token-secret URL=SECRET`
+(like `--git-token-env`) or an MCP server's variable. Values are never
+printed, not in the dry-run plan and not in logs (the proxy redacts them in
+recorded requests as it does every credential).
+
+## Resource limits
+
+Every sandbox runs with limits on memory, CPU and processes:
+
+| Option | Default | `none` |
+|---|---|---|
+| `-me`, `--memory SIZE` | `8g` | no memory limit |
+| `-cu`, `--cpus N` | half of the host's CPUs | no CPU limit |
+| `-pi`, `--pids N` | `4096` | no process limit |
+
+Podman passes them to the container (`--memory`, `--cpus`, `--pids-limit`).
+Bubblewrap runs in a transient systemd scope (`systemd-run --user --scope`).
+Both need a systemd user session with delegated cgroup controllers, as on
+every desktop; without one (a container, some servers) the sandbox starts
+without limits and says so.
+
+## Desktop app
+
+[sandbox-ai-app](https://github.com/c0decave/sandbox-ai-app) is a graphical
+front end (Python, Qt) for everything above: start sandboxes with every
+option, see the running ones, follow their connections, answer approvals,
+change their network, manage MCP servers, secrets, logins and images, browse
+the files of HOME and the workspaces, and work in terminals of the sandboxes.
+It only calls the `sandbox-ai` commands and reads their files; the sandboxes
+do not depend on it.
 
 ## Option reference
 
@@ -1252,6 +1360,7 @@ See [Workspaces and mounts](#workspaces-and-mounts).
 | `-cp`, `--copy SRC:HOME_RELATIVE_DEST` | Copy one config or credential file into the sandbox HOME; repeatable |
 | `-S`, `--state-dir DIR` | Private persistent sandbox HOME (mode 0700); default: deleted after exit |
 | `-e`, `--env NAME` | Pass one host variable to the agent only; values never printed; repeatable |
+| `-se`, `--secret-env NAME[=SECRET]` | The agent gets NAME with the value of a stored secret (default: the secret NAME); repeatable ([secrets](#secrets)) |
 
 See [Authentication and state](#authentication-and-state).
 
@@ -1286,6 +1395,7 @@ See [Kits, project memory and plugins](#kits-project-memory-and-plugins).
 | `-nw`, `--network NAME`, `-ip`, `--ip IP`, `-i6`, `--ip6 IP` | Podman: existing private network and static addresses |
 | `-X`, `--no-proxy` | No connection proxy: no connection log, pushes checked only by the hooks |
 | `-x`, `--no-inspect HOST` | Pass TLS to HOST (or `*.DOMAIN`) through unopened; repeatable |
+| `-Q`, `--ask on\|off` | Ask before what the options do not allow; unanswered after 60 s: refused (default: `on`; [approvals](#approvals-and-browser-requests)) |
 
 See [Network policy](#network-policy) and [Connection proxy](#connection-proxy).
 
@@ -1334,6 +1444,7 @@ See [Sessions](#sessions-detach-pause-resume-stop), [tmux](#tmux-mode) and
 |---|---|
 | `-d`, `--device PATH` | Hand a host device to the agent: a character device under `/dev` or `/dev/bus/usb`, `/dev/dri`, `/dev/snd` whole; repeatable (weakens isolation) |
 | `-G`, `--gpu nvidia\|dri\|rocm` | The GPU devices (NVIDIA through CDI with Podman) |
+| `-me`, `--memory SIZE`, `-cu`, `--cpus N`, `-pi`, `--pids N` | Resource limits (defaults `8g`, half the CPUs, `4096`; `none` for none; [limits](#resource-limits)) |
 
 See [Hardware](#hardware-devices-and-gpus); a service on the host reached with
 `--allow-host-port` is safer.
@@ -1360,6 +1471,9 @@ See [Project configuration](#project-configuration-and-wizard) and
 | `sandbox-ai COMMAND …` | one command for all of the below, plus `doctor`, `logs [DIR\|--project P] [--json]`, `update [--check]`, `version` |
 | `sandbox-ai privacy-check [PATH ...]` | `[--rules-dir DIR] [--project NAME] [--all] [--json]`: what the next push of each repository would publish that should stay private; exit 1 for blocking findings, 2 when it cannot check |
 | `sandbox-ai net list\|show\|allow\|revoke [RUN] [--allow-host H] [--allow-tcp IP:PORT] [--allow NET] [--allow-PRESET]` | Change what a running sandbox may reach (see [Network policy](#changing-the-network-of-a-running-sandbox)) |
+| `sandbox-ai approvals list\|history [RUN]`, `allow ID [--scope once\|run\|always]`, `deny ID` | Answer the questions of running sandboxes |
+| `sandbox-ai secrets list\|set NAME [--from-env VAR]\|delete NAME\|backend` | Secrets in the system keyring, else private files |
+| `sandbox-ai images [--json]`, `sandbox-ai images packages AGENT [--json]` | Agent images and their packages (read offline from the image) |
 | `sandbox-build-image` | `[--podman-url URL] [--pin VERSION] [--uv VERSION] [--node IMAGE] AGENT\|all [podman build options]`; newest releases unless pinned |
 | `sandbox-session list` | Sessions and their status |
 | `sandbox-session attach\|pause\|resume\|stop NAME` | Attach (detach with `Ctrl-b d`), freeze, thaw or restart, stop |
@@ -1406,6 +1520,15 @@ practical model runs, Playwright and a local LLM. Options:
 Practical model runs write their reports to `evidence/` (not versioned, so
 reports always belong to the code that produced them).
 
+`tests/test_live_e2e.py` (also `--agent-live`) checks the features of 0.1.20
+and later on a real host: the proxy behind the real NAT redirect with real TLS,
+pushes to a Git server on the host refused and accepted, SSH refused, network
+changes and approvals (connection, lookup, browser request) while a sandbox
+runs, devices, MCP catalog containers, resource limits in the container's
+cgroup, secrets as variables and the process log. The GitHub Actions workflow
+`e2e` runs them, with the image builds, on Ubuntu 24.04 with rootless Podman
+and with Bubblewrap; failures are written as annotations of the job.
+
 ## Troubleshooting
 
 Start with `sandbox-ai doctor`: it checks every requirement and prints the
@@ -1435,8 +1558,9 @@ command that fixes each problem.
    project configuration, local LLMs, MCP servers, logs, DNS and egress modes, devices and GPUs, the connection proxy (NAT redirect) and `sandbox-ai net` are covered
    by unit, contract and end-to-end tests and by new live tests, which still
    have to run on real Podman/Bubblewrap hosts.
-3. **P2 — Operational bounds:** no CPU/RAM/PID limit options; logs are not
-   size-limited.
+3. **P2 — Operational bounds:** resource limits need a systemd user session;
+   without one sandboxes start unlimited. `files.jsonl`, `processes.jsonl`
+   and `egress-denied.jsonl` are not size-limited (the connection logs are).
 4. **P2 — Claude lifecycle:** verify token refresh and write-back over a long
    session; account binding of written-back tokens is not verified.
 5. **P3 — Reproducible builds:** builds take the newest releases by design;

@@ -774,11 +774,11 @@ def test_start_loggers(scenario, tmp_path, monkeypatch):
         return
     config.write_text(json.dumps({"pinned": ["api.openai.com"] if scenario == "happy" else [], "watch": ["/work"]}))
     stop = s.start_loggers()
-    assert not stop.is_set() and stop.seen == set() and len(stop.threads) == 3
+    assert not stop.is_set() and stop.seen == set() and len(stop.threads) == 4
     targets = {target.__name__: args for target, args in started}
-    assert targets["dns_logger"] == ({"api.openai.com"} if scenario == "happy" else set(), 53, stop)
+    assert targets["dns_logger"] == ({"api.openai.com"} if scenario == "happy" else set(), 53, stop, None, ())
     assert targets["file_logger"] == (["/work"], stop)
-    assert "denied_loop" in targets
+    assert "denied_loop" in targets and targets["process_logger"] == (stop,)
 
 
 def test_poll_denied(scenario, tmp_path, monkeypatch):
@@ -1483,7 +1483,7 @@ def test_git_credentials_file(scenario, tmp_path, monkeypatch, capsys):
             {"url": "https://github.com", "user": "x-access-token", "env": "CONTRACT_GH"},
             {"url": "http://localhost:3000", "user": "first", "credentials": str(path), "line": 3}]
         assert plan["host_ports"] == [3000] and f"{path} line 4 skipped" in err
-        assert not any(secret in out + err for secret in (TOKEN, GIT_TOKEN, "secret"))
+        assert not any(secret in out + err for secret in (TOKEN, GIT_TOKEN, "secret-second", "secret-gh", "broken-secret"))
 
 
 def load_module(name, relative):
@@ -4184,9 +4184,8 @@ def test_control_server(scenario, tmp_path):
     applied, stop = [], threading.Event()
     apply = (lambda script: applied.append(script)) if scenario != "sad" else Mock(
         side_effect=subprocess.CalledProcessError(1, "nft"))
-    thread = threading.Thread(target=rt.control_server, args=(socket_path, {"loopback": [3000]},
-                                                              allow if scenario != "edge" else None, stop, apply),
-                              daemon=True)
+    network = rt.RuntimeNetwork({"loopback": [3000]}, allow if scenario != "edge" else None, apply)
+    thread = threading.Thread(target=rt.control_server, args=(socket_path, network, stop), daemon=True)
     thread.start()
     deadline = time.monotonic() + 5
     while not socket_path.exists() and time.monotonic() < deadline:
@@ -4435,8 +4434,8 @@ def test_canonical_options(scenario):
             "--state-dir", "/x", "--version"]
     elif scenario == "sad":
         # Values are never read as options; unknown tokens stay as they are for argparse to refuse.
-        assert s.canonical_options(["--env", "-D", "-e", "-S", "-Qz", "--", "-D"]) == [
-            "--env", "-D", "--env", "-S", "-Qz", "--", "-D"]
+        assert s.canonical_options(["--env", "-D", "-e", "-S", "-jz", "--", "-D"]) == [
+            "--env", "-D", "--env", "-S", "-jz", "--", "-D"]
     else:
         assert s.canonical_options(["--mount=a:/mnt/a:ro", "-d/dev/kvm", "-x", "*.example.org"]) == [
             "--mount=a:/mnt/a:ro", "--device", "/dev/kvm", "--no-inspect", "*.example.org"]
@@ -4511,6 +4510,7 @@ def test_delegated_controllers(scenario, tmp_path):
 
 def test_enforced_limits(scenario, monkeypatch):
     monkeypatch.setattr(s.os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(s, "user_manager_running", lambda: True)
     a = s.parse_args(["codex"])
     if scenario == "happy":
         monkeypatch.setattr(s, "delegated_controllers", lambda path=None: {"cpu", "memory", "pids"})
@@ -4526,10 +4526,15 @@ def test_enforced_limits(scenario, monkeypatch):
         remote = s.parse_args(["codex", "--podman-url", "unix:///x.sock"])
         monkeypatch.setattr(s, "delegated_controllers", lambda path=None: set())
         assert s.enforced_limits(remote)[0] == {"memory": "8g", "cpus": "4", "pids": 4096}  # remote: not ours to check
+        # No systemd user session: rootless Podman uses cgroupfs and cannot set limits at all.
+        monkeypatch.setattr(s, "user_manager_running", lambda: False)
+        limits, notes = s.enforced_limits(a)
+        assert limits == {} and "linger" in notes[0]
 
 
 def test_limits_prefix(scenario, monkeypatch):
     monkeypatch.setattr(s.os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(s, "user_manager_running", lambda: True)
     monkeypatch.setattr(s, "delegated_controllers", lambda path=None: {"cpu", "memory", "pids"})
     a = s.parse_args(["codex", "--backend", "bwrap"])
     if scenario == "happy":
@@ -4556,13 +4561,331 @@ def test_user_manager_running(scenario, monkeypatch, tmp_path):
         assert not s.user_manager_running()
     else:
         s.user_manager_running()
-        assert seen == [f"/run/user/{os.getuid()}/systemd/private"]
+        assert seen == [f"/run/user/{os.getuid()}/bus"]
 
 
 def test_podman_run_carries_the_limits(monkeypatch, tmp_path):
     monkeypatch.setattr(s.os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(s, "user_manager_running", lambda: True)
     monkeypatch.setattr(s, "delegated_controllers", lambda path=None: {"memory", "pids"})
     _, run = s.pod_commands(s.parse_args(["codex", "--workspace", str(tmp_path), "--memory", "2g"]), "p",
                             tmp_path / "session", tmp_path / "home")
     assert run[run.index("--memory") + 1] == "2g" and run[run.index("--pids-limit") + 1] == "4096"
     assert "--cpus" not in run  # cpu not delegated: left out, not failing the start
+
+
+def test_user_bus_environment(scenario, monkeypatch):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/tmp/elsewhere")
+    env = s.user_bus_environment()
+    if scenario == "happy":
+        assert env["XDG_RUNTIME_DIR"] == f"/run/user/{os.getuid()}"
+    elif scenario == "sad":
+        assert env["DBUS_SESSION_BUS_ADDRESS"] == f"unix:path=/run/user/{os.getuid()}/bus"
+    else:
+        assert env["PATH"] == os.environ["PATH"] and os.environ["XDG_RUNTIME_DIR"] == "/tmp/elsewhere"
+
+
+# --- approvals ------------------------------------------------------------------------------------
+
+
+def wait_for(condition, seconds=5):
+    deadline = time.monotonic() + seconds
+    while not condition():
+        assert time.monotonic() < deadline, "timed out"
+        time.sleep(0.02)
+
+
+def answer_file(directory, decision, scope="once", **extra):
+    """Answer the first open question in DIRECTORY like sandbox-ai approvals does."""
+    wait_for(lambda: list(directory.glob("*.json")))
+    question = json.loads(sorted(directory.glob("*.json"))[0].read_text())
+    (directory / f"{question['id']}.answer").write_text(json.dumps({"decision": decision, "scope": scope, **extra}))
+    return question
+
+
+def test_approval_broker_and_runtime_network(tmp_path):
+    rules = []
+    network = rt.RuntimeNetwork({"https": []}, tmp_path / "allow.json", rules.append)
+    broker = rt.ApprovalBroker(tmp_path / "approvals", network, timeout=3, poll=0.02)
+    results = []
+    thread = threading.Thread(target=lambda: results.append(broker.ask("connect", {
+        "destination": "192.0.2.7:8443", "address": "192.0.2.7", "port": 8443, "host": "api.example.org"})))
+    thread.start()
+    question = answer_file(tmp_path / "approvals", "allow", "run")
+    thread.join(5)
+    assert question["kind"] == "connect" and question["host"] == "api.example.org" and question["timeout"] == 3
+    assert results[0]["decision"] == "allow" and results[0]["scope"] == "run"
+    # Applied to the firewall and the proxy's allow-list before the answer; remembered for the run.
+    assert "ip daddr 192.0.2.7 tcp dport 8443 accept" in rules[-1]
+    assert json.loads((tmp_path / "allow.json").read_text())["tcp"] == [["192.0.2.7", 8443]]
+    assert broker.ask("connect", {"destination": "192.0.2.7:8443", "address": "192.0.2.7", "port": 8443})["scope"] == "run"
+    assert json.loads((tmp_path / "approvals" / f"{question['id']}.done").read_text())["decision"] == "allow"
+    assert stat.S_IMODE((tmp_path / "approvals" / f"{question['id']}.json").stat().st_mode) == 0o600
+
+
+def test_approval_broker_once_timeout_and_dns(tmp_path, monkeypatch):
+    rules = []
+    network = rt.RuntimeNetwork({}, None, rules.append)
+    timers = []
+    monkeypatch.setattr(network, "allow_once", lambda address, port, timer=None: (
+        rt.RuntimeNetwork.allow_once(network, address, port, timer=lambda s, f: timers.append(f) or Mock())))
+    broker = rt.ApprovalBroker(tmp_path / "a", network, timeout=1, poll=0.02)
+    results = []
+    thread = threading.Thread(target=lambda: results.append(broker.ask("connect", {
+        "destination": "198.51.100.1:22", "address": "198.51.100.1", "port": 22})))
+    thread.start()
+    answer_file(tmp_path / "a", "allow", "once")
+    thread.join(5)
+    assert results[0]["decision"] == "allow" and "198.51.100.1 tcp dport 22" in rules[-1]
+    timers[0]()  # the once-rule expires
+    assert "198.51.100.1" not in rules[-1]
+    # Unanswered: refused after the timeout and not asked again during the run.
+    started = time.monotonic()
+    denied = broker.ask("connect", {"destination": "203.0.113.9:443", "address": "203.0.113.9", "port": 443})
+    assert denied["decision"] == "deny" and "no answer" in denied["reason"] and time.monotonic() - started < 4
+    assert broker.ask("connect", {"destination": "203.0.113.9:443", "address": "203.0.113.9", "port": 443}) is denied or \
+        broker.ask("connect", {"destination": "203.0.113.9:443", "address": "203.0.113.9", "port": 443})["decision"] == "deny"
+    # A lookup is filed without waiting; its answer brings the addresses the host resolved.
+    assert broker.ask("dns", {"name": "pypi.org"}, wait=False) is None
+    files = [p for p in (tmp_path / "a").glob("*.json") if json.loads(p.read_text())["kind"] == "dns"]
+    (tmp_path / "a" / f"{files[0].stem}.answer").write_text(json.dumps(
+        {"decision": "allow", "scope": "run", "addresses": ["151.101.0.223", "not-an-address"]}))
+    wait_for(lambda: (tmp_path / "a" / f"{files[0].stem}.done").exists())
+    done = json.loads((tmp_path / "a" / f"{files[0].stem}.done").read_text())
+    assert done["decision"] == "deny" and "could not be applied" in done["reason"]  # a bad address refuses all
+
+
+def test_serve_asks(scenario, tmp_path):
+    proxy_end, supervisor_end = socket.socketpair()
+    if scenario == "edge":
+        # Lines that are not questions are skipped; the channel keeps working.
+        proxy_end.sendall(b"not json\n[1, 2]\n")
+    asked = []
+
+    class Broker:
+        def ask(self, kind, details):
+            asked.append((kind, details))
+            return {"decision": "allow" if details.get("port") == 443 else "deny", "scope": "run", "reason": "answered"}
+    threading.Thread(target=rt.serve_asks, args=(supervisor_end, Broker()), daemon=True).start()
+    channel = rt.AskChannel(proxy_end, timeout=5)
+    results = {}
+    threads = [threading.Thread(target=lambda p=p: results.__setitem__(p, channel("connect", {"port": p})))
+               for p in (443, 22)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+    assert results[443]["decision"] == "allow" and results[22]["decision"] == "deny"
+    assert sorted(d["port"] for _, d in asked) == [22, 443]
+    if scenario == "sad":
+        assert channel("other", {"port": 443})["decision"] == "deny"  # an unknown kind is never allowed
+        assert len(asked) == 2  # and never reaches the broker
+    proxy_end.close()
+
+
+def test_load_approvals_module(scenario):
+    module = s.load_approvals_module()
+    if scenario == "happy":
+        assert callable(module.answer) and callable(module.watch)
+    elif scenario == "sad":
+        assert module.ID.fullmatch("../x") is None
+    else:
+        assert module is not s.load_approvals_module()  # loaded fresh, like the other helpers
+
+
+def test_asking(scenario):
+    if scenario == "happy":
+        assert s.asking(s.parse_args(["codex"]))
+    elif scenario == "sad":
+        assert not s.asking(s.parse_args(["codex", "--ask", "off"])) and not s.asking(s.parse_args(["codex", "-X"]))
+    else:
+        assert not s.asking(s.parse_args(["codex", "--probe"])) and not s.asking(s.parse_args(["codex", "--offline"]))
+
+
+def test_apply_remembered_approvals(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    work = tmp_path / "work"
+    work.mkdir()
+    approvals = s.load_approvals_module()
+    a = s.parse_args(["codex", "--workspace", str(work)])
+    if scenario == "happy":
+        approvals.remember(work, host="pypi.org")
+        approvals.remember(work, tcp="192.0.2.5:5432")
+        notes = s.apply_remembered_approvals(a)
+        assert a.allow_host == ["pypi.org"] and a.allow_tcp == ["192.0.2.5:5432"] and "approved" in notes[0]
+        s.validate(a)
+    elif scenario == "sad":
+        assert s.apply_remembered_approvals(a) == [] and a.allow_host == []
+    else:
+        # Another project's approvals do not apply; damaged entries are ignored.
+        approvals.remember(tmp_path / "other", host="pypi.org")
+        (tmp_path / "config/sandbox-ai/approved.json").write_text(json.dumps(
+            {str(work.resolve()): {"hosts": ["bad host;"], "tcp": ["x"]}, **json.loads(
+                (tmp_path / "config/sandbox-ai/approved.json").read_text())}))
+        assert s.apply_remembered_approvals(a) == [] and a.allow_host == []
+
+
+# --- telemetry: model usage, credentials, processes, MCP tool calls -------------------------------
+
+
+def test_usage_scanner_reads_streams_and_bodies():
+    anthropic = rt.UsageScanner()
+    for chunk in (b'event: message_start\ndata: {"type":"message_start","message":{"model":"claude-opus-5-5",'
+                  b'"usage":{"input_tokens":1200,"cache_read_input_tokens":800,"output_tokens":1}}}\n\n',
+                  b'event: message_delta\ndata: {"type":"message_delta","usage":{"output_t',
+                  b'okens":345}}\n\n'):
+        anthropic.feed(chunk)
+    assert anthropic.result() == {"model": "claude-opus-5-5", "usage": {
+        "input_tokens": 1200, "cache_read_input_tokens": 800, "output_tokens": 345}}
+    openai = rt.UsageScanner()
+    openai.feed(json.dumps({"model": "gpt-5.1", "usage": {"input_tokens": 50, "output_tokens": 7,
+                                                           "total_tokens": 57}}).encode())
+    assert openai.result() == {"model": "gpt-5.1", "usage": {"input_tokens": 50, "output_tokens": 7, "total_tokens": 57}}
+    assert rt.UsageScanner().result() is None
+    noisy = rt.UsageScanner()
+    noisy.feed(b"data: [DONE]\n\ndata: {not json}\n\n" + b"x" * 100)
+    assert noisy.result() is None
+
+
+def test_is_model_request(scenario):
+    if scenario == "happy":
+        assert rt.is_model_request("/v1/messages?beta=true") and rt.is_model_request("/v1/responses")
+    elif scenario == "sad":
+        assert not rt.is_model_request("/v1/models") and not rt.is_model_request("/simple/httpx/")
+    else:
+        assert rt.is_model_request("/v1/chat/completions") and rt.is_model_request("/backend-api/codex/responses")
+
+
+def test_credential_headers(scenario):
+    if scenario == "happy":
+        assert rt.credential_headers([["Authorization", "Bearer x"], ["x-api-key", "k"], ["Accept", "*/*"]]) == [
+            "authorization", "x-api-key"]
+    elif scenario == "sad":
+        assert rt.credential_headers([]) == []
+    else:
+        assert rt.credential_headers([["Cookie", "a"], ["cookie", "b"]]) == ["cookie"]
+
+
+def test_tool_call_record(scenario):
+    if scenario == "happy":
+        record = rt.tool_call_record(json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+            "name": "web_search", "arguments": {"query": "x", "api_key": "secret-value"}}}).encode())
+        assert record["tool"] == "web_search" and '"api_key": "[redacted]"' in record["arguments"]
+    elif scenario == "sad":
+        assert rt.tool_call_record(b"not json") is None
+        assert rt.tool_call_record(b'{"method": "tools/list"}') is None
+    else:
+        record = rt.tool_call_record(json.dumps({"method": "tools/call", "params": {
+            "name": "x", "arguments": {"text": "y" * 5000}}}).encode())
+        assert len(record["arguments"]) == 2003 and record["arguments"].endswith("...")
+
+
+def test_process_logger(scenario, tmp_path, monkeypatch):
+    monkeypatch.setattr(sr, "LOG_DIR", tmp_path / "log")
+    (tmp_path / "log").mkdir()
+    proc = tmp_path / "proc"
+
+    def process(pid, argv, start="100", ppid=1):
+        (proc / str(pid)).mkdir(parents=True, exist_ok=True)
+        (proc / str(pid) / "stat").write_text(f"{pid} (x y) S {ppid} " + " ".join(["0"] * 16) + f" {start} 0 0")
+        (proc / str(pid) / "cmdline").write_bytes(b"\0".join(argv) + b"\0")
+    process(7, [b"git", b"push", b"https://x-access-token:ghp_" + b"A" * 36 + b"@github.com/a/b"])
+    if scenario == "edge":
+        (proc / "self").mkdir(parents=True)  # not a process
+        process(8, [])  # a kernel thread: no command line
+
+    class Stop:
+        calls = 0
+
+        def wait(self, interval):
+            Stop.calls += 1
+            if Stop.calls == 2 and scenario == "happy":
+                process(9, [b"python3", b"-c", b"pass"], ppid=7)
+            return Stop.calls > 3
+    rt.process_logger(Stop(), proc=proc)
+    records = [json.loads(line) for line in (tmp_path / "log/processes.jsonl").read_text().splitlines()]
+    if scenario == "sad":
+        assert len(records) == 1 and "ghp_" not in records[0]["command"]  # once, redacted
+    elif scenario == "happy":
+        assert [(r["pid"], r["ppid"]) for r in records] == [(7, 1), (9, 7)]
+    else:
+        assert [r["pid"] for r in records] == [7]
+
+
+def test_load_secret_store_module(scenario):
+    module = s.load_secret_store_module()
+    if scenario == "happy":
+        assert module.check_name("GH_PAT") == "GH_PAT"
+    elif scenario == "sad":
+        with pytest.raises(ValueError):
+            module.check_name("../etc")
+    else:
+        assert module.NAME.fullmatch("_x") and not module.NAME.fullmatch("x" * 65)
+
+
+def test_secret_environment(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setenv("SANDBOX_AI_SECRETS", "file")
+    store = s.load_secret_store_module().FileStore()
+    store.set("KEY", "value")
+    if scenario == "happy":
+        assert s.secret_environment(s.parse_args(["codex", "--secret-env", "KEY", "--secret-env", "OTHER=KEY"])) == {
+            "KEY": "value", "OTHER": "value"}
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="no secret"):
+            s.secret_environment(s.parse_args(["codex", "--secret-env", "NOPE"]))
+    else:
+        assert s.secret_environment(s.parse_args(["codex"])) == {}
+
+
+def test_open_request(scenario, tmp_path):
+    import io
+    out = io.StringIO()
+    if scenario == "happy":
+        short = Path(tempfile.mkdtemp(prefix="o-", dir="/tmp"))
+        server = rt.listen_unix(short / "s.sock")
+
+        def answer():
+            connection, _ = server.accept()
+            with connection:
+                assert json.loads(connection.makefile("r").readline()) == {"url": "https://example.org/x"}
+                connection.sendall(b'{"ok": true, "message": "asked"}\n')
+        thread = threading.Thread(target=answer)
+        thread.start()
+        assert rt.open_request(["--new-window", "https://example.org/x"], str(short / "s.sock"), out) == 0
+        thread.join(5)
+        assert out.getvalue().strip() == "asked"
+    elif scenario == "sad":
+        assert rt.open_request(["https://example.org"], str(tmp_path / "missing.sock"), out) == 1
+        assert "open it yourself" in out.getvalue()
+    else:
+        assert rt.open_request(["https://a", "https://b"], "/x", out) == 1
+        assert rt.open_request(["ftp://example.org"], "/x", out) == 1
+
+
+def test_write_browser_shims(scenario, tmp_path):
+    directory = tmp_path / "bin"
+    if scenario == "sad":
+        directory.write_text("in the way")
+        with pytest.raises(OSError):
+            s.write_browser_shims(directory)
+        return
+    s.write_browser_shims(directory)
+    if scenario == "happy":
+        assert sorted(p.name for p in directory.iterdir()) == sorted(s.BROWSER_SHIMS)
+        assert (directory / "xdg-open").read_text().endswith('--internal-open "$@"\n')
+    else:
+        assert all(stat.S_IMODE(p.stat().st_mode) == 0o755 for p in directory.iterdir())
+        s.write_browser_shims(directory)  # again: unchanged
+
+
+def test_browser_bindings_and_environment(tmp_path):
+    a = s.parse_args(["claude", "--workspace", str(tmp_path / "w")])
+    a.browser_dir = tmp_path / "run.browser"
+    _, run = s.pod_commands(a, "p", tmp_path / "session", tmp_path / "home")
+    assert f"type=bind,src={a.browser_dir},dst=/sandbox/browser,ro,nodev" in run
+    cmd = s.bwrap_command(a, tmp_path, tmp_path)
+    assert ["--ro-bind", str(a.browser_dir), "/sandbox/browser"] == cmd[cmd.index(str(a.browser_dir)) - 1:cmd.index(str(a.browser_dir)) + 2]
+    env = s.agent_environment(a)
+    assert env["BROWSER"] == "/sandbox/session/bin/xdg-open" and env["PATH"].startswith("/sandbox/session/bin:")
+    assert "BROWSER" not in s.agent_environment(s.parse_args(["claude", "--ask", "off"]))

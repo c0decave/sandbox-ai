@@ -30,7 +30,8 @@ def logs_of(directory):
 
 
 def test_live_proxy_opens_tls_logs_and_tools_trust_it(request, backend, tmp_path):
-    logs = tmp_path / "logs"
+    logs, work = tmp_path / "logs", tmp_path / "work"
+    work.mkdir()
     script = '''
 set -e
 python3 -I -c "import urllib.request; print(urllib.request.urlopen('https://api.github.com/zen', timeout=30).status)"
@@ -39,7 +40,7 @@ git ls-remote https://github.com/c0decave/sandbox-ai HEAD | cut -c1-7
 test -s /run/sandbox-ca/ca.pem && echo CA_PRESENT
 echo PROXY_TOOLS_OK
 '''
-    stdout, _ = launch(request.config, backend, "codex", tmp_path, ["--no-auth", "--allow-github", "--log-dir", str(logs),
+    stdout, _ = launch(request.config, backend, "codex", work, ["--no-auth", "--allow-github", "--log-dir", str(logs),
                                                                    "--binary", "/bin/sh"], ["-c", script], timeout=180)
     assert "PROXY_TOOLS_OK" in stdout and "curl 200" in stdout and "CA_PRESENT" in stdout, stdout
     records = logs_of(logs)
@@ -185,7 +186,11 @@ def test_live_mcp_server_from_the_catalog(request, backend, tmp_path):
         sock = tmp_path / "state/sandbox-ai/mcp/yara/sock/server.sock"
         with socket.socket(socket.AF_UNIX) as client:
             client.settimeout(120)
-            client.connect(str(sock))
+            directory = os.open(sock.parent, os.O_RDONLY | os.O_DIRECTORY)  # pytest's paths are long
+            try:
+                client.connect(f"/proc/self/fd/{directory}/{sock.name}")
+            finally:
+                os.close(directory)
             stream = client.makefile("rw")
             for message in ({"jsonrpc": "2.0", "id": 0, "method": "initialize",
                              "params": {"protocolVersion": "2025-06-18", "capabilities": {},
@@ -203,3 +208,104 @@ def test_live_mcp_server_from_the_catalog(request, backend, tmp_path):
         assert answers[1]["result"]["tools"], answers
     finally:
         subprocess.run([str(ROOT / "sandbox-mcp"), "stop", "yara"], env=env, timeout=120)
+
+
+def test_live_resource_limits_reach_the_container(request, backend, tmp_path):
+    if backend != "podman":
+        pytest.skip("checked through the container's own cgroup")
+    script = "print(open('/sys/fs/cgroup/memory.max').read().strip(), open('/sys/fs/cgroup/pids.max').read().strip())"
+    stdout, stderr = launch(request.config, backend, "codex", tmp_path,
+                            ["--no-auth", "--offline", "--memory", "2g", "--pids", "512", "--binary", "/usr/bin/python3"],
+                            ["-I", "-c", script])
+    if "not enforced" in stderr:
+        pytest.skip("this host gives the user no systemd session: " + stderr.strip().splitlines()[-1])
+    assert stdout.split()[-2:] == ["2147483648", "512"], stdout + stderr
+
+
+def running_sandbox(request, backend, tmp_path, script, options=(), extra_env=None):
+    """Start a sandbox in the background; (process, environment) with private state, config and data dirs."""
+    work = tmp_path / "work"
+    work.mkdir(exist_ok=True)
+    env = {**os.environ, "XDG_STATE_HOME": str(tmp_path / "state"), "XDG_CONFIG_HOME": str(tmp_path / "config"),
+           "XDG_DATA_HOME": str(tmp_path / "data"), "SANDBOX_AI_SECRETS": "file", **(extra_env or {})}
+    command = [str(ROOT / "codex-sandbox"), "--backend", backend, "--workspace", str(work), "--no-auth",
+               *options, "--binary", "/usr/bin/python3", "--", "-I", "-c", script]
+    if backend == "podman" and request.config.getoption("--agent-image"):
+        command[1:1] = ["--image", request.config.getoption("--agent-image")]
+    return subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+                            stdin=subprocess.DEVNULL, start_new_session=True), env
+
+
+def finished(process, timeout):
+    try:
+        return process.communicate(timeout=timeout)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+
+
+def answer_when_asked(env, kind_text, decision, scope="run", timeout=120):
+    """Wait for an open question whose description contains KIND_TEXT; answer it with sandbox-ai approvals."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        listed = subprocess.run([str(ROOT / "sandbox-ai"), "approvals", "list"], capture_output=True, text=True,
+                                env=env, timeout=30).stdout
+        for line in listed.splitlines():
+            if kind_text in line:
+                ident = line.split()[0]
+                args = [decision, ident] + (["--scope", scope] if decision == "allow" else [])
+                done = subprocess.run([str(ROOT / "sandbox-ai"), "approvals", *args], capture_output=True, text=True,
+                                      env=env, timeout=60)
+                assert done.returncode == 0, done.stderr
+                return ident
+        time.sleep(0.5)
+    raise AssertionError(f"no question about {kind_text!r}")
+
+
+def test_live_approvals_connection_lookup_and_browser(request, backend, tmp_path):
+    script = EXCHANGES + '''
+import socket, subprocess, time
+direct = exchanges("1.1.1.1", 443, timeout=90)            # held until the human answers
+try:
+    socket.getaddrinfo("example.org", 443)
+    before = True
+except OSError:
+    before = False                                          # refused at once, asked in the background
+after = False
+for _ in range(120):
+    try:
+        socket.getaddrinfo("example.org", 443)
+        after = exchanges("example.org", 443, timeout=15)
+        break
+    except OSError:
+        time.sleep(1)
+opened = subprocess.run(["xdg-open", "https://example.org/login"], capture_output=True, text=True)
+print("DIRECT=%s BEFORE=%s AFTER=%s OPEN=%s" % (direct, before, after, opened.returncode), flush=True)
+'''
+    process, env = running_sandbox(request, backend, tmp_path, script)
+    try:
+        answer_when_asked(env, "connect to 1.1.1.1:443", "allow", "once")
+        answer_when_asked(env, "look up example.org", "allow", "run")
+        answer_when_asked(env, "open https://example.org/login", "deny")
+    finally:
+        stdout, stderr = finished(process, 240)
+    assert "DIRECT=True BEFORE=False AFTER=True OPEN=0" in stdout, stdout + stderr[-4000:]
+
+
+def test_live_secret_env_and_process_log(request, backend, tmp_path):
+    data = {"XDG_DATA_HOME": str(tmp_path / "data"), "SANDBOX_AI_SECRETS": "file"}
+    stored = subprocess.run([str(ROOT / "sandbox-ai"), "secrets", "set", "DEMO_KEY"], input="demo-secret-value\n",
+                            capture_output=True, text=True, env={**os.environ, **data}, timeout=30)
+    assert stored.returncode == 0, stored.stderr
+    logs = tmp_path / "logs"
+    script = ("import os, subprocess; subprocess.run(['ls', '/work'], check=True); "
+              "print('KEY=%s' % (os.environ.get('DEMO_KEY') == 'demo-secret-value'), flush=True)")
+    process, _ = running_sandbox(request, backend, tmp_path, script,
+                                 ["--offline", "--secret-env", "DEMO_KEY", "--log-dir", str(logs)], data)
+    stdout, stderr = finished(process, 180)
+    assert process.returncode == 0 and "KEY=True" in stdout, stdout + stderr[-4000:]
+    assert "demo-secret-value" not in stderr
+    commands = [json.loads(line).get("command", "") for path in logs.rglob("processes.jsonl")
+                for line in path.read_text().splitlines() if line.strip()]
+    assert any(c.startswith("ls") for c in commands), commands

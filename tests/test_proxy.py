@@ -342,7 +342,8 @@ def git_setup(tmp_path, pki):
     (work / "README.md").write_text("hello\n")
     git("add", ".", cwd=work)
     git(*identity, "commit", "-q", "-m", "first", cwd=work)
-    rules = {"pattern": [], "allow": []}
+    rules = {"pattern": [{"id": "example-warning", "regex": "WARN-ME", "severity": "warn", "reason": "a test warning"}],
+             "allow": []}
     (tmp_path / "push.json").write_text(json.dumps({"mode": "always", "own_hosts": [],
                                                      "workspaces": [{"path": str(work), "rules": rules}]}))
     checker = subprocess.Popen([sys.executable, "-I", str(ROOT / "sandbox/privacy.py"), "serve",
@@ -698,3 +699,84 @@ def test_push_after_empty_lines_is_checked(git_setup, monkeypatch):
     monkeypatch.setattr(rt.Stream, "head", spy)
     pushed = git("push", g["url"], "main", cwd=g["work"])
     assert pushed.returncode != 0 and "config.py" in pushed.stderr
+
+
+# --- approvals in the proxy -------------------------------------------------------------------------
+
+
+class Asker:
+    """Stands in for the supervisor: records questions; ALLOW adds the destination to the allow-list."""
+
+    def __init__(self, proxy_config, allow):
+        self.questions, self.config, self.allowed = [], proxy_config, allow
+
+    def __call__(self, kind, details):
+        self.questions.append((kind, details))
+        if self.allowed:
+            self.config["allow"].setdefault("loopback", []).append(details.get("port"))
+            return {"decision": "allow", "scope": "run", "reason": "answered"}
+        return {"decision": "deny", "scope": "run", "reason": "no answer within 60 s"}
+
+
+@pytest.mark.parametrize("allowed", [True, False], ids=["approved", "refused"])
+def test_a_forbidden_destination_is_asked_about(tmp_path, pki, allowed):
+    upstream = serve(Handler, pki["server"])
+    proxy = Proxy(tmp_path, pki, upstream.server_address[1], {"allow": {"loopback": []}})
+    proxy.server.asker = Asker(proxy.server.config, allowed)
+    try:
+        if allowed:
+            assert https_request(proxy.port, pki["ca"], b"GET / HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n"
+                                 ).startswith(b"HTTP/1.1 200")
+        else:
+            with pytest.raises((ssl.SSLError, OSError)):
+                https_request(proxy.port, pki["ca"], b"GET / HTTP/1.1\r\n\r\n")
+        kind, details = proxy.server.asker.questions[0]
+        assert kind == "connect" and details["host"] == "example.test" and details["port"] == upstream.server_address[1]
+        if not allowed:
+            record = proxy.records(until=lambda r: r.get("event") == "denied")[-1]
+            assert "not approved" in record["reason"] and record["approval"]["decision"] == "deny"
+    finally:
+        proxy.close()
+        upstream.shutdown()
+
+
+def test_a_push_with_warnings_is_asked_about(git_setup):
+    g = git_setup
+    asked = []
+    g["proxy"].server.asker = lambda kind, details: asked.append((kind, details)) or {"decision": "deny", "reason": "no answer"}
+    # A finding of a warn rule: the push is held for a question, refused when it is not approved.
+    (g["work"] / "notes.txt").write_text("WARN-ME\n")
+    git("add", ".", cwd=g["work"])
+    git(*g["identity"], "commit", "-q", "-m", "notes", cwd=g["work"])
+    pushed = git("push", g["url"], "main", cwd=g["work"])
+    assert asked and asked[0][0] == "push" and asked[0][1]["refs"] == ["refs/heads/main"], asked
+    assert pushed.returncode != 0 and "not approved" in pushed.stderr
+    # Approved: the same push goes through.
+    g["proxy"].server.asker = lambda kind, details: {"decision": "allow", "scope": "once", "reason": "answered"}
+    assert git("push", g["url"], "main", cwd=g["work"]).returncode == 0
+
+
+def test_model_usage_and_credentials_are_logged(tmp_path, pki):
+    class ModelAPI(Handler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            body = (b'event: message_start\ndata: {"type":"message_start","message":{"model":"claude-opus-5-5",'
+                    b'"usage":{"input_tokens":1500,"output_tokens":1}}}\n\n' + b": ping\n\n" * 20000 +
+                    b'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":420}}\n\n')
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+    upstream = serve(ModelAPI, pki["server"])
+    proxy = Proxy(tmp_path, pki, upstream.server_address[1])
+    try:
+        https_request(proxy.port, pki["ca"], b"POST /v1/messages HTTP/1.1\r\nHost: example.test\r\nx-api-key: sk-x\r\n"
+                                             b"Content-Length: 2\r\nConnection: close\r\n\r\n{}")
+        record = next(r for r in proxy.records(until=lambda r: r.get("event") == "http") if r.get("event") == "http")
+        # The usage comes from the end of a stream far beyond the logged 64 KiB.
+        assert record["model"] == {"model": "claude-opus-5-5", "usage": {"input_tokens": 1500, "output_tokens": 420}}
+        assert record["credentials"] == ["x-api-key"] and record["response"]["body"]["truncated"]
+    finally:
+        proxy.close()
+        upstream.shutdown()

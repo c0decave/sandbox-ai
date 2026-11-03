@@ -528,3 +528,26 @@ def test_catalog_command_lists_both_catalogs(tmp_path, capsys):
     assert "c0:duckduckgo  [allowlist html.duckduckgo.com:443]  DuckDuckGo search" in captured.out
     assert "c1:binwalk  [none]  binwalk  (not published yet)" in captured.out
     assert "catalog not read" in captured.err
+
+
+def test_tool_calls_are_logged_by_the_serve_end(tmp_path):
+    out = io.StringIO()
+    short = Path(tempfile.mkdtemp(prefix="mcp-", dir="/tmp"))
+    sock = short / "s.sock"
+    threading.Thread(target=s.RUNTIME.mcp_serve, args=(str(sock), ["cat"]), kwargs={"cwd": "/", "out": out},
+                     daemon=True).start()
+    deadline = time.monotonic() + 5
+    while not sock.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    with socket.socket(socket.AF_UNIX) as client:
+        client.connect(str(sock))
+        call = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                           "params": {"name": "list_directory", "arguments": {"path": "/work"}}}) + "\n"
+        client.sendall(call.encode())
+        client.settimeout(5)
+        assert client.makefile("r").readline() == call  # passed through unchanged
+    deadline = time.monotonic() + 5
+    while "sandbox-ai-mcp-call" not in out.getvalue() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    line = next(l for l in out.getvalue().splitlines() if l.startswith("sandbox-ai-mcp-call "))
+    assert json.loads(line.split(" ", 1)[1])["tool"] == "list_directory"

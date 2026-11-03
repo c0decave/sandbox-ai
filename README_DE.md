@@ -40,10 +40,14 @@ Agenten beschränkt, solange Sie ihn nicht erweitern.
 18. [Egress- und Dateizugriffs-Logs](#egress--und-dateizugriffs-logs)
 19. [Datenschutzprüfung vor dem Veröffentlichen](#datenschutzprüfung-vor-dem-veröffentlichen)
 20. [Verbindungs-Proxy](#verbindungs-proxy)
-21. [Optionsübersicht](#optionsübersicht)
-22. [Tests](#tests)
-23. [Fehlersuche](#fehlersuche)
-24. [Grenzen und offene Arbeiten](#grenzen-und-offene-arbeiten)
+21. [Rückfragen und Browser-Anfragen](#rückfragen-und-browser-anfragen)
+22. [Geheimnisse](#geheimnisse)
+23. [Ressourcenlimits](#ressourcenlimits)
+24. [Desktop-App](#desktop-app)
+25. [Optionsübersicht](#optionsübersicht)
+26. [Tests](#tests)
+27. [Fehlersuche](#fehlersuche)
+28. [Grenzen und offene Arbeiten](#grenzen-und-offene-arbeiten)
 
 ## Voraussetzungen
 
@@ -117,8 +121,12 @@ veröffentlicht werden, steht in [RELEASING.md](RELEASING.md).
 | `sandbox-ai build [--pin V] AGENT\|all` | `sandbox-build-image` | Images bauen |
 | `sandbox-ai doctor [--backend podman\|bwrap\|both] [--json]` | | Host prüfen: Benutzer, Python, User-Namespaces, Podman (rootless), pasta, subuid/subgid, Images mit Agent-Versionen, Bubblewrap-Werkzeuge, TIOCSTI, Host-Logins (nur Ablauf), Standard-Kit und Kits mit ihren Skills, Agents, Commands und Prompts, Claude-Plugins deklariert vs. installiert, das Memory des Projekts im aktuellen Verzeichnis, Git-Identität, Projekt-Vertrauen; zu jedem Problem der Befehl, der es behebt; Exit 1 bei einem Fehler |
 | `sandbox-ai logs [VERZ\|--project P] [--json]` | | blockierte Verbindungen und Dateizugriffe eines `--log-dir` zusammenfassen und je blockiertem Ziel die passende Option vorschlagen (`--allow-pypi`, `--allow-host`, `--allow-tcp`, `--allow-host-port` …) |
+| `sandbox-ai net list\|show\|allow\|revoke …` | | ändern, was eine laufende Sandbox erreichen darf ([Netzwerkänderungen](#netzwerk-einer-laufenden-sandbox-ändern)) |
+| `sandbox-ai approvals list\|allow\|deny\|history …` | | beantworten, was laufende Sandboxen fragen ([Rückfragen](#rückfragen-und-browser-anfragen)) |
+| `sandbox-ai secrets list\|set\|delete\|backend` | | API-Schlüssel und Tokens im System-Schlüsselbund ([Geheimnisse](#geheimnisse)) |
+| `sandbox-ai images [packages AGENT] [--json]` | | die Agent-Images mit Agent-Version, Alter und Größe; die Debian- und npm-Pakete eines Images |
 | `sandbox-ai update [--check]` | `sandbox-ai-update` | eine mit `install.sh` gemachte Installation aktualisieren |
-| `sandbox-ai version` | `--version` | Version |
+| `sandbox-ai version` | `-V`, `--version` | Version |
 
 ## Images bauen und aktualisieren
 
@@ -1085,6 +1093,10 @@ werden dann nicht protokolliert):
   Auftreten) und jede Auflösung eines nicht erlaubten Namens. Mit Logging gehen
   Anfragen an einen Stub auf `127.0.0.1:53` in der Sandbox, der den Namen
   protokolliert und NXDOMAIN antwortet.
+- `processes.jsonl`: jeder Prozess, der in der Sandbox auftaucht, mit PID,
+  Elternprozess und Kommandozeile (zweimal pro Sekunde abgefragt, sehr kurze
+  Prozesse können fehlen). Geschrieben, sobald ein Log-Verzeichnis benutzt
+  wird, auch das Standardverzeichnis.
 - `files.jsonl`: `read`, `write`, `create`, `delete`, `move-from`, `move-to`
   in den Workspaces, `/root`, `/tmp` und allen Mounts (inotify; Wiederholungen
   je Pfad zwei Sekunden zusammengefasst). inotify liefert keine Prozess-ID;
@@ -1106,6 +1118,14 @@ dieses Hosts oder `--allow IP`. Jeder Vorschlag erweitert die Sandbox, also
 vorher prüfen. Namen und Pfade stammen vom Agenten: Sie werden mit allen
 Steuerzeichen escaped angezeigt, und ein Name, der kein gültiger Hostname ist,
 bekommt keinen Vorschlag.
+
+Außerdem fasst er zusammen, was das Verbindungs-Log und `processes.jsonl`
+festgehalten haben: HTTP-Anfragen je Host, geprüfte und abgewiesene Pushes,
+Aufrufe von Modell-APIs mit der gemeldeten Token-Nutzung (Antworten im Stil
+von Anthropic und OpenAI, gestreamt oder nicht), welche Anmelde-Header an
+welchen Host gingen (nur Namen; die Werte sind im Log geschwärzt),
+abgewiesene Verbindungen, die gestarteten Programme und die Tool-Aufrufe der
+mit `sandbox-mcp` gestarteten MCP-Server.
 
 ## Datenschutzprüfung vor dem Veröffentlichen
 
@@ -1257,8 +1277,100 @@ Der Proxy läuft als eigener Benutzer in der Sandbox, ohne Capabilities und mit
 verarbeitet, was der Agent sendet, bleibt dabei aber in den Namespaces der
 Sandbox. Er braucht die nftables-NAT-Module auf dem Host (`nft_chain_nat`,
 `nft_redir`; auf den meisten Systemen geladen, sonst
-`sudo modprobe nft_chain_nat nft_redir`) und `openssl` im Image (enthalten)
+`sudo modprobe -a nft_chain_nat nft_redir`) und `openssl` im Image (enthalten)
 bzw. mit Bubblewrap auf dem Host.
+
+## Rückfragen und Browser-Anfragen
+
+Mit Proxy fragt eine Sandbox nach, statt still zu scheitern (`--ask on`, der
+Standard):
+
+- eine **Verbindung** zu einem Ziel, das die Netzwerkoptionen nicht erlauben
+  (sie wartet auf die Antwort; die Frage nennt den Server aus TLS oder dem
+  `Host`-Header, wenn der Agent einen geschickt hat);
+- eine **Namensauflösung** eines nicht gepinnten Namens (sofort abgewiesen;
+  erlauben Sie ihn, löst sandbox-ai den Namen auf dem Host auf, pinnt die
+  Adressen und öffnet HTTPS zu ihnen, sodass der nächste Versuch des Agenten
+  klappt);
+- ein **Push**, den die Datenschutzprüfung durchlässt, zu dem sie aber
+  Warnungen hat (Pushes mit blockierenden Funden werden ohne Frage
+  abgewiesen);
+- das **Öffnen einer URL** in Ihrem Browser: `xdg-open`, `sensible-browser`,
+  `x-www-browser`, `www-browser`, `open` und `$BROWSER` in der Sandbox bitten
+  den Host, http(s)-URLs zu öffnen, eine Frage je URL (etwa die Login-Seite
+  eines Werkzeugs). Ohne Ihre Antwort öffnet sich nichts; das Programm in der
+  Sandbox erfährt nur, dass gefragt wurde.
+
+Jede Frage erscheint als Desktop-Benachrichtigung (`notify-send`, falls
+vorhanden), in der App und hier:
+
+```sh
+sandbox-ai approvals list                     # ID  LAUF  was gefragt wird
+sandbox-ai approvals allow ID --scope run     # once (Standard), run, always
+sandbox-ai approvals deny ID
+sandbox-ai approvals history [LAUF]           # Fragen und ihre Antworten
+```
+
+Eine Frage ohne Antwort wird nach 60 Sekunden abgewiesen und in diesem Lauf
+nicht erneut gestellt. `once` erlaubt diese eine Verbindung, `run` bis zum
+Ende der Sandbox, `always` zusätzlich jeden späteren Start desselben Projekts
+(gespeichert in `~/.config/sandbox-ai/approved.json`; Einträge dort löschen,
+um sie zu vergessen; der Launcher nennt die übernommenen). Telemetrie-Hosts,
+die die Agenten im Hintergrund ansprechen (`statsig.com`, `sentry.io` und
+ähnliche), werden ohne Frage abgewiesen. `--ask off` weist alles ab, was die
+Optionen nicht erlauben, wie bisher; `--no-proxy` und `--offline` fragen nichts.
+
+Die Fragen liegen im Steuerverzeichnis des Laufs (unter `$XDG_RUNTIME_DIR`),
+das der Agent nicht sieht; nur Prozesse Ihres eigenen Benutzers können
+antworten.
+
+## Geheimnisse
+
+`sandbox-ai secrets` bewahrt API-Schlüssel und Tokens im System-Schlüsselbund
+auf (Secret Service: GNOME Keyring, KWallet, KeePassXC; über `secret-tool`),
+oder, wenn es keinen gibt, in privaten Dateien (`0600`) unter
+`~/.local/share/sandbox-ai/secrets` (`SANDBOX_AI_SECRETS=file` erzwingt die
+Dateien).
+
+```sh
+sandbox-ai secrets set OPENROUTER_API_KEY        # Wert von stdin, nie als Argument
+sandbox-ai secrets set GH_PUSH --from-env GH_TOKEN
+sandbox-ai secrets list                          # Namen und Ablageort, nie Werte
+claude-sandbox --secret-env OPENROUTER_API_KEY    # der Agent bekommt die Variable
+claude-sandbox --secret-env API_KEY=OPENROUTER_API_KEY --git-token-secret https://github.com=GH_PUSH
+```
+
+Eine Sandbox bekommt ein Geheimnis nur, wenn es genannt wird:
+`--secret-env NAME[=GEHEIMNIS]` (eine Umgebungsvariable für den Agenten),
+`--git-token-secret URL=GEHEIMNIS` (wie `--git-token-env`) oder die Variable
+eines MCP-Servers. Werte werden nie ausgegeben, weder im Dry-Run-Plan noch in
+Logs (der Proxy schwärzt sie in aufgezeichneten Anfragen wie jede Anmeldung).
+
+## Ressourcenlimits
+
+Jede Sandbox läuft mit Limits für Speicher, CPU und Prozesse:
+
+| Option | Standard | `none` |
+|---|---|---|
+| `-me`, `--memory GRÖSSE` | `8g` | kein Speicherlimit |
+| `-cu`, `--cpus N` | die Hälfte der CPUs des Hosts | kein CPU-Limit |
+| `-pi`, `--pids N` | `4096` | kein Prozesslimit |
+
+Podman gibt sie an den Container weiter (`--memory`, `--cpus`,
+`--pids-limit`). Bubblewrap läuft in einem vorübergehenden systemd-Scope
+(`systemd-run --user --scope`). Beides braucht eine systemd-Benutzersitzung
+mit delegierten cgroup-Controllern, wie auf jedem Desktop; ohne sie (in einem
+Container, auf manchen Servern) startet die Sandbox ohne Limits und sagt das.
+
+## Desktop-App
+
+[sandbox-ai-app](https://github.com/c0decave/sandbox-ai-app) ist eine
+grafische Oberfläche (Python, Qt) für alles oben: Sandboxen mit allen Optionen
+starten, die laufenden sehen, ihre Verbindungen verfolgen, Rückfragen
+beantworten, ihr Netzwerk ändern, MCP-Server, Geheimnisse, Logins und Images
+verwalten, die Dateien von HOME und der Workspaces durchsuchen und in
+Terminals der Sandboxen arbeiten. Sie ruft nur die `sandbox-ai`-Befehle auf und
+liest deren Dateien; die Sandboxen hängen nicht von ihr ab.
 
 ## Optionsübersicht
 
@@ -1325,6 +1437,7 @@ Siehe [Workspaces und Mounts](#workspaces-und-mounts).
 | `-cp`, `--copy SRC:ZIEL_RELATIV_ZU_HOME` | Einzelne Konfigurations- oder Anmeldedatei ins Sandbox-HOME kopieren; mehrfach |
 | `-S`, `--state-dir DIR` | Privates, dauerhaftes Sandbox-HOME (Modus 0700); Standard: nach dem Ende gelöscht |
 | `-e`, `--env NAME` | Eine Host-Variable nur an den Agenten geben; Werte werden nie ausgegeben; mehrfach |
+| `-se`, `--secret-env NAME[=GEHEIMNIS]` | Der Agent bekommt NAME mit dem Wert eines gespeicherten Geheimnisses (Standard: das Geheimnis NAME); mehrfach ([Geheimnisse](#geheimnisse)) |
 
 Siehe [Anmeldung und Zustand](#anmeldung-und-zustand).
 
@@ -1359,6 +1472,7 @@ Siehe [Kits, Projekt-Memory und Plugins](#kits-projekt-memory-und-plugins).
 | `-nw`, `--network NAME`, `-ip`, `--ip IP`, `-i6`, `--ip6 IP` | Podman: vorhandenes privates Netz und feste Adressen |
 | `-X`, `--no-proxy` | Kein Verbindungs-Proxy: kein Verbindungslog, Pushes prüfen nur die Hooks |
 | `-x`, `--no-inspect HOST` | TLS zu HOST (oder `*.DOMAIN`) ungeöffnet durchreichen; mehrfach |
+| `-Q`, `--ask on\|off` | Nachfragen bei allem, was die Optionen nicht erlauben; ohne Antwort nach 60 s abgewiesen (Standard: `on`; [Rückfragen](#rückfragen-und-browser-anfragen)) |
 
 Siehe [Netzwerkregeln](#netzwerkregeln) und [Verbindungs-Proxy](#verbindungs-proxy).
 
@@ -1407,6 +1521,7 @@ und [GUI](#gui-programme-und-browser).
 |---|---|
 | `-d`, `--device PFAD` | Ein Gerät des Hosts an den Agenten geben: zeichenorientiertes Gerät unter `/dev` oder `/dev/bus/usb`, `/dev/dri`, `/dev/snd` als Ganzes; mehrfach (schwächt die Isolation) |
 | `-G`, `--gpu nvidia\|dri\|rocm` | Die GPU-Geräte (NVIDIA mit Podman über CDI) |
+| `-me`, `--memory GRÖSSE`, `-cu`, `--cpus N`, `-pi`, `--pids N` | Ressourcenlimits (Standard `8g`, die Hälfte der CPUs, `4096`; `none` für keines; [Limits](#ressourcenlimits)) |
 
 Siehe [Hardware](#hardware-geräte-und-gpus); ein Dienst auf dem Host, erreicht
 über `--allow-host-port`, ist sicherer.
@@ -1433,6 +1548,9 @@ Siehe [Projektkonfiguration](#projektkonfiguration-und-wizard) und
 | `sandbox-ai BEFEHL …` | ein Befehl für alles Folgende, dazu `doctor`, `logs [VERZ\|--project P] [--json]`, `update [--check]`, `version` |
 | `sandbox-ai privacy-check [PFAD ...]` | `[--rules-dir VERZ] [--project NAME] [--all] [--json]`: was der nächste Push jedes Repositorys veröffentlichen würde und privat bleiben sollte; Exit 1 bei blockierenden Funden, 2 wenn nicht prüfbar |
 | `sandbox-ai net list\|show\|allow\|revoke [LAUF] [--allow-host H] [--allow-tcp IP:PORT] [--allow NETZ] [--allow-PRESET]` | Ändern, was eine laufende Sandbox erreichen darf (siehe [Netzwerkregeln](#netzwerk-einer-laufenden-sandbox-ändern)) |
+| `sandbox-ai approvals list\|history [LAUF]`, `allow ID [--scope once\|run\|always]`, `deny ID` | Die Fragen laufender Sandboxen beantworten |
+| `sandbox-ai secrets list\|set NAME [--from-env VAR]\|delete NAME\|backend` | Geheimnisse im System-Schlüsselbund, sonst in privaten Dateien |
+| `sandbox-ai images [--json]`, `sandbox-ai images packages AGENT [--json]` | Agent-Images und ihre Pakete (offline aus dem Image gelesen) |
 | `sandbox-build-image` | `[--podman-url URL] [--pin VERSION] [--uv VERSION] [--node IMAGE] AGENT\|all [podman-build-Optionen]`; neueste Versionen, sofern nicht fixiert |
 | `sandbox-session list` | Sessions und ihr Status |
 | `sandbox-session attach\|pause\|resume\|stop NAME` | Verbinden (lösen mit `Ctrl-b d`), einfrieren, fortsetzen bzw. neu starten, stoppen |
@@ -1480,6 +1598,16 @@ Playwright und ein lokales LLM ab. Optionen: `--agent-backend podman|bwrap`,
 Berichte nach `evidence/` (nicht versioniert, damit Berichte immer zum Code
 passen, der sie erzeugt hat).
 
+`tests/test_live_e2e.py` (ebenfalls `--agent-live`) prüft die Funktionen ab
+0.1.20 auf einem echten Host: den Proxy hinter der echten NAT-Umleitung mit
+echtem TLS, abgewiesene und angenommene Pushes zu einem Git-Server auf dem
+Host, abgewiesenes SSH, Netzwerkänderungen und Rückfragen (Verbindung,
+Namensauflösung, Browser-Anfrage) während eine Sandbox läuft, Geräte,
+MCP-Katalog-Container, Ressourcenlimits in der cgroup des Containers,
+Geheimnisse als Variablen und das Prozess-Log. Der GitHub-Actions-Workflow
+`e2e` führt sie samt Image-Bau auf Ubuntu 24.04 mit rootless Podman und mit
+Bubblewrap aus; Fehlschläge erscheinen als Annotationen des Jobs.
+
 ## Fehlersuche
 
 Zuerst `sandbox-ai doctor` ausführen: Es prüft alle Voraussetzungen und nennt
@@ -1509,8 +1637,10 @@ zu jedem Problem den Befehl, der es behebt.
    Projektkonfiguration, lokale LLMs, MCP-Server, Logs, DNS- und Egress-Modi, Geräte und GPUs, der Verbindungs-Proxy (NAT-Umleitung) und `sandbox-ai net` sind durch
    Unit-, Contract- und End-to-End-Tests sowie neue Live-Tests abgedeckt, die
    noch auf echten Podman-/Bubblewrap-Hosts laufen müssen.
-3. **P2 – Betriebsgrenzen:** keine Optionen für CPU-/RAM-/PID-Limits; Logs sind
-   nicht größenbegrenzt.
+3. **P2 – Betriebsgrenzen:** Ressourcenlimits brauchen eine
+   systemd-Benutzersitzung; ohne sie starten Sandboxen unbegrenzt.
+   `files.jsonl`, `processes.jsonl` und `egress-denied.jsonl` sind nicht
+   größenbegrenzt (die Verbindungs-Logs schon).
 4. **P2 – Claude-Lebenszyklus:** Token-Refresh und Zurückschreiben über eine
    lange Sitzung prüfen; die Kontozugehörigkeit zurückgeschriebener Tokens wird
    nicht geprüft.

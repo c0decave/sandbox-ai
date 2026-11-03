@@ -208,7 +208,8 @@ def test_happy_dry_run_shows_no_secret(tmp_path, monkeypatch, capsys):
                                         "credentials": str(path), "line": 2}]
     assert "git.example.org" in plan["https_hosts"]
     assert [f"line {n} skipped" in err for n in (1, 3, 4)] == [True] * 3
-    assert "secret" not in json.dumps(plan) + err
+    assert not any(value in json.dumps(plan) + err
+                   for value in ("garbage-secret-1", "secret-2", "secret-3", "secret-4"))
 
 
 def test_happy_project_config_with_tilde_path(tmp_path, monkeypatch, capsys):

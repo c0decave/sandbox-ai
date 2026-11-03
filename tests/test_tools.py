@@ -377,3 +377,31 @@ def test_check_proxy_nat(scenario, tmp_path):
     assert status == ("ok" if scenario == "happy" else "warn")
     if scenario == "edge":
         assert "nft_redir" in detail and "nft_chain_nat" not in detail and "modprobe" in fix
+
+
+def test_logs_telemetry_counts_models_pushes_credentials_and_processes(tmp_path, capsys):
+    spec = importlib.util.spec_from_file_location("logs_telemetry", ROOT / "sandbox/logs.py")
+    logs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(logs)
+    (tmp_path / "connections-1.jsonl").write_text("\n".join(json.dumps(r) for r in [
+        {"event": "http", "host": "api.anthropic.com", "credentials": ["x-api-key"],
+         "model": {"model": "claude-opus-5-5", "usage": {"input_tokens": 100, "output_tokens": 20}}},
+        {"event": "http", "host": "api.anthropic.com", "credentials": ["x-api-key"],
+         "model": {"model": "claude-opus-5-5", "usage": {"input_tokens": 50, "output_tokens": 5}}},
+        {"event": "http", "host": "github.com", "push": {"ok": False}},
+        {"event": "denied", "destination": "192.0.2.1:22"}]) + "\n")
+    (tmp_path / "processes.jsonl").write_text(json.dumps({"pid": 3, "command": "/usr/bin/git push"}) + "\n")
+    seen = logs.telemetry(tmp_path)
+    assert seen["requests"] == 3 and seen["model_calls"] == {"claude-opus-5-5": 2}
+    assert seen["tokens"] == {"input_tokens": 150, "output_tokens": 25} and seen["pushes"] == {"ok": 0, "refused": 1}
+    assert seen["credentials"] == [("x-api-key -> api.anthropic.com", 2)] and seen["programs"] == [("git", 1)]
+    state = tmp_path / "state"
+    (state / "sandbox-ai/mcp/ddg").mkdir(parents=True)
+    (state / "sandbox-ai/mcp/ddg/supervisor.log").write_text(
+        'noise\nsandbox-ai-mcp-call {"time": "t", "tool": "web_search", "arguments": "{}"}\n')
+    assert logs.tool_calls(state) == {"ddg": [("t", "web_search")]}
+    assert logs.report({**logs.summarize(tmp_path), "telemetry": seen, "tool_calls": logs.tool_calls(state)},
+                       out=print) == 0
+    out = capsys.readouterr().out
+    assert "Model calls: 2x claude-opus-5-5; tokens: input_tokens 150, output_tokens 25" in out
+    assert "MCP ddg: 1 tool call(s): web_search" in out
