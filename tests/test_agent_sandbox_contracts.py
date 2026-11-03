@@ -4476,3 +4476,93 @@ def test_short_forms_like_argparse_reads_them():
     with pytest.raises(ValueError, match="Not allowed in a project configuration"):
         wizard.check_free_options("codex", "-s name")
     assert wizard.check_free_options("codex", "-g -A example.org") == ["--allow-github", "--allow-host", "example.org"]
+
+
+# --- resource limits ------------------------------------------------------------------------------
+
+
+def test_resource_limits(scenario, monkeypatch):
+    monkeypatch.setattr(s.os, "cpu_count", lambda: 8)
+    if scenario == "happy":
+        assert s.resource_limits(s.parse_args(["codex"])) == {"memory": "8g", "cpus": "4", "pids": 4096}
+        assert s.resource_limits(s.parse_args(["codex", "--memory", "2G", "--cpus", "1.5", "--pids", "512"])) == {
+            "memory": "2g", "cpus": "1.5", "pids": 512}
+    elif scenario == "sad":
+        for args in (["--memory", "lots"], ["--memory", "0g"], ["--cpus", "0"], ["--cpus", "-1"], ["--cpus", "99"],
+                     ["--pids", "3"], ["--pids", "x"]):
+            with pytest.raises(ValueError):
+                s.resource_limits(s.parse_args(["codex", *args]))
+    else:
+        assert s.resource_limits(s.parse_args(["codex", "--memory", "none", "--cpus", "none", "--pids", "none"])) == {}
+        monkeypatch.setattr(s.os, "cpu_count", lambda: 1)
+        assert s.resource_limits(s.parse_args(["codex"]))["cpus"] == "1"  # at least one CPU
+
+
+def test_delegated_controllers(scenario, tmp_path):
+    if scenario == "happy":
+        (tmp_path / "cgroup.controllers").write_text("cpuset cpu io memory pids\n")
+        assert s.delegated_controllers(tmp_path / "cgroup.controllers") == {"cpuset", "cpu", "io", "memory", "pids"}
+    elif scenario == "sad":
+        assert s.delegated_controllers(tmp_path / "missing") is None  # unknown: limits are passed on
+    else:
+        (tmp_path / "cgroup.controllers").write_text("")
+        assert s.delegated_controllers(tmp_path / "cgroup.controllers") == set()
+
+
+def test_enforced_limits(scenario, monkeypatch):
+    monkeypatch.setattr(s.os, "cpu_count", lambda: 8)
+    a = s.parse_args(["codex"])
+    if scenario == "happy":
+        monkeypatch.setattr(s, "delegated_controllers", lambda path=None: {"cpu", "memory", "pids"})
+        assert s.enforced_limits(a) == ({"memory": "8g", "cpus": "4", "pids": 4096}, [])
+    elif scenario == "sad":
+        # cpu not delegated to the user (older systemd): that limit is left out, with a note.
+        monkeypatch.setattr(s, "delegated_controllers", lambda path=None: {"memory", "pids"})
+        limits, notes = s.enforced_limits(a)
+        assert limits == {"memory": "8g", "pids": 4096} and "cpu" in notes[0] and "--cpus" in notes[0]
+    else:
+        monkeypatch.setattr(s, "delegated_controllers", lambda path=None: None)
+        assert s.enforced_limits(a)[0] == {"memory": "8g", "cpus": "4", "pids": 4096}
+        remote = s.parse_args(["codex", "--podman-url", "unix:///x.sock"])
+        monkeypatch.setattr(s, "delegated_controllers", lambda path=None: set())
+        assert s.enforced_limits(remote)[0] == {"memory": "8g", "cpus": "4", "pids": 4096}  # remote: not ours to check
+
+
+def test_limits_prefix(scenario, monkeypatch):
+    monkeypatch.setattr(s.os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(s, "delegated_controllers", lambda path=None: {"cpu", "memory", "pids"})
+    a = s.parse_args(["codex", "--backend", "bwrap"])
+    if scenario == "happy":
+        monkeypatch.setattr(s.shutil, "which", lambda name: "/usr/bin/" + name)
+        monkeypatch.setattr(s, "user_manager_running", lambda: True)
+        assert s.limits_prefix(a) == ["systemd-run", "--user", "--scope", "--quiet", "--collect", "-p", "MemoryMax=8G",
+                                      "-p", "CPUQuota=400%", "-p", "TasksMax=4096", "--"]
+    elif scenario == "sad":
+        monkeypatch.setattr(s.shutil, "which", lambda name: None)
+        assert s.limits_prefix(a) == []
+    else:
+        assert s.limits_prefix(s.parse_args(["codex", "--backend", "bwrap", "--memory", "none", "--cpus", "none",
+                                             "--pids", "none"])) == []
+
+
+def test_user_manager_running(scenario, monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.setattr(s, "Path", lambda value: seen.append(value) or (tmp_path / "private" if scenario == "happy"
+                                                                       else tmp_path / "missing"))
+    if scenario == "happy":
+        (tmp_path / "private").write_text("")
+        assert s.user_manager_running()
+    elif scenario == "sad":
+        assert not s.user_manager_running()
+    else:
+        s.user_manager_running()
+        assert seen == [f"/run/user/{os.getuid()}/systemd/private"]
+
+
+def test_podman_run_carries_the_limits(monkeypatch, tmp_path):
+    monkeypatch.setattr(s.os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(s, "delegated_controllers", lambda path=None: {"memory", "pids"})
+    _, run = s.pod_commands(s.parse_args(["codex", "--workspace", str(tmp_path), "--memory", "2g"]), "p",
+                            tmp_path / "session", tmp_path / "home")
+    assert run[run.index("--memory") + 1] == "2g" and run[run.index("--pids-limit") + 1] == "4096"
+    assert "--cpus" not in run  # cpu not delegated: left out, not failing the start

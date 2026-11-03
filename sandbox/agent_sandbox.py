@@ -196,7 +196,7 @@ SHORT_OPTIONS = {
     "--no-memory": "-nm", "--no-plugins": "-np", "--env": "-e", "--log-dir": "-l", "--gui": "-gu",
     "--gui-screen": "-gs", "--gui-vnc": "-gv", "--gui-wayland": "-gw", "--tmux": "-T", "--no-tmux": "-nt",
     "--mcp": "-M", "--session": "-s", "--config": "-c", "--no-config": "-nc", "--dry-run": "-n",
-    "--probe": "-pb",
+    "--probe": "-pb", "--memory": "-me", "--cpus": "-cu", "--pids": "-pi",
 }
 HELP_EPILOG = """\
 Agent arguments follow --. Examples: see SANDBOX.md.
@@ -253,6 +253,12 @@ def build_parser():
                         "generate --output=/etc/cdi/nvidia.yaml`; bwrap: /dev/nvidia*), dri (Intel/AMD render "
                         "nodes in /dev/dri; Mesa, Vulkan or VA-API come from your own image) or rocm (dri plus "
                         "/dev/kfd). Weakens isolation like --device")
+    p.add_argument("--memory", default="8g", metavar="SIZE",
+                   help="Memory limit of the sandbox, e.g. 4g or 512m (default: 8g; none: no limit)")
+    p.add_argument("--cpus", default=None, metavar="N",
+                   help="CPU limit, e.g. 2 or 1.5 (default: half of this host's CPUs; none: no limit)")
+    p.add_argument("--pids", default="4096", metavar="N",
+                   help="Limit on processes and threads (default: 4096; none: no limit)")
     p.add_argument("--profile", action="append", default=[], choices=PROFILES, metavar="NAME",
                    help="Network profile: " + "; ".join(f"{name}: {value['help']}" for name, value in PROFILES.items())
                         + "; repeatable")
@@ -1396,6 +1402,7 @@ def validate(a):
             raise ValueError(f"Sandbox-owned variable cannot be overridden: {name}")
     for mount in a.mount:
         parse_mount(mount)
+    resource_limits(a)
     if a.podman_url and (a.device or a.gpu in ("dri", "rocm")):
         raise ValueError("--device and --gpu dri|rocm name devices of this host; with --podman-url only "
                          "--gpu nvidia (the remote's CDI) is possible")
@@ -2546,6 +2553,78 @@ def prepare_privacy(a, session):
         lambda line: print(f"agent-sandbox: privacy: {printable(line)}", file=sys.stderr))
 
 
+CGROUP_CONTROLLERS = {"memory": "memory", "cpus": "cpu", "pids": "pids"}
+
+
+def resource_limits(a):
+    """{memory, cpus, pids} to enforce: the defaults (8 GiB, half the CPUs, 4096 processes) unless an option
+    changes or switches them off (none)."""
+    limits = {}
+    memory = str(a.memory).strip().lower()
+    if memory != "none":
+        if not re.fullmatch(r"[1-9][0-9]{0,6}[kmg]?", memory):
+            raise ValueError(f"--memory expects a size such as 4g or 512m, or none: {a.memory!r}")
+        limits["memory"] = memory
+    cpus = str(a.cpus).strip().lower() if a.cpus is not None else str(max(1, (os.cpu_count() or 2) // 2))
+    if cpus != "none":
+        try:
+            value = float(cpus)
+        except ValueError:
+            value = 0
+        if not re.fullmatch(r"[0-9]+(?:\.[0-9]{1,2})?", cpus) or not 0 < value <= (os.cpu_count() or 1):
+            raise ValueError(f"--cpus expects a number from 0.01 to {os.cpu_count() or 1} (this host's CPUs), or none")
+        limits["cpus"] = cpus
+    pids = str(a.pids).strip().lower()
+    if pids != "none":
+        if not re.fullmatch(r"[0-9]{2,7}", pids) or int(pids) < 16:
+            raise ValueError(f"--pids expects a number of at least 16, or none: {a.pids!r}")
+        limits["pids"] = int(pids)
+    return limits
+
+
+def delegated_controllers(path=None):
+    """The cgroup controllers systemd delegates to this user (rootless limits need them), or None if unknown."""
+    path = Path(path or f"/sys/fs/cgroup/user.slice/user-{os.getuid()}.slice/user@{os.getuid()}.service/"
+                       "cgroup.controllers")
+    try:
+        return set(path.read_text().split())
+    except OSError:
+        return None
+
+
+def enforced_limits(a):
+    """(limits that can be enforced here, notes about those that cannot)."""
+    limits, notes = resource_limits(a), []
+    controllers = None if a.podman_url else delegated_controllers()
+    if controllers is not None:
+        for key, controller in CGROUP_CONTROLLERS.items():
+            if key in limits and controller not in controllers:
+                del limits[key]
+                notes.append(f"the {controller} controller is not delegated to your user, so --{key} is not "
+                             "enforced (systemd: Delegate=yes in user@.service; see sandbox-ai doctor)")
+    return limits, notes
+
+
+def user_manager_running():
+    """True if a systemd user manager runs for this user (systemd-run --user can create scopes)."""
+    return Path(f"/run/user/{os.getuid()}/systemd/private").exists()
+
+
+def limits_prefix(a):
+    """Command prefix that runs Bubblewrap in a systemd scope with the limits, or [] if there is none."""
+    limits = enforced_limits(a)[0]
+    if not limits or not shutil.which("systemd-run") or not user_manager_running():
+        return []
+    properties = []
+    if "memory" in limits:
+        properties += ["-p", f"MemoryMax={limits['memory'].upper()}"]
+    if "cpus" in limits:
+        properties += ["-p", f"CPUQuota={int(round(float(limits['cpus']) * 100))}%"]
+    if "pids" in limits:
+        properties += ["-p", f"TasksMax={limits['pids']}"]
+    return ["systemd-run", "--user", "--scope", "--quiet", "--collect", *properties, "--"]
+
+
 def proxy_enabled(a):
     """The connection proxy runs unless switched off or there is no network."""
     return not a.no_proxy and not a.offline
@@ -2936,6 +3015,13 @@ def pod_commands(a, name, session, home):
            "--security-opt=apparmor=unconfined", "--security-opt=label=disable",
            "--tmpfs=/run:rw,nosuid,nodev", "--tmpfs=/tmp:rw,nosuid,nodev",
            "--tmpfs=/var/tmp:rw,nosuid,nodev", "--workdir=/work", "--interactive")
+    limits = enforced_limits(a)[0]
+    if "memory" in limits:
+        run += ["--memory", limits["memory"]]
+    if "cpus" in limits:
+        run += ["--cpus", limits["cpus"]]
+    if "pids" in limits:
+        run += ["--pids-limit", str(limits["pids"])]
     # The bootstrap's DNS logging stub binds port 53; Firejail drops it again.
     if a.pod_name:
         # Named so that `sandbox-session attach` can exec into it.
@@ -3172,7 +3258,7 @@ def run_bwrap(a, session, home):
         maps_r, maps_w = os.pipe()
         gate_r, gate_w = os.pipe()
         ready_r, ready_w = os.pipe()
-        child = subprocess.Popen(cmd + ["--info-fd", str(info_w), "--userns-block-fd", str(maps_r), "--block-fd", str(gate_r),
+        child = subprocess.Popen(limits_prefix(a) + cmd + ["--info-fd", str(info_w), "--userns-block-fd", str(maps_r), "--block-fd", str(gate_r),
                                        "/usr/bin/python3", "-I", "/sandbox/runtime.py", "--internal-bootstrap"],
                                  pass_fds=(info_w, maps_r, gate_r))
         os.close(info_w)
@@ -3281,6 +3367,11 @@ def launch(argv):
         print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
     for note in device_notes(a):
         print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
+    for note in enforced_limits(a)[1]:
+        print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
+    if a.backend == "bwrap" and resource_limits(a) and not limits_prefix(a):
+        print("agent-sandbox: the resource limits are not enforced with bwrap here (no systemd user manager)",
+              file=sys.stderr)
     if a.session is not None and not a.dry_run:
         return load_sessions_module().start(a, argv)
     if a.dry_run:
@@ -3288,6 +3379,7 @@ def launch(argv):
                           "workspaces": [{"host": src, "sandbox": dest} for src, dest in workspace_targets(a)],
                           "workspace_mode": "ro" if a.workspace_ro else "rw", "mounts": a.mount,
                           "devices": [{"path": path, "kind": kind} for path, kind in devices(a)], "gpu": a.gpu,
+                          "limits": enforced_limits(a)[0],
                           "allow": a.allow, "https_hosts": allowed_hosts(a),
                           "https_networks": host_networks(allowed_hosts(a)), "offline": a.offline,
                           "dangerously_skip_permissions": a.dangerously_skip_permissions,

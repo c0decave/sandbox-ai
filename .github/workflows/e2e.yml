@@ -37,12 +37,20 @@ jobs:
           sudo sysctl -w dev.tty.legacy_tiocsti=0 || true
           sudo modprobe nft_chain_nat nft_redir || true
           grep "^$(id -un):" /etc/subuid /etc/subgid || sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$(id -un)"
-          podman info --format '{{.Host.CgroupVersion}} {{.Host.OCIRuntime.Name}} {{.Host.NetworkBackend}}'
-      - name: sandbox-ai doctor
-        run: ./sandbox-ai doctor --backend ${{ matrix.backend }} || true
+      # The job log needs a login to read; what matters is also written as annotations.
+      - name: Diagnostics
+        run: |
+          note() { printf '::notice title=%s::%s\n' "$1" "$(printf '%s' "$2" | sed ':a;N;$!ba;s/\n/%0A/g' | head -c 3800)"; }
+          note "podman" "$(podman version 2>&1 | head -20; podman info 2>&1 | grep -iE 'cgroup|ociRuntime|name: (crun|runc)|networkBackend|pasta|rootless|slirp' | head -20)"
+          note "kernel" "$(uname -r); userns=$(cat /proc/sys/user/max_user_namespaces); apparmor_userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>&1); tiocsti=$(cat /proc/sys/dev/tty/legacy_tiocsti 2>&1); nat=$(ls /sys/module | grep -E '^nft_(chain_nat|redir)$' | tr '\n' ' '); controllers=$(cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers 2>&1)"
+          note "doctor" "$(./sandbox-ai doctor --backend ${{ matrix.backend }} 2>&1)"
       - name: Build the images
         if: matrix.backend == 'podman'
-        run: ./sandbox-build-image all
+        run: |
+          ./sandbox-build-image all 2>&1 | tee build.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" != 0 ]; then printf '::error title=image build::%s\n' "$(tail -c 3000 build.log | sed ':a;N;$!ba;s/\n/%0A/g')"; fi
+          exit "$status"
       - name: Live tests
         run: |
           python3 -m pytest -q -p no:cacheprovider -rfE --junitxml=live.xml --agent-live \
