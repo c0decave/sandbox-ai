@@ -490,7 +490,8 @@ def test_end_to_end_wizard_script_then_launcher_plan(tmp_path):
 
 
 def test_review_trust_hashes_exactly_the_bytes_shown(tmp_path):
-    path = tmp_path / ".sandbox-ai.json"
+    (tmp_path / "proj").mkdir()  # the trust store (tmp_path/cfg) must not lie in the workspace
+    path = tmp_path / "proj" / ".sandbox-ai.json"
     path.write_text(json.dumps({"version": 1, "agent": "codex", "options": ["--dns"]}))
     shown = []
     def prompt(text):
@@ -501,7 +502,7 @@ def test_review_trust_hashes_exactly_the_bytes_shown(tmp_path):
     assert any("--dns" in line for line in shown)
     launcher = w.launcher()
     with pytest.raises(ValueError, match="changed since it was trusted"):
-        launcher.load_project_config(launcher.parse_args(["codex", "--workspace", str(tmp_path)]))
+        launcher.load_project_config(launcher.parse_args(["codex", "--workspace", str(tmp_path / "proj")]))
 
 
 def test_review_wizard_never_writes_through_symlinks(scenario, tmp_path):

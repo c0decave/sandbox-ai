@@ -4,6 +4,7 @@ import argparse
 import base64
 import contextlib
 import errno
+import fcntl
 import hashlib
 import importlib.util
 import ipaddress
@@ -24,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import termios
+import threading
 import time
 import urllib.parse
 import uuid
@@ -76,6 +78,8 @@ PROXY_PORT = RUNTIME.PROXY_PORT
 PROXY_UID = RUNTIME.PROXY_UID
 CA_DIR = RUNTIME.CA_DIR
 CONTROL_DIR = RUNTIME.CONTROL_DIR
+BROWSER_DIR = PurePosixPath(RUNTIME.BROWSER_SOCKET).parent
+BROWSER_SHIMS = ("xdg-open", "sensible-browser", "x-www-browser", "www-browser", "open")
 host_matches = RUNTIME.host_matches
 # Environment variables that point TLS libraries and tools at the bundle with the session CA.
 CA_BUNDLE_VARIABLES = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO", "PIP_CERT",
@@ -148,7 +152,7 @@ CDI_DIRS = (Path("/etc/cdi"), Path("/var/run/cdi"), Path("/run/cdi"))
 PASTA_OPTIONS = ("--no-map-gw", "-t", "none", "-u", "none", "-T", "none", "-U", "none")
 POD_NETWORK = "pasta:" + ",".join(PASTA_OPTIONS)
 SESSION_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}"
-__version__ = "0.1.20"
+__version__ = "0.1.21"
 CONFIG_NAME = ".sandbox-ai.json"
 # Label on session pods: the session's tmux directory, so a stale pod can be told apart from someone else's.
 SESSION_LABEL = "sandbox-ai.session"
@@ -187,7 +191,7 @@ SHORT_OPTIONS = {
     "--allow-pypi": "-y", "--allow-github": "-g", "--allow-gitlab": "-gl", "--allow-kernel-org": "-ak",
     "--allow-duckduckgo": "-dd", "--allow-tcp": "-t", "--allow-host-port": "-P", "--git-token-env": "-ge",
     "--git-token-file": "-gf", "--git-credentials": "-gc", "--git-identity": "-I", "--privacy-check": "-pc",
-    "--privacy-rules": "-pr", "--no-proxy": "-X", "--no-inspect": "-x", "--no-provider-defaults": "-nd",
+    "--privacy-rules": "-pr", "--no-proxy": "-X", "--no-inspect": "-x", "--allow-http": "-ah", "--no-provider-defaults": "-nd",
     "--frontier": "-f", "--dangerously-skip-permissions": "-D", "--local-config": "-L", "--offline": "-o",
     "--egress-all-allow": "-E", "--dns": "-R", "--nameserver": "-ns", "--network": "-nw", "--ip": "-ip",
     "--ip6": "-i6", "--image": "-i", "--podman-url": "-pu", "--binary": "-B", "--runtime": "-rt",
@@ -196,10 +200,15 @@ SHORT_OPTIONS = {
     "--no-memory": "-nm", "--no-plugins": "-np", "--env": "-e", "--log-dir": "-l", "--gui": "-gu",
     "--gui-screen": "-gs", "--gui-vnc": "-gv", "--gui-wayland": "-gw", "--tmux": "-T", "--no-tmux": "-nt",
     "--mcp": "-M", "--session": "-s", "--config": "-c", "--no-config": "-nc", "--dry-run": "-n",
-    "--probe": "-pb",
+    "--probe": "-pb", "--memory": "-me", "--cpus": "-cu", "--pids": "-pi", "--ask": "-Q",
+    "--secret-env": "-se", "--git-token-secret": "-gk",
 }
 HELP_EPILOG = """\
-Agent arguments follow --. Examples: see SANDBOX.md.
+Agent arguments follow --. Examples (more in QUICKSTART.md):
+  claude-sandbox                                   the current directory as /work
+  claude-sandbox -w ~/src/app -p development -D    PyPI, GitHub, both APIs; no prompts
+  claude-sandbox -n                                show the plan, start nothing
+  claude-sandbox -s web                            a session: detach, attach later
 
 Every option has a short form (shown above). One-letter forms can be bundled
 (-Dn = --dangerously-skip-permissions --dry-run) and take a value directly
@@ -225,7 +234,9 @@ Hardware for the agent, safest first:
 def build_parser():
     """The launcher's option parser (also used by the wizard to split option lists)."""
     # No prefix matching: abbreviations must not reach internal or forbidden options.
-    p = argparse.ArgumentParser(description="Agent in rootless Podman/Bubblewrap + verified Firejail.",
+    p = argparse.ArgumentParser(prog="sandbox-ai", usage="sandbox-ai claude|codex|opencode [options] [-- agent arguments]\n"
+                                "       claude-sandbox|codex-sandbox|opencode-sandbox [options] [-- agent arguments]",
+                                description="Agent in rootless Podman/Bubblewrap + verified Firejail.",
                                 epilog=HELP_EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter,
                                 allow_abbrev=False)
     add = p.add_argument
@@ -235,7 +246,7 @@ def build_parser():
     p.add_argument = add_with_short_form
     p.add_argument("agent", choices=AUTH_TARGETS)
     p.add_argument("--version", action="version", version=f"sandbox-ai {__version__}")
-    p.add_argument("--backend", choices=["podman", "bwrap"], default="podman")
+    p.add_argument("--backend", choices=list(BACKENDS), default="podman")
     p.add_argument("--workspace", action="append", metavar="DIR[,DIR...]",
                    help="Host directory at /work (default: current directory); further entries, repeated or "
                         "comma-separated, appear at /workspaces/<name>")
@@ -253,6 +264,12 @@ def build_parser():
                         "generate --output=/etc/cdi/nvidia.yaml`; bwrap: /dev/nvidia*), dri (Intel/AMD render "
                         "nodes in /dev/dri; Mesa, Vulkan or VA-API come from your own image) or rocm (dri plus "
                         "/dev/kfd). Weakens isolation like --device")
+    p.add_argument("--memory", default="8g", metavar="SIZE",
+                   help="Memory limit of the sandbox, e.g. 4g or 512m (default: 8g; none: no limit)")
+    p.add_argument("--cpus", default=None, metavar="N",
+                   help="CPU limit, e.g. 2 or 1.5 (default: half of this host's CPUs; none: no limit)")
+    p.add_argument("--pids", default="4096", metavar="N",
+                   help="Limit on processes and threads (default: 4096; none: no limit)")
     p.add_argument("--profile", action="append", default=[], choices=PROFILES, metavar="NAME",
                    help="Network profile: " + "; ".join(f"{name}: {value['help']}" for name, value in PROFILES.items())
                         + "; repeatable")
@@ -274,6 +291,9 @@ def build_parser():
     p.add_argument("--git-token-file", action="append", default=[], metavar="URL=FILE",
                    help="Like --git-token-env, but the token is read from FILE (yours, mode 0600, outside every "
                         "workspace); repeatable")
+    p.add_argument("--git-token-secret", action="append", default=[], metavar="URL=SECRET",
+                   help="Like --git-token-env, but the token is the secret SECRET of sandbox-ai secrets (your "
+                        "keyring); repeatable")
     p.add_argument("--git-credentials", type=Path, metavar="FILE",
                    help="Logins for Git over HTTP(S) from FILE in git's credential-store format, e.g. "
                         "~/.git-credentials (yours, mode 0600, outside every workspace); each server is reached "
@@ -297,10 +317,20 @@ def build_parser():
                         "bodies (redacted, 64 KiB each) to connections-*.jsonl in the log directory, refuses "
                         "pushes the privacy check stops and SSH except to destinations allowed with --allow or "
                         "--allow-tcp")
+    p.add_argument("--ask", choices=["on", "off"], default="on",
+                   help="With the proxy, ask (sandbox-ai approvals, the app, a desktop notification) before a "
+                        "connection to a destination the options do not allow, a lookup of a name they do not pin, "
+                        "or a push with privacy warnings; unanswered questions are refused after 60 s (default: on)")
+    p.add_argument("--allow-http", action="append", default=[], metavar="'HOST METHODS PATH'",
+                   help="Allow only matching requests to HOST (or *.DOMAIN): METHODS such as GET,HEAD or *, PATH a "
+                        "pattern where * matches within one path segment and ** across them, e.g. "
+                        "'api.github.com GET,HEAD /repos/**'; once a host has rules, every other request to it is "
+                        "refused; repeatable")
     p.add_argument("--no-inspect", action="append", default=[], metavar="HOST",
                    help="Pass TLS to HOST (or *.DOMAIN) through unopened, for programs that do not accept the "
                         "session CA; only the name is logged, and pushes there are not checked; repeatable")
-    p.add_argument("--no-provider-defaults", action="store_true")
+    p.add_argument("--no-provider-defaults", action="store_true",
+                   help="Do not open the agent's own provider hosts; only what other options allow")
     p.add_argument("--frontier", action="store_true", help="Also allow OpenAI and Anthropic API/auth hosts (TCP/443); everything else stays denied")
     p.add_argument("--dangerously-skip-permissions", action="store_true",
                    help="Start the agent without approval prompts; the outer sandbox and egress firewall stay in force")
@@ -342,6 +372,9 @@ def build_parser():
     p.add_argument("--no-plugins", action="store_true",
                    help="No plugins from sandbox-ai's plugin store (Claude) or the kits (OpenCode)")
     p.add_argument("--env", action="append", default=[], metavar="NAME", help="Pass named host variable to agent only; values never printed")
+    p.add_argument("--secret-env", action="append", default=[], metavar="NAME[=SECRET]",
+                   help="Give the agent the environment variable NAME with the value of the secret SECRET (default: "
+                        "NAME) from sandbox-ai secrets; values never printed; repeatable")
     p.add_argument("--log-dir", type=Path,
                    help="Write egress-denied.jsonl, files.jsonl and the proxy's connections-*.jsonl here (outside "
                         "workspaces; hidden from the agent). Without it the connection log goes to "
@@ -428,6 +461,360 @@ def canonical_options(tokens):
     return result
 
 
+def logical_cwd():
+    """The working directory as the shell names it ($PWD, symlinks kept), so that a symlink on the way is seen."""
+    pwd = os.environ.get("PWD", "")
+    cwd = os.getcwd()
+    try:
+        if os.path.isabs(pwd) and os.path.samefile(pwd, cwd):
+            return os.path.normpath(pwd)
+    except OSError:
+        pass
+    return cwd
+
+
+BACKENDS = ("podman", "bwrap")
+POLICY_FILE = Path("/etc/sandbox-ai/policy.json")
+POLICY_KEYS = {"version", "forbid", "backends", "max_approval_scope", "allow_within", "allow_hosts", "mcp_network",
+               "message"}
+APPROVAL_SCOPES = ("once", "run", "always")
+
+
+def load_policy(path=None):
+    """The administrator's policy ({} without one): options nobody may use, allowed backends, the widest
+    approval scope. Only a file root owns and only root can change counts: a policy the user could edit
+    would not be one. A broken or unsafe policy file stops every start (fail closed)."""
+    path = Path(path or POLICY_FILE)
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise ValueError(f"Policy {path}: {exc.strerror}") from None
+    for item, label in ((info, str(path)), (os.stat(path.parent), str(path.parent))):
+        if item.st_uid != 0 or item.st_mode & 0o022:
+            raise ValueError(f"Policy {label} must be owned by root and writable by root only")
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError(f"Policy {path} must be a regular file")
+    try:
+        policy = json.loads(path.read_text())
+    except (OSError, ValueError, RecursionError) as exc:
+        raise ValueError(f"Policy {path} is not valid JSON: {exc}") from None
+    if not isinstance(policy, dict) or policy.get("version") != 1 or set(policy) - POLICY_KEYS:
+        raise ValueError(f"Policy {path}: version 1 with the keys {sorted(POLICY_KEYS)}")
+    forbid, backends = policy.get("forbid", []), policy.get("backends", list(BACKENDS))
+    if not isinstance(forbid, list) or not all(isinstance(v, str) and v.startswith("--") for v in forbid):
+        raise ValueError(f"Policy {path}: forbid is a list of options such as \"--no-proxy\" or \"--ask=off\"")
+    if not isinstance(backends, list) or not backends or set(backends) - set(BACKENDS):
+        raise ValueError(f"Policy {path}: backends is a non-empty list of {list(BACKENDS)}")
+    if policy.get("max_approval_scope", "always") not in APPROVAL_SCOPES:
+        raise ValueError(f"Policy {path}: max_approval_scope is one of {list(APPROVAL_SCOPES)}")
+    names = policy.get("allow_hosts", [])
+    if not isinstance(names, list) or not all(isinstance(n, str) and re.fullmatch(r"(\*\.)?[a-z0-9.-]{1,253}", n)
+                                              for n in names):
+        raise ValueError(f"Policy {path}: allow_hosts is a list of host names or *.DOMAIN")
+    if policy.get("mcp_network", "full") not in ("none", "full"):
+        raise ValueError(f"Policy {path}: mcp_network is none or full")
+    within = policy.get("allow_within")
+    if within is not None:
+        try:
+            if not isinstance(within, list):
+                raise TypeError
+            [ipaddress.ip_network(n, strict=False) for n in within]
+        except (TypeError, ValueError):
+            raise ValueError(f"Policy {path}: allow_within is a list of networks such as \"10.0.0.0/8\"") from None
+    known = build_parser()._option_string_actions
+    for value in forbid:
+        if value.split("=", 1)[0] not in known:
+            raise ValueError(f"Policy {path}: unknown option {value}")
+    return policy
+
+
+def check_policy(a, policy, path=None):
+    """Refuse what the policy forbids, however it was chosen: on the command line, in a trusted project file,
+    through a profile (--profile sets --egress-all-allow, for example) or a short form."""
+    a.max_approval_scope = policy.get("max_approval_scope", "always")
+    a.policy = {}
+    if not policy:
+        return
+    note = f" ({policy['message']})" if isinstance(policy.get("message"), str) else ""
+    where = path or POLICY_FILE
+    actions = build_parser()._option_string_actions
+    for entry in policy.get("forbid", []):
+        option, _, wanted = entry.partition("=")
+        action = actions[option]
+        value = getattr(a, action.dest, None)
+        if wanted:
+            used = (wanted in [str(v) for v in value]) if isinstance(value, list) else str(value) == wanted
+        elif action.nargs == 0:
+            used = bool(value) and value != action.default
+        else:
+            used = value not in (None, [], action.default)
+        if used:
+            raise ValueError(f"{entry} is not allowed by the administrator's policy ({where}){note}")
+    if a.backend not in policy.get("backends", list(BACKENDS)):
+        raise ValueError(f"The backend {a.backend} is not allowed by the administrator's policy ({where}){note}")
+    a.policy = {key: policy[key] for key in ("forbid", "allow_within", "allow_hosts") if key in policy}
+    check_ceiling(a, f" ({where}){note}")
+
+
+def within_ceiling(a, network=None, host=None):
+    """NETWORK (an address or CIDR) or HOST (a name) lies inside the administrator's ceiling (allow_within for
+    addresses, allow_hosts for names), or there is no ceiling."""
+    policy = getattr(a, "policy", {}) or {}
+    if policy.get("allow_within") is None:
+        return True
+    if host is not None:
+        return any(host == name or (name.startswith("*.") and host.endswith(name[1:])) for name in
+                   policy.get("allow_hosts", []))
+    network = ipaddress.ip_network(network, strict=False)
+    return any(network.version == limit.version and network.subnet_of(limit)
+               for limit in map(lambda n: ipaddress.ip_network(n, strict=False), policy["allow_within"]))
+
+
+def check_ceiling(a, where=""):
+    """Every way of widening at the start stays inside the ceiling: --allow, --allow-tcp, named hosts (--allow-host,
+    presets, --frontier; the agent's own provider is always reachable), DNS to outside resolvers (data leaves
+    through any of them), host ports (127.0.0.1), and --egress-all-allow."""
+    if (getattr(a, "policy", {}) or {}).get("allow_within") is None:
+        return
+    if a.egress_all_allow:
+        raise ValueError(f"--egress-all-allow reaches beyond the administrator's networks{where}")
+    wanted = [str(ipaddress.ip_network(n, strict=False)) for n in a.allow]
+    wanted += [address for address, _ in tcp_targets(a)]
+    wanted += ["127.0.0.1"] if a.allow_host_port else []
+    wanted += nameservers(a)
+    for network in wanted:
+        if not within_ceiling(a, network=network):
+            raise ValueError(f"{network} lies outside the networks the administrator's policy allows{where}")
+    own = set(PROVIDERS.get(a.agent, []))
+    names = list(a.allow_host) + [h for preset in a.presets for h in PRESETS[preset]] + (FRONTIER if a.frontier else [])
+    for host in dict.fromkeys(names):
+        if host not in own and not within_ceiling(a, host=host):
+            raise ValueError(f"{host} is not among the hosts the administrator's policy allows (allow_hosts){where}")
+
+
+def exposed_registry():
+    """Host trees sandboxes could write in earlier runs (see remember_exposed)."""
+    state = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
+    return state / "sandbox-ai" / "exposed.json"
+
+
+def exposed_before():
+    """The registry's trees; on first use it is seeded with what earlier versions exposed (see seed_exposed)."""
+    path = exposed_registry()
+    if not path.exists() and not path.is_symlink():
+        return seed_exposed()
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError, RecursionError):
+        return []
+    return [Path(p) for p in data if isinstance(p, str) and os.path.isabs(p)] if isinstance(data, list) else []
+
+
+def seed_exposed():
+    """Workspaces known from before the registry existed: projects with approvals or a trusted configuration,
+    sessions and MCP servers. Their symlinks may have been planted by a sandbox of an older version."""
+    found = []
+    config = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "sandbox-ai"
+    for name, project in (("approved.json", lambda key: key), ("trusted.json", lambda key: os.path.dirname(key))):
+        try:
+            data = json.loads((config / name).read_text())
+        except (OSError, ValueError, RecursionError):
+            continue
+        found += [project(key) for key in data if isinstance(key, str)] if isinstance(data, dict) else []
+    state = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "sandbox-ai"
+    for record in state.glob("sessions/*/session.json"):
+        try:
+            data = json.loads(record.read_text())
+        except (OSError, ValueError, RecursionError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("workspace"), str):
+            found.append(data["workspace"])
+        options = data.get("options", []) if isinstance(data, dict) else []
+        for flag, value in zip(options, options[1:]) if isinstance(options, list) else []:
+            if flag in ("-w", "--workspace") and isinstance(value, str):
+                found += value.split(",")  # a session's other workspaces
+    try:
+        servers = json.loads((config / "mcp.json").read_text())
+    except (OSError, ValueError, RecursionError):
+        servers = {}
+    for definition in (servers.get("servers", servers) if isinstance(servers, dict) else {}).values():
+        if not isinstance(definition, dict):
+            continue
+        found += [definition["workspace"]] if isinstance(definition.get("workspace"), str) else []
+        found += [m["host"] for m in definition.get("mounts", []) if isinstance(m, dict) and isinstance(m.get("host"), str)
+                  and m.get("mode") == "rw"]
+    found = [os.path.expanduser(p) for p in found]
+    return [Path(p) for p in dict.fromkeys(found) if os.path.isabs(p)]
+
+
+def remember_exposed(a, trees=None):
+    """Add this run's agent-writable trees (or TREES) to the registry: a symlink found in one of them later may
+    have been planted by an agent, to get another host directory mounted at a later start."""
+    path = exposed_registry()
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with open(path.with_name(".exposed.lock"), "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)  # two launches at once must not drop each other's trees
+            new = [str(t) for t in (exposed_trees(a) if trees is None else trees)]
+            known = list(dict.fromkeys(new + [str(t) for t in exposed_before()]))[:2000]
+            temporary = path.with_name(f".exposed.{os.getpid()}.json")
+            temporary.write_text(json.dumps(known))
+            os.replace(temporary, path)
+    except OSError as exc:
+        print(f"agent-sandbox: warning: cannot record exposed directories in {path}: {exc}", file=sys.stderr)
+
+
+def image_mount_hosts(project_document=None):
+    """Resolved host folders of the MCP image servers in your mcp.json and in the trusted project file."""
+    path = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "sandbox-ai" / "mcp.json"
+    try:
+        servers = json.loads(path.read_text())
+    except (OSError, ValueError, RecursionError):
+        servers = {}
+    servers = dict(servers) if isinstance(servers, dict) else {}
+    project = (project_document or {}).get("mcp_servers") if isinstance(project_document, dict) else None
+    if isinstance(project, dict):
+        servers.update({f"project:{name}": value for name, value in project.items()})
+    hosts = []
+    for definition in servers.values():
+        for mount in definition.get("mounts", []) if isinstance(definition, dict) else []:
+            if isinstance(mount, dict) and isinstance(mount.get("host"), str):
+                with contextlib.suppress(OSError, RuntimeError):
+                    hosts.append(Path(os.path.expanduser(mount["host"])).resolve())
+    return hosts
+
+
+def planted_symlink(source, trees):
+    """The first symlink on the way to SOURCE (itself or a parent) that lies in one of TREES, where a sandbox
+    could have created it; None. Links elsewhere (~/src -> /data/src, /home -> /var/home) are yours."""
+    for path in reversed((source, *source.parents)):
+        try:
+            if not path.is_symlink():
+                continue
+            holder = path.parent.resolve()
+        except OSError:
+            continue
+        if any(holder == tree or tree in holder.parents for tree in trees):
+            return path
+    return None
+
+
+def check_planted(value, option, trees):
+    """Refuse the host path VALUE (as given) if it goes through a symlink a sandbox may have planted."""
+    source = Path(os.path.normpath(Path(value).expanduser().absolute()))
+    link = planted_symlink(source, trees)
+    if link is not None:
+        raise ValueError(f"{option} {source} goes through the symlink {link} -> {os.readlink(link)}, inside a "
+                         f"directory a sandbox could write; it may have been planted to get another host directory "
+                         f"mounted. Check it, then give the real path: {shlex.quote(str(source.resolve()))}")
+
+
+def project_tool_dir(directory, workspace):
+    """DIRECTORY (on PATH, inside WORKSPACE) is the project's own tool directory: an activated virtualenv or
+    node_modules/.bin. Any other PATH directory inside a workspace (~/.cargo/bin in ~/.cargo) is refused."""
+    virtual_env = os.environ.get("VIRTUAL_ENV")
+    if virtual_env and Path(virtual_env).expanduser().resolve() / "bin" == directory:
+        return True
+    return directory.name in ("bin", ".bin") and directory.parent.name in (".venv", "venv", "node_modules")
+
+
+def tool_dirs_state(a):
+    """{directory: {name: (size, mtime, inode)}} of the PATH directories inside the workspaces (a project's own
+    .venv/bin or node_modules/.bin, which project_tool_dir lets through): what you run there next comes from the
+    agent. Compared after the run by tool_dirs_changed."""
+    workspaces = [Path(w) for w in a.workspaces]
+    state = {}
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not os.path.isabs(entry):
+            continue
+        try:
+            directory = Path(entry).resolve()
+        except OSError:
+            continue
+        if not any(directory == w or w in directory.parents for w in workspaces):
+            continue
+        files = {}
+        with contextlib.suppress(OSError):
+            for item in os.scandir(directory):
+                with contextlib.suppress(OSError):
+                    info = item.stat(follow_symlinks=False)
+                    # ctime too: an agent can write the same size in place and reset the mtime, not the ctime.
+                    files[item.name] = (info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino)
+        state[str(directory)] = files
+    return state
+
+
+def tool_dirs_changed(before):
+    """Notes on files added or changed during the run in the PATH directories recorded by tool_dirs_state."""
+    notes = []
+    for directory, files in before.items():
+        now = tool_dirs_state(argparse.Namespace(workspaces=[directory]))
+        current = now.get(directory, {})
+        added = sorted(set(current) - set(files))
+        changed = sorted(name for name in set(current) & set(files) if current[name] != files[name])
+        if added or changed:
+            names = ", ".join((added + changed)[:10]) + (" ..." if len(added + changed) > 10 else "")
+            notes.append(f"the agent added or changed programs in {directory}, which is on your PATH: {names}; "
+                         "check them before running anything from this shell")
+    return notes
+
+
+def private_locations():
+    """([fixed], [path]): host directories whose contents run on the host or hold its keys. A workspace may not
+    be, contain or lie in a fixed one, nor be or lie in a PATH directory (~/.cargo/bin, ~/go/bin ...; a project
+    may contain its own activated .venv/bin)."""
+    home = Path.home().resolve()
+    fixed = {Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config"),
+             Path(os.environ.get("XDG_DATA_HOME") or home / ".local/share"),
+             Path(os.environ.get("XDG_STATE_HOME") or home / ".local/state"),
+             home / ".local", home / ".ssh", home / ".gnupg", home / ".bin", home / "bin", home / ".mozilla"}
+    path = {Path(entry) for entry in os.environ.get("PATH", "").split(os.pathsep) if os.path.isabs(entry)}
+
+    def resolved(paths):
+        result = set()
+        for item in paths:
+            try:
+                result.add(item.expanduser().resolve())
+            except OSError:
+                continue
+        return sorted(item for item in result if item != Path("/"))
+    return resolved(fixed), resolved(path)
+
+
+def own_home(path):
+    """PATH (resolved) is or lies in a HOME sandbox-ai itself keeps for a sandbox, inside ~/.local but private
+    to that sandbox: a session's or MCP server's home, a login's staging home, the plugin installer's store,
+    the wizard's persistent HOME of a project. Their siblings (session.json, logs, the registry) are not."""
+    state = (Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "sandbox-ai").expanduser()
+    data = (Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "sandbox-ai").expanduser()
+    patterns = [(state.resolve() / "sessions", ("*", "home")), (state.resolve() / "mcp", ("*", "home")),
+                (state.resolve() / "home", ("*",)), (data.resolve() / "auth", ("*", "home")),
+                (data.resolve() / "plugins", ("*",))]
+    for base, shape in patterns:
+        try:
+            parts = path.relative_to(base).parts
+        except ValueError:
+            continue
+        if len(parts) >= len(shape) and all(want == "*" or want == got for want, got in zip(shape, parts)):
+            return True
+    return False
+
+
+def check_private_location(path, option):
+    """Refuse an agent-writable host tree PATH (resolved) in or over a private location."""
+    if own_home(path):
+        return
+    fixed, program_dirs = private_locations()
+    for private in fixed + program_dirs:
+        inside = path == private or private in path.parents
+        if inside or (path in private.parents and not project_tool_dir(private, path)):
+            raise ValueError(f"{option} {path} {'lies in' if inside else 'contains'} {private}: settings, keys, "
+                             "autostart entries or programs on your PATH there run on the host. Use a project "
+                             "directory.")
+
+
 def parse_args(argv):
     # The separator belongs to this wrapper; everything afterwards is opaque.
     tail = []
@@ -436,7 +823,7 @@ def parse_args(argv):
         argv, tail = argv[:pos], argv[pos + 1:]
     a = build_parser().parse_args(argv)
     # Commas are invalid in workspace paths, so they can separate entries.
-    a.workspaces = [part for value in (a.workspace or [os.getcwd()]) for part in value.split(",")]
+    a.workspaces = [part for value in (a.workspace or [logical_cwd()]) for part in value.split(",")]
     a.workspace = a.workspaces[0]
     a.gui = a.gui or bool(a.gui_vnc)
     for name in a.profile:
@@ -555,8 +942,10 @@ LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "[::1]"}
 
 
 def git_token_values(a):
-    """[(kind, URL=REF)] of --git-token-env (kind "env") and --git-token-file (kind "file")."""
-    return [("env", value) for value in a.git_token_env] + [("file", value) for value in a.git_token_file]
+    """[(kind, URL=REF)] of --git-token-env (kind "env"), --git-token-file ("file") and --git-token-secret
+    ("secret")."""
+    return ([("env", value) for value in a.git_token_env] + [("file", value) for value in a.git_token_file]
+            + [("secret", value) for value in getattr(a, "git_token_secret", [])])
 
 
 def git_token_credential(value, kind="env"):
@@ -568,6 +957,8 @@ def git_token_credential(value, kind="env"):
         raise ValueError(f"{option} expects URL=NAME, a variable NAME without a value: {value!r}")
     if kind == "file" and (not sep or not ref or any(ord(c) < 32 for c in ref)):
         raise ValueError(f"{option} expects URL=FILE: {value!r}")
+    if kind == "secret" and (not sep or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", ref)):
+        raise ValueError(f"{option} expects URL=SECRET, the name of a secret (sandbox-ai secrets list): {value!r}")
     credential = git_server(url, option)
     if credential["user"] is not None and not re.fullmatch(GIT_TOKEN_USER, credential["user"]):
         raise ValueError(f"{option}: user may contain only letters, digits, '.', '_' and '-': {url!r}")
@@ -712,6 +1103,13 @@ def git_tokens(a):
                              "Podman backend with its default network reaches (--allow-host-port)")
         if kind == "file":
             token = read_token_file(credential["file"], GIT_TOKEN, "--git-token-file")
+        elif kind == "secret":
+            token = load_secret_store_module().get(credential["secret"])
+            if token is None:
+                raise ValueError(f"--git-token-secret: no secret {credential['secret']}; keep one with: "
+                                 f"sandbox-ai secrets set {credential['secret']}")
+            if not re.fullmatch(GIT_TOKEN, token):
+                raise ValueError(f"the secret {credential['secret']} does not look like an access token")
         else:
             name = credential["env"]
             if name not in os.environ:
@@ -862,6 +1260,9 @@ def load_project_config(a):
     if a.no_config:
         return None, None
     path = config_key(a.config or Path(a.workspaces[0] or ".") / CONFIG_NAME)
+    # The agent must not be able to write what it would trust at its next start.
+    check_host_source(a, config_store(), "The trust store (XDG_CONFIG_HOME)",
+                      trees=[Path(w).expanduser().resolve() for w in a.workspaces if w])
     trusted = trusted_configs()
     if not path.is_symlink() and not path.exists():
         if a.config:
@@ -1387,6 +1788,9 @@ def validate(a):
         raise ValueError("--no-auth conflicts with --copy of a credential file")
     if a.import_codex_auth and a.agent != "opencode":
         raise ValueError("--import-codex-auth is supported only for OpenCode")
+    for value in a.secret_env:
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}(?:=[A-Za-z_][A-Za-z0-9_]{0,63})?", value):
+            raise ValueError(f"--secret-env expects NAME or NAME=SECRET (letters, digits, _): {value!r}")
     for name in a.env:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
             raise ValueError("--env expects a variable NAME, without a value")
@@ -1396,6 +1800,7 @@ def validate(a):
             raise ValueError(f"Sandbox-owned variable cannot be overridden: {name}")
     for mount in a.mount:
         parse_mount(mount)
+    resource_limits(a)
     if a.podman_url and (a.device or a.gpu in ("dri", "rocm")):
         raise ValueError("--device and --gpu dri|rocm name devices of this host; with --podman-url only "
                          "--gpu nvidia (the remote's CDI) is possible")
@@ -1431,6 +1836,10 @@ def validate(a):
         if public and a.privacy_check != "off":
             raise ValueError(f"--no-inspect {value} would let pushes to {', '.join(public)} pass unchecked; the "
                              "privacy check needs to see them (or start with --privacy-check off)")
+    if a.allow_http:
+        if not proxy_enabled(a):
+            raise ValueError("--allow-http needs the connection proxy (not with --no-proxy or --offline)")
+        http_rules(a)
     # Inside an agent-visible tree the Firejail blacklist would not hide them.
     for path, option in [(a.log_dir, "--log-dir"), (a.gui_vnc, "--gui-vnc"), (a.tmux_socket_dir, "--tmux-socket-dir"),
                          (a.mcp_socket_dir, "--mcp-socket-dir")]:
@@ -1449,6 +1858,8 @@ def validate(a):
         if any(path.is_symlink() and not path.exists() for path in (source, *source.parents)):
             raise ValueError("Workspace path contains a dangling symlink")
         workspace = source.resolve(strict=False)
+        # An agent of an earlier run may have planted a link to get a host directory mounted read-write.
+        check_planted(source, "Workspace", exposed_before())
         if (workspace.exists() and not workspace.is_dir()) or any(c in str(workspace) for c in (",", "\n", "\r")):
             raise ValueError("Workspace must be a directory without commas/control characters")
         resolved.append(workspace)
@@ -1509,6 +1920,7 @@ def check_workspace_scope(workspace):
         if workspace == path or workspace in path.parents:
             raise ValueError(f"Workspace {workspace} is or contains {label}; the agent could change your shell "
                              "start files, credentials and sandbox-ai's trust store. Use a project directory.")
+    check_private_location(workspace, "Workspace")
 
 
 def check_host_sources(a):
@@ -1529,6 +1941,8 @@ def check_host_sources(a):
         check_host_source(a, git_token_credential(value, "file")["file"], "--git-token-file")
     if a.git_credentials:
         check_host_source(a, a.git_credentials, "--git-credentials")
+    # The control socket and the approvals live there; the agent must not reach them through a mount.
+    check_host_source(a, runs_dir(), "The run directory (XDG_RUNTIME_DIR, else XDG_STATE_HOME)")
     if privacy_rules_dir(a):
         # The agent must neither read the rules (they name what is private) nor change them.
         check_host_source(a, privacy_rules_dir(a), "--privacy-rules")
@@ -1573,6 +1987,29 @@ def check_host_sources(a):
     rw = [Path(src) for _, src, _, mode in mounts if mode == "rw"]
     for workspace in a.workspaces:
         check_host_source(a, workspace, "--workspace", state + rw)
+    # The same for every other host path: a symlink planted in an earlier run, or a private location.
+    before = exposed_before()
+    check_host_source(a, exposed_registry(), "The registry of exposed directories (XDG_STATE_HOME)")
+    for value, src, _, mode in mounts:
+        check_planted(value.rsplit(":", 2)[0], "--mount", before)
+        if mode == "rw":
+            check_private_location(Path(src), "--mount")
+    if a.state_dir:
+        check_planted(a.state_dir, "--state-dir", before)
+        check_private_location(a.state_dir.expanduser().resolve(), "--state-dir")
+    if a.log_dir:
+        check_planted(a.log_dir, "--log-dir", before)
+    for value in a.kit_dir:
+        check_planted(value, "--kit-dir", before)
+    # An MCP image server mounts its folders again for every connection: the agent must not be able to swap
+    # one of them for a link, through a workspace or rw mount that holds it.
+    for host in image_mount_hosts(getattr(a, "project_document", None)):
+        for tree in exposed_trees(a):
+            if tree in host.parents:
+                raise ValueError(f"{tree} contains {host}, a folder an MCP image server mounts (see "
+                                 f"{Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config')}/sandbox-ai/"
+                                 "mcp.json); the agent could replace it with a link. Use a workspace beside it, "
+                                 "or the folder itself.")
 
 
 def prepare_workspace(path):
@@ -1647,8 +2084,14 @@ def firewall_rules(networks, addresses, log=False, dns=(), allow_all=False, tcp=
              " chain runtime {", " }",
              " chain output { type filter hook output priority 0; policy drop;",
              '  oifname "lo" accept', "  ct state established,related accept",
-             "  ip6 hoplimit 255 icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept",
-             "  jump runtime"]
+             "  ip6 hoplimit 255 icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept"]
+    if proxy:
+        # Redirected to the proxy: after the NAT hook the packet goes to the proxy's port on loopback, but
+        # this hook still sees the original output interface, so "oifname lo" does not match it.
+        port = int(proxy["port"])
+        lines += [f"  ct status dnat ip daddr 127.0.0.1 tcp dport {port} accept",
+                  f"  ct status dnat ip6 daddr ::1 tcp dport {port} accept"]
+    lines += ["  jump runtime"]
     for raw in networks:
         net = ipaddress.ip_network(raw, strict=False)
         lines.append(f"  {'ip' if net.version == 4 else 'ip6'} daddr {net} accept")
@@ -2546,6 +2989,167 @@ def prepare_privacy(a, session):
         lambda line: print(f"agent-sandbox: privacy: {printable(line)}", file=sys.stderr))
 
 
+CGROUP_CONTROLLERS = {"memory": "memory", "cpus": "cpu", "pids": "pids"}
+# Telemetry and error reporting the agents try on their own: looked up often, never worth a question.
+ASK_QUIET = ("statsig.com", "statsig.anthropic.com", "featuregates.org", "sentry.io", "datadoghq.com", "segment.io",
+             "segment.com", "mixpanel.com", "amplitude.com", "posthog.com", "featureassets.org",
+             "prodregistryv2.org", "honeycomb.io")
+
+
+def resource_limits(a):
+    """{memory, cpus, pids} to enforce: the defaults (8 GiB, half the CPUs, 4096 processes) unless an option
+    changes or switches them off (none)."""
+    limits = {}
+    memory = str(a.memory).strip().lower()
+    if memory != "none":
+        if not re.fullmatch(r"[1-9][0-9]{0,6}[kmg]?", memory):
+            raise ValueError(f"--memory expects a size such as 4g or 512m, or none: {a.memory!r}")
+        limits["memory"] = memory
+    cpus = str(a.cpus).strip().lower() if a.cpus is not None else str(max(1, (os.cpu_count() or 2) // 2))
+    if cpus != "none":
+        try:
+            value = float(cpus)
+        except ValueError:
+            value = 0
+        if not re.fullmatch(r"[0-9]+(?:\.[0-9]{1,2})?", cpus) or not 0 < value <= (os.cpu_count() or 1):
+            raise ValueError(f"--cpus expects a number from 0.01 to {os.cpu_count() or 1} (this host's CPUs), or none")
+        limits["cpus"] = cpus
+    pids = str(a.pids).strip().lower()
+    if pids != "none":
+        if not re.fullmatch(r"[0-9]{2,7}", pids) or int(pids) < 16:
+            raise ValueError(f"--pids expects a number of at least 16, or none: {a.pids!r}")
+        limits["pids"] = int(pids)
+    return limits
+
+
+def delegated_controllers(path=None):
+    """The cgroup controllers systemd delegates to this user (rootless limits need them), or None if unknown."""
+    path = Path(path or f"/sys/fs/cgroup/user.slice/user-{os.getuid()}.slice/user@{os.getuid()}.service/"
+                       "cgroup.controllers")
+    try:
+        return set(path.read_text().split())
+    except OSError:
+        return None
+
+
+def enforced_limits(a):
+    """(limits that can be enforced here, notes about those that cannot)."""
+    limits, notes = resource_limits(a), []
+    if limits and not a.podman_url and not user_manager_running():
+        # Without a systemd user session rootless Podman falls back to cgroupfs, where it cannot set limits,
+        # and Bubblewrap has no scope to run in.
+        return {}, ["no systemd user session (podman: cgroupfs), so --memory, --cpus and --pids are not enforced; "
+                    "`loginctl enable-linger` or a desktop login provides one"]
+    controllers = None if a.podman_url else delegated_controllers()
+    if controllers is not None:
+        for key, controller in CGROUP_CONTROLLERS.items():
+            if key in limits and controller not in controllers:
+                del limits[key]
+                notes.append(f"the {controller} controller is not delegated to your user, so --{key} is not "
+                             "enforced (systemd: Delegate=yes in user@.service; see sandbox-ai doctor)")
+    return limits, notes
+
+
+def user_manager_running():
+    """True if a systemd user manager runs for this user and its bus is there (systemd-run --user, and
+    rootless Podman's systemd cgroup manager, need it)."""
+    return Path(f"/run/user/{os.getuid()}/bus").exists()
+
+
+def user_bus_environment():
+    """The environment systemd-run --user needs, independent of the caller's XDG_RUNTIME_DIR."""
+    runtime = f"/run/user/{os.getuid()}"
+    return {**os.environ, "XDG_RUNTIME_DIR": runtime, "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime}/bus"}
+
+
+def limits_prefix(a):
+    """Command prefix that runs Bubblewrap in a systemd scope with the limits, or [] if there is none."""
+    limits = enforced_limits(a)[0]
+    if not limits or not shutil.which("systemd-run") or not user_manager_running():
+        return []
+    properties = []
+    if "memory" in limits:
+        # Swap as much again, as Podman's --memory does (its default --memory-swap is twice --memory).
+        properties += ["-p", f"MemoryMax={limits['memory'].upper()}", "-p", f"MemorySwapMax={limits['memory'].upper()}"]
+    if "cpus" in limits:
+        properties += ["-p", f"CPUQuota={int(round(float(limits['cpus']) * 100))}%"]
+    if "pids" in limits:
+        properties += ["-p", f"TasksMax={limits['pids']}"]
+    return ["systemd-run", "--user", "--scope", "--quiet", "--collect", *properties, "--"]
+
+
+def load_secret_store_module():
+    spec = importlib.util.spec_from_file_location("sandbox_secret_store", HERE / "secret_store.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def secret_environment(a):
+    """{NAME: value} of --secret-env NAME[=SECRET], read from sandbox-ai secrets; values never printed."""
+    result = {}
+    for value in a.secret_env:
+        name, _, secret = value.partition("=")
+        secret = secret or name
+        for part in (name, secret):
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", part):
+                raise ValueError(f"--secret-env expects NAME or NAME=SECRET (letters, digits, _): {value!r}")
+        if name in ("HOME", "PATH", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"):
+            raise ValueError(f"Sandbox-owned variable cannot be overridden: {name}")
+        token = load_secret_store_module().get(secret)
+        if token is None:
+            raise ValueError(f"--secret-env {value}: no secret {secret}; keep one with: sandbox-ai secrets set {secret}")
+        result[name] = token
+    return result
+
+
+def write_browser_shims(directory):
+    """xdg-open and friends for the sandbox (DIRECTORY is the session's bin/, /sandbox/session/bin there)."""
+    directory.mkdir(mode=0o755, exist_ok=True)
+    for name in BROWSER_SHIMS:
+        path = directory / name
+        path.write_text('#!/bin/sh\nexec python3 -I /sandbox/runtime.py --internal-open "$@"\n')
+        path.chmod(0o755)
+
+
+def load_approvals_module():
+    spec = importlib.util.spec_from_file_location("sandbox_approvals", HERE / "approvals.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def asking(a):
+    """Approvals are asked for: the proxy runs and --ask is on (not in probes)."""
+    return proxy_enabled(a) and a.ask == "on" and not a.probe
+
+
+def apply_remembered_approvals(a):
+    """Add what was approved "always" for this project (sandbox-ai approvals) to the options; the notes."""
+    approvals = load_approvals_module()
+    # The agent must not be able to write what widens its next start: such a file is not read.
+    try:
+        check_host_source(a, approvals.approved_file(), "Remembered approvals (XDG_CONFIG_HOME)")
+    except ValueError as exc:
+        return [f"{exc}; not read"]
+    remembered = approvals.approved_for(Path(a.workspaces[0]).expanduser())
+    hosts = [h for h in remembered["hosts"] if h not in a.allow_host]
+    tcp = [t for t in remembered["tcp"] if t not in a.allow_tcp]
+    # Under the administrator's ceiling, what lies outside it is not applied (it may predate the policy).
+    outside = [h for h in hosts if not within_ceiling(a, host=h)]
+    outside += [t for t in tcp if not within_ceiling(a, network=tcp_targets(argparse.Namespace(allow_tcp=[t]))[0][0])]
+    hosts, tcp = [h for h in hosts if h not in outside], [t for t in tcp if t not in outside]
+    ignored = [f"not applied, outside the administrator's policy: {', '.join(outside)}"] if outside else []
+    a.allow_host += hosts
+    a.allow_tcp += tcp
+    # Approved, not chosen as an option: such addresses never get SSH (see proxy_config).
+    a.approved_tcp = list(getattr(a, "approved_tcp", [])) + tcp
+    if not (hosts or tcp) or a.offline:
+        return ignored
+    return ignored + [f"allowed because you approved them always for this project: {', '.join(hosts + tcp)} "
+            f"(remove in {load_approvals_module().approved_file()})"]
+
+
 def proxy_enabled(a):
     """The connection proxy runs unless switched off or there is no network."""
     return not a.no_proxy and not a.offline
@@ -2560,16 +3164,51 @@ def proxy_allow(a, hosts):
             "loopback": host_ports(a)}
 
 
+HTTP_RULE = re.compile(r"(\*\.)?([a-z0-9-]{1,63}(?:\.[a-z0-9-]{1,63})+) +(\*|[A-Z]{3,10}(?:,[A-Z]{3,10})*) +(/[!-~]{0,500})")
+
+
+def http_rules(a):
+    """[{"host", "methods", "path"}] from --allow-http: what the proxy lets through to a host that has rules."""
+    rules = []
+    for value in a.allow_http:
+        match = HTTP_RULE.fullmatch(value.strip())
+        if not match:
+            raise ValueError(f"--allow-http expects 'HOST METHODS PATH', e.g. 'api.github.com GET,HEAD /repos/*': "
+                             f"{printable(value)!r}")
+        host = (match[1] or "") + match[2]
+        if any(host_matches_any(host, value) for value in a.no_inspect):
+            raise ValueError(f"--allow-http {host}: requests to a host under --no-inspect are not seen, so "
+                             "rules for it cannot hold")
+        rules.append({"host": host, "methods": match[3].split(","), "path": match[4]})
+    return rules
+
+
+def host_matches_any(host, pattern):
+    """HOST (a name or *.DOMAIN) and PATTERN (the same) can name the same server."""
+    host, pattern = host.lower(), pattern.lower()
+    bare = lambda value: value[2:] if value.startswith("*.") else value  # noqa: E731
+    return host == pattern or bare(host).endswith("." + bare(pattern)) or bare(pattern).endswith("." + bare(host)) \
+        or bare(host) == bare(pattern)
+
+
 def proxy_config(a, hosts, log_name):
     """proxy.json: allow-list, hosts that stay unopened, SSH policy, body limit."""
     privacy = load_privacy_module()
     public_git = sorted({addr for name, values in hosts.items() for addr in values
                          if any(name == h or name.endswith("." + h) for h in privacy.PUBLIC_GIT_HOSTS)})
-    explicit = [str(ipaddress.ip_network(n, strict=False)) for n in a.allow] + [addr for addr, _ in tcp_targets(a)]
+    explicit = [str(ipaddress.ip_network(n, strict=False)) for n in a.allow]
+    # --allow-tcp IP:PORT gives SSH to that port only; what was merely approved "always" gets none.
+    approved_targets = set(tcp_targets(argparse.Namespace(allow_tcp=getattr(a, "approved_tcp", []))))
+    explicit_tcp = [[addr, port] for addr, port in tcp_targets(a) if (addr, port) not in approved_targets]
     return {"port": PROXY_PORT, "log": log_name, "body_limit": PROXY_BODY_LIMIT,
             "no_inspect": [value.lower() for value in a.no_inspect], "allow": proxy_allow(a, hosts),
-            "ssh": {"block": a.privacy_check != "off", "allowed": explicit, "public_git": public_git},
-            "push_check": a.privacy_check != "off"}
+            "ssh": {"block": a.privacy_check != "off", "allowed": explicit, "allowed_tcp": explicit_tcp,
+                    "public_git": public_git},
+            "push_check": a.privacy_check != "off",
+            # Rules of a host also hold for its pinned addresses: a request to the bare IP is no way around them.
+            "http_rules": [{**rule, "addresses": sorted({addr for name, values in hosts.items() for addr in values
+                                                         if host_matches_any(name, rule["host"])})}
+                           for rule in http_rules(a)]}
 
 
 def write_proxy_files(a, directory, hosts, log_name):
@@ -2859,6 +3498,7 @@ def opencode_auth_from_codex(source):
 
 def agent_environment(a):
     env = {key: os.environ[key] for key in a.env}
+    env.update(secret_environment(a))
     env.update(git_environment(a))
     if a.local_config:
         env.update({"OPENCODE_CONFIG": "/root/.config/opencode/opencode.jsonc",
@@ -2881,6 +3521,10 @@ def agent_environment(a):
         env["NODE_EXTRA_CA_CERTS"] = str(CA_DIR / "ca.pem")
     if getattr(a, "run_id", None):
         env["SANDBOX_AI_RUN"] = a.run_id
+    if asking(a):
+        # Browser requests (OAuth logins and the like) go to you as questions.
+        env["PATH"] = "/sandbox/session/bin:" + base_env()["PATH"]
+        env["BROWSER"] = "/sandbox/session/bin/xdg-open"
     if a.gui:
         env["DISPLAY"] = GUI_DISPLAY
     if a.gui_wayland:
@@ -2919,7 +3563,13 @@ def mount_option(src, dest, mode):
 def pod_commands(a, name, session, home):
     create = podman_command(a, "pod", "create", "--name", name,
               "--infra-image", a.image, "--infra-command", "/usr/bin/sleep infinity",
-              "--userns=keep-id:uid=0,gid=0", "--share=net,ipc,uts",
+              # Rootless: the user namespace of rootless Podman itself, root in it = the host user, the
+              # rest = the delegated subuids (what keep-id:uid=0,gid=0 means; Podman before 5.2 writes a
+              # zero-length gid_map line for that and fails, e.g. 4.9 on Ubuntu 24.04).
+              "--userns=host", "--share=net,ipc,uts",
+              # ping without CAP_NET_RAW (ICMP datagram sockets) for the sandbox's root group, as Podman
+              # sets for single containers; a pod's network namespace does not get it on Podman 4.
+              "--sysctl=net.ipv4.ping_group_range=0 0",
               "--network", pod_network(a))
     if a.gui or a.gui_wayland:
         # Chromium-based apps exhaust Podman's default 64 MB /dev/shm.
@@ -2936,6 +3586,13 @@ def pod_commands(a, name, session, home):
            "--security-opt=apparmor=unconfined", "--security-opt=label=disable",
            "--tmpfs=/run:rw,nosuid,nodev", "--tmpfs=/tmp:rw,nosuid,nodev",
            "--tmpfs=/var/tmp:rw,nosuid,nodev", "--workdir=/work", "--interactive")
+    limits = enforced_limits(a)[0]
+    if "memory" in limits:
+        run += ["--memory", limits["memory"]]
+    if "cpus" in limits:
+        run += ["--cpus", limits["cpus"]]
+    if "pids" in limits:
+        run += ["--pids-limit", str(limits["pids"])]
     # The bootstrap's DNS logging stub binds port 53; Firejail drops it again.
     if a.pod_name:
         # Named so that `sandbox-session attach` can exec into it.
@@ -2970,6 +3627,8 @@ def pod_commands(a, name, session, home):
         bindings.append((a.proxy_dir, str(PROXY_DIR), "ro"))
     if getattr(a, "control_dir", None):
         bindings.append((a.control_dir, str(CONTROL_DIR), "rw"))
+    if getattr(a, "browser_dir", None):
+        bindings.append((a.browser_dir, str(BROWSER_DIR), "ro"))
     for src, dest, mode in bindings:
         run += mount_option(src, dest, mode)
     for path, kind in devices(a):
@@ -3030,7 +3689,9 @@ def run_pod(a, session, home):
         return wait_child(subprocess.Popen(run))
     finally:
         if owned:
-            subprocess.run(podman_command(a, "pod", "rm", "--force", name), check=False, stdout=subprocess.DEVNULL)
+            # --time 0: the infra container's sleep ignores SIGTERM; waiting for it only costs 10 seconds.
+            subprocess.run(podman_command(a, "pod", "rm", "--force", "--time", "0", name), check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def bwrap_command(a, session, home):
@@ -3078,6 +3739,8 @@ def bwrap_command(a, session, home):
         cmd += ["--ro-bind", str(a.proxy_dir), str(PROXY_DIR)]
     if getattr(a, "control_dir", None):
         cmd += ["--bind", str(a.control_dir), str(CONTROL_DIR)]
+    if getattr(a, "browser_dir", None):
+        cmd += ["--ro-bind", str(a.browser_dir), str(BROWSER_DIR)]
     for path, kind in devices(a):
         if kind == "cdi":
             raise ValueError("CDI devices need the Podman backend")
@@ -3172,9 +3835,10 @@ def run_bwrap(a, session, home):
         maps_r, maps_w = os.pipe()
         gate_r, gate_w = os.pipe()
         ready_r, ready_w = os.pipe()
-        child = subprocess.Popen(cmd + ["--info-fd", str(info_w), "--userns-block-fd", str(maps_r), "--block-fd", str(gate_r),
+        prefix = limits_prefix(a)
+        child = subprocess.Popen(prefix + cmd + ["--info-fd", str(info_w), "--userns-block-fd", str(maps_r), "--block-fd", str(gate_r),
                                        "/usr/bin/python3", "-I", "/sandbox/runtime.py", "--internal-bootstrap"],
-                                 pass_fds=(info_w, maps_r, gate_r))
+                                 pass_fds=(info_w, maps_r, gate_r), env=user_bus_environment() if prefix else None)
         os.close(info_w)
         info_w = -1
         os.close(gate_r)
@@ -3273,7 +3937,15 @@ def launch(argv):
         a = parse_args(merge_config(argv, a, document))
     # The checked document is passed on; nothing re-reads the file later.
     a.project_config, a.project_document = (str(config_path) if config_path else None), document
+    # The administrator's policy binds every way of choosing an option, the project file's included.
+    check_policy(a, load_policy())
+    # What you approved "always" for this project joins the options before they are checked.
+    remembered = apply_remembered_approvals(a) if not a.offline and a.max_approval_scope == "always" else []
     validate(a)
+    if not a.dry_run:
+        remember_exposed(a)
+    for note in remembered:
+        print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
     a.run_id = (a.pod_name[len("agent-"):] if a.pod_name else f"{a.agent}-{uuid.uuid4().hex[:8]}")
     resolve_tmux(a)
     check_login(a)
@@ -3281,6 +3953,11 @@ def launch(argv):
         print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
     for note in device_notes(a):
         print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
+    for note in enforced_limits(a)[1]:
+        print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
+    if a.backend == "bwrap" and resource_limits(a) and not limits_prefix(a):
+        print("agent-sandbox: the resource limits are not enforced with bwrap here (no systemd user manager)",
+              file=sys.stderr)
     if a.session is not None and not a.dry_run:
         return load_sessions_module().start(a, argv)
     if a.dry_run:
@@ -3288,6 +3965,7 @@ def launch(argv):
                           "workspaces": [{"host": src, "sandbox": dest} for src, dest in workspace_targets(a)],
                           "workspace_mode": "ro" if a.workspace_ro else "rw", "mounts": a.mount,
                           "devices": [{"path": path, "kind": kind} for path, kind in devices(a)], "gpu": a.gpu,
+                          "limits": enforced_limits(a)[0],
                           "allow": a.allow, "https_hosts": allowed_hosts(a),
                           "https_networks": host_networks(allowed_hosts(a)), "offline": a.offline,
                           "dangerously_skip_permissions": a.dangerously_skip_permissions,
@@ -3315,7 +3993,7 @@ def launch(argv):
                           "copy_auth": a.copy_auth, "auth_file": str(a.auth_file) if a.auth_file else None,
                           "auth_mode": auth_mode(a), "auth_copies": auth_plan(a),
                           "import_codex_auth": str(a.import_codex_auth) if a.import_codex_auth else None,
-                          "copies": a.copy, "env_names": a.env, "agent_args": a.agent_args,
+                          "copies": a.copy, "env_names": a.env, "secret_env": a.secret_env, "agent_args": a.agent_args,
                           "firejail_required": True}, indent=2))
         return 0
     if os.geteuid() == 0:
@@ -3388,9 +4066,19 @@ def launch(argv):
             write_proxy_files(a, a.proxy_dir, hosts, log_name)
         a.control_dir = register_run(a, a.run_id, session)
         cleanup.callback(shutil.rmtree, a.control_dir, True)
+        if asking(a):
+            a.browser_dir = a.control_dir.with_name(a.control_dir.name + ".browser")
+            a.browser_dir.mkdir(mode=0o700, exist_ok=True)
+            cleanup.callback(shutil.rmtree, a.browser_dir, True)
+            write_browser_shims(session / "bin")
         cfg = {"command": agent_command(a, binary), "env": agent_environment(a), "probe": a.probe,
+               # Values the supervisor's process log redacts by value (--env and --secret-env).
+               "secret_names": sorted(set(a.env) | {v.partition("=")[0] for v in a.secret_env}),
                "tmux": "detached" if a.tmux_socket_dir else a.tmux,
                "proxy": {"log": log_name} if log_name else None,
+               "ask": asking(a), "ask_quiet": list(ASK_QUIET),
+               "ask_max_scope": getattr(a, "max_approval_scope", "always"),
+               "policy": getattr(a, "policy", {}),  # the supervisor holds run-time changes to it too
                "pinned": list(hosts), "watch": [*(dest for _, dest in workspace_targets(a)), "/root", "/tmp",
                          *(parse_mount(m)[1] for m in a.mount)] if a.log_explicit else []}
         resolv, nsswitch = resolver_files(a)
@@ -3410,9 +4098,22 @@ def launch(argv):
             path.write_text(content)
             path.chmod(0o600 if name == "config.json" else 0o644)
         privacy_after_run = prepare_privacy(a, session)
+        watching = threading.Event()
+        if asking(a):
+            # The agent's terminal is busy with the agent: questions are announced on the desktop.
+            approvals = load_approvals_module()
+            threading.Thread(target=approvals.watch, args=(a.control_dir / "approvals", watching),
+                             daemon=True).start()
+            threading.Thread(target=approvals.serve_browser, args=(a.browser_dir / "open.sock",
+                                                                   a.control_dir / "approvals", watching),
+                             daemon=True).start()
+        tools = tool_dirs_state(a)
         try:
             return run_pod(a, session, home) if a.backend == "podman" else run_bwrap(a, session, home)
         finally:
+            watching.set()
+            for note in tool_dirs_changed(tools):
+                print(f"agent-sandbox: warning: {printable(note)}", file=sys.stderr)
             try:
                 message = claude_writeback(home, pair, writeback) if writeback else None
                 if message:

@@ -79,7 +79,8 @@ def forbidden():
     return launcher().CONFIG_FORBIDDEN + ("--mcp", "--mcp-socket-dir", "--tmux", "--copy-auth", "--auth-file",
                                           "--import-codex-auth", "--copy", "--probe", "--binary", "--state-dir",
                                           "--gui-wayland", "--git-token-env", "--git-token-file",
-                                          "--git-credentials", "--kit", "--kit-dir",
+                                          "--git-credentials", "--git-token-secret", "--git-identity",
+                                          "--kit", "--kit-dir",
                                           "--backend", "--podman-url",  # always the agent's own
                                           "--dangerously-skip-permissions")
 
@@ -161,6 +162,51 @@ def validated_image(definition, where):
         if key in definition and not isinstance(definition[key], str):
             raise ValueError(f"{where}: {key} must be text")
     return definition
+
+
+def check_image_policy(name, definition):
+    """An image server runs podman itself, outside the launcher: the administrator's policy is applied here. A
+    server with network acts for the agent past its firewall and proxy, so mcp_network none (or a network
+    ceiling, allow_within) refuses it."""
+    l = launcher()
+    policy = l.load_policy()
+    if definition.get("network", "none") == "full" and \
+            (policy.get("mcp_network", "full") == "none" or policy.get("allow_within") is not None):
+        raise ValueError(f"MCP server {name}: network full is not allowed by the administrator's policy "
+                         f"({l.POLICY_FILE})")
+
+
+def check_image_mounts(name, definition):
+    """The host folders of an image server pass the launcher's host-path policy: no symlink a sandbox may have
+    planted on the way, no private location for rw, and not inside a tree an agent can write (it could swap
+    the folder for a link before the next connection mounts it). Their rw folders join the registry."""
+    l = launcher()
+    before = l.exposed_before()
+    writable = []
+    for mount in definition.get("mounts", []):
+        host = os.path.expanduser(mount["host"])
+        option = f"MCP server {name}: mount {mount['target']}"
+        l.check_planted(host, option, before)
+        resolved = Path(host).resolve()
+        for tree in before:
+            if tree in resolved.parents:
+                raise ValueError(f"{option}: {resolved} lies inside {tree}, which a sandbox can write; it could "
+                                 "replace the folder with a link before a connection mounts it. Use a folder of its own.")
+        if mount.get("mode", "ro") == "rw":
+            l.check_private_location(resolved, option)
+            writable.append(resolved)
+    if writable:
+        l.remember_exposed(None, writable)
+
+
+def mount_records(definition):
+    """[{"path", "dev", "ino"}] of an image server's host folders, as image_command mounts them."""
+    records = []
+    for mount in definition.get("mounts", []):
+        path = Path(os.path.expanduser(mount["host"])).resolve()
+        info = os.stat(path)
+        records.append({"path": str(path), "dev": info.st_dev, "ino": info.st_ino})
+    return records
 
 
 def image_command(definition, engine="podman"):
@@ -421,17 +467,30 @@ def ensure_running_locked(name, a):
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
         path.chmod(0o700)
     if "image" in definition:
+        check_image_mounts(name, definition)
+        check_image_policy(name, definition)
         # A container per connection, started by a small bridge on this host: the image brings its own
         # isolation (see image_command); the bridge only connects the socket with podman's stdio.
         cmd = [sys.executable, "-I", str(HERE / "runtime.py"), "--internal-mcp-serve", str(sock / "server.sock"),
                "--", *image_command(definition)]
+        environment = dict(os.environ)
         for variable in definition.get("env", []):
-            if variable not in os.environ:
-                raise ValueError(f"MCP server {name} needs the variable {variable} in your environment")
+            if variable not in environment:
+                # Not in your environment: the secret of that name (sandbox-ai secrets), if there is one.
+                spec = importlib.util.spec_from_file_location("secret_store_for_mcp", HERE / "secret_store.py")
+                store = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(store)
+                value = store.get(variable)
+                if value is None:
+                    raise ValueError(f"MCP server {name} needs the variable {variable}: set it, or keep it with "
+                                     f"sandbox-ai secrets set {variable}")
+                environment[variable] = value
+        # The bridge compares every folder with what was checked here before each connection's container.
+        environment["SANDBOX_AI_MCP_MOUNTS"] = json.dumps(mount_records(definition))
         log = directory / "supervisor.log"
         with open(log, "ab") as stream:
             process = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
-                                       start_new_session=True, cwd=str(directory))
+                                       start_new_session=True, cwd=str(directory), env=environment)
         save_state(name, {"pid": process.pid, "image": definition["image"], "backend": "podman",
                           "definition": digest, "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
         wait_for_socket(sock / "server.sock", log, process)

@@ -35,9 +35,19 @@ def attempt(name, action):
 
 
 def connects(family, address, timeout=2):
+    """ADDRESS if something there exchanges data. The connection proxy accepts every connection and
+    resets a forbidden one at once (the probe runs with --ask off: nothing is held for a question); a
+    reset or a close counts as refused, an answer or a connection held open counts as reachable (an
+    escape, to be safe). Plain bytes: the proxy relays them as they are."""
     with socket.socket(family, socket.SOCK_STREAM) as sock:
         sock.settimeout(timeout)
         sock.connect(address)
+        try:
+            sock.sendall(b"PROBE\r\n")
+            if not sock.recv(1):
+                raise ConnectionRefusedError(111, "closed right away (connection proxy)")
+        except socket.timeout:
+            pass
         return address
 
 

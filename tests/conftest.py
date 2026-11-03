@@ -42,8 +42,10 @@ def neutral_working_directory(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def private_runtime_state(tmp_path_factory, monkeypatch):
+def private_runtime_state(request, tmp_path_factory, monkeypatch):
     """Run registrations (sandbox-ai net) and default log directories of launches under test stay in
-    temporary directories, never in the HOME of whoever runs the tests."""
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path_factory.mktemp("xdg-runtime")))
+    temporary directories, never in the HOME of whoever runs the tests. Live tests keep the real
+    XDG_RUNTIME_DIR: rootless Podman and systemd-run --user find the user's session through it."""
+    if request.node.get_closest_marker("agent_live") is None:
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path_factory.mktemp("xdg-runtime")))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("xdg-state")))

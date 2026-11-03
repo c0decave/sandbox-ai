@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import shutil
 import socket
+import struct
 import socketserver
 import ssl
 import subprocess
@@ -342,7 +343,8 @@ def git_setup(tmp_path, pki):
     (work / "README.md").write_text("hello\n")
     git("add", ".", cwd=work)
     git(*identity, "commit", "-q", "-m", "first", cwd=work)
-    rules = {"pattern": [], "allow": []}
+    rules = {"pattern": [{"id": "example-warning", "regex": "WARN-ME", "severity": "warn", "reason": "a test warning"}],
+             "allow": []}
     (tmp_path / "push.json").write_text(json.dumps({"mode": "always", "own_hosts": [],
                                                      "workspaces": [{"path": str(work), "rules": rules}]}))
     checker = subprocess.Popen([sys.executable, "-I", str(ROOT / "sandbox/privacy.py"), "serve",
@@ -666,7 +668,9 @@ def test_empty_lines_before_a_request_do_not_hide_it(tmp_path, pki, monkeypatch)
             client.sendall(b"\r\n\r\nGET /after-blank HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
             client.settimeout(10)
             assert client.recv(100).startswith(b"HTTP/1.1 200")
-        record = next(r for r in proxy.records(until=lambda r: r.get("event") == "http") if r.get("event") == "http")
+        found = proxy.records(wait=10, until=lambda r: r.get("event") == "http")
+        assert any(r.get("event") == "http" for r in found), json.dumps(found)
+        record = next(r for r in found if r.get("event") == "http")
         assert record["url"].endswith("/after-blank")
         # Anything else on an HTTP port is refused rather than passed through unread.
         monkeypatch.setattr(rt, "HTTP_PORTS", (upstream.server_address[1],))
@@ -675,7 +679,8 @@ def test_empty_lines_before_a_request_do_not_hide_it(tmp_path, pki, monkeypatch)
             client.settimeout(10)
             with contextlib.suppress(ConnectionResetError):
                 assert client.recv(100) == b""
-        assert any(r.get("reason", "").startswith("neither HTTP nor TLS") for r in proxy.records(wait=3))
+        refused = lambda r: r.get("reason", "").startswith("neither HTTP nor TLS")  # noqa: E731
+        assert any(refused(r) for r in proxy.records(wait=10, until=refused))
     finally:
         proxy.close()
         upstream.shutdown()
@@ -698,3 +703,269 @@ def test_push_after_empty_lines_is_checked(git_setup, monkeypatch):
     monkeypatch.setattr(rt.Stream, "head", spy)
     pushed = git("push", g["url"], "main", cwd=g["work"])
     assert pushed.returncode != 0 and "config.py" in pushed.stderr
+
+
+# --- approvals in the proxy -------------------------------------------------------------------------
+
+
+class Asker:
+    """Stands in for the supervisor: records questions; ALLOW adds the destination to the allow-list."""
+
+    def __init__(self, proxy_config, allow):
+        self.questions, self.config, self.allowed = [], proxy_config, allow
+
+    def __call__(self, kind, details):
+        self.questions.append((kind, details))
+        if self.allowed:
+            self.config["allow"].setdefault("loopback", []).append(details.get("port"))
+            return {"decision": "allow", "scope": "run", "reason": "answered"}
+        return {"decision": "deny", "scope": "run", "reason": "no answer within 60 s"}
+
+
+@pytest.mark.parametrize("allowed", [True, False], ids=["approved", "refused"])
+def test_a_forbidden_destination_is_asked_about(tmp_path, pki, allowed):
+    upstream = serve(Handler, pki["server"])
+    proxy = Proxy(tmp_path, pki, upstream.server_address[1], {"allow": {"loopback": []}})
+    proxy.server.asker = Asker(proxy.server.config, allowed)
+    try:
+        if allowed:
+            assert https_request(proxy.port, pki["ca"], b"GET / HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n"
+                                 ).startswith(b"HTTP/1.1 200")
+        else:
+            with pytest.raises((ssl.SSLError, OSError)):
+                https_request(proxy.port, pki["ca"], b"GET / HTTP/1.1\r\n\r\n")
+        kind, details = proxy.server.asker.questions[0]
+        assert kind == "connect" and details["host"] == "example.test" and details["port"] == upstream.server_address[1]
+        if not allowed:
+            record = proxy.records(until=lambda r: r.get("event") == "denied")[-1]
+            assert "not approved" in record["reason"] and record["approval"]["decision"] == "deny"
+    finally:
+        proxy.close()
+        upstream.shutdown()
+
+
+def test_a_push_with_warnings_is_asked_about(git_setup):
+    g = git_setup
+    asked = []
+    g["proxy"].server.asker = lambda kind, details: asked.append((kind, details)) or {"decision": "deny", "reason": "no answer"}
+    # A finding of a warn rule: the push is held for a question, refused when it is not approved.
+    (g["work"] / "notes.txt").write_text("WARN-ME\n")
+    git("add", ".", cwd=g["work"])
+    git(*g["identity"], "commit", "-q", "-m", "notes", cwd=g["work"])
+    pushed = git("push", g["url"], "main", cwd=g["work"])
+    assert asked and asked[0][0] == "push" and asked[0][1]["refs"] == ["refs/heads/main"], asked
+    assert pushed.returncode != 0 and "not approved" in pushed.stderr
+    # Approved: the same push goes through.
+    g["proxy"].server.asker = lambda kind, details: {"decision": "allow", "scope": "once", "reason": "answered"}
+    assert git("push", g["url"], "main", cwd=g["work"]).returncode == 0
+
+
+def test_model_usage_and_credentials_are_logged(tmp_path, pki):
+    class ModelAPI(Handler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            body = (b'event: message_start\ndata: {"type":"message_start","message":{"model":"claude-opus-5-5",'
+                    b'"usage":{"input_tokens":1500,"output_tokens":1}}}\n\n' + b": ping\n\n" * 20000 +
+                    b'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":420}}\n\n')
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+    upstream = serve(ModelAPI, pki["server"])
+    proxy = Proxy(tmp_path, pki, upstream.server_address[1])
+    try:
+        https_request(proxy.port, pki["ca"], b"POST /v1/messages HTTP/1.1\r\nHost: example.test\r\nx-api-key: sk-x\r\n"
+                                             b"Content-Length: 2\r\nConnection: close\r\n\r\n{}")
+        record = next(r for r in proxy.records(until=lambda r: r.get("event") == "http") if r.get("event") == "http")
+        # The usage comes from the end of a stream far beyond the logged 64 KiB.
+        assert record["model"] == {"model": "claude-opus-5-5", "usage": {"input_tokens": 1500, "output_tokens": 420}}
+        assert record["credentials"] == ["x-api-key"] and record["response"]["body"]["truncated"]
+    finally:
+        proxy.close()
+        upstream.shutdown()
+
+
+def test_ssh_to_an_allowed_tcp_target_is_limited_to_its_port(tmp_path, pki):
+    """--allow-tcp IP:PORT opens SSH to that port only; an address merely approved gets none."""
+    proxy = Proxy(tmp_path, pki, 9, {"allow": {}, "ssh": {"block": True, "allowed": [], "public_git": [],
+                                                          "allowed_tcp": [["203.0.113.5", 22]]}})
+    try:
+        assert proxy.server.ssh_refused("203.0.113.5", 22) is None
+        assert proxy.server.ssh_refused("203.0.113.5", 2222)
+        assert proxy.server.ssh_refused("198.51.100.9", 22)
+    finally:
+        proxy.close()
+
+
+def test_no_ssh_into_a_range_with_a_public_git_host(tmp_path, pki):
+    """--allow 140.82.112.0/20 with github.com pinned at 140.82.121.4: SSH to 140.82.121.35 is refused."""
+    proxy = Proxy(tmp_path, pki, 9, {"allow": {}, "ssh": {"block": True, "allowed": ["140.82.112.0/20", "10.0.0.0/8"],
+                                                          "public_git": ["140.82.121.4"]}})
+    try:
+        assert "public Git host" in proxy.server.ssh_refused("140.82.121.35", 22)
+        assert proxy.server.ssh_refused("10.1.2.3", 22) is None
+    finally:
+        proxy.close()
+
+
+class BigHandler(Handler):
+    def do_GET(self):
+        body = b"x" * (8 << 20)
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        with contextlib.suppress(OSError):
+            self.wfile.write(body)
+
+
+def test_a_client_closing_early_still_leaves_its_request_in_the_log(tmp_path, pki):
+    """The request went out: a client that resets once it has the start of the answer must not erase it."""
+    upstream = serve(BigHandler)
+    proxy = Proxy(tmp_path, pki, upstream.server_address[1])
+    try:
+        client = socket.create_connection(("127.0.0.1", proxy.port))
+        client.sendall(b"GET /big HTTP/1.1\r\nHost: a\r\n\r\n")
+        client.settimeout(10)
+        assert client.recv(100).startswith(b"HTTP/1.1 200")
+        client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        client.close()  # reset with most of the body unsent
+        is_http = lambda r: r.get("event") == "http"  # noqa: E731
+        record = next(r for r in proxy.records(wait=10, until=is_http) if is_http(r))
+        assert record["url"].endswith("/big") and record["method"] == "GET"
+    finally:
+        proxy.close()
+        upstream.shutdown()
+
+
+def test_allow_http_rules_limit_methods_and_paths(tmp_path, pki):
+    """Once a host has --allow-http rules, only matching requests reach it; the bare address is no way around."""
+    upstream = serve(Handler)
+    port = upstream.server_address[1]
+    rules = [{"host": "api.example", "methods": ["GET"], "path": "/repos/**", "addresses": ["127.0.0.1"]}]
+    proxy = Proxy(tmp_path, pki, port, {"http_rules": rules})
+    try:
+        assert proxy.server.http_refused("api.example", "GET", "/repos/a/b") is None
+        assert "not among the requests allowed" in proxy.server.http_refused("api.example", "POST", "/repos/a/b")
+        assert proxy.server.http_refused("api.example", "GET", "/gists")
+        assert proxy.server.http_refused("other.example", "POST", "/") is None  # no rules: as before
+        # Plain HTTP to the pinned address: refused with a 403 the agent can read, and logged.
+        with socket.create_connection(("127.0.0.1", proxy.port)) as client:
+            client.sendall(b"POST /gists HTTP/1.1\r\nHost: api.example\r\nContent-Length: 2\r\n\r\nhi")
+            client.settimeout(10)
+            answer = client.recv(1000)
+        assert answer.startswith(b"HTTP/1.1 403") and b"--allow-http" in answer
+        refused = lambda r: r.get("event") == "denied" and "--allow-http" in r.get("reason", "")  # noqa: E731
+        assert any(refused(r) for r in proxy.records(wait=10, until=refused))
+        with socket.create_connection(("127.0.0.1", proxy.port)) as client:
+            client.sendall(b"GET /repos/x HTTP/1.1\r\nHost: api.example\r\nConnection: close\r\n\r\n")
+            client.settimeout(10)
+            assert client.recv(100).startswith(b"HTTP/1.1 200")
+    finally:
+        proxy.close()
+        upstream.shutdown()
+
+
+def test_allow_http_cannot_be_bypassed(tmp_path, pki):
+    """Bypasses found in review: another name of the same certificate with the API's Host header, dot segments,
+    encodings, and a rule pattern whose * crossed path segments."""
+    rules = [{"host": "api.example", "methods": ["POST"], "path": "/repos/myorg/*/pulls",
+              "addresses": ["192.0.2.21"]}]
+    proxy = Proxy(tmp_path, pki, 9, {"http_rules": rules})
+    refused = proxy.server.http_refused
+    try:
+        assert refused("api.example", "POST", "/repos/myorg/app/pulls", "api.example") is None
+        # SNI www.example (same certificate), Host api.example: the API's rules apply, and the mismatch is refused.
+        assert "differs from the server name" in refused("www.example", "POST", "/gists", "api.example")
+        # The connection went to the API's pinned address under another verified name: its rules apply.
+        assert refused("www.example", "POST", "/gists", "www.example", address="192.0.2.21")
+        # * stays within one segment.
+        assert refused("api.example", "POST", "/repos/myorg/a/b/pulls", "api.example")
+    finally:
+        proxy.close()
+    assert rt.normal_path("/repos/myorg/../../gists") == "/gists"
+    assert rt.normal_path("/repos/%2e%2e/zen?x=1") == "/zen"
+    assert rt.normal_path("//a//b/") == "/a/b" and rt.normal_path("/") == "" and rt.normal_path("/a\\..\\b") == "/b"
+    assert rt.path_matches("/repos/**", "/repos/a/b") and not rt.path_matches("/repos/*", "/repos/a/b")
+    assert rt.host_name("API.example:443") == "api.example" and rt.host_name("[::1]:8080") == "::1"
+
+
+def test_semicolon_segments_and_duplicate_hosts(tmp_path, pki):
+    """GitHub resolves /x/..;/y as /y; two Host headers are read differently by different servers."""
+    assert rt.normal_path("/repos/myorg/x/..;/..;/..;/gists") == "/gists"
+    assert rt.normal_path("/o/r.git/git-receive-pack/x/..;") == "/o/r.git/git-receive-pack"
+    assert rt.normal_path("/a;jsessionid=1/b") == "/a/b"
+    upstream = serve(Handler)
+    proxy = Proxy(tmp_path, pki, upstream.server_address[1])
+    try:
+        with socket.create_connection(("127.0.0.1", proxy.port)) as client:
+            client.sendall(b"GET / HTTP/1.1\r\nHost: a.example\r\nHost: b.example\r\n\r\n")
+            client.settimeout(10)
+            assert client.recv(100).startswith(b"HTTP/1.1 400")
+        two = lambda r: r.get("reason") == "more than one Host header"  # noqa: E731
+        assert any(two(r) for r in proxy.records(wait=10, until=two))
+    finally:
+        proxy.close()
+        upstream.shutdown()
+
+
+@pytest.mark.parametrize("line", [b"GET /repos/o/x#/../../gists HTTP/1.1", b"GET /repos/o/x /gists HTTP/1.1",
+                                  b"GET  /x HTTP/1.1", b"GET /x HTTP/2.0"])
+def test_malformed_request_lines_are_refused(tmp_path, pki, line, monkeypatch):
+    """A fragment or extra spaces in the request line: a lenient server (Go's path.Clean) would run another target.
+    On an HTTP port (80, 443) nothing else passes; elsewhere unrecognised protocols are relayed as TCP."""
+    upstream = serve(Handler)
+    monkeypatch.setattr(rt, "HTTP_PORTS", (upstream.server_address[1],))
+    proxy = Proxy(tmp_path, pki, upstream.server_address[1])
+    try:
+        with socket.create_connection(("127.0.0.1", proxy.port)) as client:
+            client.sendall(line + b"\r\nHost: a.example\r\n\r\n")
+            client.settimeout(10)
+            try:
+                answer = client.recv(100)
+            except ConnectionResetError:
+                answer = b""
+            # Refused: a 400, or (not even recognisable as HTTP) the connection closed; never passed on.
+            assert answer.startswith(b"HTTP/1.1 400") or answer == b"", answer
+    finally:
+        proxy.close()
+        upstream.shutdown()
+
+
+def test_a_host_with_rules_gets_only_checked_http_on_any_port(tmp_path, pki):
+    """--allow-tcp IP:8080 to a host with --allow-http rules: raw TCP would pass the rules by, so it is refused."""
+    upstream = serve(Handler)
+    rules = [{"host": "api.example", "methods": ["GET"], "path": "/**", "addresses": ["127.0.0.1"]}]
+    proxy = Proxy(tmp_path, pki, upstream.server_address[1], {"http_rules": rules})
+    try:
+        with socket.create_connection(("127.0.0.1", proxy.port)) as client:
+            client.sendall(b"GET  /x HTTP/1.1\r\nHost: api.example\r\n\r\n")
+            client.settimeout(10)
+            try:
+                answer = client.recv(100)
+            except ConnectionResetError:
+                answer = b""
+        assert not answer.startswith(b"HTTP/1.1 200")
+        refused = lambda r: "neither HTTP nor TLS" in r.get("reason", "")  # noqa: E731
+        assert any(refused(r) for r in proxy.records(wait=10, until=refused))
+    finally:
+        proxy.close()
+        upstream.shutdown()
+
+
+# How servers resolve request paths (GitHub, nginx merge_slashes, Go's path.Clean, Tomcat path parameters,
+# IIS backslashes and double decoding): normal_path must resolve each one at least as far as the most lenient of
+# them, so that --allow-http rules and the push check judge the path that is run.
+PATH_QUIRKS = [
+    ("/a/./b", "/a/b"), ("/a/%2e/b", "/a/b"), ("/a/%2E%2E/b", "/b"), ("/a/.%2e/b", "/b"), ("/a/%2e./b", "/b"),
+    ("/a/..%2f..%2fb", "/b"), ("/a/..%5cb", "/b"), ("/a\\\\..\\\\b", "/b"), ("/a;x=1/../b", "/b"), ("/a/..;/b", "/b"),
+    ("/a/..%3b/b", "/b"), ("/a//..//b", "/b"), ("//a///b//", "/a/b"), ("/a/%252e%252e/b", "/b"),
+    ("/a/b/.", "/a/b"), ("/a/b/..", "/a"), ("/..", ""), ("/../../etc", "/etc"), ("/a?x=/../b", "/a"),
+    ("/repos/o/r.git/git-receive-pack/x/..;", "/repos/o/r.git/git-receive-pack"),
+    ("/repos/o/r.git/git-receive-pack;x", "/repos/o/r.git/git-receive-pack"),
+]
+
+
+@pytest.mark.parametrize("target,expected", PATH_QUIRKS)
+def test_path_normalisation_corpus(target, expected):
+    assert rt.normal_path(target) == expected

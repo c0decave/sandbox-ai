@@ -13,7 +13,7 @@ backend needs working rootless Podman with `pasta`;
 ## 0. Install
 
 ```bash
-./install.sh --from .     # from a checkout; later: sandbox-ai update
+./install.sh --from .     # from a checkout; update later: git pull && ./install.sh --from .
 sandbox-ai doctor         # what is missing on this host, and how to fix it
 ```
 

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""sandbox-ai logs: summarize egress-denied.jsonl and files.jsonl of a --log-dir and suggest options.
+"""sandbox-ai logs: summarize a sandbox's logs and suggest options: blocked egress, file access, the
+connection proxy's log (requests, model calls and tokens, pushes, credentials sent, refusals), processes
+and the MCP tool calls of the servers.
 
   sandbox-ai logs [DIR]          a log directory (default: the wizard's one for the current project)
   sandbox-ai logs --project P    the wizard's log directory of project P
@@ -123,6 +125,72 @@ def summarize(directory):
             "busiest_directories": directories.most_common(10), "file_errors": errors}
 
 
+def telemetry(directory):
+    """What the connection logs and processes.jsonl of DIRECTORY say: per run and in total."""
+    connections, skipped = [], 0
+    for path in sorted(Path(directory).glob("connections-*.jsonl")):
+        records, older = read_records(path)
+        connections += records
+        skipped += older
+    processes, older = read_records(Path(directory) / "processes.jsonl")
+    skipped += older
+    models, hosts, credentials = Counter(), Counter(), Counter()
+    tokens = Counter()
+    pushes = {"ok": 0, "refused": 0}
+    refusals = Counter()
+    for record in connections:
+        event = record.get("event")
+        host = str(record.get("host") or record.get("destination") or "?")
+        if event == "http":
+            hosts[host] += 1
+        model = record.get("model")
+        if isinstance(model, dict) and isinstance(model.get("usage"), dict):
+            models[str(model.get("model") or "?")] += 1
+            for key, value in model["usage"].items():
+                if isinstance(value, int):
+                    tokens[key] += value
+        for name in record.get("credentials") or []:
+            credentials[f"{name} -> {host}"] += 1
+        push = record.get("push")
+        if isinstance(push, dict):
+            pushes["ok" if push.get("ok") else "refused"] += 1
+        if event in ("denied", "tls-refused", "tls-upstream-failed"):
+            refusals[f"{event} {record.get('destination') or host}"] += 1
+    commands = Counter((str(r.get("command", "")).split() or ["?"])[0].rsplit("/", 1)[-1] for r in processes)
+    return {"requests": sum(hosts.values()), "hosts": hosts.most_common(20), "model_calls": dict(models),
+            "tokens": dict(tokens), "pushes": pushes, "credentials": credentials.most_common(20),
+            "refused": refusals.most_common(20), "processes": len(processes), "programs": commands.most_common(20),
+            "older_lines_skipped": skipped}
+
+
+def tool_calls(state_root=None):
+    """{server: [(time, tool)]} of the MCP servers' supervisor logs."""
+    root = Path(state_root or os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "sandbox-ai" / "mcp"
+    calls = {}
+    try:
+        servers = sorted(p for p in root.iterdir() if p.is_dir())
+    except OSError:
+        return calls
+    for server in servers:
+        try:
+            with open(server / "supervisor.log", "rb") as stream:  # the newest 4 MiB: the log is not rotated
+                stream.seek(max(0, stream.seek(0, os.SEEK_END) - (4 << 20)))
+                lines = stream.read().decode("utf-8", "replace").splitlines()[-5000:]
+        except OSError:
+            continue
+        for line in lines:
+            if line.startswith("sandbox-ai-mcp-call "):
+                try:
+                    record = json.loads(line.split(" ", 1)[1])
+                except (ValueError, RecursionError):
+                    continue
+                if not isinstance(record, dict):  # the server's own stderr shares this log
+                    continue
+                calls.setdefault(server.name, []).append((str(record.get("time", ""))[:40],
+                                                          str(record.get("tool", ""))[:200]))
+    return calls
+
+
 def report(summary, out=print):
     p = safe
     out(f"Logs in {p(summary['directory'])}")
@@ -150,6 +218,25 @@ def report(summary, out=print):
         out("File access: none recorded")
     for error in summary["file_errors"]:
         out(f"  note: {p(error)}")
+    seen = summary.get("telemetry") or {}
+    if seen.get("requests") or seen.get("processes"):
+        out("")
+        out(f"Connections: {seen['requests']} HTTP request(s); pushes {seen['pushes']['ok']} checked, "
+            f"{seen['pushes']['refused']} refused")
+        for host, count in seen["hosts"][:10]:
+            out(f"  {count:5}  {p(host)}")
+        if seen["model_calls"]:
+            calls = ", ".join(f"{count}x {p(model)}" for model, count in seen["model_calls"].items())
+            usage = ", ".join(f"{p(key)} {value}" for key, value in sorted(seen["tokens"].items()))
+            out(f"Model calls: {calls}; tokens: {usage}")
+        for entry, count in seen["credentials"][:10]:
+            out(f"  credential {p(entry)} ({count}x)")
+        for entry, count in seen["refused"][:10]:
+            out(f"  refused {p(entry)} ({count}x)")
+        out(f"Processes started: {seen['processes']}" + (": " + ", ".join(
+            f"{p(name)} {count}" for name, count in seen["programs"][:10]) if seen["programs"] else ""))
+    for server, calls in (summary.get("tool_calls") or {}).items():
+        out(f"MCP {p(server)}: {len(calls)} tool call(s): " + ", ".join(sorted({p(str(t)) for _, t in calls})[:10]))
     return 0
 
 
@@ -165,6 +252,8 @@ def cli(argv):
               "(the wizard's logging question) first", file=sys.stderr)
         return 1
     summary = summarize(directory)
+    summary["telemetry"] = telemetry(directory)
+    summary["tool_calls"] = tool_calls()
     if a.json:
         print(json.dumps(summary, indent=2))
         return 0

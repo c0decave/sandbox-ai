@@ -1,6 +1,6 @@
 ---
 name: sandbox-ai
-description: How to work inside a sandbox-ai sandbox - what is shared with the host, how the network allow-list, the connection proxy, the privacy check of pushes, hardware, displays and sessions work, and which start options or `sandbox-ai net` commands the human must use to unblock something. Use whenever a download, DNS lookup, connection, certificate, git push, device, display or tool fails, before trying any workaround, and when the user asks about the sandbox.
+description: How to work inside a sandbox-ai sandbox - what is shared with the host, how the network allow-list, the connection proxy, approvals, the privacy check of pushes, secrets, resource limits, hardware, displays and sessions work, and which start options or `sandbox-ai net` commands the human must use to unblock something. Use whenever a download, DNS lookup, connection, certificate, git push, device, display or tool fails, before trying any workaround, and when the user asks about the sandbox.
 ---
 
 # Working in a sandbox-ai sandbox
@@ -42,6 +42,21 @@ are not allowed do not resolve, other addresses are refused.
   `--allow-host-port PORT`.
 - `sandbox-ai logs` on the host shows what was blocked, with the option that allows it.
 
+## Questions to the human (approvals)
+
+Usually the sandbox asks the human for you (`--ask on`, the default; they answer with
+`sandbox-ai approvals`, the app or a desktop notification; no answer within 60 s means no):
+
+- A connection to a destination that is not allowed **waits** while the human is asked. If it fails
+  after about a minute, nobody allowed it: do not retry in a loop, say what you need.
+- A lookup of a name that is not allowed fails at once and is asked in the background. Retry the
+  same name a few times over a minute or two; once allowed, it resolves and HTTPS to it works.
+- A push with privacy warnings (no blocking findings) waits for the human's answer too.
+- `xdg-open URL` (and `$BROWSER`, `sensible-browser`, `open`) asks the human to open the http(s)
+  URL in their browser on the host, for example a login page. Nothing opens without their answer
+  and you are not told the answer; tell the human why you want the page opened.
+- When the human started with `--ask off`, nothing is asked: blocked is blocked.
+
 ## Connection proxy
 
 Every TCP connection passes a proxy that opens TLS with a CA made for this run. The variables
@@ -67,9 +82,18 @@ and the system bundle point at it. Each request is logged on the host with heade
 - When a push is refused: remove what was found from the commits (amend, rebase, or rewrite them)
   or ask the human whether it is meant to be public. Push only from `/work` or `/workspaces/NAME`;
   pushes of commits from anywhere else are refused because they cannot be checked.
-- Logins for Git come from the human's `--git-token-env`, `--git-token-file` or
-  `--git-credentials`; `gh` uses `GH_TOKEN` when it is set. `--git-identity` makes commits carry
+- Logins for Git come from the human's `--git-token-env`, `--git-token-secret`, `--git-token-file`
+  or `--git-credentials`; `gh` uses `GH_TOKEN` when it is set. `--git-identity` makes commits carry
   the human's name and e-mail address.
+
+## Secrets and limits
+
+- API keys reach you only as environment variables the human names: `--env NAME` (from their
+  shell) or `--secret-env NAME` (from their keyring, `sandbox-ai secrets set NAME`). Never print,
+  log, commit or send them anywhere but the service they are for.
+- The sandbox has limits on memory (default 8 GiB), CPUs (half the host's) and processes (4096). A
+  build killed for memory ("Killed", exit 137) or "Resource temporarily unavailable" on fork may be
+  one; the human can start with `--memory 16g`, `--cpus N`, `--pids N` (or `none`).
 
 ## Hardware, displays, sessions, MCP
 
@@ -91,7 +115,7 @@ and the system bundle point at it. Each request is logged on the host with heade
 
 | Need | Start option | During the run (on the host) |
 |---|---|---|
-| A website or API | `--allow-host NAME` | `sandbox-ai net allow $SANDBOX_AI_RUN --allow-host NAME` |
+| A website or API | `--allow-host NAME` | answer the question, or `sandbox-ai net allow $SANDBOX_AI_RUN --allow-host NAME` |
 | GitHub, PyPI, GitLab | `--allow-github`, `--allow-pypi`, `--allow-gitlab` | the same with `sandbox-ai net allow` |
 | A port on an address | `--allow-tcp IP:PORT` | `sandbox-ai net allow ... --allow-tcp IP:PORT` |
 | A service on the host | `--allow-host-port PORT` | restart needed |
@@ -100,6 +124,8 @@ and the system bundle point at it. Each request is logged on the host with heade
 | Pushing to GitHub | `--git-token-env https://github.com=VAR` | restart needed |
 | A device or the GPU | `--device PATH`, `--gpu KIND` | restart needed |
 | A display | `--gui` or `--gui-vnc DIR` | restart needed |
+| An API key | `--secret-env NAME` (after `sandbox-ai secrets set NAME`) | restart needed |
+| More memory, CPUs, processes | `--memory SIZE`, `--cpus N`, `--pids N` | restart needed |
 | Files kept in HOME | `--state-dir DIR` or `--session NAME` | restart needed |
 | A system package | extend the image, `sandbox-ai build` | restart needed |
 

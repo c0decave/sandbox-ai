@@ -66,6 +66,8 @@ def test_real_probe(request, backend, agent, tmp_path):
 
 @pytest.mark.parametrize("agent", ["codex", "claude", "opencode"])
 def test_image_node_supports_current_agents(request, agent):
+    if request.config.getoption("--agent-backend") == "bwrap":
+        pytest.skip("Podman images")
     cmd = ["podman"]
     url = request.config.getoption("--agent-podman-url")
     if url:
@@ -80,6 +82,8 @@ def test_image_node_supports_current_agents(request, agent):
 
 @pytest.mark.parametrize("agent", ["codex", "claude", "opencode"])
 def test_image_contains_only_selected_cli(request, agent):
+    if request.config.getoption("--agent-backend") == "bwrap":
+        pytest.skip("Podman images")
     engine = ["podman"]
     if request.config.getoption("--agent-podman-url"):
         engine += ["--remote", "--url", request.config.getoption("--agent-podman-url")]
@@ -91,7 +95,7 @@ for name in ['codex','claude','opencode']:
 for name in ['python3','pip3','uv','uvx','firejail','nft','setpriv','git','rg',
              'vim','nc','host','dig','ping','curl','wget']:
     assert shutil.which(name), name
-for name in ['gcc','g++','make','less','ps']:
+for name in ['gcc','g++','make','less']:  # ps arrives with the tools added in 0.1.20
     assert not shutil.which(name), name
 """
     result = subprocess.run([*engine, "run", "--rm", "--pull=never", "--network=none",
@@ -116,7 +120,8 @@ def test_real_auth_copy_and_mount_permissions(request, backend, agent, relative,
     writable = tmp_path / "writable"
     writable.mkdir()
     source = Path.home() / relative
-    assert source.is_file(), "A real auth file is required for this test"
+    if not source.is_file():
+        pytest.skip(f"needs a real login of {agent} on this host ({source})")
     before = hashlib.sha256(source.read_bytes()).digest()
     script = '''
 import json,os,pathlib,stat,sys
@@ -157,12 +162,14 @@ assert foreign not in pathlib.Path('/etc/hosts').read_text()
 with socket.create_connection((host,443),timeout=15) as tcp:
     with ssl.create_default_context().wrap_socket(tcp,server_hostname=host) as tls:
         assert tls.version()
+# The connection proxy accepts every connection and refuses a forbidden one right away: no
+# TLS session (no data at all) may come about.
 for host,port in [('1.1.1.1',443),(host,80)]:
-    try: connection=socket.create_connection((host,port),timeout=2)
-    except OSError: pass
-    else:
-        connection.close()
-        raise AssertionError('forbidden destination reachable')
+    try:
+        with socket.create_connection((host,port),timeout=5) as connection:
+            ssl.create_default_context().wrap_socket(connection,server_hostname=host).close()
+    except (OSError, ssl.SSLError): pass
+    else: raise AssertionError('forbidden destination reachable')
 for name in ['example.org',foreign]:
     try: socket.getaddrinfo(name,443)
     except OSError: pass
@@ -356,14 +363,27 @@ def test_real_dangerously_skip_permissions_flags_are_accepted(request, backend, 
     assert any(char.isdigit() for char in stdout), stdout
 
 
+# In scripts that run inside a sandbox: can data flow to HOST:PORT? The connection proxy accepts every
+# connection and resets a forbidden one at once.
+EXCHANGES = '''
+import socket, ssl
+def exchanges(host, port, timeout=5):
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as connection:
+            ssl.create_default_context().wrap_socket(connection, server_hostname=host).close()
+        return True
+    except (OSError, ssl.SSLError):
+        return False
+'''
+
+
 def test_real_dns_resolves_but_does_not_open_egress(request, backend, tmp_path):
-    script = '''
+    script = EXCHANGES + '''
 import socket
 assert socket.getaddrinfo('example.org', 443, type=socket.SOCK_STREAM)
 for host, port in [('example.org', 443), ('1.1.1.1', 443)]:
-    try: socket.create_connection((host, port), timeout=3).close()
-    except OSError: pass
-    else: raise AssertionError('egress open with --dns only: %s:%d' % (host, port))
+    if exchanges(host, port):
+        raise AssertionError('egress open with --dns only: %s:%d' % (host, port))
 query = b'\\x12\\x34\\x01\\x00\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x07example\\x03org\\x00\\x00\\x01\\x00\\x01'
 udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 udp.settimeout(2)
@@ -414,12 +434,11 @@ print('FRONTIER_OK')
 def test_real_logs_denied_egress_and_file_access(request, backend, tmp_path):
     work, logs = tmp_path / "work", tmp_path / "logs"
     work.mkdir()
-    script = '''
+    script = EXCHANGES + '''
 import pathlib, socket
 for target in [('192.0.2.1', 8443), ('blocked.example', 443)]:
-    try: socket.create_connection(target, timeout=2).close()
-    except OSError: pass
-    else: raise AssertionError('denied target reachable: %r' % (target,))
+    if exchanges(*target):
+        raise AssertionError('denied target reachable: %r' % (target,))
 pathlib.Path('/work/logged.txt').write_text('logged')
 assert pathlib.Path('/work/logged.txt').read_text() == 'logged'
 try: open('/sandbox/log/files.jsonl', 'a').write('{"forged": true}\\n')
@@ -428,12 +447,15 @@ else: raise AssertionError('agent can write the log directory')
 print('LOG_SCENARIO_OK')
 '''
     stdout, _ = launch(request.config, backend, "codex", work,
-                       ["--no-auth", "--log-dir", str(logs), "--binary", "/usr/bin/python3"], ["-I", "-c", script])
+                       # --ask off: refused at once and logged (with questions it would wait for an answer)
+                       ["--no-auth", "--ask", "off", "--log-dir", str(logs), "--binary", "/usr/bin/python3"],
+                       ["-I", "-c", script])
     assert "LOG_SCENARIO_OK" in stdout
     denied = [json.loads(line) for line in (logs / "egress-denied.jsonl").read_text().splitlines()]
-    assert {"address": "192.0.2.1", "protocol": "tcp", "port": 8443}.items() <= next(
-        (r for r in denied if r.get("address") == "192.0.2.1"), {}).items(), denied
-    assert any(r.get("host") == "blocked.example" for r in denied), denied
+    assert any(r.get("host") == "blocked.example" for r in denied), denied  # the DNS stub
+    # A forbidden address is refused by the connection proxy, which logs it with the destination.
+    connections = [json.loads(line) for path in logs.glob("connections-*.jsonl") for line in path.read_text().splitlines()]
+    assert any(r.get("event") == "denied" and r.get("destination") == "192.0.2.1:8443" for r in connections), connections
     files = [json.loads(line) for line in (logs / "files.jsonl").read_text().splitlines()]
     actions = {(r.get("action"), r.get("path")) for r in files}
     assert ("write", "/work/logged.txt") in actions and ("read", "/work/logged.txt") in actions, files
@@ -471,7 +493,8 @@ def test_real_default_tools_work_through_open_egress(request, backend, tmp_path)
         "dig +short example.org | grep -q .; "
         "host example.org >/dev/null; "
         "nc -z -w 5 example.org 443; "
-        "ping -c 1 -W 5 1.1.1.1 >/dev/null; "
+        "ping -c 1 -W 5 1.1.1.1 >/dev/null || { echo \"ping_group_range=$(cat /proc/sys/net/ipv4/ping_group_range) "
+        "id=$(id)\" >&2; exit 3; }; "
         "vim --version >/dev/null; git --version >/dev/null; "
         "echo TOOLS_OK"
     )
@@ -540,7 +563,14 @@ def test_real_gui_vnc_unix_socket_serves_rfb(request, backend, tmp_path):
             time.sleep(0.2)
         client = socket.socket(socket.AF_UNIX)
         client.settimeout(10)
-        client.connect(str(vnc / "vnc.sock"))
+        for attempt in range(50):  # the socket file appears before x11vnc listens on it
+            try:
+                client.connect(str(vnc / "vnc.sock"))
+                break
+            except ConnectionRefusedError:
+                if attempt == 49:
+                    raise
+                time.sleep(0.2)
         assert client.recv(12).startswith(b"RFB 003.")
         client.close()
         assert (vnc.stat().st_mode & 0o777) == 0o700
@@ -676,12 +706,16 @@ def test_real_session_restarts_after_supervisor_was_killed(request, tmp_path):
 def test_real_tmux_mode_has_agent_and_shell_windows(request, backend, tmp_path, flag):
     if backend == "bwrap" and not shutil.which("tmux"):
         pytest.skip("bwrap tmux mode needs tmux on the host")
-    import fcntl, pty, struct, termios, threading
-    # The agent drives the shell window, then exits; ending the shell ends the sandbox.
-    script = ("import pathlib,subprocess,time\n"
+    import fcntl, pty, struct, termios, threading, time
+    # The agent drives the shell window, then exits; ending the shell ends the sandbox. By default an
+    # other binary (--binary) runs without tmux even in a terminal: then there is no tmux to drive.
+    script = ("import os,pathlib,subprocess,time\n"
               "pathlib.Path('/work/agent.txt').write_text('agent')\n"
-              "subprocess.run(['tmux','send-keys','-t','sandbox:shell','echo shell > /work/shell.txt; exit','Enter'],check=True)\n"
-              "time.sleep(1)\n")
+              "if os.environ.get('TMUX'):\n"
+              "    subprocess.run(['tmux','send-keys','-t','sandbox:shell','echo shell > /work/shell.txt; exit','Enter'],check=True)\n"
+              "    time.sleep(1)\n"
+              "else:\n"
+              "    pathlib.Path('/work/no-tmux.txt').write_text('direct')\n")
     command = [str(ROOT / "codex-sandbox"), "--backend", backend, "--workspace", str(tmp_path), "--offline", "--no-auth",
                *flag, "--binary", "/usr/bin/python3", "--", "-I", "-c", script]
     if backend == "podman" and request.config.getoption("--agent-image"):
@@ -690,21 +724,30 @@ def test_real_tmux_mode_has_agent_and_shell_windows(request, backend, tmp_path, 
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
     process = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
     os.close(slave)
+    seen = []
     def drain():
         try:
-            while os.read(master, 4096):
-                pass
+            while True:
+                data = os.read(master, 4096)
+                if not data:
+                    break
+                seen.append(data)
         except OSError:
             pass
     threading.Thread(target=drain, daemon=True).start()
     try:
-        assert process.wait(timeout=120) == 0
+        status = process.wait(timeout=120)
+        time.sleep(0.5)
+        assert status == 0, b"".join(seen)[-4000:].decode("utf-8", "replace")
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGTERM)
         os.close(master)
     assert (tmp_path / "agent.txt").read_text() == "agent"
-    assert (tmp_path / "shell.txt").read_text().strip() == "shell"
+    if flag:  # --tmux: the agent in window 0 drove the shell in window 1
+        assert (tmp_path / "shell.txt").read_text().strip() == "shell"
+    else:     # default with --binary: no tmux, the program runs directly in the terminal
+        assert (tmp_path / "no-tmux.txt").read_text() == "direct" and not (tmp_path / "shell.txt").exists()
 
 
 def test_real_opencode_uses_local_llm_only(request, backend, tmp_path, monkeypatch):

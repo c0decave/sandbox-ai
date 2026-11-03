@@ -280,7 +280,10 @@ def test_read_ready_failure_matrix(failure, monkeypatch):
 
 
 @pytest.mark.parametrize("failure", ("prctl", "nft-install", "nft-list", "guard-command", "spawn"))
-def test_bootstrap_failure_matrix(failure, monkeypatch):
+def test_bootstrap_failure_matrix(failure, monkeypatch, tmp_path):
+    # Inside a sandbox-ai sandbox these paths exist (e.g. gui.json starts Xvfb through Popen).
+    for name in ("SESSION_CONFIG", "GUI_CONFIG", "LOG_DIR", "CONTROL_DIR"):
+        monkeypatch.setattr(s.RUNTIME, name, tmp_path / "missing" / name)
     monkeypatch.setattr(s.os, "getpid", lambda: 1)
     libc = Mock()
     libc.prctl.return_value = -1 if failure == "prctl" else 0

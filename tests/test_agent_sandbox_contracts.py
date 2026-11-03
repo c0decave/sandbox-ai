@@ -592,12 +592,35 @@ def test_read_ready(scenario):
 def test_stop_process(scenario):
     process = Mock()
     process.poll.return_value = 0 if scenario == "edge" else None
-    if scenario == "sad":
+    if scenario == "happy":
+        # The proxy: its stdin closes, it exits; no signal (it runs as another user, without CAP_KILL).
+        s.stop_process(process)
+        assert process.stdin.close.call_count == 1 and process.terminate.call_count == 0
+        # Still running after that and not ours to signal: left to the end of the PID namespace.
+        other = Mock()
+        other.poll.return_value = None
+        other.wait.side_effect = subprocess.TimeoutExpired("fixture", 2)
+        other.terminate.side_effect = PermissionError(1, "Operation not permitted")
+        s.stop_process(other)
+        assert other.kill.call_count == 0
+    elif scenario == "sad":
+        process.stdin = None
         process.wait.side_effect = [subprocess.TimeoutExpired("fixture", 5), 0]
-    s.stop_process(process)
-    assert process.terminate.call_count == (0 if scenario == "edge" else 1)
-    assert process.kill.call_count == (1 if scenario == "sad" else 0)
+        s.stop_process(process)
+        assert process.terminate.call_count == 1 and process.kill.call_count == 1
+    else:
+        s.stop_process(process)
+        assert process.terminate.call_count == 0 and process.kill.call_count == 0
     s.stop_process(None)
+
+
+def test_exit_on_eof(scenario):
+    import io
+    exits = []
+    stream = {"happy": io.BytesIO(b"x" * 10000), "sad": Mock(read=Mock(side_effect=OSError(9, "bad"))),
+              "edge": io.BytesIO(b"")}[scenario]
+    rt.exit_on_eof(stream, exit=exits.append)
+    assert exits == [0]
 
 
 def test_subordinate_range(scenario, monkeypatch):
@@ -764,7 +787,7 @@ def test_log_event(scenario, tmp_path, monkeypatch):
 
 def test_start_loggers(scenario, tmp_path, monkeypatch):
     config = tmp_path / "config.json"
-    monkeypatch.setattr(s.RUNTIME, "Path", lambda value: config if value == "/sandbox/session/config.json" else Path(value))
+    monkeypatch.setattr(s.RUNTIME, "SESSION_CONFIG", config)
     started = []
     monkeypatch.setattr(s.RUNTIME.threading, "Thread", lambda target, args, daemon: Mock(start=lambda: started.append((target, args))))
     if scenario == "sad":
@@ -772,13 +795,17 @@ def test_start_loggers(scenario, tmp_path, monkeypatch):
             s.start_loggers()
         assert started == []
         return
-    config.write_text(json.dumps({"pinned": ["api.openai.com"] if scenario == "happy" else [], "watch": ["/work"]}))
+    config.write_text(json.dumps({"pinned": ["api.openai.com"] if scenario == "happy" else [], "watch": ["/work"],
+                                  "env": {"API_KEY": "value-of-the-key", "PATH": "/usr/bin"},
+                                  "secret_names": ["API_KEY", "MISSING"] if scenario == "happy" else []}))
     stop = s.start_loggers()
-    assert not stop.is_set() and stop.seen == set() and len(stop.threads) == 3
+    assert not stop.is_set() and stop.seen == set() and len(stop.threads) == 4
     targets = {target.__name__: args for target, args in started}
-    assert targets["dns_logger"] == ({"api.openai.com"} if scenario == "happy" else set(), 53, stop)
+    assert targets["dns_logger"] == ({"api.openai.com"} if scenario == "happy" else set(), 53, stop, None, ())
     assert targets["file_logger"] == (["/work"], stop)
-    assert "denied_loop" in targets
+    # The process log redacts the values of --env and --secret-env variables by value.
+    assert "denied_loop" in targets and targets["process_logger"] == (
+        stop, 0.5, Path("/proc"), ["value-of-the-key"] if scenario == "happy" else [])
 
 
 def test_poll_denied(scenario, tmp_path, monkeypatch):
@@ -1024,6 +1051,8 @@ def test_start_gui(scenario, tmp_path, monkeypatch):
     stopped = []
     monkeypatch.setattr(sr, "stop_process", stopped.append)
     monkeypatch.setattr(s.time, "sleep", lambda _: None)
+    waited = []
+    monkeypatch.setattr(rt, "wait_for_unix_listener", lambda path, process, errors, name: waited.append((str(path), name)))
     config = {"display": ":99", "screen": "1920x1080x24", "vnc": scenario == "edge"}
     if scenario == "sad":
         with pytest.raises(RuntimeError, match="Xvfb exited"):
@@ -1037,6 +1066,7 @@ def test_start_gui(scenario, tmp_path, monkeypatch):
     if scenario == "edge":
         assert started[1] == drop + ["x11vnc", "-display", ":99", "-unixsock", "/sandbox/vnc/vnc.sock",
                                      "-rfbport", "0", "-forever", "-shared", "-nopw", "-quiet", "-nosel"]
+        assert waited == [("/sandbox/vnc/vnc.sock", "x11vnc")]  # started only once it listens
 
 
 def test_x_socket(scenario):
@@ -1483,7 +1513,7 @@ def test_git_credentials_file(scenario, tmp_path, monkeypatch, capsys):
             {"url": "https://github.com", "user": "x-access-token", "env": "CONTRACT_GH"},
             {"url": "http://localhost:3000", "user": "first", "credentials": str(path), "line": 3}]
         assert plan["host_ports"] == [3000] and f"{path} line 4 skipped" in err
-        assert not any(secret in out + err for secret in (TOKEN, GIT_TOKEN, "secret"))
+        assert not any(secret in out + err for secret in (TOKEN, GIT_TOKEN, "secret-second", "secret-gh", "broken-secret"))
 
 
 def load_module(name, relative):
@@ -1696,7 +1726,7 @@ def test_trust_config(scenario, tmp_path, monkeypatch):
 
 
 def test_load_project_config(scenario, tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path.with_name(tmp_path.name + "-cfg")))  # outside the workspace
     path = tmp_path / ".sandbox-ai.json"
     args = s.parse_args(["codex", "--workspace", str(tmp_path)])
     if scenario == "sad":
@@ -2448,13 +2478,13 @@ def test_auth_source_candidates(scenario, tmp_path, monkeypatch):
                                                       tmp_path / ".claude/.claude.json", tmp_path / ".claude.json"]
         # The login store feeds every sandbox: a workspace that contains it is refused.
         (tmp_path / ".local/share").mkdir(parents=True)
-        with pytest.raises(ValueError, match="agent can change"):
+        with pytest.raises(ValueError, match="agent can change|lies in "):
             s.validate(s.parse_args(["claude", "--workspace", str(tmp_path / ".local")]))
     elif scenario == "sad":
         monkeypatch.setenv("CODEX_HOME", str(tmp_path / "work/.codex"))
         assert s.auth_source_candidates("codex") == [store / "codex/.codex/auth.json", tmp_path / "work/.codex/auth.json"]
         # A credential directory inside the workspace is refused before anything is read.
-        with pytest.raises(ValueError, match="agent can change"):
+        with pytest.raises(ValueError, match="agent can change|lies in "):
             s.validate(s.parse_args(["codex", "--workspace", str(tmp_path / "work")]))
     else:
         # Set but empty counts as unset (XDG): never a path relative to the current directory.
@@ -4171,12 +4201,13 @@ def test_merged_allow(scenario):
         assert merged["https"] == ["198.51.100.1/32", "198.51.100.2/32"]
         assert merged["tcp"] == [["203.0.113.1", 22], ["203.0.113.2", 5432]] and merged["loopback"] == [3000]
     elif scenario == "sad":
-        assert rt.merged_allow({}, empty) == {"nets": [], "https": [], "tcp": [], "ssh": []}
+        assert rt.merged_allow({}, empty) == {"nets": [], "https": [], "tcp": [], "ssh": [], "ssh_tcp": []}
     else:
-        assert rt.merged_allow(base, empty) == {**base, "ssh": []} and base["nets"] == ["192.0.2.0/24"]
-        # What `net allow` opened explicitly may also take SSH, as --allow and --allow-tcp at the start.
-        assert rt.merged_allow(base, {"nets": {"10.0.0.0/8"}, "https": set(), "tcp": {("192.0.2.9", 22)}})["ssh"] == [
-            "10.0.0.0/8", "192.0.2.9"]
+        assert rt.merged_allow(base, empty) == {**base, "ssh": [], "ssh_tcp": []} and base["nets"] == ["192.0.2.0/24"]
+        # What `net allow` opened explicitly may also take SSH, as --allow and --allow-tcp at the start: a
+        # range on any port, an IP:PORT on that port only.
+        merged = rt.merged_allow(base, {"nets": {"10.0.0.0/8"}, "https": set(), "tcp": {("192.0.2.9", 22)}})
+        assert merged["ssh"] == ["10.0.0.0/8"] and merged["ssh_tcp"] == [["192.0.2.9", 22]]
 
 
 def test_control_server(scenario, tmp_path):
@@ -4184,9 +4215,8 @@ def test_control_server(scenario, tmp_path):
     applied, stop = [], threading.Event()
     apply = (lambda script: applied.append(script)) if scenario != "sad" else Mock(
         side_effect=subprocess.CalledProcessError(1, "nft"))
-    thread = threading.Thread(target=rt.control_server, args=(socket_path, {"loopback": [3000]},
-                                                              allow if scenario != "edge" else None, stop, apply),
-                              daemon=True)
+    network = rt.RuntimeNetwork({"loopback": [3000]}, allow if scenario != "edge" else None, apply)
+    thread = threading.Thread(target=rt.control_server, args=(socket_path, network, stop), daemon=True)
     thread.start()
     deadline = time.monotonic() + 5
     while not socket_path.exists() and time.monotonic() < deadline:
@@ -4247,7 +4277,8 @@ def test_proxy_config(scenario):
     hosts = {"github.com": ["192.0.2.20"], "api.github.com": ["192.0.2.21"], "pypi.org": ["192.0.2.30"]}
     if scenario == "happy":
         config = s.proxy_config(s.parse_args(["codex", "--allow-tcp", "203.0.113.5:22"]), hosts, "connections-x.jsonl")
-        assert config["ssh"] == {"block": True, "allowed": ["203.0.113.5"], "public_git": ["192.0.2.20", "192.0.2.21"]}
+        assert config["ssh"] == {"block": True, "allowed": [], "allowed_tcp": [["203.0.113.5", 22]],
+                                 "public_git": ["192.0.2.20", "192.0.2.21"]}
         assert config["push_check"] and config["log"] == "connections-x.jsonl" and config["body_limit"] == 65536
     elif scenario == "sad":
         config = s.proxy_config(s.parse_args(["codex", "--privacy-check", "off"]), hosts, "l")
@@ -4255,6 +4286,13 @@ def test_proxy_config(scenario):
     else:
         config = s.proxy_config(s.parse_args(["codex", "--no-inspect", "Login.Example.org"]), {}, "l")
         assert config["no_inspect"] == ["login.example.org"] and config["port"] == s.PROXY_PORT
+        # Approved "always" (remembered): reachable, but never over SSH, unlike --allow-tcp.
+        a = s.parse_args(["codex", "--allow-tcp", "203.0.113.5:22"])
+        a.allow_tcp.append("198.51.100.9:22")
+        a.approved_tcp = ["198.51.100.9:22"]
+        config = s.proxy_config(a, {}, "l")
+        assert config["ssh"]["allowed_tcp"] == [["203.0.113.5", 22]]
+        assert ["198.51.100.9", 22] in config["allow"]["tcp"]
 
 
 def test_write_proxy_files(scenario, tmp_path):
@@ -4435,8 +4473,8 @@ def test_canonical_options(scenario):
             "--state-dir", "/x", "--version"]
     elif scenario == "sad":
         # Values are never read as options; unknown tokens stay as they are for argparse to refuse.
-        assert s.canonical_options(["--env", "-D", "-e", "-S", "-Qz", "--", "-D"]) == [
-            "--env", "-D", "--env", "-S", "-Qz", "--", "-D"]
+        assert s.canonical_options(["--env", "-D", "-e", "-S", "-jz", "--", "-D"]) == [
+            "--env", "-D", "--env", "-S", "-jz", "--", "-D"]
     else:
         assert s.canonical_options(["--mount=a:/mnt/a:ro", "-d/dev/kvm", "-x", "*.example.org"]) == [
             "--mount=a:/mnt/a:ro", "--device", "/dev/kvm", "--no-inspect", "*.example.org"]
@@ -4476,3 +4514,1082 @@ def test_short_forms_like_argparse_reads_them():
     with pytest.raises(ValueError, match="Not allowed in a project configuration"):
         wizard.check_free_options("codex", "-s name")
     assert wizard.check_free_options("codex", "-g -A example.org") == ["--allow-github", "--allow-host", "example.org"]
+
+
+# --- resource limits ------------------------------------------------------------------------------
+
+
+def test_resource_limits(scenario, monkeypatch):
+    monkeypatch.setattr(s.os, "cpu_count", lambda: 8)
+    if scenario == "happy":
+        assert s.resource_limits(s.parse_args(["codex"])) == {"memory": "8g", "cpus": "4", "pids": 4096}
+        assert s.resource_limits(s.parse_args(["codex", "--memory", "2G", "--cpus", "1.5", "--pids", "512"])) == {
+            "memory": "2g", "cpus": "1.5", "pids": 512}
+    elif scenario == "sad":
+        for args in (["--memory", "lots"], ["--memory", "0g"], ["--cpus", "0"], ["--cpus", "-1"], ["--cpus", "99"],
+                     ["--pids", "3"], ["--pids", "x"]):
+            with pytest.raises(ValueError):
+                s.resource_limits(s.parse_args(["codex", *args]))
+    else:
+        assert s.resource_limits(s.parse_args(["codex", "--memory", "none", "--cpus", "none", "--pids", "none"])) == {}
+        monkeypatch.setattr(s.os, "cpu_count", lambda: 1)
+        assert s.resource_limits(s.parse_args(["codex"]))["cpus"] == "1"  # at least one CPU
+
+
+def test_delegated_controllers(scenario, tmp_path):
+    if scenario == "happy":
+        (tmp_path / "cgroup.controllers").write_text("cpuset cpu io memory pids\n")
+        assert s.delegated_controllers(tmp_path / "cgroup.controllers") == {"cpuset", "cpu", "io", "memory", "pids"}
+    elif scenario == "sad":
+        assert s.delegated_controllers(tmp_path / "missing") is None  # unknown: limits are passed on
+    else:
+        (tmp_path / "cgroup.controllers").write_text("")
+        assert s.delegated_controllers(tmp_path / "cgroup.controllers") == set()
+
+
+def test_enforced_limits(scenario, monkeypatch):
+    monkeypatch.setattr(s.os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(s, "user_manager_running", lambda: True)
+    a = s.parse_args(["codex"])
+    if scenario == "happy":
+        monkeypatch.setattr(s, "delegated_controllers", lambda path=None: {"cpu", "memory", "pids"})
+        assert s.enforced_limits(a) == ({"memory": "8g", "cpus": "4", "pids": 4096}, [])
+    elif scenario == "sad":
+        # cpu not delegated to the user (older systemd): that limit is left out, with a note.
+        monkeypatch.setattr(s, "delegated_controllers", lambda path=None: {"memory", "pids"})
+        limits, notes = s.enforced_limits(a)
+        assert limits == {"memory": "8g", "pids": 4096} and "cpu" in notes[0] and "--cpus" in notes[0]
+    else:
+        monkeypatch.setattr(s, "delegated_controllers", lambda path=None: None)
+        assert s.enforced_limits(a)[0] == {"memory": "8g", "cpus": "4", "pids": 4096}
+        remote = s.parse_args(["codex", "--podman-url", "unix:///x.sock"])
+        monkeypatch.setattr(s, "delegated_controllers", lambda path=None: set())
+        assert s.enforced_limits(remote)[0] == {"memory": "8g", "cpus": "4", "pids": 4096}  # remote: not ours to check
+        # No systemd user session: rootless Podman uses cgroupfs and cannot set limits at all.
+        monkeypatch.setattr(s, "user_manager_running", lambda: False)
+        limits, notes = s.enforced_limits(a)
+        assert limits == {} and "linger" in notes[0]
+
+
+def test_limits_prefix(scenario, monkeypatch):
+    monkeypatch.setattr(s.os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(s, "user_manager_running", lambda: True)
+    monkeypatch.setattr(s, "delegated_controllers", lambda path=None: {"cpu", "memory", "pids"})
+    a = s.parse_args(["codex", "--backend", "bwrap"])
+    if scenario == "happy":
+        monkeypatch.setattr(s.shutil, "which", lambda name: "/usr/bin/" + name)
+        monkeypatch.setattr(s, "user_manager_running", lambda: True)
+        assert s.limits_prefix(a) == ["systemd-run", "--user", "--scope", "--quiet", "--collect", "-p", "MemoryMax=8G",
+                                      "-p", "MemorySwapMax=8G", "-p", "CPUQuota=400%", "-p", "TasksMax=4096", "--"]
+    elif scenario == "sad":
+        monkeypatch.setattr(s.shutil, "which", lambda name: None)
+        assert s.limits_prefix(a) == []
+    else:
+        assert s.limits_prefix(s.parse_args(["codex", "--backend", "bwrap", "--memory", "none", "--cpus", "none",
+                                             "--pids", "none"])) == []
+
+
+def test_user_manager_running(scenario, monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.setattr(s, "Path", lambda value: seen.append(value) or (tmp_path / "private" if scenario == "happy"
+                                                                       else tmp_path / "missing"))
+    if scenario == "happy":
+        (tmp_path / "private").write_text("")
+        assert s.user_manager_running()
+    elif scenario == "sad":
+        assert not s.user_manager_running()
+    else:
+        s.user_manager_running()
+        assert seen == [f"/run/user/{os.getuid()}/bus"]
+
+
+def test_podman_run_carries_the_limits(monkeypatch, tmp_path):
+    monkeypatch.setattr(s.os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(s, "user_manager_running", lambda: True)
+    monkeypatch.setattr(s, "delegated_controllers", lambda path=None: {"memory", "pids"})
+    _, run = s.pod_commands(s.parse_args(["codex", "--workspace", str(tmp_path), "--memory", "2g"]), "p",
+                            tmp_path / "session", tmp_path / "home")
+    assert run[run.index("--memory") + 1] == "2g" and run[run.index("--pids-limit") + 1] == "4096"
+    assert "--cpus" not in run  # cpu not delegated: left out, not failing the start
+
+
+def test_user_bus_environment(scenario, monkeypatch):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/tmp/elsewhere")
+    env = s.user_bus_environment()
+    if scenario == "happy":
+        assert env["XDG_RUNTIME_DIR"] == f"/run/user/{os.getuid()}"
+    elif scenario == "sad":
+        assert env["DBUS_SESSION_BUS_ADDRESS"] == f"unix:path=/run/user/{os.getuid()}/bus"
+    else:
+        assert env["PATH"] == os.environ["PATH"] and os.environ["XDG_RUNTIME_DIR"] == "/tmp/elsewhere"
+
+
+# --- approvals ------------------------------------------------------------------------------------
+
+
+def wait_for(condition, seconds=5):
+    deadline = time.monotonic() + seconds
+    while not condition():
+        assert time.monotonic() < deadline, "timed out"
+        time.sleep(0.02)
+
+
+def answer_file(directory, decision, scope="once", **extra):
+    """Answer the first open question in DIRECTORY like sandbox-ai approvals does."""
+    wait_for(lambda: list(directory.glob("*.json")))
+    question = json.loads(sorted(directory.glob("*.json"))[0].read_text())
+    (directory / f"{question['id']}.answer").write_text(json.dumps({"decision": decision, "scope": scope, **extra}))
+    return question
+
+
+def test_approval_broker_and_runtime_network(tmp_path):
+    rules = []
+    network = rt.RuntimeNetwork({"https": []}, tmp_path / "allow.json", rules.append)
+    broker = rt.ApprovalBroker(tmp_path / "approvals", network, timeout=3, poll=0.02)
+    results = []
+    thread = threading.Thread(target=lambda: results.append(broker.ask("connect", {
+        "destination": "192.0.2.7:8443", "address": "192.0.2.7", "port": 8443, "host": "api.example.org"})))
+    thread.start()
+    question = answer_file(tmp_path / "approvals", "allow", "run")
+    thread.join(5)
+    assert question["kind"] == "connect" and question["host"] == "api.example.org" and question["timeout"] == 3
+    assert results[0]["decision"] == "allow" and results[0]["scope"] == "run"
+    # Applied to the firewall and the proxy's allow-list before the answer; remembered for the run.
+    assert "ip daddr 192.0.2.7 tcp dport 8443 accept" in rules[-1]
+    assert json.loads((tmp_path / "allow.json").read_text())["tcp"] == [["192.0.2.7", 8443]]
+    assert broker.ask("connect", {"destination": "192.0.2.7:8443", "address": "192.0.2.7", "port": 8443})["scope"] == "run"
+    assert json.loads((tmp_path / "approvals" / f"{question['id']}.done").read_text())["decision"] == "allow"
+    assert stat.S_IMODE((tmp_path / "approvals" / f"{question['id']}.json").stat().st_mode) == 0o600
+
+
+def test_approval_broker_once_timeout_and_dns(tmp_path, monkeypatch):
+    rules = []
+    network = rt.RuntimeNetwork({}, None, rules.append)
+    timers = []
+    monkeypatch.setattr(network, "allow_once", lambda address, port, timer=None: (
+        rt.RuntimeNetwork.allow_once(network, address, port, timer=lambda s, f: timers.append(f) or Mock())))
+    broker = rt.ApprovalBroker(tmp_path / "a", network, timeout=1, poll=0.02)
+    results = []
+    thread = threading.Thread(target=lambda: results.append(broker.ask("connect", {
+        "destination": "198.51.100.1:22", "address": "198.51.100.1", "port": 22})))
+    thread.start()
+    answer_file(tmp_path / "a", "allow", "once")
+    thread.join(5)
+    assert results[0]["decision"] == "allow" and "198.51.100.1 tcp dport 22" in rules[-1]
+    timers[0]()  # the once-rule expires
+    assert "198.51.100.1" not in rules[-1]
+    # Unanswered: refused after the timeout and not asked again during the run.
+    started = time.monotonic()
+    denied = broker.ask("connect", {"destination": "203.0.113.9:443", "address": "203.0.113.9", "port": 443})
+    assert denied["decision"] == "deny" and "no answer" in denied["reason"] and time.monotonic() - started < 4
+    assert broker.ask("connect", {"destination": "203.0.113.9:443", "address": "203.0.113.9", "port": 443}) is denied or \
+        broker.ask("connect", {"destination": "203.0.113.9:443", "address": "203.0.113.9", "port": 443})["decision"] == "deny"
+    # A lookup is filed without waiting; its answer brings the addresses the host resolved.
+    assert broker.ask("dns", {"name": "pypi.org"}, wait=False) is None
+    files = [p for p in (tmp_path / "a").glob("*.json") if json.loads(p.read_text())["kind"] == "dns"]
+    (tmp_path / "a" / f"{files[0].stem}.answer").write_text(json.dumps(
+        {"decision": "allow", "scope": "run", "addresses": ["151.101.0.223", "not-an-address"]}))
+    wait_for(lambda: (tmp_path / "a" / f"{files[0].stem}.done").exists())
+    done = json.loads((tmp_path / "a" / f"{files[0].stem}.done").read_text())
+    assert done["decision"] == "deny" and "could not be applied" in done["reason"]  # a bad address refuses all
+
+
+def test_serve_asks(scenario, tmp_path):
+    proxy_end, supervisor_end = socket.socketpair()
+    if scenario == "edge":
+        # Lines that are not questions are skipped; the channel keeps working.
+        proxy_end.sendall(b"not json\n[1, 2]\n")
+    asked = []
+
+    class Broker:
+        def ask(self, kind, details):
+            asked.append((kind, details))
+            return {"decision": "allow" if details.get("port") == 443 else "deny", "scope": "run", "reason": "answered"}
+    threading.Thread(target=rt.serve_asks, args=(supervisor_end, Broker()), daemon=True).start()
+    channel = rt.AskChannel(proxy_end, timeout=5)
+    results = {}
+    threads = [threading.Thread(target=lambda p=p: results.__setitem__(p, channel("connect", {"port": p})))
+               for p in (443, 22)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+    assert results[443]["decision"] == "allow" and results[22]["decision"] == "deny"
+    assert sorted(d["port"] for _, d in asked) == [22, 443]
+    if scenario == "sad":
+        assert channel("other", {"port": 443})["decision"] == "deny"  # an unknown kind is never allowed
+        assert len(asked) == 2  # and never reaches the broker
+    proxy_end.close()
+
+
+def test_load_approvals_module(scenario):
+    module = s.load_approvals_module()
+    if scenario == "happy":
+        assert callable(module.answer) and callable(module.watch)
+    elif scenario == "sad":
+        assert module.ID.fullmatch("../x") is None
+    else:
+        assert module is not s.load_approvals_module()  # loaded fresh, like the other helpers
+
+
+def test_asking(scenario):
+    if scenario == "happy":
+        assert s.asking(s.parse_args(["codex"]))
+    elif scenario == "sad":
+        assert not s.asking(s.parse_args(["codex", "--ask", "off"])) and not s.asking(s.parse_args(["codex", "-X"]))
+    else:
+        assert not s.asking(s.parse_args(["codex", "--probe"])) and not s.asking(s.parse_args(["codex", "--offline"]))
+
+
+def test_apply_remembered_approvals(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    work = tmp_path / "work"
+    work.mkdir()
+    approvals = s.load_approvals_module()
+    a = s.parse_args(["codex", "--workspace", str(work)])
+    if scenario == "happy":
+        approvals.remember(work, host="pypi.org")
+        approvals.remember(work, tcp="192.0.2.5:5432")
+        notes = s.apply_remembered_approvals(a)
+        assert a.allow_host == ["pypi.org"] and a.allow_tcp == ["192.0.2.5:5432"] and "approved" in notes[0]
+        s.validate(a)
+    elif scenario == "sad":
+        assert s.apply_remembered_approvals(a) == [] and a.allow_host == []
+    else:
+        # Another project's approvals do not apply; damaged entries are ignored.
+        approvals.remember(tmp_path / "other", host="pypi.org")
+        (tmp_path / "config/sandbox-ai/approved.json").write_text(json.dumps(
+            {str(work.resolve()): {"hosts": ["bad host;"], "tcp": ["x"]}, **json.loads(
+                (tmp_path / "config/sandbox-ai/approved.json").read_text())}))
+        assert s.apply_remembered_approvals(a) == [] and a.allow_host == []
+
+
+# --- telemetry: model usage, credentials, processes, MCP tool calls -------------------------------
+
+
+def test_usage_scanner_reads_streams_and_bodies():
+    anthropic = rt.UsageScanner()
+    for chunk in (b'event: message_start\ndata: {"type":"message_start","message":{"model":"claude-opus-5-5",'
+                  b'"usage":{"input_tokens":1200,"cache_read_input_tokens":800,"output_tokens":1}}}\n\n',
+                  b'event: message_delta\ndata: {"type":"message_delta","usage":{"output_t',
+                  b'okens":345}}\n\n'):
+        anthropic.feed(chunk)
+    assert anthropic.result() == {"model": "claude-opus-5-5", "usage": {
+        "input_tokens": 1200, "cache_read_input_tokens": 800, "output_tokens": 345}}
+    openai = rt.UsageScanner()
+    openai.feed(json.dumps({"model": "gpt-5.1", "usage": {"input_tokens": 50, "output_tokens": 7,
+                                                           "total_tokens": 57}}).encode())
+    assert openai.result() == {"model": "gpt-5.1", "usage": {"input_tokens": 50, "output_tokens": 7, "total_tokens": 57}}
+    assert rt.UsageScanner().result() is None
+    noisy = rt.UsageScanner()
+    noisy.feed(b"data: [DONE]\n\ndata: {not json}\n\n" + b"x" * 100)
+    assert noisy.result() is None
+
+
+def test_is_model_request(scenario):
+    if scenario == "happy":
+        assert rt.is_model_request("/v1/messages?beta=true") and rt.is_model_request("/v1/responses")
+    elif scenario == "sad":
+        assert not rt.is_model_request("/v1/models") and not rt.is_model_request("/simple/httpx/")
+    else:
+        assert rt.is_model_request("/v1/chat/completions") and rt.is_model_request("/backend-api/codex/responses")
+
+
+def test_credential_headers(scenario):
+    if scenario == "happy":
+        assert rt.credential_headers([["Authorization", "Bearer x"], ["x-api-key", "k"], ["Accept", "*/*"]]) == [
+            "authorization", "x-api-key"]
+    elif scenario == "sad":
+        assert rt.credential_headers([]) == []
+    else:
+        assert rt.credential_headers([["Cookie", "a"], ["cookie", "b"]]) == ["cookie"]
+
+
+def test_tool_call_record(scenario):
+    if scenario == "happy":
+        record = rt.tool_call_record(json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+            "name": "web_search", "arguments": {"query": "x", "api_key": "secret-value"}}}).encode())
+        assert record["tool"] == "web_search" and '"api_key": "[redacted]"' in record["arguments"]
+    elif scenario == "sad":
+        assert rt.tool_call_record(b"not json") is None
+        assert rt.tool_call_record(b'{"method": "tools/list"}') is None
+    else:
+        record = rt.tool_call_record(json.dumps({"method": "tools/call", "params": {
+            "name": "x", "arguments": {f"text{i}": "y" * 5000 for i in range(10)}}}).encode())
+        assert len(record["arguments"]) == 2003 and record["arguments"].endswith("...")
+
+
+def test_process_logger(scenario, tmp_path, monkeypatch):
+    monkeypatch.setattr(sr, "LOG_DIR", tmp_path / "log")
+    (tmp_path / "log").mkdir()
+    proc = tmp_path / "proc"
+
+    def process(pid, argv, start="100", ppid=1):
+        (proc / str(pid)).mkdir(parents=True, exist_ok=True)
+        (proc / str(pid) / "stat").write_text(f"{pid} (x y) S {ppid} " + " ".join(["0"] * 16) + f" {start} 0 0")
+        (proc / str(pid) / "cmdline").write_bytes(b"\0".join(argv) + b"\0")
+    process(7, [b"git", b"push", b"https://x-access-token:ghp_" + b"A" * 36 + b"@github.com/a/b"])
+    if scenario == "edge":
+        (proc / "self").mkdir(parents=True)  # not a process
+        process(8, [])  # a kernel thread: no command line
+
+    class Stop:
+        calls = 0
+
+        def wait(self, interval):
+            Stop.calls += 1
+            if Stop.calls == 2 and scenario == "happy":
+                process(9, [b"python3", b"-c", b"pass"], ppid=7)
+            return Stop.calls > 3
+    rt.process_logger(Stop(), proc=proc)
+    records = [json.loads(line) for line in (tmp_path / "log/processes.jsonl").read_text().splitlines()]
+    if scenario == "sad":
+        assert len(records) == 1 and "ghp_" not in records[0]["command"]  # once, redacted
+    elif scenario == "happy":
+        assert [(r["pid"], r["ppid"]) for r in records] == [(7, 1), (9, 7)]
+    else:
+        assert [r["pid"] for r in records] == [7]
+
+
+def test_load_secret_store_module(scenario):
+    module = s.load_secret_store_module()
+    if scenario == "happy":
+        assert module.check_name("GH_PAT") == "GH_PAT"
+    elif scenario == "sad":
+        with pytest.raises(ValueError):
+            module.check_name("../etc")
+    else:
+        assert module.NAME.fullmatch("_x") and not module.NAME.fullmatch("x" * 65)
+
+
+def test_secret_environment(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setenv("SANDBOX_AI_SECRETS", "file")
+    store = s.load_secret_store_module().FileStore()
+    store.set("KEY", "value")
+    if scenario == "happy":
+        assert s.secret_environment(s.parse_args(["codex", "--secret-env", "KEY", "--secret-env", "OTHER=KEY"])) == {
+            "KEY": "value", "OTHER": "value"}
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="no secret"):
+            s.secret_environment(s.parse_args(["codex", "--secret-env", "NOPE"]))
+    else:
+        assert s.secret_environment(s.parse_args(["codex"])) == {}
+
+
+def test_open_request(scenario, tmp_path):
+    import io
+    out = io.StringIO()
+    if scenario == "happy":
+        short = Path(tempfile.mkdtemp(prefix="o-", dir="/tmp"))
+        server = rt.listen_unix(short / "s.sock")
+
+        def answer():
+            connection, _ = server.accept()
+            with connection:
+                assert json.loads(connection.makefile("r").readline()) == {"url": "https://example.org/x"}
+                connection.sendall(b'{"ok": true, "message": "asked"}\n')
+        thread = threading.Thread(target=answer)
+        thread.start()
+        assert rt.open_request(["--new-window", "https://example.org/x"], str(short / "s.sock"), out) == 0
+        thread.join(5)
+        assert out.getvalue().strip() == "asked"
+    elif scenario == "sad":
+        assert rt.open_request(["https://example.org"], str(tmp_path / "missing.sock"), out) == 1
+        assert "open it yourself" in out.getvalue()
+    else:
+        assert rt.open_request(["https://a", "https://b"], "/x", out) == 1
+        assert rt.open_request(["ftp://example.org"], "/x", out) == 1
+
+
+def test_write_browser_shims(scenario, tmp_path):
+    directory = tmp_path / "bin"
+    if scenario == "sad":
+        directory.write_text("in the way")
+        with pytest.raises(OSError):
+            s.write_browser_shims(directory)
+        return
+    s.write_browser_shims(directory)
+    if scenario == "happy":
+        assert sorted(p.name for p in directory.iterdir()) == sorted(s.BROWSER_SHIMS)
+        assert (directory / "xdg-open").read_text().endswith('--internal-open "$@"\n')
+    else:
+        assert all(stat.S_IMODE(p.stat().st_mode) == 0o755 for p in directory.iterdir())
+        s.write_browser_shims(directory)  # again: unchanged
+
+
+def test_browser_bindings_and_environment(tmp_path):
+    a = s.parse_args(["claude", "--workspace", str(tmp_path / "w")])
+    a.browser_dir = tmp_path / "run.browser"
+    _, run = s.pod_commands(a, "p", tmp_path / "session", tmp_path / "home")
+    assert f"type=bind,src={a.browser_dir},dst=/sandbox/browser,ro,nodev" in run
+    cmd = s.bwrap_command(a, tmp_path, tmp_path)
+    assert ["--ro-bind", str(a.browser_dir), "/sandbox/browser"] == cmd[cmd.index(str(a.browser_dir)) - 1:cmd.index(str(a.browser_dir)) + 2]
+    env = s.agent_environment(a)
+    assert env["BROWSER"] == "/sandbox/session/bin/xdg-open" and env["PATH"].startswith("/sandbox/session/bin:")
+    assert "BROWSER" not in s.agent_environment(s.parse_args(["claude", "--ask", "off"]))
+
+
+def test_question_name(scenario):
+    if scenario == "happy":
+        assert rt.question_name("API.Example.org.") == "api.example.org"
+        assert rt.question_name("xn--bcher-kva.example") == "xn--bcher-kva.example"
+    elif scenario == "sad":
+        for bad in ("pypi.org\n1-1-1  x", "a b", "evil\x1b[8m.org", "b\u00fccher.example", "", "-x.org", "a..b"):
+            assert rt.question_name(bad) is None, bad
+    else:
+        assert rt.question_name(None) is None and rt.question_name("a" * 254) is None
+        assert rt.question_name("localhost") == "localhost"
+
+
+def test_printable_text(scenario):
+    if scenario == "happy":
+        assert rt.printable_text("https://github.com/a/b") == "https://github.com/a/b"
+    elif scenario == "sad":
+        assert rt.printable_text("x\n\x1b[31m\u202e") == "x%0A%1B[31m%E2%80%AE"
+        assert rt.printable_text("100%") == "100%25"  # unambiguous
+    else:
+        assert rt.printable_text("a" * 10, limit=4) == "aaaa" and rt.printable_text("") == ""
+
+
+def test_write_new(scenario, tmp_path):
+    target = tmp_path / "allow.json"
+    if scenario == "happy":
+        rt.write_new(target, "{}", 0o644)
+        assert target.read_text() == "{}" and stat.S_IMODE(target.stat().st_mode) == 0o644
+        rt.write_new(target, "[]", 0o600)
+        assert target.read_text() == "[]" and stat.S_IMODE(target.stat().st_mode) == 0o600
+    elif scenario == "sad":
+        # A planted symlink at any temporary name is removed, never followed.
+        victim = tmp_path / "victim"
+        victim.write_text("keep")
+        temporary = target.with_name(f".{target.name}.{os.getpid()}.{threading.get_ident()}")
+        temporary.symlink_to(victim)
+        rt.write_new(target, "new", 0o644)
+        assert victim.read_text() == "keep" and target.read_text() == "new" and not target.is_symlink()
+    else:
+        with pytest.raises(OSError):
+            rt.write_new(tmp_path / "missing" / "x.json", "{}", 0o644)
+        assert not (tmp_path / "missing").exists()
+
+
+def test_review_findings_after_0_1_20(tmp_path, monkeypatch):
+    """Findings of the review of approvals, secrets and browser requests, each kept closed."""
+    rules = []
+    network = rt.RuntimeNetwork({}, tmp_path / "allow.json", rules.append)
+    # Approved destinations never take SSH; what the human allows with sandbox-ai net does.
+    network.change({"op": "allow", "tcp": [["192.0.2.9", 443]]}, ssh=False)
+    assert json.loads((tmp_path / "allow.json").read_text())["ssh_tcp"] == []
+    network.change({"op": "allow", "tcp": [["192.0.2.9", 443]]})
+    assert json.loads((tmp_path / "allow.json").read_text())["ssh_tcp"] == [["192.0.2.9", 443]]
+    network.change({"op": "allow", "tcp": [["192.0.2.10", 22]]}, ssh=False)
+    assert json.loads((tmp_path / "allow.json").read_text())["ssh_tcp"] == [["192.0.2.9", 443]]
+    # IDs carry a random part: two sandboxes asking in the same second do not collide.
+    one = rt.ApprovalBroker(tmp_path / "a1", network, timeout=0.2, poll=0.02)
+    two = rt.ApprovalBroker(tmp_path / "a2", network, timeout=0.2, poll=0.02)
+    one.ask("dns", {"name": "a.example"}, wait=False)
+    two.ask("dns", {"name": "a.example"}, wait=False)
+    ids = [json.loads(next((tmp_path / d).glob("*.json")).read_text())["id"] for d in ("a1", "a2")]
+    assert ids[0] != ids[1]
+    # A deny counts for the run (no re-asking to wear the human down); "once" may be asked again.
+    broker = rt.ApprovalBroker(tmp_path / "a3", network, timeout=3, poll=0.02)
+    details = {"destination": "198.51.100.1:443", "address": "198.51.100.1", "port": 443}
+    results = []
+    thread = threading.Thread(target=lambda: results.append(broker.ask("connect", details)))
+    thread.start()
+    answer_file(tmp_path / "a3", "deny", "run")
+    thread.join(5)
+    assert results[0]["decision"] == "deny"
+    assert broker.ask("connect", details)["decision"] == "deny" and len(list((tmp_path / "a3").glob("*.json"))) == 1
+    # Open questions are capped; beyond that the agent is refused without asking.
+    capped = rt.ApprovalBroker(tmp_path / "a4", network, timeout=5, poll=0.05)
+    for n in range(rt.OPEN_QUESTIONS):
+        capped.ask("dns", {"name": f"n{n}.example"}, wait=False)
+    assert capped.ask("dns", {"name": "more.example"}, wait=False)["reason"] == "too many questions"
+    assert len(list((tmp_path / "a4").glob("*.json"))) == rt.OPEN_QUESTIONS
+    # A push answer covers the same warnings only; "always" is the run at most.
+    assert rt.ApprovalBroker.key("push", {"url": "u", "message": "a"}) != rt.ApprovalBroker.key("push", {"url": "u", "message": "b"})
+    # A name the agent controls opens only public addresses.
+    broker._apply("dns", {"name": "x.example"}, {"addresses": ["10.0.0.5", "127.0.0.1", "151.101.0.223"], "scope": "run"})
+    assert json.loads((tmp_path / "allow.json").read_text())["https"] == ["151.101.0.223/32"]
+    # Command lines: URL passwords, secret-named flags, curl -u.
+    for text in ("git clone https://oauth2:s3cr3t-value@git.example/x", "tool --api-key s3cr3t-value",
+                 "tool --password=s3cr3t-value", "curl -u admin:s3cr3t-value https://x"):
+        assert "s3cr3t-value" not in rt.redact_text(text), text
+    assert rt.redact_text("ls -la --color=auto /work") == "ls -la --color=auto /work"
+
+
+def test_remembered_approvals_inside_a_workspace_are_not_read(tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    (work / ".config/sandbox-ai").mkdir(parents=True)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(work / ".config"))
+    (work / ".config/sandbox-ai/approved.json").write_text(json.dumps({str(work.resolve()): {"hosts": ["evil.example"]}}))
+    a = s.parse_args(["claude", "--workspace", str(work)])
+    notes = s.apply_remembered_approvals(a)
+    assert "evil.example" not in a.allow_host and "not read" in notes[0]
+
+
+def test_firewall_accepts_what_it_redirects_to_the_proxy():
+    """Found by the e2e run on a real host: after the NAT redirect the filter hook still sees the original
+    output interface, so the redirected connection must be accepted by destination, before any drop."""
+    rules = s.firewall_rules([], ["192.0.2.1"], proxy={"port": 15001, "loopback": []})
+    output = rules.split(" chain output ")[1].split("\n }")[0].splitlines()
+    accepts = [i for i, line in enumerate(output) if "ct status dnat" in line]
+    assert [output[i].strip() for i in accepts] == ["ct status dnat ip daddr 127.0.0.1 tcp dport 15001 accept",
+                                                    "ct status dnat ip6 daddr ::1 tcp dport 15001 accept"]
+    assert accepts[-1] < next(i for i, line in enumerate(output) if "jump runtime" in line)
+    assert "ct status dnat" not in s.firewall_rules([], ["192.0.2.1"])  # without the proxy: no such door
+
+
+def test_stdin_is_pipe(scenario, tmp_path):
+    if scenario == "happy":
+        r, w = os.pipe()
+        try:
+            assert rt.stdin_is_pipe(r)
+        finally:
+            os.close(r), os.close(w)
+    elif scenario == "sad":
+        with open(tmp_path / "f", "w") as stream:
+            assert not rt.stdin_is_pipe(stream.fileno())  # /dev/null, a file, a terminal: never exits on its own
+    else:
+        assert not rt.stdin_is_pipe(987654)
+
+
+def test_wait_for_unix_listener(scenario, tmp_path):
+    import tempfile as tempfile_module
+    path = tmp_path / "s.sock"
+    errors = tempfile_module.TemporaryFile()
+    if scenario == "happy":
+        server = socket.socket(socket.AF_UNIX)
+        server.bind(str(path))
+        server.listen(1)
+        rt.wait_for_unix_listener(path, Mock(poll=Mock(return_value=None)), errors, "x11vnc", timeout=5)
+        server.close()
+    elif scenario == "sad":
+        errors.write(b"x11vnc: cannot open display\n")
+        with pytest.raises(RuntimeError, match="exited with status 1: x11vnc: cannot open display"):
+            rt.wait_for_unix_listener(path, Mock(poll=Mock(return_value=1)), errors, "x11vnc", timeout=5)
+    else:
+        bound = socket.socket(socket.AF_UNIX)
+        bound.bind(str(path))  # the file is there, nobody listens yet
+        with pytest.raises(RuntimeError, match="did not listen"):
+            rt.wait_for_unix_listener(path, Mock(poll=Mock(return_value=None)), errors, "x11vnc", timeout=0.5)
+        bound.close()
+
+
+# --- state an earlier run may have left: symlinked workspaces, private directories ------------------
+
+
+def test_logical_cwd(scenario, tmp_path, monkeypatch):
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    monkeypatch.chdir(real)
+    if scenario == "happy":  # the shell's name for the directory, symlink kept
+        monkeypatch.setenv("PWD", str(link))
+        assert s.logical_cwd() == str(link)
+    elif scenario == "sad":  # a stale or foreign PWD is ignored
+        monkeypatch.setenv("PWD", str(tmp_path))
+        assert s.logical_cwd() == str(real)
+    else:
+        monkeypatch.setenv("PWD", "relative/path")
+        assert s.logical_cwd() == str(real)
+
+
+def test_planted_symlink(scenario, tmp_path):
+    project = tmp_path / "proj"
+    (project / "src").mkdir(parents=True)
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    planted = project / "frontend"
+    planted.symlink_to(target)
+    if scenario == "happy":  # a link inside a tree a sandbox could write
+        assert s.planted_symlink(planted / "x", [project]) == planted
+    elif scenario == "sad":  # your own link elsewhere (~/src -> /data/src) is fine
+        assert s.planted_symlink(planted / "x", [tmp_path / "other"]) is None
+    else:
+        assert s.planted_symlink(project / "src", [project]) is None  # no link on the way
+
+
+def test_check_planted(scenario, tmp_path):
+    project = tmp_path / "proj"
+    project.mkdir()
+    config = tmp_path / "config"
+    config.mkdir()
+    (project / "shared").symlink_to(config)
+    if scenario == "happy":
+        with pytest.raises(ValueError, match="goes through the symlink .*shared.*give the real path: .*config"):
+            s.check_planted(project / "shared", "--mount", [project])
+    elif scenario == "sad":
+        s.check_planted(config, "--mount", [project])
+    else:
+        s.check_planted(str(project / "shared"), "--mount", [])  # no registry yet: nothing to compare
+
+
+def test_exposed_registry(scenario, tmp_path, monkeypatch):
+    if scenario == "happy":
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+        assert s.exposed_registry() == tmp_path / "sandbox-ai" / "exposed.json"
+    elif scenario == "sad":
+        monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+        assert s.exposed_registry().parts[-3:] == ("state", "sandbox-ai", "exposed.json")
+    else:
+        monkeypatch.setenv("XDG_STATE_HOME", "")
+        assert s.exposed_registry().name == "exposed.json"
+
+
+def test_exposed_before(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    path = tmp_path / "sandbox-ai" / "exposed.json"
+    path.parent.mkdir()
+    if scenario == "happy":
+        path.write_text(json.dumps(["/home/u/proj", "relative", 3]))
+        assert s.exposed_before() == [Path("/home/u/proj")]
+    elif scenario == "sad":
+        path.write_text("not json")
+        assert s.exposed_before() == []
+    else:
+        path.write_text(json.dumps({"not": "a list"}))
+        assert s.exposed_before() == []
+
+
+def test_remember_exposed(scenario, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    work = tmp_path / "work"
+    work.mkdir()
+    a = s.parse_args(["codex", "--workspace", str(work)])
+    if scenario == "happy":
+        s.remember_exposed(a)
+        s.remember_exposed(a)  # no duplicates
+        assert s.exposed_before() == [work]
+    elif scenario == "sad":  # an unwritable registry is a warning, not a failed start
+        (tmp_path / "state").write_text("a file, not a directory")
+        s.remember_exposed(a)
+        assert "cannot record exposed directories" in capsys.readouterr().err
+    else:  # the newest first, older ones kept
+        (tmp_path / "state" / "sandbox-ai").mkdir(parents=True)
+        (tmp_path / "state" / "sandbox-ai" / "exposed.json").write_text(json.dumps(["/old/tree"]))
+        s.remember_exposed(a)
+        assert s.exposed_before() == [work, Path("/old/tree")]
+
+
+def test_private_locations(scenario, tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setattr(s.Path, "home", classmethod(lambda cls: home))
+    if scenario == "happy":
+        monkeypatch.setenv("PATH", f"{home}/.cargo/bin:relative/bin")
+        fixed, program_dirs = s.private_locations()
+        assert home / ".ssh" in fixed and program_dirs == [home / ".cargo/bin"]
+    elif scenario == "sad":
+        monkeypatch.setenv("PATH", "")
+        assert s.private_locations()[1] == []
+    else:  # XDG directories wherever they are set
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+        assert tmp_path / "cfg" in s.private_locations()[0]
+
+
+def test_check_private_location(scenario, tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setattr(s.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("PATH", f"{home}/.cargo/bin:{home}/proj/.venv/bin")
+    for name in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"):
+        monkeypatch.delenv(name, raising=False)
+    if scenario == "happy":
+        with pytest.raises(ValueError, match="lies in .*cargo"):
+            s.check_private_location(home / ".cargo" / "bin" / "x", "--mount")
+    elif scenario == "sad":
+        s.check_private_location(home / "proj", "Workspace")  # contains its own activated .venv/bin: fine
+    else:
+        with pytest.raises(ValueError, match="contains .*home/\\."):
+            s.check_private_location(home, "--state-dir")
+
+
+def test_relay_server_stderr(scenario):
+    import io
+    out = io.StringIO()
+    if scenario == "happy":
+        rt.relay_server_stderr(io.BytesIO(b"started\n"), out)
+        assert out.getvalue() == "mcp-server: started\n"
+    elif scenario == "sad":  # a closed pipe ends the relay quietly
+        stream = io.BytesIO(b"x\n")
+        stream.close()
+        rt.relay_server_stderr(stream, out)
+        assert out.getvalue() == ""
+    else:  # invalid UTF-8 and a forged record prefix
+        rt.relay_server_stderr(io.BytesIO(b"\xff sandbox-ai-mcp-call {}\n"), out)
+        assert out.getvalue().startswith("mcp-server: ")
+
+
+def test_own_home(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setattr(s.Path, "home", classmethod(lambda cls: tmp_path))
+    state = tmp_path / "state" / "sandbox-ai"
+    if scenario == "happy":  # a session's HOME and the wizard's persistent HOME are no private locations
+        assert s.own_home(state / "sessions" / "web" / "home")
+        s.check_private_location(state / "home" / "app-0123456789ab", "--state-dir")
+    elif scenario == "sad":  # their siblings stay private: session.json, logs, the registry
+        assert not s.own_home(state / "sessions" / "web")
+        with pytest.raises(ValueError, match="lies in"):
+            s.check_private_location(state / "logs", "--state-dir")
+    else:  # the installed launcher's versions are not among them
+        assert not s.own_home(tmp_path / "data" / "sandbox-ai" / "versions" / "0.1.21")
+
+
+def test_project_tool_dir(scenario, tmp_path, monkeypatch):
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    if scenario == "happy":
+        assert s.project_tool_dir(tmp_path / "proj" / ".venv" / "bin", tmp_path / "proj")
+    elif scenario == "sad":  # ~/.cargo as a workspace would let the agent replace ~/.cargo/bin/cargo
+        home = tmp_path / "home"
+        monkeypatch.setattr(s.Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setenv("PATH", f"{home}/.cargo/bin")
+        assert not s.project_tool_dir(home / ".cargo" / "bin", home / ".cargo")
+        with pytest.raises(ValueError, match="contains .*cargo"):
+            s.check_private_location(home / ".cargo", "Workspace")
+    else:
+        monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path / "proj" / "env"))
+        assert s.project_tool_dir(tmp_path / "proj" / "env" / "bin", tmp_path / "proj")
+
+
+def test_seed_exposed(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    (tmp_path / "cfg" / "sandbox-ai").mkdir(parents=True)
+    if scenario == "happy":  # projects of approvals, trusted configurations, sessions and MCP definitions
+        (tmp_path / "cfg" / "sandbox-ai" / "approved.json").write_text(json.dumps({"/p/one": {}}))
+        (tmp_path / "cfg" / "sandbox-ai" / "trusted.json").write_text(json.dumps({"/p/two/.sandbox-ai.json": "x"}))
+        (tmp_path / "cfg" / "sandbox-ai" / "mcp.json").write_text(json.dumps({"bw": {
+            "image": "x", "mounts": [{"host": "/p/out", "target": "/out", "mode": "rw"}]}}))
+        session = tmp_path / "state" / "sandbox-ai" / "sessions" / "web"
+        session.mkdir(parents=True)
+        (session / "session.json").write_text(json.dumps({"workspace": "/p/three"}))
+        assert s.seed_exposed() == [Path("/p/one"), Path("/p/two"), Path("/p/three"), Path("/p/out")]
+        assert s.exposed_before() == s.seed_exposed()  # used until the registry is written
+    elif scenario == "sad":
+        (tmp_path / "cfg" / "sandbox-ai" / "approved.json").write_text("broken")
+        assert s.seed_exposed() == []
+    else:
+        (tmp_path / "cfg" / "sandbox-ai" / "approved.json").write_text(json.dumps({"relative": {}}))
+        assert s.seed_exposed() == []
+
+
+def test_shortened(scenario):
+    if scenario == "happy":  # long secrets keep their closing quote, so the redaction still matches
+        record = rt.tool_call_record(json.dumps({"method": "tools/call", "params": {
+            "name": "x", "arguments": {"client_secret": "ya29." + "A" * 9000}}}).encode())
+        assert "AAAAAAAAAA" not in record["arguments"]
+    elif scenario == "sad":
+        assert rt.shortened({"k": ["v"] * 500})["k"][-1] == "..."
+    else:
+        assert rt.shortened(7) == 7 and rt.shortened("x" * 501).endswith("...")
+
+
+def test_private_directories_are_no_workspaces(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / ".config" / "systemd").mkdir(parents=True)
+    monkeypatch.setattr(s.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    with pytest.raises(ValueError, match="lies in .*\\.config"):
+        s.check_workspace_scope(home / ".config" / "systemd")
+    s.check_workspace_scope(home / "src" / "app")  # a project directory in HOME is fine
+
+
+def test_overlapping_once_approvals_keep_the_target_open_until_the_last_ends():
+    rules, timers = [], []
+    network = rt.RuntimeNetwork({}, None, rules.append)
+    for _ in range(2):
+        network.allow_once("198.51.100.1", 443, timer=lambda seconds, function: timers.append(function) or Mock())
+    timers[0]()
+    assert "198.51.100.1" in rules[-1]  # the second approval is still running
+    timers[1]()
+    assert "198.51.100.1" not in rules[-1]
+
+
+def test_mounts_changed(scenario, tmp_path):
+    folder = tmp_path / "out"
+    folder.mkdir()
+    info = os.stat(folder)
+    record = [{"path": str(folder), "dev": info.st_dev, "ino": info.st_ino}]
+    if scenario == "happy":
+        assert rt.mounts_changed(record) is None and rt.mounts_changed([]) is None
+    elif scenario == "sad":  # swapped for a link to another folder while the server ran
+        other = tmp_path / "config"
+        other.mkdir()
+        folder.rmdir()
+        folder.symlink_to(other)
+        assert "has become a symlink" in rt.mounts_changed(record)
+    else:  # replaced by another directory of the same name
+        folder.rmdir()
+        folder.mkdir()
+        (tmp_path / "keep").mkdir()  # the old inode must not come back
+        assert "replaced" in rt.mounts_changed(record) or os.stat(folder).st_ino == info.st_ino
+
+
+def test_image_mount_hosts(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    (tmp_path / "sandbox-ai").mkdir()
+    path = tmp_path / "sandbox-ai" / "mcp.json"
+    if scenario == "happy":
+        path.write_text(json.dumps({"bw": {"image": "x", "mounts": [{"host": str(tmp_path / "out"), "target": "/o"}]}}))
+        assert s.image_mount_hosts() == [(tmp_path / "out").resolve()]
+    elif scenario == "sad":
+        assert s.image_mount_hosts() == []  # no mcp.json
+    else:
+        path.write_text(json.dumps({"bw": {"mounts": ["not a dict"]}, "x": []}))
+        assert s.image_mount_hosts() == []
+        # Image servers of the trusted project file count too.
+        project = {"mcp_servers": {"p": {"image": "x", "mounts": [{"host": str(tmp_path / "p"), "target": "/o"}]}}}
+        assert s.image_mount_hosts(project) == [(tmp_path / "p").resolve()]
+
+
+def test_workspace_holding_an_image_mount_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    work = tmp_path / "data"
+    (work / "extracted").mkdir(parents=True)
+    (tmp_path / "cfg" / "sandbox-ai").mkdir(parents=True)
+    (tmp_path / "cfg" / "sandbox-ai" / "mcp.json").write_text(json.dumps(
+        {"bw": {"image": "x", "mounts": [{"host": str(work / "extracted"), "target": "/out", "mode": "rw"}]}}))
+    with pytest.raises(ValueError, match="an MCP image server mounts"):
+        s.validate(s.parse_args(["codex", "--workspace", str(work), "--no-config"]))
+    s.validate(s.parse_args(["codex", "--workspace", str(work / "extracted"), "--no-config"]))  # the folder itself
+
+
+def test_tool_dirs_state(scenario, tmp_path, monkeypatch):
+    work = tmp_path / "proj"
+    tools = work / ".venv" / "bin"
+    tools.mkdir(parents=True)
+    (tools / "python").write_text("x")
+    a = argparse.Namespace(workspaces=[str(work)])
+    if scenario == "happy":
+        monkeypatch.setenv("PATH", f"{tools}:/usr/bin")
+        assert list(s.tool_dirs_state(a)) == [str(tools)] and "python" in s.tool_dirs_state(a)[str(tools)]
+    elif scenario == "sad":
+        monkeypatch.setenv("PATH", "/usr/bin:relative")
+        assert s.tool_dirs_state(a) == {}
+    else:
+        monkeypatch.setenv("PATH", str(tmp_path / "missing"))
+        assert s.tool_dirs_state(a) == {}
+
+
+def test_tool_dirs_changed(scenario, tmp_path, monkeypatch):
+    work = tmp_path / "proj"
+    tools = work / "node_modules" / ".bin"
+    tools.mkdir(parents=True)
+    (tools / "eslint").write_text("x")
+    monkeypatch.setenv("PATH", str(tools))
+    before = s.tool_dirs_state(argparse.Namespace(workspaces=[str(work)]))
+    if scenario == "happy":  # the agent put a git where your shell finds it first
+        (tools / "git").write_text("#!/bin/sh\n")
+        assert "git" in s.tool_dirs_changed(before)[0] and "on your PATH" in s.tool_dirs_changed(before)[0]
+    elif scenario == "sad":
+        assert s.tool_dirs_changed(before) == []
+    else:  # same size, mtime reset: the ctime still tells
+        stat_before = os.stat(tools / "eslint")
+        time.sleep(0.01)
+        (tools / "eslint").write_text("y")
+        os.utime(tools / "eslint", ns=(stat_before.st_atime_ns, stat_before.st_mtime_ns))
+        assert "eslint" in s.tool_dirs_changed(before)[0]
+
+
+# --- the administrator's policy -------------------------------------------------------------------
+
+
+def policy_file(tmp_path, document, monkeypatch, owner=0, mode=0o644):
+    """A policy file as root would own it (os.lstat/os.stat report OWNER and MODE)."""
+    path = tmp_path / "policy.json"
+    path.write_text(json.dumps(document))
+    real_lstat, real_stat = os.lstat, os.stat
+
+    def fake(function):
+        def call(target, *args, **kwargs):
+            info = function(target, *args, **kwargs)
+            if Path(target) in (path, path.parent):
+                values = list(info)
+                values[stat.ST_UID], values[stat.ST_MODE] = owner, (info.st_mode & ~0o7777) | mode
+                return os.stat_result(values)
+            return info
+        return call
+    monkeypatch.setattr(s.os, "lstat", fake(real_lstat))
+    monkeypatch.setattr(s.os, "stat", fake(real_stat))
+    return path
+
+
+def test_load_policy(scenario, tmp_path, monkeypatch):
+    if scenario == "happy":
+        path = policy_file(tmp_path, {"version": 1, "forbid": ["--egress-all-allow", "--ask=off"],
+                                      "max_approval_scope": "run"}, monkeypatch)
+        assert s.load_policy(path)["max_approval_scope"] == "run"
+        assert s.load_policy(tmp_path / "missing.json") == {}  # no policy: nothing changes
+    elif scenario == "sad":  # a file the user could edit is no policy: every start stops
+        path = policy_file(tmp_path, {"version": 1}, monkeypatch, owner=os.getuid() or 1000)
+        with pytest.raises(ValueError, match="owned by root"):
+            s.load_policy(path)
+    else:
+        path = policy_file(tmp_path, {"version": 1, "forbid": ["--no-such-option"]}, monkeypatch)
+        with pytest.raises(ValueError, match="unknown option"):
+            s.load_policy(path)
+        path = policy_file(tmp_path, {"version": 1}, monkeypatch, mode=0o666)
+        with pytest.raises(ValueError, match="writable by root only"):
+            s.load_policy(path)
+
+
+def test_check_policy(scenario):
+    policy = {"version": 1, "forbid": ["--egress-all-allow", "--privacy-check=off", "--no-proxy"],
+              "backends": ["podman"], "max_approval_scope": "once", "message": "ask IT"}
+    if scenario == "happy":
+        a = s.parse_args(["codex", "--allow-pypi"])
+        s.check_policy(a, policy)
+        assert a.max_approval_scope == "once"
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="--privacy-check=off is not allowed.*ask IT"):
+            s.check_policy(s.parse_args(["codex", "-pc", "off"]), policy)  # a short form counts too
+        with pytest.raises(ValueError, match="backend bwrap"):
+            s.check_policy(s.parse_args(["codex", "--backend", "bwrap"]), policy)
+    else:  # whatever sets the option: a profile that implies --egress-all-allow is refused as well
+        a = s.parse_args(["codex"])
+        a.egress_all_allow = True
+        with pytest.raises(ValueError, match="--egress-all-allow"):
+            s.check_policy(a, policy)
+        empty = s.parse_args(["codex"])
+        s.check_policy(empty, {})
+        assert empty.max_approval_scope == "always"
+
+
+def test_policy_caps_the_scope_of_answers(tmp_path):
+    broker = rt.ApprovalBroker(tmp_path / "a", rt.RuntimeNetwork({}, None, lambda rules: None), max_scope="run")
+    (tmp_path / "a" / "1-1-1.answer").write_text(json.dumps({"decision": "allow", "scope": "always"}))
+    assert broker._read_answer("1-1-1")["scope"] == "run"
+
+
+def test_http_rules(scenario):
+    if scenario == "happy":
+        a = s.parse_args(["codex", "--allow-http", "api.github.com GET,HEAD /repos/**", "-ah", "*.example.org * /"])
+        assert s.http_rules(a) == [{"host": "api.github.com", "methods": ["GET", "HEAD"], "path": "/repos/**"},
+                                   {"host": "*.example.org", "methods": ["*"], "path": "/"}]
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="HOST METHODS PATH"):
+            s.http_rules(s.parse_args(["codex", "--allow-http", "api.github.com get /x"]))
+    else:  # rules for a host whose TLS passes unopened could never hold
+        with pytest.raises(ValueError, match="--no-inspect"):
+            s.http_rules(s.parse_args(["codex", "--allow-http", "api.github.com GET /", "--no-inspect", "*.github.com"]))
+
+
+def test_host_matches_any(scenario):
+    if scenario == "happy":
+        assert s.host_matches_any("api.github.com", "*.github.com") and s.host_matches_any("a.b", "a.b")
+    elif scenario == "sad":
+        assert not s.host_matches_any("github.com.evil.example", "github.com")
+    else:
+        assert s.host_matches_any("*.github.com", "github.com")
+
+
+def test_proxy_config_carries_http_rules_with_pinned_addresses():
+    a = s.parse_args(["codex", "--allow-http", "api.github.com POST /repos/*/issues"])
+    config = s.proxy_config(a, {"api.github.com": ["192.0.2.21"], "pypi.org": ["192.0.2.30"]}, "l")
+    assert config["http_rules"] == [{"host": "api.github.com", "methods": ["POST"], "path": "/repos/*/issues",
+                                     "addresses": ["192.0.2.21"]}]
+
+
+def test_policy_network_ceiling_and_mcp(tmp_path, monkeypatch):
+    policy = {"version": 1, "allow_within": ["10.0.0.0/8"], "mcp_network": "none"}
+    s.check_policy(s.parse_args(["codex", "--allow", "10.1.0.0/16", "--allow-tcp", "10.2.3.4:5432"]), policy)
+    for options in (["--allow", "0.0.0.0/1"], ["--allow-tcp", "192.0.2.9:22"], ["--egress-all-allow"]):
+        with pytest.raises(ValueError, match="administrator"):
+            s.check_policy(s.parse_args(["codex", *options]), policy)
+    a = s.parse_args(["codex"])
+    s.check_policy(a, {"version": 1, "forbid": ["--no-proxy"], "allow_within": ["10.0.0.0/8"]})
+    assert a.policy == {"forbid": ["--no-proxy"], "allow_within": ["10.0.0.0/8"]}  # handed to the supervisor
+
+
+def test_runtime_changes_obey_the_policy(tmp_path):
+    """sandbox-ai net allow and approvals during a run: the supervisor holds the ceiling and the forbidden options."""
+    network = rt.RuntimeNetwork({}, None, lambda rules: None, within=["10.0.0.0/8"])
+    network.change({"op": "allow", "nets": ["10.9.0.0/16"]})
+    with pytest.raises(ValueError, match="outside the networks"):
+        network.change({"op": "allow", "nets": ["0.0.0.0/1"]})
+    with pytest.raises(ValueError, match="outside the networks"):
+        network.allow_once("192.0.2.9", 443)
+    import socket as socket_module
+    path = tmp_path / "control.sock"
+    stop = threading.Event()
+    thread = threading.Thread(target=rt.control_server, args=(path, rt.RuntimeNetwork({}, None, lambda r: None), stop,
+                                                               ["--allow", "--egress-all-allow"]), daemon=True)
+    thread.start()
+    for _ in range(100):
+        if path.exists():
+            break
+        time.sleep(0.02)
+
+    def ask(request):
+        with socket_module.socket(socket_module.AF_UNIX) as client:
+            client.connect(str(path))
+            client.sendall((json.dumps(request) + "\n").encode())
+            return json.loads(client.makefile().readline())
+    assert "not allowed by the administrator" in ask({"op": "allow", "nets": ["192.0.2.0/24"]})["error"]
+    assert ask({"op": "allow", "tcp": [["192.0.2.9", 443]]})["ok"]
+    stop.set()
+    thread.join(5)
+
+
+def test_host_name(scenario):
+    if scenario == "happy":
+        assert rt.host_name("API.github.com:443") == "api.github.com"
+    elif scenario == "sad":
+        assert rt.host_name(None) is None and rt.host_name("") is None
+    else:
+        assert rt.host_name("[2001:db8::1]:8443") == "2001:db8::1" and rt.host_name("[broken") is None
+
+
+def test_is_address_origin(scenario):
+    if scenario == "happy":
+        assert rt.is_address_origin("192.0.2.7:80") and rt.is_address_origin("[2001:db8::1]:443")
+    elif scenario == "sad":
+        assert not rt.is_address_origin("api.github.com")
+    else:
+        assert rt.is_address_origin("192.0.2.7")
+
+
+def test_normal_path(scenario):
+    if scenario == "happy":
+        assert rt.normal_path("/repos/a/b/../c?q=1#f") == "/repos/a/c"
+    elif scenario == "sad":  # encodings and dot segments resolve as the server would
+        assert rt.normal_path("/x/%2e%2e/%2e%2e/../gists") == "/gists"
+    else:
+        assert rt.normal_path("") == "" and rt.normal_path("relative/path") == "/relative/path"
+
+
+def test_path_matches(scenario):
+    if scenario == "happy":
+        assert rt.path_matches("/repos/*/pulls", "/repos/app/pulls") and rt.path_matches("/**", "/a/b/c")
+    elif scenario == "sad":
+        assert not rt.path_matches("/repos/*", "/repos/a/b") and not rt.path_matches("/a.b", "/axb")
+    else:
+        assert rt.path_matches("/", "") and rt.path_matches("/*", "/")
+
+
+def test_within_ceiling(scenario):
+    a = s.parse_args(["codex"])
+    a.policy = {"allow_within": ["10.0.0.0/8"], "allow_hosts": ["*.corp.example", "pypi.org"]}
+    if scenario == "happy":
+        assert s.within_ceiling(a, network="10.1.2.3") and s.within_ceiling(a, host="git.corp.example")
+    elif scenario == "sad":
+        assert not s.within_ceiling(a, network="0.0.0.0/1") and not s.within_ceiling(a, host="pastebin.com")
+    else:
+        a.policy = {}
+        assert s.within_ceiling(a, network="0.0.0.0/0") and s.within_ceiling(a, host="anything.example")
+
+
+def test_check_ceiling(scenario):
+    policy = {"version": 1, "allow_within": ["10.0.0.0/8"], "allow_hosts": ["pypi.org", "files.pythonhosted.org"]}
+    if scenario == "happy":  # the provider and listed hosts are fine
+        s.check_policy(s.parse_args(["codex", "--allow-pypi", "--allow-host", "pypi.org"]), policy)
+    elif scenario == "sad":  # named hosts, presets, DNS, host ports: all widen past the ceiling
+        for options in (["--allow-host", "pastebin.com"], ["--allow-github"], ["--dns"], ["--nameserver", "8.8.8.8"],
+                        ["--allow-host-port", "11434"]):
+            with pytest.raises(ValueError, match="administrator"):
+                s.check_policy(s.parse_args(["codex", *options]), policy)
+    else:  # a resolver inside the ceiling is fine
+        s.check_policy(s.parse_args(["codex", "--nameserver", "10.0.0.53"]), policy)

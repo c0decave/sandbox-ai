@@ -14,7 +14,7 @@ Standard-Backend braucht funktionierendes rootless Podman mit `pasta`;
 ## 0. Installieren
 
 ```bash
-./install.sh --from .     # aus einem Checkout; später: sandbox-ai update
+./install.sh --from .     # aus einem Checkout; später: git pull && ./install.sh --from .
 sandbox-ai doctor         # was auf diesem Host fehlt und wie man es behebt
 ```
 

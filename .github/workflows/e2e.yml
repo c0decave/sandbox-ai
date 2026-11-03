@@ -1,0 +1,90 @@
+name: e2e
+
+# Real sandboxes on a real host: the images are built, then the live tests run with rootless
+# Podman and with Bubblewrap + Firejail (nftables firewall, the connection proxy's NAT redirect,
+# pushes to a Git server on the host, network changes while a sandbox runs, MCP catalog containers).
+# Failed tests are reported as annotations of the job.
+
+on:
+  push:
+    branches: [e2e]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [podman, bwrap]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q podman passt bubblewrap firejail slirp4netns uidmap nftables tmux python3-pytest
+      - name: Host settings (user namespaces, terminal injection, NAT modules)
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo sysctl -w dev.tty.legacy_tiocsti=0 || true
+          sudo modprobe -a nft_chain_nat nft_redir || true
+          grep "^$(id -un):" /etc/subuid /etc/subgid || sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$(id -un)"
+          # A systemd user session, as on a desktop: rootless Podman's cgroup manager and systemd-run --user.
+          sudo loginctl enable-linger "$(id -un)"
+          for _ in $(seq 30); do [ -S "/run/user/$(id -u)/bus" ] && break; sleep 1; done
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
+      - name: Agent CLIs on the host (Bubblewrap runs the host's binaries)
+        if: matrix.backend == 'bwrap'
+        run: |
+          sudo npm install -g --prefix /usr/local @openai/codex @anthropic-ai/claude-code opencode-ai
+          printf '::notice title=agents::%s\n' "$(for c in node codex claude opencode; do printf '%s=%s ' "$c" "$(readlink -f "$(command -v $c)")"; done)"
+      # The job log needs a login to read; what matters is also written as annotations.
+      - name: Diagnostics
+        run: |
+          note() { printf '::notice title=%s::%s\n' "$1" "$(printf '%s' "$2" | sed ':a;N;$!ba;s/\n/%0A/g' | head -c 3800)"; }
+          note "podman" "$(podman version 2>&1 | head -20; podman info 2>&1 | grep -iE 'cgroup|ociRuntime|name: (crun|runc)|networkBackend|pasta|rootless|slirp' | head -20)"
+          note "kernel" "$(uname -r); userns=$(cat /proc/sys/user/max_user_namespaces); apparmor_userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>&1); tiocsti=$(cat /proc/sys/dev/tty/legacy_tiocsti 2>&1); nat=$(ls /sys/module | grep -E '^nft_(chain_nat|redir)$' | tr '\n' ' '); controllers=$(cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers 2>&1)"
+          note "doctor" "$(./sandbox-ai doctor --backend ${{ matrix.backend }} 2>&1)"
+      - name: Build the images
+        if: matrix.backend == 'podman'
+        run: |
+          ./sandbox-build-image all 2>&1 | tee build.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" != 0 ]; then printf '::error title=image build::%s\n' "$(tail -c 3000 build.log | sed ':a;N;$!ba;s/\n/%0A/g')"; fi
+          exit "$status"
+      - name: Live tests
+        run: |
+          python3 -m pytest -q -p no:cacheprovider -rfE --junitxml=live.xml --agent-live \
+            --agent-backend ${{ matrix.backend }} \
+            tests/test_live_e2e.py tests/test_agent_sandbox_live.py tests/test_escape_live.py
+      - name: Failures as annotations
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          # GitHub shows ten errors per step: one summary line with every failure, then the details,
+          # each with the end of its text (where the sandbox's stderr is).
+          failed, cases = [], 0
+          for case in ET.parse("live.xml").iter("testcase"):
+              cases += 1
+              for bad in list(case.iter("failure")) + list(case.iter("error")):
+                  failed.append((case.get("name"), bad.text or bad.get("message") or ""))
+          print(f"::error title=summary::{len(failed)} of {cases} failed: " + ", ".join(n for n, _ in failed))
+          for name, text in failed[:9]:
+              text = text.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+              print(f"::error title={name}::{text[-3500:]}")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-${{ matrix.backend }}
+          path: live.xml

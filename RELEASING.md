@@ -47,9 +47,9 @@ tag if it does not exist and replaces files of the same name.
 Users then update with `sandbox-ai-update`; new installs use
 `./install.sh` (or `install.sh --source URL`).
 
-## Later: public repository on GitHub and PyPI
+## GitHub and PyPI
 
-The public repository (`sandbox-ai-public`) runs `.github/workflows/`:
+The repository runs `.github/workflows/`:
 
 - `ci.yml`: tests on Python 3.9 to 3.13, builds the package and runs every command from the wheel.
 - `release.yml`, for a pushed tag `vX.Y.Z`: tests, checks that the tag matches
@@ -62,7 +62,7 @@ The public repository (`sandbox-ai-public`) runs `.github/workflows/`:
 `DEFAULT_SOURCE` in `install.sh` and `[project.urls]` in `pyproject.toml` point
 to `https://github.com/c0decave/sandbox-ai`.
 
-Before anything reaches the public repository, run the privacy check on what
-would be published: `sandbox-ai privacy-check` (with `--privacy-rules` or
-`--rules-dir` for your own rules), see the README section "Privacy check
+Before you push or tag a release, run the privacy check on what would be
+published: `sandbox-ai privacy-check` (with `--rules-dir` for your
+own rules), see the README section "Privacy check
 before publishing".

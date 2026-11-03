@@ -800,7 +800,7 @@ class SandboxTests(unittest.TestCase):
         return path
 
     def test_project_config_is_loaded_from_main_workspace(self):
-        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {"XDG_CONFIG_HOME": d + "/cfg"}):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as cfg, patch.dict(os.environ, {"XDG_CONFIG_HOME": cfg}):
             work = Path(d) / "proj"
             work.mkdir()
             self.write_project_config(work, {"version": 1, "agent": "opencode",
@@ -822,7 +822,7 @@ class SandboxTests(unittest.TestCase):
             self.assertIsNone(json.loads(stdout.getvalue())["project_config"])
 
     def test_untrusted_or_changed_project_config_is_refused(self):
-        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {"XDG_CONFIG_HOME": d + "/cfg"}):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as cfg, patch.dict(os.environ, {"XDG_CONFIG_HOME": cfg}):
             path = self.write_project_config(d, {"version": 1, "agent": "codex", "options": ["--egress-all-allow"]}, trust=False)
             with self.assertRaisesRegex(ValueError, "not trusted"):
                 s.main(["codex", "--workspace", d, "--dry-run"])
@@ -832,7 +832,7 @@ class SandboxTests(unittest.TestCase):
                 s.main(["codex", "--workspace", d, "--dry-run"])
 
     def test_project_config_content_is_validated(self):
-        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {"XDG_CONFIG_HOME": d + "/cfg"}):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as cfg, patch.dict(os.environ, {"XDG_CONFIG_HOME": cfg}):
             for document, message in [({"version": 1, "agent": "claude", "options": []}, "for claude"),
                                       ({"version": 2, "agent": "codex", "options": []}, "version"),
                                       ({"version": 1, "agent": "codex", "options": ["--pod-name", "agent-x"]}, "not allowed"),
@@ -845,7 +845,7 @@ class SandboxTests(unittest.TestCase):
                         s.main(["codex", "--workspace", d, "--dry-run"])
 
     def test_explicit_config_path(self):
-        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {"XDG_CONFIG_HOME": d + "/cfg"}):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as cfg, patch.dict(os.environ, {"XDG_CONFIG_HOME": cfg}):
             path = Path(d) / "elsewhere.json"
             path.write_text(json.dumps({"version": 1, "agent": "codex", "options": ["--dns"]}))
             s.trust_config(path)
@@ -855,7 +855,7 @@ class SandboxTests(unittest.TestCase):
 
     def test_session_accepts_tmux_from_project_config(self):
         # A session is tmux already; --tmux (e.g. from the wizard) is redundant, not an error.
-        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {"XDG_CONFIG_HOME": d + "/cfg"}):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as cfg, patch.dict(os.environ, {"XDG_CONFIG_HOME": cfg}):
             work = Path(d) / "w"
             work.mkdir()
             self.write_project_config(work, {"version": 1, "agent": "claude", "options": ["--tmux"]})
@@ -912,7 +912,7 @@ class SandboxTests(unittest.TestCase):
         self.assertIn("--mcp-socket-dir", s.CONFIG_FORBIDDEN)
 
     def test_review_symlinked_project_config_is_refused(self):
-        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {"XDG_CONFIG_HOME": d + "/cfg"}):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as cfg, patch.dict(os.environ, {"XDG_CONFIG_HOME": cfg}):
             trusted_project, attacker = Path(d) / "b", Path(d) / "a"
             trusted_project.mkdir()
             attacker.mkdir()
@@ -922,7 +922,7 @@ class SandboxTests(unittest.TestCase):
                 s.main(["codex", "--workspace", str(attacker), "--dry-run"])
 
     def test_review_config_is_hashed_and_parsed_from_the_same_bytes(self):
-        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {"XDG_CONFIG_HOME": d + "/cfg"}):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as cfg, patch.dict(os.environ, {"XDG_CONFIG_HOME": cfg}):
             path = self.write_project_config(d, {"version": 1, "agent": "codex", "options": ["--dns"]})
             evil = json.dumps({"version": 1, "agent": "codex", "options": ["--egress-all-allow"]})
             real_read = s.os.read
@@ -950,7 +950,7 @@ class SandboxTests(unittest.TestCase):
                     s.load_project_config(s.parse_args(["codex", "--workspace", d]))
 
     def test_review_missing_trusted_config_is_an_error(self):
-        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {"XDG_CONFIG_HOME": d + "/cfg"}):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as cfg, patch.dict(os.environ, {"XDG_CONFIG_HOME": cfg}):
             path = self.write_project_config(d, {"version": 1, "agent": "codex", "options": ["--offline"]})
             path.unlink()
             with self.assertRaisesRegex(ValueError, "trusted project configuration .* is missing"):
@@ -959,7 +959,7 @@ class SandboxTests(unittest.TestCase):
                 s.main(["codex", "--workspace", d, "--no-config", "--dry-run"])
 
     def test_review_cli_auth_choice_replaces_config_auth_choice(self):
-        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {"XDG_CONFIG_HOME": d + "/cfg"}):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as cfg, patch.dict(os.environ, {"XDG_CONFIG_HOME": cfg}):
             self.write_project_config(d, {"version": 1, "agent": "codex", "options": ["--no-auth", "--dns"]})
             with contextlib.redirect_stdout(io.StringIO()) as stdout:
                 s.main(["codex", "--workspace", d, "--copy-auth", "--dry-run"])
@@ -1081,7 +1081,7 @@ class SandboxTests(unittest.TestCase):
             return Mock()
         with patch.object(s.subprocess, "run", side_effect=run), self.assertRaises(SystemExit):
             s.run_pod(a, Path("/tmp/session"), Path("/tmp/home"))
-        self.assertTrue(any(cmd[-3:-1] == ["rm", "--force"] for cmd in calls))
+        self.assertTrue(any(cmd[-5:-1] == ["rm", "--force", "--time", "0"] for cmd in calls))
 
     def test_mount_with_spaces_and_ipv6_allow(self):
         with tempfile.TemporaryDirectory(prefix="space dir ") as d:
@@ -1197,7 +1197,8 @@ class SandboxTests(unittest.TestCase):
     def test_pod_uses_owned_namespace_and_verified_bootstrap(self):
         a = s.parse_args(["codex", "--network", "research", "--ip", "198.51.100.2"])
         create, run = s.pod_commands(a, "owned-pod", Path("/tmp/session"), Path("/tmp/home"))
-        self.assertIn("--userns=keep-id:uid=0,gid=0", create)
+        self.assertIn("--userns=host", create)
+        self.assertFalse(any("keep-id" in token for token in create))  # Podman < 5.2: broken gid_map
         self.assertEqual(create[create.index("--infra-image") + 1], a.image)
         self.assertEqual(create[create.index("--infra-command") + 1], "/usr/bin/sleep infinity")
         self.assertEqual(create[create.index("--network") + 1], "research")

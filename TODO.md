@@ -69,6 +69,28 @@ the wizard's origin default. Still open, low severity:
   the tokens (every login in the file) to the agent; the push proxy above would
   keep them on the host.
 
+## Open findings from the reviews of 2026-11-03
+
+Fixed in 0.1.21: approvals naming the sandbox, one host-path policy (registry
+of exposed trees, planted symlinks, private locations and PATH directories for
+workspaces, mounts, --state-dir, --log-dir, --kit-dir and MCP image mounts),
+SSH as address and port, safe tool-call redaction, approvals remembered only
+once applied. Still open:
+
+- **Check, then mount.** The checks run before Podman resolves the paths
+  itself; a sandbox running at the same time can swap a directory for a link
+  in between (`RENAME_EXCHANGE`). MCP image servers now compare every folder
+  with its device and inode before each connection, which narrows this to
+  milliseconds. Bubblewrap could bind file descriptors (`--bind-fd`); for
+  Podman, re-check from inside the started container against the inode
+  recorded at check time.
+- **MCP server egress.** A server with network acts for the agent past its
+  proxy and approvals; route server traffic through the same proxy and
+  allow-list. One agent holding all 16 connections of a shared server locks
+  other sandboxes out (per-client limit or idle timeout).
+- **Registry seeding** covers approvals, trusted configurations, sessions and
+  MCP definitions; plain runs of older versions left no trace.
+
 ## Kits, memory and plugins (2026-11-02)
 
 Not verified live yet (no Podman/Bubblewrap or agent images where this was built):

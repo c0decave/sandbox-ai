@@ -33,8 +33,8 @@ def sandbox(tmp_path, monkeypatch):
                                               "started": "now", "session": None}))
     applied, stop = [], threading.Event()
     allow = tmp_path / "allow.json"
-    thread = threading.Thread(target=rt.control_server, args=(run / "control.sock", {"loopback": []}, allow, stop,
-                                                              applied.append), daemon=True)
+    network = rt.RuntimeNetwork({"loopback": []}, allow, applied.append)
+    thread = threading.Thread(target=rt.control_server, args=(run / "control.sock", network, stop), daemon=True)
     thread.start()
     deadline = time.monotonic() + 5
     while not (run / "control.sock").exists() and time.monotonic() < deadline:

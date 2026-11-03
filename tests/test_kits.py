@@ -860,7 +860,7 @@ def test_review_agent_trees_inside_a_store_are_refused(tmp_path):
     for path in (k.plugin_store("claude") / ".claude/plugins/cache/x", data() / "home/claude/skills",
                  Path(os.environ["HOME"]) / ".local/state/sandbox-ai/memory/p"):
         path.mkdir(parents=True, exist_ok=True)
-        with pytest.raises(ValueError, match="lies inside"):
+        with pytest.raises(ValueError, match="lies inside|lies in "):
             s.validate(s.parse_args(["claude", "--workspace", str(path), "--no-auth"]))
     # The plugin store's own sandbox (--no-plugins, store as HOME) is fine.
     s.validate(s.parse_args(["claude", "--workspace", str(tmp_path / "w"), "--no-auth", "--no-plugins",

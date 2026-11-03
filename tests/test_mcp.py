@@ -528,3 +528,72 @@ def test_catalog_command_lists_both_catalogs(tmp_path, capsys):
     assert "c0:duckduckgo  [allowlist html.duckduckgo.com:443]  DuckDuckGo search" in captured.out
     assert "c1:binwalk  [none]  binwalk  (not published yet)" in captured.out
     assert "catalog not read" in captured.err
+
+
+def test_tool_calls_are_logged_by_the_serve_end(tmp_path):
+    out = io.StringIO()
+    short = Path(tempfile.mkdtemp(prefix="mcp-", dir="/tmp"))
+    sock = short / "s.sock"
+    threading.Thread(target=s.RUNTIME.mcp_serve, args=(str(sock), ["cat"]), kwargs={"cwd": "/", "out": out},
+                     daemon=True).start()
+    deadline = time.monotonic() + 5
+    while not sock.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    with socket.socket(socket.AF_UNIX) as client:
+        client.connect(str(sock))
+        call = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                           "params": {"name": "list_directory", "arguments": {"path": "/work"}}}) + "\n"
+        client.sendall(call.encode())
+        client.settimeout(5)
+        assert client.makefile("r").readline() == call  # passed through unchanged
+    deadline = time.monotonic() + 5
+    while "sandbox-ai-mcp-call" not in out.getvalue() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    line = next(l for l in out.getvalue().splitlines() if l.startswith("sandbox-ai-mcp-call "))
+    assert json.loads(line.split(" ", 1)[1])["tool"] == "list_directory"
+
+
+def test_server_stderr_cannot_forge_call_records():
+    """The server's stderr shares the log with our tool-call records: each of its lines is prefixed."""
+    import io
+    rt = load("runtime_for_stderr_test", "runtime.py")
+    out = io.StringIO()
+    rt.relay_server_stderr(io.BytesIO(b'sandbox-ai-mcp-call {"tool": "fake"}\nplain\n'), out)
+    assert out.getvalue() == 'mcp-server: sandbox-ai-mcp-call {"tool": "fake"}\nmcp-server: plain\n'
+    assert not any(line.startswith("sandbox-ai-mcp-call ") for line in out.getvalue().splitlines())
+
+
+def test_git_credentials_are_not_allowed_for_mcp_servers():
+    for option in ("--git-token-secret", "--git-identity"):
+        with pytest.raises(ValueError, match="not allowed for an MCP server"):
+            m.validated({"x": {"command": ["srv"], "options": [option] + (["github.com=T"] if "secret" in option else [])}}, "test")
+
+
+def test_image_mounts_pass_the_host_path_policy(tmp_path, monkeypatch):
+    """An image server's folder inside an agent's workspace could be swapped for a link to ~/.config."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    work = tmp_path / "proj"
+    (work / "extracted").mkdir(parents=True)
+    l = m.launcher()
+    l.remember_exposed(None, [work])
+    inside = {"image": "x", "mounts": [{"host": str(work / "extracted"), "target": "/out", "mode": "rw"}]}
+    with pytest.raises(ValueError, match="lies inside .*proj"):
+        m.check_image_mounts("bw", inside)
+    planted = tmp_path / "other"
+    planted.mkdir()
+    (work / "link").symlink_to(planted)
+    with pytest.raises(ValueError, match="goes through the symlink"):
+        m.check_image_mounts("bw", {"image": "x", "mounts": [{"host": str(work / "link"), "target": "/o"}]})
+    own = tmp_path / "bw-out"
+    own.mkdir()
+    m.check_image_mounts("bw", {"image": "x", "mounts": [{"host": str(own), "target": "/out", "mode": "rw"}]})
+    assert own in l.exposed_before()  # what the server writes is watched from now on
+
+
+def test_image_servers_obey_the_policy(monkeypatch):
+    l = m.launcher()
+    monkeypatch.setattr(l, "load_policy", lambda path=None: {"version": 1, "mcp_network": "none"})
+    with pytest.raises(ValueError, match="network full is not allowed"):
+        m.check_image_policy("fetch", {"image": "x", "network": "full"})
+    m.check_image_policy("bw", {"image": "x"})  # no network: fine

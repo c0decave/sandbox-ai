@@ -163,7 +163,7 @@ def check_proxy_nat(modules=Path("/sys/module"), builtin=None):
                if not (modules / name).exists() and f"/{name}.ko" not in built_in]
     if missing:
         return ("warn", "Connection proxy", "nftables NAT not loaded: " + ", ".join(missing) + " (the kernel may "
-                "still load it on demand)", "sudo modprobe nft_chain_nat nft_redir (persist in "
+                "still load it on demand)", "sudo modprobe -a nft_chain_nat nft_redir (persist in "
                 "/etc/modules-load.d/), or start with --no-proxy")
     return "ok", "Connection proxy", "nftables NAT available", ""
 
