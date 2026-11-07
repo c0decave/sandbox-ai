@@ -279,8 +279,8 @@ MCP-Server, die noch hinzuzufügen sind.
 
 ```bash
 sandbox-ai net allow --allow-host pypi.org       # mehr Ziele, bis die Sandbox endet
-sandbox-ai net allow --allow-host-port 3000      # ein Dienst auf diesem Host, über ein Relay
-sandbox-ai net allow --git-token-env http://localhost:3000=SANDBOX_GIT_TOKEN   # ein Git-Login
+sandbox-ai net allow --allow-host-port 3080      # ein Dienst auf diesem Host, über ein Relay
+sandbox-ai net allow --git-token-env http://localhost:3080=SANDBOX_GIT_TOKEN   # ein Git-Login
 sandbox-ai net allow --allow-host api.osv.dev --keep   # auch für die nächsten Starts
 sandbox-ai net show                              # was dazukam
 ```
@@ -291,7 +291,7 @@ Sandbox:
 
 ```bash
 sandbox-ai secrets set GITEA_TOKEN
-sandbox-ai git-logins add http://localhost:3000 --secret GITEA_TOKEN --user sie
+sandbox-ai git-logins add http://localhost:3080 --secret GITEA_TOKEN --user sie
 ```
 
 API-Schlüssel gehen genauso: Mit `--api-key dev.to=DEVTO_API_KEY` ist
@@ -320,7 +320,7 @@ Build, damit die Sandbox überlebt. `sandbox-ai web` bietet all das als Webseite
 | `--allow-host-port PORT` | Dienst auf dem eigenen Host erreichen, etwa einen lokalen Git-Server (während des Laufs: `net allow --allow-host-port`) |
 | `--model opus`, `--effort high` | Modell und Gründlichkeit des Agenten, in seinen eigenen Worten (Claude Code, Codex) |
 | `--preset NAME`, `--preset-value K=V` | Mit einem Preset starten (siehe Schritt 10) |
-| `--git-token-env URL=NAME`, `--git-identity` | Aus der Sandbox pushen, z. B. `http://localhost:3000=SANDBOX_GIT_TOKEN` |
+| `--git-token-env URL=NAME`, `--git-identity` | Aus der Sandbox pushen, z. B. `http://localhost:3080=SANDBOX_GIT_TOKEN` |
 | `--git-token-env https://github.com=NAME` | Nach GitHub pushen |
 | `--git-credentials ~/.git-credentials` | Vorhandene Git-Logins nutzen (der Agent kann sie lesen) |
 | `--kit NAME`, `--no-memory` | Skills, Agents und Commands eines Kits dazunehmen (`~/.local/share/sandbox-ai/kits/NAME`); ohne Projekt-Memory starten |
@@ -331,12 +331,12 @@ Build, damit die Sandbox überlebt. `sandbox-ai web` bietet all das als Webseite
 | `--log-dir DIR` | Logs (siehe Schritt 9) |
 | `--dry-run`, `--probe` | Plan zeigen / Isolation prüfen |
 
-Auf ein lokales Gitea oder Forgejo auf Port 3000 pushen:
+Auf ein lokales Gitea oder Forgejo auf Port 3080 pushen:
 
 ```bash
 export SANDBOX_GIT_TOKEN=...   # Gitea: Einstellungen -> Anwendungen
 ./sandbox-ai claude --workspace "$HOME/src/sandbox-demo" \
-  --git-token-env http://localhost:3000=SANDBOX_GIT_TOKEN --git-identity
+  --git-token-env http://localhost:3080=SANDBOX_GIT_TOKEN --git-identity
 ```
 
 `./sandbox-ai claude --help` listet jede Option; die

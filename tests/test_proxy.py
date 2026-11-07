@@ -1033,7 +1033,7 @@ def plain_request(port, request):
 
 
 def test_a_login_for_the_hosts_loopback_reaches_only_that_port_over_plain_http(tmp_path, pki):
-    """sandbox-ai git-logins for http://localhost:3000 (a local Gitea): the proxy adds the token to Git's requests
+    """sandbox-ai git-logins for http://localhost:3080 (a local Gitea): the proxy adds the token to Git's requests
     to that loopback port, which the sandbox reaches only as the host's; not to other paths, ports or servers."""
     upstream = serve(EchoAuthorization)
     port = upstream.server_address[1]

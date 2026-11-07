@@ -27,23 +27,23 @@ def run(*argv):
 
 
 def test_add_list_check_and_remove(capsys):
-    status, text = run("add", "http://localhost:3000/", "--secret", "GITEA", "--user", "alice")
-    assert status == 0 and "http://localhost:3000: login alice with the secret GITEA" in text
+    status, text = run("add", "http://localhost:3080/", "--secret", "GITEA", "--user", "alice")
+    assert status == 0 and "http://localhost:3080: login alice with the secret GITEA" in text
     assert "sandbox-ai secrets set GITEA" in text  # not kept yet: said
     assert g.path().stat().st_mode & 0o777 == 0o600
     assert run("check")[0] == 1 and "the secret GITEA is missing" in run("check")[1]
     g.launcher().load_secret_store_module().store().set("GITEA", TOKEN)
-    assert run("check") == (0, "http://localhost:3000: ok")
+    assert run("check") == (0, "http://localhost:3080: ok")
     pairs, notes = g.credentials()
-    assert [(c["url"], c["user"], c["loopback"], t) for c, t in pairs] == [("http://localhost:3000", "alice", True, TOKEN)]
+    assert [(c["url"], c["user"], c["loopback"], t) for c, t in pairs] == [("http://localhost:3080", "alice", True, TOKEN)]
     assert notes == [] and TOKEN not in g.path().read_text()  # the list holds the secret's name only
     # The same server again replaces its login; list shows it once.
-    run("add", "http://localhost:3000", "--secret", "GITEA2")
+    run("add", "http://localhost:3080", "--secret", "GITEA2")
     status, text = run("list", "--json")
     assert [e["secret"] for e in json.loads(text)] == ["GITEA2"]
-    assert run("remove", "http://localhost:3000")[0] == 0 and run("list")[1].startswith("no Git logins")
-    assert run("remove", "http://localhost:3000")[0] == 1
-    assert "no login for http://localhost:3000" in capsys.readouterr().err
+    assert run("remove", "http://localhost:3080")[0] == 0 and run("list")[1].startswith("no Git logins")
+    assert run("remove", "http://localhost:3080")[0] == 1
+    assert "no login for http://localhost:3080" in capsys.readouterr().err
 
 
 def test_refusals(capsys, home):
@@ -66,9 +66,9 @@ def test_refusals(capsys, home):
 
 def test_a_start_option_skips_its_server_and_a_missing_secret_is_named():
     g.save([{"url": "https://github.com", "user": "x-access-token", "secret": "GH"},
-            {"url": "http://localhost:3000", "user": "ch", "secret": "NOT_KEPT"}])
+            {"url": "http://localhost:3080", "user": "ch", "secret": "NOT_KEPT"}])
     g.launcher().load_secret_store_module().store().set("GH", "ghp_" + "a" * 36)
     pairs, notes = g.credentials(skip={"https://github.com"})
-    assert pairs == [] and notes == ["git-logins: http://localhost:3000 left out: no usable secret NOT_KEPT "
+    assert pairs == [] and notes == ["git-logins: http://localhost:3080 left out: no usable secret NOT_KEPT "
                                      "(sandbox-ai secrets set NOT_KEPT)"]
     assert [c["url"] for c, _ in g.credentials()[0]] == ["https://github.com"]

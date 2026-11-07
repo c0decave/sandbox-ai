@@ -127,7 +127,7 @@ def test_happy_normalisation_default_ports_case_paths():
         "https://u:p@git.example.org/owner/repo.git": "https://git.example.org",
         "https://u:p@git.example.org:8443/x": "https://git.example.org:8443",
         "http://u:p@LOCALHOST:80": "http://localhost",
-        "http://u:p@127.0.0.1:3000/": "http://127.0.0.1:3000",
+        "http://u:p@127.0.0.1:3080/": "http://127.0.0.1:3080",
         "http://u:p@[::1]:3000/x": "http://[::1]:3000",
         "https://u:p@[::1]": "https://[::1]",
         "https://u:a:b:c@h.example": "https://h.example",  # git splits at the first ':'
@@ -372,13 +372,13 @@ def test_sad_offline_and_mcp(tmp_path):
 
 
 def test_sad_loopback_without_podman_default_network(tmp_path):
-    path = lines(tmp_path / "private", login("a", GIT_TOKEN, "http://localhost:3000"),
+    path = lines(tmp_path / "private", login("a", GIT_TOKEN, "http://localhost:3080"),
                  login("b", GIT_TOKEN, "http://[::1]:3001"), login("c", GIT_TOKEN, "https://git.example.org"))
     for options in (["--backend", "bwrap"], ["--network", "research"]):
         a = validated(tmp_path, *options, "--git-credentials", str(path))
         assert entries(a) == [("https://git.example.org", "c", GIT_TOKEN)]
         assert [("loopback" in n) for n in notes(a)] == [True, True] and a.allow_host_port == []
-    only_loopback = lines(tmp_path / "loop", login("a", GIT_TOKEN, "http://localhost:3000"))
+    only_loopback = lines(tmp_path / "loop", login("a", GIT_TOKEN, "http://localhost:3080"))
     refused(tmp_path, "no login the sandbox can use", "--backend", "bwrap", "--git-credentials", str(only_loopback))
 
 
@@ -514,7 +514,7 @@ def test_parity_lines_git_writes(tmp_path):
 
 
 @needs_git
-@pytest.mark.parametrize("server", ["http://localhost:3000", "http://[::1]:3000", "https://git.example.org:8443"])
+@pytest.mark.parametrize("server", ["http://localhost:3080", "http://[::1]:3080", "https://git.example.org:8443"])
 def test_parity_git_written_ports(tmp_path, server):
     path = tmp_path / "private" / "git-credentials"
     path.parent.mkdir()

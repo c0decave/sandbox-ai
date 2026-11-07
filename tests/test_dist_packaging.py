@@ -294,13 +294,14 @@ def test_ci_installs_only_hash_pinned_packages():
         assert uploaded and datetime.date.fromisoformat(uploaded[1]) <= pinned_on() - MIN_AGE, requirement
 
 
-def test_a_release_bundles_the_app_at_a_fixed_commit():
-    """Review finding: APP_REF defaulted to the app's moving main branch; a tag build must name a commit."""
+def test_a_release_bundles_the_app_of_its_own_commit():
+    """The app is part of this repository: a release takes it from the same checkout, never from a moving branch of
+    another repository."""
     release = (ROOT / ".github/workflows/release.yml").read_text()
-    step = release[release.index("- name: The app is pinned for a release"):]
-    step = step[:step.index("\n      - ")]
-    assert "if: startsWith(github.ref, 'refs/tags/')" in step and "[0-9a-f]{40}" in step and "exit 1" in step
-    assert release.index("The app is pinned for a release") < release.index("repository: ${{ env.APP_REPOSITORY }}")
+    assert "repository:" not in release and "SANDBOX_AI_APP_REF" not in release
+    assert (ROOT / "projects/sandbox-ai-app/sandbox_ai_app/__main__.py").is_file()
+    ci = (ROOT / ".github/workflows/ci.yml").read_text()
+    assert "working-directory: projects/sandbox-ai-app" in ci  # its tests run in CI
 
 
 @pytest.mark.parametrize("script", BUILD_SCRIPTS[:2], ids=lambda p: p.name)

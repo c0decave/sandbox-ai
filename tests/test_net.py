@@ -517,34 +517,34 @@ def git_fill(tokens, url, extra_config=()):
 def test_allow_git_token_gives_the_running_sandbox_a_login(sandbox, monkeypatch, capsys):
     tokens = git_ready(sandbox)
     monkeypatch.setenv("GITEA_TOKEN", TOKEN)
-    status, lines = run_net(["allow", "--git-token-env", "http://localhost:3000=GITEA_TOKEN"])
+    status, lines = run_net(["allow", "--git-token-env", "http://localhost:3080=GITEA_TOKEN"])
     text = "\n".join(lines)
     assert status == 0, capsys.readouterr().err
     # Listed by server and user, never the token; a loopback server needs its port forwarded from the start.
-    assert "http://localhost:3000" in text and "x-access-token" in text and TOKEN not in text
-    assert "--allow-host-port 3000" in text and "start with: --git-token-env http://localhost:3000=GITEA_TOKEN" in text
+    assert "http://localhost:3080" in text and "x-access-token" in text and TOKEN not in text
+    assert "--allow-host-port 3080" in text and "start with: --git-token-env http://localhost:3080=GITEA_TOKEN" in text
     assert tokens.stat().st_mode & 0o777 == 0o600
-    assert json.loads(tokens.read_text())["logins"] == [{"url": "http://localhost:3000", "user": "x-access-token",
+    assert json.loads(tokens.read_text())["logins"] == [{"url": "http://localhost:3080", "user": "x-access-token",
                                                          "token": TOKEN}]
     assert sandbox["applied"] == []  # nothing opened: the loopback is not the firewall's
     status, lines = run_net(["show", "--json"])
-    assert json.loads("\n".join(lines))["git"] == [{"url": "http://localhost:3000", "user": "x-access-token"}]
+    assert json.loads("\n".join(lines))["git"] == [{"url": "http://localhost:3080", "user": "x-access-token"}]
     # Git in the sandbox: the helper answers for that server (path and default ports do not matter) and no other.
-    assert git_fill(tokens, "http://localhost:3000/ch/repo.git") == \
-        (0, {"protocol": "http", "host": "localhost:3000", "username": "x-access-token",
+    assert git_fill(tokens, "http://localhost:3080/ch/repo.git") == \
+        (0, {"protocol": "http", "host": "localhost:3080", "username": "x-access-token",
              "password": TOKEN})
     assert git_fill(tokens, "http://localhost:3001/repo.git")[0] != 0  # no login: Git gives up (no prompt)
-    assert git_fill(tokens, "http://other@localhost:3000/repo.git")[0] != 0  # another user named in the URL
+    assert git_fill(tokens, "http://other@localhost:3080/repo.git")[0] != 0  # another user named in the URL
     # A login given at the start (its own helper after the empty value) wins over the run's.
-    start = [("credential.http://localhost:3000.helper", ""),
-             ("credential.http://localhost:3000.helper", "!f() { echo username=start; echo password=start-token; }; f")]
-    assert git_fill(tokens, "http://localhost:3000/repo.git", start)[1]["password"] == "start-token"
+    start = [("credential.http://localhost:3080.helper", ""),
+             ("credential.http://localhost:3080.helper", "!f() { echo username=start; echo password=start-token; }; f")]
+    assert git_fill(tokens, "http://localhost:3080/repo.git", start)[1]["password"] == "start-token"
     # Revoked: the file keeps the others; a second revoke says there is none.
-    status, lines = run_net(["revoke", "--git-token-env", "http://localhost:3000=ANY"])
+    status, lines = run_net(["revoke", "--git-token-env", "http://localhost:3080=ANY"])
     assert status == 0 and json.loads(tokens.read_text())["logins"] == []
-    assert git_fill(tokens, "http://localhost:3000/repo.git")[0] != 0
-    assert run_net(["revoke", "--git-token-env", "http://localhost:3000=ANY"])[0] == 1
-    assert "no Git login for http://localhost:3000" in capsys.readouterr().err
+    assert git_fill(tokens, "http://localhost:3080/repo.git")[0] != 0
+    assert run_net(["revoke", "--git-token-env", "http://localhost:3080=ANY"])[0] == 1
+    assert "no Git login for http://localhost:3080" in capsys.readouterr().err
 
 
 def test_allow_git_token_for_github_opens_its_hosts(sandbox, monkeypatch, tmp_path):
@@ -574,11 +574,11 @@ def test_allow_git_token_refusals(sandbox, monkeypatch, capsys):
     tokens = git_ready(sandbox, runtime_git_tokens=False)
     monkeypatch.setenv("GITEA_TOKEN", TOKEN)
     # A run started with --token-proxy or by an older sandbox-ai has no helper to read it.
-    assert run_net(["allow", "--git-token-env", "http://localhost:3000=GITEA_TOKEN"])[0] == 1
+    assert run_net(["allow", "--git-token-env", "http://localhost:3080=GITEA_TOKEN"])[0] == 1
     assert "takes no Git login during the run" in capsys.readouterr().err
     git_ready(sandbox)
     for argv, message in (
-            (["--git-token-env", "http://localhost:3000=UNSET_VARIABLE"], "Host variable is not set: UNSET_VARIABLE"),
+            (["--git-token-env", "http://localhost:3080=UNSET_VARIABLE"], "Host variable is not set: UNSET_VARIABLE"),
             (["--git-token-env", "http://git.example.org=GITEA_TOKEN"], "plain http would send the token"),
             (["--git-token-env", "https://git.example.org/path=GITEA_TOKEN"], "without a path"),
             (["--git-token-env", "https://a.example=GITEA_TOKEN", "--git-token-env", "https://a.example=OTHER"],
@@ -592,7 +592,7 @@ def test_allow_git_token_refusals(sandbox, monkeypatch, capsys):
     assert not tokens.exists() and sandbox["applied"] == []  # nothing written, nothing opened
     # The administrator's policy forbids the option at the start: then during the run too.
     monkeypatch.setattr(net.launcher(), "load_policy", lambda path=None: {"forbid": ["--git-token-env"]})
-    assert run_net(["allow", "--git-token-env", "http://localhost:3000=GITEA_TOKEN"])[0] == 1
+    assert run_net(["allow", "--git-token-env", "http://localhost:3080=GITEA_TOKEN"])[0] == 1
     assert "forbidden by the administrator's policy" in capsys.readouterr().err
     assert not tokens.exists()
 

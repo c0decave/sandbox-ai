@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<!-- Local files only: the scripts and styles next to this page and Qt's qwebchannel.js. -->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src file: qrc:; style-src file: 'unsafe-inline'; font-src file: data:; img-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<title>sandbox-ai terminal</title>
+<link rel="stylesheet" href="vendor/xterm.css">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #1e1e1e; }
+  body.light { background: #ffffff; }
+  #terminal { position: absolute; top: 4px; left: 6px; right: 2px; bottom: 2px; }
+</style>
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+<script src="vendor/xterm.js"></script>
+<script src="vendor/addon-fit.js"></script>
+<script src="terminal.js"></script>
+</head>
+<body>
+<div id="terminal"></div>
+</body>
+</html>

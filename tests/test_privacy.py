@@ -64,16 +64,16 @@ def test_builtin_rules_find_credentials_and_mask_them():
 
 
 def test_derived_rules_name_what_is_yours():
-    context = {"homes": ["/home/marco"], "email": "marco@mail.example", "hostname": "zephyr7",
+    context = {"homes": ["/home/ada"], "email": "ada@mail.example", "hostname": "host7",
                "addresses": ["192.168.88.7", "127.0.0.1", "203.0.113.9"],
-               "servers": [{"host": "localhost", "port": 3000, "user": "m4rcoz"},
+               "servers": [{"host": "localhost", "port": 3080, "user": "ada42"},
                            {"host": "github.com", "port": 443, "user": "public-handle"},
                            {"host": "git.lan", "port": 443, "user": "oauth2"}],
                "tokens": [OWN_TOKEN]}
     derived = p.derived_rules(context)
-    text = "\n".join(["/home/marco/src/x", "/home/marcos/other", "mail marco@MAIL.example", "on zephyr7.",
+    text = "\n".join(["/home/ada/src/x", "/home/adams/other", "mail ada@MAIL.example", "on host7.",
                       "http://192.168.88.7:1234", "192.168.88.70", "127.0.0.1", "203.0.113.9",
-                      "http://localhost:3000/m4rcoz/repo", "localhost:30001", "github.com/public-handle",
+                      "http://localhost:3080/ada42/repo", "localhost:30801", "github.com/public-handle",
                       "git.lan/x", "oauth2", f"secret={OWN_TOKEN}"])
     found = {(f.where, f.pattern.id, f.pattern.severity) for f in p.scan_text(text, derived, "", str)}
     assert found == {("1", "host-home", "block"), ("3", "git-email", "warn"), ("4", "host-name", "warn"),
@@ -203,8 +203,8 @@ def test_scan_checks_author_and_committer(tmp_path):
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     (repo / "a").write_text("a\n")
     git(repo, "add", "a")
-    git(repo, "commit", "-qm", "one", env={"GIT_AUTHOR_EMAIL": "marco@mail.example"})
-    derived = p.derived_rules({"email": "marco@mail.example"})
+    git(repo, "commit", "-qm", "one", env={"GIT_AUTHOR_EMAIL": "ada@mail.example"})
+    derived = p.derived_rules({"email": "ada@mail.example"})
     assert [(f.where.split()[-1], f.pattern.id) for f in p.scan_repository(repo, derived).findings] == \
         [("author", "git-email")]
 
@@ -260,7 +260,7 @@ def test_check_after_run_only_for_public_remotes(tmp_path):
 
 def hooked_repo(tmp_path):
     engine = tmp_path / "engine"
-    p.write_hooks(engine, engine / "privacy.py", p.derived_rules({"homes": ["/home/marco"]}), ["git.lan"])
+    p.write_hooks(engine, engine / "privacy.py", p.derived_rules({"homes": ["/home/ada"]}), ["git.lan"])
     repo = published_repo(tmp_path)
     env = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath", "GIT_CONFIG_VALUE_0": str(engine / "hooks")}
     own = repo / ".git" / "hooks" / "pre-push"
@@ -272,7 +272,7 @@ def hooked_repo(tmp_path):
 @needs_git
 def test_pre_commit_warns_and_commits(tmp_path):
     _, repo, env = hooked_repo(tmp_path)
-    (repo / "conf.py").write_text("ROOT = '/home/marco/work'\n")
+    (repo / "conf.py").write_text("ROOT = '/home/ada/work'\n")
     git(repo, "add", "conf.py")
     result = git(repo, "commit", "-m", "conf", env=env)
     assert result.returncode == 0 and "conf.py:1 [host-home] block" in result.stderr
@@ -282,7 +282,7 @@ def test_pre_commit_warns_and_commits(tmp_path):
 @needs_git
 def test_pre_push_to_a_public_remote_refuses_blocking_findings(tmp_path):
     engine, repo, env = hooked_repo(tmp_path)
-    (repo / "conf.py").write_text(f"ROOT = '/home/marco/work'\nT = '{GH_TOKEN}'\n")
+    (repo / "conf.py").write_text(f"ROOT = '/home/ada/work'\nT = '{GH_TOKEN}'\n")
     git(repo, "add", "conf.py")
     git(repo, "commit", "-qm", "conf")
     head = git(repo, "rev-parse", "HEAD").stdout.strip()

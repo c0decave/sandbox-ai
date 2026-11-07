@@ -371,7 +371,7 @@ def host_port_is_podman_only(m):
     network_value = run.create[run.create.index("--network") + 1]
     assert "-T,3000,-T,11434" in network_value and "-T,none" not in network_value
     assert "tcp dport != { 3000, 11434 } return" in run.firewall
-    assert "127.0.0.1:3000 in the sandbox reaches port 3000" in run.err
+    assert "127.0.0.1:3080 in the sandbox reaches port 3000" in run.err
 
 
 @network
@@ -572,9 +572,9 @@ def git_login(m, url, secret="GITEA", token=TOKEN, user="alice"):
 @git
 def git_logins_reach_the_proxy_never_the_agent(m):
     """sandbox-ai git-logins: every run's proxy adds them; the agent's sandbox holds no token, no helper for it."""
-    git_login(m, "http://localhost:3000")
+    git_login(m, "http://localhost:3080")
     plan = m.plan("--allow-host-port", "3000") if m.backend == "podman" else m.plan()
-    assert plan["git_logins"] == [{"url": "http://localhost:3000", "user": "alice"}]
+    assert plan["git_logins"] == [{"url": "http://localhost:3080", "user": "alice"}]
     run = m.run(*(["--allow-host-port", "3000"] if m.backend == "podman" else []))
     assert run.proxy["git_tokens"] == [{"host": "localhost", "port": 3000, "user": "alice", "loopback": True,
                                         "token": TOKEN}]
@@ -656,11 +656,11 @@ def token_proxy_refusals(m):
     m.refused("--git-token-env", "http://git.example.org=GITEA", match="plain http would send the token unencrypted")
     # Plain http is for the host's loopback only (Podman); there the proxy adds the token to that port only.
     if m.backend == "podman":
-        run = m.run("--token-proxy", "--git-token-env", "http://localhost:3000=GITEA")
+        run = m.run("--token-proxy", "--git-token-env", "http://localhost:3080=GITEA")
         assert run.proxy["git_tokens"] == [{"host": "localhost", "port": 3000, "user": "x-access-token",
                                             "loopback": True, "token": TOKEN}] and TOKEN not in json.dumps(run.env)
     else:
-        m.refused("--token-proxy", "--git-token-env", "http://localhost:3000=GITEA", match="only the Podman backend")
+        m.refused("--token-proxy", "--git-token-env", "http://localhost:3080=GITEA", match="only the Podman backend")
     login = ":".join(("alice", TOKEN))  # git-credential-store line: https://USER:TOKEN@HOST
     credentials = m.private_file("git-credentials", f"https://{login}@git.example.org\n")
     m.refused("--token-proxy", "--git-credentials", str(credentials), match="not --git-credentials")
@@ -674,11 +674,11 @@ def token_proxy_refusals(m):
 def loopback_token_needs_podman_pasta(m):
     m.monkeypatch.setenv("GITEA", TOKEN)
     if m.backend == "bwrap":
-        m.refused("--git-token-env", "http://localhost:3000=GITEA", match="only the Podman backend")
+        m.refused("--git-token-env", "http://localhost:3080=GITEA", match="only the Podman backend")
         return
-    plan = m.plan("--git-token-env", "http://localhost:3000=GITEA")
+    plan = m.plan("--git-token-env", "http://localhost:3080=GITEA")
     assert plan["host_ports"] == [3000]  # implied --allow-host-port
-    m.refused("--network", "lab", "--git-token-env", "http://localhost:3000=GITEA", match="only the Podman backend")
+    m.refused("--network", "lab", "--git-token-env", "http://localhost:3080=GITEA", match="only the Podman backend")
 
 
 @git

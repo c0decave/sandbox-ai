@@ -964,7 +964,7 @@ def test_a_redirect_never_carries_the_token_over_plain_http_or_to_another_host()
     assert follow("https://git.example/a", "https://git.example/b").get_header("Authorization") == "token secret-token-123"
     assert follow("https://git.example/a", "http://git.example/b").get_header("Authorization") is None, "plain http"
     assert follow("https://git.example/a", "https://other.example/b").get_header("Authorization") is None
-    assert follow("http://localhost:3000/a", "http://localhost:3000/b").get_header("Authorization") == \
+    assert follow("http://localhost:3080/a", "http://localhost:3080/b").get_header("Authorization") == \
         "token secret-token-123"  # this host's loopback may be plain http
 
 

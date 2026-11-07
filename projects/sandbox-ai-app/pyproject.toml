@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sandbox-ai-app"
+dynamic = ["version"]
+description = "Graphical front end for sandbox-ai: every option, approvals, statistics, files, terminals, images, credentials"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+# PySide6 6.12.0 releases a reference to None too many in every call without a result; below Python 3.12
+# (where None is not immortal) the app aborts after a while ("deallocating None").
+dependencies = ["PySide6-Essentials>=6.6,!=6.12.0; python_version < '3.12'",
+                "PySide6-Essentials>=6.6; python_version >= '3.12'"]
+
+[project.optional-dependencies]
+# Terminal tabs inside the app (QtWebEngine; a separate wheel since PySide6 6.12). Also run
+# scripts/vendor_xterm.py before installing, for xterm.js.
+terminal = ["PySide6-Addons>=6.6,!=6.12.0; python_version < '3.12'", "PySide6-Addons>=6.6; python_version >= '3.12'",
+            "PySide6-WebEngine>=6.12; python_version >= '3.12'"]
+
+[project.scripts]
+sandbox-ai-app = "sandbox_ai_app.main:main"
+
+[project.urls]
+Source = "https://github.com/c0decave/sandbox-ai-app"
+
+[tool.setuptools]
+packages = ["sandbox_ai_app"]
+
+[tool.setuptools.package-data]
+sandbox_ai_app = ["web/*.html", "web/*.js", "web/vendor/*.js", "web/vendor/*.css", "web/vendor/LICENSE.*",
+                  "web/vendor/manifest.json"]
+
+[tool.setuptools.dynamic]
+version = { attr = "sandbox_ai_app.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

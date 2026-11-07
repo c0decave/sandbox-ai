@@ -1,0 +1,225 @@
+"""Identities (sandbox-ai identities): who a sandbox works as - a commit name and address, Git logins and publish
+logins under one name, chosen at a start with --identity NAME. A section of the Credentials page; every change goes
+through the command line (identities add/set/login/logout/publish/unpublish), names of secrets only, never tokens."""
+from __future__ import annotations
+
+import re
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QComboBox, QCompleter, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLineEdit,
+    QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
+)
+
+from .backend import SandboxAI
+from .files import printable
+from .i18n import tr
+from .widgets import background, confirm, fill, plain_label, selected, table
+
+PUBLISH_KINDS = tuple(SandboxAI.PUBLISH_HOSTS)
+
+
+def summary(identity):
+    who = " ".join(part for part in (identity.get("name"), f"<{identity['email']}>" if identity.get("email") else None)
+                   if part)
+    return [who or tr("(no commit name)"), ", ".join(e["url"] for e in identity.get("git", [])) or "—",
+            ", ".join(e["kind"] for e in identity.get("publish", [])) or "—"]
+
+
+class IdentitiesBox(QGroupBox):
+    """The identities with Add, Edit and Remove."""
+
+    def __init__(self, sai):
+        super().__init__(tr("Identities (sandbox-ai identities)"))
+        self.sai, self.known, self.secret_names = sai, {}, []
+        layout = QVBoxLayout(self)
+        layout.addWidget(plain_label(tr("Who a sandbox works as: commit name and address, Git and publish logins under "
+                                        "one name; a start uses one with --identity NAME. Without it: default (your "
+                                        "git-logins and publish-logins)."), role="secondary"))
+        self.list = table([tr("Identity"), tr("Commits as"), tr("Git servers"), tr("Publishes to")])
+        layout.addWidget(self.list)
+        row = QHBoxLayout()
+        self.add_button, self.edit_button, self.remove_button = \
+            QPushButton(tr("Add…")), QPushButton(tr("Edit…")), QPushButton(tr("Remove…"))
+        self.add_button.clicked.connect(lambda: self.edit(None))
+        self.edit_button.clicked.connect(lambda: self.edit(selected(self.list)))
+        self.remove_button.clicked.connect(self.remove)
+        for widget in (self.add_button, self.edit_button, self.remove_button):
+            row.addWidget(widget)
+        row.addStretch()
+        layout.addLayout(row)
+        self.message = plain_label()
+        self.message.setWordWrap(True)
+        layout.addWidget(self.message)
+
+    def refresh(self):
+        def read():
+            try:
+                names = [name for name, _ in self.sai.secrets()[1]]
+            except Exception:  # noqa: BLE001 - only an offer while typing
+                names = []
+            return self.sai.identities(), names
+        background(read, owner=self, timeout=90, done=self.shown)
+
+    def shown(self, result, error):
+        if error is not None:
+            self.message.setText(printable(error))
+            return
+        self.known, self.secret_names = result
+        fill(self.list, [[name, *summary(identity)] for name, identity in sorted(self.known.items())])
+
+    def edit(self, name):
+        if name is not None and name not in self.known:
+            return
+        dialog = IdentityDialog(self, name, self.known.get(name), self.secret_names, set(self.known))
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        target, new = dialog.result_identity()
+        old = self.known.get(target)
+        self.message.setText(tr("Saving {name}…", name=target))
+        background(lambda: self.sai.save_identity(target, old, new), owner=self, timeout=120,
+                   source=[self.add_button, self.edit_button, self.remove_button],
+                   done=lambda result, error: self.saved(target, result, error))
+
+    def saved(self, name, result, error):
+        status, said = (1, str(error)) if error is not None else result
+        self.message.setText(tr("{name} saved.", name=name) if status == 0 else printable(said)[-1500:])
+        self.refresh()
+
+    def remove(self):
+        name = selected(self.list)
+        if not name or not confirm(self, tr("Remove identity"),
+                                   tr("Remove the identity {name}? Its secrets stay in sandbox-ai secrets.", name=name),
+                                   tr("Remove"), destructive=True):
+            return
+        background(lambda: self.sai.call("identities", "remove", name, timeout=60), owner=self, timeout=90,
+                   done=lambda result, error: self.saved(name, (result[0], result[1] + result[2]) if error is None
+                                                         else (1, str(error)), None))
+
+
+class IdentityDialog(QDialog):
+    """One identity: its name (when new), commit name, address, description, Git logins and publish logins."""
+
+    def __init__(self, parent, name, identity, secret_names, taken):
+        super().__init__(parent)
+        self.setWindowTitle(tr("Identity {name}", name=name) if name else tr("New identity"))
+        self.resize(760, 560)
+        self.taken, self.original = taken, name
+        identity = identity or {}
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.name = QLineEdit(name or "")
+        self.name.setPlaceholderText(tr("lower-case letters, digits, - and _, e.g. work or c0decave"))
+        self.name.setReadOnly(name is not None)
+        self.person = QLineEdit(identity.get("name", ""))
+        self.person.setPlaceholderText(tr("the commit name, e.g. Ada Lovelace"))
+        self.email = QLineEdit(identity.get("email", ""))
+        self.email.setPlaceholderText(tr("the commit address, e.g. you@users.noreply.github.com"))
+        self.description = QLineEdit(identity.get("description", ""))
+        for label, widget in ((tr("Identity"), self.name), (tr("Commit name"), self.person), (tr("Commit address"), self.email),
+                              (tr("Description"), self.description)):
+            form.addRow(label, widget)
+        layout.addLayout(form)
+        self.secret_names = list(secret_names)
+        layout.addWidget(plain_label(tr("Git logins (the token is a secret of sandbox-ai secrets; the proxy adds it)"),
+                                     role="section"))
+        self.git = self.make_table([tr("Git server"), tr("User"), tr("Secret")])
+        for login in identity.get("git", []):
+            self.add_git(login["url"], login["user"], login["secret"])
+        layout.addWidget(self.git)
+        layout.addLayout(self.buttons_for(self.git, lambda: self.add_git("https://github.com", "", "")))
+        layout.addWidget(plain_label(tr("Publish logins (used with --publish KIND)"), role="section"))
+        self.publish = self.make_table([tr("Kind"), tr("Secret"), tr("Own server (optional)")])
+        for login in identity.get("publish", []):
+            default = SandboxAI.PUBLISH_HOSTS.get(login["kind"])
+            self.add_publish(login["kind"], login["secret"], "" if login["host"] == default else f"https://{login['host']}")
+        layout.addWidget(self.publish)
+        layout.addLayout(self.buttons_for(self.publish, lambda: self.add_publish("pypi", "", "")))
+        self.note = plain_label(role="secondary")
+        self.note.setWordWrap(True)
+        layout.addWidget(self.note)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.check_and_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    @staticmethod
+    def make_table(headers):
+        widget = QTableWidget(0, len(headers))
+        widget.setHorizontalHeaderLabels(headers)
+        widget.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        widget.verticalHeader().setVisible(False)
+        widget.setMaximumHeight(150)
+        return widget
+
+    def buttons_for(self, widget, add):
+        row = QHBoxLayout()
+        plus, minus = QPushButton(tr("Add")), QPushButton(tr("Remove"))
+        plus.clicked.connect(add)
+        minus.clicked.connect(lambda: [widget.removeRow(r) for r in
+                                       sorted({i.row() for i in widget.selectedIndexes()}, reverse=True)])
+        row.addWidget(plus)
+        row.addWidget(minus)
+        row.addStretch()
+        return row
+
+    def secret_edit(self, value):
+        edit = QLineEdit(value)
+        edit.setPlaceholderText(tr("a secret's name, e.g. GH_PUSH"))
+        completer = QCompleter(self.secret_names, edit)
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        edit.setCompleter(completer)
+        return edit
+
+    def add_git(self, url, user, secret):
+        row = self.git.rowCount()
+        self.git.insertRow(row)
+        self.git.setItem(row, 0, QTableWidgetItem(url))
+        self.git.setItem(row, 1, QTableWidgetItem(user))
+        self.git.setCellWidget(row, 2, self.secret_edit(secret))
+
+    def add_publish(self, kind, secret, url):
+        row = self.publish.rowCount()
+        self.publish.insertRow(row)
+        kinds = QComboBox()
+        kinds.addItems(PUBLISH_KINDS)
+        kinds.setCurrentText(kind)
+        self.publish.setCellWidget(row, 0, kinds)
+        self.publish.setCellWidget(row, 1, self.secret_edit(secret))
+        self.publish.setItem(row, 2, QTableWidgetItem(url))
+
+    def result_identity(self):
+        git = []
+        for row in range(self.git.rowCount()):
+            url = (self.git.item(row, 0).text() if self.git.item(row, 0) else "").strip()
+            user = (self.git.item(row, 1).text() if self.git.item(row, 1) else "").strip()
+            secret = self.git.cellWidget(row, 2).text().strip()
+            if url or secret:
+                git.append({"url": url, "user": user, "secret": secret})
+        publish = []
+        for row in range(self.publish.rowCount()):
+            kind = self.publish.cellWidget(row, 0).currentText()
+            secret = self.publish.cellWidget(row, 1).text().strip()
+            url = (self.publish.item(row, 2).text() if self.publish.item(row, 2) else "").strip()
+            if secret:
+                publish.append({"kind": kind, "secret": secret, **({"url": url} if url else {})})
+        return self.name.text().strip(), {"name": self.person.text().strip(), "email": self.email.text().strip(),
+                                          "description": self.description.text().strip(), "git": git,
+                                          "publish": publish}
+
+    def check_and_accept(self):
+        name, identity = self.result_identity()
+        problem = None
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", name) or name == "default":
+            problem = tr("The identity's name is lower-case letters, digits, - and _ (not default).")
+        elif self.original is None and name in self.taken:
+            problem = tr("There is an identity {name} already.", name=name)
+        elif any(not e["url"] or not e["secret"] for e in identity["git"]):
+            problem = tr("Each Git login needs a server (https://HOST, or http://localhost:PORT) and a secret.")
+        elif len({e["kind"] for e in identity["publish"]}) != len(identity["publish"]):
+            problem = tr("Each kind of publish login once.")
+        if problem:
+            self.note.setText(problem)
+            return
+        self.accept()

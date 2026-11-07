@@ -218,7 +218,7 @@ DEFAULTS_KEYS = {"version", "subnet", "subnet6", "mode", "canaries", "keep_days"
 SESSION_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}"
 # The directory of a start: its first name, with a suffix when that directory is taken (sessions.new_key).
 START_ID = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}"
-__version__ = "0.1.65"
+__version__ = "0.1.66"
 CONFIG_NAME = ".sandbox-ai.json"
 RULES_NAME = "rules.json"  # ~/.config/sandbox-ai/rules.json: your own rules, for every start
 # Label on session pods: the session's tmux directory, so a stale pod can be told apart from someone else's.
@@ -515,7 +515,7 @@ def build_parser():
                         "e.g. a local Git server; repeatable")
     p.add_argument("--git-token-env", action="append", default=[], metavar="URL=NAME",
                    help="Host variable NAME with an access token for Git over HTTP(S) at URL, e.g. "
-                        "http://localhost:3000=GITEA_TOKEN or https://github.com=GH_PAT (user as "
+                        "https://git.example.org=GITEA_TOKEN or https://github.com=GH_PAT (user as "
                         "http://USER@HOST:PORT); loopback URLs imply --allow-host-port, github.com --allow-github "
                         "and sets GH_TOKEN, other URLs --allow-host; repeatable")
     p.add_argument("--git-token-file", action="append", default=[], metavar="URL=FILE",

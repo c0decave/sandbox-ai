@@ -225,8 +225,8 @@ def test_git_remote_origin(scenario, tmp_path):
     project = tmp_path / "proj"
     if scenario == "happy":
         git_config(project, '[core]\n\tbare = false\n[remote "upstream"]\n\turl = https://example.org/x.git\n'
-                            '[remote "origin"]\n\turl = http://alice@localhost:3000/alice/sandbox-ai.git\n')
-        assert w.git_remote_origin(project) == "http://alice@localhost:3000"
+                            '[remote "origin"]\n\turl = http://alice@localhost:3080/alice/sandbox-ai.git\n')
+        assert w.git_remote_origin(project) == "http://alice@localhost:3080"
     elif scenario == "sad":
         assert w.git_remote_origin(project) is None
         git_config(project, '[remote "origin"]\n\turl = git@github.com:owner/repo.git\n')
@@ -273,25 +273,25 @@ def test_ask_git(scenario, tmp_path, monkeypatch):
     monkeypatch.setenv("CONTRACT_GH", "set")
     if scenario == "happy":
         # Tokens typed (hidden) for github.com and for the project's origin: only file paths reach the options.
-        git_config(project, '[remote "origin"]\n\turl = http://localhost:3000/alice/sandbox-ai.git\n')
+        git_config(project, '[remote "origin"]\n\turl = http://localhost:3080/alice/sandbox-ai.git\n')
         pending = []
         prompts = Prompts(["", "enter", "y", "", ""], secrets=[GH, GITEA])
         options = w.ask_git(prompts.p, {"backend": "podman", "network": "default"}, project, pending)
-        github, gitea = str(w.token_path("github.com")), str(w.token_path("http://localhost:3000"))
+        github, gitea = str(w.token_path("github.com")), str(w.token_path("http://localhost:3080"))
         assert options == ["--git-identity", "--git-token-file", f"https://github.com={github}",
-                           "--git-token-file", f"http://localhost:3000={gitea}"]
+                           "--git-token-file", f"http://localhost:3080={gitea}"]
         assert pending == [(github, GH), (gitea, GITEA)]
         assert GH not in "\n".join(prompts.lines) and GITEA not in "\n".join(prompts.lines)
         # A host variable instead: suggested name, note when it is not set.
-        prompts = Prompts(["n", "variable", "", "http://localhost:3000", "variable", "", ""])
+        prompts = Prompts(["n", "variable", "", "http://localhost:3080", "variable", "", ""])
         options = w.ask_git(prompts.p, {"backend": "podman", "network": "default"}, tmp_path / "none")
         assert options == ["--git-token-env", "https://github.com=SANDBOX_GH_TOKEN",
-                           "--git-token-env", "http://localhost:3000=SANDBOX_GIT_TOKEN"]
+                           "--git-token-env", "http://localhost:3080=SANDBOX_GIT_TOKEN"]
         assert any("SANDBOX_GIT_TOKEN is not set" in line for line in prompts.lines)
     elif scenario == "sad":
         # Bad names, plain http to a remote host, loopback with bwrap and malformed tokens are refused;
         # the malformed token is never echoed.
-        prompts = Prompts(["n", "variable", "GH=x", "CONTRACT_GH", "http://git.example.org", "http://localhost:3000",
+        prompts = Prompts(["n", "variable", "GH=x", "CONTRACT_GH", "http://git.example.org", "http://localhost:3080",
                            "https://git.example.org", "enter", "", "n"], secrets=["bad token\nx", ""])
         assert w.ask_git(prompts.p, {"backend": "bwrap", "network": "default"}, project) == [
             "--git-token-env", "https://github.com=CONTRACT_GH"]
@@ -400,10 +400,10 @@ def test_write_token(scenario, tmp_path):
 
 
 def test_token_path(scenario):
-    label = {"happy": "github.com", "sad": "http://localhost:3000", "edge": "https://[::1]:8443"}[scenario]
+    label = {"happy": "github.com", "sad": "http://localhost:3080", "edge": "https://[::1]:8443"}[scenario]
     path = w.token_path(label)
     assert path.parent == w.token_store() and "/" not in path.name and ".." not in path.name
-    assert path.name == {"happy": "github.com", "sad": "http-localhost-3000", "edge": "https-1-8443"}[scenario]
+    assert path.name == {"happy": "github.com", "sad": "http-localhost-3080", "edge": "https-1-8443"}[scenario]
 
 
 def test_ask_extra(scenario, tmp_path):
@@ -437,22 +437,22 @@ def test_ask_extra(scenario, tmp_path):
 
 def test_run_with_optional_blocks_then_launcher_plan(tmp_path, monkeypatch, capsys):
     project = tmp_path / "proj"
-    git_config(project, '[remote "origin"]\n\turl = http://localhost:3000/alice/sandbox-ai.git\n')
+    git_config(project, '[remote "origin"]\n\turl = http://localhost:3080/alice/sandbox-ai.git\n')
     out = []
     path = w.run(prompt=scripted([str(project), "", "", "claude", "podman", "default", "", "n", "n", "", "n",
                                   "y", "pypi", "", "", "", "",
                                   "y", "n", "", "y", "variable", "SANDBOX_GITEA_TOKEN", "",
                                   "n", "y"]), out=out.append, fetch=fake_fetch({}))
     document = json.loads(path.read_text())
-    assert document["options"] == ["--allow-pypi", "--git-token-env", "http://localhost:3000=SANDBOX_GITEA_TOKEN"]
+    assert document["options"] == ["--allow-pypi", "--git-token-env", "http://localhost:3080=SANDBOX_GITEA_TOKEN"]
     # The token is not exported yet: the wizard says the launcher would refuse, and writes anyway.
     assert any("would refuse" in line and "SANDBOX_GITEA_TOKEN" in line for line in out)
     monkeypatch.setenv("SANDBOX_GITEA_TOKEN", "0123456789abcdef0123456789abcdef01234567")
     launcher = w.launcher()
     assert launcher.launch(["claude", "--workspace", str(project), "--dry-run"]) == 0
     plan = json.loads(capsys.readouterr().out)
-    assert plan["host_ports"] == [3000] and "pypi.org" in plan["https_hosts"]
-    assert plan["git_credentials"] == [{"url": "http://localhost:3000", "user": "x-access-token",
+    assert plan["host_ports"] == [3080] and "pypi.org" in plan["https_hosts"]
+    assert plan["git_credentials"] == [{"url": "http://localhost:3080", "user": "x-access-token",
                                         "env": "SANDBOX_GITEA_TOKEN"}]
 
 
@@ -664,25 +664,25 @@ def test_line_editing_off_without_terminal(monkeypatch):
 
 def test_run_writes_typed_token_privately_then_launcher_plan(tmp_path, capsys):
     project = tmp_path / "proj"
-    git_config(project, '[remote "origin"]\n\turl = http://localhost:3000/alice/sandbox-ai.git\n')
+    git_config(project, '[remote "origin"]\n\turl = http://localhost:3080/alice/sandbox-ai.git\n')
     out = []
     path = w.run(prompt=scripted([str(project), "", "", "claude", "podman", "development", "", "n", "n", "", "n",
                                   "n", "y", "n", "none", "y", "enter", "", "n", "y"]),
                  out=out.append, fetch=fake_fetch({}), secret=scripted([GITEA]))
     text = path.read_text()
-    token_file = w.token_path("http://localhost:3000")
+    token_file = w.token_path("http://localhost:3080")
     # The token is in a private file, not in the project configuration, and the check did not complain.
     assert GITEA not in text and GITEA not in "\n".join(out)
     assert token_file.read_text() == GITEA + "\n" and token_file.stat().st_mode & 0o777 == 0o600
     assert not any("would refuse" in line for line in out)
     options = json.loads(text)["options"]
     assert options[:2] == ["--profile", "development"]
-    assert ["--git-token-file", f"http://localhost:3000={token_file}"] == options[-2:]
+    assert ["--git-token-file", f"http://localhost:3080={token_file}"] == options[-2:]
     assert w.launcher().launch(["claude", "--workspace", str(project), "--dry-run"]) == 0
     plan = json.loads(capsys.readouterr().out)
-    assert plan["git_credentials"] == [{"url": "http://localhost:3000", "user": "x-access-token",
+    assert plan["git_credentials"] == [{"url": "http://localhost:3080", "user": "x-access-token",
                                         "file": str(token_file)}]
-    assert plan["host_ports"] == [3000] and "pypi.org" in plan["https_hosts"] and "api.openai.com" in plan["https_hosts"]
+    assert plan["host_ports"] == [3080] and "pypi.org" in plan["https_hosts"] and "api.openai.com" in plan["https_hosts"]
 
 
 def test_run_cancel_writes_no_token(tmp_path):

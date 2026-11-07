@@ -153,8 +153,8 @@ def test_validate(scenario, tmp_path, monkeypatch):
                  ["--git-token-env", "https://github.com=UNSET_CONTRACT_VARIABLE"],
                  ["--git-token-env", "https://github.com=PATH", "--offline"],
                  ["--git-credentials", "/nonexistent/git-credentials"],
-                 ["--git-token-env", "http://localhost:3000=UNSET_CONTRACT_VARIABLE"],
-                 ["--git-token-env", "http://localhost:3000=PATH", "--backend", "bwrap"],
+                 ["--git-token-env", "http://localhost:3080=UNSET_CONTRACT_VARIABLE"],
+                 ["--git-token-env", "http://localhost:3080=PATH", "--backend", "bwrap"],
                  ["--git-token-env", "https://git.example.org=PATH", "--offline"],
                  ["--device", "/dev/console"], ["--device", "/dev/null"],
                  ["--gpu", "dri", "--podman-url", "unix:///example/podman.sock"]]
@@ -1578,15 +1578,15 @@ GIT_TOKEN = "0123456789abcdef" * 2 + "01234567"
 
 def test_git_token_credential(scenario):
     if scenario == "happy":
-        assert s.git_token_credential("http://alice@localhost:3000=GITEA") == {
-            "url": "http://localhost:3000", "user": "alice", "host": "localhost", "port": 3000,
+        assert s.git_token_credential("http://alice@localhost:3080=GITEA") == {
+            "url": "http://localhost:3080", "user": "alice", "host": "localhost", "port": 3000,
             "loopback": True, "env": "GITEA"}
         assert s.git_token_credential("https://Git.Example.org:443/=T")["url"] == "https://git.example.org"
     elif scenario == "sad":
         # Plain http leaves the host only on loopback; paths, quotes in the user and bad names are refused.
-        for bad in ["http://git.example.org=T", "http://localhost:3000/owner=T", "http://localhost:3000",
-                    "http://a'b@localhost:3000=T", "ssh://localhost:22=T", "http://localhost:70000=T",
-                    "https://a..example.org=T", "http://localhost:3000=T=x"]:
+        for bad in ["http://git.example.org=T", "http://localhost:3080/owner=T", "http://localhost:3080",
+                    "http://a'b@localhost:3080=T", "ssh://localhost:22=T", "http://localhost:70000=T",
+                    "https://a..example.org=T", "http://localhost:3080=T=x"]:
             with pytest.raises(ValueError):
                 s.git_token_credential(bad)
     else:
@@ -1626,39 +1626,39 @@ def test_git_token_value(scenario, monkeypatch, tmp_path):
 def test_git_tokens(scenario, monkeypatch):
     monkeypatch.setenv("CONTRACT_GIT", GIT_TOKEN)
     if scenario == "happy":
-        args = s.parse_args(["claude", "--git-token-env", "http://localhost:3000=CONTRACT_GIT",
+        args = s.parse_args(["claude", "--git-token-env", "http://localhost:3080=CONTRACT_GIT",
                              "--git-token-env", "https://git.example.org=CONTRACT_GIT"])
         # Loopback is reached through pasta's host forward, a remote host through its pinned name.
         assert args.allow_host_port == ["3000"] and args.allow_host == ["git.example.org"]
         assert [(c["url"], token) for c, token in s.git_tokens(args)] == [
-            ("http://localhost:3000", GIT_TOKEN), ("https://git.example.org", GIT_TOKEN)]
+            ("http://localhost:3080", GIT_TOKEN), ("https://git.example.org", GIT_TOKEN)]
         # The same entry from the command line and the project file counts once.
-        twice = s.parse_args(["claude", "--git-token-env", "http://localhost:3000=CONTRACT_GIT",
-                              "--git-token-env", "http://localhost:3000/=CONTRACT_GIT"])
+        twice = s.parse_args(["claude", "--git-token-env", "http://localhost:3080=CONTRACT_GIT",
+                              "--git-token-env", "http://localhost:3080/=CONTRACT_GIT"])
         assert len(s.git_tokens(twice)) == 1
     elif scenario == "sad":
         monkeypatch.delenv("UNSET_CONTRACT_VARIABLE", raising=False)
-        for options in [["http://localhost:3000=UNSET_CONTRACT_VARIABLE"],
-                        ["http://localhost:3000=CONTRACT_GIT", "http://localhost:3000/=OTHER_GIT"]]:
+        for options in [["http://localhost:3080=UNSET_CONTRACT_VARIABLE"],
+                        ["http://localhost:3080=CONTRACT_GIT", "http://localhost:3080/=OTHER_GIT"]]:
             with pytest.raises(ValueError):
                 s.git_tokens(s.parse_args(["claude", *(f"--git-token-env={o}" for o in options)]))
         with pytest.raises(ValueError, match="loopback"):
             s.git_tokens(s.parse_args(["claude", "--backend", "bwrap", "--git-token-env",
-                                       "http://localhost:3000=CONTRACT_GIT"]))
+                                       "http://localhost:3080=CONTRACT_GIT"]))
     else:
         # Tokens that could add credential protocol fields are refused, and never echoed.
         for bad in [GIT_TOKEN + "\npassword=evil", GIT_TOKEN + " x", "short", "x" * 600]:
             monkeypatch.setenv("CONTRACT_GIT", bad)
             with pytest.raises(ValueError) as error:
-                s.git_tokens(s.parse_args(["claude", "--git-token-env", "http://localhost:3000=CONTRACT_GIT"]))
+                s.git_tokens(s.parse_args(["claude", "--git-token-env", "http://localhost:3080=CONTRACT_GIT"]))
             assert bad not in str(error.value)
 
 
 def test_git_token_values(scenario):
-    options = {"happy": ["--git-token-env", "http://localhost:3000=A", "--git-token-file", "https://h.example=/t"],
-               "sad": [], "edge": ["--git-token-file", "http://localhost:3000=/x=y"]}[scenario]
-    expected = {"happy": [("env", "http://localhost:3000=A"), ("file", "https://h.example=/t")], "sad": [],
-                "edge": [("file", "http://localhost:3000=/x=y")]}[scenario]
+    options = {"happy": ["--git-token-env", "http://localhost:3080=A", "--git-token-file", "https://h.example=/t"],
+               "sad": [], "edge": ["--git-token-file", "http://localhost:3080=/x=y"]}[scenario]
+    expected = {"happy": [("env", "http://localhost:3080=A"), ("file", "https://h.example=/t")], "sad": [],
+                "edge": [("file", "http://localhost:3080=/x=y")]}[scenario]
     assert s.git_token_values(s.parse_args(["claude", *options])) == expected
 
 
@@ -1705,7 +1705,7 @@ def test_token_files_in_launcher(scenario, tmp_path, monkeypatch):
         gh = tmp_path / "private" / "gh"
         gh.write_text(TOKEN)
         gh.chmod(0o600)
-        args = s.parse_args(["claude", "--workspace", str(work), "--git-token-file", f"http://localhost:3000={token}",
+        args = s.parse_args(["claude", "--workspace", str(work), "--git-token-file", f"http://localhost:3080={token}",
                              "--git-token-file", f"https://github.com={gh}"])
         s.validate(args)
         assert args.allow_host_port == ["3000"] and "github" in args.presets
@@ -1719,7 +1719,7 @@ def test_token_files_in_launcher(scenario, tmp_path, monkeypatch):
         inside.chmod(0o600)
         with pytest.raises(ValueError, match="agent can change"):
             s.validate(s.parse_args(["claude", "--workspace", str(work),
-                                     "--git-token-file", f"http://localhost:3000={inside}"]))
+                                     "--git-token-file", f"http://localhost:3080={inside}"]))
         monkeypatch.setenv("CONTRACT_GH", TOKEN)
         with pytest.raises(ValueError, match="given twice"):
             s.validate(s.parse_args(["claude", "--workspace", str(work),
@@ -1729,8 +1729,8 @@ def test_token_files_in_launcher(scenario, tmp_path, monkeypatch):
         # The same URL from the command line and the project file, once as a file and once as a variable: refused.
         monkeypatch.setenv("CONTRACT_GIT", GIT_TOKEN)
         with pytest.raises(ValueError, match="given twice"):
-            s.git_tokens(s.parse_args(["claude", "--git-token-file", f"http://localhost:3000={token}",
-                                       "--git-token-env", "http://localhost:3000=CONTRACT_GIT"]))
+            s.git_tokens(s.parse_args(["claude", "--git-token-file", f"http://localhost:3080={token}",
+                                       "--git-token-env", "http://localhost:3080=CONTRACT_GIT"]))
 
 
 def test_git_credential_helper(scenario):
@@ -1768,8 +1768,8 @@ def test_read_private_file(scenario, tmp_path):
 
 def test_git_server(scenario):
     if scenario == "happy":
-        assert s.git_server("http://localhost:3000", "--x") == {
-            "url": "http://localhost:3000", "user": None, "host": "localhost", "port": 3000, "loopback": True}
+        assert s.git_server("http://localhost:3080", "--x") == {
+            "url": "http://localhost:3080", "user": None, "host": "localhost", "port": 3000, "loopback": True}
         assert s.git_server("https://alice@Git.Example.org:443/", "--x")["url"] == "https://git.example.org"
     elif scenario == "sad":
         for bad in ["http://git.example.org", "https://git.example.org/owner", "ftp://localhost", "https://a_b.org"]:
@@ -1803,8 +1803,8 @@ def credential_line(user, password, server):
 
 def test_git_credentials_line(scenario):
     if scenario == "happy":
-        server, user, password = s.git_credentials_line(credential_line("alice", GIT_LOGIN, "http://localhost:3000"))
-        assert (server["url"], user, password) == ("http://localhost:3000", "alice", GIT_LOGIN)
+        server, user, password = s.git_credentials_line(credential_line("alice", GIT_LOGIN, "http://localhost:3080"))
+        assert (server["url"], user, password) == ("http://localhost:3080", "alice", GIT_LOGIN)
         # A path, as git stores it with credential.useHttpPath, does not narrow the server.
         server, user, _ = s.git_credentials_line("https://me%40example.org:tok@GitHub.com/owner/repo.git")
         assert server["url"] == "https://github.com" and user == "me@example.org"
@@ -1837,7 +1837,7 @@ def test_git_credentials_file(scenario, tmp_path, monkeypatch, capsys):
     if scenario == "happy":
         path = credentials_file(tmp_path / "private",
                                 credential_line("x-access-token", TOKEN, "https://github.com"),
-                                credential_line("alice", GIT_TOKEN, "http://localhost:3000"),
+                                credential_line("alice", GIT_TOKEN, "http://localhost:3080"),
                                 credential_line("me@example.org", GIT_LOGIN, "https://git.example.org"))
         args = s.parse_args(["claude", "--workspace", str(work), "--git-credentials", str(path)])
         s.validate(args)
@@ -1845,7 +1845,7 @@ def test_git_credentials_file(scenario, tmp_path, monkeypatch, capsys):
         assert args.allow_host_port == ["3000"] and "github" in args.presets and args.allow_host == ["git.example.org"]
         entries, notes = s.git_credentials_file(args)
         assert notes == [] and [(c["url"], c["user"], c["line"], password) for c, password in entries] == [
-            ("https://github.com", "x-access-token", 1, TOKEN), ("http://localhost:3000", "alice", 2, GIT_TOKEN),
+            ("https://github.com", "x-access-token", 1, TOKEN), ("http://localhost:3080", "alice", 2, GIT_TOKEN),
             ("https://git.example.org", "me@example.org", 3, GIT_LOGIN)]
         assert s.git_tokens(args) == entries
         env = s.git_environment(args)
@@ -1862,7 +1862,7 @@ def test_git_credentials_file(scenario, tmp_path, monkeypatch, capsys):
         assert "line 1" in str(error.value) and "line 3" in str(error.value) and "unencrypted" in str(error.value)
         assert "secret" not in str(error.value)
         # A loopback server needs the Podman default network.
-        local = credentials_file(tmp_path / "local", credential_line("u", GIT_TOKEN, "http://localhost:3000"))
+        local = credentials_file(tmp_path / "local", credential_line("u", GIT_TOKEN, "http://localhost:3080"))
         with pytest.raises(ValueError, match="loopback"):
             s.validate(s.parse_args(["claude", "--workspace", str(work), "--backend", "bwrap",
                                      "--git-credentials", str(local)]))
@@ -1882,8 +1882,8 @@ def test_git_credentials_file(scenario, tmp_path, monkeypatch, capsys):
         # notes name lines only, and the launcher prints them.
         monkeypatch.setenv("CONTRACT_GH", TOKEN)
         path = credentials_file(tmp_path / "private", "", "broken-secret",
-                                credential_line("first", GIT_TOKEN, "http://localhost:3000"),
-                                credential_line("second", "secret-second", "http://localhost:3000/other/repo"),
+                                credential_line("first", GIT_TOKEN, "http://localhost:3080"),
+                                credential_line("second", "secret-second", "http://localhost:3080/other/repo"),
                                 credential_line("x", "secret-gh", "https://github.com"), newline="\r\n")
         args = s.parse_args(["claude", "--workspace", str(work), "--git-credentials", str(path),
                              "--git-token-env", "https://github.com=CONTRACT_GH"])
@@ -1893,7 +1893,7 @@ def test_git_credentials_file(scenario, tmp_path, monkeypatch, capsys):
         assert "earlier line" in notes[1] and "--git-token-*" in notes[2]
         assert not any("secret" in note or "second" in note for note in notes)
         assert [(c["url"], token) for c, token in s.git_tokens(args)] == [
-            ("https://github.com", TOKEN), ("http://localhost:3000", GIT_TOKEN)]
+            ("https://github.com", TOKEN), ("http://localhost:3080", GIT_TOKEN)]
         monkeypatch.setattr(s, "load_project_config", lambda a: (None, None))
         monkeypatch.setattr(s, "check_login", lambda a: None)
         assert s.launch(["claude", "--workspace", str(work), "--no-auth", "--dry-run", "--git-credentials", str(path),
@@ -1902,7 +1902,7 @@ def test_git_credentials_file(scenario, tmp_path, monkeypatch, capsys):
         plan = json.loads(out)
         assert plan["git_credentials"] == [
             {"url": "https://github.com", "user": "x-access-token", "env": "CONTRACT_GH"},
-            {"url": "http://localhost:3000", "user": "first", "credentials": str(path), "line": 3}]
+            {"url": "http://localhost:3080", "user": "first", "credentials": str(path), "line": 3}]
         assert plan["host_ports"] == [3000] and f"{path} line 4 skipped" in err
         assert not any(secret in out + err for secret in (TOKEN, GIT_TOKEN, "secret-second", "secret-gh", "broken-secret"))
 
@@ -2038,7 +2038,7 @@ def test_git_environment(scenario, monkeypatch, tmp_path):
     monkeypatch.setenv("CONTRACT_GIT", GIT_TOKEN)
     options = {"happy": ["--git-identity", "--git-token-env", "https://github.com=CONTRACT_GH"], "sad": [],
                "edge": ["--git-token-env", "https://github.com=CONTRACT_GH",
-                        "--git-token-env", "http://alice@localhost:3000=CONTRACT_GIT"]}[scenario]
+                        "--git-token-env", "http://alice@localhost:3080=CONTRACT_GIT"]}[scenario]
     env = s.git_environment(s.parse_args(["claude", *options]))
     if scenario == "sad":
         # The helper for logins added during the run, and the privacy hooks unless they are switched off.
@@ -2073,12 +2073,12 @@ def test_git_environment(scenario, monkeypatch, tmp_path):
     assert f"password={TOKEN}" in answer and "username=x-access-token" in answer and "planted" not in answer
     for other in ["https://github.com.evil.example/x.git", "http://github.com/x.git", "https://gitlab.com/x.git"]:
         assert TOKEN not in fill(other)
-    local = fill("http://localhost:3000/alice/sandbox-ai.git")
+    local = fill("http://localhost:3080/alice/sandbox-ai.git")
     if scenario == "edge":
         assert env["SANDBOX_GIT_TOKEN_1"] == GIT_TOKEN and GIT_TOKEN not in json.dumps(
             {k: v for k, v in env.items() if k != "SANDBOX_GIT_TOKEN_1"})
         assert f"password={GIT_TOKEN}" in local and "username=alice" in local and "planted" not in local
-        for other in ["http://localhost:3001/x.git", "http://127.0.0.1:3000/x.git", "https://localhost:3000/x.git"]:
+        for other in ["http://localhost:3001/x.git", "http://127.0.0.1:3080/x.git", "https://localhost:3080/x.git"]:
             assert GIT_TOKEN not in fill(other)
     else:
         assert GIT_TOKEN not in local
@@ -4077,7 +4077,7 @@ def test_privacy_rules_dir(scenario, tmp_path, monkeypatch):
 def test_privacy_context(scenario, tmp_path, monkeypatch):
     monkeypatch.setenv("CONTRACT_GIT", GIT_TOKEN)
     options = {"happy": ["--allow-tcp", "192.168.50.10:1234", "--git-token-env",
-                         "http://alice@localhost:3000=CONTRACT_GIT"],
+                         "http://alice@localhost:3080=CONTRACT_GIT"],
                "sad": [], "edge": ["--allow-tcp", "[fd00::5]:11434"]}[scenario]
     context = s.privacy_context(s.parse_args(["claude", "--workspace", str(tmp_path), *options]))
     assert str(Path.home()) in context["homes"]
@@ -4122,7 +4122,7 @@ def test_prepare_privacy(scenario, tmp_path, monkeypatch):
     (rules / "global.rules.json").write_text(json.dumps({"pattern": [
         {"id": "codename", "regex": r"\bbluefin\b", "severity": "block", "reason": "internal codename"}]}))
     monkeypatch.setenv("CONTRACT_GIT", GIT_TOKEN)
-    check = s.prepare_privacy(s.parse_args([*options, "--git-token-env", "http://alice@localhost:3000=CONTRACT_GIT"]),
+    check = s.prepare_privacy(s.parse_args([*options, "--git-token-env", "http://alice@localhost:3080=CONTRACT_GIT"]),
                               session)
     hook = json.loads((session / "privacy" / "hook.json").read_text())
     # Your own rules and the tokens stay on the host; the agent's hooks know the rest.
@@ -6264,7 +6264,7 @@ def test_git_credential(scenario, tmp_path):
     import io
     tokens = tmp_path / "git-tokens.json"
     tokens.write_text(json.dumps({"version": 1, "logins": [
-        {"url": "http://localhost:3000", "user": "alice", "token": "gitea_token_1"},
+        {"url": "http://localhost:3080", "user": "alice", "token": "gitea_token_1"},
         {"url": "https://git.example.org", "user": "x-access-token", "token": "glpat_token_2"}]}))
 
     def ask(text, operation="get", path=tokens):
@@ -6272,30 +6272,30 @@ def test_git_credential(scenario, tmp_path):
         assert rt.git_credential(operation, io.StringIO(text), out, path=path) == 0  # never fails Git
         return out.getvalue()
     if scenario == "happy":
-        assert ask("protocol=http\nhost=localhost:3000\npath=alice/repo.git\n\n") == \
+        assert ask("protocol=http\nhost=localhost:3080\npath=alice/repo.git\n\n") == \
             "username=alice\npassword=gitea_token_1\n"
         # The default port is the origin without it; the host name is not case-sensitive.
         assert ask("protocol=https\nhost=Git.Example.org:443\n") == "username=x-access-token\npassword=glpat_token_2\n"
-        assert ask("protocol=http\nhost=localhost:3000\nusername=alice\n").startswith("username=alice")
+        assert ask("protocol=http\nhost=localhost:3080\nusername=alice\n").startswith("username=alice")
     elif scenario == "sad":
-        for text in ("protocol=http\nhost=localhost:3001\n", "protocol=https\nhost=localhost:3000\n",
-                     "protocol=http\nhost=localhost:3000\nusername=mallory\n", "protocol=ftp\nhost=localhost:3000\n",
-                     "host=localhost:3000\n", "", "protocol=https\nhost=git.example.org.evil.example\n"):
+        for text in ("protocol=http\nhost=localhost:3001\n", "protocol=https\nhost=localhost:3080\n",
+                     "protocol=http\nhost=localhost:3080\nusername=mallory\n", "protocol=ftp\nhost=localhost:3080\n",
+                     "host=localhost:3080\n", "", "protocol=https\nhost=git.example.org.evil.example\n"):
             assert ask(text) == "", text
         # store and erase change nothing: the agent cannot replace what the human gave.
         before = tokens.read_text()
-        assert ask("protocol=http\nhost=localhost:3000\nusername=x\npassword=y\n", "store") == ""
-        assert ask("protocol=http\nhost=localhost:3000\n", "erase") == "" and tokens.read_text() == before
+        assert ask("protocol=http\nhost=localhost:3080\nusername=x\npassword=y\n", "store") == ""
+        assert ask("protocol=http\nhost=localhost:3080\n", "erase") == "" and tokens.read_text() == before
     else:
         # No file (no login added), a damaged one, or a login with a line break: no answer, no error.
-        assert ask("protocol=http\nhost=localhost:3000\n", path=tmp_path / "absent.json") == ""
+        assert ask("protocol=http\nhost=localhost:3080\n", path=tmp_path / "absent.json") == ""
         (tmp_path / "bad.json").write_text("{not json")
-        assert ask("protocol=http\nhost=localhost:3000\n", path=tmp_path / "bad.json") == ""
+        assert ask("protocol=http\nhost=localhost:3080\n", path=tmp_path / "bad.json") == ""
         (tmp_path / "list.json").write_text("[]")
-        assert ask("protocol=http\nhost=localhost:3000\n", path=tmp_path / "list.json") == ""
+        assert ask("protocol=http\nhost=localhost:3080\n", path=tmp_path / "list.json") == ""
         (tmp_path / "evil.json").write_text(json.dumps({"logins": [
-            {"url": "http://localhost:3000", "user": "a", "token": "t\nusername=evil"}]}))
-        assert ask("protocol=http\nhost=localhost:3000\n", path=tmp_path / "evil.json") == ""
+            {"url": "http://localhost:3080", "user": "a", "token": "t\nusername=evil"}]}))
+        assert ask("protocol=http\nhost=localhost:3080\n", path=tmp_path / "evil.json") == ""
 
 
 def test_open_request(scenario, tmp_path):
@@ -9089,12 +9089,12 @@ def git_logins_home(monkeypatch, tmp_path, logins):
 def test_registry_git_tokens(scenario, monkeypatch, tmp_path):
     """The run's logins from sandbox-ai git-logins: only with the proxy, --git-logins on, and not for a server a
     start option names; read once per start."""
-    git_logins_home(monkeypatch, tmp_path, [{"url": "http://localhost:3000", "user": "ch", "secret": "GITEA"},
+    git_logins_home(monkeypatch, tmp_path, [{"url": "http://localhost:3080", "user": "ch", "secret": "GITEA"},
                                             {"url": "https://git.example.org", "user": "u", "secret": "MISSING"}])
     if scenario == "happy":
         a = s.parse_args(["claude"])
         pairs, notes = s.registry_git_tokens(a)
-        assert [(c["url"], c["user"], c["loopback"], t) for c, t in pairs] == [("http://localhost:3000", "ch", True, GIT_TOKEN)]
+        assert [(c["url"], c["user"], c["loopback"], t) for c, t in pairs] == [("http://localhost:3080", "ch", True, GIT_TOKEN)]
         assert len(notes) == 1 and "no usable secret MISSING" in notes[0]
         assert s.registry_git_tokens(a) is s.registry_git_tokens(a)  # cached for the start
     elif scenario == "sad":
@@ -9105,20 +9105,20 @@ def test_registry_git_tokens(scenario, monkeypatch, tmp_path):
         assert s.registry_git_tokens(a) == ([], [])
     else:
         monkeypatch.setenv("OWN", GIT_TOKEN)
-        a = s.parse_args(["claude", "--git-token-env", "http://localhost:3000=OWN"])
+        a = s.parse_args(["claude", "--git-token-env", "http://localhost:3080=OWN"])
         assert s.registry_git_tokens(a)[0] == []  # the start's option wins for its server
 
 
 def test_proxied_git_tokens(scenario, monkeypatch, tmp_path):
-    git_logins_home(monkeypatch, tmp_path, [{"url": "http://localhost:3000", "user": "ch", "secret": "GITEA"}]
+    git_logins_home(monkeypatch, tmp_path, [{"url": "http://localhost:3080", "user": "ch", "secret": "GITEA"}]
                     if scenario != "sad" else [])
     monkeypatch.setenv("CONTRACT_GIT", GIT_TOKEN)
     argv = {"happy": ["claude", "--token-proxy", "--git-token-env", "https://git.example.org=CONTRACT_GIT"],
             "sad": ["claude"], "edge": ["claude", "--git-token-env", "https://git.example.org=CONTRACT_GIT"]}[scenario]
     found = [c["url"] for c, _ in s.proxied_git_tokens(s.parse_args(argv))]
-    assert found == {"happy": ["https://git.example.org", "http://localhost:3000"], "sad": [],
+    assert found == {"happy": ["https://git.example.org", "http://localhost:3080"], "sad": [],
                      # without --token-proxy the start's token is the agent's (git_environment), the login the proxy's
-                     "edge": ["http://localhost:3000"]}[scenario]
+                     "edge": ["http://localhost:3080"]}[scenario]
 
 
 def test_local_engine(scenario, monkeypatch):
@@ -9236,7 +9236,7 @@ def test_start_audio(scenario, tmp_path, capsys):
 
 def test_host_ports_go_through_the_proxy_over_ipv6_too():
     """pasta forwards [::1]:PORT as well as 127.0.0.1:PORT: a push to http://[::1]:3000 meets the proxy (and its
-    privacy check) as one to 127.0.0.1:3000 does; other ::1 ports stay the sandbox's own."""
+    privacy check) as one to 127.0.0.1:3080 does; other ::1 ports stay the sandbox's own."""
     rules = s.firewall_rules([], [], proxy={"port": s.PROXY_PORT, "loopback": [3000]})
     assert "  ip daddr 127.0.0.0/8 tcp dport != { 3000 } return" in rules
     assert "  ip6 daddr ::1 tcp dport != { 3000 } return" in rules

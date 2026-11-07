@@ -27,20 +27,20 @@ def run(*argv):
 def test_an_identity_with_git_and_publish_logins(capsys):
     assert run("add", "c0decave", "--name", "dash", "--email", "c0decave@users.noreply.github.com")[0] == 0
     assert run("login", "c0decave", "https://github.com/", "--secret", "GH_C0DECAVE", "--user", "c0decave")[0] == 0
-    assert run("login", "c0decave", "http://localhost:3000", "--secret", "GITEA", "--user", "you")[0] == 0
+    assert run("login", "c0decave", "http://localhost:3080", "--secret", "GITEA", "--user", "you")[0] == 0
     assert run("publish", "c0decave", "pypi", "--secret", "PYPI_C0DECAVE")[0] == 0
     status, text = run("show", "c0decave")
     assert status == 0 and text.splitlines()[0] == "c0decave: dash <c0decave@users.noreply.github.com>"
-    assert "https://github.com" in text and "http://localhost:3000" in text and "upload.pypi.org" in text
+    assert "https://github.com" in text and "http://localhost:3080" in text and "upload.pypi.org" in text
     stored = json.loads(ids.path().read_text())["identities"]["c0decave"]
     assert stored["git"][0] == {"url": "https://github.com", "user": "c0decave", "secret": "GH_C0DECAVE"}
     assert oct(ids.path().stat().st_mode & 0o777) == "0o600"
     # The same server again replaces its login; logout and unpublish take one back.
     assert run("login", "c0decave", "https://github.com", "--secret", "GH_OTHER")[0] == 0
     assert [e["secret"] for e in ids.get("c0decave")["git"]] == ["GITEA", "GH_OTHER"]
-    assert run("logout", "c0decave", "http://localhost:3000")[0] == 0 and run("unpublish", "c0decave", "pypi")[0] == 0
-    assert run("logout", "c0decave", "http://localhost:3000")[0] == 1
-    assert "has no login for http://localhost:3000" in capsys.readouterr().err
+    assert run("logout", "c0decave", "http://localhost:3080")[0] == 0 and run("unpublish", "c0decave", "pypi")[0] == 0
+    assert run("logout", "c0decave", "http://localhost:3080")[0] == 1
+    assert "has no login for http://localhost:3080" in capsys.readouterr().err
     assert run("check", "c0decave")[0] == 1  # GH_OTHER is not kept
     ids.module("agent_sandbox").load_secret_store_module().FileStore().set("GH_OTHER", "ghp_x")
     assert run("check") == (0, "c0decave: https://github.com: ok")

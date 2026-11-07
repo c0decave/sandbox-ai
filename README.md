@@ -1189,13 +1189,13 @@ with any other machine on your network, but hides the host. Use
 `--allow-host-port PORT` instead: pasta then forwards `127.0.0.1:PORT`
 in the sandbox to the same port on the host's loopback, and
 nothing else on the host becomes reachable. A Git remote such as
-`http://localhost:3000/...` works unchanged inside the sandbox. The host is
+`http://localhost:3080/...` works unchanged inside the sandbox. The host is
 the machine running Podman, so with `--podman-url` it is that machine. Only
 the Podman backend with its default network supports this; it conflicts
 with `--offline`, `--network` and `--backend bwrap`.
 
 ```bash
-./sandbox-ai claude --workspace "$HOME/src/demo" --allow-host-port 3000
+./sandbox-ai claude --workspace "$HOME/src/demo" --allow-host-port 3080
 ```
 
 **The sandbox's own addresses** (`--subnet`, `--subnet6`). Without them,
@@ -1285,7 +1285,7 @@ on the host's loopback (`localhost`, `127.0.0.1`, `[::1]`) implies
 network; plain `http` is accepted only there. Other hosts need `https`; the
 option implies `--allow-host HOST` (name pinned, TCP/443), a different port
 additionally needs `--allow-tcp IP:PORT`. The URL must match the remote's host exactly: a token for
-`http://localhost:3000` does not answer for `http://127.0.0.1:3000`. As
+`http://localhost:3080` does not answer for `http://127.0.0.1:3080`. As
 with GitHub, helpers from a `~/.gitconfig` in the sandbox are ignored for
 that URL, and the agent can read the token (as `SANDBOX_GIT_TOKEN_0`, ...),
 so create one limited to the needed repositories.
@@ -1319,8 +1319,8 @@ sandbox-ai claude --git-token-secret https://github.com=GH_PUSH --token-proxy --
 file in the format of Git's `store` credential helper, usually
 `~/.git-credentials` (one `https://USER:PASSWORD@HOST[:PORT]` per line). Each
 login answers for its server exactly as a `--git-token-*` option would, with
-the same network rules: a login for `http://localhost:3000` implies
-`--allow-host-port 3000`, one for `https://github.com` `--allow-github` and
+the same network rules: a login for `http://localhost:3080` implies
+`--allow-host-port 3080`, one for `https://github.com` `--allow-github` and
 `GH_TOKEN`, others `--allow-host HOST`. The file must belong to you, have mode
 `0600`, not be a symlink and lie outside every workspace; it is read on the
 host and never mounted. As in Git, the first line for a server wins and a
@@ -1347,7 +1347,7 @@ privacy check of pushes knows the tokens.
 
 ```bash
 sandbox-ai secrets set GITEA_TOKEN                        # the token, from standard input
-sandbox-ai git-logins add http://localhost:3000 --secret GITEA_TOKEN --user you
+sandbox-ai git-logins add http://localhost:3080 --secret GITEA_TOKEN --user you
 sandbox-ai secrets set GH_PUSH
 sandbox-ai git-logins add https://github.com --secret GH_PUSH
 sandbox-ai git-logins list | check | remove URL
@@ -1356,8 +1356,8 @@ sandbox-ai git-logins list | check | remove URL
 The list (`~/.config/sandbox-ai/git-logins.json`, mode `0600`) holds servers,
 users and secret names, never a token. Plain http is for this host's loopback
 only (a local Gitea): the proxy adds that token only to the loopback port, which
-the sandbox reaches as the host's (`--allow-host-port 3000`, or during the run
-`sandbox-ai net allow --allow-host-port 3000`); an HTTPS login goes only to the
+the sandbox reaches as the host's (`--allow-host-port 3080`, or during the run
+`sandbox-ai net allow --allow-host-port 3080`); an HTTPS login goes only to the
 server whose certificate the proxy checked. The logins do not open the servers:
 they must be reachable as usual (`--allow-github`, `--allow-host`). A
 `--git-token-*` option for the same server wins for its start;
@@ -1443,8 +1443,8 @@ sandbox-ai net allow claude-1a2b3c4d --allow-tcp 192.0.2.10:5432
 sandbox-ai net show                                    # what was added during the run
 sandbox-ai net revoke --allow-host pypi.org
 sandbox-ai net allow --dns                             # real DNS lookups (or --nameserver IP)
-sandbox-ai net allow --git-token-env http://localhost:3000=GITEA_TOKEN   # a Git login
-sandbox-ai net allow --allow-host-port 3000                               # the host's 127.0.0.1:3000
+sandbox-ai net allow --git-token-env http://localhost:3080=GITEA_TOKEN   # a Git login
+sandbox-ai net allow --allow-host-port 3080                               # the host's 127.0.0.1:3080
 sandbox-ai net stop claude-1a2b3c4d                    # end it; its launcher cleans up
 sandbox-ai net untaint claude-1a2b3c4d                 # take back the run's taint (see Rulesets)
 sandbox-ai net allow --allow-host api.osv.dev --keep   # and for the next starts too (.sandbox-ai.json)
@@ -1499,7 +1499,7 @@ helper that every start configures (before the logins of the start options,
 which win for their server) answers Git with it; `show` lists the servers and
 users, never the token, and `revoke --git-token-env URL=ANY` takes a login back.
 The server is opened as at the start: `https://github.com` the GitHub preset,
-another HTTPS server its name; a server on the host's loopback (`http://localhost:3000`)
+another HTTPS server its name; a server on the host's loopback (`http://localhost:3080`)
 is reached if the run forwards its port (`--allow-host-port`, or a login for it
 at the start) or relays it (`net allow --allow-host-port PORT`, below). It works for runs started with sandbox-ai 0.1.37 or newer and
 not with `--token-proxy` (the tokens stay outside the sandbox there); `gh` does

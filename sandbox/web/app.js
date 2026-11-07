@@ -353,7 +353,7 @@ function networkCard(main, name) {
   const field = (id, placeholder) => el("input", { id, placeholder, class: "mono" });
   const hosts = field("net-hosts", "pypi.org api.example.org"), tcp = field("net-tcp", "192.0.2.10:5432");
   const ports = field("net-ports", "3000 11434"), dns = el("input", { id: "net-dns", type: "checkbox" });
-  const gitUrl = field("net-git-url", "http://localhost:3000"), gitRef = field("net-git-ref", "GITEA_TOKEN");
+  const gitUrl = field("net-git-url", "https://git.example.org"), gitRef = field("net-git-ref", "GITEA_TOKEN");
   const gitKind = el("select", { id: "net-git-kind" }, el("option", { value: "env" }, "variable"), el("option", { value: "secret" }, "secret"));
   const shown = el("pre", { class: "mono" }, "");
   const words = (input) => input.value.split(/\s+/).filter(Boolean);

@@ -48,3 +48,46 @@ jobs:
         run: scripts/e2e_package.sh pyz dist/sandbox-ai.pyz --python python
       - name: The package build scripts parse
         run: bash -n scripts/build_appimage.sh scripts/build_macos_app.sh scripts/e2e_package.sh
+
+  # The desktop app (projects/sandbox-ai-app), tested against the sandbox-ai of the same commit.
+  app:
+    runs-on: ubuntu-24.04  # the apt names below (libasound2t64, ...) are 24.04's
+    timeout-minutes: 30
+    env:
+      QT_QPA_PLATFORM: offscreen
+      # A test skipped for missing Qt, QtWebEngine or sandbox-ai fails instead (tests/conftest.py).
+      SANDBOX_AI_APP_REQUIRE_QT: "1"
+      # Chromium's own sandbox needs user namespaces and the runner has no GPU: off for the tests only.
+      QTWEBENGINE_CHROMIUM_FLAGS: "--no-sandbox --disable-gpu"
+      QTWEBENGINE_DISABLE_SANDBOX: "1"
+      SANDBOX_AI_HOME: ${{ github.workspace }}
+    defaults:
+      run:
+        working-directory: projects/sandbox-ai-app
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1, published 2026-07-20
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0, published 2026-10-22
+        with:
+          python-version: "3.12"
+      - name: System libraries for Qt and QtWebEngine
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libopengl0 libxkbcommon0 libxkbcommon-x11-0 libfontconfig1 libdbus-1-3 \
+            libnss3 libasound2t64 libxcomposite1 libxdamage1 libxrandr2 libxtst6 libxshmfence1 libgbm1 \
+            libdrm2 libxkbfile1 libxcb-cursor0 fonts-dejavu-core
+      - name: Install PySide6 (with Addons and WebEngine) and pytest
+        working-directory: .
+        run: "python -m pip install --require-hashes --only-binary :all: -r packaging/requirements-app-test.txt -r packaging/requirements-ci.txt"
+      - name: Vendor xterm.js
+        run: python scripts/vendor_xterm.py
+      - name: Tests (offscreen, Qt required)
+        run: python -m pytest -v -rs tests 2>&1 | tee tests.txt; test "${PIPESTATUS[0]}" -eq 0
+      - name: No Qt test was skipped
+        run: |
+          if grep -E "SKIPPED.*(PySide6|QtWebEngine|QtCore|QtWidgets|SANDBOX_AI_HOME)" tests.txt; then
+            echo "::error::Qt tests were skipped"
+            exit 1
+          fi

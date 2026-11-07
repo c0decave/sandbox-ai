@@ -1,0 +1,328 @@
+"""The Hosts page: other machines (Proxmox LXC containers, servers) whose sandbox-ai this app manages over SSH,
+with the list `sandbox-ai hosts` keeps (the web interface uses the same). For the chosen host: its starts and
+sessions (attach in a terminal tab, pause, resume, stop), its open approvals (allow, deny), its doctor and the
+agents' telemetry of every start there. Everything runs as `sandbox-ai hosts run HOST -- ARGS`, each argument
+quoted on its own, over SSH with your keys (no password prompt, the host key learnt once); nothing listens on
+the hosts but sshd.
+"""
+from __future__ import annotations
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem,
+    QPlainTextEdit, QPushButton, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout,
+    QWidget,
+)
+
+from .files import printable
+from .i18n import tr
+from .widgets import MONO, background, plain_label, warn
+
+
+def cell(text):
+    item = QTableWidgetItem(printable(str(text if text is not None else "")))
+    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+    return item
+
+
+class AddHostDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(tr("Add a host"))
+        form = QFormLayout(self)
+        self.name, self.ssh, self.identity, self.description = QLineEdit(), QLineEdit(), QLineEdit(), QLineEdit()
+        self.name.setPlaceholderText(tr("ct101"))
+        self.ssh.setPlaceholderText(tr("user@192.0.2.10"))
+        self.identity.setPlaceholderText(tr("~/.ssh/id_ed25519 (optional)"))
+        self.port = QSpinBox()
+        self.port.setRange(1, 65535)
+        self.port.setValue(22)
+        form.addRow(tr("Name"), self.name)
+        form.addRow(tr("SSH"), self.ssh)
+        form.addRow(tr("Port"), self.port)
+        form.addRow(tr("Key"), self.identity)
+        form.addRow(tr("Description"), self.description)
+        form.addRow(plain_label(tr("Your user needs SSH access with a key (ssh-copy-id), and sandbox-ai installed "
+                                   "there. The host key is learnt at the first contact and checked from then on."),
+                                role="secondary"))
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def values(self):
+        return (self.name.text().strip(), self.ssh.text().strip(), self.port.value(), self.identity.text().strip(),
+                self.description.text().strip())
+
+
+class HostsPage(QWidget):
+    def __init__(self, sai, in_terminal):
+        super().__init__()
+        self.sai, self.in_terminal = sai, in_terminal
+        layout = QVBoxLayout(self)
+        layout.addWidget(plain_label(tr("Other machines whose sandbox-ai this app manages over SSH (the web "
+                                        "interface, sandbox-ai web, uses the same list)."), role="secondary"))
+        split = QSplitter()
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        self.list = QListWidget()
+        self.list.currentItemChanged.connect(lambda *_: self.refresh_host() if self.isVisible() else None)
+        left_layout.addWidget(self.list, 1)
+        buttons = QHBoxLayout()
+        self.add_button, self.remove_button, self.test_button = (QPushButton(tr("Add…")), QPushButton(tr("Remove")),
+                                                                 QPushButton(tr("Test")))
+        self.add_button.clicked.connect(self.add)
+        self.remove_button.clicked.connect(self.remove)
+        self.test_button.clicked.connect(self.test)
+        for button in (self.add_button, self.remove_button, self.test_button):
+            buttons.addWidget(button)
+        left_layout.addLayout(buttons)
+        split.addWidget(left)
+        self.tabs = QTabWidget()
+        # starts
+        starts = QWidget()
+        starts_layout = QVBoxLayout(starts)
+        self.starts = QTableWidget(0, 5)
+        self.starts.setHorizontalHeaderLabels([tr("Name"), tr("Agent"), tr("State"), tr("Workspace"), tr("Started")])
+        self.starts.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.starts.horizontalHeader().setStretchLastSection(True)
+        starts_layout.addWidget(self.starts, 1)
+        row = QHBoxLayout()
+        self.attach_button = QPushButton(tr("Attach"))
+        self.attach_button.clicked.connect(self.attach)
+        row.addWidget(self.attach_button)
+        self.action_buttons = {}
+        for action, label in (("pause", tr("Pause")), ("resume", tr("Resume")), ("stop", tr("Stop"))):
+            button = QPushButton(label)
+            button.clicked.connect(lambda _=False, a=action: self.start_action(a))
+            self.action_buttons[action] = button
+            row.addWidget(button)
+        self.refresh_button = QPushButton(tr("Refresh"))
+        self.refresh_button.clicked.connect(self.refresh_host)
+        row.addStretch(1)
+        row.addWidget(self.refresh_button)
+        starts_layout.addLayout(row)
+        self.tabs.addTab(starts, tr("Starts and sessions"))
+        # approvals
+        approvals = QWidget()
+        approvals_layout = QVBoxLayout(approvals)
+        self.questions = QTableWidget(0, 2)
+        self.questions.setHorizontalHeaderLabels([tr("Question"), tr("Sandbox")])
+        self.questions.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.questions.horizontalHeader().setStretchLastSection(True)
+        approvals_layout.addWidget(self.questions, 1)
+        row = QHBoxLayout()
+        self.scope = QComboBox()
+        for scope in ("once", "run", "always"):
+            self.scope.addItem(scope, scope)
+        self.allow_button, self.deny_button = QPushButton(tr("Allow")), QPushButton(tr("Deny"))
+        self.allow_button.clicked.connect(lambda: self.answer("allow"))
+        self.deny_button.clicked.connect(lambda: self.answer("deny"))
+        for widget in (self.scope, self.allow_button, self.deny_button):
+            row.addWidget(widget)
+        row.addStretch(1)
+        approvals_layout.addLayout(row)
+        self.tabs.addTab(approvals, tr("Approvals"))
+        # doctor
+        self.doctor = QPlainTextEdit()
+        self.doctor.setReadOnly(True)
+        self.doctor.setFont(MONO)
+        self.tabs.addTab(self.doctor, tr("Doctor"))
+        # defaults
+        defaults = QWidget()
+        form = QFormLayout(defaults)
+        self.telemetry = QComboBox()
+        for level, text in (("off", tr("off: no usage statistics, error reports, feedback or update checks "
+                                       "(recommended)")),
+                            ("strict", tr("strict: also no other calls than the model's")),
+                            ("on", tr("on: the agents' own settings"))):
+            self.telemetry.addItem(text, level)
+        self.telemetry.activated.connect(self.set_telemetry)
+        form.addRow(tr("Telemetry of Claude Code, Codex and OpenCode"), self.telemetry)
+        self.defaults_note = plain_label(role="secondary")
+        form.addRow(self.defaults_note)
+        self.tabs.addTab(defaults, tr("Defaults"))
+        split.addWidget(self.tabs)
+        split.setStretchFactor(1, 3)
+        layout.addWidget(split, 1)
+        self.status = plain_label(role="secondary")
+        layout.addWidget(self.status)
+        self.entries = []
+        self.load_hosts()
+
+    # -- the list --
+
+    def host(self):
+        item = self.list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+
+    def load_hosts(self, select=None):
+        if not self.sai.hosts_supported():
+            self.status.setText(tr("This sandbox-ai has no hosts yet: update it."))
+            for widget in (self.add_button, self.remove_button, self.test_button, self.tabs):
+                widget.setEnabled(False)
+            return
+        try:
+            self.entries = self.sai.host_entries()
+        except (OSError, ValueError) as exc:
+            self.status.setText(printable(str(exc)))
+            self.entries = []
+        current = select or self.host()
+        self.list.blockSignals(True)
+        self.list.clear()
+        for entry in self.entries:
+            text = tr("{name} (this machine)", name=entry["name"]) if entry.get("kind") == "local" else \
+                f"{entry['name']}  {entry.get('ssh', '')}"
+            item = QListWidgetItem(printable(text))
+            item.setData(Qt.ItemDataRole.UserRole, entry["name"])
+            item.setToolTip(printable(entry.get("description") or ""))
+            self.list.addItem(item)
+            if entry["name"] == current:
+                self.list.setCurrentItem(item)
+        if self.list.currentItem() is None and self.list.count():
+            self.list.setCurrentRow(0)
+        self.list.blockSignals(False)
+        self.remove_button.setEnabled(self.host() not in (None, "local"))
+        if self.isVisible():
+            self.refresh_host()
+
+    def showEvent(self, event):
+        """The selected host is asked when the page is shown, not when the window is built: no sandbox-ai command
+        (and no SSH connection) at every start of the app for a page nobody opened."""
+        super().showEvent(event)
+        if self.host() is not None and not event.spontaneous():
+            self.refresh_host()
+
+    def add(self):
+        dialog = AddHostDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        name, ssh, port, identity, description = dialog.values()
+        background(self.sai.host_add, name, ssh, port, identity, description, owner=self, source=self.add_button,
+                   timeout=60,
+                   done=lambda result, error: warn(self, tr("Add a host"), printable(str(error))) if error
+                   else self.load_hosts(name))
+
+    def remove(self):
+        name = self.host()
+        if name in (None, "local"):
+            return
+        background(self.sai.host_remove, name, owner=self, source=self.remove_button, timeout=60,
+                   done=lambda result, error: warn(self, tr("Remove"), printable(str(error))) if error
+                   else self.load_hosts())
+
+    def test(self):
+        name = self.host()
+        if name is None:
+            return
+        self.status.setText(tr("Testing {host}…", host=name))
+
+        def done(result, error):
+            if error:
+                self.status.setText(printable(str(error)))
+                return
+            if result.get("error"):
+                self.status.setText(printable(f"{name}: {result['error']}"))
+            else:
+                self.status.setText(printable(f"{name}: {result.get('version')}"))
+            self.show_doctor(result.get("doctor") or [])
+        background(self.sai.host_test, name, owner=self, source=self.test_button, timeout=180, done=done)
+
+    # -- the chosen host --
+
+    def refresh_host(self):
+        name = self.host()
+        self.remove_button.setEnabled(name not in (None, "local"))
+        if name is None:
+            return
+        self.status.setText(tr("Asking {host}…", host=name))
+        background(lambda: (self.sai.host_json(name, "list", "--json"),
+                            self.sai.host_json(name, "approvals", "list", "--json", timeout=60),
+                            self.sai.host_json(name, "defaults", "show", "--json", timeout=60)),
+                   owner=self, source=self.refresh_button, timeout=270,
+                   done=lambda result, error: self.shown(name, result, error))
+
+    def shown(self, name, result, error):
+        if name != self.host():
+            return
+        if error:
+            self.status.setText(printable(f"{name}: {error}"))
+            return
+        starts, questions, defaults = result
+        self.status.setText(tr("{host}: {starts} starts, {questions} open questions", host=name, starts=len(starts),
+                               questions=len(questions)))
+        self.starts.setRowCount(0)
+        for entry in starts:
+            row = self.starts.rowCount()
+            self.starts.insertRow(row)
+            for column, key in enumerate(("name", "agent", "state", "workspace", "started")):
+                item = cell(entry.get(key))
+                item.setData(Qt.ItemDataRole.UserRole, entry)
+                self.starts.setItem(row, column, item)
+        self.questions.setRowCount(0)
+        for question in questions:
+            row = self.questions.rowCount()
+            self.questions.insertRow(row)
+            item = cell(question.get("question"))
+            item.setData(Qt.ItemDataRole.UserRole, question.get("id"))
+            self.questions.setItem(row, 0, item)
+            self.questions.setItem(row, 1, cell(question.get("sandbox") or question.get("run")))
+        level = (defaults.get("values") or {}).get("telemetry", "off")
+        self.telemetry.setEnabled(bool(defaults.get("telemetry_levels")))
+        self.telemetry.setCurrentIndex(max(0, self.telemetry.findData(level)))
+        self.defaults_note.setText(printable(tr("For every start on {host}, in {path}", host=name,
+                                                path=defaults.get("path", "?"))))
+
+    def chosen_start(self):
+        rows = self.starts.selectionModel().selectedRows() if self.starts.selectionModel() else []
+        if not rows:
+            return None
+        return self.starts.item(rows[0].row(), 0).data(Qt.ItemDataRole.UserRole)
+
+    def attach(self):
+        entry, name = self.chosen_start(), self.host()
+        if entry is None or name is None:
+            return
+        if not entry.get("attachable"):
+            warn(self, tr("Attach"), tr("{start} cannot be attached (not a running session).", start=entry["name"]))
+            return
+        self.in_terminal(self.sai.host_terminal(name, "attach", entry["name"]), f"{name}: {entry['name']}")
+
+    def start_action(self, action):
+        entry, name = self.chosen_start(), self.host()
+        if entry is None or name is None:
+            return
+        background(lambda: self.sai.host_run(name, action, entry["name"], timeout=180), owner=self,
+                   source=self.action_buttons[action], timeout=210,
+                   done=lambda result, error: self.acted(result, error))
+
+    def acted(self, result, error):
+        if error or (result and result[0] != 0):
+            text = str(error) if error else (result[2] or result[1]).strip()[-500:]
+            warn(self, tr("Hosts"), printable(text))
+        self.refresh_host()
+
+    def answer(self, decision):
+        rows = self.questions.selectionModel().selectedRows() if self.questions.selectionModel() else []
+        name = self.host()
+        if not rows or name is None:
+            return
+        ident = self.questions.item(rows[0].row(), 0).data(Qt.ItemDataRole.UserRole)
+        background(lambda: self.sai.host_run(name, "approvals", decision, ident, "--scope", self.scope.currentData(),
+                                             timeout=60),
+                   owner=self, source=[self.allow_button, self.deny_button], timeout=90,
+                   done=lambda result, error: self.acted(result, error))
+
+    def set_telemetry(self, _index=None):
+        name, level = self.host(), self.telemetry.currentData()
+        if name is None:
+            return
+        args = ("defaults", "unset", "telemetry") if level == "off" else ("defaults", "set", "telemetry", level)
+        background(lambda: self.sai.host_run(name, *args, timeout=60), owner=self, source=self.telemetry, timeout=90,
+                   done=lambda result, error: self.acted(result, error))
+
+    def show_doctor(self, results):
+        lines = [f"{str(r.get('status', '?')).upper():5} {r.get('check', '')}: {r.get('detail', '')}"
+                 + (f"\n      {r['hint']}" if r.get("hint") else "") for r in results]
+        self.doctor.setPlainText(printable("\n".join(lines) or tr("The doctor found nothing to do.")))
+        self.tabs.setCurrentWidget(self.doctor)

@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+# xterm.js, downloaded and verified by scripts/vendor_xterm.py
+sandbox_ai_app/web/vendor/
+.pytest_cache/
+# Claude Code state and agent worktrees
+.claude/

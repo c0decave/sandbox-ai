@@ -1,0 +1,10 @@
+# The desktop app's tests in CI (ci.yml, job app): PySide6 with Addons (QtWebEngine for the terminals), hash-pinned.
+# PySide6 6.12.0: uploaded 2026-10-08 (pinned 2026-11-07, 30 days). Linux x86_64 wheels only: the runner's.
+pyside6==6.12.0 \
+    --hash=sha256:d13ed4d0053cc20f3e4e0fdbf12790a9b7f958d7e22c0843411ecfa8c799e2a9
+pyside6-addons==6.12.0 \
+    --hash=sha256:4ab38c0017f0453671a9313d3a53ca1c0e378924f54b07e596bcea94a9642391
+pyside6-essentials==6.12.0 \
+    --hash=sha256:16f4b5e41daf49235ae048458243da9efe5f3d8040f9cc5aa454ce69893d3bd9
+shiboken6==6.12.0 \
+    --hash=sha256:3bde565bb0890044b5c7f63808adddede5abc241e9395a2bfed61919884d6240

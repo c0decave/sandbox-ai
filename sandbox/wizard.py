@@ -544,7 +544,7 @@ def ask_git(p, a, project, pending=None, current=None):
         if offered:
             url, offered = origin, False
         else:
-            url = p.ask("Your own Git server (Gitea, Forgejo, GitLab ...) for a token, e.g. http://localhost:3000, "
+            url = p.ask("Your own Git server (Gitea, Forgejo, GitLab ...) for a token, e.g. https://git.example.org, "
                         "or a Git credentials file (/path or ~/path, git's store format), empty to finish")
         if not url:
             break

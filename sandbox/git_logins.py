@@ -7,7 +7,7 @@
   sandbox-ai git-logins check [URL]                           whether each login's secret is there
 
 URL is http(s)://HOST[:PORT] (plain http only for this host's loopback, e.g. a local Gitea at
-http://localhost:3000). Keep the token first: sandbox-ai secrets set NAME (it is read from standard input).
+https://git.example.org, http://localhost:3080). Keep the token first: sandbox-ai secrets set NAME (it is read from standard input).
 
 Every sandbox with the connection proxy gets these logins in the proxy's own directory, which the agent cannot
 read: the proxy adds them on the wire to Git's smart HTTP requests to that server (clone, fetch, push), and only

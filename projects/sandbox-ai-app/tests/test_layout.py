@@ -1,0 +1,69 @@
+"""No clipped text: every page and the main dialogs, in both languages and three themes (light, dark and the
+largest font), at the window's minimum size. A button or a one-line label narrower than its text, or a wrapping
+label shorter than its text needs, is a finding."""
+import pytest
+
+QtWidgets = pytest.importorskip("PySide6.QtWidgets", reason="PySide6 is not installed")
+from sandbox_ai_app import backend, i18n, settings, theme, ui, vpn_page, widgets, wizard  # noqa: E402
+
+from test_ui import env  # noqa: E402,F401 - the isolated home of the UI tests
+
+KINDS = (QtWidgets.QLabel, QtWidgets.QPushButton, QtWidgets.QCheckBox, QtWidgets.QRadioButton, QtWidgets.QToolButton)
+
+
+def clipped(top):
+    found = []
+    for kind in KINDS:
+        for w in top.findChildren(kind):
+            if not w.isVisibleTo(top) or not w.text().strip():
+                continue
+            if isinstance(w, QtWidgets.QLabel) and w.wordWrap():
+                if w.heightForWidth(w.width()) > w.height() + 2:
+                    found.append(f"{type(w).__name__} {w.text()[:60]!r}: needs {w.heightForWidth(w.width())} px high, has {w.height()}")
+            elif w.width() > 0 and w.sizeHint().width() > w.width() + 2:
+                found.append(f"{type(w).__name__} {w.text()[:60]!r}: needs {w.sizeHint().width()} px wide, has {w.width()}")
+    return found
+
+
+@pytest.mark.parametrize("language", ["en", "de"])
+@pytest.mark.parametrize("mode", ["light", "dark", "win311"])
+def test_no_text_is_clipped_at_the_smallest_window(qapp, env, monkeypatch, language, mode):  # noqa: F811
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    i18n.set_language(language)
+    try:
+        theme.apply(mode, qapp)
+        sai = backend.SandboxAI()
+        window = ui.MainWindow(sai)
+        window.resize(window.minimumSizeHint())
+        window.show()
+        qapp.processEvents()
+        found = []
+        for key, _ in ui.PAGES:
+            window.show_page(key, raise_window=False)
+            qapp.processEvents()
+            found += [f"page {key}: {item}" for item in clipped(getattr(window, key))]
+        dialog = settings.SettingsDialog(sai, window)
+        dialog.show()
+        for index in range(dialog.tabs.count()):
+            dialog.tabs.setCurrentIndex(index)
+            qapp.processEvents()
+            found += [f"settings {dialog.tabs.tabText(index)}: {item}" for item in clipped(dialog)]
+        dialog.close()
+        flow = wizard.SandboxWizard(sai, lambda: {}, window)
+        flow.show()
+        for page in flow.pageIds():
+            flow.setStartId(page)
+            flow.restart()
+            qapp.processEvents()
+            found += [f"wizard page {page}: {item}" for item in clipped(flow)]
+        flow.close()
+        vpn = vpn_page.VpnDialog(window)
+        vpn.show()
+        qapp.processEvents()
+        found += [f"vpn dialog: {item}" for item in clipped(vpn)]
+        vpn.close()
+        window.close()
+        assert found == [], "\n".join(found)
+    finally:
+        i18n.set_language("en")
+        theme.apply("system", qapp)

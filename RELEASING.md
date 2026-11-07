@@ -52,8 +52,7 @@ Without a key in `sandbox/release-signers` (see below), leave out `--sign`.
 | `sandbox-ai-ARCH.dmg` | `scripts/build_macos_app.sh --bundle dist/sandbox-ai-bundle-X.Y.Z.tar.gz` | macOS of that architecture |
 
 All three are made from the bundle, so they carry exactly the tree `install.sh` would install, with the app
-(`projects/sandbox-ai-app`: build `dist/` from a checkout that has it; `release.yml` checks out
-`c0decave/sandbox-ai-app` at the repository variable `SANDBOX_AI_APP_REF`, default `main`). Each package has a
+(`projects/sandbox-ai-app`, part of this repository since 0.1.66: the bundle takes it from the same checkout). Each package has a
 `PACKAGING` file beside `sandbox/`, so `sandbox-ai update` points to the download instead of running
 `install.sh`. `scripts/e2e_package.sh KIND FILE` checks a package the way a user starts it (version, presets,
 doctor, a dry run, the copy in the cache, the app's `--self-test`); `release.yml` runs it for every package, the
@@ -77,8 +76,7 @@ AppImage also in `ubuntu:22.04` and `debian:12` containers.
   the first start (right-click > Open, Open Anyway, or `xattr -dr com.apple.quarantine`).
 
 **Pins.** CI installs pytest, build and setuptools only from `packaging/requirements-ci.txt` (hashes;
-`make_dist.py --no-isolation` builds with that setuptools), and a tag build stops unless `SANDBOX_AI_APP_REF` is
-the app's commit (40 hex digits). Every third-party download is pinned by release, exact file name and SHA-256: python-build-standalone,
+`make_dist.py --no-isolation` builds with that setuptools). Every third-party download is pinned by release, exact file name and SHA-256: python-build-standalone,
 appimagetool and the AppImage runtime in `packaging/pins.sh`, PySide6 in `packaging/requirements-app.txt`, the
 GitHub actions by commit SHA in the workflows. A release is pinned only once it is at least 14 days old, with its
 publish date beside the pin; `tests/test_dist_packaging.py` checks all of it. To move a pin: look up the release's
@@ -178,10 +176,8 @@ python3 scripts/publish_release.py --source https://github.com/c0decave/sandbox-
 
 `--sums-only` keeps `dist/` as it is, `--add` copies the packages in, and
 `SHA256SUMS` (with its signature) then covers every file. `make_dist.py`
-builds the same bundle and `.pyz` from the same commit and app checkout
-(reproducible), so you can compare them with CI's before you sign. Set the
-repository variable `SANDBOX_AI_APP_REF` to the app's tag or commit for a
-release: its default `main` moves. Before that, a key stored as a CI secret would make the signature
+builds the same bundle and `.pyz` from the same commit (the app is part of it;
+reproducible), so you can compare them with CI's before you sign. Before that, a key stored as a CI secret would make the signature
 worth as much as the account it should protect against.
 
 ### Rotate

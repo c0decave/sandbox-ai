@@ -1,0 +1,525 @@
+"""The (?) buttons, their explanation and the Help area on screen (help_texts.py and help_content.py have the texts).
+
+A HelpButton is a small round "?" painted in the theme's colours; a click (or Space) opens a HelpPopover with what
+the thing is, what it is for, what happens when you use it, the command-line option behind it and "More in Help",
+which opens the Help page at the matching section (in a dialog of its own when the (?) sits in a modal dialog).
+install() puts the (?)s of help_texts.PLACES on the window's pages. The HelpPage is the Help area: a searchable
+list of every section, the text in English or German, and the tours to start from there.
+"""
+from __future__ import annotations
+
+import html
+import re
+
+from PySide6.QtCore import QEvent, QObject, QPoint, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QPainter, QPen
+from PySide6.QtWidgets import (
+    QAbstractScrollArea, QBoxLayout, QComboBox, QDialog, QFrame, QGroupBox, QHBoxLayout, QLineEdit, QListWidget,
+    QListWidgetItem, QPushButton, QSplitter, QTabWidget, QTextBrowser, QToolButton, QVBoxLayout, QWidget,
+    QWidgetItem,
+)
+
+from . import help_texts as H
+from . import i18n, theme, tours
+from .i18n import N_, tr
+from .widgets import MONO, FlowLayout, plain_label
+
+OPENER = None   # the window's show_help(section id): set by the main window
+OPENED = []     # the ids of the explanations opened in this run (a tour step waits for one)
+SIZE = 18
+
+
+class HelpButton(QToolButton):
+    """A round "?" that explains TIP_ID."""
+
+    def __init__(self, tip_id, parent=None):
+        super().__init__(parent)
+        self.setObjectName("helpButton")
+        self.setText("?")
+        self.setAutoRaise(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self.setFixedSize(SIZE, SIZE)
+        self.popover = None
+        self.clicked.connect(lambda _=False: self.explain())
+        self.set_tip(tip_id)
+
+    def set_tip(self, tip_id):
+        self.tip_id = tip_id
+        title = H.say(H.tip(tip_id).title)
+        self.setToolTip(tr("What is this? {title}", title=title))
+        self.setAccessibleName(tr("What is this? {title}", title=title))
+
+    def sizeHint(self):  # noqa: N802 - the stylesheet's padding must not make it larger
+        return QSize(SIZE, SIZE)
+
+    def minimumSizeHint(self):  # noqa: N802
+        return QSize(SIZE, SIZE)
+
+    def paintEvent(self, event):  # noqa: N802
+        painter = QPainter(self)
+        paint_mark(painter, QRectF(0, 0, SIZE, SIZE), self.underMouse() or self.hasFocus() or self.isDown(),
+                   self.font())
+
+    def explain(self):
+        self.popover = show_tip(self.tip_id, self, self.mapToGlobal(QPoint(0, self.height() + 2)))
+        return self.popover
+
+
+def paint_mark(painter, rect, lit=False, font=None):
+    """A (?) in RECT: a ring in the accent colour with a "?", filled when LIT (hovered, focused, pressed)."""
+    colors = theme.colors()
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    accent = QColor(colors["accent"])
+    painter.setPen(QPen(accent, 1.4))
+    painter.setBrush(accent if lit else QColor(colors["base"]))
+    painter.drawEllipse(rect.adjusted(1.0, 1.0, -1.0, -1.0))
+    font = QFont(font) if font is not None else QFont()
+    font.setBold(True)
+    font.setPixelSize(max(6, int(rect.height()) - 6))
+    painter.setFont(font)
+    painter.setPen(QColor(colors["accent_text"] if lit else colors["accent"]))
+    painter.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), "?")
+    painter.restore()
+
+
+class HelpPopover(QFrame):
+    """The explanation of one (?): it closes on a click outside it or Esc."""
+
+    def __init__(self, tip_id, parent=None):
+        super().__init__(parent, Qt.WindowType.Popup)
+        self.setObjectName("helpPopover")
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.tip = H.tip(tip_id)
+        self.setFixedWidth(380)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(6)
+        self.title = plain_label(H.say(self.tip.title), role="section")
+        self.what = plain_label(H.say(self.tip.what))
+        layout.addWidget(self.title)
+        layout.addWidget(self.what)
+        self.does = plain_label(H.say(self.tip.does) if self.tip.does else "")
+        self.does.setVisible(self.tip.does is not None)
+        layout.addWidget(self.does)
+        self.cli = plain_label(tr("Command line: {cli}", cli=self.tip.cli) if self.tip.cli else "", role="secondary")
+        self.cli.setFont(MONO)
+        self.cli.setVisible(bool(self.tip.cli))
+        layout.addWidget(self.cli)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.more = QPushButton(tr("More in Help"))
+        self.more.setProperty("role", "primary")
+        self.more.clicked.connect(lambda _=False: self.more_in_help())
+        self.more.setVisible(bool(self.tip.section))
+        row.addWidget(self.more)
+        layout.addLayout(row)
+
+    def more_in_help(self):
+        section, owner = self.tip.section, self.parentWidget()
+        self.close()
+        open_section(section, owner)
+
+    def show_at(self, point):
+        """Below POINT (global), kept on its screen."""
+        self.resize(self.width(), self.layout().totalHeightForWidth(self.width()))  # wrapped labels need it
+        screen = QGuiApplication.screenAt(point) or QGuiApplication.primaryScreen()
+        area = screen.availableGeometry() if screen is not None else None
+        x, y = point.x(), point.y()
+        if area is not None:
+            x = max(area.left() + 4, min(x, area.right() - self.width() - 4))
+            if y + self.height() > area.bottom() - 4:
+                y = max(area.top() + 4, point.y() - self.height() - SIZE - 6)
+        self.move(x, y)
+        self.show()
+        self.more.setFocus()
+
+
+def show_tip(tip_id, owner, point):
+    """Open the explanation TIP_ID for the widget OWNER at the global POINT."""
+    popover = HelpPopover(tip_id, owner)
+    popover.show_at(point)
+    OPENED.append(tip_id)
+    return popover
+
+
+def open_section(section, owner=None):
+    """The Help area at SECTION: the window's Help page, or a dialog when OWNER sits in a modal dialog (the window
+    cannot be used then) or there is no window."""
+    window = owner.window() if owner is not None else None
+    modal = isinstance(window, QDialog) and window.isModal()
+    if OPENER is not None and not modal:
+        try:
+            OPENER(section)
+            return None
+        except RuntimeError:  # the window that set it is gone
+            pass
+    dialog = HelpDialog(section, window)
+    dialog.show()
+    return dialog
+
+
+# -- where the (?)s go --
+
+class Corner(QObject):
+    """Keeps BUTTON in the top right corner of TARGET (left of a vertical scroll bar; in the title row of a group
+    box)."""
+
+    def __init__(self, target, button):
+        super().__init__(target)
+        self.target, self.button = target, button
+        target.installEventFilter(self)
+        if isinstance(target, QAbstractScrollArea):
+            target.verticalScrollBar().rangeChanged.connect(lambda *_: self.place())
+        self.place()
+
+    def eventFilter(self, watched, event):  # noqa: N802
+        if event.type() in (QEvent.Type.Resize, QEvent.Type.Show, QEvent.Type.LayoutRequest):
+            self.place()
+        return False
+
+    def place(self):
+        target = self.target
+        inset = 4
+        x = target.width() - SIZE - inset
+        y = inset
+        if isinstance(target, QGroupBox):
+            x, y = target.width() - SIZE - 8, 0
+        elif isinstance(target, QAbstractScrollArea):
+            bar = target.verticalScrollBar()
+            if bar.isVisible():
+                x -= bar.width()
+        self.button.move(max(0, x), y)
+        self.button.raise_()
+
+
+def corner(target, tip_id):
+    button = HelpButton(tip_id, target)
+    button.corner = Corner(target, button)
+    button.show()
+    return button
+
+
+def group_of(widget):
+    while widget is not None and not isinstance(widget, QGroupBox):
+        widget = widget.parentWidget()
+    return widget
+
+
+def layout_holding(layout, widget):
+    """(the layout, index) of the item for WIDGET in LAYOUT or a layout nested in it, or (None, -1)."""
+    if layout is None:
+        return None, -1
+    for index in range(layout.count()):
+        item = layout.itemAt(index)
+        if item.widget() is widget:
+            return layout, index
+        if item.layout() is not None:
+            found = layout_holding(item.layout(), widget)
+            if found[0] is not None:
+                return found
+    return None, -1
+
+
+def after(widget, tip_id):
+    """A (?) right after WIDGET in its row (a box or flow layout); None where it has none."""
+    parent = widget.parentWidget()
+    layout, index = layout_holding(parent.layout() if parent is not None else None, widget)
+    if layout is None:
+        return None
+    button = HelpButton(tip_id)
+    if isinstance(layout, QBoxLayout):
+        layout.insertWidget(index + 1, button, 0, Qt.AlignmentFlag.AlignVCenter)
+    elif isinstance(layout, FlowLayout):
+        layout.addChildWidget(button)
+        layout.items.insert(index + 1, QWidgetItem(button))
+        layout.invalidate()
+    else:
+        button.deleteLater()
+        return None
+    return button
+
+
+def place(target, tip_id, how):
+    if how == "after":
+        return after(target, tip_id)
+    if how == "group":
+        group = group_of(target)
+        return corner(group, tip_id) if group is not None else corner(target, tip_id)
+    if isinstance(target, QTabWidget) and target.cornerWidget(Qt.Corner.TopRightCorner) is None:
+        button = HelpButton(tip_id)
+        holder = QWidget()
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(4, 2, 4, 2)
+        row.addWidget(button)
+        target.setCornerWidget(holder, Qt.Corner.TopRightCorner)
+        return button
+    return corner(target, tip_id)
+
+
+def install(window):
+    """The (?)s of help_texts.PLACES on the window's pages; returns {page: [HelpButton]} and keeps what could not be
+    placed in window.help_missing (the tests want it empty)."""
+    placed, missing = {}, []
+    for page, places in H.PLACES.items():
+        widget = getattr(window, page, None)
+        for attribute, tip_id, how in places:
+            target = getattr(widget, attribute, None) if widget is not None else None
+            button = place(target, tip_id, how) if isinstance(target, QWidget) else None
+            if button is None:
+                missing.append((page, attribute))
+            else:
+                placed.setdefault(page, []).append(button)
+    window.help_missing = missing
+    return placed
+
+
+# -- the Help area --
+
+def render(section, language):
+    """SECTION as HTML (its texts escaped: nothing in them is markup but `code`, - bullets and paragraphs)."""
+    def inline(text):
+        return re.sub(r"`([^`]+)`", r"<code>\1</code>", html.escape(text))
+    parts = [f"<h2>{html.escape(H.say(section.title, language))}</h2>"]
+    for block in H.say(section.body, language).split("\n\n"):
+        lines = [line.strip() for line in block.strip().splitlines() if line.strip()]
+        bullets = [line[2:] for line in lines if line.startswith("- ")]
+        text = " ".join(line for line in lines if not line.startswith("- "))
+        if text:
+            parts.append(f"<p>{inline(text)}</p>")
+        if bullets:
+            parts.append("<ul>" + "".join(f"<li>{inline(b)}</li>" for b in bullets) + "</ul>")
+    if section.cli:
+        label = html.escape(tr_in(language, N_("Command line")))
+        parts.append(f"<p><b>{label}:</b> " + ", ".join(f"<code>{html.escape(c)}</code>" for c in section.cli)
+                     + "</p>")
+    from . import help_content
+    links = [f'<a href="section:{s}">{html.escape(H.say(help_content.BY_ID[s].title, language))}</a>'
+             for s in section.see if s in help_content.BY_ID]
+    if links:
+        parts.append(f"<p><b>{html.escape(tr_in(language, N_('See also')))}:</b> " + " · ".join(links) + "</p>")
+    return "\n".join(parts)
+
+
+def tr_in(language, key, **values):
+    """tr() in LANGUAGE (None: the app's)."""
+    if language is None or language == i18n.language():
+        return tr(key, **values)
+    entry = i18n.TEXTS.get(key) or {}
+    text = entry.get(language) or key
+    return text.format(**values) if values else text
+
+
+def tour_title(ident, language=None):
+    """The title of a tour: a task tour's own, or "Tour of PAGE" for area:PAGE."""
+    if ident.startswith("area:"):
+        from . import guide
+        page = ident[len("area:"):]
+        title = next((step.title for step in guide.TOUR if step.page == page), page)
+        return tr_in(language, N_("Tour of the page {page}"), page=tr_in(language, title))
+    return H.say(tours.task_tour(ident).title, language)
+
+
+ALL_TOURS = "tours"  # the index entry listing every tour
+
+
+class HelpPage(QWidget):
+    """The Help area: search, the sections by group, the text, the tours to start."""
+    tour_requested = Signal(str)  # a task tour's id, or area:PAGE
+
+    def __init__(self, parent=None, with_tours=True):
+        super().__init__(parent)
+        from . import help_content
+        self.content, self.with_tours, self.shown = help_content, with_tours, None
+        layout = QVBoxLayout(self)
+        top = QHBoxLayout()
+        self.search = QLineEdit()
+        self.search.setPlaceholderText(tr("Search the help, in English or German"))
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self.filter)
+        top.addWidget(self.search, 1)
+        top.addWidget(HelpButton("help.search"))
+        self.language = QComboBox()
+        self.language.addItem(tr("Language of the app"), None)
+        for code, name in zip(i18n.LANGUAGES, ("English", "Deutsch")):
+            self.language.addItem(name, code)
+        self.language.currentIndexChanged.connect(lambda _i: self.relabel())
+        top.addWidget(self.language)
+        top.addWidget(HelpButton("help.language"))
+        layout.addLayout(top)
+        split = QSplitter(Qt.Orientation.Horizontal)
+        self.index = QListWidget()
+        self.index.setMinimumWidth(170)
+        self.index.currentItemChanged.connect(lambda item, _old: self.show_item(item))
+        split.addWidget(self.index)
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        self.text = QTextBrowser()
+        self.text.setOpenLinks(False)
+        self.text.anchorClicked.connect(lambda url: self.link(url.toString()))
+        right_layout.addWidget(self.text, 1)
+        self.tours = QWidget()
+        tours_row = QHBoxLayout(self.tours)
+        tours_row.setContentsMargins(0, 0, 0, 0)
+        self.tour_buttons = QWidget()
+        self.tour_flow = FlowLayout(self.tour_buttons)
+        tours_row.addWidget(self.tour_buttons, 1)
+        tours_row.addWidget(HelpButton("help.tours"), 0, Qt.AlignmentFlag.AlignTop)
+        right_layout.addWidget(self.tours)
+        split.addWidget(right)
+        split.setStretchFactor(1, 1)
+        split.setSizes([230, 700])
+        layout.addWidget(split, 1)
+        self.empty = plain_label(role="secondary")
+        self.empty.hide()
+        layout.addWidget(self.empty)
+        self.fill()
+        self.show_section("page-help")
+
+    def lang(self):
+        return self.language.currentData()
+
+    def groups(self):
+        return (("app", tr_in(self.lang(), N_("The app"))), ("concepts", tr_in(self.lang(), N_("Concepts"))))
+
+    def fill(self):
+        """The index: a heading per group (not selectable), its sections, then the tours."""
+        self.index.blockSignals(True)
+        self.index.clear()
+        self.items = {}
+        for key, title in self.groups():
+            header = QListWidgetItem(title.upper())
+            header.setFlags(Qt.ItemFlag.NoItemFlags)
+            header.setData(Qt.ItemDataRole.UserRole + 1, key)
+            self.index.addItem(header)
+            for section in self.content.SECTIONS:
+                if section.group == key:
+                    item = QListWidgetItem("  " + H.say(section.title, self.lang()))
+                    item.setData(Qt.ItemDataRole.UserRole, section.id)
+                    self.index.addItem(item)
+                    self.items[section.id] = item
+        if self.with_tours:
+            header = QListWidgetItem(tr_in(self.lang(), N_("Tours")).upper())
+            header.setFlags(Qt.ItemFlag.NoItemFlags)
+            header.setData(Qt.ItemDataRole.UserRole + 1, ALL_TOURS)
+            self.index.addItem(header)
+            item = QListWidgetItem("  " + tr_in(self.lang(), N_("All tours")))
+            item.setData(Qt.ItemDataRole.UserRole, ALL_TOURS)
+            self.index.addItem(item)
+            self.items[ALL_TOURS] = item
+        self.index.blockSignals(False)
+
+    def relabel(self):
+        shown = self.shown
+        self.fill()
+        self.filter(self.search.text())
+        self.show_section(shown or "page-help")
+
+    def matches(self, ident, words):
+        if not words:
+            return True
+        if ident == ALL_TOURS:
+            haystack = " ".join(H.say(t.title, lang) + " " + H.say(t.summary, lang)
+                                for t in tours.TASK_TOURS.values() for lang in i18n.LANGUAGES)
+        else:
+            section = self.content.BY_ID[ident]
+            haystack = " ".join([section.title.en, section.title.de, section.body.en, section.body.de,
+                                 " ".join(section.cli)])
+        haystack = haystack.lower()
+        return all(word in haystack for word in words)
+
+    def filter(self, text):
+        """Only the sections with every word of TEXT (in either language); headings of empty groups go."""
+        words = text.lower().split()
+        header, visible_in_group, first = None, 0, None
+        for row in range(self.index.count()):
+            item = self.index.item(row)
+            ident = item.data(Qt.ItemDataRole.UserRole)
+            if ident is None:
+                if header is not None:
+                    header.setHidden(visible_in_group == 0)
+                header, visible_in_group = item, 0
+                continue
+            hidden = not self.matches(ident, words)
+            item.setHidden(hidden)
+            if not hidden:
+                visible_in_group += 1
+                first = first or ident
+        if header is not None:
+            header.setHidden(visible_in_group == 0)
+        self.empty.setText(tr("Nothing matches {text}.", text=text.strip()) if first is None else "")
+        self.empty.setVisible(first is None)
+        if first is not None and (self.shown not in self.items or self.items[self.shown].isHidden()):
+            self.show_section(first)
+
+    def show_item(self, item):
+        if item is not None and item.data(Qt.ItemDataRole.UserRole):
+            self.show_section(item.data(Qt.ItemDataRole.UserRole))
+
+    def show_section(self, ident):
+        """Show section IDENT (a help_content id, or "tours" for every tour); False for an unknown one."""
+        if ident != ALL_TOURS and ident not in self.content.BY_ID:
+            return False
+        self.shown = ident
+        language = self.lang()
+        if ident == ALL_TOURS:
+            rows = [f"<h2>{html.escape(tr_in(language, N_('All tours')))}</h2>"]
+            for tour in tours.TASK_TOURS.values():
+                rows.append(f'<p><a href="tour:{tour.id}"><b>{html.escape(H.say(tour.title, language))}</b></a><br>'
+                            f"{html.escape(H.say(tour.summary, language))}</p>")
+            rows.append(f"<h3>{html.escape(tr_in(language, N_('Tours of the pages')))}</h3><p>")
+            rows.append(" · ".join(f'<a href="tour:area:{page}">{html.escape(tour_title("area:" + page, language))}'
+                                   f"</a>" for page in tours.AREA_TOURS))
+            rows.append("</p>")
+            self.text.setHtml("\n".join(rows))
+            wanted = tuple(tours.TASK_TOURS)
+        else:
+            section = self.content.BY_ID[ident]
+            self.text.setHtml(render(section, language))
+            wanted = section.tours
+        self.set_tours(wanted if self.with_tours else ())
+        item = self.items.get(ident)
+        if item is not None and self.index.currentItem() is not item:
+            self.index.blockSignals(True)
+            self.index.setCurrentItem(item)
+            self.index.blockSignals(False)
+            self.index.scrollToItem(item)
+        return True
+
+    def set_tours(self, idents):
+        while self.tour_flow.count():
+            taken = self.tour_flow.takeAt(0)
+            if taken.widget() is not None:
+                taken.widget().deleteLater()
+        for ident in idents:
+            if not ident.startswith("area:") and ident not in tours.TASK_TOURS:
+                continue
+            button = QPushButton(tr_in(self.lang(), N_("Start: {tour}"), tour=tour_title(ident, self.lang())))
+            button.clicked.connect(lambda _=False, i=ident: self.tour_requested.emit(i))
+            self.tour_flow.addWidget(button)
+        self.tour_flow.invalidate()
+        self.tours.setVisible(bool(idents))
+
+    def link(self, target):
+        if target.startswith("section:"):
+            self.show_section(target[len("section:"):])
+        elif target.startswith("tour:"):
+            self.tour_requested.emit(target[len("tour:"):])
+
+
+class HelpDialog(QDialog):
+    """The Help area in a window of its own (from a (?) in a modal dialog)."""
+
+    def __init__(self, section=None, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setWindowTitle(tr("Help"))
+        self.resize(900, 620)
+        layout = QVBoxLayout(self)
+        self.page = HelpPage(self, with_tours=False)
+        layout.addWidget(self.page)
+        if section:
+            self.page.show_section(section)
