@@ -173,3 +173,54 @@ def test_the_thread_runs_and_stops(tmp_path):
         time.sleep(0.05)
     assert json.loads((tmp_path / "memory.json").read_text())["used_bytes"] == GIB
     assert w.stop() == [] and not w.thread.is_alive()
+
+
+def supervisor_child(hold_mib):
+    """A real process named as the supervisor is (kthreadd, for Firejail) that holds HOLD_MIB."""
+    code = (f"open('/proc/self/comm', 'w').write('kthreadd'); data = bytearray({hold_mib} << 20); "
+            "[data.__setitem__(i, 1) for i in range(0, len(data), 4096)]; print('ready', flush=True); "
+            "import time; time.sleep(120)")
+    process = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+    assert process.stdout.readline().strip() == "ready"
+    return process
+
+
+def test_the_supervisors_memory_is_recorded_and_reported(tmp_path, processes, monkeypatch):
+    """The supervisor (named kthreadd) holding more than it should: recorded at each doubling, the human told once at
+    SUPERVISOR_WARN, its own records copied into the memory log at the end, and named in the closing lines."""
+    monkeypatch.setattr(s, "SUPERVISOR_RECORD", 32 << 20)
+    monkeypatch.setattr(s, "SUPERVISOR_WARN", 64 << 20)
+    supervisor = supervisor_child(100)
+    other = child("worker", hold_mib=10)
+    processes += [supervisor, other]
+    group = cgroup(tmp_path, [supervisor.pid, other.pid], current=GIB)
+    control = tmp_path / "control"
+    control.mkdir()
+    (control / "supervisor-memory.jsonl").write_text(
+        json.dumps({"rss": 300 << 20, "threads": {"proxy-ask": 900}, "event": "forged", "self": 1}) + "\nnot json\n")
+    notes, log = [], tmp_path / "memory.jsonl"
+    w = watch(group, protected={supervisor.pid}, log=log, notify=lambda *a: notes.append(a), control=lambda: control)
+    w.cgroup = group
+    pid, rss = w.supervisor_rss()
+    assert pid == supervisor.pid and rss >= 100 << 20
+    w.watch_supervisor({"current": GIB, "limit": 8 * GIB})
+    w.watch_supervisor({"current": GIB, "limit": 8 * GIB})
+    events = [json.loads(line) for line in log.read_text().splitlines()]
+    assert [e["event"] for e in events] == ["supervisor-memory"]  # once per doubling, not at every look
+    assert len(notes) == 1 and "supervisor" in notes[0][1] and "claude-test" in notes[0][1]
+    lines = w.stop()
+    assert any("supervisor held up to" in line and str(log) in line for line in lines)
+    detail = [json.loads(line) for line in log.read_text().splitlines()][-1]
+    assert detail["event"] == "supervisor-detail" and detail["threads"] == {"proxy-ask": 900}
+    assert "self" not in detail and detail["run"] == "claude-test"
+
+
+def test_no_supervisor_no_records(tmp_path, processes):
+    other = child("worker", hold_mib=10)
+    processes.append(other)
+    group = cgroup(tmp_path, [other.pid], current=GIB)
+    w = watch(group, log=tmp_path / "memory.jsonl")
+    w.cgroup = group
+    assert w.supervisor_rss() is None
+    w.watch_supervisor({"current": GIB, "limit": 8 * GIB})
+    assert w.supervisor_records() == 0 and w.stop() == [] and not (tmp_path / "memory.jsonl").exists()

@@ -218,7 +218,7 @@ DEFAULTS_KEYS = {"version", "subnet", "subnet6", "mode", "canaries", "keep_days"
 SESSION_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}"
 # The directory of a start: its first name, with a suffix when that directory is taken (sessions.new_key).
 START_ID = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}"
-__version__ = "0.1.58"
+__version__ = "0.1.65"
 CONFIG_NAME = ".sandbox-ai.json"
 RULES_NAME = "rules.json"  # ~/.config/sandbox-ai/rules.json: your own rules, for every start
 # Label on session pods: the session's tmux directory, so a stale pod can be told apart from someone else's.
@@ -640,7 +640,7 @@ def build_parser():
     p.add_argument("--auth-file", type=Path, help="Copy this JSON file to agent's standard auth path")
     p.add_argument("--import-codex-auth", type=Path, metavar="FILE", help="OpenCode only: import a Codex ChatGPT auth.json as a private OAuth copy")
     p.add_argument("--copy", action="append", default=[], metavar="SRC:HOME_RELATIVE_DEST", help="Copy individual config/credential file; repeatable")
-    p.add_argument("--state-dir", type=Path, metavar="DIR", help="Private persistent sandbox home; default: deleted after exit")
+    p.add_argument("--state-dir", type=Path, metavar="DIR", help="Private persistent sandbox home in DIR; default: a HOME kept per start (sandbox-ai resume NAME), with --no-keep deleted after exit")
     p.add_argument("--kit", action="append", default=[], metavar="NAME",
                    help="Also use the kit ~/.local/share/sandbox-ai/kits/NAME/AGENT (skills, agents, commands, "
                         "prompts, memory template, marketplaces.json), else sandbox-ai's built-in kit NAME "
@@ -730,7 +730,7 @@ def build_parser():
                    metavar="AGENT",
                    help="Another agent (claude, codex, opencode) in the same sandbox, for this agent to call from "
                         "the shell (claude -p, codex exec, opencode run): its login, its provider's hosts and its "
-                        "managed hooks join this run's; needs the team image (sandbox-build-image team)")
+                        "managed hooks join this run's; needs the team image (sandbox-ai build team)")
     p.add_argument("--mcp-approvals-dir", type=Path, help=argparse.SUPPRESS)
     p.add_argument("--config", type=Path, metavar="FILE",
                    help=f"Project configuration (default: {CONFIG_NAME} in the main workspace, if trusted)")
@@ -6255,6 +6255,10 @@ def remove_stale_pod(a, pod, owner):
 # a build), before the kernel picks one. Files in the sandbox's /tmp and HOME (tmpfs) count as memory too.
 
 MEMORY_WARN, MEMORY_ACT, MEMORY_INTERVAL, MEMORY_GRACE = 0.85, 0.95, 2.0, 3.0
+# The supervisor itself (named kthreadd for Firejail): its resident memory recorded from SUPERVISOR_RECORD (then at
+# each doubling), the human told once at SUPERVISOR_WARN; its own records (runtime.py MemoryGuard) are in the run's
+# control directory and are copied to the memory log when the run ends.
+SUPERVISOR_NAME, SUPERVISOR_RECORD, SUPERVISOR_WARN = "kthreadd", 512 << 20, 1 << 30
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 # Never ended by the watch: sandbox-ai's own processes (their command lines name an --internal- entry point too).
 MEMORY_PROTECTED = {"kthreadd", "firejail", "tmux: server", "tmux: client", "conmon", "catatonit", "pasta",
@@ -6344,8 +6348,13 @@ class MemoryWatch:
     a file for memory.jsonl records (or None), NOTIFY(title, text) tells the human."""
 
     def __init__(self, locate, name, session=None, log=None, notify=None, warn=MEMORY_WARN, act=MEMORY_ACT,
-                 interval=MEMORY_INTERVAL, grace=MEMORY_GRACE, clock=time.monotonic, kill=os.kill, proc=Path("/proc")):
+                 interval=MEMORY_INTERVAL, grace=MEMORY_GRACE, clock=time.monotonic, kill=os.kill, proc=Path("/proc"),
+                 control=None):
         self.locate, self.name, self.session, self.log, self.notify = locate, name, session, log, notify
+        # CONTROL() gives the run's control directory (or None), where the supervisor writes its own records.
+        self.control = control or (lambda: None)
+        self.supervisor, self.supervisor_peak, self.supervisor_next, self.supervisor_warned = None, 0, \
+            SUPERVISOR_RECORD, False
         self.warn, self.act, self.interval, self.grace, self.clock, self.kill, self.proc = \
             warn, act, interval, grace, clock, kill, Path(proc)
         self.cgroup, self.protected, self.first_oom = None, set(), None
@@ -6405,9 +6414,69 @@ class MemoryWatch:
         elif self.clock() - self.written >= 10:
             self.share(state, self.warned)
             self.written = self.clock()
+            self.watch_supervisor(state)
         if ratio >= self.act:
             self.relieve(state)
         return state
+
+    def supervisor_rss(self):
+        """(pid, rss bytes) of the sandbox's supervisor (the largest process named SUPERVISOR_NAME), or None."""
+        best = None
+        for pid in cgroup_processes(self.cgroup):
+            try:
+                if (self.proc / str(pid) / "comm").read_text().strip() != SUPERVISOR_NAME:
+                    continue
+                rss = next(int(line.split()[1]) * 1024 for line in (self.proc / str(pid) / "status").read_text()
+                           .splitlines() if line.startswith("VmRSS:"))
+            except (OSError, ValueError, IndexError, StopIteration):
+                continue
+            if best is None or rss > best[1]:
+                best = (pid, rss)
+        return best
+
+    def watch_supervisor(self, state):
+        found = self.supervisor_rss()
+        if found is None:
+            return
+        self.supervisor = found
+        rss = found[1]
+        self.supervisor_peak = max(self.supervisor_peak, rss)
+        if rss >= self.supervisor_next:
+            while self.supervisor_next <= rss:
+                self.supervisor_next *= 2
+            self.record("supervisor-memory", rss=rss, used=state["current"], limit=state["limit"])
+        if rss >= SUPERVISOR_WARN and not self.supervisor_warned:
+            self.supervisor_warned = True
+            if self.notify is not None:
+                with contextlib.suppress(Exception):
+                    self.notify("sandbox-ai: supervisor memory",
+                                f"sandbox-ai's supervisor of {self.name} holds {gib(rss)} (it should stay far below); "
+                                "if the run ends by memory, its records are in memory.jsonl: please report them")
+
+    def supervisor_records(self):
+        """The supervisor's own records (runtime.py MemoryGuard) from the control directory, copied into the memory
+        log; their number."""
+        directory = self.control()
+        if directory is None:
+            return 0
+        try:
+            lines = (Path(directory) / "supervisor-memory.jsonl").read_text(encoding="utf-8").splitlines()[:50]
+        except OSError:
+            return 0
+        count = 0
+        for line in lines:
+            try:
+                data = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(data, dict):
+                # Written by the supervisor, which runs beside the agent: only plain fields, the record's own kind.
+                data.pop("event", None)
+                data.pop("run", None)
+                self.record("supervisor-detail", **{key: value for key, value in data.items()
+                                                    if isinstance(key, str) and key.isidentifier() and key != "self"})
+                count += 1
+        return count
 
     def relieve(self, state):
         now = self.clock()
@@ -6467,9 +6536,14 @@ class MemoryWatch:
         for entry in self.ended:
             lines.append(f"memory nearly full: ended {printable(entry['name'])} (PID {entry['pid']}, {gib(entry['rss'])}) "
                          "so that the sandbox could go on")
+        details = self.supervisor_records()
         if oom > 0:
             lines.append(f"the sandbox ran out of memory: the kernel ended {oom} process{'es' if oom != 1 else ''} "
                          f"(peak {gib(self.peak)}); start with --memory 16g, or run fewer things at once")
+        if self.supervisor_peak >= SUPERVISOR_RECORD:
+            where = f" (details: {self.log})" if self.log is not None and details else ""
+            lines.append(f"sandbox-ai's supervisor held up to {gib(self.supervisor_peak)}{where}; that is more than it "
+                         "should: please report it")
         return lines
 
 
@@ -6515,7 +6589,7 @@ def start_memory_watch(a, session):
     def notify(title, text):
         load_approvals_module().desktop_notification(title, text)
     return MemoryWatch(locate, getattr(a, "run_id", None) or pod_name(a), session=session, log=log,
-                       notify=notify).start()
+                       notify=notify, control=lambda: getattr(a, "control_dir", None)).start()
 
 
 def run_pod(a, session, home):

@@ -124,6 +124,37 @@ def test_entries(scenario, tmp_path):
         assert [(e["name"], e["state"]) for e in listed()] == [("bad", "damaged")]
 
 
+def test_entries_say_why_nothing_can_be_attached(scenario, tmp_path):
+    """attach_why: one word for the desktop app and the web page, null exactly when attachable."""
+    def foreground_start(key, pid, paused=False):  # a kept start in the foreground (--no-tmux): its own launcher
+        fake_process(tmp_path, pid, ["python3", "agent_sandbox.py", "claude"], start=7)
+        data = make_start(key, paused=paused, mode="foreground", pid_start=7, started="2026-11-02T09:30:00Z")
+        sessions.save(key, {**data, "pid": pid})
+
+    if scenario == "happy":
+        make_start("web", tmp_path, pid=41)
+        register("claude-1234abcd")  # a plain run: no start directory, no tmux
+        foreground_start("task", 42)
+        make_mcp(tmp_path, "demo", pid=43)
+        register("mcp-demo", pid=os.getpid())
+        found = {e["name"]: (e["attachable"], e["attach_why"]) for e in listed()}
+        assert found == {"web": (True, None), "claude-1234abcd": (False, "foreground"),
+                         "task": (False, "foreground"), "mcp-demo": (False, "mcp")}
+    elif scenario == "sad":
+        make_start("held", tmp_path, pid=41, paused=True)
+        make_start("old")
+        found = {e["name"]: (e["state"], e["attachable"], e["attach_why"]) for e in listed()}
+        assert found == {"held": ("paused", False, "paused"), "old": ("stopped", False, "stopped")}
+    else:
+        bad = sessions.root() / "bad"
+        bad.mkdir(parents=True)
+        (bad / "session.json").write_text("{not json")
+        foreground_start("task", 42, paused=True)  # paused, but the foreground is what matters
+        found = {e["name"]: e["attach_why"] for e in listed()}
+        assert found == {"bad": "damaged", "task": "foreground"}
+        assert all(e["attach_why"] is None for e in listed() if e["attachable"])
+
+
 def test_show(scenario, tmp_path):
     lines = []
     if scenario == "happy":
@@ -653,6 +684,27 @@ def test_resume_review_home(scenario, tmp_path):
         assert st.main(["resume", "web", "--review-home"], out=lines.append) == 0
         assert "== changed .bashrc" in lines
         assert not (sessions.session_dir("web") / "tmux" / "attach.sock").exists()  # nothing started
+
+
+def test_resume_with_workspaces_and_restart(scenario, tmp_path, monkeypatch):
+    """resume NAME --workspace/--mount: a kept start comes back with them; --restart stops a running one first."""
+    make_start("web", started="2026-11-01T00:00:00Z")
+    resumed, stopped = Mock(return_value=0), Mock(return_value=0)
+    monkeypatch.setattr(sessions, "resume", resumed)
+    monkeypatch.setattr(sessions, "stop", stopped)
+    if scenario == "happy":
+        assert st.main(["resume", "web", "-w", str(tmp_path), "--mount", f"{tmp_path}:/mnt/x:ro"]) == 0
+        assert resumed.call_args.args[1:] == ([str(tmp_path)], [f"{tmp_path}:/mnt/x:ro"]) and not stopped.called
+    elif scenario == "sad":
+        register("claude-1", name="task")
+        assert st.main(["resume", "task", "--workspace", str(tmp_path)]) == 1  # a plain run: nothing to start again
+        assert st.main(["resume", "web", "--review-home", "--workspace", str(tmp_path)]) == 1
+        assert not resumed.called
+    else:
+        monkeypatch.setattr(st, "find", lambda name: {**st.entries(True)[0], "state": "running"})
+        lines = []
+        assert st.main(["resume", "web", "--restart"], out=lines.append) == 0
+        assert stopped.called and resumed.call_args.args[1:] == ([], []) and "stopping it" in lines[0]
 
 
 # --- the single commands are deprecated ---------------------------------------------------------------------

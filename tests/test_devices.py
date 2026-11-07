@@ -186,6 +186,24 @@ def test_limits_through_systemd_or_the_cgroup_files(world, tmp_path, monkeypatch
         d.set_limits(record, finder=finder)
 
 
+def test_limits_keep_to_the_runs_security_mode(world, monkeypatch):
+    """A strict mode caps --memory/--cpus/--pids at the start; `sandbox-ai limits` during the run keeps to it."""
+    proc, record = world
+    finder = lambda r: d.sandbox_processes(r, proc)  # noqa: E731
+    commands = []
+    monkeypatch.setattr(d.shutil, "which", lambda name: "/usr/bin/" + name)
+    systemctl = lambda command, **kwargs: commands.append(command) or types.SimpleNamespace(returncode=0)  # noqa: E731
+    strict = {**record, "mode": {"name": "high"}}
+    with pytest.raises(ValueError, match=r"--memory none: the mode limits it to 4g \(security mode high\)"):
+        d.set_limits(strict, memory="none", finder=finder, runner=systemctl)
+    with pytest.raises(ValueError, match="--pids 9999"):
+        d.set_limits(strict, memory="2g", pids="9999", finder=finder, runner=systemctl)
+    assert commands == []  # nothing changed
+    assert d.set_limits(strict, memory="2g", finder=finder, runner=systemctl, out=lambda line: None) == "systemd"
+    assert d.set_limits({**record, "mode": {"name": "medium"}}, memory="none", finder=finder, runner=systemctl,
+                        out=lambda line: None) == "systemd"  # no cap in medium
+
+
 def record_cgroup(proc, record):
     return d.sandbox_processes(record, proc)["cgroup"]
 

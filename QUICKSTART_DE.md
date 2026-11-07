@@ -10,6 +10,9 @@ LLM und Browser-Tests.
 Alle Befehle als normaler Benutzer ausführen, nie mit `sudo`. Das
 Standard-Backend braucht funktionierendes rootless Podman mit `pasta`;
 `podman info --format '{{.Host.Security.Rootless}}'` sollte `true` ausgeben.
+Unter macOS laufen die Sandboxes in einer rootless `podman machine`, die
+`/Users` freigibt (`sandbox-ai doctor` prüft das; die README sagt, was dort
+bisher geht).
 
 ## 0. Installieren
 
@@ -19,13 +22,19 @@ sandbox-ai doctor         # was auf diesem Host fehlt und wie man es behebt
 ```
 
 Das legt die Befehle in `~/.local/bin` (und `~/.bin`, falls vorhanden), dieses
-Verzeichnis in `~/.bashrc` auf Ihren `PATH` (`--no-modify-rc` lässt die Datei in
-Ruhe) und die Dateien in `~/.local/share/sandbox-ai` ab. Öffnen Sie danach ein
+Verzeichnis in `~/.bashrc` und `~/.zshrc` auf Ihren `PATH` (`--no-modify-rc` lässt
+beide in Ruhe) und die Dateien in `~/.local/share/sandbox-ai` ab. Öffnen Sie danach ein
 neues Terminal. Ohne `--from` lädt es das neueste
 Release (`--source URL` wählt das Repository). Alles funktioniert auch direkt
 aus dem Checkout als `./sandbox-ai claude` usw., wie unten; nur darf der Checkout
 selbst nie ein Workspace sein. Die Tab-Vervollständigung für bash, zsh und fish
 kommt mit (`sandbox-ai completion install` richtet sie erneut ein).
+
+Ohne Checkout: Die [Release-Seite](https://github.com/c0decave/sandbox-ai/releases)
+bietet `sandbox-ai.pyz` (eine Datei, jedes Python ab 3.9), ein AppImage für
+Linux (x86_64, aarch64) und `sandbox-ai.app` für macOS, fertig zum Starten
+([Vier Wege zur Installation](README_DE.md#vier-wege-zur-installation)). Mit der
+`.pyz` lauten die Befehle unten `./sandbox-ai.pyz build all` usw.
 
 ## 1. Images bauen
 
@@ -99,11 +108,16 @@ Sehen, was passieren würde, ohne etwas zu starten? `--dry-run` anhängen.
 
 ```text
 Project directory (mounted at /work) [/home/ich/src/sandbox-demo]:
+  Security modes (options can only narrow the chosen one):
+    lax: every outbound destination (--egress-all-allow), logged with --log-debug; no approval questions
+    …
+Security mode (lax/low/medium/high/paranoid) [medium]:
 Additional workspaces, comma-separated (mounted at /workspaces/<name>): ~/src/shared-lib
 Agent (codex/claude/opencode): claude
 Backend (podman/bwrap) [podman]:
   default: the agent's own provider only; development: plus PyPI, GitHub and the OpenAI and Anthropic APIs; …
 Network (default/development/frontier/dns/egress-all/offline) [default]: development
+Advanced: choose the sandbox's own network addresses (--subnet; default: the backend's own) [y/N]:
 Start the agent without permission prompts (--dangerously-skip-permissions) [y/N]: y
 Virtual display for GUI apps and browsers (--gui) [y/N]:
 Run in tmux with an extra shell window (default of the launcher in a terminal; no adds --no-tmux) [Y/n]:
@@ -111,27 +125,36 @@ Log denied egress and file access (--log-dir) [y/N]: y
 Allow further network destinations (presets such as github, hosts, TCP ports, ports on this host) [y/N]:
 Set up Git (commit identity, push tokens for GitHub or your own Git server) [y/N]: y
 Commit as your host's git user.name and user.email (--git-identity) [Y/n]:
-Token for github.com (…): enter it now, use a host variable, or none (none/enter/variable) [none]:
-Add a push token for this project's origin http://localhost:3000 [y/N]: y
-Token for http://localhost:3000: enter it now or use a host variable (enter/variable) [enter]:
-Token for http://localhost:3000 (input hidden, empty to skip):
-Your own Git server (Gitea, Forgejo, GitLab ...) for a token, e.g. http://localhost:3000, empty to finish:
+Token for github.com (…): enter it now, use a host variable, a secret of `sandbox-ai secrets`, or none (none/enter/variable/secret) [none]:
+Add a push token for this project's origin https://git.example.org [y/N]: y
+Token for https://git.example.org: enter it now, use a host variable or a secret (enter/variable/secret) [enter]:
+Token for https://git.example.org (input hidden, empty to skip):
+Your own Git server (Gitea, Forgejo, GitLab ...) for a token, e.g. (…), or a Git credentials file (…), empty to finish:
+Keep these tokens out of the sandbox: the connection proxy adds them to Git's requests, the agent never reads them (--token-proxy; no GH_TOKEN for gh then) [Y/n]:
+  Kit: /home/ich/.local/share/sandbox-ai/home/claude (…); project memory on. Change both later with: sandbox-ai wizard edit, part k
 Further options (read-only workspaces, persistent HOME, mounts, variables, MCP, display, any other) [y/N]:
 …
 Write configuration [Y/n]:
-Wrote the token to /home/me/.config/sandbox-ai/tokens/http-localhost-3000 (mode 0600; the project configuration names only this file)
+Wrote the token to /home/ich/.config/sandbox-ai/tokens/https-git.example.org (mode 0600; the project configuration names only this file)
 Wrote and trusted /home/ich/src/sandbox-demo/.sandbox-ai.json
 Start with: ./sandbox-ai claude --workspace /home/ich/src/sandbox-demo
 ```
 
 Antworten lassen sich wie in einer Shell bearbeiten (Backspace, Pfeiltasten,
-Tab ergänzt Pfade). `development` erlaubt PyPI, GitHub und die APIs von OpenAI
-und Anthropic. Die letzten drei Blöcke sind optional; mit `n` überspringen. Der
+Tab ergänzt Pfade). Zuerst kommt der Sicherheitsmodus: Enter behält `medium`
+(oder den Modus Ihrer Vorgaben), und die Fragen danach bieten nur an, was der
+Modus erlaubt (`high` und `paranoid` öffnen nichts über den Anbieter des
+Agenten hinaus; README, „Sicherheitsmodi“). `development` erlaubt PyPI, GitHub
+und die APIs von OpenAI und Anthropic. Die letzten drei Blöcke sind optional;
+mit `n` überspringen. Der
 Git-Block bietet einen Token für das `origin`-Remote des Projekts an (mit `y`
 bestätigen; Vorgabe ist Nein, weil der Agent dieses Remote ändern kann). Ein
 eingegebener Token wird nicht angezeigt und landet in einer privaten Datei
 (Modus 0600) außerhalb des Projekts; die Konfiguration nennt nur diese Datei.
-Mit `variable` bleibt der Token stattdessen in einer Host-Variable.
+Mit `variable` bleibt der Token stattdessen in einer Host-Variable, mit `secret`
+in einem Geheimnis von `sandbox-ai secrets`. Für HTTPS-Server bietet der Git-Block
+auch `--token-proxy` an: Der Verbindungs-Proxy setzt den Token in die Anfragen von
+Git ein, und der Agent liest ihn nie.
 
 Ab jetzt wendet der Starter diese Einstellungen automatisch an; Optionen auf
 der Kommandozeile haben weiterhin Vorrang. Später ändern Sie die Konfiguration
@@ -290,7 +313,8 @@ Build, damit die Sandbox überlebt. `sandbox-ai web` bietet all das als Webseite
 | Option | Zweck |
 |---|---|
 | `--workspace DIR` | Projekt unter `/work`; für weitere wiederholen oder mit Kommas trennen |
-| `--session NAME` | Lösbare Session (siehe Schritt 5) |
+| `--name NAME` | Den Start benennen (siehe Schritt 5); `--no-keep` verwirft sein HOME am Ende |
+| `--mode high` | Sicherheitsmodus: `lax`, `low`, `medium` (Vorgabe), `high`, `paranoid`; Optionen können ihn nur enger machen |
 | `--dangerously-skip-permissions` | Keine Rückfragen; die Sandbox bleibt in Kraft |
 | `--allow-github`, `--allow-pypi`, `--allow-host HOST` | Einzelne HTTPS-Ziele öffnen |
 | `--allow-host-port PORT` | Dienst auf dem eigenen Host erreichen, etwa einen lokalen Git-Server (während des Laufs: `net allow --allow-host-port`) |
@@ -301,7 +325,7 @@ Build, damit die Sandbox überlebt. `sandbox-ai web` bietet all das als Webseite
 | `--git-credentials ~/.git-credentials` | Vorhandene Git-Logins nutzen (der Agent kann sie lesen) |
 | `--kit NAME`, `--no-memory` | Skills, Agents und Commands eines Kits dazunehmen (`~/.local/share/sandbox-ai/kits/NAME`); ohne Projekt-Memory starten |
 | `--profile development` | Anbieter, PyPI, GitHub und die APIs von OpenAI und Anthropic |
-| `--state-dir DIR` | Sandbox-HOME zwischen Läufen behalten |
+| `--state-dir DIR` | Ein eigenes Sandbox-HOME für mehrere Starts (jeder Start behält ohnehin sein eigenes) |
 | `--offline`, `--egress-all-allow` | Kein Netz / jedes ausgehende Ziel |
 | `--gui`, `--gui-vnc DIR` | Virtuelles Display (siehe Schritt 7) |
 | `--log-dir DIR` | Logs (siehe Schritt 9) |

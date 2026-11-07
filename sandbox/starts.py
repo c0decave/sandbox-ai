@@ -26,7 +26,9 @@ their own: gc removes them on request, or every new start does with "keep_days" 
 
 One table for what runs and what is kept: the starts of agents (detachable sessions included), and the MCP
 server sandboxes. By default: what runs or is paused, and the starts whose HOME is kept; --all adds stopped
-MCP servers. --json writes the same as a list of objects, for scripts and the desktop app.
+MCP servers. --json writes the same as a list of objects, for scripts and the desktop app; "attachable" says
+whether attach can bring a start's terminal here, and "attach_why" why not (mcp, damaged, stopped, foreground,
+paused; null when it can).
 
 Every start has a name: --name NAME, or AGENT-PROJECT-xxxx (PROJECT: --project-name, the project file's
 "name", else the main workspace's folder name). A name is 1-40 letters, digits, '_', '.' or '-' and unique
@@ -325,7 +327,7 @@ def start_entries(prune=True):
         data = read_json(directory / "session.json")
         if data is None or not isinstance(data.get("agent"), str) or not isinstance(data.get("options"), list):
             found[key] = {"name": key, "id": key, "kind": "session", "agent": None, "state": "damaged",
-                          "home": None, "directory": str(directory)}
+                          "home": None, "attachable": False, "directory": str(directory)}
             continue
         try:
             state = sessions.status(key, data)
@@ -381,6 +383,24 @@ def mcp_entries(include_stopped=False):
     return found
 
 
+def attach_why(entry):
+    """Why the start ENTRY has no terminal to attach to, in one word for programs (None: it has one, attachable):
+    "mcp" (an MCP server sandbox), "damaged", "stopped" (nothing runs), "foreground" (it runs without tmux, in
+    the foreground of its own terminal or script: a task, no terminal, --no-tmux), "paused" (resume it first).
+    The desktop app and the web interface explain each in their own words."""
+    if entry.get("attachable"):
+        return None
+    if entry.get("kind") == "mcp":
+        return "mcp"
+    if entry.get("state") == "damaged":
+        return "damaged"
+    if entry.get("state") not in ("running", "paused"):
+        return "stopped"
+    if entry.get("kind") == "run":
+        return "foreground"
+    return "paused" if entry.get("state") == "paused" else "foreground"
+
+
 def entries(include_all=False, prune=True):
     """Every start this registry knows, as a list of entries (dicts, see list --json): the running sandboxes,
     the start directories and the MCP servers; with INCLUDE_ALL also the MCP servers that do not run."""
@@ -409,6 +429,8 @@ def entries(include_all=False, prune=True):
                       "started": text(record_.get("started")), "workspace": text(record_.get("workspace")),
                       "directory": None, "run_dir": record_.get("directory")})
     found = list(starts.values()) + plain + list(servers.values())
+    for entry in found:
+        entry["attach_why"] = attach_why(entry)
     return sorted(found, key=lambda e: (STATE_ORDER.get(e["state"], 9), e.get("started") or "", e["name"]))
 
 
@@ -453,9 +475,11 @@ def rename(old, new, out=print):
     return 0
 
 
-def act(command, name, out=print, wait=None, yes=False, review=False, as_json=False):
+def act(command, name, out=print, wait=None, yes=False, review=False, as_json=False, workspaces=(), mounts=(),
+        restart=False):
     """attach, pause, resume, stop or delete the start NAME, whatever kind it is. REVIEW (resume): show what
-    changed in its kept HOME instead, AS_JSON for programs."""
+    changed in its kept HOME instead, AS_JSON for programs. WORKSPACES, MOUNTS (resume): added at its start;
+    RESTART: a running one is stopped first."""
     printable = launcher().printable
     try:
         entry = find(name)
@@ -481,7 +505,15 @@ def act(command, name, out=print, wait=None, yes=False, review=False, as_json=Fa
             return sessions.review(key, as_json, out)
         if command == "stop":
             return sessions.stop(key) if wait is None else sessions.stop(key, wait)
+        if command == "resume" and (workspaces or mounts or restart):
+            if restart and entry["state"] in ("running", "paused"):
+                out(f"{shown}: stopping it to start it again")
+                sessions.stop(key)
+            return sessions.resume(key, list(workspaces), list(mounts))
         return {"attach": sessions.attach, "pause": sessions.pause, "resume": sessions.resume}[command](key)
+    if workspaces or mounts or restart:
+        raise ValueError(f"{shown} keeps nothing to start again with (a run without a kept start): end it and start "
+                         "anew with the workspace")
     record_ = module("net").running().get(entry["run"])
     if record_ is None:
         raise ValueError(f"{shown} has ended meanwhile")
@@ -697,6 +729,13 @@ def parser():
             sub.add_argument("-r", "--review-home", action="store_true",
                              help="show what changed in its HOME's start files since its last start; start nothing")
             sub.add_argument("-j", "--json", action="store_true", help="with --review-home: as JSON")
+            sub.add_argument("-w", "--workspace", action="append", default=[], metavar="DIR",
+                             help="start it with this directory added (at /workspaces/<name>; repeatable), kept for "
+                                  "its later starts")
+            sub.add_argument("-m", "--mount", action="append", default=[], metavar="SOURCE:DESTINATION[:ro|rw]",
+                             help="start it with this mount added (repeatable), kept for its later starts")
+            sub.add_argument("--restart", action="store_true",
+                             help="a running start is stopped first (the agent continues its conversation)")
     return p
 
 
@@ -713,8 +752,13 @@ def main(argv, out=print):
         if args.command in ("attach", "pause", "resume", "stop", "delete"):
             if getattr(args, "json", False) and not getattr(args, "review_home", False):
                 raise ValueError("--json goes with --review-home")
+            if getattr(args, "review_home", False) and (getattr(args, "workspace", None) or getattr(args, "mount", None)
+                                                         or getattr(args, "restart", False)):
+                raise ValueError("--review-home starts nothing: it goes without --workspace, --mount and --restart")
             return act(args.command, args.name, out, wait=getattr(args, "wait", None), yes=getattr(args, "yes", False),
-                       review=getattr(args, "review_home", False), as_json=getattr(args, "json", False))
+                       review=getattr(args, "review_home", False), as_json=getattr(args, "json", False),
+                       workspaces=getattr(args, "workspace", []), mounts=getattr(args, "mount", []),
+                       restart=getattr(args, "restart", False))
         if args.history:
             return show_history(args.history, out, args.json)
         show(entries(args.all), out, args.json)

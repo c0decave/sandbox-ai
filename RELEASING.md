@@ -12,7 +12,7 @@ A release consists of
 | `sandbox-ai-bundle-X.Y.Z.tar.gz` | `install.sh` (the whole tree, reproducible) |
 | `sandbox_ai-X.Y.Z-py3-none-any.whl`, `sandbox_ai-X.Y.Z.tar.gz` | PyPI (`pip install sandbox-ai`) |
 | `install.sh` | first installs (`curl … | bash`); carries the release keys of `sandbox/release-signers` |
-| `sandbox-ai.pyz` | the command line in one file (`python3 sandbox-ai.pyz …`); made by `make_dist.py` from the bundle |
+| `sandbox-ai.pyz` | the command line in one file (`./sandbox-ai.pyz …` or `python3 -I sandbox-ai.pyz …`); made by `make_dist.py` from the bundle |
 | `sandbox-ai-x86_64.AppImage`, `sandbox-ai-aarch64.AppImage` | the app with sandbox-ai, Python and PySide6 inside, for Linux; built by `release.yml` |
 | `sandbox-ai-arm64.dmg`, `sandbox-ai-x86_64.dmg` | `sandbox-ai.app` for macOS (not notarised); built by `release.yml` |
 | `SHA256SUMS` | `install.sh` verifies the bundle with it; it lists every file above |
@@ -250,6 +250,8 @@ This checks the published `install.sh` before a first `curl … | bash` too.
 The repository runs `.github/workflows/`:
 
 - `ci.yml`: tests on Python 3.9 to 3.13, builds the package and runs every command from the wheel.
+- `e2e.yml`, on a push to the branch `e2e` or started by hand: builds the images and runs the live tests
+  with real sandboxes, rootless Podman and Bubblewrap with Firejail.
 - `release.yml`, for a pushed tag `vX.Y.Z`: tests, checks that the tag matches
   `__version__`, builds `dist/` (with `sandbox-ai.pyz`), the AppImages
   (`ubuntu-24.04`, `ubuntu-24.04-arm`) and the macOS disk images (`macos-14`,

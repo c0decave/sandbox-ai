@@ -777,6 +777,8 @@ def inner_bootstrap():
     taint = Taint(mirror=PROXY_RUN / "taint.json" if cfg.get("proxy") else None,
                   log=LOG_DIR / cfg["proxy"]["log"] if cfg.get("proxy") and LOG_DIR.is_dir() else None)
     gui, proxy, control = [], None, None
+    guard = threading.Event()
+    MemoryGuard(CONTROL_DIR if CONTROL_DIR.is_dir() else None).start(guard)
     try:
         if canaries is not None:
             canaries.start()
@@ -805,6 +807,7 @@ def inner_bootstrap():
         oom_first(child.pid)  # an out-of-memory kill takes the agent's processes before PID 1 (the whole run)
         return wait_child(child)
     finally:
+        guard.set()
         for process in gui:
             stop_process(process)
         if proxy:
@@ -924,7 +927,7 @@ def start_loggers(broker=None, quiet=(), who=None, canaries=None, network=None):
     # behind a refused lookup or a dropped packet; CANARIES (Canaries) checks the names looked up.
     cfg = json.loads(SESSION_CONFIG.read_text())
     stop = threading.Event()
-    stop.seen = set()
+    stop.seen = memory_part("denied seen", set())
     stop.threads = []
     def denied_loop():
         while not stop.wait(1):
@@ -936,7 +939,7 @@ def start_loggers(broker=None, quiet=(), who=None, canaries=None, network=None):
     if cfg["watch"]:  # file access only with an explicit --log-dir
         loggers.append((file_logger, (cfg["watch"], stop)))
     for target, args in loggers:
-        thread = threading.Thread(target=target, args=args, daemon=True)
+        thread = threading.Thread(target=target, args=args, name=target.__name__, daemon=True)
         thread.start()
         stop.threads.append(thread)
     return stop
@@ -950,6 +953,7 @@ def process_logger(stop, interval=0.5, proc=Path("/proc"), secret_values=(), lim
     with its command line, redacted (patterns, and the exact values of SECRET_VALUES: what --env and
     --secret-env pass). Runs in PID 1 outside Firejail, which sees the agent's processes. Stops at LIMIT."""
     seen = set()
+    memory_part("processes seen", lambda: len(seen))
     values = sorted({v for v in secret_values if isinstance(v, str) and len(v) >= 6}, key=len, reverse=True)
     try:
         written = (LOG_DIR / "processes.jsonl").stat().st_size
@@ -1088,7 +1092,8 @@ def dns_logger(pinned, port=53, stop=None, broker=None, quiet=(), who=None, cana
                 if not workers.acquire(blocking=False):
                     continue  # DNS_WORKERS lookups wait for nameservers already: the client asks again
                 try:
-                    threading.Thread(target=forwarded, args=(query, peer, name, reply, servers), daemon=True).start()
+                    threading.Thread(target=forwarded, args=(query, peer, name, reply, servers), name="dns-forward",
+                                     daemon=True).start()
                 except RuntimeError:  # no thread to be had (the sandbox's process limit): the client asks again
                     workers.release()
                 continue
@@ -1107,7 +1112,28 @@ def dns_logger(pinned, port=53, stop=None, broker=None, quiet=(), who=None, cana
     sock.close()
 
 
-def file_logger(roots, stop=None):
+FILE_PRUNE_SECONDS = 60.0
+
+
+def live_watches(fd, proc=Path("/proc")):
+    """The watch descriptors the kernel still holds on inotify FD (/proc/self/fdinfo), or None if unreadable or FD is
+    no inotify instance (then nothing may be pruned)."""
+    try:
+        if os.readlink(Path(proc) / "self" / "fd" / str(fd)) != "anon_inode:inotify":
+            return None
+        text = (Path(proc) / "self" / "fdinfo" / str(fd)).read_text()
+    except OSError:
+        return None
+    return {int(match, 16) for match in re.findall(r"^inotify wd:([0-9a-f]+)", text, re.MULTILINE)}
+
+
+def file_logger(roots, stop=None, prune_every=FILE_PRUNE_SECONDS):
+    """files.jsonl: what happens to the files below ROOTS (inotify). A directory's watch goes when the directory
+    does (IN_IGNORED); when the event queue overflows those events are lost, and since the kernel never reuses a
+    watch number their entries would stay for the whole run: test suites that make and remove tens of thousands of
+    directories a run grew the supervisor by gigabytes that way until the OOM killer ended the run. So after an
+    overflow, and every PRUNE_EVERY seconds, the table is matched with the watches the kernel still holds. When
+    the supervisor runs short of memory (MemoryGuard) the file log stops, with a note."""
     libc = ctypes.CDLL(None, use_errno=True)
     fd = libc.inotify_init1(0o2000000)
     if fd < 0:
@@ -1137,7 +1163,27 @@ def file_logger(roots, stop=None):
     for root in roots:
         watch(root)
     recent = {}
+    memory_part("file watches", lambda: len(paths))
+    memory_part("file recent", lambda: len(recent))
+    shed = threading.Event()
+    memory_shedder("file log", shed.set)
+    pruned, overflowed = time.monotonic(), False
+
+    def prune():
+        live = live_watches(fd)
+        if live is not None:
+            for wd in [wd for wd in paths if wd not in live]:
+                del paths[wd]
     while True:
+        if shed.is_set():
+            log_event("files.jsonl", {"error": "file log stopped: sandbox-ai's supervisor ran short of memory; "
+                                               "the run goes on without it"})
+            paths.clear()
+            recent.clear()
+            break
+        if overflowed or time.monotonic() - pruned >= prune_every:
+            prune()
+            pruned, overflowed = time.monotonic(), False
         # After stop, queued events are still drained before returning.
         if stop is not None and not select.select([fd], [], [], 0.2)[0]:
             if stop.is_set():
@@ -1151,6 +1197,7 @@ def file_logger(roots, stop=None):
             pos += 16 + size
             if event & 0x4000:
                 log_event("files.jsonl", {"error": "event queue overflow; events lost"})
+                overflowed = True  # IN_IGNORED of removed directories may be among the lost ones
                 continue
             if event & 0x8000:  # IN_IGNORED: the watch is gone (directory removed): forget its path
                 paths.pop(wd, None)
@@ -1173,7 +1220,9 @@ def file_logger(roots, stop=None):
     os.close(fd)
 
 
-OOM_MARGIN = 300
+# The agent's processes get the kernel's highest oom_score_adj: the OOM killer then always takes one of them while any
+# is left (it adds 1000/1000 of the memory limit to their score), never PID 1, the supervisor, whose death ends the run.
+OOM_MARGIN = 1000
 
 
 def oom_first(pid, proc=Path("/proc"), margin=OOM_MARGIN):
@@ -1187,6 +1236,162 @@ def oom_first(pid, proc=Path("/proc"), margin=OOM_MARGIN):
         return value
     except (OSError, ValueError, TypeError):
         return None  # no /proc, or the process ended: the run goes on as before
+
+
+# --- the supervisor's own memory ---------------------------------------------------------------------
+#
+# The supervisor is PID 1 of the sandbox: if the kernel's OOM killer takes it, the whole run ends. Runs were lost
+# that way with 1.2 and 2.8 GB in it. MemoryGuard looks at its own resident memory every SUPERVISOR_MEMORY_INTERVAL
+# seconds, gives freed heap back to the system (malloc_trim) and, each time it passes the next step (256 MiB, then
+# double), writes what it holds to supervisor-memory.jsonl in the run's control directory (the launcher's side
+# reads it): its threads by name, the most numerous object types and the size of each table registered in
+# MEMORY_PARTS. From SUPERVISOR_TRACE_FROM it traces allocations (tracemalloc), so the steps after that name the
+# lines that keep allocating. Only sizes, counts and code locations: no data of the run.
+
+SUPERVISOR_MEMORY_INTERVAL = 30.0
+SUPERVISOR_MEMORY_STEP = 256 << 20
+SUPERVISOR_TRACE_FROM = 512 << 20
+SUPERVISOR_MEMORY_RECORDS = 12   # steps written per run at most
+SUPERVISOR_MEMORY_FILE = "supervisor-memory.jsonl"
+MEMORY_PARTS = {}  # name: () -> int, the number of entries of one of the supervisor's tables
+MEMORY_SHEDDERS = {}  # name: () -> None, drops something the run can go on without (MemoryGuard, from SHED_FROM)
+SUPERVISOR_SHED_FROM = 768 << 20
+
+
+def memory_shedder(name, shed):
+    """Register SHED (a callable) under NAME: MemoryGuard calls it once when the supervisor passes SHED_FROM."""
+    MEMORY_SHEDDERS[name] = shed
+    return shed
+
+
+def memory_part(name, sized):
+    """Register SIZED (anything with a len, or a callable giving a number) under NAME for MemoryGuard's records."""
+    MEMORY_PARTS[name] = sized if callable(sized) and not hasattr(sized, "__len__") else (lambda: len(sized))
+    return sized
+
+
+def resident_bytes(proc=Path("/proc")):
+    """This process's resident memory (VmRSS) in bytes, or None."""
+    try:
+        for line in (Path(proc) / "self" / "status").read_text().splitlines():
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+class MemoryGuard:
+    """See above. DIRECTORY: where supervisor-memory.jsonl goes (None: nowhere, only the trimming); RSS() reads the
+    resident memory; TRIM() gives freed memory back; TRACE (bool) whether allocations may be traced."""
+
+    def __init__(self, directory=None, rss=resident_bytes, trim=None, step=SUPERVISOR_MEMORY_STEP,
+                 trace_from=SUPERVISOR_TRACE_FROM, records=SUPERVISOR_MEMORY_RECORDS, trace=True,
+                 interval=SUPERVISOR_MEMORY_INTERVAL, parts=None, shed_from=SUPERVISOR_SHED_FROM, shedders=None):
+        self.directory, self.rss, self.step, self.trace_from = directory, rss, step, trace_from
+        self.records, self.trace, self.interval, self.shed_from = records, trace, interval, shed_from
+        self.parts = MEMORY_PARTS if parts is None else parts
+        self.shedders = MEMORY_SHEDDERS if shedders is None else shedders
+        self.shed = []  # the names already called
+        self.trim = trim if trim is not None else self.malloc_trim()
+        self.next, self.written, self.peak = step, 0, 0
+
+    @staticmethod
+    def malloc_trim():
+        try:
+            function = ctypes.CDLL(None).malloc_trim
+        except (OSError, AttributeError):  # not glibc (musl has none): nothing to give back this way
+            return lambda: None
+        function.argtypes, function.restype = [ctypes.c_size_t], ctypes.c_int
+        return lambda: function(0)
+
+    def census(self, top=15):
+        """{type name: count} of the most numerous objects the garbage collector tracks."""
+        import gc
+        counts = {}
+        for item in gc.get_objects():
+            name = type(item).__name__
+            counts[name] = counts.get(name, 0) + 1
+        return dict(sorted(counts.items(), key=lambda pair: -pair[1])[:top])
+
+    def snapshot(self, rss):
+        threads = {}
+        for thread in threading.enumerate():
+            name = re.sub(r"[-_ ]?\d+(?: \(.*\))?$", "", thread.name) or "thread"
+            threads[name] = threads.get(name, 0) + 1
+        sizes = {}
+        for name, size in list(self.parts.items()):
+            with contextlib.suppress(Exception):
+                sizes[name] = int(size())
+        record = {"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "rss": rss, "peak": self.peak,
+                  "threads": threads, "parts": sizes}
+        with contextlib.suppress(Exception):
+            record["objects"] = self.census()
+        import tracemalloc
+        if tracemalloc.is_tracing():
+            with contextlib.suppress(Exception):
+                stats = tracemalloc.take_snapshot().statistics("lineno")[:15]
+                record["traced"] = [{"where": f"{stat.traceback[0].filename.rsplit('/', 1)[-1]}:"
+                                              f"{stat.traceback[0].lineno}", "bytes": stat.size, "count": stat.count}
+                                    for stat in stats]
+        return record
+
+    def check(self):
+        """One look; the record written (or None)."""
+        with contextlib.suppress(Exception):
+            self.trim()
+        rss = self.rss()
+        if rss is None:
+            return None
+        self.peak = max(self.peak, rss)
+        if rss >= self.shed_from:
+            self.shed_memory(rss)
+        if rss < self.next:
+            return None
+        while self.next <= rss:
+            self.next *= 2
+        if self.trace and rss >= self.trace_from:
+            import tracemalloc
+            if not tracemalloc.is_tracing():
+                tracemalloc.start(1)  # from here on: the growth, not what was there before
+        if self.written >= self.records:
+            return None
+        record = self.snapshot(rss)
+        self.written += 1
+        if self.directory is not None:
+            with contextlib.suppress(OSError):
+                with open(Path(self.directory) / SUPERVISOR_MEMORY_FILE, "a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(record) + "\n")
+        return record
+
+    def shed_memory(self, rss):
+        """Call each shedder not called yet; one record of what was dropped."""
+        names = [name for name in list(self.shedders) if name not in self.shed]
+        if not names:
+            return
+        for name in names:
+            self.shed.append(name)
+            with contextlib.suppress(Exception):
+                self.shedders[name]()
+        import gc
+        gc.collect()
+        with contextlib.suppress(Exception):
+            self.trim()
+        if self.directory is not None:
+            with contextlib.suppress(OSError):
+                with open(Path(self.directory) / SUPERVISOR_MEMORY_FILE, "a", encoding="utf-8") as stream:
+                    stream.write(json.dumps({"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "rss": rss,
+                                             "shed": names}) + "\n")
+
+    def run(self, stop):
+        while not stop.wait(self.interval):
+            with contextlib.suppress(Exception):  # the guard never ends the run
+                self.check()
+
+    def start(self, stop):
+        thread = threading.Thread(target=self.run, args=(stop,), name="memory-guard", daemon=True)
+        thread.start()
+        return thread
 
 
 def firejail_command(before):
@@ -2077,6 +2282,10 @@ def identity_head(head):
     return head[:-2] + b"Accept-Encoding: identity\r\n\r\n"
 
 
+PROXY_CONTEXTS = 256    # TLS contexts the proxy keeps (one per host name it opens)
+PROXY_VERIFIED = 4096   # (address, port, name) answers of serves_name it keeps
+
+
 class ProxyServer:
     """Connections of one sandbox run; one thread per connection."""
 
@@ -2276,14 +2485,20 @@ class ProxyServer:
         return self.config.get("allow", {})
 
     def server_context(self, host):
+        """The TLS context for HOST, kept for the PROXY_CONTEXTS hosts used last (each holds a certificate in
+        OpenSSL's memory; names under an allowed wildcard are endless)."""
         with self.lock:
-            context = self.contexts.get(host)
+            context = self.contexts.pop(host, None)
+            if context is not None:
+                self.contexts[host] = context  # the most recently used last
         if context is None:
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.set_alpn_protocols(["http/1.1"])
             context.load_cert_chain(str(server_certificate(self.run_dir, host)), str(self.run_dir / "leaf.key"))
             with self.lock:
                 self.contexts[host] = context
+                while len(self.contexts) > PROXY_CONTEXTS:
+                    self.contexts.pop(next(iter(self.contexts)))
         return context
 
     def ssh_refused(self, address, port=None):
@@ -2477,7 +2692,12 @@ class ProxyServer:
         except (OSError, ssl.SSLError, ValueError):
             return False
         with self.lock:
-            self.verified[key] = time.monotonic() + 600
+            now = time.monotonic()
+            if len(self.verified) >= PROXY_VERIFIED:  # expired ones first, then the oldest
+                self.verified = {k: until for k, until in self.verified.items() if until > now}
+                while len(self.verified) >= PROXY_VERIFIED:
+                    self.verified.pop(next(iter(self.verified)))
+            self.verified[key] = now + 600
         return True
 
     @staticmethod
@@ -3085,6 +3305,13 @@ def proxy_main(log_fd, ready_fd, ask_fd=None, asking=True):
     channel = AskChannel(socket.socket(fileno=ask_fd)) if ask_fd is not None else None
     server = ProxyServer(config, log_fd, checker, run_dir=PROXY_RUN, asker=channel if asking else None, who=channel)
     server.serve(listeners)
+    # Freed memory back to the system every half minute, its TLS contexts dropped if it grows large anyway (the
+    # supervisor's guard; no records: this user writes no control directory).
+    def drop_contexts():
+        with server.lock:
+            server.contexts.clear()
+    memory_shedder("proxy tls contexts", drop_contexts)
+    MemoryGuard(None, trace=False).start(threading.Event())
     os.write(ready_fd, b"1")
     os.close(ready_fd)
     return server.wait()
@@ -3175,6 +3402,9 @@ class Attribution:
         self.lock = threading.Lock()
         self.owners, self.scanned = {}, None  # socket inode: (pid, fd), from the last scan
         self.cache, self.window, self.count = {}, 0.0, 0
+        memory_part("attribution cache", lambda: len(self.cache))
+        memory_part("attribution sockets", lambda: len(self.owners))
+        memory_shedder("attribution cache", self.cache.clear)
 
     # -- sockets --
 
@@ -4539,7 +4769,7 @@ def hook_problem(cfg, run=subprocess.run):
             problem = hooks_supported(companion, [companion], run=run)
             if problem:
                 return f"the rules for {companion}'s own tools (--with {companion}) cannot hold: {problem}; " \
-                       "update the image (sandbox-build-image team)"
+                       "update the image (sandbox-ai build team)"
         return None
     what = "the rules for the agent's own tools" if cfg.get("hooks") is not None else "the kits' approved hooks"
     return f"{what} cannot hold: {problem}; update the agent (sandbox-build-image)"
@@ -5241,6 +5471,9 @@ class ApprovalBroker:
         self.lock, self.pending, self.decided, self.counter = threading.Lock(), {}, {}, 0
         self.run_token = secrets.randbelow(10 ** 9)  # IDs differ between sandboxes asking in the same second
         self.directory.mkdir(mode=0o700, exist_ok=True)
+        memory_part("questions open", lambda: len(self.pending))
+        memory_part("answers kept", lambda: len(self.decided))
+        memory_part("certificates seen", lambda: len(self.verified))
 
     @staticmethod
     def key(kind, details):
@@ -5283,7 +5516,8 @@ class ApprovalBroker:
                 try:
                     self._write(f"{ident}.json", {"id": ident, "kind": kind, "time": time.strftime(
                         "%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "timeout": self.timeout, **details})
-                    threading.Thread(target=self._wait, args=(key, kind, details, waiting), daemon=True).start()
+                    threading.Thread(target=self._wait, args=(key, kind, details, waiting), name="approval-wait",
+                                     daemon=True).start()
                 except (OSError, RuntimeError) as exc:  # no space, no more threads: refused, not asked
                     self.pending.pop(key, None)
                     return {"decision": "deny", "scope": "once", "reason": f"could not ask: {exc}"}
@@ -5474,7 +5708,7 @@ def serve_asks(channel, broker, who=None, taint=None):
             continue
         if isinstance(message, dict):
             try:
-                threading.Thread(target=answer, args=(message,), daemon=True).start()
+                threading.Thread(target=answer, args=(message,), name="proxy-ask", daemon=True).start()
             except RuntimeError:  # no thread to be had (the sandbox's process limit): refused at once
                 if message.get("kind") != "verified":  # nobody waits for that one
                     with lock, contextlib.suppress(OSError):

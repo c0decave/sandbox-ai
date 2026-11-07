@@ -27,7 +27,14 @@
   sandbox-ai vpn add|list|show|remove|check ...                      VPN profiles for --vpn (WireGuard, OpenVPN, Mullvad, Tailscale)
   sandbox-ai hosts list|add|remove|test|run ...                       other machines (LXC containers) managed over SSH
   sandbox-ai team start|list|show|post|stop|delete ...                a team of agents, one sandbox each, with a task board
-  sandbox-ai images [packages|extend|check|new|remove|history] ...   the agent images, their contents and extensions
+  sandbox-ai web [serve|user|vendor|cert] ...                         the web interface (HTTPS, password and TOTP)
+  sandbox-ai presets list|show|check ...                              ready setups to start an agent with (--preset NAME)
+  sandbox-ai defaults [show|set|unset] ...                            your defaults for every start (defaults.json)
+  sandbox-ai git-logins add|list|remove|check ...                     Git logins for pushes, used by the proxy
+  sandbox-ai publish-logins add|list|remove|check|kinds ...           package registry logins, used by the proxy
+  sandbox-ai identities add|set|login|publish|list|show|check|remove ...  commit identities with their logins
+  sandbox-ai demo-device start|serve|status|stop ...                  a virtual device to try the device rules
+  sandbox-ai images [packages|extend|check|new|remove|history|recipe] ...  the agent images, their contents and extensions
   sandbox-ai update [--check] [--version X.Y.Z] ...                  update an installation made by install.sh (signed)
   sandbox-ai version [--verbose]                                     version; --verbose: install place, release keys
   sandbox-ai completion bash|zsh|fish|install                        Tab completion for your shell (install.sh sets it up)

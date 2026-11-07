@@ -77,19 +77,46 @@ To verify on a real Mac (not possible in the sandbox): a macOS CI runner (GitHub
 (Podman 5, rootless and rootful) for each stage. `webui.py` needs OpenSSL's `-addext`; macOS
 ships LibreSSL, so check it or fall back.
 
-## Supervisor memory: the sandbox was OOM-killed (2026-11-05)
+## Supervisor memory: the sandbox was OOM-killed (2026-11-05, again 2026-11-07)
 
 A run ended when the kernel's memory-cgroup OOM killer took PID 1 of the sandbox, the
 supervisor (`inner_bootstrap`, named `kthreadd` for Firejail): `Killed process ... (kthreadd)
-total-vm:2239240kB, anon-rss:1236056kB`. Killing it ends the whole run. The load was six
-worktrees with test suites and agents at once, within the default `--memory 8g`.
+total-vm:2239240kB, anon-rss:1236056kB` on 2026-11-05 (six worktrees with test suites and agents
+at once, `--memory 8g`), and with 0.1.59 on 2026-11-07 with `anon-rss:2834008kB`. Killing it
+ends the whole run. 0.1.36's `oom_score_adj` margin does not save it once it is itself the
+largest process, and the memory watch never ends sandbox-ai's own processes.
 
-Open: 1.2 GB anonymous memory in the supervisor is far more than it should hold. Measure it
-over a long run with many processes and connections (`/proc/<supervisor>/status` from the
-host): `Attribution`, `ApprovalBroker`, `Taint`, the hook and control servers and the DNS
-stub's state are the candidates (`process_logger` is bounded: `seen &= current`). Also
-consider `oom_score_adj` -1000 for the supervisor (the agent should be killed first, not the
-run) and a doctor/launcher hint that names `--memory` when a run ends by OOM.
+Cause (found 2026-11-07, fixed in 0.1.65): the file logger (`--log-dir` watches the workspaces, HOME
+and /tmp). When the inotify queue overflows, which test suites do several times a run, the
+IN_IGNORED events of removed directories are lost; the kernel never reuses a watch number, so
+their entries stayed for the whole run. Reproduced: one overflow left 5774 entries for 1 live
+watch; tens of thousands of test directories per run, in several worktrees, add up to gigabytes
+(an agent could do it on purpose). Fixed: the table is matched with the kernel's watches
+(`/proc/self/fdinfo`) after every overflow and every minute.
+
+Measured, not the cause: the process logger (bounded by the live processes), `poll_denied`
+(about 150 MB at most with full nft sets), a thread per proxy question reading `/proc/net/tcp*`
+(no malloc arena growth, also without `MALLOC_ARENA_MAX`).
+
+Also in 0.1.65: the agent's processes get `oom_score_adj` +1000 (was +300), so the kernel takes
+one of them while any is left, never the supervisor; MemoryGuard sheds from 768 MiB (the file
+log stops with a note, caches are dropped) instead of growing into the OOM killer; the proxy
+caps its TLS contexts (256) and server checks (4096) and gives memory back the same way. The
+records of 0.1.60 stay: if a run still grows, `memory.jsonl` names what.
+
+## A workspace added to a running sandbox (requested 2026-11-07)
+
+Done: `sandbox-ai resume NAME [--restart] --workspace DIR` (a restart; the conversation goes on).
+Open, live without a restart (`sandbox-ai workspace add NAME DIR`): the sandbox's mounts are
+private (no propagation), so a later mount reaches it only through a staging directory mounted
+at the start with `bind-propagation=rslave` (Podman) and made `rshared` in rootless Podman's
+mount namespace; the launcher then binds DIR below it with `podman unshare mount --bind`, and
+Firejail's namespace (slave of the container's) receives it. Bubblewrap: the same with `nsenter`
+into its user and mount namespace. Needs: the checks of a start for DIR (private locations,
+policy) bound to the opened directory (`open_tree`/`move_mount` or `--bind-fd`, not a path a
+symlink swap can redirect), a way back (`workspace remove`: umount, busy files), macOS (podman
+machine: inside the VM), and live tests with real Podman (rootless and rootful) and Bubblewrap;
+none of that can run in the sandbox.
 
 ## Every start: names, detach, keep, rebirth (2026-11-04)
 
@@ -134,7 +161,8 @@ Open:
   checkpoint needs root (or a rootless CRIU setup) and does not cover
   Bubblewrap; worth a look only if users ask for long-running processes to
   survive a reboot.
-- **A rebirth's options.** A reborn start keeps its saved options; there is no
+- **A rebirth's options.** Done for workspaces and mounts (0.1.60: `resume NAME
+  [--restart] --workspace DIR --mount SPEC`, added and kept). Other options: a reborn start keeps its saved options; there is no
   way to change one (`sandbox-ai resume NAME --gui`). It would need the
   checks of a new start for the changed options (policy, private paths) and a
   clear rule for what is replaced and what is added.

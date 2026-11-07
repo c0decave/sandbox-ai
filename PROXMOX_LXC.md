@@ -160,3 +160,18 @@ It reaches your screen in one of three ways:
 - **Qt's own VNC:** `QT_QPA_PLATFORM=vnc:size=1600x1000 sandbox-ai-app`, only
   through an SSH tunnel (`ssh -L 5900:localhost:5900`). It has no password and
   no encryption, and terminal windows do not work with it.
+
+## 6. From another machine
+
+Instead of a desktop in the container, manage it from your own machine over
+SSH: `sandbox-ai hosts` keeps the container as a host, and the desktop app
+and the web interface (`sandbox-ai web`) show its starts, approvals and
+doctor next to your own (README, "Other hosts").
+
+```
+sandbox-ai hosts add ct1 user@ct1.lan --description "Proxmox 101"
+sandbox-ai hosts test ct1                 # SSH, its sandbox-ai version, its doctor
+sandbox-ai hosts run ct1 -- list          # sandbox-ai list in the container
+```
+
+The container needs only sshd and sandbox-ai; nothing listens there besides.

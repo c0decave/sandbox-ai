@@ -624,6 +624,18 @@ def test_a_terminal_over_a_websocket(server):
     sock.close()
 
 
+def test_the_terminals_page_lists_every_running_start():
+    """Terminals: every running start of the host (however it began), attachable ones open with one click (one tab
+    per start), the others say why (list --json's attach_why); refreshed with the page's poll."""
+    script = (Path(w.__file__).parent / "web" / "app.js").read_text()
+    page = script.split("// --- terminals")[1]
+    assert "refreshTerminalStarts" in page and 'hostPath("/starts")' in page and "s.attachable" in page
+    assert 'if (state.page === "terminals") refreshTerminalStarts(' in script
+    for why in ("foreground", "paused", "mcp", "stopped", "damaged"):
+        assert f"  {why}: " in page
+    assert "--no-tmux" in page and "t.key === key && !t.closed" in page
+
+
 def test_the_page_offers_the_network_of_a_start_and_the_presets():
     script = (Path(w.__file__).parent / "web" / "app.js").read_text()
     assert "/net/${encodeURIComponent(name)}" in script and 'hostPath("/presets")' in script
@@ -634,6 +646,146 @@ def test_the_page_has_a_vpn_page_that_sends_only_names_of_secrets():
     script = (Path(w.__file__).parent / "web" / "app.js").read_text()
     assert '["vpn", "VPN profiles"]' in script and "pages.vpn" in script and 'hostPath("/vpn")' in script
     assert "no key passes through this page" in script and 'type: "password"' not in script.split("pages.vpn")[1].split("pages.llm")[0]
+
+
+# -- notifications: themed toasts instead of alert() --
+
+WEB = ROOT / "sandbox" / "web"
+THEMES = json.loads((WEB / "themes.json").read_text())["themes"]
+
+
+def luminance(color):
+    color = color.lstrip("#")
+    if len(color) == 3:
+        color = "".join(c * 2 for c in color)
+
+    def channel(i):
+        value = int(color[i:i + 2], 16) / 255
+        return value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
+    return 0.2126 * channel(0) + 0.7152 * channel(2) + 0.0722 * channel(4)
+
+
+def contrast(a, b):
+    high, low = sorted((luminance(a), luminance(b)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+def badge_sign(background, colors):
+    """The colour app.js gives the sign on a toast's badge: the most readable of these on BACKGROUND."""
+    candidates = [colors["accent_text"], colors["base"], colors["text"], "#000000", "#ffffff"]
+    return max(candidates, key=lambda c: contrast(c, background))
+
+
+def test_the_page_shows_results_and_errors_as_toasts_not_alerts():
+    script = (WEB / "app.js").read_text()
+    css = (WEB / "app.css").read_text()
+    assert "alert(" not in script, "errors and results are toasts in the theme, not the browser's dialog"
+    assert script.count("confirm(") == 4, "confirmations stay confirm()"
+    assert "function toast(level, title, text, options)" in script and 'role: level === "error" ? "alert" : "status"' in script
+    assert ".innerHTML" not in script and "insertAdjacentHTML" not in script and "outerHTML" not in script
+    for level, colour in (("success", "--ok"), ("warning", "--warn"), ("error", "--bad")):
+        assert f".toast.{level} {{ --level: var({colour});" in css, level
+    assert ".notice.warn" in css
+
+
+@pytest.mark.parametrize("name", sorted(THEMES))
+def test_toasts_are_readable_in_every_theme(name):
+    """The toast's background is the theme's base colour: title and text in its text colours, the level as bar,
+    border and badge (3:1 for those against the base, as for controls), the badge's sign at 4.5:1 on the badge."""
+    colors, status = THEMES[name]["colors"], THEMES[name]["status"]
+    assert contrast(colors["text"], colors["base"]) >= 4.5 and contrast(colors["secondary"], colors["base"]) >= 4.5
+    levels = {"info": colors["accent"], "success": status["ok"], "warning": status["warn"], "error": status["bad"]}
+    for level, colour in levels.items():
+        assert contrast(colour, colors["base"]) >= 3.0, (name, level, colour)
+        assert contrast(badge_sign(colour, colors), colour) >= 4.5, (name, level, colour)
+    assert len({levels["info"], levels["warning"], levels["error"]}) == 3, "the levels look different"
+    for level in ("warning", "error"):  # the inline notices colour their text with the level's colour
+        assert contrast(levels[level], colors["base"]) >= 4.5, (name, level)
+
+
+TOAST_DRIVER = r"""
+const fs = require("fs"), vm = require("vm");
+class Node {
+  constructor(tag) { this.tagName = tag; this.children = []; this.attributes = {}; this.listeners = {}; this.parent = null;
+    this.className = ""; this.text = ""; }
+  setAttribute(k, v) { this.attributes[k] = String(v); if (k === "id") this.id = String(v); }
+  getAttribute(k) { return this.attributes[k]; }
+  addEventListener(type, f) { (this.listeners[type] = this.listeners[type] || []).push(f); }
+  fire(type) { for (const f of this.listeners[type] || []) f({ target: this }); }
+  append(...nodes) { for (const n of nodes) { n.parent = this; this.children.push(n); } }
+  prepend(n) { n.parent = this; this.children.unshift(n); }
+  remove() { if (this.parent) this.parent.children = this.parent.children.filter(c => c !== this); this.parent = null; }
+  get lastElementChild() { return this.children[this.children.length - 1]; }
+  get textContent() { return this.tagName === "#text" ? this.text : this.children.map(c => c.textContent).join(""); }
+  find(cls) { if ((this.className || "").split(" ").includes(cls)) return this;
+    for (const c of this.children) { const f = c.find && c.find(cls); if (f) return f; } return null; }
+  findTag(tag) { if (this.tagName === tag) return this;
+    for (const c of this.children) { const f = c.findTag && c.findTag(tag); if (f) return f; } return null; }
+}
+const body = new Node("body");
+const all = () => { const out = []; const walk = n => { out.push(n); n.children.forEach(walk); }; walk(body); return out; };
+const document = {
+  body, createElement: t => new Node(t),
+  createTextNode: t => { const n = new Node("#text"); n.text = t; return n; },
+  getElementById: id => all().find(n => n.id === id) || null,
+  querySelector: () => null, querySelectorAll: () => [], documentElement: { style: { setProperty() {} } },
+};
+let now = 0, timers = [];
+const setTimeout = (f, ms) => { const t = { f, at: now + ms, id: timers.length + 1 }; timers.push(t); return t.id; };
+const clearTimeout = id => { timers = timers.filter(t => t.id !== id); };
+const advance = ms => { now += ms; for (const t of timers.filter(t => t.at <= now)) { clearTimeout(t.id); t.f(); } };
+const context = vm.createContext({ document, Node, setTimeout, clearTimeout, console, window: {}, location: { host: "x" },
+  localStorage: { getItem: () => null, setItem() {} }, fetch: () => Promise.reject(new Error("offline")) });
+const source = fs.readFileSync(process.argv[2], "utf8").replace(/loadThemes\(\)\.then\(render\);\s*$/, "");
+vm.runInContext(source, context);
+const box = () => document.getElementById("toasts");
+const result = {};
+const t1 = context.toast("warning", "<b>asks</b>", "<img src=x onerror=alert(1)>", { action: ["Open approvals", () => { result.acted = true; }] });
+result.warning = { role: t1.getAttribute("role"), cls: t1.className, title: t1.find("title").textContent,
+  text: t1.find("text").textContent, textNodes: t1.find("text").children.map(c => c.tagName),
+  label: t1.find("sr-only").textContent, glyphHidden: t1.find("glyph").getAttribute("aria-hidden") };
+const e1 = context.toast("error", "failed", "exit status 1");
+result.error = { role: e1.getAttribute("role"), first: box().children[0] === e1 };
+result.unknown = context.toast("nonsense", "x", "").className;
+advance(4000);
+t1.fire("mouseenter"); advance(8000); result.keptWhileHovered = box().children.includes(t1);
+t1.fire("mouseleave"); advance(8001); result.closedAfter = !box().children.includes(t1);
+result.errorStays = box().children.includes(e1);
+e1.find("close").fire("click"); result.closedByButton = !box().children.includes(e1);
+const t2 = context.toast("info", "i", "", { action: ["Go", () => { result.acted = true; }] });
+t2.find("actions").findTag("button").fire("click"); result.actionClosed = !box().children.includes(t2);
+for (let i = 0; i < 6; i++) context.toast("error", `e${i}`, "");
+result.count = box().children.length; result.newest = box().children[0].find("title").textContent;
+result.signs = {};
+for (const [name, theme] of Object.entries(JSON.parse(fs.readFileSync(process.argv[3], "utf8")).themes)) {
+  const c = theme.colors, s = theme.status;
+  result.signs[name] = [c.accent, s.ok, s.warn, s.bad].map(bg => context.readableOn(bg, [c.accent_text, c.base, c.text, "#000000", "#ffffff"]));
+}
+console.log(JSON.stringify(result));
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_toasts_in_the_page(tmp_path):
+    """app.js's toast() in node with a small stand-in for the DOM: roles, plain text, closing on its own (not
+    errors, not under the pointer), the close button, the action, at most four, and the badge's sign colour."""
+    driver = tmp_path / "toasts.js"
+    driver.write_text(TOAST_DRIVER)
+    run = subprocess.run(["node", str(driver), str(WEB / "app.js"), str(WEB / "themes.json")], capture_output=True,
+                         text=True, timeout=60)
+    assert run.returncode == 0, run.stderr
+    result = json.loads(run.stdout)
+    assert result["warning"] == {"role": "status", "cls": "toast warning", "title": "<b>asks</b>",
+                                 "text": "<img src=x onerror=alert(1)>", "textNodes": ["#text"],
+                                 "label": "Warning: ", "glyphHidden": "true"}, "plain text, never markup"
+    assert result["error"] == {"role": "alert", "first": True} and result["unknown"] == "toast info"
+    assert result["keptWhileHovered"] and result["closedAfter"], "closes after 8 s, not while under the pointer"
+    assert result["errorStays"] and result["closedByButton"], "an error stays until it is closed"
+    assert result["acted"] and result["actionClosed"]
+    assert result["count"] == 4 and result["newest"] == "e5"
+    for name, signs in result["signs"].items():
+        c, s = THEMES[name]["colors"], THEMES[name]["status"]
+        assert signs == [badge_sign(bg, c) for bg in (c["accent"], s["ok"], s["warn"], s["bad"])], name
 
 
 def test_a_removed_or_reset_user_loses_its_sessions_at_once():

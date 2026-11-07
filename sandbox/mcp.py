@@ -275,6 +275,27 @@ def mount_records(definition):
     return records
 
 
+TOR_USERS = {"950", "debian-tor", "tor", "_tor", "toranon"}
+
+
+def check_tor_image_user(name, image, inspect=None):
+    """An image server behind a tor profile must not run as tor's own user: the kill switch lets that user's
+    packets out past Tor (it shares the VPN container's network namespace). The container cannot become it
+    (--cap-drop=ALL, no-new-privileges), so only the image's configured user counts: refused when it is tor's
+    uid or one of the usual names for it. A user name the image maps to that uid by its own /etc/passwd is not
+    seen here (README: the limits of a tor profile)."""
+    inspect = inspect or (lambda: subprocess.run(["podman", "image", "inspect", "--format", "{{.Config.User}}", image],
+                                                 capture_output=True, text=True, timeout=30))
+    try:
+        result = inspect()
+    except (OSError, subprocess.SubprocessError):
+        return
+    user = (result.stdout or "").strip().split(":", 1)[0] if result.returncode == 0 else ""
+    if user in TOR_USERS:
+        raise ValueError(f"MCP server {name}: its image runs as {user!r}, the user tor's kill switch lets out past "
+                         "Tor; it cannot go behind a tor profile (use an image with another user)")
+
+
 def image_command(definition, engine="podman", vpn_container=None):
     """The podman command that runs one instance of an image server (one per connection)."""
     command = [engine, "run", *RUN_FLAGS, f"--pids-limit={definition.get('pids', 128)}",
@@ -740,7 +761,14 @@ def ensure_running_locked(name, a, vpn=None):
         if definition.get("vpn") and engine == "podman":
             # The VPN's container first (checked; a failure stops the server), then the bridge, whose containers
             # join its network namespace. The wrapper is the supervisor: stopping it takes the tunnel down too.
-            container = launcher().load_vpn_module().mcp_container(name)
+            vpn_module = launcher().load_vpn_module()
+            try:
+                kind = vpn_module.load_profile(definition["vpn"]).get("type")
+            except (OSError, ValueError):
+                kind = None  # a missing or damaged profile: the VPN's own start says so
+            if kind == "tor" and not definition.get("mounts"):
+                check_tor_image_user(name, definition["image"])  # with mounts it runs as 0:0 anyway
+            container = vpn_module.mcp_container(name)
             cmd = [sys.executable, "-I", str(HERE / "vpn.py"), "--internal-mcp-vpn", definition["vpn"], container,
                    str(sock.resolve()), "--", *bridge, *image_command(definition, vpn_container=container)]
         environment = dict(os.environ)

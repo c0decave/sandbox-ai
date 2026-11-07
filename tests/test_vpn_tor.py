@@ -550,3 +550,36 @@ def test_mcp_servers_take_a_tor_profile(home, monkeypatch):
     FakeTunnel.inside = tor_inside()
     assert v.mcp_wrapper("anon", "sandbox-ai-vpn-mcp-x", "/owner", [sys.executable, "-c", "raise SystemExit(0)"]) == 0
     assert FakeTunnel.last.data["profile"]["type"] == "tor" and FakeTunnel.last.closed
+
+
+def test_doctor_does_not_ask_tor_for_a_tunnel_device(home, tmp_path, monkeypatch):
+    """Tor has no tunnel device: with only tor profiles /dev/net/tun is not needed; a WireGuard one still needs it."""
+    doctor = load("sandbox_doctor_tor_test", "doctor.py")
+    assert v.main(["add", "anon", "--tor"]) == 0
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr(doctor, "run", lambda command, timeout=30: (0, ""))
+    assert doctor.check_vpn(tun=tmp_path / "no-tun")[0] == "ok"
+    conf = tmp_path / "wg.conf"
+    key = "a" * 42 + "A="
+    conf.write_text(f"[Interface]\nPrivateKey = {key}\nAddress = 10.66.0.2/32\nDNS = 10.66.0.1\n\n[Peer]\n"
+                    f"PublicKey = {key}\nAllowedIPs = 0.0.0.0/0\nEndpoint = 198.51.100.7:51820\n")
+    conf.chmod(0o600)
+    assert v.main(["add", "wg", "--wireguard", str(conf)]) == 0
+    assert doctor.check_vpn(tun=tmp_path / "no-tun")[:3] == ("fail", "VPN", "/dev/net/tun is missing")
+
+
+@pytest.mark.parametrize("user, refused", [("950", True), ("950:950", True), ("debian-tor", True), ("tor", True),
+                                           ("", False), ("root", False), ("10001", False), ("node:node", False)])
+def test_an_image_running_as_tors_user_cannot_go_behind_tor(user, refused):
+    """Tor's kill switch lets tor's own uid out past Tor; an MCP image that runs as it would bypass the tunnel (it
+    shares the VPN container's network namespace and cannot change its uid: no capabilities)."""
+    import subprocess
+    mcp = load("sandbox_mcp_tor_test", "mcp.py")
+    inspect = lambda: subprocess.CompletedProcess([], 0, user + "\n", "")  # noqa: E731
+    if refused:
+        with pytest.raises(ValueError, match="the user tor's kill switch lets out past Tor"):
+            mcp.check_tor_image_user("osint", "ghcr.io/x/osint@sha256:0", inspect)
+    else:
+        mcp.check_tor_image_user("osint", "ghcr.io/x/osint@sha256:0", inspect)
+    failed = lambda: subprocess.CompletedProcess([], 125, "", "no such image")  # noqa: E731
+    mcp.check_tor_image_user("osint", "missing", failed)  # podman's own error comes at the start

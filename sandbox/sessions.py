@@ -697,16 +697,61 @@ def thaw(name, data):
     (session_dir(name) / "paused").unlink(missing_ok=True)
 
 
-def resume(name):
+def added_options(data, workspaces=(), mounts=()):
+    """The session's saved options with WORKSPACES (directories) and MOUNTS (SOURCE:DESTINATION[:ro|rw]) added, their
+    host paths made absolute from here (the session starts in its own directory). A session that named no workspace
+    had its start directory as /work: it stays first, the new ones follow at /workspaces/<name>. Checked as the
+    launcher parses them; what a start checks besides (policy, private locations) it checks when it starts."""
+    l = launcher()
+    options = list(data["options"])
+    if workspaces:
+        with in_directory(data["cwd"]):
+            try:
+                given = l.parse_args([data["agent"], *options])
+            except SystemExit:
+                raise ValueError("the session's saved options no longer parse; start anew") from None
+        named = any(option in ("-w", "--workspace") or option.startswith("--workspace=")
+                    or (option.startswith("-w") and not option.startswith("--")) for option in options)
+        if not named:
+            options += ["--workspace", ",".join(given.workspaces)]
+    for value in workspaces:
+        path = Path(os.path.expanduser(value)).absolute()
+        if "," in str(path):
+            raise ValueError(f"{l.printable(str(path))}: a workspace path cannot hold a comma (it separates entries)")
+        if not path.is_dir():
+            raise ValueError(f"{l.printable(str(path))}: no such directory")
+        options += ["--workspace", str(path)]
+    for value in mounts:
+        head, _, mode = value.rpartition(":")
+        source_destination = head if mode in ("ro", "rw") else value
+        source, separator, destination = source_destination.rpartition(":")
+        if not separator or not source or not destination:
+            raise ValueError(f"--mount {l.printable(value)}: SOURCE:DESTINATION[:ro|rw]")
+        source = str(Path(os.path.expanduser(source)).absolute())
+        options += ["--mount", f"{source}:{destination}" + (f":{mode}" if mode in ("ro", "rw") else "")]
+    with in_directory(data["cwd"]):
+        try:
+            l.parse_args([data["agent"], *options])
+        except SystemExit:
+            raise ValueError("these options do not go with the session's own; see sandbox-ai claude --help") from None
+    return options
+
+
+def resume(name, workspaces=(), mounts=()):
+    """Thaw or restart the session NAME; with WORKSPACES or MOUNTS a stopped session starts with them added (kept
+    for its later starts)."""
     with session_lock(name):
-        result, restarted = resume_locked(name)
+        result, restarted = resume_locked(name, workspaces, mounts)
     return attach_if_terminal(name) if restarted and not result else result
 
 
-def resume_locked(name):
+def resume_locked(name, workspaces=(), mounts=()):
     data = load(name)
     state = status(name, data)
     shown = launcher().printable(display(name, data))
+    if (workspaces or mounts) and state in ("paused", "running"):
+        raise ValueError(f"{shown} is {state}: a workspace or mount is added at a start; add --restart (the agent "
+                         "continues its conversation)")
     if state == "paused":
         thaw(name, data)
         activity_event(name, "resume")
@@ -721,12 +766,25 @@ def resume_locked(name):
         raise ValueError(f"{shown} has ended and its HOME was discarded (it was started with --no-keep); "
                          "start anew")
     check_keep_policy(shown)
+    before = list(data["options"])
+    if workspaces or mounts:
+        data["options"] = added_options(data, workspaces, mounts)
     review_home(name, data)
     print(f"agent-sandbox: restarting stopped session {shown}; the agent continues its last conversation",
           file=sys.stderr)
+    for path in workspaces:
+        print(f"agent-sandbox: added: {launcher().printable(str(Path(os.path.expanduser(path)).absolute()))} at "
+              f"/workspaces/{launcher().printable(Path(os.path.expanduser(path)).absolute().name)} (a repeated name "
+              "gets -2, -3 ...)", file=sys.stderr)
     a, document = effective(data)
     args = restart_args(data, (document or {}).get("agent_args", []), bool(a and a.binary))
-    return launch(name, data, args, a), True
+    try:
+        return launch(name, data, args, a), True
+    except BaseException:
+        if data["options"] != before:  # refused or failed: the session keeps the options it had
+            data["options"] = before
+            save(name, data)
+        raise
 
 
 def home_review():

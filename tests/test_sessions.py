@@ -939,3 +939,57 @@ def test_delete_forgets_the_canaries_of_the_home(tmp_path, monkeypatch):
     record.write_text("{}")
     assert m.delete("old", yes=True) == 0
     assert not record.exists() and not m.session_dir("old").exists()
+
+
+def test_added_options(scenario, tmp_path, monkeypatch):
+    """Workspaces and mounts a stopped session starts with: host paths absolute from here, the first workspace kept."""
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    monkeypatch.chdir(tmp_path)
+    data = make_session("s")
+    if scenario == "happy":
+        options = m.added_options(data, ["extra"], [f"{tmp_path}:/mnt/data:ro"])
+        assert options[:4] == ["--workspace", "/srv/w", "--backend", "podman"]  # the saved ones first, unchanged
+        assert options[4:] == ["--workspace", str(extra), "--mount", f"{tmp_path}:/mnt/data:ro"]
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="no such directory"):
+            m.added_options(data, ["missing"])
+        (tmp_path / "a,b").mkdir()
+        with pytest.raises(ValueError, match="comma"):
+            m.added_options(data, ["a,b"])
+        with pytest.raises(ValueError, match="SOURCE:DESTINATION"):
+            m.added_options(data, mounts=["only-a-source"])
+    else:
+        # A session that named no workspace had its start directory as /work: it stays first.
+        data = {**data, "options": ["--backend", "podman"], "cwd": str(tmp_path / "extra")}
+        options = m.added_options(data, [str(tmp_path)], ["rel:/opt/x"])
+        assert options == ["--backend", "podman", "--workspace", str(extra), "--workspace", str(tmp_path),
+                           "--mount", f"{tmp_path / 'rel'}:/opt/x"]
+
+
+def test_resume_with_a_workspace_starts_with_it_and_keeps_it(tmp_path, monkeypatch):
+    extra = tmp_path / "notes"
+    extra.mkdir()
+    make_session("s")
+    launch = Mock(return_value=0)
+    monkeypatch.setattr(m, "launch", launch)
+    assert m.resume("s", [str(extra)]) == 0
+    data = launch.call_args.args[1]
+    assert data["options"][-2:] == ["--workspace", str(extra)] and launch.call_args.args[2] == ["resume", "--last"]
+
+
+def test_resume_with_a_workspace_that_fails_keeps_the_old_options(tmp_path, monkeypatch):
+    extra = tmp_path / "notes"
+    extra.mkdir()
+    before = make_session("s")["options"]
+    monkeypatch.setattr(m, "launch", Mock(side_effect=RuntimeError("refused by the policy")))
+    with pytest.raises(RuntimeError, match="policy"):
+        m.resume("s", [str(extra)])
+    assert m.load("s")["options"] == before
+
+
+def test_resume_with_a_workspace_refuses_a_running_session(tmp_path, monkeypatch):
+    make_session("s", pid=61, tmp_path=tmp_path)
+    monkeypatch.setattr(m, "alive", lambda name, data: True)
+    with pytest.raises(ValueError, match="--restart"):
+        m.resume("s", [str(tmp_path)])

@@ -162,7 +162,7 @@ def test_run_writes_trusted_local_llm_project(tmp_path):
     launcher = w.launcher()
     args = launcher.parse_args(["opencode", "--workspace", str(project)])
     assert launcher.load_project_config(args)[1] == document
-    assert any("./opencode-sandbox --workspace" in line for line in out)
+    assert any("Start with: sandbox-ai opencode --workspace" in line for line in out)
 
 
 def test_run_handles_loopback_unreachable_and_overwrite(scenario, tmp_path):

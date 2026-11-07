@@ -1265,6 +1265,13 @@ def set_limits(record, memory=None, cpus=None, pids=None, out=print, finder=sand
                cgroup_root=CGROUP_ROOT):
     if not (memory or cpus or pids):
         raise ValueError("give --memory, --cpus or --pids")
+    # A strict security mode caps the limits at the start; a change during the run keeps to the same cap.
+    mode = record.get("mode") if isinstance(record.get("mode"), dict) else {}
+    modes = module("modes")
+    if mode.get("name") in modes.MODES:
+        wider = modes.limit_widening(argparse.Namespace(memory=memory, cpus=cpus, pids=pids), mode["name"])
+        if wider:
+            raise ValueError("; ".join(f"{given}: {why} (security mode {mode['name']})" for given, why in wider))
     properties, files = limit_properties(memory, cpus, pids)
     found = finder(record)
     if not found or not found.get("cgroup"):

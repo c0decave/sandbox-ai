@@ -494,6 +494,92 @@ def test_oom_first(scenario, tmp_path):
         assert rt.oom_first(42, proc=proc, margin=-5000) == -1000
 
 
+def test_memory_part(scenario, monkeypatch):
+    """A table of the supervisor, registered for MemoryGuard's records by its size."""
+    monkeypatch.setattr(rt, "MEMORY_PARTS", {})
+    if scenario == "happy":
+        table = rt.memory_part("seen", {1, 2})
+        assert table == {1, 2} and rt.MEMORY_PARTS["seen"]() == 2
+        table.add(3)
+        assert rt.MEMORY_PARTS["seen"]() == 3  # read at each record, not at registration
+    elif scenario == "sad":
+        rt.memory_part("gone", lambda: 7)  # a callable gives the number itself
+        assert rt.MEMORY_PARTS["gone"]() == 7
+    else:
+        rt.memory_part("same", [1])
+        rt.memory_part("same", [1, 2, 3])  # the newest registration wins (one supervisor, one table)
+        assert rt.MEMORY_PARTS["same"]() == 3
+
+
+def test_resident_bytes(scenario, tmp_path):
+    proc = tmp_path / "proc"
+    (proc / "self").mkdir(parents=True)
+    if scenario == "happy":
+        (proc / "self" / "status").write_text("Name:\tkthreadd\nVmRSS:\t  2048 kB\nThreads:\t9\n")
+        assert rt.resident_bytes(proc) == 2 << 20
+        assert rt.resident_bytes() > 0  # this process, for real
+    elif scenario == "sad":
+        assert rt.resident_bytes(proc) is None  # no status file
+    else:
+        (proc / "self" / "status").write_text("Name:\tkthreadd\nVmRSS:\tlots\n")
+        assert rt.resident_bytes(proc) is None
+
+
+def test_memory_guard_records_each_step_with_its_tables_and_threads(tmp_path, monkeypatch):
+    """The supervisor's own look at its memory: a record per step (then doubled), with its tables and threads, at
+    most RECORDS; freed memory given back at every look."""
+    rss, trims = [100 << 20], []
+    guard = rt.MemoryGuard(tmp_path, rss=lambda: rss[0], trim=lambda: trims.append(1), step=256 << 20,
+                           trace=False, records=2, parts={"seen": lambda: 41, "broken": lambda: 1 / 0},
+                           shedders={})
+    assert guard.check() is None and trims == [1]          # below the first step: nothing written
+    rss[0] = 300 << 20
+    record = guard.check()
+    assert record["rss"] == 300 << 20 and record["parts"] == {"seen": 41}  # a broken table is left out
+    assert guard.next == 512 << 20 and record["threads"].get("MainThread") == 1 and record["objects"]
+    assert guard.check() is None                           # the same step again: no new record
+    rss[0] = 3 << 30
+    assert guard.check()["rss"] == 3 << 30 and guard.next == 4 << 30  # past several steps: one record
+    rss[0] = 5 << 30
+    assert guard.check() is None                           # RECORDS reached
+    lines = (tmp_path / rt.SUPERVISOR_MEMORY_FILE).read_text().splitlines()
+    assert len(lines) == 2 and json.loads(lines[1])["peak"] == 3 << 30
+    assert len(trims) == 5
+
+
+def test_memory_guard_traces_the_growth_from_its_threshold(tmp_path):
+    import tracemalloc
+    if tracemalloc.is_tracing():
+        pytest.skip("allocations are traced already")
+    rss = [600 << 20]
+    guard = rt.MemoryGuard(None, rss=lambda: rss[0], trim=lambda: None, step=256 << 20, trace_from=512 << 20,
+                           shedders={})
+    try:
+        assert "traced" in guard.check() or tracemalloc.is_tracing()
+        held = [bytearray(1000) for _ in range(2000)]  # noqa: F841 - the growth to be found
+        rss[0] = 1100 << 20
+        record = guard.check()
+        assert record["traced"] and all({"where", "bytes", "count"} <= set(entry) for entry in record["traced"])
+        assert not (Path(".") / rt.SUPERVISOR_MEMORY_FILE).exists()  # no directory: nothing written anywhere
+    finally:
+        tracemalloc.stop()
+
+
+def test_memory_guard_survives_a_broken_look(tmp_path):
+    guard = rt.MemoryGuard(tmp_path / "gone", rss=lambda: None, trim=lambda: 1 / 0, interval=0.01)
+    assert guard.check() is None  # no RSS, a failing trim: nothing, no exception
+    guard = rt.MemoryGuard(tmp_path / "gone", rss=lambda: 1 << 30, trim=lambda: None, trace=False, shedders={})
+    assert guard.check()["rss"] == 1 << 30  # a directory that is not there: the record still comes back
+    stop = rt.threading.Event()
+    thread = rt.MemoryGuard(None, rss=lambda: 1 / 0, trim=lambda: None, interval=0.01).start(stop)
+    time.sleep(0.05)
+    assert thread.is_alive() and thread.name == "memory-guard"
+    stop.set()
+    thread.join(1)
+    assert not thread.is_alive()
+    assert callable(rt.MemoryGuard.malloc_trim())
+
+
 def test_firejail_command(scenario, monkeypatch):
     run = Mock(return_value=Mock(stdout="--shell=program" if scenario == "edge" else "--seccomp"))
     monkeypatch.setattr(s.subprocess, "run", run)
@@ -892,7 +978,7 @@ def test_start_loggers(scenario, tmp_path, monkeypatch):
     config = tmp_path / "config.json"
     monkeypatch.setattr(s.RUNTIME, "SESSION_CONFIG", config)
     started = []
-    monkeypatch.setattr(s.RUNTIME.threading, "Thread", lambda target, args, daemon: Mock(start=lambda: started.append((target, args))))
+    monkeypatch.setattr(s.RUNTIME.threading, "Thread", lambda target, args, daemon, name=None: Mock(start=lambda: started.append((target, args))))
     if scenario == "sad":
         with pytest.raises(OSError):
             s.start_loggers()
@@ -1056,6 +1142,115 @@ def test_file_logger_forgets_old_paths(tmp_path, monkeypatch):
     records = [json.loads(line) for line in (tmp_path / "log/files.jsonl").read_text().splitlines()]
     # Every distinct path is logged; f0.txt again within 2 s was forgotten under the limit and logged again.
     assert len(records) == 51 and records[-1]["path"].endswith("f0.txt")
+
+
+def test_live_watches(scenario, tmp_path):
+    proc = tmp_path / "proc"
+    (proc / "self" / "fd").mkdir(parents=True)
+    (proc / "self" / "fdinfo").mkdir()
+    (proc / "self" / "fd" / "7").symlink_to("anon_inode:inotify" if scenario != "sad" else "/dev/null")
+    (proc / "self" / "fdinfo" / "7").write_text(
+        "pos:\t0\nflags:\t02000000\n"
+        + ("inotify wd:1 ino:2 sdev:3 mask:4 ignored_mask:0\ninotify wd:1a ino:5 sdev:3 mask:4 ignored_mask:0\n"
+           if scenario == "happy" else ""))
+    if scenario == "happy":
+        assert s.RUNTIME.live_watches(7, proc) == {1, 0x1a}  # hexadecimal, as the kernel writes them
+    elif scenario == "sad":
+        assert s.RUNTIME.live_watches(7, proc) is None  # not an inotify instance: nothing may be pruned
+        assert s.RUNTIME.live_watches(8, proc) is None
+    else:
+        assert s.RUNTIME.live_watches(7, proc) == set()  # every watch gone
+
+
+def test_file_logger_matches_the_kernels_watches_after_an_overflow(tmp_path):
+    """Directories removed while the queue overflowed: their IN_IGNORED are lost, so their entries go when the table
+    is matched with the kernel's watches; real inotify, a real overflow."""
+    root = tmp_path / "work"
+    for i in range(300):
+        (root / f"d{i}" / "x").mkdir(parents=True)
+    log = tmp_path / "log"
+    log.mkdir()
+    rt_module = s.RUNTIME
+    stop = threading.Event()
+    old = rt_module.LOG_DIR
+    rt_module.LOG_DIR = log
+    rt_module.MEMORY_PARTS.pop("file watches", None)
+    watches = lambda: rt_module.MEMORY_PARTS.get("file watches", lambda: 0)()  # noqa: E731
+    try:
+        thread = threading.Thread(target=rt_module.file_logger, args=([str(root)], stop, 3600), daemon=True)
+        thread.start()
+        deadline = time.monotonic() + 30
+        while watches() < 601 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert watches() == 601
+        # A real overflow, then the directories go: the logger is told by the queue's overflow event.
+        # The logger held at its next line while the queue fills past the kernel's limit and the directories go.
+        original, held = rt_module.log_event, threading.Event()
+        rt_module.log_event = lambda *a: (held.wait(30), original(*a))
+        for i in range(300):
+            for j in range(30):
+                (root / f"d{i}" / "x" / f"f{j}").write_text("x")
+        for i in range(300):
+            shutil.rmtree(root / f"d{i}")
+        held.set()
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline and watches() > 1:
+            time.sleep(0.2)
+        rt_module.log_event = original
+        records = (log / "files.jsonl").read_text()
+        assert watches() == 1  # only the root is left, as in the kernel
+        if "overflow" not in records:
+            pytest.skip("this machine drained the queue in time: no overflow to recover from")
+    finally:
+        stop.set()
+        rt_module.LOG_DIR = old
+
+
+def test_file_logger_stops_when_the_supervisor_sheds_memory(tmp_path, monkeypatch):
+    monkeypatch.setattr(sr, "LOG_DIR", tmp_path / "log")
+    monkeypatch.setattr(rt, "MEMORY_SHEDDERS", {})
+    (tmp_path / "log").mkdir()
+    (tmp_path / "work").mkdir()
+    stop = threading.Event()
+    thread = threading.Thread(target=rt.file_logger, args=([str(tmp_path / "work")], stop), daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 10
+    while "file log" not in rt.MEMORY_SHEDDERS and time.monotonic() < deadline:
+        time.sleep(0.02)
+    rt.MEMORY_SHEDDERS["file log"]()
+    thread.join(5)
+    assert not thread.is_alive() and not stop.is_set()  # ended by itself: the run goes on
+    assert "ran short of memory" in (tmp_path / "log/files.jsonl").read_text()
+
+
+def test_memory_shedder(scenario, monkeypatch):
+    monkeypatch.setattr(rt, "MEMORY_SHEDDERS", {})
+    calls = []
+    if scenario == "happy":
+        assert rt.memory_shedder("cache", lambda: calls.append(1)) is rt.MEMORY_SHEDDERS["cache"]
+        rt.MEMORY_SHEDDERS["cache"]()
+        assert calls == [1]
+    elif scenario == "sad":
+        assert rt.MEMORY_SHEDDERS == {}  # nothing registered: nothing to shed
+    else:
+        rt.memory_shedder("same", lambda: calls.append("old"))
+        rt.memory_shedder("same", lambda: calls.append("new"))
+        rt.MEMORY_SHEDDERS["same"]()
+        assert calls == ["new"]
+
+
+def test_memory_guard_sheds_once_from_its_threshold(tmp_path):
+    rss, calls = [100 << 20], []
+    guard = rt.MemoryGuard(tmp_path, rss=lambda: rss[0], trim=lambda: None, trace=False, shed_from=768 << 20,
+                           shedders={"file log": lambda: calls.append("files"), "broken": lambda: 1 / 0})
+    guard.check()
+    assert calls == []
+    rss[0] = 800 << 20
+    guard.check()
+    guard.check()
+    assert calls == ["files"] and guard.shed == ["file log", "broken"]  # once each; a broken one does not stop it
+    lines = [json.loads(line) for line in (tmp_path / rt.SUPERVISOR_MEMORY_FILE).read_text().splitlines()]
+    assert {"shed": ["file log", "broken"]}.items() <= lines[0].items()
 
 
 def test_oauth_fields(scenario):

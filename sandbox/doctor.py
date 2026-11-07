@@ -294,7 +294,14 @@ def check_vpn(podman_url=None, modules=Path("/sys/module"), tun=Path("/dev/net/t
         return "fail", "VPN", "no podman", "--vpn needs the Podman backend"
     if run([*podman_base(podman_url), "image", "exists", vpn.VPN_IMAGE])[0] != 0:
         return "warn", "VPN", f"{vpn.VPN_IMAGE} missing", "sandbox-ai build vpn"
-    if not podman_url and not tun.exists():
+    # Tor has no tunnel device: /dev/net/tun only matters for the other kinds.
+    kinds = set()
+    for profile in profiles:
+        try:
+            kinds.add(vpn.load_profile(profile).get("type"))
+        except (OSError, ValueError):
+            kinds.add(None)
+    if not podman_url and not tun.exists() and kinds - {"tor"}:
         return "fail", "VPN", "/dev/net/tun is missing", "sudo modprobe tun"
     kernel = (modules / "wireguard").exists()
     return ("ok", "VPN", f"{len(profiles)} profile(s); WireGuard "

@@ -1483,3 +1483,43 @@ def test_a_privacy_check_that_does_not_answer_refuses_the_push_in_time(tmp_path,
         proxy.close()
         checker.stdin.close()
         checker.wait(5)
+
+
+def test_the_proxys_caches_stay_bounded(monkeypatch, tmp_path):
+    """Names under an allowed wildcard are endless: the TLS contexts (a certificate each in OpenSSL's memory) and
+    the server checks the proxy keeps are capped, the most recently used kept."""
+    import threading as threads
+    server = rt.ProxyServer.__new__(rt.ProxyServer)
+    server.lock, server.contexts, server.verified, server.run_dir = threads.Lock(), {}, {}, tmp_path
+    made = []
+
+    class Context:
+        def __init__(self, protocol):
+            made.append(self)
+
+        def set_alpn_protocols(self, protocols):
+            pass
+
+        def load_cert_chain(self, certificate, key):
+            pass
+    monkeypatch.setattr(rt.ssl, "SSLContext", Context)
+    monkeypatch.setattr(rt, "server_certificate", lambda run_dir, host: tmp_path / f"{host}.pem")
+    monkeypatch.setattr(rt, "PROXY_CONTEXTS", 4)
+    first = server.server_context("h0.example.org")
+    for i in range(1, 6):
+        server.server_context(f"h{i}.example.org")
+        assert server.server_context("h0.example.org") is first  # in use: kept
+    assert len(server.contexts) == 4 and "h1.example.org" not in server.contexts and len(made) == 6
+    # serves_name: expired answers go first, then the oldest; never more than PROXY_VERIFIED.
+    monkeypatch.setattr(rt, "PROXY_VERIFIED", 3)
+
+    class Upstream:
+        def wrap_socket(self, raw, server_hostname):
+            return contextlib.nullcontext()
+    server.upstream = Upstream()
+    monkeypatch.setattr(rt.socket, "create_connection", lambda *a, **kw: contextlib.nullcontext())
+    server.verified = {("1.1.1.1", 443, "old"): rt.time.monotonic() - 1}
+    for name in ("a", "b", "c", "d"):
+        assert server.serves_name("1.1.1.1", 443, name)
+    assert len(server.verified) <= 3 and ("1.1.1.1", 443, "old") not in server.verified
+    assert ("1.1.1.1", 443, "d") in server.verified

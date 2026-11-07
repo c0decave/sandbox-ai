@@ -5,7 +5,7 @@
 const state = {
   me: null, host: localStorage.getItem("sandbox-ai-host") || "local", hosts: [], page: "starts",
   themes: {}, theme: localStorage.getItem("sandbox-ai-theme") || "system", terminals: [], current: null,
-  approvals: 0, timer: null,
+  approvals: 0, timer: null, asked: new Set(),
 };
 const AGENTS = ["claude", "codex", "opencode"];
 const PAGES = [
@@ -58,6 +58,47 @@ function hostPath(suffix) { return `/api/hosts/${encodeURIComponent(state.host)}
 
 function notice(text, kind) { return el("div", { class: `notice ${kind || ""}`, role: kind === "error" ? "alert" : "status" }, text); }
 
+// --- notifications: toasts in the theme's colours, top right ---------------------------------------------
+// Errors stay until they are closed (role "alert"); the others (role "status") close after TOAST_SECONDS, not
+// while the pointer or the focus is on them. Title and text are text nodes: what a sandbox chose is never markup.
+
+const TOAST_SECONDS = 8;
+const TOAST_MAX = 4;
+const TOAST_LEVELS = { info: ["Information", "i"], success: ["Done", "✓"], warning: ["Warning", "!"], error: ["Error", "×"] };
+
+function toast(level, title, text, options) {
+  if (!Object.prototype.hasOwnProperty.call(TOAST_LEVELS, level)) level = "info";
+  const opts = options || {};
+  let box = document.getElementById("toasts");
+  if (!box) { box = el("div", { id: "toasts", class: "toasts" }); document.body.append(box); }
+  const [name, sign] = TOAST_LEVELS[level];
+  const seconds = level === "error" ? 0 : (opts.seconds ?? TOAST_SECONDS);
+  let timer = null;
+  const item = el("div", { class: `toast ${level}`, role: level === "error" ? "alert" : "status" });
+  const dismiss = () => { clearTimeout(timer); item.remove(); };
+  const start = () => { clearTimeout(timer); if (seconds > 0) timer = setTimeout(dismiss, seconds * 1000); };
+  const body = String(text ?? "");
+  item.append(
+    el("span", { class: "glyph", "aria-hidden": "true" }, sign),
+    el("div", { class: "body" },
+      el("span", { class: "sr-only" }, `${name}: `),
+      el("strong", { class: "title" }, String(title ?? "")),
+      body ? el("div", { class: "text" }, body.length > 2000 ? `${body.slice(0, 1999)}…` : body) : null,
+      opts.action ? el("div", { class: "actions" },
+        el("button", { onclick: () => { dismiss(); opts.action[1](); } }, opts.action[0])) : null),
+    el("button", { class: "close", "aria-label": "Close", title: "Close", onclick: dismiss }, "×"));
+  for (const type of ["mouseenter", "focusin"]) item.addEventListener(type, () => clearTimeout(timer));
+  for (const type of ["mouseleave", "focusout"]) item.addEventListener(type, start);
+  box.prepend(item);  // the newest on top
+  while (box.children.length > TOAST_MAX) box.lastElementChild.remove();
+  start();
+  item.dismiss = dismiss;
+  return item;
+}
+
+// What failed, as an error toast: catch (e) { failed("Could not …")(e); }
+function failed(title) { return (e) => toast("error", title, e && e.message ? e.message : String(e)); }
+
 function statusCell(value) {
   const kind = { ok: "ok", warn: "warn", fail: "fail", skip: "skip", running: "ok", paused: "warn", stopped: "muted" }[value] || "muted";
   return el("td", { class: `status-${kind}` }, value === undefined || value === null ? "" : String(value));
@@ -85,6 +126,23 @@ async function loadThemes() {
   if (window.matchMedia) window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => applyTheme(state.theme));
 }
 
+// WCAG 2.1 contrast, for the sign on a toast's badge (the theme's warn, bad, ok or accent colour behind it).
+function luminance(color) {
+  let hex = String(color || "").replace("#", "");
+  if (hex.length === 3) hex = hex.split("").map(c => c + c).join("");
+  const channel = (i) => { const v = parseInt(hex.slice(i, i + 2), 16) / 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+  return 0.2126 * channel(0) + 0.7152 * channel(2) + 0.0722 * channel(4);
+}
+
+function contrast(a, b) {
+  const [high, low] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (high + 0.05) / (low + 0.05);
+}
+
+function readableOn(background, candidates) {
+  return candidates.filter(Boolean).reduce((best, c) => (contrast(c, background) > contrast(best, background) ? c : best));
+}
+
 function applyTheme(name) {
   state.theme = name;
   localStorage.setItem("sandbox-ai-theme", name);
@@ -94,6 +152,10 @@ function applyTheme(name) {
   const root = document.documentElement.style;
   for (const [key, value] of Object.entries(theme.colors || {})) root.setProperty(`--${key}`, value);
   for (const [key, value] of Object.entries(theme.status || {})) root.setProperty(`--${key}`, value);
+  const colors = theme.colors || {}, status = theme.status || {};
+  for (const [key, value] of [["accent", colors.accent], ["ok", status.ok], ["warn", status.warn], ["bad", status.bad]]) {
+    if (value) root.setProperty(`--on-${key}`, readableOn(value, [colors.accent_text, colors.base, colors.text, "#000000", "#ffffff"]));
+  }
   root.setProperty("--radius", `${theme.radius ?? 8}px`);
   const families = (theme.font && theme.font.families) || [];
   if (families.length) root.setProperty("--font", families.map(f => (/\s/.test(f) ? `"${f}"` : f)).join(", "));
@@ -178,7 +240,8 @@ async function render() {
 async function logout() {
   try { await api("POST", "/api/logout"); } catch (e) { /* the session is gone either way */ }
   for (const t of state.terminals) t.ws.close();
-  state.terminals = []; state.me = null; clearInterval(state.timer);
+  state.terminals = []; state.me = null; clearInterval(state.timer); state.asked.clear();
+  for (const item of document.querySelectorAll("#toasts .toast")) item.remove();
   render();
 }
 
@@ -187,6 +250,9 @@ async function poll() {
   try {
     const open = await api("GET", hostPath("/approvals"));
     state.approvals = open.length;
+    const fresh = open.filter(q => !state.asked.has(`${state.host} ${q.id}`));
+    for (const q of fresh) state.asked.add(`${state.host} ${q.id}`);
+    if (fresh.length && state.page !== "approvals") announce(fresh);
   } catch (e) { state.approvals = 0; }
   const button = document.querySelector('nav button[data-page="approvals"]');
   if (button) {
@@ -194,6 +260,16 @@ async function poll() {
     if (state.approvals) button.append(el("span", { class: "badge", "aria-label": `${state.approvals} open` }, state.approvals));
   }
   if (state.page === "approvals") pages.approvals(document.getElementById("main"), true);
+  if (state.page === "terminals") refreshTerminalStarts(document.getElementById("main"));
+}
+
+// New questions: a warning toast (a canary that went off: an error, which stays), with the way to answer them.
+function announce(questions) {
+  const canary = questions.find(q => q.kind === "canary");
+  const first = canary || questions[0];
+  const more = questions.length > 1 ? ` and ${questions.length - 1} more` : "";
+  toast(canary ? "error" : "warning", `sandbox-ai asks: ${first.sandbox || first.run || state.host}`, `${first.question || first.kind || ""}${more}`,
+    { action: ["Open approvals", () => show("approvals")] });
 }
 
 function show(page) {
@@ -221,7 +297,7 @@ pages.starts = async (main) => {
         if (action === "delete" && !confirm(`Delete ${s.name} and its kept HOME?`)) return;
         await busy(event.target, async () => {
           try { await api("POST", hostPath(`/starts/${encodeURIComponent(s.name)}/${action}`), action === "delete" ? { confirm: true } : {}); show("starts"); }
-          catch (e) { alert(e.message); }
+          catch (e) { failed(`Could not ${label.toLowerCase()} ${s.name}`)(e); }
         });
       },
     }, extra || {}), label);
@@ -288,7 +364,7 @@ function networkCard(main, name) {
   };
   const refresh = async () => { try { shown.textContent = JSON.stringify(await api("GET", hostPath(`/net/${encodeURIComponent(name)}`)), null, 2); } catch (e) { shown.textContent = e.message; } };
   const change = (op) => async (event) => busy(event.target, async () => {
-    try { await api("POST", hostPath(`/net/${encodeURIComponent(name)}`), body(op)); await refresh(); } catch (e) { alert(e.message); }
+    try { await api("POST", hostPath(`/net/${encodeURIComponent(name)}`), body(op)); await refresh(); } catch (e) { failed(`Could not change the network of ${name}`)(e); }
   });
   main.append(el("div", { class: "card", id: "network-card" }, el("h2", {}, `Network of ${name}`),
     el("p", { class: "hint" }, "Until the sandbox ends. Ports on the host go through a relay only you start; a Git login names where its token is, never the token."),
@@ -316,7 +392,7 @@ pages.approvals = async (main, refresh) => {
     const scope = el("select", { "aria-label": "Scope" }, ["once", "run", "always"].map(s => el("option", { value: s }, s)));
     const answer = (decision) => async (event) => busy(event.target, async () => {
       try { await api("POST", hostPath(`/approvals/${encodeURIComponent(q.id)}`), { decision, scope: scope.value }); pages.approvals(main); poll(); }
-      catch (e) { alert(e.message); }
+      catch (e) { failed(`Could not ${decision} the question`)(e); }
     });
     return el("tr", {}, el("td", {}, q.question, q.always ? el("div", { class: "hint" }, q.always) : null), el("td", { class: "mono" }, q.sandbox || q.run),
       el("td", { class: "actions" }, scope, el("button", { class: "primary", onclick: answer("allow") }, "Allow"), el("button", { class: "danger", onclick: answer("deny") }, "Deny")));
@@ -355,10 +431,11 @@ pages.vpn = async (main) => {
   const rows = profiles.map(p => el("tr", {}, el("td", { class: "mono" }, p.profile), el("td", {}, p.type || ""), el("td", {}, p.provider || ""),
     el("td", { class: "actions" },
       el("button", { onclick: async (event) => busy(event.target, async () => {
-        try { alert((await api("POST", hostPath(`/vpn/${encodeURIComponent(p.profile)}/check`), {})).output || "ok"); } catch (e) { alert(e.message); } }) }, "Check"),
+        try { toast("success", `${p.profile} works`, (await api("POST", hostPath(`/vpn/${encodeURIComponent(p.profile)}/check`), {})).output || "ok"); }
+        catch (e) { failed(`The check of ${p.profile} failed`)(e); } }) }, "Check"),
       el("button", { class: "danger", onclick: async (event) => {
         if (!confirm(`Remove the VPN profile ${p.profile}?`)) return;
-        await busy(event.target, async () => { try { await api("DELETE", hostPath(`/vpn/${encodeURIComponent(p.profile)}`)); show("vpn"); } catch (e) { alert(e.message); } });
+        await busy(event.target, async () => { try { await api("DELETE", hostPath(`/vpn/${encodeURIComponent(p.profile)}`)); show("vpn"); } catch (e) { failed(`Could not remove ${p.profile}`)(e); } });
       } }, "Remove"))));
   main.append(table(["Profile", "Kind", "Provider", ""], rows, "No VPN profiles on this host."));
   const name = el("input", { id: "vpn-name", placeholder: "home", pattern: "[a-z0-9][a-z0-9_-]{0,31}" });
@@ -381,7 +458,7 @@ pages.vpn = async (main) => {
   form.append(el("span"), el("button", { class: "primary", onclick: async (event) => busy(event.target, async () => {
     const body = { name: name.value.trim(), kind: kind.value };
     for (const key of wanted[kind.value]) { const value = rows2[key][0].value.trim(); if (value) body[key] = value; }
-    try { await api("POST", hostPath("/vpn"), body); show("vpn"); } catch (e) { alert(e.message); }
+    try { await api("POST", hostPath("/vpn"), body); show("vpn"); } catch (e) { failed("Could not add the VPN profile")(e); }
   }) }, "Add profile"));
   main.append(el("h2", {}, "New profile"), el("div", { class: "card" }, form));
 };
@@ -404,7 +481,7 @@ pages.llm = async (main) => {
           try { const r = await api("GET", hostPath(`/llm/${encodeURIComponent(e.name)}/models`)); output.append(el("pre", {}, JSON.stringify(r, null, 2))); }
           catch (err) { output.append(notice(err.message, "error")); }
         }) }, "Models"),
-        el("button", { class: "danger", onclick: async () => { if (!confirm(`Forget ${e.name}?`)) return; try { await api("DELETE", hostPath(`/llm/${encodeURIComponent(e.name)}`)); show("llm"); } catch (err) { alert(err.message); } } }, "Remove")));
+        el("button", { class: "danger", onclick: async () => { if (!confirm(`Forget ${e.name}?`)) return; try { await api("DELETE", hostPath(`/llm/${encodeURIComponent(e.name)}`)); show("llm"); } catch (err) { failed(`Could not forget ${e.name}`)(err); } } }, "Remove")));
   });
   main.append(table(["Name", "Kind", "URL", "Model", ""], rows, "No LLM server yet."), output);
   const name = el("input", { id: "llm-name", placeholder: "lmstudio" });
@@ -467,7 +544,7 @@ pages.hosts = async (main) => {
           if (r.doctor) output.append(table(["", "Check", "Detail"], r.doctor.filter(d => d.status !== "ok").map(d => el("tr", {}, statusCell(d.status), el("td", {}, d.check), el("td", {}, d.detail || ""))), "The doctor found nothing to do."));
         } catch (e) { output.append(notice(e.message, "error")); }
       }) }, "Test"),
-      h.kind === "local" ? null : el("button", { class: "danger", onclick: async () => { if (!confirm(`Remove ${h.name} from the list?`)) return; try { await api("DELETE", `/api/hosts/${encodeURIComponent(h.name)}`); render(); } catch (e) { alert(e.message); } } }, "Remove"))));
+      h.kind === "local" ? null : el("button", { class: "danger", onclick: async () => { if (!confirm(`Remove ${h.name} from the list?`)) return; try { await api("DELETE", `/api/hosts/${encodeURIComponent(h.name)}`); render(); } catch (e) { failed(`Could not remove ${h.name}`)(e); } } }, "Remove"))));
   main.append(table(["Name", "SSH", "Description", ""], rows), output);
   const fields = { name: el("input", { id: "host-name", placeholder: "ct101" }), ssh: el("input", { id: "host-ssh", class: "mono", placeholder: "user@192.168.1.101" }),
     port: el("input", { id: "host-port", type: "number", min: 1, max: 65535, placeholder: "22" }), identity: el("input", { id: "host-identity", class: "mono", placeholder: "~/.ssh/id_ed25519 (optional)" }),
@@ -488,13 +565,67 @@ pages.hosts = async (main) => {
 
 // --- terminals -------------------------------------------------------------------------------------------
 
+// Why a start has no terminal to attach to (list --json's attach_why; guessed for an older sandbox-ai without it).
+// The desktop app says the same.
+const ATTACH_WHY = {
+  foreground: "runs in the foreground of its own terminal (started with --no-tmux, as a task, or without a terminal): nothing to attach; start with tmux (the default for interactive starts) to attach from here",
+  paused: "paused: resume it (Starts and sessions) to attach",
+  mcp: "an MCP server sandbox: it has no terminal of its own",
+  stopped: "does not run",
+  damaged: "damaged: see sandbox-ai list on its host",
+};
+
+function attachWhy(s) {
+  const why = s.attach_why || (s.kind === "mcp" ? "mcp" : s.kind === "run" ? "foreground" : s.state === "paused" ? "paused" : "");
+  return ATTACH_WHY[why] || "nothing to attach";
+}
+
+function terminalKey(host, name) { return JSON.stringify([host, name]); }
+
+// Every start that runs on the chosen host, however it began (a terminal, the desktop app, this page, another
+// machine over SSH): one click attaches the ones in tmux, the others say why they cannot be attached.
+async function refreshTerminalStarts(main) {
+  const box = main && main.querySelector(".terminal-starts");
+  if (!box || box.dataset.loading) return;
+  const host = state.host;
+  box.dataset.loading = "1";
+  let starts;
+  try { starts = await api("GET", hostPath("/starts")); }
+  catch (e) { starts = e; }
+  finally { delete box.dataset.loading; }
+  if (state.page !== "terminals" || state.host !== host || !box.isConnected) return;
+  const list = box.querySelector(".terminal-starts-list");
+  if (starts instanceof Error) { delete box.dataset.shown; clear(list).append(notice(starts.message, "error")); return; }
+  const running = starts.filter(s => s.state === "running" || s.state === "paused");
+  box.querySelector("summary").textContent = `Running on ${host} (${running.length})`;
+  // Unchanged since the last read: the table stays (no flicker under the pointer).
+  const shown = JSON.stringify([host, running.map(s => [s.name, s.agent, s.kind, s.state, s.workspace, s.attachable, s.attach_why]),
+    state.terminals.filter(t => !t.closed).map(t => t.key)]);
+  if (box.dataset.shown === shown) return;
+  box.dataset.shown = shown;
+  clear(list);
+  const rows = running.map(s => {
+    const open = state.terminals.find(t => t.key === terminalKey(host, s.name) && !t.closed);
+    const action = s.attachable
+      ? el("td", { class: "actions" }, el("button", { class: open ? "" : "primary", onclick: () => openTerminal({ kind: "attach", name: s.name }, s.name) }, open ? "Show" : "Open terminal"))
+      : el("td", { class: "hint" }, attachWhy(s));
+    return el("tr", {}, el("td", { class: "mono" }, s.name), el("td", {}, s.agent || s.kind || ""), statusCell(s.state),
+      el("td", { class: "mono" }, s.workspace || ""), action);
+  });
+  list.append(table(["Name", "Agent", "State", "Workspace", ""], rows, "Nothing runs on this host."));
+}
+
 pages.terminals = async (main) => {
   if (!main.querySelector(".terminal-tabs")) {
-    clear(main).append(el("h1", {}, "Terminals"), el("div", { class: "terminal-tabs", role: "tablist" }), el("div", { class: "terminal-boxes" }));
+    clear(main).append(el("h1", {}, "Terminals"),
+      el("details", { class: "terminal-starts", open: !state.terminals.length }, el("summary", {}, `Running on ${state.host}`),
+        el("div", { class: "terminal-starts-list" }, el("p", { class: "hint" }, "Loading…"))),
+      el("div", { class: "terminal-tabs", role: "tablist" }), el("div", { class: "terminal-boxes" }));
   }
+  refreshTerminalStarts(main);
   const tabs = clear(main.querySelector(".terminal-tabs"));
   if (!state.terminals.length) {
-    tabs.append(el("p", { class: "hint" }, window.Terminal ? "Attach to a start, or start one, on the page Starts and sessions." : "Terminals need xterm.js on the server: sandbox-ai web vendor"));
+    tabs.append(el("p", { class: "hint" }, window.Terminal ? "Open the terminal of a running start above, or start one on the page Starts and sessions." : "Terminals need xterm.js on the server: sandbox-ai web vendor"));
   }
   for (const t of state.terminals) {
     tabs.append(el("button", { role: "tab", class: t === state.current ? "selected" : "", onclick: () => { state.current = t; show("terminals"); } }, t.title),
@@ -505,7 +636,11 @@ pages.terminals = async (main) => {
 };
 
 function openTerminal(params, title) {
-  if (!window.Terminal) { alert("Terminals need xterm.js on the server: sandbox-ai web vendor"); return; }
+  if (!window.Terminal) { toast("warning", "No terminals here", "Terminals need xterm.js on the server: sandbox-ai web vendor"); return; }
+  // One tab per start: attaching again shows the tab already open.
+  const key = params.kind === "attach" ? terminalKey(state.host, params.name) : null;
+  const already = key && state.terminals.find(t => t.key === key && !t.closed);
+  if (already) { state.current = already; show("terminals"); return; }
   const term = new window.Terminal({ cursorBlink: true, fontFamily: getComputedStyle(document.documentElement).getPropertyValue("--mono"), theme: terminalTheme(), scrollback: 5000 });
   const fit = window.FitAddon ? new window.FitAddon.FitAddon() : null;
   if (fit) term.loadAddon(fit);
@@ -519,9 +654,10 @@ function openTerminal(params, title) {
   const ws = new WebSocket(`wss://${location.host}/api/terminal?${query}`);
   ws.binaryType = "arraybuffer";
   const encoder = new TextEncoder();
-  const entry = { title: `${state.host}: ${title}`, term, ws, box, fit: () => { if (fit) { fit.fit(); if (ws.readyState === 1) ws.send(JSON.stringify({ resize: [term.cols, term.rows] })); } } };
+  const entry = { title: `${state.host}: ${title}`, key, closed: false, term, ws, box, fit: () => { if (fit) { fit.fit(); if (ws.readyState === 1) ws.send(JSON.stringify({ resize: [term.cols, term.rows] })); } } };
   ws.onmessage = (event) => term.write(typeof event.data === "string" ? event.data : new Uint8Array(event.data));
   ws.onclose = () => {
+    entry.closed = true;
     term.write("\r\n[the terminal ended]\r\n");
     setTimeout(() => {
       state.terminals = state.terminals.filter(t => t !== entry);

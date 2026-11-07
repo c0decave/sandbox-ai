@@ -1406,7 +1406,7 @@ def finish(p, project, target, answers, tokens, old=None):
     write_file(target, text)
     launcher().trust_config(target, hashlib.sha256(text.encode()).hexdigest())
     out(f"Wrote and trusted {target}")
-    out(f"Start with: ./{agent}-sandbox --workspace {shlex.quote(str(project))}")
+    out(f"Start with: sandbox-ai {agent} --workspace {shlex.quote(str(project))}")
     out(f"Change it later with: sandbox-ai wizard edit {shlex.quote(str(project))}")
     return target
 

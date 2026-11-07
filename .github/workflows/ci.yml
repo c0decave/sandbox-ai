@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # ubuntu-latest is 26.04 since 2026-10-19: no Python 3.9 there
     strategy:
       fail-fast: false
       matrix:
@@ -27,7 +27,7 @@ jobs:
       - run: python -m pytest -q tests
 
   package:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # ubuntu-latest is 26.04 since 2026-10-19: no Python 3.9 there
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1, published 2026-07-20
         with:

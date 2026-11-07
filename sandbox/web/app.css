@@ -64,9 +64,50 @@ pre { background: var(--base); border: 1px solid var(--border); border-radius: v
 .notice { padding: 10px 12px; border-radius: var(--radius); border: 1px solid var(--border); margin: 0 0 12px; background: var(--base); }
 .notice.error { border-color: var(--danger); color: var(--danger); }
 .notice.ok { border-color: var(--ok); color: var(--ok); }
+.notice.warn { border-color: var(--warn); color: var(--warn); }
+/* Notifications (toasts), top right: the theme's base and text colours; the level is the bar, the border and a
+   badge in the theme's own colour (warn, bad, ok, accent) whose sign gets the more readable of the theme's
+   colours (app.js computes --on-*), so every theme stays readable without a filled background behind text. */
+.toasts {
+  position: fixed; top: 60px; right: 16px; z-index: 1000; display: flex; flex-direction: column; gap: 8px;
+  width: min(380px, calc(100vw - 32px)); pointer-events: none;
+}
+.toast {
+  --level: var(--accent); --on-level: var(--on-accent, var(--accent_text));
+  pointer-events: auto; display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: start;
+  background: var(--base); color: var(--text); border: 1px solid var(--level); border-left: 5px solid var(--level);
+  border-radius: var(--radius); padding: 10px 8px 10px 10px; box-shadow: 0 4px 16px rgba(0, 0, 0, .28);
+  overflow-wrap: anywhere;
+}
+.toast.success { --level: var(--ok); --on-level: var(--on-ok, var(--base)); }
+.toast.warning { --level: var(--warn); --on-level: var(--on-warn, var(--base)); }
+.toast.error { --level: var(--bad); --on-level: var(--on-bad, var(--base)); }
+.toast .glyph {
+  display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%;
+  background: var(--level); color: var(--on-level); font-weight: 700; font-size: 14px; line-height: 1;
+}
+.toast.warning .glyph { border-radius: 3px; }
+.toast .title { display: block; font-weight: 600; color: var(--text); }
+.toast .text { color: var(--secondary); white-space: pre-wrap; max-height: 12em; overflow: auto; }
+.toast .actions { margin-top: 6px; }
+.toast .actions button { padding: 3px 10px; border-color: var(--level); }
+.toast button.close {
+  background: transparent; border: 0; color: var(--secondary); font-size: 18px; line-height: 1; padding: 0 4px;
+}
+.toast button.close:hover { color: var(--text); }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0);
+  white-space: nowrap; border: 0;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .toast { animation: toast-in .16s ease-out; }
+  @keyframes toast-in { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: none; } }
+}
 .login { max-width: 380px; margin: 12vh auto; }
 .login h1 { text-align: center; }
 .login .form { grid-template-columns: 1fr; }
+.terminal-starts { margin-bottom: 10px; }
+.terminal-starts summary { cursor: pointer; color: var(--title); font-weight: 600; margin-bottom: 6px; }
 .terminal-tabs { display: flex; gap: 4px; margin-bottom: 8px; flex-wrap: wrap; }
 .terminal-tabs button.selected { background: var(--accent); color: var(--accent_text); }
 .terminal { height: calc(100vh - 190px); min-height: 300px; background: #000; border-radius: var(--radius); padding: 6px; }
