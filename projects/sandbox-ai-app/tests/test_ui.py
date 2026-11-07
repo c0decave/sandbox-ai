@@ -1038,6 +1038,48 @@ def test_closing_while_work_runs_asks_and_stops_copies(window, monkeypatch, wait
     assert widgets.ThreadCall.running() == []
 
 
+def test_pages_scroll_instead_of_squeezing_when_the_window_is_low(window, qapp):
+    """Every page but the board's canvas and the terminals sits in a scroll area: in a low window its sections keep
+    the height they need and the page scrolls up and down (never sideways)."""
+    from sandbox_ai_app.ui import PageScroll
+    assert isinstance(window.pages.frame_of(window.system), PageScroll)
+    assert window.pages.frame_of(window.board) is window.board and window.pages.frame_of(window.terminals) is window.terminals
+    window.show()
+    for key in ("system", "credentials"):
+        window.show_page(key, raise_window=False)
+        assert window.pages.currentWidget() is getattr(window, key) and window.current_page() == key
+    window.show_page("system", raise_window=False)
+    window.resize(window.minimumSizeHint())
+    qapp.processEvents()
+    frame = window.pages.frame_of(window.system)
+    page = window.system
+    assert frame.viewport().height() < page.minimumSizeHint().height(), "the window is lower than the page"
+    assert page.height() >= page.minimumSizeHint().height(), "the page keeps its height"
+    assert frame.verticalScrollBar().maximum() > 0 and frame.horizontalScrollBar().maximum() == 0
+
+
+def test_quitting_asks_only_about_terminals_that_really_end(window, monkeypatch):
+    """A session's tab only detaches when the app quits (the sandbox and its agent run on): no question for it.
+    Commands that end with the app are named in the question."""
+    from PySide6.QtGui import QCloseEvent
+    monkeypatch.setattr(window.terminals, "ending", lambda: [])
+    monkeypatch.setattr(window.terminals, "detaching", lambda: ["a session"])
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", False)
+    event = QCloseEvent()
+    window.closeEvent(event)
+    assert event.isAccepted() and not [t for t, *_ in widgets.SHOWN if t == "Quit"], "sessions: nobody was asked"
+
+
+def test_quitting_names_the_commands_that_end_with_the_app(window, monkeypatch):
+    from PySide6.QtGui import QCloseEvent
+    monkeypatch.setattr(window.terminals, "ending", lambda: ["doctor", "build"])
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", False)  # "Keep the window"
+    event = QCloseEvent()
+    window.closeEvent(event)
+    title, text, _ = widgets.SHOWN[-1]
+    assert not event.isAccepted() and title == "Quit" and "doctor, build" in text and "Sessions keep running" in text
+
+
 def test_an_answer_that_hangs_frees_the_buttons_after_a_while(window, env, monkeypatch, wait):
     """Regression: the answer ran in a ThreadCall without a timeout; a sandbox-ai call that never returned
     kept self.answering set, and Allow and Deny greyed out, for good."""

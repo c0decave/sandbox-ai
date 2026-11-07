@@ -217,3 +217,37 @@ def test_the_question_marks_follow_the_language(window):
         popover.close()
     finally:
         i18n.set_language("en")
+
+
+def test_the_question_marks_can_be_switched_off_and_on_live(window, qapp):
+    """Settings > Appearance: "Show the (?) help buttons". Off hides every (?) at once (the pages', the board's in
+    its nodes, new ones too), on shows them again; the Help page stays."""
+    from sandbox_ai_app.settings import SettingsDialog
+    window.resize(1360, 900)
+    window.show()
+    window.show_page("board", raise_window=False)
+    qapp.processEvents()
+    canvas = next(b for b in window.help_buttons["board"] if b.tip_id == "board.canvas")
+    marks = lambda: [item.help_mark for item in window.board.items.values()]  # noqa: E731
+    assert canvas.isVisible() and window.page_help.isVisible() and marks() and all(m.isVisible() for m in marks())
+    dialog = SettingsDialog(window.sai, window)
+    dialog.changed.connect(window.apply_setting)
+    try:
+        dialog.fields["help_buttons"].setChecked(False)
+        qapp.processEvents()
+        assert not help_view.buttons_shown() and window.sai.settings()["help_buttons"] is False
+        assert not canvas.isVisible() and not window.page_help.isVisible()
+        assert not any(m.isVisible() for m in marks())
+        late = help_view.HelpButton("board.canvas", window.board)
+        late.show()
+        assert not late.isVisible(), "a (?) made while they are off stays hidden"
+        window.show_page("help", raise_window=False)
+        assert window.current_page() == "help"
+        window.show_page("board", raise_window=False)
+        dialog.fields["help_buttons"].setChecked(True)
+        qapp.processEvents()
+        assert help_view.buttons_shown() and canvas.isVisible() and window.page_help.isVisible() and late.isVisible()
+        assert all(m.isVisible() for m in marks())
+    finally:
+        help_view.set_shown(True)
+        dialog.close()

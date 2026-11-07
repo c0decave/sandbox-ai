@@ -24,8 +24,11 @@ def child(*argv, hold_mib=0, program=None):
     agent's command line starts with its program: claude, codex, opencode)."""
     code = f"import time; data = bytearray({hold_mib} << 20); [data.__setitem__(i, 1) for i in range(0, len(data), 4096)]; " \
            "print('ready', flush=True); time.sleep(120)"
+    # A relocatable Python (setup-python, uv) finds its standard library from argv[0]: with another program name it
+    # needs to be told where it lives.
+    environment = {**os.environ, "PYTHONHOME": sys.base_prefix} if program else None
     process = subprocess.Popen([program or sys.executable, "-c", code, *argv], executable=sys.executable,
-                               stdout=subprocess.PIPE, text=True)
+                               stdout=subprocess.PIPE, text=True, env=environment)
     assert process.stdout.readline().strip() == "ready"
     return process
 

@@ -244,9 +244,6 @@ TEXTS = {
     'Testing {host}…': {
         'en': 'Testing {host}…',
         'de': 'Teste {host}…'},
-    'The doctor found nothing to do.': {
-        'en': 'The doctor found nothing to do.',
-        'de': 'Der Doctor hat nichts zu tun gefunden.'},
     'This sandbox-ai has no hosts yet: update it.': {
         'en': 'This sandbox-ai has no hosts yet: update it.',
         'de': 'Dieses sandbox-ai kennt noch keine Hosts: bitte aktualisieren.'},
@@ -1180,9 +1177,6 @@ TEXTS = {
     'Load the catalogs and select an entry first.': {
         'en': 'Load the catalogs and select an entry first.',
         'de': 'Lade die Kataloge und wähle zuerst einen Eintrag.'},
-    'Result': {
-        'en': 'Result',
-        'de': 'Ergebnis'},
     'How to fix': {
         'en': 'How to fix',
         'de': 'Abhilfe'},
@@ -1264,9 +1258,6 @@ TEXTS = {
     'Quit': {
         'en': 'Quit',
         'de': 'Beenden'},
-    '{count} terminal(s) still run. End them and quit?': {
-        'en': '{count} terminal(s) still run. End them and quit?',
-        'de': '{count} Terminal(s) laufen noch. Beenden und die App schließen?'},
     'These are not options of this sandbox-ai version and were left out:': {
         'en': 'These are not options of this sandbox-ai version and were left out:',
         'de': 'Diese Optionen kennt diese sandbox-ai-Version nicht; sie wurden ausgelassen:'},
@@ -1975,9 +1966,6 @@ TEXTS = {
     'CPUs': {
         'en': 'CPUs',
         'de': 'CPUs'},
-    'Choose a folder that exists.': {
-        'en': 'Choose a folder that exists.',
-        'de': 'Einen vorhandenen Ordner wählen.'},
     'Command line': {
         'en': 'Command line',
         'de': 'Befehlszeile'},
@@ -5031,4 +5019,230 @@ TEXTS = {
     'Agent start': {
         'en': 'Agent start',
         'de': 'Agenten-Start'},
+    # <<< help area, (?) buttons, tours through a task, board drag and drop <<<
+    "The board uses MCP servers the project defines ({names}). The launcher knows them only from the project's trusted .sandbox-ai.json. {why} It is written and trusted now, then the sandbox starts.": {
+        'en': "The board uses MCP servers the project defines ({names}). The launcher knows them only from the project's trusted .sandbox-ai.json. {why} It is written and trusted now, then the sandbox starts.",
+        'de': 'Das Board nutzt MCP-Server, die das Projekt selbst definiert ({names}). Der Launcher kennt sie nur aus der vertrauten .sandbox-ai.json des Projekts. {why} Sie wird jetzt geschrieben und vertraut, dann startet die Sandbox.'},
+    'The board uses MCP servers the project defines ({names}); they are written into the project file, which needs a workspace first.': {
+        'en': 'The board uses MCP servers the project defines ({names}); they are written into the project file, which needs a workspace first.',
+        'de': 'Das Board nutzt MCP-Server, die das Projekt selbst definiert ({names}); sie stehen in der Projektdatei, und die braucht zuerst einen Arbeitsordner.'},
+    '{path} does not hold the board after it was written; look at it, then Apply again.': {
+        'en': '{path} does not hold the board after it was written; look at it, then Apply again.',
+        'de': '{path} enthält nach dem Schreiben nicht das Board; sehen Sie sie an und wenden Sie dann erneut an.'},
+    'The project file is not written yet.': {
+        'en': 'The project file is not written yet.',
+        'de': 'Die Projektdatei ist noch nicht geschrieben.'},
+    'The project file is not trusted (or changed since it was trusted).': {
+        'en': 'The project file is not trusted (or changed since it was trusted).',
+        'de': 'Der Projektdatei wird nicht vertraut (oder sie hat sich seitdem geändert).'},
+    'The project file differs from the board.': {
+        'en': 'The project file differs from the board.',
+        'de': 'Die Projektdatei weicht vom Board ab.'},
+    'The project file cannot be read.': {
+        'en': 'The project file cannot be read.',
+        'de': 'Die Projektdatei kann nicht gelesen werden.'},
+    "The board uses MCP servers the project defines ({names}). The launcher knows them only from the project's trusted .sandbox-ai.json, which was not written. Apply it (it is shown first), then start.": {
+        'en': "The board uses MCP servers the project defines ({names}). The launcher knows them only from the project's trusted .sandbox-ai.json, which was not written. Apply it (it is shown first), then start.",
+        'de': 'Das Board nutzt MCP-Server, die das Projekt selbst definiert ({names}). Der Launcher kennt sie nur aus der vertrauten .sandbox-ai.json des Projekts, und die wurde nicht geschrieben. Wenden Sie sie an (sie wird zuerst gezeigt), dann starten Sie.'},
+    'The project file was not written, so the start that needs it did not happen.': {
+        'en': 'The project file was not written, so the start that needs it did not happen.',
+        'de': 'Die Projektdatei wurde nicht geschrieben, darum fand der Start, der sie braucht, nicht statt.'},
+    'Not attached': {
+        'en': 'Not attached',
+        'de': 'Nicht verbunden'},
+    "inside sandbox-ai's own folder ({path})": {
+        'en': "inside sandbox-ai's own folder ({path})",
+        'de': 'im eigenen Ordner von sandbox-ai ({path})'},
+    'Choose a folder (a new one is created).': {
+        'en': 'Choose a folder (a new one is created).',
+        'de': 'Wählen Sie einen Ordner (ein neuer wird angelegt).'},
+    'Give the full path of the folder (it starts with / or ~).': {
+        'en': 'Give the full path of the folder (it starts with / or ~).',
+        'de': 'Geben Sie den vollständigen Pfad des Ordners an (er beginnt mit / oder ~).'},
+    '{path} exists and is not a folder.': {
+        'en': '{path} exists and is not a folder.',
+        'de': '{path} existiert und ist kein Ordner.'},
+    'Not created: {path} is {why}.': {
+        'en': 'Not created: {path} is {why}.',
+        'de': 'Nicht angelegt: {path} ist {why}.'},
+    'Create the folder': {
+        'en': 'Create the folder',
+        'de': 'Ordner anlegen'},
+    '{path} does not exist yet. Create it (and the folders above it that are missing) as the new project folder?': {
+        'en': '{path} does not exist yet. Create it (and the folders above it that are missing) as the new project folder?',
+        'de': '{path} existiert noch nicht. Als neuen Projektordner anlegen (samt fehlender übergeordneter Ordner)?'},
+    'Choose a folder that exists, or agree to create it.': {
+        'en': 'Choose a folder that exists, or agree to create it.',
+        'de': 'Wählen Sie einen vorhandenen Ordner oder stimmen Sie dem Anlegen zu.'},
+    '{path} could not be created: {error}': {
+        'en': '{path} could not be created: {error}',
+        'de': '{path} konnte nicht angelegt werden: {error}'},
+    'These end with the app: {list}. Sessions keep running (attach again from Terminals or with sandbox-ai attach NAME). Quit?': {
+        'en': 'These end with the app: {list}. Sessions keep running (attach again from Terminals or with sandbox-ai attach NAME). Quit?',
+        'de': 'Diese enden mit der App: {list}. Sitzungen laufen weiter (wieder verbinden über Terminals oder mit sandbox-ai attach NAME). Beenden?'},
+    'End them and quit': {
+        'en': 'End them and quit',
+        'de': 'Beenden und schließen'},
+    'Show the (?) help buttons (the Help page, the tours and F1 stay)': {
+        'en': 'Show the (?) help buttons (the Help page, the tours and F1 stay)',
+        'de': 'Die (?)-Hilfeknöpfe zeigen (die Hilfe-Seite, die Touren und F1 bleiben)'},
+    'Fine': {
+        'en': 'Fine',
+        'de': 'In Ordnung'},
+    'Problem': {
+        'en': 'Problem',
+        'de': 'Problem'},
+    'Not checked': {
+        'en': 'Not checked',
+        'de': 'Nicht geprüft'},
+    'Engine (Podman, Bubblewrap, images)': {
+        'en': 'Engine (Podman, Bubblewrap, images)',
+        'de': 'Engine (Podman, Bubblewrap, Images)'},
+    'Agents (logins, kits, plugins)': {
+        'en': 'Agents (logins, kits, plugins)',
+        'de': 'Agenten (Anmeldungen, Kits, Plugins)'},
+    'Project and security mode': {
+        'en': 'Project and security mode',
+        'de': 'Projekt und Sicherheitsmodus'},
+    'Everything needed is in place.': {
+        'en': 'Everything needed is in place.',
+        'de': 'Alles Nötige ist vorhanden.'},
+    'The doctor found nothing to check.': {
+        'en': 'The doctor found nothing to check.',
+        'de': 'Der Doctor hat nichts zu prüfen gefunden.'},
+    '{failed} problem(s), {warned} warning(s): each says how to fix it.': {
+        'en': '{failed} problem(s), {warned} warning(s): each says how to fix it.',
+        'de': '{failed} Problem(e), {warned} Warnung(en): Bei jedem steht, wie es sich beheben lässt.'},
+    'Not checked yet: press Check.': {
+        'en': 'Not checked yet: press Check.',
+        'de': 'Noch nicht geprüft: Drücken Sie auf Prüfen.'},
+    'Only problems and warnings': {
+        'en': 'Only problems and warnings',
+        'de': 'Nur Probleme und Warnungen'},
+    'Copy the fix command': {
+        'en': 'Copy the fix command',
+        'de': 'Befehl zum Beheben kopieren'},
+    'Copies the command of the selected check; run it in a terminal yourself': {
+        'en': 'Copies the command of the selected check; run it in a terminal yourself',
+        'de': 'Kopiert den Befehl der gewählten Prüfung; führen Sie ihn selbst in einem Terminal aus'},
+    'What was found': {
+        'en': 'What was found',
+        'de': 'Was gefunden wurde'},
+    '{failed} problem(s), {warned} warning(s)': {
+        'en': '{failed} problem(s), {warned} warning(s)',
+        'de': '{failed} Problem(e), {warned} Warnung(en)'},
+    'all fine': {
+        'en': 'all fine',
+        'de': 'alles in Ordnung'},
+    'Command: {command} (double-click copies it)': {
+        'en': 'Command: {command} (double-click copies it)',
+        'de': 'Befehl: {command} (Doppelklick kopiert ihn)'},
+    '{version} now (alias; the installed Claude Code decides)': {
+        'en': '{version} now (alias; the installed Claude Code decides)',
+        'de': 'derzeit {version} (Alias; das installierte Claude Code entscheidet)'},
+    'Git logins (sandbox-ai git-logins)': {
+        'en': 'Git logins (sandbox-ai git-logins)',
+        'de': 'Git-Logins (sandbox-ai git-logins)'},
+    'Publish logins (sandbox-ai publish-logins)': {
+        'en': 'Publish logins (sandbox-ai publish-logins)',
+        'de': 'Veröffentlichungs-Logins (sandbox-ai publish-logins)'},
+    'Agent login': {
+        'en': 'Agent login',
+        'de': 'Login eines Agenten'},
+    'Git login': {
+        'en': 'Git login',
+        'de': 'Git-Login'},
+    'Publish login': {
+        'en': 'Publish login',
+        'de': 'Veröffentlichungs-Login'},
+    'The connection proxy of every sandbox logs in to these Git servers on the wire (clone, fetch, push); no token enters a sandbox. The token is the secret named.': {
+        'en': 'The connection proxy of every sandbox logs in to these Git servers on the wire (clone, fetch, push); no token enters a sandbox. The token is the secret named.',
+        'de': 'Der Verbindungs-Proxy jeder Sandbox meldet sich unterwegs bei diesen Git-Servern an (clone, fetch, push); kein Token gelangt in eine Sandbox. Das Token ist das genannte Geheimnis.'},
+    'Package registries and forges a start may publish to with --publish KIND; the proxy adds the token on the wire and asks before every upload.': {
+        'en': 'Package registries and forges a start may publish to with --publish KIND; the proxy adds the token on the wire and asks before every upload.',
+        'de': 'Paket-Registries und Forges, in die ein Start mit --publish ART veröffentlichen darf; der Proxy fügt das Token unterwegs ein und fragt vor jedem Hochladen.'},
+    'Agent logins': {
+        'en': 'Agent logins',
+        'de': 'Logins der Agenten'},
+    'Secrets': {
+        'en': 'Secrets',
+        'de': 'Geheimnisse'},
+    'Git logins': {
+        'en': 'Git logins',
+        'de': 'Git-Logins'},
+    'Publish logins': {
+        'en': 'Publish logins',
+        'de': 'Veröffentlichungs-Logins'},
+    'Identities': {
+        'en': 'Identities',
+        'de': 'Identitäten'},
+    'ready': {
+        'en': 'ready',
+        'de': 'bereit'},
+    'secret {name} missing': {
+        'en': 'secret {name} missing',
+        'de': 'Geheimnis {name} fehlt'},
+    'Working…': {
+        'en': 'Working…',
+        'de': 'Wird ausgeführt…'},
+    'New Git login': {
+        'en': 'New Git login',
+        'de': 'Neuer Git-Login'},
+    'New publish login': {
+        'en': 'New publish login',
+        'de': 'Neuer Veröffentlichungs-Login'},
+    'Secret (its name)': {
+        'en': 'Secret (its name)',
+        'de': 'Geheimnis (sein Name)'},
+    'Overview': {
+        'en': 'Overview',
+        'de': 'Übersicht'},
+    'Not done: {error}': {
+        'en': 'Not done: {error}',
+        'de': 'Nicht erledigt: {error}'},
+    'Keep the token first on the Secrets tab; only its name is written here.': {
+        'en': 'Keep the token first on the Secrets tab; only its name is written here.',
+        'de': 'Bewahren Sie das Token zuerst im Reiter Geheimnisse auf; hier wird nur sein Name eingetragen.'},
+    "Give the server's address.": {
+        'en': "Give the server's address.",
+        'de': 'Geben Sie die Adresse des Servers an.'},
+    'Everything configured, with its state. Click a row to open its tab.': {
+        'en': 'Everything configured, with its state. Click a row to open its tab.',
+        'de': 'Alles Eingerichtete mit seinem Zustand. Ein Klick auf eine Zeile öffnet ihren Reiter.'},
+    'Where / used by': {
+        'en': 'Where / used by',
+        'de': 'Wo / genutzt von'},
+    'Used by': {
+        'en': 'Used by',
+        'de': 'Genutzt von'},
+    'Git login {name}': {
+        'en': 'Git login {name}',
+        'de': 'Git-Login {name}'},
+    'publish login {name}': {
+        'en': 'publish login {name}',
+        'de': 'Veröffentlichungs-Login {name}'},
+    '{count} configured, {problems} need attention.': {
+        'en': '{count} configured, {problems} need attention.',
+        'de': '{count} eingerichtet, {problems} brauchen Aufmerksamkeit.'},
+    'Nothing configured yet: log in to an agent, keep a secret.': {
+        'en': 'Nothing configured yet: log in to an agent, keep a secret.',
+        'de': 'Noch nichts eingerichtet: Melden Sie sich bei einem Agenten an, bewahren Sie ein Geheimnis auf.'},
+    'Remove the Git login for {name}? Its secret stays.': {
+        'en': 'Remove the Git login for {name}? Its secret stays.',
+        'de': 'Den Git-Login für {name} entfernen? Sein Geheimnis bleibt.'},
+    'Remove the publish login for {name}? Its secret stays.': {
+        'en': 'Remove the publish login for {name}? Its secret stays.',
+        'de': 'Den Veröffentlichungs-Login für {name} entfernen? Sein Geheimnis bleibt.'},
+    'kept': {
+        'en': 'kept',
+        'de': 'aufbewahrt'},
+    'configured': {
+        'en': 'configured',
+        'de': 'eingerichtet'},
+    'identity {name}': {
+        'en': 'identity {name}',
+        'de': 'Identität {name}'},
+    '{where}, secret {secret}': {
+        'en': '{where}, secret {secret}',
+        'de': '{where}, Geheimnis {secret}'},
 }

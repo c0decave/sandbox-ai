@@ -73,10 +73,13 @@ class FolderPage(Page):
 
     def validatePage(self):  # noqa: N802
         directory = self.path.edit.text().strip()
-        if not directory or not os.path.isdir(os.path.expanduser(directory)):
-            self.note.setText(tr("Choose a folder that exists."))
+        if not directory:
+            self.note.setText(tr("Choose a folder (a new one is created)."))
             return False
-        self.wizard_.directory = os.path.realpath(os.path.expanduser(directory))
+        directory = os.path.expanduser(directory)
+        if not os.path.isdir(directory) and not self.create(directory):
+            return False
+        self.wizard_.directory = os.path.realpath(directory)
         self.wizard_.existing = None
         try:
             review = self.wizard_.sai.review_project(self.wizard_.directory)
@@ -90,6 +93,57 @@ class FolderPage(Page):
         return True
 
 
+    def create(self, directory):
+        """Create the new project folder DIRECTORY after the human confirmed the full path; never one that is,
+        lies in or holds the host's settings, keys or programs (board.sensitive, the launcher's private
+        locations), nor one inside sandbox-ai or this app. False (the reason in the note) when not created."""
+        if not os.path.isabs(directory):
+            self.note.setText(tr("Give the full path of the folder (it starts with / or ~)."))
+            return False
+        if os.path.lexists(directory):
+            self.note.setText(tr("{path} exists and is not a folder.", path=printable(directory)))
+            return False
+        why = refusal(self.wizard_.sai, directory)
+        if why:
+            self.note.setText(tr("Not created: {path} is {why}.", path=printable(directory), why=why))
+            return False
+        path = os.path.abspath(directory)
+        if not confirm(self, tr("Create the folder"), tr("{path} does not exist yet. Create it (and the folders above "
+                                                         "it that are missing) as the new project folder?",
+                                                         path=printable(path)), tr("Create")):
+            self.note.setText(tr("Choose a folder that exists, or agree to create it."))
+            return False
+        try:
+            os.makedirs(path, mode=0o755)
+        except OSError as exc:
+            self.note.setText(tr("{path} could not be created: {error}", path=printable(path),
+                                 error=printable(exc.strerror or exc)))
+            return False
+        self.path.edit.setText(path)
+        return True
+
+
+def refusal(sai, path):
+    """Why a new project folder may not be created at PATH, or None: what board.sensitive calls "bad" (HOME, the
+    file system, the host's settings, keys and programs), and the folders of sandbox-ai and of this app."""
+    launcher = None
+    try:
+        launcher = sai.launcher
+    except Exception:  # noqa: BLE001 - board.sensitive's own list still holds
+        pass
+    verdict = B.sensitive(path, launcher)
+    if verdict and verdict[0] == "bad":
+        return verdict[1]
+    resolved = Path(os.path.abspath(path)).resolve(strict=False)
+    own = [Path(__file__).resolve().parents[1]]
+    if getattr(sai, "directory", None):
+        own.append(Path(sai.directory).resolve())
+    for folder in own:
+        if resolved == folder or folder in resolved.parents:
+            return tr("inside sandbox-ai's own folder ({path})", path=printable(folder))
+    return None
+
+
 class AgentPage(Page):
     def __init__(self, wizard):
         super().__init__(wizard, tr("Agent"), tr("Which coding agent runs in the sandbox."))
@@ -98,8 +152,8 @@ class AgentPage(Page):
         self.agent.setCurrentText(wizard.settings().get("default_agent", "claude"))
         self.danger = QCheckBox(tr("without the agent's own approval prompts (-D; the sandbox stays in force)"))
         self.forbid(self.danger, "--dangerously-skip-permissions")
-        # The model's and the effort's choices are the agent's own (guide.AGENT_MODELS / AGENT_EFFORTS); a model
-        # it does not list can be typed.
+        # The model's choices are the agent's own with their versions (models.py), the effort's guide.AGENT_EFFORTS;
+        # a model it does not list can be typed.
         self.model = QComboBox()
         self.model.setEditable(True)
         self.effort = QComboBox()
@@ -111,17 +165,10 @@ class AgentPage(Page):
         self.agent_changed(self.agent.currentText())
 
     def agent_changed(self, agent):
-        from .guide import AGENT_EFFORTS, AGENT_MODELS
+        from .guide import AGENT_EFFORTS
+        from . import models
         model, effort = self.model_name(), self.effort.currentData() or ""
-        self.model.clear()
-        self.model.addItem(tr("the agent's default"), "")
-        for name in AGENT_MODELS.get(agent, ()):
-            self.model.addItem(name, name)
-        index = self.model.findData(model)
-        if index >= 0:
-            self.model.setCurrentIndex(index)
-        elif model:
-            self.model.setEditText(model)
+        models.fill_combo(self.model, agent, model)  # each with its version (models.py says where from)
         self.effort.clear()
         self.effort.addItem(tr("the agent's default"), "")
         for level in AGENT_EFFORTS.get(agent, ()):
@@ -133,10 +180,8 @@ class AgentPage(Page):
 
     def model_name(self):
         """The model chosen or typed ("" for the agent's default)."""
-        text = self.model.currentText().strip()
-        index = self.model.findText(text)
-        data = self.model.itemData(index) if index >= 0 else None
-        return data if data is not None else text
+        from . import models
+        return models.combo_value(self.model)
 
     def initializePage(self):  # noqa: N802
         existing = self.wizard_.existing

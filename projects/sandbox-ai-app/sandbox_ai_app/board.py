@@ -464,6 +464,28 @@ def launcher_argv(sai, board):
     return to_argv(sai, board) + ["--no-config"]
 
 
+def project_servers(board):
+    """The names of the MCP servers the board uses that the project itself defines (.sandbox-ai.json
+    "mcp_servers", e.g. a preset's search server). The launcher knows them only from the trusted project file:
+    a start with --no-config would refuse them ("Unknown MCP server")."""
+    return [n.props["name"] for n in board.included() if n.kind == "mcp" and n.props.get("name")
+            and n.props.get("project") and isinstance(n.props.get("definition"), dict)]
+
+
+def file_start_argv(sai, board):
+    """The launcher options of a start that takes the board from its written and trusted project file: the
+    main workspace (where the file is; the launcher applies it, its MCP servers included) and the options a
+    project file may not carry (--mode, --name, --rules ...), nothing else (the file's options would be given
+    twice otherwise)."""
+    _, found, _ = values(board, sai)
+    workspaces = list(found.get("--workspace", []))
+    forbidden = set(sai.launcher.CONFIG_FORBIDDEN) - {"--workspace", "--config", "--no-config", "--"}
+    kept = {name: value for name, value in found.items() if name in forbidden}
+    argv = backend.argv_from_values(list(_options(sai).values()), kept)
+    argv += [t for t in board.extra if t.split("=", 1)[0] in forbidden]
+    return argv + (["--workspace", workspaces[0]] if workspaces else [])
+
+
 def command_line(sai, board):
     agent, _, agent_args = values(board, sai)
     return shlex.join(["sandbox-ai", agent, *to_argv(sai, board), *(["--", *agent_args] if agent_args else [])])

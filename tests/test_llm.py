@@ -424,7 +424,10 @@ def test_golden_opencode(team):
 def test_golden_codex(team):
     text = llm.codex_profile(team, "qwen3-coder-30b")
     golden("codex.config.toml", text)
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.9 and 3.10
+        import tomli as tomllib
     config = tomllib.loads(text)
     provider = config["model_providers"]["llm-team"]
     assert config["model_provider"] == "llm-team" and config["model"] == "qwen3-coder-30b"
@@ -529,3 +532,15 @@ def test_sandbox_ai_dispatches_llm():
     module = importlib.util.module_from_spec(main)
     main.loader.exec_module(module)
     assert module.PYTHON_COMMANDS["llm"] == ("llm.py",) and "sandbox-ai llm add" in module.__doc__
+
+
+def test_the_models_carry_the_date_their_server_gives():
+    """The version of a model as the server knows it: Ollama's modified_at, the OpenAI listing's created."""
+    ollama = {"/api/tags": {"models": [{"name": "qwen3:8b", "modified_at": "2026-05-04T10:00:00.1+02:00",
+                                        "details": {"parameter_size": "8.2B", "quantization_level": "Q4_K_M"}}]},
+              "/api/ps": {"models": []}}
+    assert llm.discover("ollama", lambda path: ollama[path])[0]["details"] == "8.2B Q4_K_M, 2026-05-04"
+    listing = {"/v1/models": {"data": [{"id": "gpt-oss-20b", "created": 1767225600}, {"id": "x", "created": "soon"}]}}
+    found = llm.discover("openai-compatible", lambda path: listing[path])
+    assert [m["details"] for m in found] == ["2026-01-01", ""]
+    assert llm.model_date(True) == "" and llm.model_date(-5) == ""

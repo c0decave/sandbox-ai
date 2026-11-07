@@ -460,6 +460,15 @@ AREA_TIPS = (
           "Speichern ändert die Erweiterung; das Image ändert sich erst, wenn Sie neu bauen."),
          "", "page-images"),
     # Credentials
+    _tip("credentials.overview", ("Everything configured", "Alles Eingerichtete"),
+         ("Agent logins, secrets, Git and publish logins, identities and VPN profiles in one list, each with its "
+          "state; what needs attention is marked.",
+          "Logins der Agenten, Geheimnisse, Git- und Veröffentlichungs-Logins, Identitäten und VPN-Profile in einer "
+          "Liste, jedes mit seinem Zustand; was Aufmerksamkeit braucht, ist markiert."),
+         ("A click on a row opens its tab, where it can be changed. No value of a secret is ever shown.",
+          "Ein Klick auf eine Zeile öffnet ihren Reiter, wo es sich ändern lässt. Kein Wert eines Geheimnisses wird "
+          "je gezeigt."),
+         "sandbox-ai secrets | git-logins | publish-logins | identities | vpn", "secrets"),
     _tip("credentials.logins", ("Agent logins", "Logins der Agenten"),
          ("Each agent's login, kept on this computer outside every sandbox.",
           "Der Login jedes Agenten, auf diesem Rechner außerhalb jeder Sandbox aufbewahrt."),
@@ -636,8 +645,8 @@ PLACES = {
     "mcp": (("servers", "mcp.servers", "group"), ("catalog", "mcp.catalog", "group")),
     "images": (("images", "images.images", "group"), ("build_button", "images.build", "after"),
                ("new_button", "images.variant", "after"), ("editor_tabs", "images.editor", "corner")),
-    "credentials": (("logins", "credentials.logins", "group"), ("secrets", "credentials.secrets", "group"),
-                    ("vpn", "credentials.vpn", "group")),
+    "credentials": (("overview", "credentials.overview", "group"), ("logins", "credentials.logins", "group"),
+                    ("secrets", "credentials.secrets", "group"), ("vpn", "credentials.vpn", "group")),
     "system": (("checks", "system.checks", "group"), ("theme", "system.settings", "group"),
                ("update_button", "system.update", "after"), ("policy_text", "system.policy", "group")),
     "hosts": (("list", "hosts.list", "corner"), ("tabs", "hosts.tabs", "corner")),

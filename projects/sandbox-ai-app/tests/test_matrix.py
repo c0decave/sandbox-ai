@@ -866,7 +866,7 @@ def changed_settings(env):
             "notify_seconds": 30, "notify_style": "system", "approvals_interval": 500, "sandboxes_interval": 5000, "connections_interval": 4000,
             "sandbox_ai_home": str(env / "checkout"), "default_agent": "codex", "default_backend": "bwrap",
             "default_template": "research", "board_grid": 40, "auto_tabs": False, "guide_nodes": False,
-            "guide_tour": False, "intro": False, "debug": True}
+            "guide_tour": False, "intro": False, "debug": True, "help_buttons": False}
 
 
 def field_value(widget):
@@ -945,6 +945,10 @@ def test_every_setting_round_trips_through_a_restart(qapp, env, monkeypatch, age
         # The settings that act at once do: commands in a terminal window.
         w.system.tool(("build", "all"))
         assert w.opened == [] and w.started[-1][-2:] == ["build", "all"]
+        from sandbox_ai_app import help_view
+        assert not help_view.buttons_shown() and not w.page_help.isVisibleTo(w), "the (?)s stay off after a restart"
     finally:
         close_window(w)
         i18n.set_language("en")
+        from sandbox_ai_app import help_view
+        help_view.set_shown(True)

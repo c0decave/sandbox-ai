@@ -141,7 +141,7 @@ class VpnBox(QGroupBox):
 
     def __init__(self, sai):
         super().__init__(tr("VPN profiles (sandbox-ai vpn)"))
-        self.sai = sai
+        self.sai, self.entries, self.on_change = sai, [], None  # on_change: the Credentials page's overview
         layout = QVBoxLayout(self)
         self.profiles = table([tr("Profile"), tr("Kind"), tr("Provider")])
         layout.addWidget(self.profiles)
@@ -165,7 +165,10 @@ class VpnBox(QGroupBox):
         if error is not None:
             self.message.setText(printable(error))
             return
-        fill(self.profiles, [[e.get("profile", ""), e.get("type", ""), e.get("provider", "")] for e in result or []])
+        self.entries = [e for e in result or [] if isinstance(e, dict)]
+        fill(self.profiles, [[e.get("profile", ""), e.get("type", ""), e.get("provider", "")] for e in self.entries])
+        if self.on_change is not None:
+            self.on_change()
 
     def check(self):
         name = selected(self.profiles)

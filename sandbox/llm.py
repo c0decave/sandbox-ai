@@ -426,6 +426,22 @@ class Client:
             raise ValueError(f"{self.endpoint['url']}{path}: the answer is not JSON") from None
 
 
+def model_date(value):
+    """The date of a model as its server gives it (OpenAI's "created": seconds since 1970; Ollama's "modified_at": ISO
+    8601), as YYYY-MM-DD; "" when there is none."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value < 32503680000:
+        return time.strftime("%Y-%m-%d", time.gmtime(value))
+    if isinstance(value, str) and re.match(r"\d{4}-\d{2}-\d{2}", value):
+        return value[:10]
+    return ""
+
+
+def with_date(details, value):
+    """DETAILS with the model's date (its version as the server knows it) appended."""
+    date = model_date(value)
+    return ", ".join(part for part in (details, date) if part)
+
+
 def discover_raw(kind, fetch):
     """Models of a server as [{name, size, loaded, details}] (untrusted: see clean_models). FETCH(PATH) returns the
     JSON of GET PATH below the server's root."""
@@ -436,8 +452,9 @@ def discover_raw(kind, fetch):
         except (OSError, ValueError, KeyError, TypeError):
             loaded = None
         return [{"name": m["name"], "size": m.get("size"), "loaded": None if loaded is None else m["name"] in loaded,
-                 "details": " ".join(v for v in (m.get("details", {}).get("parameter_size"),
-                                                m.get("details", {}).get("quantization_level")) if v)}
+                 "details": with_date(" ".join(v for v in (m.get("details", {}).get("parameter_size"),
+                                                          m.get("details", {}).get("quantization_level")) if v),
+                                      m.get("modified_at"))}
                 for m in tags]
     if kind == "lmstudio":
         try:
@@ -446,11 +463,13 @@ def discover_raw(kind, fetch):
                      "details": m.get("quantization", "")} for m in data if m.get("type") in ("llm", "vlm")]
         except (OSError, ValueError, KeyError, TypeError):
             # Older LM Studio, or one behind a gateway: the OpenAI-compatible listing only.
-            return [{"name": m["id"], "size": None, "loaded": None, "details": ""} for m in fetch("/v1/models")["data"]]
+            return [{"name": m["id"], "size": None, "loaded": None, "details": with_date("", m.get("created"))}
+                    for m in fetch("/v1/models")["data"]]
     if kind == "vllm":
         # vLLM serves exactly the models it has loaded.
         return [{"name": m["id"], "size": None, "loaded": True,
-                 "details": f"max_model_len {m['max_model_len']}" if m.get("max_model_len") else ""}
+                 "details": with_date(f"max_model_len {m['max_model_len']}" if m.get("max_model_len") else "",
+                                      m.get("created"))}
                 for m in fetch("/v1/models")["data"]]
     if kind == "llamacpp":
         answer = fetch("/v1/models")
@@ -461,10 +480,12 @@ def discover_raw(kind, fetch):
             # A single model is loaded; the router mode reports a status per model.
             loaded = status["value"] == "loaded" if isinstance(status.get("value"), str) else (True if not status else None)
             result.append({"name": m["id"], "size": meta.get("size"), "loaded": loaded,
-                           "details": f"n_ctx_train {meta['n_ctx_train']}" if meta.get("n_ctx_train") else ""})
+                           "details": with_date(f"n_ctx_train {meta['n_ctx_train']}" if meta.get("n_ctx_train")
+                                                else "", m.get("created"))})
         return result
     if kind == "openai-compatible":
-        return [{"name": m["id"], "size": None, "loaded": None, "details": ""} for m in fetch("/v1/models")["data"]]
+        return [{"name": m["id"], "size": None, "loaded": None, "details": with_date("", m.get("created"))}
+                for m in fetch("/v1/models")["data"]]
     raise ValueError(f"Unknown server type: {kind}")
 
 

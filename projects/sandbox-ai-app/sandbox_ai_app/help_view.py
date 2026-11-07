@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import html
 import re
+import weakref
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QPainter, QPen
@@ -27,6 +28,39 @@ from .widgets import MONO, FlowLayout, plain_label
 OPENER = None   # the window's show_help(section id): set by the main window
 OPENED = []     # the ids of the explanations opened in this run (a tour step waits for one)
 SIZE = 18
+_SHOWN = [True]  # the setting help_buttons: the (?)s are shown (the Help page, tours and F1 stay either way)
+_BUTTONS = weakref.WeakSet()  # every HelpButton made, to hide or show them when the setting changes
+_LISTENERS = []  # weakref.WeakMethod of callbacks (the board's (?) marks in its nodes)
+
+
+def buttons_shown():
+    return _SHOWN[0]
+
+
+def on_shown_changed(method):
+    """Call the bound METHOD(shown) whenever the setting changes (kept weakly: a page that is gone is dropped)."""
+    _LISTENERS.append(weakref.WeakMethod(method))
+
+
+def set_shown(on):
+    """Show or hide every (?) at once, live (setting help_buttons)."""
+    on = bool(on)
+    if on == _SHOWN[0]:
+        return
+    _SHOWN[0] = on
+    for button in list(_BUTTONS):
+        try:
+            button.apply_shown()
+        except RuntimeError:  # its C++ side is gone
+            _BUTTONS.discard(button)
+    for ref in list(_LISTENERS):
+        method = ref()
+        try:
+            if method is None:
+                raise RuntimeError
+            method(on)
+        except RuntimeError:
+            _LISTENERS.remove(ref)
 
 
 class HelpButton(QToolButton):
@@ -41,8 +75,25 @@ class HelpButton(QToolButton):
         self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
         self.setFixedSize(SIZE, SIZE)
         self.popover = None
+        self.wanted = None  # what setVisible asked for (None: as Qt decides, with its parent)
         self.clicked.connect(lambda _=False: self.explain())
         self.set_tip(tip_id)
+        _BUTTONS.add(self)
+        if not _SHOWN[0]:
+            QToolButton.setVisible(self, False)
+
+    def setVisible(self, visible):  # noqa: N802 - Qt's name; the setting help_buttons wins
+        self.wanted = bool(visible)
+        QToolButton.setVisible(self, self.wanted and _SHOWN[0])
+
+    def apply_shown(self):
+        if not _SHOWN[0]:
+            QToolButton.setVisible(self, False)
+        elif self.wanted is not False:
+            if self.parentWidget() is None:  # not placed yet: shown with its parent later, never as a window
+                self.setAttribute(Qt.WidgetAttribute.WA_WState_ExplicitShowHide, False)
+            else:
+                QToolButton.setVisible(self, True)
 
     def set_tip(self, tip_id):
         self.tip_id = tip_id

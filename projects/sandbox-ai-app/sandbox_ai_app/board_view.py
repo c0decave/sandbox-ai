@@ -101,6 +101,7 @@ class NodeHelpMark(QGraphicsItem):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip(tr("What is this? {title}", title=tr(B.KINDS[kind].title)))
         self.setZValue(3)
+        self.setVisible(help_view.buttons_shown())  # the setting help_buttons
 
     def boundingRect(self):  # noqa: N802
         return QRectF(0, 0, help_view.SIZE, help_view.SIZE)
@@ -903,6 +904,12 @@ class BoardPage(QWidget):
         self.check_timer.timeout.connect(self.check)
         self.set_board(B.with_backend(B.from_argv(sai, self.default_agent(), []),
                                       self.settings().get("default_backend")), None)
+        help_view.on_shown_changed(self.show_help_marks)
+
+    def show_help_marks(self, shown):
+        """The (?) in each node's title band follows the setting help_buttons."""
+        for item in self.items.values():
+            item.help_mark.setVisible(shown)
 
     # -- settings and policy --
 
@@ -1451,7 +1458,7 @@ class BoardPage(QWidget):
             agent.setCurrentText(node.props.get("agent", "claude"))
             agent.currentTextChanged.connect(lambda text: self.set_prop(node_id, "agent", text))
             self.inspector.addRow(tr("Agent"), agent)
-            self.text_row(node, "model", tr("Model"), tr("passed as --model to the agent"))
+            self.model_row(node)
             self.text_row(node, "arguments", tr("Agent arguments"), tr("e.g. --verbose"))
         elif kind == "workspace":
             path = PathEdit(node.props.get("path", ""))
@@ -1662,6 +1669,19 @@ class BoardPage(QWidget):
         failed = [(out + err).strip() for status, out, err in results if status != 0]
         text = "\n".join(printable((out + err).strip()) for _, out, err in results)
         (warn if failed else inform)(self, title, text)
+
+    def model_row(self, node):
+        """The agent's model: its models with their versions to choose from (models.py), any other typed."""
+        from . import models
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.setToolTip(tr("passed as --model to the agent"))
+        models.fill_combo(combo, node.props.get("agent", "claude"), str(node.props.get("model", "") or ""))
+        combo.activated.connect(lambda _i: self.set_prop(node.id, "model", models.combo_value(combo)))
+        combo.lineEdit().editingFinished.connect(lambda: self.set_prop(node.id, "model", models.combo_value(combo)))
+        self.inspector.addRow(tr("Model"), combo)
+        self.model_combo = combo
+        return combo
 
     def text_row(self, node, key, label, placeholder):
         edit = QLineEdit(str(node.props.get(key, "") or ""))
@@ -1935,7 +1955,10 @@ class BoardPage(QWidget):
     def errors(self):
         return [p for p in B.problems(self.sai, self.board, self.policy()) if p.level == "error"]
 
-    def apply(self):
+    def apply(self, then=None, lead=""):
+        """Show the project file of the board and what changes, then write and trust exactly it (in a thread).
+        THEN runs once it is written (a start that needs the file); LEAD is said before the question. True when
+        the file is being written."""
         errors = self.errors()
         if errors:
             warn(self, tr("Not written"), "\n".join(p.text for p in errors))
@@ -1948,17 +1971,21 @@ class BoardPage(QWidget):
         old = read_small(Path(main) / ".sandbox-ai.json")
         diff = "\n".join(difflib.unified_diff(old.splitlines(), new.splitlines(), tr("before"), tr("after"),
                                               lineterm="")) if old else new
-        if not confirm(self, tr("Write and trust"), tr("Write {path} with this content and trust exactly it? The "
-                                                       "details show what changes.", path=f"{main}/.sandbox-ai.json"),
+        question = tr("Write {path} with this content and trust exactly it? The details show what changes.",
+                      path=f"{main}/.sandbox-ai.json")
+        if not confirm(self, tr("Write and trust"), (lead + "\n\n" + question) if lead else question,
                        tr("Write and trust"), details=diff):
             return False
         background(self.sai.write_project, main, document, owner=self, source=self.apply_button, timeout=60,
-                   done=lambda result, error: self.applied(main, result, error))
+                   done=lambda result, error: self.applied(main, result, error, then))
         return True
 
-    def applied(self, main, result, error):
+    def applied(self, main, result, error, then=None):
         if error is not None:
             warn(self, tr("Not written"), printable(error))
+            if then is not None:
+                warn(self, tr("Not started"), tr("The project file was not written, so the start that needs it "
+                                                 "did not happen."))
             return
         try:
             B.write_layout(main, self.board)
@@ -1969,8 +1996,11 @@ class BoardPage(QWidget):
         self.undo.setClean()
         self.show_notice("")
         self.untrusted.pop(self.key_of(main), None)
-        inform(self, tr("Project configuration"), tr("Written and trusted: {path}", path=printable(result)))
         self.opened.emit(str(main))
+        if then is not None:  # the start waited for the file: it goes on now (no second message in between)
+            then()
+            return
+        inform(self, tr("Project configuration"), tr("Written and trusted: {path}", path=printable(result)))
 
     def dry_run(self):
         agent, _, _ = B.values(self.board)
@@ -1999,13 +2029,71 @@ class BoardPage(QWidget):
         if session == "":
             inform(self, tr("Session"), tr("Give the session a name first."))
             return False
-        agent, _, agent_args = B.values(self.board, self.sai)
-        argv = self.sai.launch_argv(agent, B.launcher_argv(self.sai, self.board), agent_args, session or None)
-        workspaces = self.board.of_kind("workspace")
-        cwd = workspaces[0].props.get("path") if workspaces else None
-        title = agent + (f" ({session})" if session else "")
-        self.terminal(argv, title, embedded=None if session else embedded, cwd=cwd)
+        servers = B.project_servers(self.board)
+        if servers:
+            return self.start_from_project_file(servers, embedded, session)
+        return self.run_start(B.launcher_argv(self.sai, self.board), embedded, session)
+
+    def run_start(self, options, embedded, session):
+        """Run the start in a terminal; a failure to start it is a message, never an exception in a slot."""
+        try:
+            agent, _, agent_args = B.values(self.board, self.sai)
+            argv = self.sai.launch_argv(agent, options, agent_args, session or None)
+            workspaces = self.board.of_kind("workspace")
+            cwd = workspaces[0].props.get("path") if workspaces else None
+            title = agent + (f" ({session})" if session else "")
+            self.terminal(argv, title, embedded=None if session else embedded, cwd=cwd)
+        except Exception as exc:  # noqa: BLE001 - the window stays; the reason is shown
+            warn(self, tr("Not started"), printable(exc))
+            return False
         return True
+
+    def project_file_state(self, main, document):
+        """"same" when MAIN/.sandbox-ai.json is trusted and holds exactly DOCUMENT; else "missing", "untrusted"
+        (not trusted or changed since), "differs" (another content) or "unreadable"."""
+        try:
+            review = self.sai.review_project(main)
+        except FileNotFoundError:
+            return "missing"
+        except (OSError, ValueError):
+            return "unreadable"
+        if review.document != json.loads(json.dumps(document)):
+            return "differs"
+        return "same" if review.trusted else "untrusted"
+
+    def start_from_project_file(self, servers, embedded, session, written=False):
+        """The board uses MCP servers the project defines: the launcher knows them only from the trusted project
+        file, so the start takes the board from that file (written and trusted by Apply first, after the human
+        saw it). Declined: not started, with the reason."""
+        document, main = B.project_document(self.sai, self.board)
+        names = ", ".join(servers)
+        if not main:
+            warn(self, tr("Not started"), tr("The board uses MCP servers the project defines ({names}); they are "
+                                             "written into the project file, which needs a workspace first.",
+                                             names=names))
+            return False
+        state = self.project_file_state(main, document)
+        if state == "same":
+            return self.run_start(B.file_start_argv(self.sai, self.board), embedded, session)
+        if written:  # just written and trusted, and still not the board (swapped meanwhile?): no second round
+            warn(self, tr("Not started"), tr("{path} does not hold the board after it was written; look at it, then "
+                                             "Apply again.", path=printable(f"{main}/.sandbox-ai.json")))
+            return False
+        why = {"missing": tr("The project file is not written yet."),
+               "untrusted": tr("The project file is not trusted (or changed since it was trusted)."),
+               "differs": tr("The project file differs from the board."),
+               "unreadable": tr("The project file cannot be read.")}[state]
+        lead = tr("The board uses MCP servers the project defines ({names}). The launcher knows them only from the "
+                  "project's trusted .sandbox-ai.json. {why} It is written and trusted now, then the sandbox starts.",
+                  names=names, why=why)
+        if self.apply(then=lambda: self.start_from_project_file(servers, embedded, session, written=True),
+                      lead=lead):
+            return True
+        if not self.errors():  # errors were shown by apply already
+            warn(self, tr("Not started"), tr("The board uses MCP servers the project defines ({names}). The launcher "
+                                             "knows them only from the project's trusted .sandbox-ai.json, which was "
+                                             "not written. Apply it (it is shown first), then start.", names=names))
+        return False
 
 
 def preset_kind(path):

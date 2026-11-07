@@ -349,11 +349,15 @@ class NodeGuide(QDialog):
     @staticmethod
     def fill_agent_choices(question, widget, agent, current):
         """The model names or effort levels AGENT knows; the empty choice is its default."""
+        if question.form == "model":  # each model with its version (models.py says where the lists come from)
+            from . import models
+            models.fill_combo(widget, agent, current)
+            widget.setEnabled(True)
+            return
         widget.blockSignals(True)
         widget.clear()
         widget.addItem(tr("the agent's default"), "")
-        known = guide.AGENT_MODELS if question.form == "model" else guide.AGENT_EFFORTS
-        for value in known.get(agent, ()):
+        for value in guide.AGENT_EFFORTS.get(agent, ()):
             widget.addItem(value, value)
         index = widget.findData(current)
         if index >= 0:

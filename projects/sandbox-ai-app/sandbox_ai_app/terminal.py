@@ -215,6 +215,39 @@ def attach_key(argv):
     return None
 
 
+AGENT_NAMES = ("claude", "codex", "opencode")
+
+
+def detaches(argv, launcher=None):
+    """Whether closing the terminal of ARGV only detaches it, the start running on: attaching to a start (tmux),
+    a start with --session, or an interactive agent start, which the launcher runs as a detachable session in tmux
+    by default (not with --no-tmux, --probe, --dry-run, --binary, a prompt or subcommand for the agent, or on macOS;
+    sandbox-ai's detachable() and resolve_tmux()). Everything else (a build, doctor, a task) ends with its tab."""
+    if attach_key(argv) is not None:
+        return True
+    argv = [str(arg) for arg in argv]
+    at = next((i + 1 for i, token in enumerate(argv) if os.path.basename(token) in ("main.py", "sandbox-ai")), None)
+    if at is None or at >= len(argv) or argv[at] not in AGENT_NAMES:
+        return False
+    rest = argv[at + 1:]
+    options, agent_args = (rest[:rest.index("--")], rest[rest.index("--") + 1:]) if "--" in rest else (rest, [])
+    names = {option.split("=", 1)[0] for option in options}
+    if names & {"--dry-run", "--probe", "-n"}:
+        return False
+    if "--session" in names:
+        return True
+    if names & {"--no-tmux", "--binary"} or sys.platform == "darwin":
+        return False
+    if "--tmux" in names:
+        return True
+    if launcher is not None and hasattr(launcher, "interactive_args"):
+        try:
+            return bool(launcher.interactive_args(argv[at], agent_args))
+        except Exception:  # noqa: BLE001 - an older launcher: options only means interactive
+            pass
+    return all(arg.startswith("-") for arg in agent_args)
+
+
 class TerminalsPage(QWidget):
     """Tabs with terminals, and above them every start that runs on this machine (or a host of `sandbox-ai
     hosts`), however it was started: the command line, the app, the web interface, another machine. One click
@@ -489,6 +522,24 @@ class TerminalsPage(QWidget):
 
     def running(self):
         return [view for view in self.views() if view.running]
+
+    def launcher(self):
+        try:
+            return self.sai.launcher if self.sai is not None else None
+        except Exception:  # noqa: BLE001 - without it the command line alone decides
+            return None
+
+    def ending(self):
+        """The titles of the tabs whose command still runs and ends with the app (not a session or an attached
+        start: closing those only detaches, the sandbox runs on)."""
+        launcher = self.launcher()
+        return [self.tabs.tabText(self.tabs.indexOf(view)) for view in self.running()
+                if not detaches(view.argv, launcher)]
+
+    def detaching(self):
+        """The running tabs that only detach when the app quits (sessions, attached starts)."""
+        launcher = self.launcher()
+        return [view for view in self.running() if detaches(view.argv, launcher)]
 
     def close_tab(self, index, ask=True):
         view = self.tabs.widget(index)

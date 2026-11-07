@@ -8856,7 +8856,10 @@ def test_codex_telemetry_keys(scenario):
 
 
 def test_codex_config_with(scenario):
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.9 and 3.10
+        import tomli as tomllib
     keys = s.codex_telemetry_keys("off")
     if scenario == "happy":
         text, kept = s.codex_config_with('model = "x"\n', keys, tomllib)
@@ -8872,7 +8875,10 @@ def test_codex_config_with(scenario):
 
 
 def test_codex_telemetry_defaults(scenario, tmp_path, capsys):
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.9 and 3.10
+        import tomli as tomllib
     home = tmp_path / "home"
     (home / ".codex").mkdir(parents=True)
     config = home / ".codex/config.toml"

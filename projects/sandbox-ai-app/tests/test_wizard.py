@@ -141,9 +141,35 @@ def test_the_policy_greys_out_what_it_forbids(qapp, tmp_path, monkeypatch):
     assert not combo.model().item(combo.findData("off")).isEnabled()
 
 
-def test_a_folder_that_does_not_exist_stops_the_first_page(wizard, tmp_path):
-    wizard.folder_page.path.edit.setText(str(tmp_path / "missing"))
-    assert not wizard.folder_page.validatePage() and "exists" in wizard.folder_page.note.text()
+def test_a_new_folder_is_created_after_the_path_is_confirmed(wizard, tmp_path):
+    target = tmp_path / "projects" / "new-test"
+    wizard.folder_page.path.edit.setText(str(target))
+    assert wizard.folder_page.validatePage() and target.is_dir()
+    title, text, _ = widgets.SHOWN[-1]
+    assert title == "Create the folder" and str(target) in text
+    assert wizard.directory == os.path.realpath(target)
+
+
+def test_a_new_folder_is_not_created_when_declined_or_in_a_private_place(wizard, tmp_path, monkeypatch):
+    page = wizard.folder_page
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", False)
+    page.path.edit.setText(str(tmp_path / "declined"))
+    assert not page.validatePage() and not (tmp_path / "declined").exists() and "create" in page.note.text()
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    shown = len(widgets.SHOWN)
+    for refused in (tmp_path / "config" / "evil",  # XDG_CONFIG_HOME: the host's settings
+                    tmp_path / "work" / ".ssh" / "p",
+                    os.path.join(os.environ["SANDBOX_AI_HOME"], "sandbox", "new-project"),
+                    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "x")):
+        page.path.edit.setText(str(refused))
+        assert not page.validatePage(), refused
+        assert "Not created" in page.note.text() and not os.path.exists(refused)
+    assert len(widgets.SHOWN) == shown, "refused before the question"
+    page.path.edit.setText("relative/folder")
+    assert not page.validatePage() and "full path" in page.note.text()
+    (tmp_path / "file").write_text("x")
+    page.path.edit.setText(str(tmp_path / "file"))
+    assert not page.validatePage() and "not a folder" in page.note.text()
 
 
 def test_the_git_page_shows_how_tokens_get_there(wizard, tmp_path, monkeypatch, wait):

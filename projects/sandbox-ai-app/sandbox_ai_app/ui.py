@@ -11,10 +11,10 @@ from PySide6.QtCore import QByteArray, QEvent, QPoint, QProcess, QRect, QSize, Q
 from PySide6.QtGui import QAction, QActionGroup, QBrush, QCloseEvent, QColor, QFont, QKeySequence, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout,
-    QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
+    QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QPlainTextEdit,
     QPushButton,
-    QDockWidget, QScrollArea, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QStyle, QSystemTrayIcon, QTabBar,
+    QDockWidget, QFrame, QScrollArea, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QStyle, QSystemTrayIcon, QTabBar,
     QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
@@ -600,9 +600,14 @@ class LaunchPage(QWidget):
         show_text(self, tr("Plan (dry run)"), (message + "\n\n" if message else "") + json.dumps(plan, indent=2))
 
     def start(self, session=None, embedded=False):
-        argv = self.sai.launch_argv(self.agent.currentText(), self.argv(), self.agent_arguments(), session)
-        title = f"{self.agent.currentText()}" + (f" ({session})" if session else "")
-        self.terminal(argv, title, embedded=embedded, cwd=self.workspace())
+        try:
+            argv = self.sai.launch_argv(self.agent.currentText(), self.argv(), self.agent_arguments(), session)
+            title = f"{self.agent.currentText()}" + (f" ({session})" if session else "")
+            self.terminal(argv, title, embedded=embedded, cwd=self.workspace())
+        except Exception as exc:  # noqa: BLE001 - a start that cannot be run is a message, the window stays
+            warn(self, tr("Not started"), printable(exc))
+            return False
+        return True
 
     def start_in_app(self):
         self.start(embedded=True)
@@ -1152,8 +1157,11 @@ class SandboxesPage(QWidget):
             return
         name = instance.session
         if action in ("attach", "attach-app"):
-            self.terminal(self.sai.command("session", "attach", name), tr("session {name}", name=name),
-                          embedded=action == "attach-app")
+            try:
+                self.terminal(self.sai.command("session", "attach", name), tr("session {name}", name=name),
+                              embedded=action == "attach-app")
+            except Exception as exc:  # noqa: BLE001 - attaching that cannot be run is a message, the window stays
+                warn(self, tr("Not attached"), printable(exc))
             return
         if action == "delete" and QMessageBox.question(
                 self, tr("Delete"), tr("Delete session {name} and its HOME?", name=name)) != QMessageBox.StandardButton.Yes:
@@ -1658,12 +1666,8 @@ class SystemPage(QWidget):
         row.addWidget(run)
         row.addStretch()
         doctor_layout.addLayout(row)
-        self.checks = table(["", tr("Check"), tr("Result"), tr("How to fix")])
-        self.checks.setWordWrap(True)
-        header = self.checks.horizontalHeader()
-        header.setStretchLastSection(False)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        from .doctor_view import DoctorView
+        self.checks = DoctorView()  # by area, status icons in the theme's colours, the fix command copyable
         doctor_layout.addWidget(self.checks)
         layout.addWidget(doctor, 1)
         tools = QGroupBox(tr("Images, updates, privacy"))
@@ -1765,11 +1769,11 @@ class SystemPage(QWidget):
         if error is not None:
             warn(self, tr("Host check (sandbox-ai doctor)"), printable(error))
             return
-        symbols = {"ok": "✔", "warn": "!", "fail": "✘", "skip": "–"}
-        colors = {"ok": "ok", "warn": "warn", "fail": "bad"}
-        fill(self.checks, [[symbols.get(s, s), title, detail, hint] for s, title, detail, hint in results],
-             [colors.get(s) for s, *_ in results])
-        self.checks.resizeRowsToContents()
+        try:
+            groups = getattr(self.sai.module("doctor"), "group_of", None)
+        except Exception:  # noqa: BLE001 - the view's own table of areas
+            groups = None
+        self.checks.set_results(results, groups)
 
     def tool(self, args):
         self.terminal(self.sai.command(*args), "sandbox-ai " + " ".join(args))
@@ -2133,21 +2137,67 @@ class ProjectTabs(QTabBar):
             self.decorate(index)
 
 
+# Pages with a canvas or terminal of their own that fills the page: never in a scroll area.
+UNSCROLLED_PAGES = ("board", "terminals")
+SCROLL_MIN_HEIGHT = 220  # the height a scrolled page may shrink to before the window does
+
+
+class PageScroll(QScrollArea):
+    """A page that scrolls up and down when the window is lower than the page needs, instead of squeezing its
+    sections (Settings, Credentials, long forms); as wide as the page needs, so that no text is cut off."""
+
+    def __init__(self, page):
+        super().__init__()
+        self.setObjectName("pageScroll")
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setWidget(page)
+
+    def minimumSizeHint(self):  # noqa: N802
+        hint = self.widget().minimumSizeHint()
+        bar = self.verticalScrollBar().sizeHint().width()
+        return QSize(hint.width() + bar, min(hint.height(), SCROLL_MIN_HEIGHT))
+
+    def sizeHint(self):  # noqa: N802
+        return self.widget().sizeHint()
+
+
 class PageStack(QStackedWidget):
     """The pages: as small as the page shown allows (not the largest of all), so that the panels of a page fit
-    next to it on a small screen."""
+    next to it on a small screen. Most pages sit in a PageScroll; currentWidget() and setCurrentWidget() speak of the
+    pages themselves."""
 
     def __init__(self):
         super().__init__()
         self.currentChanged.connect(lambda _index: self.updateGeometry())
 
+    def add_page(self, page, scroll=True):
+        return self.addWidget(PageScroll(page) if scroll else page)
+
+    def frame_of(self, page):
+        for index in range(self.count()):
+            frame = self.widget(index)
+            if frame is page or (isinstance(frame, PageScroll) and frame.widget() is page):
+                return frame
+        return None
+
+    def currentWidget(self):  # noqa: N802
+        frame = super().currentWidget()
+        return frame.widget() if isinstance(frame, PageScroll) else frame
+
+    def setCurrentWidget(self, page):  # noqa: N802
+        frame = self.frame_of(page)
+        if frame is not None:
+            super().setCurrentWidget(frame)
+
     def minimumSizeHint(self):  # noqa: N802
-        page = self.currentWidget()
-        return page.minimumSizeHint() if page is not None else super().minimumSizeHint()
+        frame = super().currentWidget()
+        return frame.minimumSizeHint() if frame is not None else super().minimumSizeHint()
 
     def sizeHint(self):  # noqa: N802
-        page = self.currentWidget()
-        return page.sizeHint() if page is not None else super().sizeHint()
+        frame = super().currentWidget()
+        return frame.sizeHint() if frame is not None else super().sizeHint()
 
 
 class PanelDock(QDockWidget):
@@ -2240,7 +2290,7 @@ class MainWindow(QMainWindow):
                 item.setData(Qt.ItemDataRole.UserRole, key)
                 self.nav_rows[key] = self.nav.count()
                 self.nav.addItem(item)
-                self.pages.addWidget(getattr(self, key))
+                self.pages.add_page(getattr(self, key), scroll=key not in UNSCROLLED_PAGES)
                 self.keys.append(key)
                 if len(self.keys) <= SHORTCUT_PAGES:
                     item.setToolTip(tr("{page} (Ctrl+{number})", page=tr(title), number=len(self.keys)))
@@ -2326,6 +2376,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         self.make_docks()
         help_view.OPENER = self.show_help
+        help_view.set_shown(backend.setting("help_buttons"))  # the setting; the Help page and F1 stay either way
         self.help_buttons = help_view.install(self)  # the (?)s of the pages' areas and controls
         self.statusBar().showMessage(tr("sandbox-ai {version} from {path}", version=sai.version(), path=sai.directory))
         self.tray, self.tray_timer = None, None
@@ -2990,7 +3041,10 @@ class MainWindow(QMainWindow):
         return dialog
 
     def apply_setting(self, key):
-        """What can change at once does (theme: by the dialog; polling intervals here)."""
+        """What can change at once does (theme: by the dialog; polling intervals and the (?)s here)."""
+        if key == "help_buttons":
+            help_view.set_shown(backend.setting("help_buttons"))
+            return
         timers = {"approvals_interval": self.approvals.timer, "sandboxes_interval": self.sandboxes.timer,
                   "connections_interval": self.connections.timer}
         if key in timers and timers[key].isActive():
@@ -3554,12 +3608,18 @@ class MainWindow(QMainWindow):
         if not self.questions_refused_without_window():  # really closing (no tray, or Quit in its menu)
             event.ignore()
             return
-        running = self.terminals.running()
-        if running and QMessageBox.question(
-                self, tr("Quit"), tr("{count} terminal(s) still run. End them and quit?", count=len(running))) != \
-                QMessageBox.StandardButton.Yes:
+        # Tabs of sessions and attached starts only detach (the sandbox and its agent run on): no question for
+        # them. Asked only for commands that really end with the app, by name.
+        ending = self.terminals.ending()
+        if ending and not confirm(self, tr("Quit"), tr("These end with the app: {list}. Sessions keep running "
+                                                       "(attach again from Terminals or with sandbox-ai attach NAME). "
+                                                       "Quit?", list=", ".join(ending)),
+                                  tr("End them and quit"), destructive=True, reject=tr("Keep the window")):
             event.ignore()
             return
+        if self.terminals.detaching():
+            applog.write(f"{applog.header('INFO', 'quit')}\n  sessions keep running; attach again from Terminals or "
+                         f"with sandbox-ai attach NAME\n")
         work = self.running_work()
         if work:
             if not confirm(self, tr("Quit"), tr("Still at work: {pages}. Quit anyway? Copies are cancelled and what "

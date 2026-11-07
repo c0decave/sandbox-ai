@@ -13,8 +13,8 @@ import os
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QListWidget, QListWidgetItem,
-    QPlainTextEdit, QPushButton, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout, QListWidget, QListWidgetItem,
+    QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from . import backend, notifications, presets as PR, theme
@@ -148,6 +148,8 @@ class SettingsDialog(QDialog):
         form.addRow(plain_label(tr("A new language applies when the app is started again."), role="secondary"))
         self.check(form, "guide_nodes", tr("Help set up each new part of the board, one question at a time"), current)
         self.check(form, "guide_tour", tr("Offer the guided tour at the first start"), current)
+        self.check(form, "help_buttons", tr("Show the (?) help buttons (the Help page, the tours and F1 stay)"),
+                   current)
         self.check(form, "intro", tr("Play the intro animation at start (Esc skips it)"), current)
         self.replay = QPushButton(tr("Watch the intro again"))
         self.replay.clicked.connect(self.watch_intro)
@@ -266,9 +268,14 @@ class SettingsDialog(QDialog):
         self.intro_requested.emit()
 
     def tab(self, title):
+        """A tab with a form; it scrolls when the dialog is lower than the form (every setting stays reachable)."""
         page = QWidget()
         form = QFormLayout(page)
-        self.tabs.addTab(page, title)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(page)
+        self.tabs.addTab(scroll, title)
         return page, form
 
     def save(self, key, value):
@@ -330,5 +337,5 @@ class SettingsDialog(QDialog):
             self.autostart.blockSignals(False)
 
     def show_policy(self):
-        self.tabs.setCurrentWidget(self.policy_page)
+        self.tabs.setCurrentWidget(self.policy_page.parentWidget().parentWidget())  # its scroll area (tab())
 

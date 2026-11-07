@@ -32,6 +32,7 @@ class IdentitiesBox(QGroupBox):
     def __init__(self, sai):
         super().__init__(tr("Identities (sandbox-ai identities)"))
         self.sai, self.known, self.secret_names = sai, {}, []
+        self.on_change = None  # the Credentials page's overview
         layout = QVBoxLayout(self)
         layout.addWidget(plain_label(tr("Who a sandbox works as: commit name and address, Git and publish logins under "
                                         "one name; a start uses one with --identity NAME. Without it: default (your "
@@ -67,6 +68,8 @@ class IdentitiesBox(QGroupBox):
             return
         self.known, self.secret_names = result
         fill(self.list, [[name, *summary(identity)] for name, identity in sorted(self.known.items())])
+        if self.on_change is not None:
+            self.on_change()
 
     def edit(self, name):
         if name is not None and name not in self.known:

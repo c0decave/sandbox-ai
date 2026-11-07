@@ -179,3 +179,35 @@ def test_end_to_end_with_the_vendored_xterm(terminal, wait, tmp_path):
     if not ready:
         pytest.skip(f"needs QtWebEngine and xterm.js vendored by scripts/vendor_xterm.py: {why}")
     run_terminal(terminal, terminal.WEB, wait, tmp_path)
+
+
+def test_which_tabs_only_detach_when_the_app_quits(terminal):
+    """Quitting ends the commands of the tabs, but a session or an attached start only detaches (tmux): those are
+    not asked about. Interactive agent starts are sessions too (the launcher's default); tasks, builds, doctor and
+    --no-tmux starts really end."""
+    d = terminal.detaches
+    assert d(["/x/sandbox-ai", "attach", "web"]) and d(["/x/main.py", "session", "attach", "web"])
+    assert d(["ssh", "-t", "host", "sandbox-ai attach web"])
+    assert d(["/x/sandbox-ai", "claude", "--workspace", "/p", "--session", "s1"])
+    assert not d(["/x/sandbox-ai", "claude", "--dry-run"]) and not d(["/x/sandbox-ai", "doctor"])
+    assert not d(["/x/sandbox-ai", "build"]) and not d(["sh", "-c", "sleep 60"])
+    assert not d(["/x/sandbox-ai", "codex", "--no-tmux"])
+    if terminal.sys.platform != "darwin":
+        assert d(["/x/sandbox-ai", "claude", "--workspace", "/p"])
+        assert d(["/x/sandbox-ai", "claude", "--tmux"])
+        assert not d(["/x/sandbox-ai", "claude", "--", "-p", "a task"]), "a prompt runs and exits: not in tmux"
+        assert not d(["/x/sandbox-ai", "codex", "--", "exec", "fix it"])
+
+
+def test_the_quit_question_names_only_what_really_ends(terminal, stub_web, monkeypatch):
+    page = terminal.TerminalsPage(stub_web)
+
+    class View:
+        def __init__(self, argv):
+            self.argv = argv
+    views = {"session s1": View(["/x/sandbox-ai", "attach", "s1"]), "doctor": View(["/x/sandbox-ai", "doctor"])}
+    monkeypatch.setattr(page, "running", lambda: list(views.values()))
+    monkeypatch.setattr(page.tabs, "indexOf", lambda view: list(views.values()).index(view))
+    monkeypatch.setattr(page.tabs, "tabText", lambda index: list(views)[index])
+    assert page.ending() == ["doctor"] and page.detaching() == [views["session s1"]]
+    page.deleteLater()

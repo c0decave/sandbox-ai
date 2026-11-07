@@ -423,6 +423,14 @@ class SandboxAI:
         """[{profile, type, provider, ...}] of `sandbox-ai vpn list --json` (no keys: the profiles name them)."""
         return [e for e in self.listing("vpn", "list") if isinstance(e.get("profile"), str)]
 
+    def git_logins(self):
+        """[{url, user, secret}] of `sandbox-ai git-logins list --json` (secret names, never tokens)."""
+        return [e for e in self.listing("git-logins", "list") if isinstance(e.get("url"), str)]
+
+    def publish_logins(self):
+        """[{kind, host, secret}] of `sandbox-ai publish-logins list --json` (secret names, never tokens)."""
+        return [e for e in self.listing("publish-logins", "list") if isinstance(e.get("kind"), str)]
+
     # -- identities (sandbox-ai identities) --
 
     def has_identities(self):
@@ -1949,7 +1957,7 @@ SETTINGS = {"theme": "system", "language": "system", "terminal": "app", "tray": 
             "notify_seconds": 15, "notify_style": "themed", "approvals_interval": 1000, "sandboxes_interval": 3000, "connections_interval": 2000,
             "sandbox_ai_home": "", "default_agent": "claude", "default_backend": "podman",
             "default_template": "development", "board_grid": 20, "auto_tabs": True, "guide_nodes": True,
-            "guide_tour": True, "intro": True, "debug": False}
+            "guide_tour": True, "intro": True, "debug": False, "help_buttons": True}
 
 
 def setting(name, settings=None):

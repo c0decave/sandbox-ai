@@ -14,8 +14,8 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem,
-    QPlainTextEdit, QPushButton, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout,
+    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit,
+    QPushButton, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout,
     QWidget,
 )
 
@@ -175,9 +175,8 @@ class HostsPage(QWidget):
         approvals_layout.addLayout(row)
         self.tabs.addTab(approvals, tr("Approvals"))
         # doctor
-        self.doctor = QPlainTextEdit()
-        self.doctor.setReadOnly(True)
-        self.doctor.setFont(MONO)
+        from .doctor_view import DoctorView
+        self.doctor = DoctorView()  # sandbox-ai doctor --json of the host, by area, the fix commands copyable
         self.tabs.addTab(self.doctor, tr("Doctor"))
         # updates
         self.updates = QPlainTextEdit()
@@ -488,7 +487,9 @@ class HostsPage(QWidget):
         self.load_hosts()
 
     def show_doctor(self, results):
-        lines = [f"{str(r.get('status', '?')).upper():5} {r.get('check', '')}: {r.get('detail', '')}"
-                 + (f"\n      {r['hint']}" if r.get("hint") else "") for r in results]
-        self.doctor.setPlainText(printable("\n".join(lines) or tr("The doctor found nothing to do.")))
+        """The host's doctor (--json: a list of checks; an older one's text output as a string)."""
+        if isinstance(results, str):
+            self.doctor.set_text(results)
+        else:
+            self.doctor.set_results([r for r in results if isinstance(r, dict)])
         self.tabs.setCurrentWidget(self.doctor)

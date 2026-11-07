@@ -149,6 +149,66 @@ def test_a_project_file_nobody_trusted_is_shown_never_started_until_applied(page
     assert page.start(embedded=True) and len(page.started) == started + 1
 
 
+def test_a_board_with_the_projects_own_mcp_servers_starts_from_the_written_trusted_file(page, tmp_path, wait):
+    """Regression ("Unknown MCP server: search; defined: demo, yara"): the research preset's servers are the
+    project's own (.sandbox-ai.json "mcp_servers"); a start with --no-config never told the launcher about them.
+    Start now writes and trusts the file first (Apply, shown first), then starts from it."""
+    project = tmp_path / "new-test"
+    project.mkdir()
+    page.directory = str(project)
+    page.new_from_preset("research")
+    assert sorted(B.project_servers(page.board)) == ["fetch", "search"]
+    assert page.start(embedded=True)
+    title, text, details = widgets.SHOWN[-1]
+    assert title == "Write and trust" and "MCP servers the project defines" in text and '"search"' in details
+    assert wait(lambda: page.started, 60), widgets.SHOWN[-3:]
+    argv, _, embedded, cwd = page.started[-1]
+    document = json.loads((project / ".sandbox-ai.json").read_text())
+    assert set(document["mcp_servers"]) == {"search", "fetch"} and page.sai.review_project(project).trusted
+    assert "--no-config" not in argv and argv[argv.index("--workspace") + 1] == str(project)
+    assert "--mcp" not in argv, "the trusted file names its servers; not given twice"
+    assert embedded is True and cwd == str(project)
+    # Written and trusted already: the next start goes ahead at once, from the file.
+    shown = len(widgets.SHOWN)
+    assert page.start(embedded=False) and len(page.started) == 2 and len(widgets.SHOWN) == shown
+    assert "--no-config" not in page.started[-1][0]
+
+
+def test_declining_to_write_the_project_file_refuses_the_start_with_the_reason(page, tmp_path, monkeypatch):
+    project = tmp_path / "p"
+    project.mkdir()
+    page.directory = str(project)
+    page.new_from_preset("research")
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", False)
+    assert page.start(embedded=True) is False and page.started == []
+    title, text, _ = widgets.SHOWN[-1]
+    assert title == "Not started" and "search" in text and "Apply" in text
+    assert not (project / ".sandbox-ai.json").exists()
+
+
+def test_the_inspector_lists_the_agents_models_with_their_versions(page):
+    agent = page.board.first("agent")
+    page.inspect(agent)
+    combo = page.model_combo
+    texts = [combo.itemText(i) for i in range(combo.count())]
+    assert "Opus 5.5 — claude-opus-5-5" in texts and any(t.startswith("Opus 5.5 now") for t in texts)
+    combo.setCurrentIndex(combo.findData("claude-opus-5-5"))
+    combo.activated.emit(combo.currentIndex())
+    assert page.board.first("agent").props["model"] == "claude-opus-5-5"
+    assert "--model claude-opus-5-5" in page.preview.toPlainText()
+
+
+def test_a_start_that_cannot_be_run_is_a_message_not_an_exception(page, tmp_path):
+    page.directory = str(tmp_path)
+    page.new_from_template("locked")
+
+    def broken(*_args, **_kwargs):
+        raise OSError("no terminal")
+    page.terminal = broken
+    assert page.start(embedded=True) is False
+    assert widgets.SHOWN[-1][0] == "Not started" and "no terminal" in widgets.SHOWN[-1][1]
+
+
 def test_painting_the_canvas_changes_no_view_state(page):
     """Regression: drawBackground set the drag mode and the transformation anchor on every paint - a paint
     during a pan with the middle button switched the pan off. They are set once, when the view is made."""

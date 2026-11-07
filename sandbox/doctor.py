@@ -630,7 +630,9 @@ def cli(argv):
     a = parser.parse_args(argv)
     results = checks(a.backend, a.podman_url)
     if a.json:
-        print(json.dumps([dict(zip(("status", "check", "detail", "hint"), r)) for r in results], indent=2))
+        # "group": the area of the table (System, Engine, Agents, Project), for the app and other readers.
+        print(json.dumps([{**dict(zip(("status", "check", "detail", "hint"), r)), "group": group_of(r[1])}
+                          for r in results], indent=2))
         return 1 if any(r[0] == "fail" for r in results) else 0
     colour = False if a.no_color else None
     status = report(results, colour=colour, plain=a.plain)
