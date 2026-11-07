@@ -232,3 +232,11 @@ def test_a_board_with_a_secret_is_not_saved_and_large_files_are_refused(tmp_path
 def test_search():
     assert PR.matches(PR.find("vpn-mcp"), "vpn mcp") and not PR.matches(PR.find("locked"), "vpn")
     assert {p.id for p in PR.PRESETS if PR.matches(p, "tailscale")} == {"remote-llm", "tailnet"}
+
+
+def test_a_preset_asks_for_no_more_cpus_than_the_machine_has():
+    """The kernel and GPU presets ask for 8 CPUs; on a machine with 4 the launcher refuses more than it has."""
+    assert PR.fitted_options(["--memory", "16g", "--cpus", "8"], cpus=4) == ["--memory", "16g", "--cpus", "4"]
+    assert PR.fitted_options(["--cpus", "2"], cpus=4) == ["--cpus", "2"]
+    assert PR.fitted_options(["--cpus", "none", "--cpus"], cpus=4) == ["--cpus", "none", "--cpus"]
+    assert PR.fitted_options(("--cpus", "<cpus>"), cpus=1) == ["--cpus", "<cpus>"]

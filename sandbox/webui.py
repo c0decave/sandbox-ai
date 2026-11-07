@@ -352,6 +352,7 @@ NET_GIT_URL = re.compile(r"https?://(?:[A-Za-z0-9._-]{1,64}@)?(?:[A-Za-z0-9.-]{1
 NET_REF = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 
 
+CANARY_RUN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,80}")
 VPN_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 VPN_LOCATION = re.compile(r"[a-z]{2}(?:-[a-z0-9-]{1,20})?")
 VPN_LOGIN_SERVER = re.compile(r"https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?/?")
@@ -369,6 +370,40 @@ def start_name(value):
     return value
 
 
+# Kits (sandbox-ai kits): the names as kits.py has them; every value is checked here and again by the command.
+KIT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+KIT_SKILL = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")  # a new skill's name (Claude's rule)
+KIT_PLUGIN = re.compile(r"[A-Za-z0-9@][A-Za-z0-9@/._^~<>=*+-]{0,200}")  # NAME@MARKETPLACE or an npm package
+KIT_ACTIONS = ("add-skill", "new-skill", "add-plugin", "add-marketplace", "remove-skill", "remove-plugin")
+
+
+def kit_name(value, what="a kit's name"):
+    if not (isinstance(value, str) and KIT_NAME.fullmatch(value)) or value in ("default", "built-in"):
+        raise Refused(400, f"{what} is 1-64 letters, digits, '_', '.' or '-' (not default or built-in)")
+    return value
+
+
+def kit_agents(body, many=True):
+    """--agent=AGENT options of BODY's "agents" (a list) or "agent" (one)."""
+    values = strings(body.get("agents", []), "agents", 3) if many else (
+        [body["agent"]] if body.get("agent") is not None else [])
+    if not all(value in AGENTS for value in values):
+        raise Refused(400, "an agent is claude, codex or opencode")
+    return [f"--agent={value}" for value in dict.fromkeys(values)]
+
+
+def host_path(value, what):
+    if not (isinstance(value, str) and value.startswith("/") and "\0" not in value and len(value) < 4096):
+        raise Refused(400, f"{what} is an absolute path on that host")
+    return value
+
+
+def one_line(value, what, limit=1024):
+    if not (isinstance(value, str) and value.strip() and len(value) <= limit and value.isprintable()):
+        raise Refused(400, f"{what}: one line of at most {limit} characters")
+    return value.strip()
+
+
 def strings(value, what, limit=64):
     if not (isinstance(value, list) and len(value) <= limit and all(isinstance(v, str) and len(v) <= 4096
                                                                        and "\0" not in v for v in value)):
@@ -380,17 +415,24 @@ class Api:
     """The actions of the web interface: (method, path pattern) -> handler(match, body) -> JSON. RUNNER is
     hosts.run (tests give their own)."""
 
-    def __init__(self, runner=None):
+    def __init__(self, runner=None, updater=None, statuses=None):
         self.runner = runner or (lambda host, args, timeout=120, input=None:
                                  module("hosts").run(host, args, input=input, timeout=timeout))
+        # hosts update and hosts list's status (several commands each; tests give their own)
+        self.updater = updater or (lambda host, version=None, sudo=None: module("hosts").update(host, version, sudo))
+        self.statuses = statuses or (lambda names, refresh=False: module("hosts").statuses(names, refresh=refresh))
         self.routes = [
             ("GET", r"/api/hosts", self.hosts),
             ("POST", r"/api/hosts", self.add_host),
+            ("GET", r"/api/hosts-status", self.host_statuses),
+            ("POST", r"/api/hosts-status", lambda params, body: self.host_statuses({"refresh": "1"}, body)),
             ("DELETE", r"/api/hosts/(?P<host>[^/]+)", self.remove_host),
             ("POST", r"/api/hosts/(?P<host>[^/]+)/test", self.test_host),
+            ("POST", r"/api/hosts/(?P<host>[^/]+)/update", self.update_host),
             ("GET", r"/api/hosts/(?P<host>[^/]+)/starts", self.starts),
             ("POST", r"/api/hosts/(?P<host>[^/]+)/starts/(?P<name>[^/]+)/(?P<action>pause|resume|stop|delete)",
              self.start_action),
+            ("POST", r"/api/hosts/(?P<host>[^/]+)/mcp/(?P<name>[^/]+)/attach", self.mcp_attach),
             ("GET", r"/api/hosts/(?P<host>[^/]+)/approvals", self.approvals),
             ("POST", r"/api/hosts/(?P<host>[^/]+)/approvals/(?P<id>[^/]+)", self.answer),
             ("GET", r"/api/hosts/(?P<host>[^/]+)/doctor", self.doctor),
@@ -409,6 +451,12 @@ class Api:
             ("POST", r"/api/hosts/(?P<host>[^/]+)/vpn", self.vpn_add),
             ("POST", r"/api/hosts/(?P<host>[^/]+)/vpn/(?P<name>[^/]+)/check", self.vpn_check),
             ("DELETE", r"/api/hosts/(?P<host>[^/]+)/vpn/(?P<name>[^/]+)", self.vpn_remove),
+            ("GET", r"/api/hosts/(?P<host>[^/]+)/kits", self.kits),
+            ("POST", r"/api/hosts/(?P<host>[^/]+)/kits", self.kit_new),
+            ("POST", r"/api/hosts/(?P<host>[^/]+)/kits/(?P<name>[^/]+)/(?P<action>[a-z-]+)", self.kit_change),
+            ("DELETE", r"/api/hosts/(?P<host>[^/]+)/kits/(?P<name>[^/]+)", self.kit_delete),
+            ("GET", r"/api/hosts/(?P<host>[^/]+)/canaries", self.canaries),
+            ("GET", r"/api/hosts/(?P<host>[^/]+)/canaries/(?P<run>[^/]+)", self.canaries),
         ]
 
     def dispatch(self, method, path, body):
@@ -444,10 +492,19 @@ class Api:
     def hosts(self, params, body):
         return module("hosts").entries()
 
+    def host_statuses(self, params, body):
+        """{name: {"version", "kind", "available", "update", "error", ...} or null}: each host's sandbox-ai and
+        whether an update is there, as hosts list finds it (kept 10 minutes; ?refresh=1 asks again)."""
+        hosts = module("hosts")
+        names = sorted(hosts.load())
+        found = self.statuses(names, refresh=params.get("refresh") == "1") if names else {}
+        return {name: ({key: value for key, value in info.items() if key not in ("ssh", "port")} if info else None)
+                for name, info in found.items()}
+
     def add_host(self, params, body):
         hosts = module("hosts")
         name = body.get("name")
-        entry = {key: body[key] for key in ("ssh", "port", "identity", "description", "command")
+        entry = {key: body[key] for key in ("ssh", "port", "identity", "description", "command", "update_sudo")
                  if body.get(key) not in (None, "")}
         try:
             checked = hosts.check(name, entry)
@@ -457,7 +514,14 @@ class Api:
             hosts.save({**current, name: checked})
         except ValueError as exc:
             raise Refused(400, printable(exc)) from None
-        return {"name": name, **checked}
+        # A key file others can read (ssh refuses it): made private now, and then whether the host answers.
+        fixed, warnings = hosts.protect_keys(checked)
+        result = {"name": name, **checked, "fixed": fixed, "warnings": warnings}
+        if fixed:
+            status, out, err = self.run(name, ["--version"], 30)
+            result["connection"] = {"ok": status == 0, "version": out.strip() if status == 0 else None,
+                                    "error": None if status == 0 else hosts.failure(status, out, err)}
+        return result
 
     def remove_host(self, params, body):
         hosts = module("hosts")
@@ -466,14 +530,27 @@ class Api:
             raise Refused(404, "no such host")
         del current[params["host"]]
         hosts.save(current)
+        hosts.forget_status(params["host"])
         return {"removed": params["host"]}
 
     def test_host(self, params, body):
-        """As `sandbox-ai hosts test`: whether the host answers, its sandbox-ai version and its doctor."""
+        """As `sandbox-ai hosts test`: whether the host answers, its sandbox-ai version and its doctor; a key file
+        others can read is made private first ("fixed"), and once more when ssh still refuses one as too open."""
+        hosts = module("hosts")
         name = host_name(params["host"])
-        local = name == module("hosts").LOCAL
-        result = {"name": name, "ssh": None if local else False, "version": None, "doctor": None, "error": None}
+        local = name == hosts.LOCAL
+        result = {"name": name, "ssh": None if local else False, "version": None, "doctor": None, "error": None,
+                  "fixed": [], "warnings": []}
+        entry = None if local else hosts.load().get(name)
+        if entry:
+            result["fixed"], result["warnings"] = hosts.protect_keys(entry)
         status, out, err = self.run(name, ["--version"], 30)
+        if entry and status != 0 and hosts.TOO_OPEN.search(err or ""):
+            more, warnings = hosts.protect_keys(entry, err)
+            result["fixed"] += more
+            result["warnings"] += [warning for warning in warnings if warning not in result["warnings"]]
+            if more:
+                status, out, err = self.run(name, ["--version"], 30)
         if status != 0:
             result["error"] = printable((err or out).strip()[-500:]) or f"exit status {status}"
             if status == 255 and not local:
@@ -486,6 +563,22 @@ class Api:
             result["error"] = str(exc)
         return result
 
+    def update_host(self, params, body):
+        """As `sandbox-ai hosts update NAME`: the host's own signed update, old -> new version. {"sudo": true}
+        runs it as sudo -n (a system installation); when sudo wants a password, "needs_password" says so and the
+        page opens a terminal (kind=update), where sudo asks."""
+        name = host_name(params["host"])
+        sudo, version = body.get("sudo"), body.get("version")
+        if sudo not in (None, True, False):
+            raise Refused(400, "sudo is true, false or null (the host's setting)")
+        hosts = module("hosts")
+        if version is not None and not (isinstance(version, str) and hosts.VERSION.fullmatch(version)):
+            raise Refused(400, "version is X.Y.Z")
+        try:
+            return self.updater(name, version, sudo)
+        except ValueError as exc:
+            raise Refused(404 if "no host" in str(exc) else 400, printable(exc)) from None
+
     # starts and sessions
     def starts(self, params, body):
         return self.json_of(params["host"], ["list", "--json"])
@@ -497,6 +590,18 @@ class Api:
                 raise Refused(400, "deleting a start removes its kept HOME: send {\"confirm\": true}")
             return self.done(params["host"], ["delete", name, "--yes"])
         return self.done(params["host"], [action, name], timeout=180)
+
+    def mcp_attach(self, params, body):
+        """As `sandbox-ai mcp attach NAME START [--restart]`: the MCP server connected to an agent start (kept for
+        its later starts; a running one reaches it after a restart, done now with {"restart": true})."""
+        name = params["name"]
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", name):
+            raise Refused(400, "an MCP server's name is 1-32 letters, digits, '_' or '-'")
+        start, restart = start_name(body.get("start")), body.get("restart", False)
+        if not isinstance(restart, bool):
+            raise Refused(400, "restart is true or false")
+        return self.json_of(params["host"], ["mcp", "attach", name, start, "--json", *(["--restart"] if restart else [])],
+                            timeout=300)
 
     # the network of a running sandbox (sandbox-ai net), and the presets to start from
     def net_show(self, params, body):
@@ -576,8 +681,81 @@ class Api:
     def vpn_remove(self, params, body):
         return self.done(params["host"], ["vpn", "remove", vpn_name(params["name"])], 60)
 
+    # the canary log (sandbox-ai canaries log): every event, by which process, next to the agent's tool call and
+    # model requests; redacted there, and the run's tokens never in it
+    def canaries(self, params, body):
+        run = params.get("run")
+        if run is not None and not (CANARY_RUN.fullmatch(run)):
+            raise Refused(400, "a run is 1-81 letters, digits, '_', '.' or '-'")
+        document = self.json_of(params["host"], ["canaries", "log", *([run] if run else []), "--json"], 60)
+        return [document] if run else document
+
     def presets(self, params, body):
         return self.json_of(params["host"], ["presets", "list", "--json"], 30)
+
+    # kits (sandbox-ai kits): every change is that command on the host, so its checks apply (a skill folder is a
+    # real folder with SKILL.md, nothing followed, limits, a note when it lies where sandboxes can write; built-in
+    # kits read-only); the values come after "--", never read as options
+    def kits(self, params, body):
+        return self.json_of(params["host"], ["kits", "list", "--json"], 60)
+
+    def kit_new(self, params, body):
+        return self.done(params["host"], ["kits", "new", *kit_agents(body), "--", kit_name(body.get("name"))], 60)
+
+    def kit_change(self, params, body):
+        """add-skill {path, as?, agents?}, new-skill {skill, description?, agents?}, add-plugin {plugin, agent?,
+        source?}, add-marketplace {marketplace, source, agent?}, remove-skill {skill, agents?}, remove-plugin
+        {plugin, agent?}; with "create": true the kit is created first (sandbox-ai kits new), so what is added to
+        a built-in kit's selection lands in a new kit of yours."""
+        name, action = kit_name(params["name"]), params["action"]
+        if action not in KIT_ACTIONS:
+            raise Refused(404, "no such action")
+        options, values = [], []
+        if action == "add-skill":
+            values = [host_path(body.get("path"), "path")]
+            if body.get("as") not in (None, ""):
+                options.append(f"--as={kit_name(body['as'], 'as')}")
+            options += kit_agents(body)
+        elif action in ("new-skill", "remove-skill"):
+            skill = body.get("skill")
+            pattern = KIT_SKILL if action == "new-skill" else KIT_NAME
+            if not (isinstance(skill, str) and pattern.fullmatch(skill)):
+                raise Refused(400, "a skill's name is 1-64 lower-case letters, digits and '-'" if action == "new-skill"
+                              else "no such skill")
+            values = [skill]
+            options += kit_agents(body)
+            if action == "new-skill" and body.get("description") not in (None, ""):
+                options.append(f"--description={one_line(body['description'], 'description')}")
+        elif action in ("add-plugin", "remove-plugin"):
+            plugin = body.get("plugin")
+            if not (isinstance(plugin, str) and KIT_PLUGIN.fullmatch(plugin)):
+                raise Refused(400, "a plugin is NAME@MARKETPLACE (Claude) or an npm package (OpenCode)")
+            values = [plugin]
+            options += kit_agents(body, many=False)
+            if action == "add-plugin" and body.get("source") not in (None, ""):
+                options.append(f"--source={one_line(body['source'], 'source', 2048)}")
+        else:  # add-marketplace
+            values = [kit_name(body.get("marketplace"), "a marketplace's name"),
+                      one_line(body.get("source"), "source", 2048)]
+            options += kit_agents(body, many=False)
+        if body.get("create") not in (None, False, True):
+            raise Refused(400, "create is true or false")
+        first = ""
+        if body.get("create") is True:
+            status, out, err = self.run(params["host"], ["kits", "list", "--json"], 60)
+            try:
+                existing = {kit.get("name") for kit in json.loads(out).get("kits", []) if kit.get("kind") == "user"}
+            except (ValueError, AttributeError):
+                existing = set()
+            if name not in existing:
+                first = self.done(params["host"], ["kits", "new", "--", name], 60)["output"] + "\n"
+        result = self.done(params["host"], ["kits", action, *options, "--", name, *values], 300)
+        return {"output": first + result["output"]}
+
+    def kit_delete(self, params, body):
+        if body.get("confirm") is not True:
+            raise Refused(400, "deleting a kit removes its folder: send {\"confirm\": true}")
+        return self.done(params["host"], ["kits", "delete", "--yes", "--", kit_name(params["name"])], 60)
 
     # approvals
     def approvals(self, params, body):
@@ -674,7 +852,18 @@ def terminal_command(query):
         options = json.loads(query.get("options") or "[]")
         args += strings(options, "options")
         return host, hosts.argv(host, args, tty=True)
-    raise Refused(400, "kind is attach or start")
+    if kind == "update":
+        # The host's update where sudo may ask for its password (hosts update said it wants one).
+        version = query.get("version") or None
+        if version is not None and not hosts.VERSION.fullmatch(version):
+            raise Refused(400, "version is X.Y.Z")
+        if host == hosts.LOCAL:
+            raise Refused(400, "this machine updates with: sandbox-ai update (in a terminal of its own)")
+        try:
+            return host, hosts.update_terminal(host, version)
+        except ValueError as exc:
+            raise Refused(400, printable(exc)) from None
+    raise Refused(400, "kind is attach, start or update")
 
 
 # --- WebSocket (RFC 6455) ---------------------------------------------------------------------------------

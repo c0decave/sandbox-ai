@@ -33,6 +33,11 @@ The relay in front of every server is a gateway: the MCP rules of the starting a
 ask or deny each tool call (runtime.py, McpGateway). Its records and questions reach the server's state
 directory through the log reader on the host (`mcp.py --internal-log DIR`): mcp-calls.jsonl and
 approvals/, which `sandbox-ai approvals` lists as the run mcp-NAME.
+
+`mcp attach NAME START` (and `mcp start NAME --for START`, which starts the server as that start starts it)
+connects a server to an agent start that exists: --mcp NAME joins its kept options, checked as its start checks
+it. A running sandbox cannot take a new server while it runs (LIVE says why), so a running start is restarted
+with it (--restart) or gets it at its next start. `mcp list` names the starts each server serves.
 """
 import argparse
 import base64
@@ -947,16 +952,149 @@ def stop_locked(name, timeout=30):
     return 0
 
 
+# --- an MCP server for a named start (mcp start NAME --for START, mcp attach NAME START) ---------------------
+
+# Why a running sandbox is not given a new MCP server while it runs, for either backend.
+LIVE = ("a running sandbox cannot take a new MCP server while it runs: its agent (claude, codex or opencode) reads "
+        "its MCP servers once, when it starts (--mcp-config, -c mcp_servers, opencode.json), and a server's socket "
+        "reaches the sandbox only through a folder mounted at its start (a running Podman container takes no new "
+        "mount, and neither does Bubblewrap's mount namespace)")
+
+_starts = None
+
+
+def starts_module():
+    global _starts
+    if _starts is None:
+        spec = importlib.util.spec_from_file_location("starts_for_mcp", HERE / "starts.py")
+        _starts = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_starts)
+    return _starts
+
+
+def start_arguments(data, extra=()):
+    """The launcher's arguments of a kept start (its session.json DATA) with EXTRA options, prepared as its next
+    start prepares them (preset, project file, security mode) and checked as it checks them: a ValueError names
+    what the administrator's policy or the start's security mode refuses (the same words as at a start)."""
+    l = launcher()
+    sessions = starts_module().module("sessions")
+    with sessions.in_directory(data["cwd"]):
+        argv, _ = l.load_presets_module().apply(l.canonical_options([data["agent"], *data["options"], *extra]),
+                                                canonical=l.canonical_options, with_mode=True)
+        argv = l.canonical_options(argv)
+        try:
+            a = l.parse_args(argv)
+        except SystemExit:
+            raise ValueError("the start's saved options no longer parse; start it anew") from None
+        config_path, document = l.load_project_config(a)
+        merged = l.merge_config(argv, a, document) if document else argv
+        if document:
+            a = l.parse_args(merged)
+        user_defaults, policy = l.load_user_defaults(a), l.load_policy()
+        a = l.MODES.apply(l.launcher_namespace(), merged, a, document, config_path, user_defaults, policy)
+        a.project_config, a.project_document = (str(config_path) if config_path else None), document
+        l.check_policy(a, policy)
+        l.MODES.check(l.launcher_namespace(), a, policy)
+    return a
+
+
+def serving(found=None):
+    """{server: [start names]}: the agent starts that reach each MCP server now (their run says so), or will at
+    their next start (their saved options name it)."""
+    found = starts_module().entries(True, prune=False) if found is None else found
+    served = {}
+    for entry in found:
+        if entry.get("kind") == "mcp":
+            continue
+        for name in dict.fromkeys((entry.get("mcp") or []) + (entry.get("mcp_running") or [])):
+            served.setdefault(name, []).append(entry["name"])
+    return served
+
+
+def attach(name, start, restart=False, start_server=False, vpn=None, ask=None, out=print):
+    """Connect the MCP server NAME to the agent start START (by name or id): kept in its options (--mcp NAME, for
+    its later starts too), checked as its start checks it (policy, security mode, the server's definition). A
+    stopped start reaches it from its next start; a running one only after a restart (LIVE says why), done now
+    with RESTART (or when ASK(question) says yes), else named. START_SERVER (mcp start --for): the server is
+    started now as that start starts it (its backend and rules). {"server", "start", "state", "attached":
+    "already" | "next start" | "restarted" | "after a restart", "server_started": bool, "message"}."""
+    printable = launcher().printable
+    starts = starts_module()
+    entry = starts.find(start)
+    shown = printable(entry["name"])
+    if entry["kind"] == "mcp":
+        raise ValueError(f"{shown} is an MCP server's sandbox: a server is attached to an agent's start")
+    if entry["state"] == "damaged":
+        raise ValueError(f"{shown} is damaged (see sandbox-ai list); repair or delete it first")
+    if not entry.get("directory"):
+        raise ValueError(f"{shown} is a run without a kept start, which keeps nothing to start again with, and {LIVE}; "
+                         f"end it (sandbox-ai stop {shown}) and start anew with --mcp {name}")
+    sessions = starts.module("sessions")
+    key = entry["id"]
+    data = sessions.load(key)
+    a = start_arguments(data, ["--mcp", name])  # refuses what its start would refuse
+    servers = definitions(a.project_document)
+    if name not in servers:
+        raise ValueError(f"Unknown MCP server: {name}; defined: {', '.join(sorted(servers))}")
+    running = entry["state"] in ("running", "paused")
+    result = {"server": name, "start": entry["name"], "state": entry["state"], "server_started": False}
+    named = name in starts.mcp_names(data["options"])
+    # A run of a version that did not record its servers (no "mcp_running"): its options are taken for it.
+    if named and (not running or name in entry.get("mcp_running", [name])):
+        result.update(attached="already", message=f"{shown} uses the MCP server {name} already")
+        out(result["message"])
+        return result
+    if start_server:
+        result["server_started"] = ensure_running(name, a, vpn) == "started"
+    if running and not restart and ask is not None:
+        restart = ask(f"{shown} runs; {LIVE}. Restart it now with {name}? The agent continues its conversation.")
+    if running and restart:
+        out(f"{shown}: stopping it to start it again with the MCP server {name}")
+        sessions.stop(key)
+        with sessions.session_lock(key):
+            sessions.resume_locked(key, mcp=[name])
+        result.update(attached="restarted", state="running",
+                      message=f"{shown} runs again with the MCP server {name}; the agent continues its conversation")
+        out(result["message"])
+        return result
+    sessions.add_mcp(key, [name])
+    if running:
+        result.update(attached="after a restart",
+                      message=f"{shown} reaches the MCP server {name} from its next start on, not now: {LIVE}. "
+                              f"Restart it now (the agent continues its conversation): sandbox-ai mcp attach {name} "
+                              f"{shown} --restart (or: sandbox-ai resume {shown} --restart)")
+    else:
+        result.update(attached="next start", message=f"{shown} reaches the MCP server {name} from its next start on: "
+                                                     f"sandbox-ai resume {shown}")
+    out(result["message"])
+    return result
+
+
 def cli(argv):
     parser = argparse.ArgumentParser(prog="sandbox-mcp", description="Manage local MCP servers that run in their "
                                      "own sandboxes. Agents use them with --mcp NAME.")
     parser.add_argument("-V", "--version", action="version", version=f"sandbox-ai {launcher().__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("list", help="Defined servers and their status")
+    listing = commands.add_parser("list", help="Defined servers, their status and the starts they serve")
+    listing.add_argument("-j", "--json", action="store_true")
     start = commands.add_parser("start", help="Start a server sandbox now")
     start.add_argument("name")
     start.add_argument("-b", "--backend", choices=["podman", "bwrap"], default="podman")
     start.add_argument("-v", "--vpn", metavar="PROFILE", help="Put this VPN profile in front (sandbox-ai vpn list)")
+    start.add_argument("-f", "--for", dest="for_start", metavar="START",
+                       help="for this agent start (sandbox-ai list): started as it starts it (its backend and rules) "
+                            "and attached to it (as mcp attach)")
+    start.add_argument("-r", "--restart", action="store_true",
+                       help="with --for: a running start is restarted with it now (the agent continues its "
+                            "conversation)")
+    start.add_argument("-j", "--json", action="store_true", help="with --for: the result as JSON")
+    attaching = commands.add_parser("attach", help="Connect a server to an agent start (kept for its later starts)")
+    attaching.add_argument("name")
+    attaching.add_argument("start", metavar="START", help="the agent start (sandbox-ai list)")
+    attaching.add_argument("-r", "--restart", action="store_true",
+                           help="a running start is restarted with it now (the agent continues its conversation); "
+                                "without it a running start reaches the server from its next start")
+    attaching.add_argument("-j", "--json", action="store_true")
     commands.add_parser("stop", help="Stop a server sandbox").add_argument("name")
     catalog = commands.add_parser("catalog", help="Servers of the MCP catalogs (sandbox-ai-mcp, axross-mcp-hub)")
     catalog.add_argument("-c", "--catalog", action="append", default=[], metavar="FILE_OR_URL",
@@ -1001,17 +1139,42 @@ def cli(argv):
             unsigned=a.unsigned, backend=a.backend)
         return 0
     if a.command == "list":
-        rows = [["NAME", "STATUS", "COMMAND"]] + [[name, status(name), (d["image"] if "image" in d else
-                                                                        f"rootfs {d['rootfs']['sha256'][:12]}" if "rootfs" in d else
-                                                                        " ".join(d["command"]))
-                                                  + (f"  (vpn {d['vpn']})" if d.get("vpn") else "")]
-                                                  for name, d in sorted(definitions().items())]
-        widths = [max(len(row[i]) for row in rows) for i in range(2)]
+        try:
+            served = serving()
+        except (OSError, ValueError) as exc:  # the starts could not be read: the servers are listed anyway
+            print(f"sandbox-mcp: the starts they serve are unknown: {exc}", file=sys.stderr)
+            served = {}
+        found = [{"name": name, "status": status(name),
+                  "command": (d["image"] if "image" in d else f"rootfs {d['rootfs']['sha256'][:12]}" if "rootfs" in d
+                              else " ".join(d["command"])) + (f"  (vpn {d['vpn']})" if d.get("vpn") else ""),
+                  "serves": served.get(name, [])} for name, d in sorted(definitions().items())]
+        if a.json:
+            print(json.dumps(found, indent=2))
+            return 0
+        printable = launcher().printable
+        rows = [["NAME", "STATUS", "SERVES", "COMMAND"]] + [
+            [e["name"], e["status"], printable(", ".join(e["serves"]) or "-"), printable(e["command"])] for e in found]
+        widths = [max(len(row[i]) for row in rows) for i in range(3)]
         for row in rows:
-            print(f"{row[0].ljust(widths[0])}  {row[1].ljust(widths[1])}  {row[2]}")
+            print(f"{row[0].ljust(widths[0])}  {row[1].ljust(widths[1])}  {row[2].ljust(widths[2])}  {row[3]}")
         return 0
-    if a.command == "start":
+    if a.command == "start" and a.for_start is None:
+        if a.restart or a.json:
+            raise ValueError("--restart and --json go with --for START")
         ensure_running(a.name, launcher().parse_args(["codex", "--backend", a.backend]), a.vpn)
+        return 0
+    if a.command in ("start", "attach"):
+        interactive = sys.stdin.isatty() and sys.stdout.isatty() and not a.json
+
+        def ask(question):
+            answer = input(f"{launcher().printable(question)} [y/N] ")
+            return answer.strip().lower() in ("y", "yes", "j", "ja")
+        say = (lambda text: print(text, file=sys.stderr)) if a.json else print
+        result = attach(a.name, a.for_start if a.command == "start" else a.start, restart=a.restart,
+                        start_server=a.command == "start", vpn=getattr(a, "vpn", None),
+                        ask=ask if interactive else None, out=say)
+        if a.json:
+            print(json.dumps(result, indent=2))
         return 0
     return stop(a.name)
 

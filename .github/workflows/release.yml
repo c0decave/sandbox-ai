@@ -35,7 +35,9 @@ jobs:
       - run: "python -m pip install --require-hashes --only-binary :all: -r packaging/requirements-ci.txt"
       - name: Tests (failures summarised as an annotation, readable through the API)
         run: |
-          python -m pytest -q -rfE tests 2>&1 | tee pytest.txt; status=${PIPESTATUS[0]}
+          # Into a file, not a pipe: a process a test leaves behind would hold the pipe open and the step would hang.
+          status=0; python -m pytest -q -rfE tests > pytest.txt 2>&1 || status=$?
+          tail -n 300 pytest.txt
           if [ "$status" -ne 0 ]; then
             failed=$(grep -E '^(FAILED|ERROR) ' pytest.txt | head -60 | cut -c1-300 | sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g')
             echo "::error title=pytest failed::${failed:-no summary line; see the log}"
@@ -234,13 +236,18 @@ jobs:
         if: github.server_url == 'https://github.com' && steps.signing.outputs.signed != '1'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --title "sandbox-ai ${GITHUB_REF_NAME#v}" --generate-notes
+        run: |
+          # The page says what is new (docs/releases/vX.Y.Z.md), which file is for whom, how to install, start and update.
+          python3 scripts/release_notes.py --version "${GITHUB_REF_NAME#v}" > "$RUNNER_TEMP/notes.md"
+          gh release create "$GITHUB_REF_NAME" dist/* --title "sandbox-ai ${GITHUB_REF_NAME#v}" --notes-file "$RUNNER_TEMP/notes.md"
       - name: Gitea/Forgejo release
         if: github.server_url != 'https://github.com' && steps.signing.outputs.signed != '1'
         env:
           RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           SOURCE: ${{ github.server_url }}/${{ github.repository }}
-        run: python3 scripts/publish_release.py --source "$SOURCE" --token-env RELEASE_TOKEN dist/*
+        run: |
+          python3 scripts/publish_release.py --source "$SOURCE" --token-env RELEASE_TOKEN \
+            --notes "$(python3 scripts/release_notes.py --source "$SOURCE")" dist/*
 
   pypi:
     needs: [build, e2e-pyz, e2e-appimage, e2e-macos]

@@ -694,7 +694,7 @@ def test_resume_with_workspaces_and_restart(scenario, tmp_path, monkeypatch):
     monkeypatch.setattr(sessions, "stop", stopped)
     if scenario == "happy":
         assert st.main(["resume", "web", "-w", str(tmp_path), "--mount", f"{tmp_path}:/mnt/x:ro"]) == 0
-        assert resumed.call_args.args[1:] == ([str(tmp_path)], [f"{tmp_path}:/mnt/x:ro"]) and not stopped.called
+        assert resumed.call_args.args[1:] == ([str(tmp_path)], [f"{tmp_path}:/mnt/x:ro"], []) and not stopped.called
     elif scenario == "sad":
         register("claude-1", name="task")
         assert st.main(["resume", "task", "--workspace", str(tmp_path)]) == 1  # a plain run: nothing to start again
@@ -704,7 +704,7 @@ def test_resume_with_workspaces_and_restart(scenario, tmp_path, monkeypatch):
         monkeypatch.setattr(st, "find", lambda name: {**st.entries(True)[0], "state": "running"})
         lines = []
         assert st.main(["resume", "web", "--restart"], out=lines.append) == 0
-        assert stopped.called and resumed.call_args.args[1:] == ([], []) and "stopping it" in lines[0]
+        assert stopped.called and resumed.call_args.args[1:] == ([], [], []) and "stopping it" in lines[0]
 
 
 # --- the single commands are deprecated ---------------------------------------------------------------------
@@ -749,3 +749,119 @@ def test_console_entry_points_say_so_too(scenario, monkeypatch, capsys):
     else:
         cli.main()  # sandbox-ai: not deprecated
         assert capsys.readouterr().err == "" and str(calls[-1][2]).endswith("main.py")
+
+
+# --- an MCP server for a named start: mcp attach NAME START, mcp start NAME --for START ------------------------
+
+def kept(key, tmp_path, pid=None, **fields):
+    """A start directory whose start folder is one of this test's (not /, which holds the trust store)."""
+    folder = tmp_path / "projects" / key
+    folder.mkdir(parents=True, exist_ok=True)
+    return make_start(key, tmp_path, pid=pid, **{"cwd": str(folder), "workspace": str(folder), **fields})
+
+
+@pytest.fixture
+def attaching(monkeypatch, tmp_path):
+    """mcp.py works on this test's registry; no administrator's policy; the starts' agents need no login."""
+    monkeypatch.setattr(mcp, "_starts", st)
+    monkeypatch.setattr(mcp.launcher(), "load_policy", lambda path=None: {})
+    (tmp_path / "config/sandbox-ai").mkdir(parents=True)
+    (tmp_path / "config/sandbox-ai/mcp.json").write_text(json.dumps({
+        "web-search": {"command": ["python3", "-I", "/opt/x.py"], "options": ["--allow-github"]}}))
+    said = []
+    return said.append, said
+
+
+def test_attach_to_a_stopped_start_keeps_it_for_its_next_start(tmp_path, attaching):
+    out, said = attaching
+    kept("web", tmp_path)
+    result = mcp.attach("demo", "web", out=out)
+    assert result["attached"] == "next start" and "sandbox-ai resume web" in said[-1]
+    assert sessions.load("web")["options"] == ["--backend", "podman", "--mcp", "demo"]
+    assert {e["name"]: e for e in listed()}["web"]["mcp"] == ["demo"]
+    assert mcp.attach("demo", "web", out=out)["attached"] == "already"
+    assert sessions.load("web")["options"].count("demo") == 1
+    # whom the server serves: mcp list (and sandbox-ai list for a running server)
+    assert mcp.serving() == {"demo": ["web"]}
+    with pytest.raises(ValueError, match="Unknown MCP server: nope"):
+        mcp.attach("nope", "web", out=out)
+    assert "nope" not in sessions.load("web")["options"]
+
+
+def test_attach_to_a_running_start_needs_its_restart(tmp_path, attaching, monkeypatch):
+    out, said = attaching
+    kept("web", tmp_path, pid=41)
+    register("session-web", session="agent-session-web", start="web", mcp_servers=[])
+    result = mcp.attach("demo", "web", out=out)
+    assert result["attached"] == "after a restart" and result["state"] == "running"
+    assert "cannot take a new MCP server while it runs" in said[-1] and "--restart" in said[-1]
+    assert "--mcp" in sessions.load("web")["options"], "kept: it is there from its next start on"
+    entry = {e["name"]: e for e in listed()}["web"]
+    assert entry["mcp"] == ["demo"] and entry["mcp_running"] == []
+    # --restart: stopped and started again with it (the agent continues its conversation)
+    done = []
+    monkeypatch.setattr(sessions, "stop", lambda key, *rest: done.append(("stop", key)))
+    monkeypatch.setattr(sessions, "resume_locked", lambda key, workspaces=(), mounts=(), mcp=(): done.append(
+        ("resume", key, list(mcp))) or (0, True))
+    result = mcp.attach("web-search", "web", restart=True, out=out)
+    assert result["attached"] == "restarted" and done == [("stop", "web"), ("resume", "web", ["web-search"])]
+    # asked in a terminal: yes restarts, no keeps it for the next start
+    done.clear()
+    assert mcp.attach("demo", "web", ask=lambda question: True, out=out)["attached"] == "restarted"
+    assert done[0] == ("stop", "web")
+
+
+def test_what_cannot_be_attached(tmp_path, attaching, monkeypatch):
+    out, _ = attaching
+    register("claude-1234abcd", name="quick")
+    with pytest.raises(ValueError, match="without a kept start.*cannot take a new MCP server.*--mcp demo"):
+        mcp.attach("demo", "quick", out=out)
+    make_mcp(tmp_path, "demo", pid=43)
+    with pytest.raises(ValueError, match="MCP server's sandbox"):
+        mcp.attach("demo", "mcp-demo", out=out)
+    with pytest.raises(ValueError, match="nothing named"):
+        mcp.attach("demo", "nobody", out=out)
+
+
+def test_attach_keeps_to_the_policy_and_the_security_mode(tmp_path, attaching, monkeypatch):
+    out, _ = attaching
+    kept("web", tmp_path)
+    monkeypatch.setattr(mcp.launcher(), "load_policy", lambda path=None: {"forbid": ["--mcp"]})
+    with pytest.raises(ValueError, match="--mcp.*policy"):
+        mcp.attach("demo", "web", out=out)
+    monkeypatch.setattr(mcp.launcher(), "load_policy", lambda path=None: {})
+    kept("tight", tmp_path, options=["--backend", "podman", "--mode", "paranoid", "--no-keep"])
+    with pytest.raises(ValueError, match="widens the security mode paranoid"):
+        mcp.attach("web-search", "tight", out=out)  # a server that reaches the network
+    assert "--mcp" not in sessions.load("tight")["options"]
+
+
+def test_mcp_start_for_a_start_and_attach_on_the_command_line(tmp_path, attaching, monkeypatch, capsys):
+    out, _ = attaching
+    kept("web", tmp_path, options=["--backend", "bwrap"], backend="bwrap")
+    started = []
+    monkeypatch.setattr(mcp, "ensure_running", lambda name, a, vpn=None: started.append((name, a.backend, a.mcp,
+                                                                                         vpn)) or "started")
+    monkeypatch.setattr(mcp.sys.stdin, "isatty", lambda: False)
+    assert mcp.cli(["start", "demo", "--for", "web", "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["server_started"] and result["attached"] == "next start"
+    assert started == [("demo", "bwrap", ["demo"], None)], "started as the start starts it: its backend"
+    kept("other", tmp_path)
+    assert mcp.cli(["attach", "demo", "other"]) == 0
+    assert "--mcp" in sessions.load("other")["options"]
+    assert mcp.cli(["list", "--json"]) == 0
+    servers = {e["name"]: e for e in json.loads(capsys.readouterr().out.split("\n", 1)[1])}
+    assert servers["demo"]["serves"] == ["other", "web"] or sorted(servers["demo"]["serves"]) == ["other", "web"]
+    with pytest.raises(ValueError, match="--for"):
+        mcp.cli(["start", "demo", "--restart"])
+
+
+def test_resume_takes_an_mcp_server(tmp_path, monkeypatch):
+    kept("web", tmp_path)
+    launched = []
+    monkeypatch.setattr(sessions, "launch", lambda key, data, args, a=None, event="rebirth": launched.append(
+        list(data["options"])) or 0)
+    monkeypatch.setattr(sessions, "review_home", lambda key, data: None)
+    assert st.main(["resume", "web", "--mcp", "demo"], out=print) == 0
+    assert launched == [["--backend", "podman", "--mcp", "demo"]]

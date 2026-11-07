@@ -15,7 +15,7 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, QProcess, QSortFilt
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu,
-    QPlainTextEdit, QPushButton, QSplitter, QTableView, QToolButton, QVBoxLayout, QWidget,
+    QPlainTextEdit, QPushButton, QSplitter, QTableView, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
 from . import backend, theme, widgets
@@ -233,7 +233,11 @@ class ActivityPage(QWidget):
         super().__init__()
         self.sai, self.window = sai, window
         self.process, self.buffer, self.errors, self.starts = None, b"", "", {}
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.tabs = QTabWidget()
+        timeline = QWidget()
+        layout = QVBoxLayout(timeline)
         top = QHBoxLayout()
         self.source = QComboBox()
         self.source.setMinimumWidth(340)
@@ -311,8 +315,22 @@ class ActivityPage(QWidget):
         bottom.addWidget(self.files_button)
         bottom.addWidget(self.status, 1)
         layout.addLayout(bottom)
+        # The canary log (sandbox-ai canaries log): opened decoys and tokens that left, with who and what around it.
+        from .canaries_view import CanariesView  # here: it uses this module's helpers
+        self.canaries = CanariesView(sai)
+        self.canaries.counted.connect(self.canaries_counted)
+        self.tabs.addTab(timeline, tr("Timeline"))
+        self.tabs.addTab(self.canaries, tr("Canaries"))
+        outer.addWidget(self.tabs)
         self.update_buttons()
         self.started = False
+
+    def canaries_counted(self, count):
+        """The Canaries tab names how many events there are, in the theme's "bad" colour when there are any."""
+        index = self.tabs.indexOf(self.canaries)
+        self.tabs.setTabText(index, tr("Canaries ({count})", count=count) if count else tr("Canaries"))
+        self.tabs.tabBar().setTabTextColor(index, theme.color("bad") if count else
+                                           self.tabs.tabBar().palette().color(self.tabs.tabBar().foregroundRole()))
 
     # -- what to show --
 
@@ -364,6 +382,7 @@ class ActivityPage(QWidget):
         if not self.started:
             self.started = True
             self.refresh_sources()
+            self.canaries.refresh()  # the tab names how many events there are
 
     # -- the command --
 
@@ -624,3 +643,4 @@ class ActivityPage(QWidget):
         super().changeEvent(event)
         if event.type() == event.Type.PaletteChange:
             self.model.recolor()
+            self.canaries.recolor()

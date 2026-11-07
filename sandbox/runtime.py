@@ -765,7 +765,7 @@ def inner_bootstrap():
     env = cfg.get("env", {})
     who = Attribution(sandbox=cfg.get("sandbox"), debug=bool(cfg.get("log_debug")),
                       secret_values=[env[name] for name in cfg.get("secret_names", []) if name in env])
-    canaries = Canaries.load() if CONTROL_DIR.is_dir() else None  # decoy files of the run (canary.py)
+    canaries = Canaries.load(who=who) if CONTROL_DIR.is_dir() else None  # decoy files of the run (canary.py)
     loggers = start_loggers(broker, cfg.get("ask_quiet", []), who, canaries, network) if LOG_DIR.is_dir() else None
     network.dns_stub = loggers is not None  # `sandbox-ai net allow --dns` needs it (resolv.conf names it)
     # `sandbox-ai net allow --allow-host-port`: the host relays listen in the control directory; with the proxy
@@ -3617,6 +3617,48 @@ class Attribution:
                     return {**self.found(pid, "the process ended"), "state": candidate["state"]}
         return self.found(None, "no socket to that destination any more")
 
+    def openers(self, path, limit=4):
+        """[process info] of the processes that hold the file PATH open now (a canary file inotify reported):
+        an fd whose target names the file (its path, or the same file name seen through another mount) and, when
+        the file is still there, is the same file (device and inode). As far as BUDGET allows; a process that
+        opened, read and closed the file before the scan is not found (inotify does not say who it was)."""
+        try:
+            info = os.stat(path, follow_symlinks=False)
+            key = (info.st_dev, info.st_ino)
+        except OSError:
+            key = None
+        name = os.path.basename(str(path))
+        found, deadline, me = [], self.clock() + self.budget, os.getpid()
+        try:
+            pids = sorted((int(entry.name) for entry in os.scandir(self.proc) if entry.name.isdigit()), reverse=True)
+        except OSError:
+            return found
+        for pid in pids:  # the newest first: a reader started for the occasion
+            if self.clock() > deadline or len(found) >= limit:
+                break
+            if pid == me:
+                continue
+            try:
+                fds = [entry.name for entry in os.scandir(self.proc / str(pid) / "fd")]
+            except OSError:
+                continue
+            for fd in fds:
+                with contextlib.suppress(OSError):
+                    target = os.readlink(self.proc / str(pid) / "fd" / fd)
+                    if target.endswith(" (deleted)"):
+                        target = target[:-len(" (deleted)")]
+                    if target != str(path) and not target.endswith("/" + name):
+                        continue
+                    if key is not None and target != str(path):
+                        held = os.stat(self.proc / str(pid) / "fd" / fd)
+                        if (held.st_dev, held.st_ino) != key:
+                            continue
+                    process = self.process(pid)
+                    if process is not None:
+                        found.append({**process, "fd": int(fd) if fd.isdigit() else fd})
+                    break
+        return found
+
     @staticmethod
     def peer(connection):
         """(pid, uid, gid) of the process at the other end of a Unix socket (SO_PEERCRED), as the kernel
@@ -5926,22 +5968,40 @@ class Canaries:
     FILE_MASK = 0x1 | 0x2 | 0x4 | 0x20 | 0x400 | 0x800 | 0x02000000            # ... | IN_DONT_FOLLOW
     DIR_MASK = 0x40 | 0x80 | 0x100 | 0x200 | 0x02000000 | 0x01000000          # ... | IN_ONLYDIR
 
-    def __init__(self, config, directory=None):
+    def __init__(self, config, directory=None, who=None):
         self.files = [entry for entry in config.get("files", []) if isinstance(entry, dict)
                       and isinstance(entry.get("path"), str) and isinstance(entry.get("id"), str)]
         self.names = CanaryMatcher(config.get("names", []), lower=True)
         self.events = Path(directory if directory is not None else CONTROL_DIR) / CANARY_EVENTS
         self.stopping, self.thread = threading.Event(), None
+        self.who = who  # Attribution: which process holds a canary file open right after inotify reported it
 
     @classmethod
-    def load(cls, directory=None):
+    def load(cls, directory=None, who=None):
         """The canaries of this run (CONTROL_DIR/canary.json), or None without any."""
         directory = Path(directory if directory is not None else CONTROL_DIR)
         try:
             config = json.loads((directory / CANARY_CONFIG).read_text())
         except (OSError, ValueError):
             return None
-        return cls(config, directory) if isinstance(config, dict) else None
+        return cls(config, directory, who) if isinstance(config, dict) else None
+
+    def opened_by(self, entry, action):
+        """{"process": ...} for a file event: the process(es) that hold the canary open now, looked up at once in
+        /proc (best effort: inotify does not say who; a reader that already closed it is "unknown")."""
+        if self.who is None:
+            return {"process": {"unknown": "no process lookup here"}}
+        if action in ("delete", "move", "replace"):
+            return {"process": {"unknown": "inotify does not say who; the file's name changed, nothing holds it"}}
+        if not self.who.allowed():
+            return {"process": {"unknown": "too many lookups"}}
+        try:
+            found = self.who.openers(entry["path"])
+        except Exception:  # noqa: BLE001 - the lookup is a courtesy; the event is reported either way
+            found = []
+        if not found:
+            return {"process": {"unknown": "no process held the file open when it was looked up (closed already)"}}
+        return {"process": found[0], **({"processes": found} if len(found) > 1 else {})}
 
     def report(self, record):
         return canary_event(record, self.events)
@@ -5966,7 +6026,8 @@ class Canaries:
 
     def watch(self, stop, libc=None):
         """Report what happens to the files until STOP: read (opened or read), modify, delete, move, replace (a new
-        file under its name). Who did it inotify does not say; one event of a kind per file every few seconds."""
+        file under its name). Who did it inotify does not say: the processes holding the file open right after the
+        event are looked up (opened_by); one event of a kind per file every few seconds."""
         libc = libc or ctypes.CDLL(None, use_errno=True)
         fd = libc.inotify_init1(0o2000000)
         if fd < 0:
@@ -6006,7 +6067,8 @@ class Canaries:
                     if now - recent.get((entry["id"], action), -CANARY_REPEAT) < CANARY_REPEAT:
                         continue
                     recent[(entry["id"], action)] = now
-                    self.report({"event": action, "source": "files", "canary": entry["id"], "path": entry["path"]})
+                    self.report({"event": action, "source": "files", "canary": entry["id"], "path": entry["path"],
+                                 **self.opened_by(entry, action)})
         finally:
             os.close(fd)
 

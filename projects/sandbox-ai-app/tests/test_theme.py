@@ -105,7 +105,9 @@ def test_the_web_interface_has_the_same_themes():
     import os
     from pathlib import Path
     home = os.environ.get("SANDBOX_AI_HOME")
-    path = Path(home) / "web" / "themes.json" if home else None
-    if path is None or not path.is_file():
+    # SANDBOX_AI_HOME names sandbox-ai's folder: its checkout (sandbox/web) or an installed tree (web)
+    path = next((p for p in (Path(home) / "sandbox" / "web" / "themes.json", Path(home) / "web" / "themes.json")
+                 if p.is_file()), None) if home else None
+    if path is None:
         pytest.skip("SANDBOX_AI_HOME names no sandbox-ai with a web interface")
     assert json.loads(path.read_text())["themes"] == json.loads(json.dumps(theme.THEMES_DATA))

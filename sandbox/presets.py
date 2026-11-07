@@ -5,13 +5,19 @@
   sandbox-ai presets show NAME [--json]                 what NAME sets, needs and asks for
   sandbox-ai presets check NAME [--value KEY=VALUE]... [--agent AGENT]
                                                         what is missing before NAME can start (values, MCP servers)
+  sandbox-ai presets dirs [list] [--json]               the extra preset directories (defaults.json)
+  sandbox-ai presets dirs add|remove DIR                add or remove one
   sandbox-ai AGENT --preset NAME [--preset-value KEY=VALUE]... [options]   start with it
 
 A preset is launcher options (with {placeholders} for what only you know: a folder, a port, a device, an LLM
 server), MCP servers by name, an optional ruleset file and an optional first task for the agent. The built-in
 presets ship with sandbox-ai (sandbox/presets/*.json); your own, private ones live in
 ~/.config/sandbox-ai/presets/*.json, outside every workspace (an agent must not write what it starts with), and
-win over a built-in one of the same id. The command line wins over the preset, the preset over nothing else:
+win over a built-in one of the same id. Further directories of presets (a private collection, a team's checkout)
+are listed in ~/.config/sandbox-ai/defaults.json as "preset_dirs" (`sandbox-ai presets dirs add DIR`): yours win
+over them, the first listed over the later ones, and they over the built-in presets. A directory inside a folder
+sandboxes can or could write (a workspace, a rw mount, a kept state) is refused and skipped, and so is a preset
+file or ruleset there that is a symlink. The command line wins over the preset, the preset over nothing else:
 a project's .sandbox-ai.json, your defaults, the security mode and the administrator's policy apply as always.
 
 A preset never holds a secret: options only name them (--secret-env NAME, --git-token-secret URL=NAME), and
@@ -26,11 +32,14 @@ options that copy a login in are refused. Format (JSON):
 Standard library only.
 """
 import argparse
+import errno
+import importlib.util
 import json
 import os
 from pathlib import Path
 import re
 import shlex
+import stat
 import sys
 
 HERE = Path(__file__).resolve().parent
@@ -65,9 +74,112 @@ def user_dir():
     return config_home() / "sandbox-ai" / "presets"
 
 
-def directories():
-    """[(directory, origin)]: the built-in presets, then yours (yours win)."""
-    return [(BUILTIN, "built-in"), (user_dir(), "yours")]
+DIRS_KEY = "preset_dirs"  # defaults.json: the extra preset directories, in order
+DIRS_LIMIT = 32
+# The launcher sets this to its exposed_before() (the trees sandboxes could write in earlier runs) when it loads
+# this module; elsewhere net.py's launcher gives it, together with the workspaces of running sandboxes.
+EXPOSED_BEFORE = None
+
+
+def defaults_path():
+    return config_home() / "sandbox-ai" / "defaults.json"
+
+
+def check_dirs(value, where=DIRS_KEY):
+    """VALUE as defaults.json's preset_dirs: a list of distinct absolute paths; ValueError otherwise."""
+    if not isinstance(value, list) or len(value) > DIRS_LIMIT or not all(
+            isinstance(v, str) and os.path.isabs(v) and "\0" not in v and len(v) < 4096
+            and not any(ord(c) < 32 for c in v) for v in value):
+        raise ValueError(f"{where} is a list of at most {DIRS_LIMIT} absolute paths of directories")
+    normal = [os.path.normpath(v) for v in value]
+    if len(set(normal)) != len(normal):
+        raise ValueError(f"{where} names a directory twice")
+    return normal
+
+
+def listed_dirs():
+    """The extra preset directories of defaults.json, in order ([] without the file or the key); a damaged file
+    or value is a ValueError."""
+    try:
+        document = json.loads(defaults_path().read_text())
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError, RecursionError) as exc:
+        raise ValueError(f"{defaults_path()}: {exc}") from None
+    if not isinstance(document, dict) or DIRS_KEY not in document:
+        return []
+    return [Path(p) for p in check_dirs(document[DIRS_KEY], f"{defaults_path()}: {DIRS_KEY}")]
+
+
+def _module(name):
+    spec = importlib.util.spec_from_file_location(f"sandbox_ai_{name}_for_presets", HERE / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def writable_trees():
+    """[(tree, why)]: the folders sandboxes can or could write (workspaces, rw mounts, kept states of earlier runs,
+    the workspaces of running sandboxes). An error when they cannot be known: a directory is not trusted then."""
+    if EXPOSED_BEFORE is not None:
+        return [(Path(t), "a folder sandboxes could write in an earlier run") for t in EXPOSED_BEFORE()]
+    net = _module("net")
+    trees = [(Path(t), "a folder sandboxes could write in an earlier run") for t in net.launcher().exposed_before()]
+    trees += [(Path(record["workspace"]), f"the workspace of the running sandbox {name}")
+              for name, record in net.running().items() if isinstance(record.get("workspace"), str)]
+    return trees
+
+
+def unsafe_dir(path, trees):
+    """Why the preset directory PATH must not be used (None when it may): it lies in a folder sandboxes can write
+    (an agent must not write what it is started with), or it is sandbox-ai's own or your presets' folder."""
+    literal = Path(os.path.normpath(os.path.abspath(path)))
+    real = Path(os.path.realpath(path))
+    for candidate in dict.fromkeys([literal, real]):
+        for tree, why in trees:
+            for form in dict.fromkeys([Path(os.path.normpath(tree)), Path(os.path.realpath(tree))]):
+                if candidate == form or form in candidate.parents:
+                    return f"it lies in {form}, {why}"
+    if real == Path(os.path.realpath(BUILTIN)):
+        return "it is the folder of sandbox-ai's built-in presets"
+    if real == Path(os.path.realpath(user_dir())):
+        return "it is the folder of your own presets, read anyway"
+    return None
+
+
+def extra_dirs(out_problems=None):
+    """The extra preset directories that may be used, in order; the others are left out (and said in
+    OUT_PROBLEMS)."""
+    try:
+        listed = listed_dirs()
+    except ValueError as exc:
+        if out_problems is not None:
+            out_problems.append(f"extra preset directories: {exc}")
+        return []
+    if not listed:
+        return []
+    try:
+        trees = writable_trees()
+    except Exception as exc:  # noqa: BLE001 - not knowing where sandboxes write means not trusting the directories
+        if out_problems is not None:
+            out_problems.append(f"extra preset directories skipped: cannot tell where sandboxes write ({exc})")
+        return []
+    usable = []
+    for directory in listed:
+        why = unsafe_dir(directory, trees)
+        if why:
+            if out_problems is not None:
+                out_problems.append(f"preset directory {directory} skipped: {why}")
+            continue
+        usable.append(directory)
+    return usable
+
+
+def directories(out_problems=None):
+    """[(directory, origin)] from the lowest precedence to the highest: the built-in presets, the extra directories
+    (the first listed wins over the later ones), yours (they win over all)."""
+    extra = [(directory, "extra") for directory in reversed(extra_dirs(out_problems))]
+    return [(BUILTIN, "built-in"), *extra, (user_dir(), "yours")]
 
 
 def problems(document, where="preset"):
@@ -121,8 +233,35 @@ def problems(document, where="preset"):
     return found
 
 
-def read(path):
-    data = Path(path).read_bytes()
+def read_bytes(path, follow=True):
+    """The bytes of PATH; FOLLOW=False refuses a symlink (and anything but a regular file)."""
+    if follow:
+        return Path(path).read_bytes()
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ValueError(f"{path}: a symlink, not followed in an extra preset directory") from None
+        raise
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError(f"{path}: not a regular file")
+        chunks, size = [], 0
+        while True:
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > LIMIT:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks) + (b" " if size > LIMIT else b"")
+    finally:
+        os.close(fd)
+
+
+def read(path, follow=True):
+    data = read_bytes(path, follow)
     if len(data) > LIMIT:
         raise ValueError(f"{path}: larger than {LIMIT >> 10} KiB")
     try:
@@ -136,9 +275,11 @@ def read(path):
 
 
 def catalog(out_problems=None):
-    """{id: preset}, each with "_path" and "_origin"; damaged files are skipped (and reported to OUT_PROBLEMS)."""
+    """{id: preset}, each with "_path" and "_origin" (built-in, extra or yours; "_dir" for an extra one); damaged
+    files are skipped (and reported to OUT_PROBLEMS). In an extra directory no symlink is followed: a preset or
+    ruleset that is one is skipped."""
     found = {}
-    for directory, origin in directories():
+    for directory, origin in directories(out_problems):
         try:
             paths = sorted(directory.glob("*.json"))
         except OSError:
@@ -147,19 +288,28 @@ def catalog(out_problems=None):
             if path.name.endswith(".rules.json"):
                 continue
             try:
-                document = read(path)
+                document = read(path, follow=origin != "extra")
+                if origin == "extra" and document.get("rules") and (path.parent / document["rules"]).is_symlink():
+                    raise ValueError(f"{path}: its ruleset {document['rules']} is a symlink, not followed in an "
+                                     "extra preset directory")
             except (OSError, ValueError) as exc:
                 if out_problems is not None:
                     out_problems.append(str(exc))
                 continue
-            found[document["id"]] = {**document, "_path": str(path), "_origin": origin}
+            found[document["id"]] = {**document, "_path": str(path), "_origin": origin,
+                                     **({"_dir": str(directory)} if origin == "extra" else {})}
     return found
 
 
+LOADED = None  # the file of the preset load() gave last (the launcher checks it lies where no agent writes)
+
+
 def load(name):
+    global LOADED
     presets = catalog()
     if name not in presets:
         raise ValueError(f"no preset {name!r}; see: sandbox-ai presets list")
+    LOADED = presets[name]
     return presets[name]
 
 
@@ -350,8 +500,12 @@ def apply(argv, canonical=None, with_mode=False):
     return (result, mode) if with_mode else result
 
 
+def origin_text(preset):
+    return f"from {preset['_dir']}" if preset["_origin"] == "extra" else preset["_origin"]
+
+
 def describe(preset, out=print):
-    out(f"{preset['id']}: {preset['title']}  ({preset.get('category', 'simple')}, {preset['_origin']})")
+    out(f"{preset['id']}: {preset['title']}  ({preset.get('category', 'simple')}, {origin_text(preset)})")
     out(f"  {preset['description']}")
     out(f"  agents: {', '.join(preset.get('agents', AGENTS))}")
     if preset.get("options"):
@@ -373,7 +527,100 @@ def describe(preset, out=print):
 
 
 def public(preset):
-    return {key: value for key, value in preset.items() if not key.startswith("_")} | {"origin": preset["_origin"]}
+    return ({key: value for key, value in preset.items() if not key.startswith("_")} | {"origin": preset["_origin"]}
+            | ({"directory": preset["_dir"]} if preset.get("_dir") else {}))
+
+
+# -- the extra preset directories (defaults.json's preset_dirs) --
+
+def dirs_report():
+    """[{path, state, why, presets}] of every listed directory: usable (with how many presets it holds) or why not."""
+    listed = listed_dirs()
+    try:
+        trees, problem = writable_trees(), None
+    except Exception as exc:  # noqa: BLE001
+        trees, problem = [], f"cannot tell where sandboxes write ({exc})"
+    report = []
+    for directory in listed:
+        why = problem or unsafe_dir(directory, trees)
+        if why is None and not directory.is_dir():
+            why = "it does not exist (or is not a directory)"
+        count = 0
+        if why is None:
+            try:
+                count = sum(1 for p in directory.glob("*.json") if not p.name.endswith(".rules.json"))
+            except OSError as exc:
+                why = exc.strerror
+        report.append({"path": str(directory), "state": "skipped" if why else "used", "why": why, "presets": count})
+    return report
+
+
+def change_dirs(change, out):
+    """Apply CHANGE(list of paths) -> new list to defaults.json through sandbox-ai defaults (checked, atomic)."""
+    defaults = _module("defaults_cmd")
+    document, path = defaults.read()
+    current = check_dirs(document.get(DIRS_KEY, []), f"{path}: {DIRS_KEY}")
+    wanted = change(list(current))
+    if wanted:
+        document[DIRS_KEY] = wanted
+    else:
+        document.pop(DIRS_KEY, None)
+    defaults.check(document, path)
+    defaults.write(path, document)
+    return path
+
+
+def dirs_add(value, out):
+    path = os.path.normpath(os.path.abspath(os.path.expanduser(value)))
+    if not os.path.isdir(path):
+        raise ValueError(f"{value}: not a directory")
+    if os.path.islink(path):
+        out(f"note: {path} is a symlink to {os.path.realpath(path)}; both are checked, now and at every use")
+    why = unsafe_dir(path, writable_trees())
+    if why:
+        raise ValueError(f"{path} cannot hold presets: {why} (an agent must not write what it is started with)")
+
+    def add(current):
+        if path in current:
+            raise ValueError(f"{path} is listed already")
+        return current + [path]
+    where = change_dirs(add, out)
+    count = sum(1 for p in Path(path).glob("*.json") if not p.name.endswith(".rules.json"))
+    out(f"preset directory {path} added ({count} preset file(s)) in {where}; your own presets still win over it, "
+        "it over the built-in ones")
+    return 0
+
+
+def dirs_remove(value, out):
+    path = os.path.normpath(os.path.abspath(os.path.expanduser(value)))
+
+    def remove(current):
+        if path not in current:
+            raise ValueError(f"{path} is not listed; see: sandbox-ai presets dirs list")
+        return [p for p in current if p != path]
+    where = change_dirs(remove, out)
+    out(f"preset directory {path} removed from {where}")
+    return 0
+
+
+def dirs_main(args, out):
+    if args.dirs_command == "add":
+        return dirs_add(args.directory, out)
+    if args.dirs_command == "remove":
+        return dirs_remove(args.directory, out)
+    report = dirs_report()
+    if args.json:
+        out(json.dumps({"key": DIRS_KEY, "file": str(defaults_path()), "builtin": str(BUILTIN), "yours": str(user_dir()),
+                        "dirs": report}, indent=2))
+        return 0
+    out(f"yours (win over all): {user_dir()}")
+    for number, entry in enumerate(report, 1):
+        state = f"{entry['presets']} preset(s)" if entry["state"] == "used" else f"skipped: {entry['why']}"
+        out(f"{number}. {entry['path']}  ({state})")
+    if not report:
+        out("no extra preset directories; add one with: sandbox-ai presets dirs add DIR")
+    out(f"built-in: {BUILTIN}")
+    return 0
 
 
 def main(argv, out=print):
@@ -389,8 +636,17 @@ def main(argv, out=print):
     checked.add_argument("name")
     checked.add_argument("--value", action="append", default=[], metavar="KEY=VALUE")
     checked.add_argument("--agent", choices=AGENTS)
+    dirs = commands.add_parser("dirs", help="the extra preset directories (defaults.json: preset_dirs)")
+    dirs_commands = dirs.add_subparsers(dest="dirs_command")
+    dirs_list = dirs_commands.add_parser("list", help="the directories, in order, and whether each is used")
+    for listing_parser in (dirs, dirs_list):
+        listing_parser.add_argument("-j", "--json", action="store_true")
+    dirs_commands.add_parser("add", help="add a directory (after the others)").add_argument("directory")
+    dirs_commands.add_parser("remove", help="remove a directory").add_argument("directory")
     args = p.parse_args(argv)
     try:
+        if args.command == "dirs":
+            return dirs_main(args, out)
         if args.command == "list":
             damaged = []
             presets = catalog(damaged)
@@ -402,7 +658,8 @@ def main(argv, out=print):
                     if group:
                         out(f"{category}:")
                         for preset in sorted(group, key=lambda x: x["id"]):
-                            mine = "  (yours)" if preset["_origin"] == "yours" else ""
+                            mine = ("  (yours)" if preset["_origin"] == "yours" else
+                                    f"  (from {preset['_dir']})" if preset["_origin"] == "extra" else "")
                             out(f"  {preset['id']:<22} {preset['title']}{mine}")
             for problem in damaged:
                 print(f"sandbox-ai presets: skipped {problem}", file=sys.stderr)

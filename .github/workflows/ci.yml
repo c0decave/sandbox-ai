@@ -26,7 +26,9 @@ jobs:
       # Unit, contract, matrix and end-to-end tests; live sandbox tests need --agent-live.
       - name: Tests (failures summarised as an annotation, readable through the API)
         run: |
-          python -m pytest -q -rfE tests 2>&1 | tee pytest.txt; status=${PIPESTATUS[0]}
+          # Into a file, not a pipe: a process a test leaves behind would hold the pipe open and the step would hang.
+          status=0; python -m pytest -q -rfE tests > pytest.txt 2>&1 || status=$?
+          tail -n 300 pytest.txt
           if [ "$status" -ne 0 ]; then
             failed=$(grep -E '^(FAILED|ERROR) ' pytest.txt | head -60 | cut -c1-300 | sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g')
             echo "::error title=pytest failed::${failed:-no summary line; see the log}"
@@ -92,7 +94,9 @@ jobs:
         run: python scripts/vendor_xterm.py
       - name: Tests (offscreen, Qt required)
         run: |
-          python -m pytest -v -rs -rfE tests 2>&1 | tee tests.txt; status=${PIPESTATUS[0]}
+          # Into a file, not a pipe: a process a test leaves behind would hold the pipe open and the step would hang.
+          status=0; python -m pytest -v -rs -rfE tests > tests.txt 2>&1 || status=$?
+          tail -n 300 tests.txt
           if [ "$status" -ne 0 ]; then
             failed=$(grep -E '^(FAILED|ERROR) ' tests.txt | head -60 | cut -c1-300 | sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g')
             echo "::error title=app tests failed::${failed:-no summary line; see the log}"

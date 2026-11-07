@@ -214,11 +214,11 @@ SUBNET_RANGES = {4: [ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0
                                                        "100.64.0.0/10")],
                  6: [ipaddress.ip_network("fc00::/7")]}
 ROUTE_FILES = (Path("/proc/net/route"), Path("/proc/net/ipv6_route"))
-DEFAULTS_KEYS = {"version", "subnet", "subnet6", "mode", "canaries", "keep_days", "telemetry"}
+DEFAULTS_KEYS = {"version", "subnet", "subnet6", "mode", "canaries", "keep_days", "telemetry", "preset_dirs"}
 SESSION_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}"
 # The directory of a start: its first name, with a suffix when that directory is taken (sessions.new_key).
 START_ID = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}"
-__version__ = "0.1.68"
+__version__ = "0.1.72"
 CONFIG_NAME = ".sandbox-ai.json"
 RULES_NAME = "rules.json"  # ~/.config/sandbox-ai/rules.json: your own rules, for every start
 # Label on session pods: the session's tmux directory, so a stale pod can be told apart from someone else's.
@@ -1561,6 +1561,10 @@ def load_user_defaults(a):
         load_canary_module().parse_categories(document["canaries"], f"{path}: canaries")
     if "telemetry" in document and document["telemetry"] not in TELEMETRY_LEVELS:
         raise ValueError(f"{path}: telemetry is one of {', '.join(TELEMETRY_LEVELS)}")
+    if "preset_dirs" in document:
+        # Extra preset directories (presets.py): their shape here; where they lie when one is used (presets.py and
+        # check_host_sources: never where an agent writes).
+        load_presets_module().check_dirs(document["preset_dirs"], f"{path}: preset_dirs")
     days = document.get("keep_days", 1)
     if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 36500:
         raise ValueError(f"{path}: keep_days is a number of days (1 or more): kept starts unused for longer expire")
@@ -3126,6 +3130,10 @@ def check_host_sources(a):
         check_host_source(a, privacy_rules_dir(a), "--privacy-rules")
     # Rules the agent could rewrite would be no rules (and it should not learn them either).
     check_host_source(a, user_rules_file(), "Your rules (XDG_CONFIG_HOME)")
+    # The preset this start comes from (--preset): an agent must not write what it is started with.
+    preset = _presets_module.LOADED if _presets_module is not None else None
+    if preset and preset.get("_origin") != "built-in":
+        check_host_source(a, preset["_path"], f"The preset {preset.get('id')} ({preset['_origin']})")
     for path in a.rules:
         check_host_source(a, path, "--rules")
     for value in a.copy:
@@ -5690,6 +5698,8 @@ def register_run(a, run, session):
         "runtime_git_tokens": not a.token_proxy,
         # `sandbox-ai net allow --allow-host-port` relays host ports into this run (the supervisor's PortRelay).
         "host_relay": True,
+        # The MCP servers this run reaches (--mcp, helpers included): sandbox-ai mcp list names whom each serves.
+        "mcp_servers": [] if a.mcp_socket_dir else list(dict.fromkeys(a.mcp)),
         # The security mode: `sandbox-ai net allow` and `sandbox-ai approvals` keep to it (modes.py).
         "mode": a.runtime_mode}))
     return directory
@@ -7090,6 +7100,7 @@ def load_presets_module():
         spec = importlib.util.spec_from_file_location("sandbox_ai_presets", HERE / "presets.py")
         _presets_module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(_presets_module)
+        _presets_module.EXPOSED_BEFORE = exposed_before  # where sandboxes wrote: no preset directory there
     return _presets_module
 
 

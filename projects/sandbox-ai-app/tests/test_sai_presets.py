@@ -87,3 +87,26 @@ def test_a_presets_mode_is_a_floor_not_a_weakening(sai):
     by_id = {p.id: p for p in PR.sandbox_ai_presets(sai)[0]}
     audit = by_id["sai-code-audit"]
     assert "--mode" not in audit.options and "--mode-at-least" in audit.options
+
+
+def test_presets_of_an_extra_directory_join_the_gallery_and_say_where_they_come_from(sai, tmp_path):
+    """defaults.json's preset_dirs (sandbox-ai presets dirs add): their presets are in the gallery with a note
+    naming the directory; one where sandboxes wrote is left out, and said."""
+    import json
+    team = tmp_path / "team"
+    team.mkdir()
+    (team / "team-tool.json").write_text(json.dumps({"format": "sandbox-ai preset", "version": 1, "id": "team-tool",
+                                                     "title": "Team tool", "description": "ours",
+                                                     "options": ["--memory", "2g"]}))
+    defaults = tmp_path / "config" / "sandbox-ai" / "defaults.json"
+    defaults.parent.mkdir(parents=True)
+    defaults.write_text(json.dumps({"version": 1, "preset_dirs": [str(team)]}))
+    found, problems = PR.sandbox_ai_presets(sai)
+    tool = {p.id: p for p in found}["sai-team-tool"]
+    assert problems == [] and any(str(team) in note for note in tool.notes)
+    assert sai.module("presets").EXPOSED_BEFORE == sai.launcher.exposed_before, "the launcher says where sandboxes wrote"
+    registry = Path(sai.launcher.exposed_registry())
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text(json.dumps([str(tmp_path)]))
+    found, problems = PR.sandbox_ai_presets(sai)
+    assert "sai-team-tool" not in {p.id for p in found} and any("skipped" in problem for problem in problems)

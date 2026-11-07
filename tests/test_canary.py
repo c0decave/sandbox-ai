@@ -870,3 +870,187 @@ def test_the_models_of_every_agent_of_the_run_are_context(tmp_path):
     plan.launcher, plan.a = Launcher(), type("A", (), {"agent": "claude", "frontier": False, "llm": None})()
     assert plan.proxy_entry()["model_hosts"] == ["api.anthropic.com", "api.openai.com"]
     plan.finish()
+
+
+# --- the canary log: who opened a canary, and what the agent did around it ---------------------------------
+
+activity = load("sandbox_activity_canary_test", ROOT / "sandbox/activity.py")
+
+
+def fake_reader(proc, pid, comm, argv, files=(), ppid=1, start=1000):
+    """A process of a fake /proc (as test_attribution.py fakes it) holding FILES open (fd 3, 4, ...)."""
+    base = proc / str(pid)
+    (base / "fd").mkdir(parents=True)
+    fields = ["S", str(ppid)] + ["0"] * 17 + [str(start), "4096"]
+    (base / "stat").write_text(f"{pid} ({comm}) {' '.join(fields)}\n")
+    (base / "status").write_text(f"Name:\t{comm}\nPPid:\t{ppid}\nUid:\t0\t0\t0\t0\nNSpid:\t{pid}\t{pid - 20}\n")
+    (base / "comm").write_text(comm + "\n")
+    (base / "cmdline").write_bytes(b"".join(a.encode() + b"\0" for a in argv))
+    (base / "exe").symlink_to(f"/usr/bin/{comm}")
+    (base / "cwd").symlink_to("/work")
+    (base / "fd" / "0").symlink_to("/dev/null")
+    for fd, path in enumerate(files, 3):
+        (base / "fd" / str(fd)).symlink_to(path)
+
+
+@pytest.fixture
+def canary_proc(tmp_path):
+    """A canary file, the same file seen through another mount (a hard link), a file of the same name elsewhere,
+    and a fake /proc: bash (40) with nothing open, cat (41) holding the canary, python (42) holding the other
+    view, vim (43) holding the look-alike only."""
+    root, view, other = tmp_path / "root/.aws", tmp_path / "view/.aws", tmp_path / "other/.aws"
+    for directory in (root, view, other):
+        directory.mkdir(parents=True)
+    canary = root / "credentials"
+    canary.write_text("[default]\n")
+    os.link(canary, view / "credentials")
+    (other / "credentials").write_text("[mine]\n")
+    proc = tmp_path / "proc"
+    fake_reader(proc, 40, "bash", ["bash"])
+    fake_reader(proc, 41, "cat", ["cat", str(canary)], [str(canary)], ppid=40)
+    fake_reader(proc, 42, "python3", ["python3", "-c", "open('~/.aws/credentials')", "SECRETVALUE1"],
+                [str(view / "credentials")], ppid=40)
+    fake_reader(proc, 43, "vim", ["vim"], [str(other / "credentials")], ppid=40)
+    return canary, proc
+
+
+def test_the_supervisor_names_the_processes_holding_a_canary_open(canary_proc):
+    canary, proc = canary_proc
+    who = rt.Attribution(proc=proc, secret_values=["SECRETVALUE1"])
+    found = who.openers(str(canary))
+    assert [(p["pid"], p["comm"]) for p in found] == [(42, "python3"), (41, "cat")]  # the newest first
+    assert found[1]["argv"] == ["cat", str(canary)] and found[1]["parents"] == ["bash"] and found[1]["fd"] == 3
+    assert found[1]["ns_pid"] == 21
+    assert "SECRETVALUE1" not in json.dumps(found)  # command lines redacted as for connections
+    watcher = rt.Canaries({"files": [{"id": "aws", "path": str(canary)}]}, proc, who)
+    opened = watcher.opened_by(watcher.files[0], "read")
+    assert opened["process"]["pid"] == 42 and [p["pid"] for p in opened["processes"]] == [42, 41]
+    # Honest when nobody is found: closed already, the name changed, no lookup, or too many lookups.
+    shutil.rmtree(proc / "41")
+    shutil.rmtree(proc / "42")
+    assert "closed already" in watcher.opened_by(watcher.files[0], "read")["process"]["unknown"]
+    assert "inotify does not say" in watcher.opened_by(watcher.files[0], "delete")["process"]["unknown"]
+    assert rt.Canaries({"files": []}).opened_by({"path": str(canary)}, "read")["process"] == \
+        {"unknown": "no process lookup here"}
+    limited = rt.Canaries({"files": []}, proc, rt.Attribution(proc=proc, rate=0))
+    assert limited.opened_by({"path": str(canary)}, "read")["process"] == {"unknown": "too many lookups"}
+
+
+def test_a_watched_read_carries_the_process_found(canary_proc, tmp_path):
+    canary, proc = canary_proc
+    control = tmp_path / "control"
+    control.mkdir()
+    (control / rt.CANARY_CONFIG).write_text(json.dumps({"files": [{"id": "aws", "path": str(canary)}]}))
+    watcher = rt.Canaries.load(control, who=rt.Attribution(proc=proc)).start()
+    try:
+        time.sleep(0.2)
+        canary.read_text()
+        found = events(control, until=lambda f: any(e["event"] == "read" for e in f))
+    finally:
+        watcher.close()
+    read = next(e for e in found if e["event"] == "read")
+    assert read["process"]["comm"] == "python3" and {p["comm"] for p in read["processes"]} == {"python3", "cat"}
+
+
+def jsonl_lines(path, records):
+    path.write_text("".join(json.dumps(r) + "\n" for r in records))
+
+
+def canary_log_run(tmp_path):
+    """An armed run with a read of the AWS canary at 10:00:05 by cat, a token in a request to the model at
+    10:00:07, the run's activity timeline and its connection log."""
+    plan, control, logs, *_ = armed(tmp_path)
+    run = plan.run
+    token = next(t for ident, t in plan.tokens() if ident == "aws")
+    connections = logs / f"connections-20261107-100000-{run}.jsonl"
+    jsonl_lines(connections, [
+        {"time": "2026-11-07T10:00:03Z", "event": "http", "host": "api.openai.com", "method": "POST",
+         "url": "https://api.openai.com/v1/responses", "status": 200},
+        {"time": "2026-11-07T10:00:04Z", "event": "http", "host": "pypi.org", "method": "GET",
+         "url": "https://pypi.org/simple/"},
+        {"time": "2026-11-07T10:00:07Z", "event": "http", "host": "api.openai.com", "method": "POST",
+         "url": "https://api.openai.com/v1/responses", "status": 200,
+         "canary": {"canary": "aws", "encoding": "plain", "where": "body", "context": True}},
+        {"time": "2026-11-07T10:00:09Z", "event": "http", "host": "api.openai.com", "method": "POST",
+         "url": "https://api.openai.com/v1/responses", "status": 200}])
+    redact = activity.Redactor()
+    network = [activity.finalize(e, run, None, "codex", redact)
+               for e in activity.Connections(logs, connections.name).poll([1 << 20], time.time(), final=True)]
+    transcript = [
+        {"v": 1, "time": "2026-11-07T10:00:00Z", "run": run, "agent": "codex", "kind": "prompt", "id": "p1",
+         "summary": "tidy up the deployment scripts", "details": {}, "source": "codex"},
+        {"v": 1, "time": "2026-11-07T10:00:02Z", "run": run, "agent": "codex", "kind": "command", "id": "t1",
+         "summary": "ls -la", "details": {"command": "ls -la"}, "source": "codex"},
+        {"v": 1, "time": "2026-11-07T10:00:04Z", "run": run, "agent": "codex", "kind": "command", "id": "t2",
+         "summary": "cat ~/.aws/credentials", "details": {"command": f"cat ~/.aws/credentials # {token}"},
+         "source": "codex"},
+        {"v": 1, "time": "2026-11-07T10:00:04Z", "run": "other-run", "agent": "codex", "kind": "command",
+         "id": "x1", "summary": "cat ~/.aws/credentials", "details": {}, "source": "codex"}]
+    jsonl_lines(logs / "activity.jsonl", transcript + network)
+    report(control, event="read", source="files", canary="aws", path="/root/.aws/credentials",
+           time="2026-11-07T10:00:05Z", process={"pid": 41, "ns_pid": 21, "comm": "cat", "argv": ["cat", token],
+                                                  "parents": ["bash", "codex"], "start": 1})
+    report(control, event="context", source="proxy", where="body", canary="aws", encoding="plain",
+           url="https://api.openai.com/v1/responses", time="2026-11-07T10:00:07Z",
+           process={"unknown": "the process ended or closed the socket before it was found"})
+    report(control, event="read", source="files", canary="netrc", path="/root/.netrc", time="2026-11-07T10:01:30Z")
+    plan.poll()
+    return plan, run, token, network
+
+
+def test_the_canary_log_links_each_event_to_its_process_tool_call_turn_and_model_requests(tmp_path):
+    plan, run, token, network = canary_log_run(tmp_path)
+    out = []
+    assert c.main(["log", run, "--json"], out.append) == 0
+    log = json.loads(out[0])
+    assert log["run"] == run and log["activity"] and log["connections"]
+    read, context, netrc = log["events"]
+    assert (read["event"], read["canary"], read["path"], read["action"]) == ("read", "aws", "/root/.aws/credentials",
+                                                                              "report")
+    assert read["process"]["comm"] == "cat" and read["process"]["pid"] == 41 and "start" not in read["process"]
+    # The tool call that names the file, not the nearest one; the prompt turn it belongs to.
+    assert [(t["id"], t["match"]) for t in read["tool_calls"]] == [("t2", "names the file")]
+    assert read["turn"]["id"] == "p1" and read["turn"]["summary"] == "tidy up the deployment scripts"
+    # The model requests around it: the one before (which asked for the tool call), and those after it.
+    positions = [(r["position"], r["time"]) for r in read["requests"]]
+    assert positions == [("before", "2026-11-07T10:00:03Z"), ("carried the token", "2026-11-07T10:00:07Z"),
+                         ("after", "2026-11-07T10:00:09Z")]
+    ids = {r["id"] for r in network}
+    assert read["requests"][0]["activity_id"] in ids  # the first request to the host is in the timeline
+    assert read["requests"][2]["activity_id"] is None and read["requests"][2]["offset"] > 0  # counted there only
+    # The token in a model request: the request that carried it, and the process "unknown" said honestly.
+    carried = [r for r in context["requests"] if r["position"] == "carried the token"]
+    assert [r["time"] for r in carried] == ["2026-11-07T10:00:07Z"]
+    assert context["process"]["unknown"].startswith("the process ended")
+    # An event without a tool call in its window, and without a process recorded (an older supervisor).
+    assert netrc["tool_calls"] == [] and netrc["process"]["unknown"].startswith("inotify does not say who")
+    # The run's canary tokens never show, wherever they were (an argv, a command in the timeline).
+    assert token not in out[0]
+    plan.finish()
+
+
+def test_the_canary_log_as_text_and_for_every_run(tmp_path):
+    plan, run, token, _ = canary_log_run(tmp_path)
+    out = []
+    assert c.main(["log", run], out.append) == 0
+    text = "\n".join(out)
+    assert "READ  aws  /root/.aws/credentials  [report]" in text
+    assert "process: cat (pid 41, 21 in the sandbox): cat [redacted] <- bash <- codex" in text
+    assert "tool call (names the file): cat ~/.aws/credentials" in text and "activity t2" in text
+    assert "prompt turn: tidy up the deployment scripts" in text
+    assert "model request (carried the token): POST https://api.openai.com/v1/responses → 200" in text
+    assert "process: unknown (" in text and token not in text
+    everything = []
+    assert c.main(["log"], everything.append) == 0
+    assert f"run {run} (codex" in "\n".join(everything)
+    listed = []
+    assert c.main(["log", "--json"], listed.append) == 0
+    assert [entry["run"] for entry in json.loads(listed[0])] == [run]
+    assert c.main(["log", "no-such-run"], out.append) == 1
+    plan.finish()
+
+
+def test_the_run_record_names_its_model_providers(tmp_path):
+    plan, *_ = armed(tmp_path)
+    assert "api.openai.com" in json.loads(c.run_state(plan.run).read_text())["model_hosts"]
+    plan.finish()

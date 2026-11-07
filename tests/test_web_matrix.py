@@ -209,7 +209,22 @@ ACTIONS = [
      [["vpn", "add", "mv", "--mullvad", "--account-secret=MULLVAD", "--location=se-sto"]]),
     ("POST", "/vpn/mv/check", {}, [["vpn", "check", "mv"]]),
     ("DELETE", "/vpn/mv", None, [["vpn", "remove", "mv"]]),
+    ("GET", "/canaries", None, [["canaries", "log", "--json"]]),
+    ("GET", "/canaries/web", None, [["canaries", "log", "web", "--json"]]),
     ("POST", "/test", {}, [["--version"], ["doctor", "--json"]]),
+    ("GET", "/kits", None, [["kits", "list", "--json"]]),
+    ("POST", "/kits", {"name": "mv", "agents": ["claude"]}, [["kits", "new", "--agent=claude", "--", "mv"]]),
+    ("POST", "/kits/mv/add-skill", {"path": "/home/u/skills/review", "as": "", "agents": ["claude"], "create": False},
+     [["kits", "add-skill", "--agent=claude", "--", "mv", "/home/u/skills/review"]]),
+    ("POST", "/kits/mv/new-skill", {"skill": "notes", "description": "when noting", "agents": [], "create": False},
+     [["kits", "new-skill", "--description=when noting", "--", "mv", "notes"]]),
+    ("POST", "/kits/mv/add-plugin", {"plugin": "egm@sandbox-ai", "agent": "claude", "source": "", "create": False},
+     [["kits", "add-plugin", "--agent=claude", "--", "mv", "egm@sandbox-ai"]]),
+    ("POST", "/kits/mv/remove-skill", {"skill": "notes", "agents": ["claude"]},
+     [["kits", "remove-skill", "--agent=claude", "--", "mv", "notes"]]),
+    ("POST", "/kits/mv/remove-plugin", {"plugin": "egm@sandbox-ai", "agent": "claude"},
+     [["kits", "remove-plugin", "--agent=claude", "--", "mv", "egm@sandbox-ai"]]),
+    ("DELETE", "/kits/mv", {"confirm": True}, [["kits", "delete", "--yes", "--", "mv"]]),
 ]
 
 
@@ -458,6 +473,11 @@ def test_every_call_of_the_page_is_in_the_matrix():
     covered = {(m, "/api/hosts/X" + re.sub(r"/(web|gpu|mv|1700000000-1-2)(?=/|$)", "/X", p)) for m, p, _, _ in ACTIONS}
     covered |= {(m, re.sub(r"/ct1$", "/X", p)) for m, p, _ in SESSION_CALLS} | {("POST", "/api/login")}
     covered |= {("POST", "/api/hosts/X/starts/X/X")}  # ${action}: pause, resume, stop, delete above
+    covered |= {("POST", "/api/hosts/X/kits/X/X"),  # ${action}: add-skill, new-skill, add-plugin above
+                ("POST", "/api/hosts/X/kits/X/remove-X")}  # remove-${kind}: remove-skill, remove-plugin above
+    # Tested on their own in test_web.py: a host's update runs through the updater (not one command), and an MCP
+    # server attached to a start (test_an_mcp_server_is_attached_to_a_start).
+    covered |= {("POST", "/api/hosts/X/update"), ("POST", "/api/hosts/X/mcp/X/attach")}
     assert calls and calls <= covered, sorted(calls - covered)
     assert "new WebSocket(`wss://${location.host}/api/terminal?" in script
 

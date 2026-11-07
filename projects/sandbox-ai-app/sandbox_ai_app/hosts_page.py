@@ -4,6 +4,11 @@ sessions (attach in a terminal tab, pause, resume, stop), its open approvals (al
 agents' telemetry of every start there. Everything runs as `sandbox-ai hosts run HOST -- ARGS`, each argument
 quoted on its own, over SSH with your keys (no password prompt, the host key learnt once); nothing listens on
 the hosts but sshd.
+
+Each host shows its sandbox-ai version and whether an update is there (hosts list's status, kept 10 minutes).
+Update and Update all run `sandbox-ai hosts update` (each host's own signed update); a sudo that wants a password
+opens the host's update in a terminal tab, where sudo asks. Adding and testing a host make a key file that others
+can read private (ssh refuses it) and say so.
 """
 from __future__ import annotations
 
@@ -16,7 +21,41 @@ from PySide6.QtWidgets import (
 
 from .files import printable
 from .i18n import tr
-from .widgets import MONO, background, plain_label, warn
+from .widgets import MONO, background, confirm, plain_label, warn
+
+
+def version_text(info):
+    """A host's sandbox-ai in a few words: its version and whether an update is there ("" when not asked yet)."""
+    if not info:
+        return ""
+    if not info.get("version"):
+        return tr("unreachable") if info.get("error") else ""
+    if info.get("kind") in ("checkout", "pip", "package"):
+        return f"{info['version']} ({info['kind']})"
+    if info.get("update"):
+        return tr("{version}, update: {available}", version=info["version"], available=info.get("available") or "?")
+    return tr("{version}, up to date", version=info["version"]) if info.get("update") is False else info["version"]
+
+
+def key_lines(result):
+    """What was made private on the way (a key file ssh refused as readable by others) and what only named."""
+    return [tr("{path} could be read by others (mode {was}), which ssh refuses: made private ({now})",
+               path=change.get("path"), was=change.get("was"), now=change.get("now"))
+            for change in result.get("fixed") or []] + list(result.get("warnings") or [])
+
+
+def update_text(name, result):
+    """One host's update in a line or two."""
+    if result.get("error") and not result.get("after"):
+        line = tr("{host}: not updated: {error}", host=name, error=result["error"])
+    elif result.get("changed"):
+        line = tr("{host}: {before} -> {after}", host=name, before=result.get("before") or "?",
+                  after=result["after"])
+    else:
+        line = tr("{host}: {version}, up to date", host=name,
+                  version=result.get("after") or result.get("before") or "?")
+    return "\n".join([line, *("  " + text for text in key_lines(result)),
+                      *("  " + note for note in result.get("notes") or [])])
 
 
 def cell(text):
@@ -77,6 +116,18 @@ class HostsPage(QWidget):
         for button in (self.add_button, self.remove_button, self.test_button):
             buttons.addWidget(button)
         left_layout.addLayout(buttons)
+        updates = QHBoxLayout()
+        self.update_button, self.update_all_button, self.versions_button = (
+            QPushButton(tr("Update")), QPushButton(tr("Update all")), QPushButton(tr("Check versions")))
+        self.update_button.setToolTip(tr("sandbox-ai update on this host (its own signed update; sudo for a system "
+                                         "installation)"))
+        self.update_all_button.setToolTip(tr("sandbox-ai update on every host of the list, one after the other"))
+        self.update_button.clicked.connect(self.update_host)
+        self.update_all_button.clicked.connect(self.update_all)
+        self.versions_button.clicked.connect(lambda: self.load_versions(refresh=True))
+        for button in (self.update_button, self.update_all_button, self.versions_button):
+            updates.addWidget(button)
+        left_layout.addLayout(updates)
         split.addWidget(left)
         self.tabs = QTabWidget()
         # starts
@@ -128,6 +179,13 @@ class HostsPage(QWidget):
         self.doctor.setReadOnly(True)
         self.doctor.setFont(MONO)
         self.tabs.addTab(self.doctor, tr("Doctor"))
+        # updates
+        self.updates = QPlainTextEdit()
+        self.updates.setReadOnly(True)
+        self.updates.setFont(MONO)
+        self.updates.setPlaceholderText(tr("Update or Update all: each host's own sandbox-ai update, signed, as "
+                                           "install.sh installed it there."))
+        self.tabs.addTab(self.updates, tr("Updates"))
         # defaults
         defaults = QWidget()
         form = QFormLayout(defaults)
@@ -147,7 +205,7 @@ class HostsPage(QWidget):
         layout.addWidget(split, 1)
         self.status = plain_label(role="secondary")
         layout.addWidget(self.status)
-        self.entries = []
+        self.entries, self.versions, self.queue, self.results = [], {}, [], []
         self.load_hosts()
 
     # -- the list --
@@ -159,9 +217,19 @@ class HostsPage(QWidget):
     def load_hosts(self, select=None):
         if not self.sai.hosts_supported():
             self.status.setText(tr("This sandbox-ai has no hosts yet: update it."))
-            for widget in (self.add_button, self.remove_button, self.test_button, self.tabs):
+            for widget in (self.add_button, self.remove_button, self.test_button, self.tabs, self.update_button,
+                           self.update_all_button, self.versions_button):
                 widget.setEnabled(False)
             return
+        if not self.sai.host_update_supported():
+            for widget in (self.update_button, self.update_all_button, self.versions_button):
+                widget.setEnabled(False)
+                widget.setToolTip(tr("This sandbox-ai cannot update hosts yet: update it."))
+        else:
+            try:
+                self.versions = self.sai.host_statuses(cached=True)  # what is kept: no SSH here
+            except (OSError, ValueError):
+                self.versions = {}
         try:
             self.entries = self.sai.host_entries()
         except (OSError, ValueError) as exc:
@@ -173,6 +241,9 @@ class HostsPage(QWidget):
         for entry in self.entries:
             text = tr("{name} (this machine)", name=entry["name"]) if entry.get("kind") == "local" else \
                 f"{entry['name']}  {entry.get('ssh', '')}"
+            version = version_text(self.versions.get(entry["name"]))
+            if version:
+                text += f"  ({version})"
             item = QListWidgetItem(printable(text))
             item.setData(Qt.ItemDataRole.UserRole, entry["name"])
             item.setToolTip(printable(entry.get("description") or ""))
@@ -198,10 +269,18 @@ class HostsPage(QWidget):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         name, ssh, port, identity, description = dialog.values()
+        def done(result, error):
+            if error:
+                warn(self, tr("Add a host"), printable(str(error)))
+                return
+            self.load_hosts(name)
+            # A key ssh would refuse (others could read it) was made private, and the connection tried: said here.
+            said = [line.strip() for line in str(result or "").splitlines() if line.strip().startswith(("key:", "note:",
+                                                                                                    "connection:"))]
+            if said:
+                self.status.setText(printable("\n".join([name, *said])))
         background(self.sai.host_add, name, ssh, port, identity, description, owner=self, source=self.add_button,
-                   timeout=60,
-                   done=lambda result, error: warn(self, tr("Add a host"), printable(str(error))) if error
-                   else self.load_hosts(name))
+                   timeout=60, done=done)
 
     def remove(self):
         name = self.host()
@@ -221,10 +300,11 @@ class HostsPage(QWidget):
             if error:
                 self.status.setText(printable(str(error)))
                 return
+            keys = key_lines(result)
             if result.get("error"):
-                self.status.setText(printable(f"{name}: {result['error']}"))
+                self.status.setText(printable("\n".join([f"{name}: {result['error']}", *keys])))
             else:
-                self.status.setText(printable(f"{name}: {result.get('version')}"))
+                self.status.setText(printable("\n".join([f"{name}: {result.get('version')}", *keys])))
             self.show_doctor(result.get("doctor") or [])
         background(self.sai.host_test, name, owner=self, source=self.test_button, timeout=180, done=done)
 
@@ -320,6 +400,92 @@ class HostsPage(QWidget):
         args = ("defaults", "unset", "telemetry") if level == "off" else ("defaults", "set", "telemetry", level)
         background(lambda: self.sai.host_run(name, *args, timeout=60), owner=self, source=self.telemetry, timeout=90,
                    done=lambda result, error: self.acted(result, error))
+
+    # -- versions and updates --
+
+    def load_versions(self, refresh=False):
+        """Each host's sandbox-ai version and whether an update is there (over SSH, in the background)."""
+        if not self.sai.host_update_supported():
+            return
+        self.status.setText(tr("Asking the hosts for their versions…"))
+        background(lambda: self.sai.host_statuses(refresh=refresh, cached=False), owner=self,
+                   source=self.versions_button, timeout=300, done=self.versions_read)
+
+    def versions_read(self, result, error):
+        if error:
+            self.status.setText(printable(str(error)))
+            return
+        self.versions = result or {}
+        waiting = [name for name, info in self.versions.items() if info and info.get("update")]
+        self.status.setText(tr("Updates for: {hosts}", hosts=", ".join(waiting)) if waiting else
+                            tr("Every host answered is up to date."))
+        self.load_hosts()
+
+    def update_host(self):
+        name = self.host()
+        if name is None:
+            return
+        if name == "local":
+            warn(self, tr("Update"), tr("This machine updates on the page System (or: sandbox-ai update)."))
+            return
+        self.results, self.queue = [], [name]
+        self.updates.clear()
+        self.tabs.setCurrentWidget(self.updates)
+        self.next_update()
+
+    def update_all(self):
+        names = [entry["name"] for entry in self.entries if entry.get("kind") == "ssh"]
+        if not names:
+            return
+        self.results, self.queue = [], list(names)
+        self.updates.clear()
+        self.tabs.setCurrentWidget(self.updates)
+        self.next_update()
+
+    def next_update(self, sudo=None):
+        """The next host of the queue, one after the other (each may take minutes); the summary at the end."""
+        if not self.queue:
+            return self.updates_done()
+        name, total = self.queue[0], len(self.results) + len(self.queue)
+        self.status.setText(tr("Updating {host} ({index} of {count})…", host=name, index=len(self.results) + 1,
+                               count=total))
+        background(self.sai.host_update, name, sudo, owner=self,
+                   source=[self.update_button, self.update_all_button], timeout=1200,
+                   done=lambda result, error: self.updated(name, result, error))
+
+    def updated(self, name, result, error):
+        if error:
+            result = {"name": name, "error": str(error)}
+        if result.get("needs_sudo") and len(self.results) + len(self.queue) == 1 and confirm(
+                self, tr("Update"), tr("The installation on {host} belongs to root. Update it with sudo?", host=name),
+                tr("Update with sudo")):
+            return self.next_update(sudo=True)
+        self.queue.pop(0)
+        self.results.append(result)
+        self.updates.appendPlainText(printable(update_text(name, result)))
+        if result.get("needs_password"):
+            # sudo there wants a password: the host's update in a terminal tab, where sudo asks for it.
+            try:
+                self.in_terminal(self.sai.host_update_terminal(name), tr("{host}: update", host=name))
+                self.updates.appendPlainText(printable(tr("  {host}: the update runs in a terminal tab, where sudo "
+                                                          "asks for the password", host=name)))
+            except (OSError, ValueError) as exc:
+                self.updates.appendPlainText(printable(f"  {exc}"))
+        self.next_update()
+
+    def updates_done(self):
+        results = self.results
+        updated = sum(1 for r in results if r.get("changed"))
+        failed = sum(1 for r in results if r.get("error") and not r.get("after"))
+        summary = tr("{count} hosts: {updated} updated, {current} up to date, {failed} not updated",
+                     count=len(results), updated=updated, current=len(results) - updated - failed, failed=failed)
+        self.updates.appendPlainText(summary)
+        self.status.setText(summary)
+        try:
+            self.versions = self.sai.host_statuses(cached=True)
+        except (OSError, ValueError):
+            pass
+        self.load_hosts()
 
     def show_doctor(self, results):
         lines = [f"{str(r.get('status', '?')).upper():5} {r.get('check', '')}: {r.get('detail', '')}"

@@ -160,10 +160,11 @@ NAMED = {
     ("vpn", "*", "name"): vpn_names, ("kits", "*", "name"): kit_names,
     ("approvals", "allow", "id"): question_ids, ("approvals", "deny", "id"): question_ids,
     ("team", "*", "name"): team_names, ("approvals", "history", "run"): run_names,
+    ("hosts", "update", "names"): host_names, ("mcp", "attach", "start"): start_names,
 }
 # Secrets are not listed: reading their names may ask the keyring to unlock, which a Tab must never do.
 VALUES = {"--kit": kit_names, "--mcp": mcp_names, "--llm": llm_names, "--vpn": vpn_names,
-          "--session": start_names, "--name": start_names, "--host": host_names, "--helper": lambda: list(AGENTS),
+          "--session": start_names, "--name": start_names, "--for": start_names, "--host": host_names, "--helper": lambda: list(AGENTS),
           "--with": lambda: list(AGENTS)}
 
 

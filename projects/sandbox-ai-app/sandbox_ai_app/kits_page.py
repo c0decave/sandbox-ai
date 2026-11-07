@@ -17,7 +17,7 @@ import re
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QInputDialog,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout,
     QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSplitter, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
     QWidget,
 )
@@ -36,6 +36,7 @@ KIND_TITLES = {"always": N_("always (sandbox-ai)"), "default": N_("always (defau
 ENTRY_TITLES = (("skills", N_("Skills")), ("agents", N_("Agents")), ("commands", N_("Commands")),
                 ("prompts", N_("Prompts")))
 AGENTS = backend.AGENTS
+NEW_KIT = "my-kit"  # the name proposed for a first kit of yours (a name, not a text)
 HOOK_EVENTS = ("PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop", "SessionStart")
 
 
@@ -256,6 +257,35 @@ class RemoveDialog(FormDialog):
         return item.data(Qt.ItemDataRole.UserRole) if item else None
 
 
+class TargetKitDialog(FormDialog):
+    """Which kit of yours receives what is added when the selected kit is not one of yours (sandbox-ai's own
+    kits are read-only): one of yours, or a new kit created first (sandbox-ai kits new)."""
+
+    def __init__(self, parent, why, kits):
+        super().__init__(parent, tr("Add to a kit of yours"), why)
+        self.kit = QComboBox()
+        for name in kits:
+            self.kit.addItem(printable(name), name)
+        self.kit.addItem(tr("A new kit…"), "")
+        self.name = QLineEdit()
+        self.name.setPlaceholderText(tr("my-kit"))
+        if not kits:
+            self.name.setText(NEW_KIT)
+        self.form.addRow(tr("Kit"), self.kit)
+        self.form.addRow(tr("New kit's name"), self.name)
+        self.kit.currentIndexChanged.connect(lambda _=0: self.changed())
+        self.changed()
+        self.finish()
+
+    def changed(self):
+        self.name.setEnabled(self.kit.currentData() == "")
+
+    def chosen(self):
+        """(name, whether it is new)."""
+        current = self.kit.currentData()
+        return (current, False) if current else (self.name.text().strip(), True)
+
+
 class KitsPage(QWidget):
     enable_kit = Signal(str)  # use this kit in the current project (the window passes it to the Board)
     inventory_loaded = Signal(object)  # the inventory, for the Board's kits node
@@ -312,9 +342,16 @@ class KitsPage(QWidget):
         self.delete_button = QPushButton(tr("Delete kit…"))
         self.delete_button.setProperty("role", "danger")
         self.delete_button.clicked.connect(lambda _=False: self.delete())
-        self.edit_buttons = [self.skill_button, self.new_skill_button, self.plugin_button, self.marketplace_button,
-                             self.hook_button, self.remove_button, self.delete_button]
+        # Adding works whatever kit is selected: into the selected kit when it is yours, else into a kit of yours
+        # chosen (or created) first. Removing and deleting are for your own kits only.
+        self.add_buttons = [self.skill_button, self.new_skill_button, self.plugin_button, self.marketplace_button,
+                            self.hook_button]
+        self.change_buttons = [self.remove_button, self.delete_button]
+        self.edit_buttons = self.add_buttons + self.change_buttons
         kits_layout.addWidget(flow(self.use_button, *self.edit_buttons, self.trust_button))
+        self.add_hint = plain_label(role="secondary")
+        self.add_hint.setWordWrap(True)
+        kits_layout.addWidget(self.add_hint)
         details_box = QGroupBox(tr("What it brings"))
         details_layout = QVBoxLayout(details_box)
         self.where = plain_label(role="secondary")
@@ -505,8 +542,13 @@ class KitsPage(QWidget):
                tr("The default kit is edited in its folder: {path}", path=printable(kit.get("path") or ""))
                if kind == "default" else
                tr("sandbox-ai's own kits are read-only: create a kit of your own (New kit…)."))
-        for button in self.edit_buttons:
+        for button in self.change_buttons:
             set_enabled(button, why is None, why)
+        for button in self.add_buttons:
+            set_enabled(button, True)
+        self.add_hint.setText("" if why is None or kit is None else
+                              tr("{why} What you add goes to a kit of yours: you choose it (or a new one) first.",
+                                 why=why))
         use_why = (none if kit is None else
                    tr("This kit is part of every sandbox already.") if kind in ("always", "default") else
                    tr("Choose a project first (at the top of the window).") if not self.project else
@@ -523,19 +565,54 @@ class KitsPage(QWidget):
         set_enabled(self.trust_button, trust_why is None, trust_why,
                     tooltip=tr("sandbox-ai kits trust-hooks, in a terminal: shows every hook and the full text of "
                                "every file; you approve there"))
-        user_kits = [k for k in self.kits.values() if k.get("kind") == "user"]
-        rows = selected_rows(self.market)
-        market_why = (tr("Select a plugin of the marketplace first.") if not rows else
-                      tr("Create a kit of your own first (New kit…).") if not user_kits else None)
+        rows = selected_rows(self.market)  # the kit of yours is chosen (or created) when adding
+        market_why = tr("Select a plugin of the marketplace first.") if not rows else None
         set_enabled(self.add_to_kit_button, market_why is None, market_why)
 
     # -- actions --
 
-    def run(self, action, name, *arguments, options=(), title=None):
-        background(lambda: self.sai.kit_command(action, name, *arguments, options=options), owner=self,
+    def run(self, action, name, *arguments, options=(), title=None, create=False):
+        """`sandbox-ai kits ACTION ... NAME ARGUMENTS` in the background; CREATE: `sandbox-ai kits new NAME` first
+        (nothing more runs when that fails)."""
+        def work():
+            first = ""
+            if create:
+                status, out, err = self.sai.kit_command("new", name)
+                if status != 0:
+                    return status, out, err
+                first = out
+            status, out, err = self.sai.kit_command(action, name, *arguments, options=options)
+            return status, first + out, err
+        background(work, owner=self,
                    source=[self.refresh_button, self.use_button, self.add_to_kit_button, *self.edit_buttons],
                    timeout=300, done=lambda result, error: self.done(title or f"sandbox-ai kits {action}", result,
                                                                      error))
+
+    def user_kits(self):
+        return sorted(kit["name"] for kit in self.kits.values() if kit.get("kind") == "user")
+
+    def target(self, why=None):
+        """(kit name, create it first?, its inventory entry or None) that receives an addition: the selected kit
+        when it is yours, else the kit of yours the human chooses (or names, to be created first). None when
+        cancelled."""
+        kit = self.current()
+        if kit is not None and kit.get("kind") == "user" and why is None:
+            return kit["name"], False, kit
+        if why is None:
+            why = (tr("No kit of yours is selected.") if kit is None else
+                   tr("The default kit is edited in its folder: {path}", path=printable(kit.get("path") or ""))
+                   if kit.get("kind") == "default" else
+                   tr("sandbox-ai's own kits are read-only: create a kit of your own (New kit…)."))
+        dialog = TargetKitDialog(self, why, self.user_kits())
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        name, new = dialog.chosen()
+        if not self.valid_name(name) or (new and name in ("default", "built-in")):
+            if name in ("default", "built-in"):
+                warn(self, tr("Kits & plugins"), tr("{name} is not a valid name.", name=printable(name)))
+            return None
+        new = new and name not in self.user_kits()
+        return name, new, self.kits.get(f"user:{name}")
 
     def done(self, title, result, error):
         status, out, err = outcome(result, error)
@@ -563,18 +640,23 @@ class KitsPage(QWidget):
         self.run("new", name, options=[f"--agent={agent}" for agent in dialog.agents.chosen()], title=tr("New kit"))
 
     def add_skill(self):
-        kit = self.current()
-        if kit is None:
+        """A skill folder (with SKILL.md) copied into a kit of yours: sandbox-ai kits add-skill checks it (a real
+        folder, nothing followed, special files skipped, limits) and notes when it lies in a folder sandboxes
+        can write."""
+        target = self.target()
+        if target is None:
             return
+        name, create, _ = target
         path = choose_folder(self, tr("Skill folder (with SKILL.md)"), "skill")
         if path:
-            self.run("add-skill", kit["name"], path, title=tr("Add skill"))
+            self.run("add-skill", name, path, title=tr("Add skill"), create=create)
 
     def new_skill(self):
-        kit = self.current()
-        if kit is None:
+        target = self.target()
+        if target is None:
             return
-        dialog = NewSkillDialog(self, sorted(kit_agents(kit)) or list(AGENTS))
+        kit_name, create, kit = target
+        dialog = NewSkillDialog(self, (sorted(kit_agents(kit)) if kit else []) or list(AGENTS))
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         name = dialog.name.text().strip()
@@ -583,15 +665,16 @@ class KitsPage(QWidget):
         options = [f"--agent={agent}" for agent in dialog.agents.chosen()]
         if dialog.description.text().strip():
             options.append(f"--description={dialog.description.text().strip()}")
-        self.run("new-skill", kit["name"], name, options=options, title=tr("New skill"))
+        self.run("new-skill", kit_name, name, options=options, title=tr("New skill"), create=create)
 
     def known_plugins(self):
         return list(self.market_entries)
 
-    def add_plugin(self, plugin=None, kit=None):
-        kit = kit or self.current()
-        if kit is None:
+    def add_plugin(self, plugin=None):
+        target = self.target()
+        if target is None:
             return
+        name, create, _ = target
         dialog = PluginDialog(self, self.known_plugins())
         if plugin:
             dialog.plugin.setCurrentText(plugin)
@@ -603,19 +686,20 @@ class KitsPage(QWidget):
         options = [f"--agent={dialog.agent.currentText()}"]
         if dialog.source.text().strip():
             options.append(f"--source={dialog.source.text().strip()}")
-        self.run("add-plugin", kit["name"], plugin, options=options, title=tr("Add plugin"))
+        self.run("add-plugin", name, plugin, options=options, title=tr("Add plugin"), create=create)
 
     def add_marketplace(self):
-        kit = self.current()
-        if kit is None:
+        target = self.target()
+        if target is None:
             return
+        kit_name, create, _ = target
         dialog = MarketplaceDialog(self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         name, source = dialog.name.text().strip(), dialog.source.text().strip()
         if not self.valid_name(name) or not source:
             return
-        self.run("add-marketplace", kit["name"], name, source, title=tr("Add marketplace"))
+        self.run("add-marketplace", kit_name, name, source, title=tr("Add marketplace"), create=create)
 
     def remove(self):
         kit = self.current()
@@ -638,16 +722,17 @@ class KitsPage(QWidget):
         self.run(action, kit["name"], value, options=[f"--agent={agent}"], title=tr("Remove from the kit"))
 
     def add_hook(self):
-        kit = self.current()
-        if kit is None:
+        target = self.target()
+        if target is None:
             return
-        dialog = HookDialog(self, sorted(kit_agents(kit)) or list(AGENTS))
+        name, create, kit = target
+        dialog = HookDialog(self, (sorted(kit_agents(kit)) if kit else []) or list(AGENTS))
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         path = dialog.file.text().strip()
         if not path or not dialog.agents.chosen():
             return
-        self.run("add-hook", kit["name"], path, options=dialog.options(), title=tr("Add hook"))
+        self.run("add-hook", name, path, options=dialog.options(), title=tr("Add hook"), create=create)
 
     def trust_hooks(self):
         """`sandbox-ai kits trust-hooks KIT` in a terminal: the review is there, and so is the yes (or no). Refresh
@@ -678,12 +763,12 @@ class KitsPage(QWidget):
     def add_to_kit(self):
         rows = selected_rows(self.market)
         plugin = row_key(self.market, rows[0]) if rows else None
-        user = sorted(kit["name"] for kit in self.kits.values() if kit.get("kind") == "user")
-        if not plugin or not user:
+        if not plugin:
             return
-        name, ok = QInputDialog.getItem(self, tr("Add to a kit…").rstrip("…"), tr("Kit"), user, 0, False)
-        if ok and name:
-            self.run("add-plugin", name, plugin, options=["--agent=claude"], title=tr("Add plugin"))
+        target = self.target(why=tr("Declare {plugin} in a kit of yours:", plugin=printable(plugin)))
+        if target is not None:
+            self.run("add-plugin", target[0], plugin, options=["--agent=claude"], title=tr("Add plugin"),
+                     create=target[1])
 
     def install(self, update):
         """`sandbox-ai plugins claude [--update]` in a terminal, with --kit for the built-in kits the current

@@ -123,3 +123,50 @@ def test_the_agents_telemetry_is_chosen_for_every_start(qapp, env, monkeypatch):
     monkeypatch.setattr(type(sai), "telemetry_levels", lambda self: ())
     path.unlink()
     assert not SettingsDialog(sai).fields["telemetry"].isEnabled()
+
+
+def test_extra_preset_directories_are_managed_through_sandbox_ai(qapp, env, monkeypatch, wait):
+    """Settings > sandbox-ai: the extra preset directories, listed with what each gives or why it is skipped;
+    Add folder… and Remove run `sandbox-ai presets dirs`, whose refusal is shown as it is."""
+    from sandbox_ai_app import settings
+    calls, listing = [], {"dirs": [{"path": "/srv/presets", "state": "used", "why": None, "presets": 3},
+                                   {"path": "/work/p", "state": "skipped", "why": "it lies in /work", "presets": 0}],
+                          "yours": "/home/u/.config/sandbox-ai/presets"}
+
+    class Sai:
+        def has_preset_dirs(self):
+            return True
+
+        def preset_dirs(self):
+            return listing
+
+        def preset_dir_command(self, action, path):
+            calls.append((action, path))
+            return (1, "", "sandbox-ai presets: /tmp/x cannot hold presets: it lies in /tmp") if path == "/tmp/x" \
+                else (0, f"preset directory {path} {action}ed", "")
+    box = settings.PresetDirs(Sai())
+    assert wait(lambda: box.list.count() == 2, 10)
+    assert box.list.item(0).text() == "/srv/presets  (3 presets)" and "skipped: it lies in /work" in box.list.item(1).text()
+    assert "/home/u/.config/sandbox-ai/presets" in box.status.text() and not box.remove_button.isEnabled()
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getExistingDirectory", lambda *a, **k: "/srv/more")
+    box.add()
+    assert wait(lambda: calls == [("add", "/srv/more")], 10)
+    assert wait(lambda: box.add_button.isEnabled(), 10)
+    box.list.setCurrentRow(0)
+    assert box.remove_button.isEnabled()
+    box.remove()
+    assert wait(lambda: calls[-1] == ("remove", "/srv/presets"), 10)
+    assert wait(lambda: box.add_button.isEnabled(), 10)
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getExistingDirectory", lambda *a, **k: "/tmp/x")
+    box.add()
+    assert wait(lambda: widgets.SHOWN and "cannot hold presets" in widgets.SHOWN[-1][1], 10)
+    # A sandbox-ai without the command: said, nothing to press.
+    older = type("Old", (), {"has_preset_dirs": lambda self: False})()
+    box = settings.PresetDirs(older)
+    assert "update it" in box.status.text() and not box.add_button.isEnabled()
+
+
+def test_preset_dir_commands_are_checked_before_they_run(env):
+    sai = backend.SandboxAI()
+    assert sai.preset_dir_command("delete", "/x")[0] == 2 and sai.preset_dir_command("add", "relative")[0] == 2
+    assert sai.has_preset_dirs()

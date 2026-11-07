@@ -2,6 +2,8 @@
 """sandbox-ai canaries: decoy files with tokens made for each run.
 
   sandbox-ai canaries list [RUN] [--tokens] [--json]   runs with canaries; one run's files and what happened
+  sandbox-ai canaries log [RUN] [--json]               every event: when, which canary, by which process, and
+                                                       the agent's tool call, prompt and model requests around it
   sandbox-ai canaries resume RUN                       continue a sandbox a canary paused
 
 A sandbox gets decoy files (canaries) that look like credentials: ~/.aws/credentials, a gcloud login, an SSH
@@ -787,6 +789,7 @@ class Plan:
                   "agent": getattr(self.a, "agent", None), "workspace": (getattr(self.a, "workspaces", None) or [None])[0],
                   "home": str(self.home), "kept_home": self.kept, "categories": list(self.categories),
                   "decisions": self.decisions, "log_dir": str(self.log_dir) if self.log_dir else None,
+                  "model_hosts": self.known_model_hosts(),
                   "canaries": [{key: value for key, value in entry.items() if key != "content"}
                                for entry in self.entries]}
         self.started = record["started"]
@@ -814,6 +817,11 @@ class Plan:
                 request.setdefault(text, [text, ident, encoding])
             for text, encoding in name_forms(token).items():
                 names.setdefault(text, [text, ident, encoding])
+        return {"forms": list(request.values()), "names": list(names.values()),
+                "block": self.decisions["on_send"] != "report", "model_hosts": self.model_hosts()}
+
+    def model_hosts(self):
+        """The hosts of the run's model providers (the lead's, the companions', --frontier, --llm)."""
         models = []
         if self.launcher is not None:
             # Every agent of the run talks to its model: the lead's provider and those of the agents --with.
@@ -825,8 +833,13 @@ class Plan:
             with contextlib.suppress(Exception):
                 if getattr(self.a, "llm", None):
                     models += list(self.launcher.load_llm_module().pinned_names(self.a))
-        return {"forms": list(request.values()), "names": list(names.values()),
-                "block": self.decisions["on_send"] != "report", "model_hosts": sorted(set(models))}
+        return sorted(set(models))
+
+    def known_model_hosts(self):
+        try:
+            return self.model_hosts()
+        except Exception:  # noqa: BLE001 - the record is saved either way; canaries log falls back on known hosts
+            return []
 
     def push_entry(self):
         """push.json's "canaries" (for the push check, privacy.py)."""
@@ -1271,6 +1284,289 @@ def show_run(run, out=print, tokens=False, as_json=False):
     return 0
 
 
+# --- the canary log: every event, who, and what the agent did around it ------------------------------
+#
+# `sandbox-ai canaries log` puts each event of a run next to the run's other records: the process the
+# supervisor found holding the file (file events; inotify itself does not say who) or that sent the request
+# (the proxy, the DNS stub), the agent's tool calls in the same time window (activity.jsonl: the one that names
+# the file first), the prompt turn it belongs to, and the requests to the model provider just before and after
+# (the proxy's connections-*.jsonl), each with the id of its activity record where the timeline has one.
+# Everything shown is redacted as the activity log redacts, and the run's canary tokens are masked.
+
+TOOL_BEFORE = 30.0           # seconds before an event a tool call may have started and still be the cause
+TOOL_AFTER = 5.0             # seconds after (the clocks of the transcript and of the supervisor differ a little)
+REQUEST_WINDOW = 120.0       # seconds around an event in which model requests are linked
+REQUESTS_AROUND = 2          # model requests linked before and after an event
+CONNECTIONS_READ = 256 << 20  # bytes of connection logs read per run
+DEFAULT_MODEL_HOSTS = ("api.anthropic.com", "console.anthropic.com", "claude.ai", "api.openai.com", "chatgpt.com",
+                       "opencode.ai")  # for runs recorded before the record named its providers
+PROCESS_KEYS = ("pid", "ns_pid", "comm", "argv", "exe", "cwd", "uid", "parents", "fd")
+
+_modules = {}
+
+
+def module(name):
+    if name not in _modules:
+        spec = importlib.util.spec_from_file_location(f"sandbox_ai_{name}_for_canaries_log", HERE / f"{name}.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        _modules[name] = loaded
+    return _modules[name]
+
+
+def process_of(event):
+    """The process an event names, as {pid, comm, argv, ...} or {"unknown": why}."""
+    process = event.get("process")
+    if isinstance(process, dict) and not process.get("unknown"):
+        return {key: process[key] for key in PROCESS_KEYS if key in process}
+    if isinstance(process, dict):
+        return {"unknown": str(process.get("unknown"))}
+    if isinstance(process, str) and process:
+        return {"comm": process}
+    if event.get("source") == "files":
+        return {"unknown": "inotify does not say who (recorded before the supervisor looked it up)"}
+    if event.get("source") == "push":
+        return {"unknown": "found by the push check"}
+    return {"unknown": "not recorded"}
+
+
+def process_text(process):
+    if not isinstance(process, dict) or process.get("unknown") is not None or not process:
+        why = process.get("unknown") if isinstance(process, dict) else None
+        return f"unknown ({why})" if why else "unknown"
+    argv = process.get("argv") if isinstance(process.get("argv"), list) else []
+    text = f"{process.get('comm') or '?'} (pid {process.get('pid', '?')}"
+    if process.get("ns_pid") not in (None, process.get("pid")):
+        text += f", {process['ns_pid']} in the sandbox"
+    text += ")"
+    if argv:
+        text += ": " + " ".join(str(a) for a in argv)
+    if process.get("parents"):
+        text += " <- " + " <- ".join(str(p) for p in process["parents"][:3])
+    return text
+
+
+def activity_records(log_dir, run):
+    """The run's activity records (the last version of each id), in time order."""
+    activity = module("activity")
+    if not log_dir:
+        return []
+    records = {}
+    for record in activity.read_records(Path(log_dir) / activity.ACTIVITY_FILE, keep=lambda r: r.get("run") == run):
+        if isinstance(record.get("id"), str):
+            records[record["id"]] = record
+    return sorted(records.values(), key=lambda r: activity.epoch(r.get("time")) or 0)
+
+
+def request_host(record):
+    host = record.get("host")
+    if not isinstance(host, str) or not host:
+        match = re.match(r"[a-z][a-z0-9+.-]*://([^/?#:]+)", str(record.get("url") or ""))
+        host = match.group(1) if match else ""
+    return host.lower().rstrip(".").split(":")[0]
+
+
+def model_requests(log_dir, run, hosts):
+    """[request] of the proxy's connection logs of RUN that went to HOSTS (or carried a canary token), with the id
+    of the activity record each one became (if the timeline has one: repeated requests are only counted there)."""
+    activity = module("activity")
+    if not log_dir:
+        return []
+    hosts = {h.lower() for h in hosts}
+    needles = [h.encode() for h in hosts] + [b'"canary"']
+    found, budget = [], CONNECTIONS_READ
+    try:
+        paths = sorted(Path(log_dir).glob(f"connections-*-{run}.jsonl"))
+    except OSError:
+        return []
+    for path in paths:
+        if path.is_symlink() or not path.is_file() or budget <= 0:
+            continue
+        try:
+            with open(path, "rb") as stream:
+                offset = 0
+                for line in stream:
+                    start, offset = offset, offset + len(line)
+                    budget -= len(line)
+                    if budget <= 0:
+                        break
+                    if not line.endswith(b"\n") or not any(n in line for n in needles):
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    host = request_host(record)
+                    if host not in hosts and not isinstance(record.get("canary"), dict):
+                        continue
+                    seconds = activity.epoch(record.get("time"))
+                    if seconds is None:
+                        continue
+                    ident = hashlib.sha256(f"{run}\0proxy\0proxy:{start}".encode("utf-8", "replace")).hexdigest()[:16]
+                    found.append({"time": record.get("time"), "epoch": seconds, "host": host,
+                                  "event": record.get("event"), "method": record.get("method"),
+                                  "url": record.get("url"), "status": record.get("status"),
+                                  "model": host in hosts, "activity_id": ident,
+                                  "canary": record["canary"] if isinstance(record.get("canary"), dict) else None,
+                                  "log": path.name, "offset": start})
+        except OSError:
+            continue
+    return sorted(found, key=lambda r: r["epoch"])
+
+
+def mentions(record, needles):
+    text = (str(record.get("summary") or "") + " " + json.dumps(record.get("details") or {}, ensure_ascii=False))
+    return any(n and n in text for n in needles)
+
+
+def tool_entry(record, match):
+    details = record.get("details") if isinstance(record.get("details"), dict) else {}
+    return {"id": record.get("id"), "time": record.get("time"), "kind": record.get("kind"), "agent": record.get("agent"),
+            "summary": record.get("summary"), "match": match,
+            "details": {k: details[k] for k in ("tool", "name", "command", "arguments", "status", "exit_code", "path",
+                                                "duration", "output") if k in details}}
+
+
+def correlate(event, records, requests):
+    """{"tool_calls", "turn", "requests"} of EVENT: the tool calls in its time window (those that name the file
+    first, then the nearest), the prompt turn before it, the model requests just before and after it."""
+    activity = module("activity")
+    at = activity.epoch(event.get("time"))
+    result = {"tool_calls": [], "turn": None, "requests": []}
+    if at is None:
+        return result
+    path = str(event.get("path") or "")
+    needles = [n for n in {path, os.path.basename(path), path.replace("/root/", "~/", 1)} if len(n) >= 3]
+    timed = [(activity.epoch(r.get("time")), r) for r in records]
+    window = [(t, r) for t, r in timed if t is not None and r.get("kind") in ("tool", "command", "mcp")
+              and at - TOOL_BEFORE <= t <= at + TOOL_AFTER]
+    named = [(t, r) for t, r in window if mentions(r, needles)]
+    if named:
+        chosen = sorted(named, key=lambda item: abs(at - item[0]))[:3]
+        result["tool_calls"] = [tool_entry(r, "names the file") for _, r in chosen]
+    elif window:
+        before = [(t, r) for t, r in window if t <= at + 1]
+        t, r = max(before, key=lambda item: item[0]) if before else min(window, key=lambda item: item[0])
+        result["tool_calls"] = [tool_entry(r, "same time")]
+    prompts = [(t, r) for t, r in timed if t is not None and r.get("kind") == "prompt" and t <= at + 1]
+    if prompts:
+        t, r = prompts[-1]
+        result["turn"] = {"id": r.get("id"), "time": r.get("time"), "agent": r.get("agent"), "summary": r.get("summary")}
+    ids = {r.get("id") for r in records}
+    near = [q for q in requests if abs(q["epoch"] - at) <= REQUEST_WINDOW]
+    # A request that carried this canary's token: the one the event is about (a token that left, or entered the
+    # agent's conversation: the same second), or after a read, the first that took the file's content on.
+    own = [q for q in near if q.get("canary") and str(q["canary"].get("canary")) == str(event.get("canary"))]
+    if event.get("event") in ("send", "context"):
+        carried = [q for q in own if abs(q["epoch"] - at) <= 2][:1]
+    else:
+        carried = [q for q in own if q["epoch"] >= at][:1]
+    before = [q for q in near if q["model"] and q["epoch"] < at and q not in carried][-REQUESTS_AROUND:]
+    after = [q for q in near if q["model"] and q["epoch"] >= at and q not in carried][:REQUESTS_AROUND]
+    chosen = [("carried the token", q) for q in carried] + [("before", q) for q in before] + \
+        [("same second" if int(q["epoch"]) == int(at) else "after", q) for q in after]
+    for position, q in sorted(chosen, key=lambda item: item[1]["epoch"]):
+        result["requests"].append({"position": position, "time": q["time"], "method": q["method"], "url": q["url"],
+                                   "host": q["host"], "status": q["status"], "event": q["event"],
+                                   "activity_id": q["activity_id"] if q["activity_id"] in ids else None,
+                                   "log": q["log"], "offset": q["offset"]})
+    return result
+
+
+def log_entries(run):
+    """The canary log of RUN: [entry] in time order (see the comment above)."""
+    record = read_json(run_state(run))
+    if record is None:
+        raise ValueError(f"no canaries recorded for run {shown(run)}; see sandbox-ai canaries list")
+    activity = module("activity")
+    tokens = [token for entry in record.get("canaries", []) for token in (entry.get("tokens") or {}).values()
+              if isinstance(token, str)]
+    redact = activity.Redactor(tokens)
+    log_dir = record.get("log_dir")
+    records = activity_records(log_dir, run)
+    hosts = record.get("model_hosts") or DEFAULT_MODEL_HOSTS
+    requests = model_requests(log_dir, run, hosts)
+    entries = []
+    for event in read_events(run):
+        entry = {key: event.get(key) for key in ("time", "canary", "category", "path", "host_path", "event", "source",
+                                                 "where", "url", "host", "encoding", "action", "summary", "error")
+                 if event.get(key) is not None}
+        entry["run"] = run
+        entry["process"] = process_of(event)
+        if isinstance(event.get("processes"), list):
+            entry["processes"] = [process_of({"process": p}) for p in event["processes"][:4]]
+        if event.get("canary"):
+            entry.update(correlate(event, records, requests))
+        entries.append(activity.clean(entry, redact, limit=activity.TEXT_LIMIT, budget=[2000]))
+    return {"run": run, "status": record.get("status"), "started": record.get("started"),
+            "agent": record.get("agent"), "log_dir": log_dir, "activity": bool(records),
+            "connections": bool(requests), "events": entries}
+
+
+def resolve_run(run):
+    if run_state(run).exists():
+        return run
+    with contextlib.suppress(Exception):
+        other = module("activity").run_id(run)  # the name of a running sandbox or of a kept start
+        if other and RUN_NAME.fullmatch(str(other)) and run_state(other).exists():
+            return other
+    return run
+
+
+def show_log(run=None, out=print, as_json=False):
+    if run:
+        logs = [log_entries(resolve_run(run))]
+    else:
+        logs = []
+        for path in sorted((state_root() / "runs").glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+            if path.name.endswith(".events.jsonl") or not RUN_NAME.fullmatch(path.stem):
+                continue
+            if read_events(path.stem):
+                with contextlib.suppress(ValueError):
+                    logs.append(log_entries(path.stem))
+    if as_json:
+        out(json.dumps(logs if not run else logs[0], indent=2, ensure_ascii=False))
+        return 0
+    if not logs or not any(log["events"] for log in logs):
+        out("no canary events" + (f" in run {shown(run)}" if run else ""))
+        return 0
+    for log in logs:
+        out(f"run {shown(log['run'])} ({shown(log.get('agent') or '?')}, {shown(log.get('status'))}, started "
+            f"{shown(log.get('started'))}): {len(log['events'])} event(s)")
+        if not log["activity"]:
+            out("  (no activity timeline for this run: tool calls and prompts cannot be linked)")
+        for entry in log["events"]:
+            out("")
+            head = f"  {shown(entry.get('time'))}  {shown(entry.get('event', '?')).upper()}  " \
+                   f"{shown(entry.get('canary') or '-')}  {shown(entry.get('path') or '')}"
+            out(head + (f"  [{shown(entry.get('action'))}]" if entry.get("action") else ""))
+            if entry.get("summary") or entry.get("error"):
+                out(f"    {shown(entry.get('summary') or entry.get('error'), 500)}")
+            out(f"    process: {shown(process_text(entry.get('process')), 600)}")
+            for other in (entry.get("processes") or [])[1:]:
+                out(f"    also:    {shown(process_text(other), 600)}")
+            for call in entry.get("tool_calls") or []:
+                out(f"    tool call ({shown(call.get('match'))}): {shown(call.get('summary'), 300)}  "
+                    f"[{shown(call.get('time'))}, activity {shown(call.get('id'))}]")
+            if entry.get("turn"):
+                turn = entry["turn"]
+                out(f"    prompt turn: {shown(turn.get('summary'), 200)}  [{shown(turn.get('time'))}, activity "
+                    f"{shown(turn.get('id'))}]")
+            for request in entry.get("requests") or []:
+                line = f"    model request ({shown(request.get('position'))}): {shown(request.get('method') or '')} " \
+                       f"{shown(request.get('url') or request.get('host') or '', 300)}"
+                if request.get("status"):
+                    line += f" → {shown(request['status'])}"
+                line += f"  [{shown(request.get('time'))}"
+                line += f", activity {shown(request['activity_id'])}]" if request.get("activity_id") else \
+                    f", {shown(request.get('log'))} @{shown(request.get('offset'))}]"
+                out(line)
+        out("")
+    return 0
+
+
 def resume(run, out=print):
     spec = importlib.util.spec_from_file_location("sandbox_net_for_canaries", HERE / "net.py")
     net = importlib.util.module_from_spec(spec)
@@ -1296,12 +1592,18 @@ def main(argv, out=print):
     listing.add_argument("run", nargs="?")
     listing.add_argument("--tokens", action="store_true", help="show the tokens in full")
     listing.add_argument("-j", "--json", action="store_true")
+    logging = commands.add_parser("log", help="every canary event with its process, the tool call, the prompt "
+                                              "and the model requests around it")
+    logging.add_argument("run", nargs="?", help="a run id or the name of a start (default: every run)")
+    logging.add_argument("-j", "--json", action="store_true")
     resuming = commands.add_parser("resume", help="continue a sandbox a canary paused")
     resuming.add_argument("run")
     args = parser.parse_args(argv)
     try:
         if args.command == "resume":
             return resume(args.run, out)
+        if args.command == "log":
+            return show_log(args.run, out, args.json)
         if args.run:
             return show_run(args.run, out, args.tokens, args.json)
         return list_runs(out, args.json)

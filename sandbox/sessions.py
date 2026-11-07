@@ -697,13 +697,25 @@ def thaw(name, data):
     (session_dir(name) / "paused").unlink(missing_ok=True)
 
 
-def added_options(data, workspaces=(), mounts=()):
-    """The session's saved options with WORKSPACES (directories) and MOUNTS (SOURCE:DESTINATION[:ro|rw]) added, their
-    host paths made absolute from here (the session starts in its own directory). A session that named no workspace
-    had its start directory as /work: it stays first, the new ones follow at /workspaces/<name>. Checked as the
-    launcher parses them; what a start checks besides (policy, private locations) it checks when it starts."""
+def added_options(data, workspaces=(), mounts=(), mcp=()):
+    """The session's saved options with WORKSPACES (directories), MOUNTS (SOURCE:DESTINATION[:ro|rw]) and MCP servers
+    (--mcp NAME; one it names already is not added again) added, their host paths made absolute from here (the
+    session starts in its own directory). A session that named no workspace had its start directory as /work: it
+    stays first, the new ones follow at /workspaces/<name>. Checked as the launcher parses them; what a start
+    checks besides (policy, mode, private locations) it checks when it starts."""
     l = launcher()
     options = list(data["options"])
+    if mcp:
+        with in_directory(data["cwd"]):
+            try:
+                given = l.parse_args([data["agent"], *options])
+            except SystemExit:
+                raise ValueError("the session's saved options no longer parse; start anew") from None
+        for name in dict.fromkeys(mcp):
+            if not re.fullmatch(l.MCP_NAME, name):
+                raise ValueError(f"--mcp NAME: 1-32 letters, digits, '_' or '-': {l.printable(name)!r}")
+            if name not in given.mcp:
+                options += ["--mcp", name]
     if workspaces:
         with in_directory(data["cwd"]):
             try:
@@ -737,21 +749,31 @@ def added_options(data, workspaces=(), mounts=()):
     return options
 
 
-def resume(name, workspaces=(), mounts=()):
-    """Thaw or restart the session NAME; with WORKSPACES or MOUNTS a stopped session starts with them added (kept
-    for its later starts)."""
+def resume(name, workspaces=(), mounts=(), mcp=()):
+    """Thaw or restart the session NAME; with WORKSPACES, MOUNTS or MCP servers a stopped session starts with them
+    added (kept for its later starts)."""
     with session_lock(name):
-        result, restarted = resume_locked(name, workspaces, mounts)
+        result, restarted = resume_locked(name, workspaces, mounts, mcp)
     return attach_if_terminal(name) if restarted and not result else result
 
 
-def resume_locked(name, workspaces=(), mounts=()):
+def add_mcp(name, servers):
+    """Add the MCP SERVERS to the saved options of session NAME (--mcp, kept for its later starts) without starting
+    it: the options it starts with from now on."""
+    with session_lock(name):
+        data = load(name)
+        data["options"] = added_options(data, mcp=servers)
+        save(name, data)
+        return list(data["options"])
+
+
+def resume_locked(name, workspaces=(), mounts=(), mcp=()):
     data = load(name)
     state = status(name, data)
     shown = launcher().printable(display(name, data))
-    if (workspaces or mounts) and state in ("paused", "running"):
-        raise ValueError(f"{shown} is {state}: a workspace or mount is added at a start; add --restart (the agent "
-                         "continues its conversation)")
+    if (workspaces or mounts or mcp) and state in ("paused", "running"):
+        raise ValueError(f"{shown} is {state}: a workspace, mount or MCP server is added at a start; add --restart "
+                         "(the agent continues its conversation)")
     if state == "paused":
         thaw(name, data)
         activity_event(name, "resume")
@@ -767,8 +789,8 @@ def resume_locked(name, workspaces=(), mounts=()):
                          "start anew")
     check_keep_policy(shown)
     before = list(data["options"])
-    if workspaces or mounts:
-        data["options"] = added_options(data, workspaces, mounts)
+    if workspaces or mounts or mcp:
+        data["options"] = added_options(data, workspaces, mounts, mcp)
     review_home(name, data)
     print(f"agent-sandbox: restarting stopped session {shown}; the agent continues its last conversation",
           file=sys.stderr)
@@ -776,6 +798,9 @@ def resume_locked(name, workspaces=(), mounts=()):
         print(f"agent-sandbox: added: {launcher().printable(str(Path(os.path.expanduser(path)).absolute()))} at "
               f"/workspaces/{launcher().printable(Path(os.path.expanduser(path)).absolute().name)} (a repeated name "
               "gets -2, -3 ...)", file=sys.stderr)
+    for server in dict.fromkeys(mcp):
+        print(f"agent-sandbox: added: the MCP server {launcher().printable(server)} (--mcp), kept for its later "
+              "starts", file=sys.stderr)
     a, document = effective(data)
     args = restart_args(data, (document or {}).get("agent_args", []), bool(a and a.binary))
     try:

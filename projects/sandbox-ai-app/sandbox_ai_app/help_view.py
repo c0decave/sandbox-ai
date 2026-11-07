@@ -341,6 +341,12 @@ class HelpPage(QWidget):
         self.search.textChanged.connect(self.filter)
         top.addWidget(self.search, 1)
         top.addWidget(HelpButton("help.search"))
+        if with_tours:
+            self.tour_about_button = QPushButton(tr("Tour about…"))
+            self.tour_about_button.setToolTip(tr("Type a topic: the tours and Help sections about it, best first "
+                                                 "(Ctrl+F1)"))
+            self.tour_about_button.clicked.connect(lambda _=False: self.tour_about())
+            top.addWidget(self.tour_about_button)
         self.language = QComboBox()
         self.language.addItem(tr("Language of the app"), None)
         for code, name in zip(i18n.LANGUAGES, ("English", "Deutsch")):
@@ -503,11 +509,101 @@ class HelpPage(QWidget):
         self.tour_flow.invalidate()
         self.tours.setVisible(bool(idents))
 
+    def tour_about(self, text=None):
+        """Tour about…: a topic in, the tours and sections about it out; a tour starts (tour_requested), a section
+        opens here."""
+        dialog = TourSearchDialog(self, self.search.text() if text is None else text)
+        dialog.tour_requested.connect(self.tour_requested.emit)
+        dialog.section_requested.connect(self.show_section)
+        dialog.show()
+        self.tour_dialog = dialog
+        return dialog
+
     def link(self, target):
         if target.startswith("section:"):
             self.show_section(target[len("section:"):])
         elif target.startswith("tour:"):
             self.tour_requested.emit(target[len("tour:"):])
+
+
+KIND_LABELS = {"task": N_("Tour through a task"), "area": N_("Tour of a page"), "section": N_("Help section")}
+
+
+class TourSearchDialog(QDialog):
+    """Tour about…: the human types a topic (English or German); the tours through a task, the tours of the pages
+    and the Help sections about it are listed best first (tour_search.py). Enter or a double click starts the
+    tour (tour_requested: its id or area:PAGE) or opens the section (section_requested: its id)."""
+    tour_requested = Signal(str)
+    section_requested = Signal(str)
+
+    def __init__(self, parent=None, text=""):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setWindowTitle(tr("Tour about…"))
+        self.resize(620, 460)
+        layout = QVBoxLayout(self)
+        layout.addWidget(plain_label(tr("Which topic? A tour shows it step by step on the pages; a Help section "
+                                        "explains it."), role="secondary"))
+        self.query = QLineEdit()
+        self.query.setPlaceholderText(tr("A topic, e.g. network, presets, kits, Netzwerk, Vorlagen"))
+        self.query.setClearButtonEnabled(True)
+        self.query.textChanged.connect(lambda value: self.find(value))
+        self.query.returnPressed.connect(self.start_current)
+        layout.addWidget(self.query)
+        self.results = QListWidget()
+        self.results.itemActivated.connect(lambda item: self.start(item))
+        layout.addWidget(self.results, 1)
+        self.status = plain_label(role="secondary")
+        layout.addWidget(self.status)
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        self.start_button = QPushButton(tr("Start the tour"))
+        self.start_button.setProperty("role", "primary")
+        self.start_button.clicked.connect(lambda _=False: self.start_current())
+        close = QPushButton(tr("Close"))
+        close.clicked.connect(lambda _=False: self.close())
+        buttons.addWidget(self.start_button)
+        buttons.addWidget(close)
+        layout.addLayout(buttons)
+        self.results.currentItemChanged.connect(lambda item, _old: self.update_button(item))
+        self.query.setText(text or "")
+        self.find(self.query.text())
+        self.query.setFocus()
+
+    def find(self, text):
+        from . import tour_search
+        self.results.clear()
+        hits = tour_search.search(text)
+        for hit in hits:
+            item = QListWidgetItem(f"{tr(KIND_LABELS[hit.kind])}:  {H.say(hit.title)}")
+            item.setToolTip(H.say(hit.summary))
+            item.setData(Qt.ItemDataRole.UserRole, (hit.kind, hit.ident))
+            self.results.addItem(item)
+        if hits:
+            self.results.setCurrentRow(0)
+        self.status.setText("" if not text.strip() else tr("Nothing about {text}: try another word, in English or "
+                                                           "German.", text=text.strip()) if not hits else
+                            tr("{count} found; Enter starts the first.", count=len(hits)))
+        self.update_button(self.results.currentItem())
+        return hits
+
+    def update_button(self, item):
+        kind = item.data(Qt.ItemDataRole.UserRole)[0] if item is not None else None
+        self.start_button.setEnabled(kind is not None)
+        self.start_button.setText(tr("Open the section") if kind == "section" else tr("Start the tour"))
+
+    def start_current(self):
+        self.start(self.results.currentItem())
+
+    def start(self, item):
+        if item is None:
+            return
+        kind, ident = item.data(Qt.ItemDataRole.UserRole)
+        if kind == "section":
+            self.section_requested.emit(ident)
+        else:
+            self.tour_requested.emit(ident)
+        self.close()
 
 
 class HelpDialog(QDialog):

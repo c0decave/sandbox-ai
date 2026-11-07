@@ -47,6 +47,161 @@ def tr(key, **values):
 
 
 TEXTS = {
+    # extra preset directories (sandbox-ai presets dirs)
+    'Add folder…': {
+        'en': 'Add folder…',
+        'de': 'Ordner hinzufügen…'},
+    'This sandbox-ai has no extra preset directories yet; update it.': {
+        'en': 'This sandbox-ai has no extra preset directories yet; update it.',
+        'de': 'Dieses sandbox-ai kennt noch keine zusätzlichen Vorlagen-Ordner; aktualisieren Sie es.'},
+    'Cannot list the preset directories: {error}': {
+        'en': 'Cannot list the preset directories: {error}',
+        'de': 'Die Vorlagen-Ordner lassen sich nicht auflisten: {error}'},
+    '{path}  ({count} presets)': {
+        'en': '{path}  ({count} presets)',
+        'de': '{path}  ({count} Vorlagen)'},
+    '{path}  (skipped: {why})': {
+        'en': '{path}  (skipped: {why})',
+        'de': '{path}  (übergangen: {why})'},
+    'Presets are read from your folder {yours} first, then from these in their order, then the built-in ones. A folder sandboxes can write is refused.': {
+        'en': 'Presets are read from your folder {yours} first, then from these in their order, then the built-in ones. A folder sandboxes can write is refused.',
+        'de': 'Vorlagen werden zuerst aus Ihrem Ordner {yours} gelesen, dann aus diesen in ihrer Reihenfolge, dann die eingebauten. Ein Ordner, in den Sandboxen schreiben können, wird abgelehnt.'},
+    'Folder with presets (*.json)': {
+        'en': 'Folder with presets (*.json)',
+        'de': 'Ordner mit Vorlagen (*.json)'},
+    'Preset directories': {
+        'en': 'Preset directories',
+        'de': 'Vorlagen-Ordner'},
+    'From the preset directory {path}': {
+        'en': 'From the preset directory {path}',
+        'de': 'Aus dem Vorlagen-Ordner {path}'},
+    # Tour about…: tours and Help sections by topic
+    'Tour about…': {
+        'en': 'Tour about…',
+        'de': 'Tour zu…'},
+    'Type a topic: the tours and Help sections about it, best first (Ctrl+F1)': {
+        'en': 'Type a topic: the tours and Help sections about it, best first (Ctrl+F1)',
+        'de': 'Geben Sie ein Thema ein: die Touren und Hilfeabschnitte dazu, die besten zuerst (Strg+F1)'},
+    'Tour through a task': {
+        'en': 'Tour through a task',
+        'de': 'Tour durch eine Aufgabe'},
+    'Tour of a page': {
+        'en': 'Tour of a page',
+        'de': 'Tour einer Seite'},
+    'Help section': {
+        'en': 'Help section',
+        'de': 'Hilfeabschnitt'},
+    'Which topic? A tour shows it step by step on the pages; a Help section explains it.': {
+        'en': 'Which topic? A tour shows it step by step on the pages; a Help section explains it.',
+        'de': 'Welches Thema? Eine Tour zeigt es Schritt für Schritt auf den Seiten; ein Hilfeabschnitt erklärt es.'},
+    'A topic, e.g. network, presets, kits, Netzwerk, Vorlagen': {
+        'en': 'A topic, e.g. network, presets, kits, Netzwerk, Vorlagen',
+        'de': 'Ein Thema, z. B. Netzwerk, Vorlagen, Kits, network, presets'},
+    'Start the tour': {
+        'en': 'Start the tour',
+        'de': 'Tour starten'},
+    'Open the section': {
+        'en': 'Open the section',
+        'de': 'Abschnitt öffnen'},
+    'Nothing about {text}: try another word, in English or German.': {
+        'en': 'Nothing about {text}: try another word, in English or German.',
+        'de': 'Nichts zu {text}: Versuchen Sie ein anderes Wort, auf Deutsch oder Englisch.'},
+    '{count} found; Enter starts the first.': {
+        'en': '{count} found; Enter starts the first.',
+        'de': '{count} gefunden; Enter startet den ersten.'},
+    # kits: adding into a kit of yours from any selection
+    'Add to a kit of yours': {
+        'en': 'Add to a kit of yours',
+        'de': 'Zu einem eigenen Kit hinzufügen'},
+    'A new kit…': {
+        'en': 'A new kit…',
+        'de': 'Ein neues Kit…'},
+    "New kit's name": {
+        'en': "New kit's name",
+        'de': 'Name des neuen Kits'},
+    '{why} What you add goes to a kit of yours: you choose it (or a new one) first.': {
+        'en': '{why} What you add goes to a kit of yours: you choose it (or a new one) first.',
+        'de': '{why} Was Sie hinzufügen, kommt in ein eigenes Kit: Sie wählen es (oder ein neues) zuerst.'},
+    'No kit of yours is selected.': {
+        'en': 'No kit of yours is selected.',
+        'de': 'Kein eigenes Kit ausgewählt.'},
+    'Declare {plugin} in a kit of yours:': {
+        'en': 'Declare {plugin} in a kit of yours:',
+        'de': '{plugin} in einem eigenen Kit eintragen:'},
+    # >>> canary log (Activity, tab Canaries) >>>
+    'unknown ({why})': {
+        'en': 'unknown ({why})',
+        'de': 'unbekannt ({why})'},
+    'unknown': {
+        'en': 'unknown',
+        'de': 'unbekannt'},
+    ', {pid} in the sandbox': {
+        'en': ', {pid} in the sandbox',
+        'de': ', {pid} in der Sandbox'},
+    'Tool call ({match}): {summary}  [{time}, activity {id}]': {
+        'en': 'Tool call ({match}): {summary}  [{time}, activity {id}]',
+        'de': 'Tool-Aufruf ({match}): {summary}  [{time}, Aktivität {id}]'},
+    'Prompt turn: {summary}  [{time}, activity {id}]': {
+        'en': 'Prompt turn: {summary}  [{time}, activity {id}]',
+        'de': 'Prompt-Zug: {summary}  [{time}, Aktivität {id}]'},
+    'activity {id}': {
+        'en': 'activity {id}',
+        'de': 'Aktivität {id}'},
+    'Model request ({position}): {request}  [{time}, {where}]': {
+        'en': 'Model request ({position}): {request}  [{time}, {where}]',
+        'de': 'Modellanfrage ({position}): {request}  [{time}, {where}]'},
+    'Also held open by: {process}': {
+        'en': 'Also held open by: {process}',
+        'de': 'Auch offen gehalten von: {process}'},
+    'Canary': {
+        'en': 'Canary',
+        'de': 'Canary'},
+    'Process': {
+        'en': 'Process',
+        'de': 'Prozess'},
+    'same second': {
+        'en': 'same second',
+        'de': 'dieselbe Sekunde'},
+    'carried the token': {
+        'en': 'carried the token',
+        'de': 'trug das Token'},
+    'names the file': {
+        'en': 'names the file',
+        'de': 'nennt die Datei'},
+    'same time': {
+        'en': 'same time',
+        'de': 'zur selben Zeit'},
+    'This sandbox-ai has no canary log yet; update it with: sandbox-ai update': {
+        'en': 'This sandbox-ai has no canary log yet; update it with: sandbox-ai update',
+        'de': 'Dieses sandbox-ai hat noch kein Canary-Log; aktualisieren Sie es mit: sandbox-ai update'},
+    'Reading the canary log…': {
+        'en': 'Reading the canary log…',
+        'de': 'Lese das Canary-Log…'},
+    'Cannot read the canary log: {error}': {
+        'en': 'Cannot read the canary log: {error}',
+        'de': 'Das Canary-Log lässt sich nicht lesen: {error}'},
+    "Nothing of the agent's in that time window.": {
+        'en': "Nothing of the agent's in that time window.",
+        'de': 'Nichts vom Agenten in diesem Zeitfenster.'},
+    'No activity timeline for this run: nothing to link.': {
+        'en': 'No activity timeline for this run: nothing to link.',
+        'de': 'Kein Aktivitätsverlauf für diesen Lauf: nichts zu verknüpfen.'},
+    '{count} canary event(s) in {runs} run(s)': {
+        'en': '{count} canary event(s) in {runs} run(s)',
+        'de': '{count} Canary-Ereignis(se) in {runs} Lauf/Läufen'},
+    'No canary was touched: no decoy file opened, no token sent.': {
+        'en': 'No canary was touched: no decoy file opened, no token sent.',
+        'de': 'Kein Canary berührt: keine Köderdatei geöffnet, kein Token gesendet.'},
+    'Timeline': {
+        'en': 'Timeline',
+        'de': 'Verlauf'},
+    'Canaries': {
+        'en': 'Canaries',
+        'de': 'Canaries'},
+    'Canaries ({count})': {
+        'en': 'Canaries ({count})',
+        'de': 'Canaries ({count})'},
+    # <<< canary log <<<
     'ct101': {
         'en': 'ct101',
         'de': 'ct101'},
@@ -2591,9 +2746,6 @@ TEXTS = {
     'Commands': {
         'en': 'Commands',
         'de': 'Befehle'},
-    'Create a kit of your own first (New kit…).': {
-        'en': 'Create a kit of your own first (New kit…).',
-        'de': 'Zuerst ein eigenes Kit anlegen (Neues Kit…).'},
     'Declare the selected plugin in one of your kits (sandbox-ai kits add-plugin)': {
         'en': 'Declare the selected plugin in one of your kits (sandbox-ai kits add-plugin)',
         'de': 'Das gewählte Plugin in einem Ihrer Kits eintragen (sandbox-ai kits add-plugin)'},
@@ -4773,5 +4925,110 @@ TEXTS = {
     'Tours through a task': {
         'en': 'Tours through a task',
         'de': 'Touren durch eine Aufgabe'},
-    # <<< help area, (?) buttons, tours through a task, board drag and drop <<<
+    # <<< help area, (?) buttons, tours through a task, board drag and drop <<<,
+    'unreachable': {
+        'en': 'unreachable',
+        'de': 'nicht erreichbar'},
+    '{version}, update: {available}': {
+        'en': '{version}, update: {available}',
+        'de': '{version}, Update: {available}'},
+    '{version}, up to date': {
+        'en': '{version}, up to date',
+        'de': '{version}, aktuell'},
+    '{path} could be read by others (mode {was}), which ssh refuses: made private ({now})': {
+        'en': '{path} could be read by others (mode {was}), which ssh refuses: made private ({now})',
+        'de': '{path} war für andere lesbar (Modus {was}), was ssh ablehnt: privat gemacht ({now})'},
+    '{host}: not updated: {error}': {
+        'en': '{host}: not updated: {error}',
+        'de': '{host}: nicht aktualisiert: {error}'},
+    '{host}: {before} -> {after}': {
+        'en': '{host}: {before} -> {after}',
+        'de': '{host}: {before} -> {after}'},
+    '{host}: {version}, up to date': {
+        'en': '{host}: {version}, up to date',
+        'de': '{host}: {version}, aktuell'},
+    'Update': {
+        'en': 'Update',
+        'de': 'Aktualisieren'},
+    'Update all': {
+        'en': 'Update all',
+        'de': 'Alle aktualisieren'},
+    'Check versions': {
+        'en': 'Check versions',
+        'de': 'Versionen prüfen'},
+    'sandbox-ai update on this host (its own signed update; sudo for a system installation)': {
+        'en': 'sandbox-ai update on this host (its own signed update; sudo for a system installation)',
+        'de': 'sandbox-ai update auf diesem Host (sein eigenes signiertes Update; sudo für eine Systeminstallation)'},
+    'sandbox-ai update on every host of the list, one after the other': {
+        'en': 'sandbox-ai update on every host of the list, one after the other',
+        'de': 'sandbox-ai update auf jedem Host der Liste, einer nach dem anderen'},
+    "Update or Update all: each host's own sandbox-ai update, signed, as install.sh installed it there.": {
+        'en': "Update or Update all: each host's own sandbox-ai update, signed, as install.sh installed it there.",
+        'de': 'Aktualisieren oder Alle aktualisieren: das eigene sandbox-ai-Update jedes Hosts, signiert, so wie install.sh es dort installiert hat.'},
+    'Updates': {
+        'en': 'Updates',
+        'de': 'Updates'},
+    'This sandbox-ai cannot update hosts yet: update it.': {
+        'en': 'This sandbox-ai cannot update hosts yet: update it.',
+        'de': 'Dieses sandbox-ai kann Hosts noch nicht aktualisieren: bitte aktualisieren.'},
+    'Asking the hosts for their versions…': {
+        'en': 'Asking the hosts for their versions…',
+        'de': 'Frage die Hosts nach ihren Versionen…'},
+    'Updates for: {hosts}': {
+        'en': 'Updates for: {hosts}',
+        'de': 'Updates für: {hosts}'},
+    'Every host answered is up to date.': {
+        'en': 'Every host answered is up to date.',
+        'de': 'Jeder Host, der geantwortet hat, ist aktuell.'},
+    'This machine updates on the page System (or: sandbox-ai update).': {
+        'en': 'This machine updates on the page System (or: sandbox-ai update).',
+        'de': 'Diese Maschine wird auf der Seite System aktualisiert (oder: sandbox-ai update).'},
+    'Updating {host} ({index} of {count})…': {
+        'en': 'Updating {host} ({index} of {count})…',
+        'de': 'Aktualisiere {host} ({index} von {count})…'},
+    'The installation on {host} belongs to root. Update it with sudo?': {
+        'en': 'The installation on {host} belongs to root. Update it with sudo?',
+        'de': 'Die Installation auf {host} gehört root. Mit sudo aktualisieren?'},
+    'Update with sudo': {
+        'en': 'Update with sudo',
+        'de': 'Mit sudo aktualisieren'},
+    '{host}: update': {
+        'en': '{host}: update',
+        'de': '{host}: Update'},
+    '  {host}: the update runs in a terminal tab, where sudo asks for the password': {
+        'en': '  {host}: the update runs in a terminal tab, where sudo asks for the password',
+        'de': '  {host}: das Update läuft in einem Terminal-Tab, dort fragt sudo nach dem Passwort'},
+    '{count} hosts: {updated} updated, {current} up to date, {failed} not updated': {
+        'en': '{count} hosts: {updated} updated, {current} up to date, {failed} not updated',
+        'de': '{count} Hosts: {updated} aktualisiert, {current} aktuell, {failed} nicht aktualisiert'},
+    'Attach {name} to…': {
+        'en': 'Attach {name} to…',
+        'de': '{name} verbinden mit…'},
+    'uses it': {
+        'en': 'uses it',
+        'de': 'nutzt ihn'},
+    'Restart it now if it runs (the agent continues its conversation)': {
+        'en': 'Restart it now if it runs (the agent continues its conversation)',
+        'de': 'Jetzt neu starten, falls er läuft (der Agent setzt sein Gespräch fort)'},
+    "A running sandbox cannot take a new MCP server while it runs: its agent reads its servers when it starts, and the server's socket is mounted at the start. The server is kept in the start's options: without a restart it is there from its next start on.": {
+        'en': "A running sandbox cannot take a new MCP server while it runs: its agent reads its servers when it starts, and the server's socket is mounted at the start. The server is kept in the start's options: without a restart it is there from its next start on.",
+        'de': 'Eine laufende Sandbox kann keinen neuen MCP-Server aufnehmen, solange sie läuft: ihr Agent liest seine Server beim Start, und der Socket des Servers wird beim Start eingehängt. Der Server bleibt in den Optionen des Starts: ohne Neustart ist er ab dem nächsten Start da.'},
+    'Serves': {
+        'en': 'Serves',
+        'de': 'Bedient'},
+    'Attach to…': {
+        'en': 'Attach to…',
+        'de': 'Verbinden mit…'},
+    'Connect the server to an agent start (sandbox-ai mcp attach)': {
+        'en': 'Connect the server to an agent start (sandbox-ai mcp attach)',
+        'de': 'Den Server mit einem Agenten-Start verbinden (sandbox-ai mcp attach)'},
+    'Select a server first.': {
+        'en': 'Select a server first.',
+        'de': 'Bitte zuerst einen Server auswählen.'},
+    'No kept agent start to attach it to: start one (a run without a kept start takes no new server).': {
+        'en': 'No kept agent start to attach it to: start one (a run without a kept start takes no new server).',
+        'de': 'Kein behaltener Agenten-Start, mit dem er verbunden werden kann: bitte einen starten (ein Lauf ohne behaltenen Start nimmt keinen neuen Server auf).'},
+    'Agent start': {
+        'en': 'Agent start',
+        'de': 'Agenten-Start'},
 }

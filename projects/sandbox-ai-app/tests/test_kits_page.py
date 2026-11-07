@@ -95,16 +95,100 @@ def test_the_page_lists_every_kit_what_it_brings_and_the_marketplace(fake):
 def test_only_your_kits_can_be_changed_and_why(fake, env):
     page = fake.kits
     select_kit(page, "builtin", "egm")
-    assert not any(b.isEnabled() for b in page.edit_buttons)
-    assert "read-only" in page.skill_button.toolTip()
+    assert not any(b.isEnabled() for b in page.change_buttons)
+    assert "read-only" in page.remove_button.toolTip() and "read-only" in page.delete_button.toolTip()
+    assert all(b.isEnabled() for b in page.add_buttons), "adding goes to a kit of yours, chosen first"
+    assert "read-only" in page.add_hint.text() and "a kit of yours" in page.add_hint.text()
     assert not page.use_button.isEnabled() and "Choose a project first" in page.use_button.toolTip()
     fake.set_project(project(env, "p"))
     select_kit(page, "builtin", "egm")
     assert page.use_button.isEnabled()
     select_kit(page, "default", "default")
-    assert "edited in its folder" in page.skill_button.toolTip() and not page.use_button.isEnabled()
+    assert "edited in its folder" in page.remove_button.toolTip() and not page.use_button.isEnabled()
     select_kit(page, "user", "mine")
     assert all(b.isEnabled() for b in page.edit_buttons) and page.use_button.isEnabled()
+    assert page.add_hint.text() == ""
+
+
+def fake_target(name, new):
+    class Target:
+        def __init__(self, parent, why, kits):
+            Target.why, Target.kits = why, kits
+
+        def exec(self):
+            return QtWidgets.QDialog.DialogCode.Accepted
+
+        def chosen(self):
+            return name, new
+    return Target
+
+
+def test_a_skill_added_with_a_built_in_kit_selected_goes_to_a_kit_of_yours(fake, env, monkeypatch, wait):
+    """The complaint: with sandbox-ai's own kits only "Use in the current project" worked. Now adding asks
+    which kit of yours receives it, and creates a new one first when wanted."""
+    page, calls = fake.kits, fake.calls
+    skill = env / "skill"
+    skill.mkdir()
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getExistingDirectory", lambda *a, **k: str(skill))
+    target = fake_target("team", True)
+    monkeypatch.setattr(kits_page, "TargetKitDialog", target)
+    select_kit(page, "builtin", "egm")
+    page.add_skill()
+    assert wait(lambda: calls[-2:] == [("new", "team"), ("add-skill", "team", str(skill))], 10)
+    assert "read-only" in target.why and target.kits == ["mine"]
+    # An existing kit of yours: nothing is created.
+    monkeypatch.setattr(kits_page, "TargetKitDialog", fake_target("mine", False))
+    del calls[:]
+    page.table.clearSelection()
+    page.add_skill()
+    assert wait(lambda: calls == [("add-skill", "mine", str(skill))], 10)
+    # A name of yours typed as new is not created again.
+    monkeypatch.setattr(kits_page, "TargetKitDialog", fake_target("mine", True))
+    del calls[:]
+    select_kit(page, "builtin", "egm")
+    page.add_skill()
+    assert wait(lambda: calls == [("add-skill", "mine", str(skill))], 10)
+    # When creating the kit fails, nothing else runs and the reason is shown.
+    monkeypatch.setattr(kits_page, "TargetKitDialog", fake_target("other", True))
+    del calls[:]
+    fake.sai.kit_command = lambda action, name, *a, options=(): (calls.append((action, name)) or
+                                                                 (1, "", "sandbox-ai kits: no space left"))
+    select_kit(page, "builtin", "egm")
+    page.add_skill()
+    assert wait(lambda: widgets.SHOWN and "no space left" in widgets.SHOWN[-1][1], 10)
+    assert calls == [("new", "other")]
+
+
+def test_a_new_skill_for_a_new_kit_offers_every_agent(fake, monkeypatch, wait):
+    page, calls = fake.kits, fake.calls
+    monkeypatch.setattr(kits_page, "TargetKitDialog", fake_target("fresh", True))
+    seen = {}
+
+    class Skill:
+        def __init__(self, parent, agents):
+            seen["agents"] = agents
+            self.name, self.description = QtWidgets.QLineEdit("lint"), QtWidgets.QLineEdit("when linting")
+            self.agents = type("A", (), {"chosen": lambda self: ["claude"]})()
+
+        def exec(self):
+            return QtWidgets.QDialog.DialogCode.Accepted
+    monkeypatch.setattr(kits_page, "NewSkillDialog", Skill)
+    select_kit(page, "always", "built-in")
+    page.new_skill()
+    assert wait(lambda: calls[-2:] == [("new", "fresh"), ("new-skill", "fresh", "lint", "--agent=claude",
+                                                          "--description=when linting")], 10)
+    assert seen["agents"] == list(kits_page.AGENTS)
+
+
+def test_the_target_dialog_lists_your_kits_and_a_new_one(window):
+    dialog = kits_page.TargetKitDialog(window, "why", ["a", "b"])
+    assert [dialog.kit.itemText(i) for i in range(dialog.kit.count())] == ["a", "b", "A new kit…"]
+    assert dialog.chosen() == ("a", False) and not dialog.name.isEnabled()
+    dialog.kit.setCurrentIndex(2)
+    dialog.name.setText(" team ")
+    assert dialog.name.isEnabled() and dialog.chosen() == ("team", True)
+    empty = kits_page.TargetKitDialog(window, "why", [])
+    assert empty.chosen() == ("my-kit", True), "without a kit of yours, a new one is proposed"
 
 
 def test_every_change_runs_sandbox_ai_kits(fake, env, monkeypatch, wait):
@@ -167,7 +251,7 @@ def test_every_change_runs_sandbox_ai_kits(fake, env, monkeypatch, wait):
     assert widgets.SHOWN[-1][0] == "Delete kit" and "mine" in widgets.SHOWN[-1][1], "asked first"
     # A marketplace plugin goes into one of your kits.
     page.market.selectRow(widgets.find_row(page.market, "egm@sandbox-ai"))
-    monkeypatch.setattr(QtWidgets.QInputDialog, "getItem", lambda *a, **k: ("mine", True))
+    monkeypatch.setattr(kits_page, "TargetKitDialog", fake_target("mine", False))
     page.add_to_kit()
     assert wait(lambda: calls[-1] == ("add-plugin", "mine", "egm@sandbox-ai", "--agent=claude"), 10)
     # sandbox-ai's refusal is shown as it is.

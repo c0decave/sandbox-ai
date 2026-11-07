@@ -257,7 +257,11 @@ SECTIONS = (
          "red.\n"
          "- Select an event to see its full record. Show in Connections opens a network event's log filtered "
          "to its host; Show in Files (or a double click) opens a file event's folder.\n"
-         "- Export… writes what the filters show as JSON lines or text.\n\n"
+         "- Export… writes what the filters show as JSON lines or text.\n"
+         "- The Canaries tab lists every opened decoy file and every canary token that left, in red: when, which "
+         "canary and path, the process found holding the file (or unknown, with why), and, unfolded, the agent's "
+         "tool call and prompt turn at that moment and the model requests around it (`sandbox-ai canaries "
+         "log`).\n\n"
          "Everything here may quote the agent, so it is shown as plain text with control characters escaped. "
          "The timeline needs a log directory, which every run with the connection proxy has.",
          "Aktivität zeigt, was die Agenten in einem Lauf, einer Session oder allen Läufen eines Projekts taten, "
@@ -271,10 +275,15 @@ SECTIONS = (
          "- Wählen Sie ein Ereignis, um seinen ganzen Eintrag zu sehen. In Verbindungen zeigen öffnet das Log "
          "eines Netzwerkereignisses, gefiltert auf seinen Host; In Dateien zeigen (oder ein Doppelklick) öffnet "
          "den Ordner eines Dateiereignisses.\n"
-         "- Exportieren… schreibt, was die Filter zeigen, als JSON-Zeilen oder Text.\n\n"
+         "- Exportieren… schreibt, was die Filter zeigen, als JSON-Zeilen oder Text.\n"
+         "- Der Reiter Canaries listet jede geöffnete Köderdatei und jedes Canary-Token, das hinausging, in Rot: "
+         "wann, welcher Canary und Pfad, der Prozess, der die Datei offen hielt (oder unbekannt, mit Grund), und "
+         "aufgeklappt den Werkzeugaufruf und die Prompt-Runde des Agenten in diesem Moment und die Anfragen an "
+         "das Modell darum herum (`sandbox-ai canaries log`).\n\n"
          "Alles hier kann den Agenten zitieren und wird daher als reiner Text mit maskierten Steuerzeichen "
          "gezeigt. Die Zeitleiste braucht ein Log-Verzeichnis; jeder Lauf mit Verbindungs-Proxy hat eines."),
-        cli=("sandbox-ai activity --follow", "sandbox-ai activity --project PATH", "sandbox-ai activity --json"),
+        cli=("sandbox-ai activity --follow", "sandbox-ai activity --project PATH", "sandbox-ai activity --json",
+             "sandbox-ai canaries log [RUN] [--json]"),
         see=("logs", "taint", "page-connections", "page-files"),
         tours=("area:activity",)),
     section(
@@ -333,7 +342,9 @@ SECTIONS = (
          "commands, prompts, the memory template, marketplaces and plugins) and whether the current project uses "
          "it. sandbox-ai's plugin marketplace shows where each plugin comes from.\n\n"
          "- New kit…, Add skill from a folder…, New skill…, Add plugin…, Add marketplace…, Add hook…, Remove… "
-         "and Delete kit… run `sandbox-ai kits`. sandbox-ai's own and the built-in kits are read-only.\n"
+         "and Delete kit… run `sandbox-ai kits`. sandbox-ai's own and the built-in kits are read-only: with one "
+         "of them selected, what you add goes to a kit of yours, which you choose (or name, and it is created) "
+         "first.\n"
          "- Use in the current project… adds `--kit NAME` to the project's `.sandbox-ai.json` through the "
          "Board's Apply (shown, then written and trusted).\n"
          "- Install plugins and Update plugins run `sandbox-ai plugins claude` in a terminal.\n"
@@ -347,7 +358,8 @@ SECTIONS = (
          "nutzt. Der Plugin-Marktplatz von sandbox-ai zeigt, woher jedes Plugin kommt.\n\n"
          "- Neues Kit…, Skill aus einem Ordner…, Neuer Skill…, Plugin hinzufügen…, Marktplatz hinzufügen…, Hook "
          "hinzufügen…, Entfernen… und Kit löschen… führen `sandbox-ai kits` aus. Das eigene Kit von sandbox-ai und "
-         "die eingebauten Kits sind schreibgeschützt.\n"
+         "die eingebauten Kits sind schreibgeschützt: Ist eines davon ausgewählt, kommt, was Sie hinzufügen, in "
+         "ein eigenes Kit, das Sie zuerst wählen (oder benennen, dann wird es angelegt).\n"
          "- Im aktuellen Projekt nutzen… trägt `--kit NAME` über Übernehmen der Tafel in die `.sandbox-ai.json` "
          "des Projekts ein (gezeigt, dann geschrieben und vertraut).\n"
          "- Plugins installieren und Plugins aktualisieren führen `sandbox-ai plugins claude` in einem Terminal "
@@ -517,7 +529,9 @@ SECTIONS = (
          "- The text of the selected section is on the right, with the related commands and options as they are "
          "typed, and links to related sections.\n"
          "- A switch shows the text in English or German. It follows the app's language unless you change it.\n"
-         "- Buttons start the tours linked to a section: an area tour of a page, or a tour through a task.\n\n"
+         "- Buttons start the tours linked to a section: an area tour of a page, or a tour through a task.\n"
+         "- Tour about… (also in the Help menu, Ctrl+F1) asks for a topic, such as network, presets or kits, and "
+         "lists the tours and sections about it, best first: Enter starts the tour or opens the section.\n\n"
          "Every page, panel and component has a small (?) button. It opens a short explanation that ends with "
          "More in Help, which opens the matching section here.",
          "Die Seite Hilfe erklärt jede Seite und Funktion der App und die Begriffe von sandbox-ai.\n\n"
@@ -528,7 +542,10 @@ SECTIONS = (
          "- Ein Umschalter zeigt den Text auf Englisch oder Deutsch. Er folgt der Sprache der App, solange Sie ihn "
          "nicht ändern.\n"
          "- Schaltflächen starten die Touren eines Abschnitts: die Bereichs-Tour einer Seite oder eine Tour durch "
-         "eine Aufgabe.\n\n"
+         "eine Aufgabe.\n"
+         "- Tour zu… (auch im Menü Hilfe, Strg+F1) fragt nach einem Thema, etwa Netzwerk, Vorlagen oder Kits, und "
+         "listet die Touren und Abschnitte dazu, die besten zuerst: Enter startet die Tour oder öffnet den "
+         "Abschnitt.\n\n"
          "Jede Seite, jeder Bereich und jedes Bauteil hat eine kleine (?)-Schaltfläche. Sie öffnet eine kurze "
          "Erklärung, die mit einem Verweis auf die Hilfe endet; er öffnet den passenden Abschnitt hier."),
         see=("app-tours", "app-settings"),
@@ -1004,9 +1021,9 @@ SECTIONS = (
          "Sandbox fort, die ein Köder pausiert hat. Ein zerteiltes, verschlüsseltes oder am Proxy vorbei "
          "gesendetes Token wird nicht gefunden."),
         cli=("--canaries credentials,home,workspace", "--no-canaries", "sandbox-ai canaries list",
-             "sandbox-ai canaries resume RUN"),
-        see=("security-modes", "rulesets", "policy", "proxy"),
-        tours=()),
+             "sandbox-ai canaries resume RUN", "sandbox-ai canaries log [RUN] [--json]"),
+        see=("security-modes", "rulesets", "policy", "proxy", "page-activity"),
+        tours=("area:activity",)),
     section(
         "presets", "concepts", ("Presets of sandbox-ai", "Presets von sandbox-ai"),
         ("A preset of sandbox-ai is a ready setup to start an agent with: launcher options, MCP servers, an "

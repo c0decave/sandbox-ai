@@ -13,15 +13,106 @@ import os
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QPlainTextEdit, QPushButton, QSpinBox,
-    QTabWidget, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QListWidget, QListWidgetItem,
+    QPlainTextEdit, QPushButton, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from . import backend, notifications, presets as PR, theme
 from .board_view import PathEdit
 from .files import printable
 from .i18n import tr
-from .widgets import MONO, plain_label, warn
+from .widgets import MONO, background, inform, outcome, plain_label, warn
+
+
+class PresetDirs(QWidget):
+    """The extra preset directories (sandbox-ai presets dirs): listed in order with what each gives or why it is
+    skipped; Add folder… and Remove run the command, whose checks apply (never a folder sandboxes can write).
+    The preset gallery shows the presets found there."""
+    changed = Signal()
+
+    def __init__(self, sai, parent=None):
+        super().__init__(parent)
+        self.sai, self.entries = sai, []
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.list = QListWidget()
+        self.list.setMaximumHeight(120)
+        self.list.itemSelectionChanged.connect(self.update_buttons)
+        layout.addWidget(self.list)
+        row = QHBoxLayout()
+        self.add_button = QPushButton(tr("Add folder…"))
+        self.add_button.clicked.connect(lambda _=False: self.add())
+        self.remove_button = QPushButton(tr("Remove"))
+        self.remove_button.clicked.connect(lambda _=False: self.remove())
+        row.addWidget(self.add_button)
+        row.addWidget(self.remove_button)
+        row.addStretch()
+        layout.addLayout(row)
+        self.status = plain_label(role="secondary")
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        if not sai.has_preset_dirs():
+            self.status.setText(tr("This sandbox-ai has no extra preset directories yet; update it."))
+            self.add_button.setEnabled(False)
+            self.remove_button.setEnabled(False)
+        else:
+            self.refresh()
+
+    def refresh(self):
+        background(self.sai.preset_dirs, owner=self, source=[self.add_button, self.remove_button], timeout=90,
+                   done=self.loaded)
+
+    def loaded(self, result, error):
+        self.list.clear()
+        if error is not None:
+            self.status.setText(tr("Cannot list the preset directories: {error}", error=printable(str(error))))
+            self.entries = []
+            self.update_buttons()
+            return
+        self.entries = [e for e in result.get("dirs", []) if isinstance(e, dict) and isinstance(e.get("path"), str)]
+        for entry in self.entries:
+            text = (tr("{path}  ({count} presets)", path=printable(entry["path"]), count=entry.get("presets", 0))
+                    if entry.get("state") == "used" else
+                    tr("{path}  (skipped: {why})", path=printable(entry["path"]), why=printable(entry.get("why") or "")))
+            item = QListWidgetItem(text)
+            item.setData(256, entry["path"])
+            self.list.addItem(item)
+        self.status.setText(tr("Presets are read from your folder {yours} first, then from these in their order, then "
+                               "the built-in ones. A folder sandboxes can write is refused.",
+                               yours=printable(str(result.get("yours") or ""))))
+        self.update_buttons()
+
+    def update_buttons(self):
+        if not self.sai.has_preset_dirs():
+            return
+        self.add_button.setEnabled(True)
+        self.remove_button.setEnabled(bool(self.list.selectedItems()))
+
+    def add(self):
+        from .state import choose_folder
+        path = choose_folder(self, tr("Folder with presets (*.json)"), "presets")
+        if path:
+            self.run("add", path)
+
+    def remove(self):
+        items = self.list.selectedItems()
+        if items:
+            self.run("remove", items[0].data(256))
+
+    def run(self, action, path):
+        background(lambda: self.sai.preset_dir_command(action, path), owner=self,
+                   source=[self.add_button, self.remove_button], timeout=90,
+                   done=lambda result, error: self.done(result, error))
+
+    def done(self, result, error):
+        status, out, err = outcome(result, error)
+        text = (out + err).strip()
+        if status != 0:
+            warn(self, tr("Preset directories"), text or tr("Failed (exit status {status}).", status=status))
+        elif text:
+            inform(self, tr("Preset directories"), text, modal=False)
+        self.changed.emit()
+        self.refresh()
 
 
 class SettingsDialog(QDialog):
@@ -103,6 +194,8 @@ class SettingsDialog(QDialog):
         form.addRow(plain_label(tr("Empty: the sandbox-ai command, or $SANDBOX_AI_HOME when it is set (it wins). "
                                    "Applies at the next start; a folder a sandbox can write is refused then."),
                                 role="secondary"))
+        self.preset_dirs = PresetDirs(sai)
+        form.addRow(tr("Preset directories"), self.preset_dirs)
 
         # new projects and the board
         page, form = self.tab(tr("New projects"))

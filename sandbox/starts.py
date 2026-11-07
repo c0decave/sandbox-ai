@@ -352,8 +352,25 @@ def start_entries(prune=True):
                       "last_used": used or None, "expires": expires,
                       "expired": bool(expires and state == "stopped" and expires < now()),
                       "workspace": text(data.get("workspace")), "project": text(data.get("project")),
-                      "directory": str(directory)}
+                      "mcp": mcp_names(data["options"]), "directory": str(directory)}
     return found
+
+
+def mcp_names(options):
+    """The MCP servers OPTIONS (a start's saved options, as on a command line) name: --mcp NAME, --mcp=NAME, -M NAME."""
+    names = []
+    for index, token in enumerate(options if isinstance(options, list) else []):
+        if token in ("--mcp", "-M") and index + 1 < len(options) and isinstance(options[index + 1], str):
+            names.append(options[index + 1])
+        elif isinstance(token, str) and token.startswith("--mcp="):
+            names.append(token.partition("=")[2])
+    return [name for name in dict.fromkeys(names) if re.fullmatch(r"[A-Za-z0-9_-]{1,32}", name)]
+
+
+def record_mcp(record_):
+    """The MCP servers a running sandbox records in its run.json (None for a version that did not record them)."""
+    value = record_.get("mcp_servers") if isinstance(record_, dict) else None
+    return [name for name in value if isinstance(name, str)] if isinstance(value, list) else None
 
 
 def mcp_entries(include_stopped=False):
@@ -379,7 +396,8 @@ def mcp_entries(include_stopped=False):
         found[name] = {"name": f"mcp-{name}", "id": f"mcp-{name}", "kind": "mcp", "agent": None,
                        "backend": text(data.get("backend")), "state": state, "home": None, "attachable": False,
                        "run": None, "pid": data.get("pid") if state == "running" else None,
-                       "started": text(data.get("started")), "workspace": None, "directory": str(directory)}
+                       "started": text(data.get("started")), "workspace": None, "directory": str(directory),
+                       "serves": []}
     return found
 
 
@@ -413,6 +431,9 @@ def entries(include_all=False, prune=True):
         session = starts.get(text(record_.get("start")) or "") or legacy.get(run)
         if session is not None:
             session["run"], session["run_dir"], session["mode"] = run, record_.get("directory"), mode_of(record_)
+            running_mcp = record_mcp(record_)
+            if running_mcp is not None:  # what it reaches now; its options say what it starts with next time
+                session["mcp_running"] = running_mcp
             continue
         server = by_pid.get(record_.get("pid"))
         if server is not None or record_.get("kind") == "mcp" or str(run).startswith("mcp-"):
@@ -427,10 +448,14 @@ def entries(include_all=False, prune=True):
                       "mode": mode_of(record_),
                       "attachable": False, "run": run, "pid": record_.get("pid"),
                       "started": text(record_.get("started")), "workspace": text(record_.get("workspace")),
-                      "directory": None, "run_dir": record_.get("directory")})
+                      "mcp": record_mcp(record_) or [], "directory": None, "run_dir": record_.get("directory")})
     found = list(starts.values()) + plain + list(servers.values())
     for entry in found:
         entry["attach_why"] = attach_why(entry)
+    # Whom each MCP server serves: the starts that reach it, or will at their next start (sandbox-ai mcp attach).
+    for name, server in servers.items():
+        server["serves"] = [entry["name"] for entry in found if entry.get("kind") != "mcp"
+                            and name in (entry.get("mcp") or []) + (entry.get("mcp_running") or [])]
     return sorted(found, key=lambda e: (STATE_ORDER.get(e["state"], 9), e.get("started") or "", e["name"]))
 
 
@@ -476,10 +501,10 @@ def rename(old, new, out=print):
 
 
 def act(command, name, out=print, wait=None, yes=False, review=False, as_json=False, workspaces=(), mounts=(),
-        restart=False):
+        restart=False, mcp=()):
     """attach, pause, resume, stop or delete the start NAME, whatever kind it is. REVIEW (resume): show what
-    changed in its kept HOME instead, AS_JSON for programs. WORKSPACES, MOUNTS (resume): added at its start;
-    RESTART: a running one is stopped first."""
+    changed in its kept HOME instead, AS_JSON for programs. WORKSPACES, MOUNTS, MCP servers (resume): added at its
+    start; RESTART: a running one is stopped first."""
     printable = launcher().printable
     try:
         entry = find(name)
@@ -505,15 +530,16 @@ def act(command, name, out=print, wait=None, yes=False, review=False, as_json=Fa
             return sessions.review(key, as_json, out)
         if command == "stop":
             return sessions.stop(key) if wait is None else sessions.stop(key, wait)
-        if command == "resume" and (workspaces or mounts or restart):
+        if command == "resume" and (workspaces or mounts or mcp or restart):
             if restart and entry["state"] in ("running", "paused"):
                 out(f"{shown}: stopping it to start it again")
                 sessions.stop(key)
-            return sessions.resume(key, list(workspaces), list(mounts))
+            return sessions.resume(key, list(workspaces), list(mounts), list(mcp))
         return {"attach": sessions.attach, "pause": sessions.pause, "resume": sessions.resume}[command](key)
-    if workspaces or mounts or restart:
+    if workspaces or mounts or mcp or restart:
         raise ValueError(f"{shown} keeps nothing to start again with (a run without a kept start): end it and start "
-                         "anew with the workspace")
+                         "anew with " + ("--mcp " + " --mcp ".join(mcp) if mcp and not (workspaces or mounts)
+                                         else "the workspace"))
     record_ = module("net").running().get(entry["run"])
     if record_ is None:
         raise ValueError(f"{shown} has ended meanwhile")
@@ -652,7 +678,9 @@ def show(found, out=print, as_json=False):
     rows = [[printable(e["name"]), e["kind"], printable(e.get("agent") or "-"),
              t.style(e["state"] + (", expired" if e.get("expired") else ""), colours.get(e["state"], "muted")),
              e.get("home") or "-",
-             shown_time(e.get("started")), printable(e.get("workspace") or "-")] for e in found]
+             shown_time(e.get("started")),
+             printable(e.get("workspace") or ("serves " + ", ".join(e["serves"]) if e.get("serves") else "-"))]
+            for e in found]
     # The workspace last: it is the longest and wraps at the terminal's width.
     t.table(["NAME", "KIND", "AGENT", "STATE", "HOME", "STARTED (UTC)", "WORKSPACE"], rows, out, indent=0,
             empty="nothing runs and no start is kept; start one with: sandbox-ai claude|codex|opencode")
@@ -734,6 +762,9 @@ def parser():
                                   "its later starts")
             sub.add_argument("-m", "--mount", action="append", default=[], metavar="SOURCE:DESTINATION[:ro|rw]",
                              help="start it with this mount added (repeatable), kept for its later starts")
+            sub.add_argument("-M", "--mcp", action="append", default=[], metavar="NAME",
+                             help="start it with this MCP server connected (repeatable; sandbox-ai mcp list), kept "
+                                  "for its later starts")
             sub.add_argument("--restart", action="store_true",
                              help="a running start is stopped first (the agent continues its conversation)")
     return p
@@ -753,12 +784,13 @@ def main(argv, out=print):
             if getattr(args, "json", False) and not getattr(args, "review_home", False):
                 raise ValueError("--json goes with --review-home")
             if getattr(args, "review_home", False) and (getattr(args, "workspace", None) or getattr(args, "mount", None)
-                                                         or getattr(args, "restart", False)):
-                raise ValueError("--review-home starts nothing: it goes without --workspace, --mount and --restart")
+                                                         or getattr(args, "mcp", None) or getattr(args, "restart", False)):
+                raise ValueError("--review-home starts nothing: it goes without --workspace, --mount, --mcp and "
+                                 "--restart")
             return act(args.command, args.name, out, wait=getattr(args, "wait", None), yes=getattr(args, "yes", False),
                        review=getattr(args, "review_home", False), as_json=getattr(args, "json", False),
                        workspaces=getattr(args, "workspace", []), mounts=getattr(args, "mount", []),
-                       restart=getattr(args, "restart", False))
+                       restart=getattr(args, "restart", False), mcp=getattr(args, "mcp", []))
         if args.history:
             return show_history(args.history, out, args.json)
         show(entries(args.all), out, args.json)

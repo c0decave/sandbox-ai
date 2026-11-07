@@ -29,7 +29,9 @@ def test_a_qt_skip_fails_when_qt_is_required():
 
 
 def test_ci_requires_qt_and_runs_offscreen():
-    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
-    assert 'SANDBOX_AI_APP_REQUIRE_QT: "1"' in workflow and "QT_QPA_PLATFORM: offscreen" in workflow
-    assert "runs-on: ubuntu-24.04" in workflow and "ref: ${{ env.SANDBOX_AI_REF }}" in workflow
-    assert "libegl1" in workflow and "libxkbcommon0" in workflow and "PySide6" in workflow
+    """The app is part of sandbox-ai's repository: its tests are the job app of the repository's CI."""
+    workflow = (ROOT.parents[1] / ".github" / "workflows" / "ci.yml").read_text()
+    job = workflow[workflow.index("\n  app:"):]
+    assert 'SANDBOX_AI_APP_REQUIRE_QT: "1"' in job and "QT_QPA_PLATFORM: offscreen" in job
+    assert "runs-on: ubuntu-24.04" in job and "working-directory: projects/sandbox-ai-app" in job
+    assert "libegl1" in job and "libxkbcommon0" in job and "requirements-app-test.txt" in job

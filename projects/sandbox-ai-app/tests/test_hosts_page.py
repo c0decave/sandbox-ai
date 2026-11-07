@@ -16,7 +16,7 @@ pytestmark = pytest.mark.skipif(not os.environ.get("SANDBOX_AI_HOME") and not ba
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     for name, sub in (("XDG_CONFIG_HOME", "config"), ("XDG_STATE_HOME", "state"), ("XDG_RUNTIME_DIR", "runtime"),
-                      ("XDG_DATA_HOME", "data")):
+                      ("XDG_DATA_HOME", "data"), ("XDG_CACHE_HOME", "cache")):
         monkeypatch.setenv(name, str(tmp_path / sub))
     (tmp_path / "runtime").mkdir()
     monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
@@ -70,3 +70,50 @@ def test_hosts_starts_approvals_and_telemetry(qapp, env, monkeypatch):
     page.remove()
     page.close()
     assert [e["name"] for e in sai.host_entries()] == ["local"]
+
+
+def test_versions_update_and_update_all(qapp, env, monkeypatch):
+    sai = backend.SandboxAI()
+    if not sai.hosts_supported() or not sai.host_update_supported():
+        pytest.skip("this sandbox-ai cannot update hosts")
+    sai.host_add("ct1", "admin@192.0.2.10", 22, "", "")
+    sai.host_add("ct2", "admin@192.0.2.11", 22, "", "")
+    monkeypatch.setattr(sai, "host_statuses", lambda refresh=False, cached=True: {
+        "ct1": {"version": "0.1.60", "available": "0.1.66", "update": True, "kind": "user"},
+        "ct2": {"version": "0.1.66", "available": "0.1.66", "update": False, "kind": "system"}})
+    asked, opened = [], []
+
+    def host_update(name, sudo=None):
+        asked.append((name, sudo))
+        if name == "ct2" and not sudo:
+            return {"name": name, "before": "0.1.66", "after": None, "error": "belongs to root", "needs_sudo": True}
+        if name == "ct2":
+            return {"name": name, "before": "0.1.66", "after": None, "error": "sudo wants a password",
+                    "needs_password": True}
+        return {"name": name, "before": "0.1.60", "after": "0.1.66", "changed": True, "error": None,
+                "fixed": [{"path": "/home/u/.ssh/id_ct1", "was": "0644", "now": "0600"}]}
+    monkeypatch.setattr(sai, "host_update", host_update)
+    monkeypatch.setattr(sai, "host_update_terminal", lambda name: ["ssh", "-tt", name, "sudo"])
+    monkeypatch.setattr(sai, "host_run", lambda name, *args, timeout=120: (0, "[]" if args[0] != "defaults" else "{}", ""))
+    page = HostsPage(sai, lambda argv, title: opened.append((argv, title)))
+    texts = [page.list.item(i).text() for i in range(page.list.count())]
+    assert "0.1.60, update: 0.1.66" in texts[1] and "0.1.66, up to date" in texts[2], texts
+    page.list.setCurrentRow(1)
+    page.update_host()
+    assert asked == [("ct1", None)]
+    log = page.updates.toPlainText()
+    assert "ct1: 0.1.60 -> 0.1.66" in log and "made private (0600)" in log and "1 hosts: 1 updated" in log
+    # one host whose installation is root's: asked whether with sudo (yes), then sudo wants a password: a terminal
+    page.list.setCurrentRow(2)
+    page.update_host()
+    assert asked[-2:] == [("ct2", None), ("ct2", True)]
+    assert opened == [(["ssh", "-tt", "ct2", "sudo"], "ct2: update")]
+    assert "not updated: sudo wants a password" in page.updates.toPlainText()
+    # update all: one after the other, a summary
+    asked.clear()
+    page.update_all()
+    assert [name for name, _ in asked] == ["ct1", "ct2"]
+    assert "2 hosts: 1 updated, 0 up to date, 1 not updated" in page.updates.toPlainText()
+    page.list.setCurrentRow(0)
+    page.update_host()  # this machine: not over SSH
+    page.close()

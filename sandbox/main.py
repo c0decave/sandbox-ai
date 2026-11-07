@@ -7,7 +7,7 @@
   sandbox-ai attach|pause|resume|stop|delete NAME                    any start by its name (detach: Ctrl-b d)
   sandbox-ai gc [--older-than DAYS] [--dry-run]                      remove leftovers and old kept starts
   sandbox-ai session list|attach|pause|resume|stop|delete ...       the same for sessions (older form)
-  sandbox-ai mcp list|start|stop ...                                MCP server sandboxes
+  sandbox-ai mcp list|start|stop|attach ...                         MCP server sandboxes (attach: to a start)
   sandbox-ai login claude|codex|opencode | --status                  log in inside a sandbox; kept for all sandboxes
   sandbox-ai plugins [claude [--update] | --status]                  install the plugins the kits declare
   sandbox-ai kits [list|show|new|add-skill|new-skill|add-plugin|...] see and change kits (skills, plugins)
@@ -25,10 +25,10 @@
   sandbox-ai secrets list|set|delete|backend ...                     API keys and tokens in your keyring
   sandbox-ai llm add|list|show|remove|models|check ...                LLM servers, local or remote, for --llm
   sandbox-ai vpn add|list|show|remove|check ...                      VPN profiles for --vpn (WireGuard, OpenVPN, Mullvad, Tailscale)
-  sandbox-ai hosts list|add|remove|test|run ...                       other machines (LXC containers) managed over SSH
+  sandbox-ai hosts list|add|set|remove|test|update|run ...            other machines (LXC containers) managed over SSH
   sandbox-ai team start|list|show|post|stop|delete ...                a team of agents, one sandbox each, with a task board
   sandbox-ai web [serve|user|vendor|cert] ...                         the web interface (HTTPS, password and TOTP)
-  sandbox-ai presets list|show|check ...                              ready setups to start an agent with (--preset NAME)
+  sandbox-ai presets list|show|check|dirs ...                         ready setups to start an agent with (--preset NAME)
   sandbox-ai defaults [show|set|unset] ...                            your defaults for every start (defaults.json)
   sandbox-ai git-logins add|list|remove|check ...                     Git logins for pushes, used by the proxy
   sandbox-ai publish-logins add|list|remove|check|kinds ...           package registry logins, used by the proxy
@@ -149,6 +149,30 @@ def verbose_version():
     return 0
 
 
+HOMES = ("/home/", "/root/", "/Users/", "/var/home/")
+
+
+def installation_mode(rest, here=None, euid=None, writable=None):
+    """`update` ARGS with the kind of installation this copy is (install.sh decides by who runs it: root makes a
+    system installation, anyone else one of their own): a system one (PREFIX/lib/sandbox-ai/versions/X) is
+    updated as such (--system --prefix PREFIX), a user's own stays theirs when root updates it (--user). A
+    ValueError when a system installation would be updated by someone who cannot write it."""
+    here = Path(here or HERE)
+    euid = os.geteuid() if euid is None else euid
+    writable = writable or (lambda path: os.access(path, os.W_OK))
+    given = any(arg in ("--user", "--system", "--prefix", "--uninstall") or arg.startswith("--prefix=")
+                for arg in rest)
+    if given or "--check" in rest or here.parent.parent.name != "versions":
+        return list(rest)
+    data = here.parent.parent.parent
+    if data.name == "sandbox-ai" and data.parent.name == "lib" and not str(data).startswith(HOMES):
+        prefix = data.parent.parent
+        if euid != 0 and not writable(data):
+            raise ValueError(f"this is a system installation ({data}): update it as root: sudo sandbox-ai update")
+        return ["--system", "--prefix", str(prefix), *rest]
+    return ["--user", *rest] if euid == 0 else list(rest)
+
+
 BASH_CANDIDATES = ("/opt/homebrew/bin/bash", "/usr/local/bin/bash")  # Homebrew on Apple silicon, on Intel
 
 
@@ -206,6 +230,11 @@ def main(argv):
         if not installer.is_file() or (HERE.parent / ".git").exists():
             print("sandbox-ai update: this copy was not installed by install.sh; update a checkout with git, "
                   "a pip installation with: pip install -U sandbox-ai", file=sys.stderr)
+            return 1
+        try:
+            rest = installation_mode(rest)
+        except ValueError as exc:
+            print(f"sandbox-ai update: {exc}", file=sys.stderr)
             return 1
         bash(installer, rest)
     print(f"sandbox-ai: unknown command {command!r}; see sandbox-ai --help", file=sys.stderr)

@@ -43,6 +43,14 @@ python3 scripts/publish_release.py --source "${SANDBOX_AI_SOURCE:-https://github
 
 Without a key in `sandbox/release-signers` (see below), leave out `--sign`.
 
+## The release page
+
+`scripts/release_notes.py` writes the text of the release page (release.yml passes it to `gh release create`, and
+to Gitea/Forgejo through `publish_release.py --notes`): what is new, a table of every file with who it is for,
+how to install and start (install.sh, AppImage, the macOS app, PyPI, the `.pyz`), the first steps, how to update
+and how to check the files. What is new comes from `docs/releases/vX.Y.Z.md`; write it before you tag (a list of
+the changes users notice). `python3 scripts/release_notes.py` shows the page.
+
 ## The ready-made packages
 
 | File | Built by | Where |

@@ -392,7 +392,7 @@ und passen so immer zur installierten Version.
 | `sandbox-ai identities add\|set\|login\|logout\|publish\|unpublish\|list\|show\|check\|remove …` | | Commit-Name und -Adresse, Git- und Publish-Logins unter einem Namen, für `--identity` ([Identitäten](#identitäten-sandbox-ai-identities---identity)) |
 | `sandbox-ai presets list\|show\|check …`, `sandbox-ai demo-device start\|serve\|status\|stop` | | fertige Einrichtungen für `--preset`; ein nachgebildetes serielles Gerät zum Üben ([Presets](#presets)) |
 | `sandbox-ai team start\|list\|show\|post\|stop\|delete …` | | ein Team von Agenten, je eine Sandbox, mit einem Aufgabenbrett ([Ein Team von Agenten](#ein-team-von-agenten)) |
-| `sandbox-ai hosts list\|add\|remove\|test\|run …` | | andere Rechner (oder LXC-Container), deren sandbox-ai dieses über SSH verwaltet ([Andere Hosts](#andere-hosts)) |
+| `sandbox-ai hosts list\|add\|set\|remove\|test\|update\|run …` | | andere Rechner (oder LXC-Container), deren sandbox-ai dieses über SSH verwaltet und aktualisiert ([Andere Hosts](#andere-hosts)) |
 | `sandbox-ai web user\|vendor\|serve\|cert …`, `sandbox-ai defaults show\|set\|unset …` | | die Weboberfläche; Ihre Vorgaben für jeden Start in `~/.config/sandbox-ai/defaults.json` ([Weboberfläche](#weboberfläche)) |
 | `sandbox-ai completion bash\|zsh\|fish\|install` | | Tab-Vervollständigung (siehe oben) |
 | `sandbox-ai llm add\|list\|show\|remove\|models\|check …` | | LLM-Server, lokal oder entfernt, für `--llm NAME[:MODELL]`; ihre Schlüssel bleiben beim Verbindungs-Proxy ([LLM-Server](#llm-server-lokal-und-entfernt)) |
@@ -612,6 +612,17 @@ der ID eines eingebauten ersetzt dieses. Ein Preset enthält nie ein Geheimnis
 `--auth-file`, ...), den Workspace wählen oder `--rules` tragen (eine
 `"rules"`-Datei daneben wird dafür übergeben). Das Format steht in
 `sandbox-ai presets --help` und `sandbox/presets.py`.
+
+Weitere Preset-Ordner, eine private Sammlung oder der Checkout eines Teams,
+kommen mit `sandbox-ai presets dirs add ORDNER` hinzu (aufgelistet mit
+`presets dirs`, entfernt mit `presets dirs remove ORDNER`; gespeichert als
+`"preset_dirs"` in `~/.config/sandbox-ai/defaults.json`, in der App auch unter
+Einstellungen > sandbox-ai). Ihr eigener Ordner gewinnt vor ihnen, der zuerst
+genannte vor den späteren, und sie vor den eingebauten Presets. Aus demselben
+Grund wie oben wird ein Ordner in einem Workspace oder einem anderen Ordner, in
+den Sandboxen schreiben können oder konnten, abgelehnt (und übergangen, wenn er
+es später wird), und einem Preset oder Regelwerk dort, das ein Symlink ist, wird
+nicht gefolgt.
 
 **Ein Gerät zum Üben.** `sandbox-ai demo-device start` startet ein emuliertes
 serielles Gerät auf `127.0.0.1:4000` (den erfundenen „SB-42 Sensorknoten“:
@@ -1994,9 +2005,37 @@ Server läuft für weitere Agenten und Sessions weiter.
 
 ```bash
 ./sandbox-ai claude --workspace "$HOME/src/app" --mcp demo   # eingebauter Testserver
-./sandbox-ai mcp list                                        # NAME  STATUS  COMMAND
+./sandbox-ai mcp list                                        # NAME  STATUS  SERVES  COMMAND
 ./sandbox-ai mcp stop demo
 ```
+
+### Ein MCP-Server für einen bestehenden Start
+
+```bash
+./sandbox-ai mcp attach demo web               # web bekommt demo (auch für seine späteren Starts)
+./sandbox-ai mcp attach demo web --restart     # web läuft: jetzt damit neu gestartet
+./sandbox-ai mcp start demo --for web          # demo so starten, wie web es startet, und verbinden
+./sandbox-ai resume web --mcp demo             # dasselbe für einen gestoppten Start, jetzt gestartet
+```
+
+`mcp attach NAME START` (und `mcp start NAME --for START`) fügt `--mcp NAME` zu
+den Optionen des behaltenen Starts hinzu, geprüft wie sein Start es prüft: die
+Richtlinie des Administrators (`forbid` `--mcp`), sein Sicherheitsmodus
+(`paranoid` lehnt einen Server mit Netz ab) und die Definition des Servers.
+`--for` startet den Server sofort mit Backend und Regeln dieses Starts, sodass
+der Start ihn laufend vorfindet. Eine laufende Sandbox kann keinen neuen
+MCP-Server aufnehmen, solange sie läuft, mit keinem Backend: Ihr Agent liest
+seine MCP-Server einmal, beim Start (`--mcp-config`, `-c mcp_servers`,
+`opencode.json`), und der Socket des Servers erreicht die Sandbox nur über
+einen beim Start eingehängten Ordner (ein laufender Podman-Container nimmt
+keinen neuen Mount, der Mount-Namespace von Bubblewrap auch nicht). Darum wird
+ein laufender Start damit neu gestartet (`--restart`, oder ja im Terminal; der
+Agent setzt sein Gespräch fort), sonst erreicht er den Server ab seinem
+nächsten Start, und der Befehl sagt, wie man ihn neu startet. Ein Lauf ohne
+behaltenen Start (`--no-keep`) hat nichts zum erneuten Starten: beenden und mit
+`--mcp NAME` neu starten. `mcp list` und `sandbox-ai list` zeigen, wen jeder
+Server bedient; die MCP-Seite der App hat **Verbinden mit…**, die
+Weboberfläche dasselbe in der Zeile eines Servers unter Starts und Sitzungen.
 
 Zwischen den Sandboxes gibt es keinen Netzweg: Die Server-Sandbox lauscht auf
 einem Unix-Socket in `~/.local/state/sandbox-ai/mcp/NAME/sock/` und startet je
@@ -2287,7 +2326,9 @@ sandbox-ai hosts add ct1 user@ct1.lan --description "Proxmox 101"
 sandbox-ai hosts test ct1                 # SSH, seine sandbox-ai-Version, sein doctor
 sandbox-ai hosts run ct1 -- list          # sandbox-ai list auf ct1
 sandbox-ai hosts run ct1 -- attach web    # in eine Sitzung dort (ein Terminal über SSH)
-sandbox-ai hosts list
+sandbox-ai hosts list                     # die sandbox-ai-Version jedes Hosts und ob ein Update da ist
+sandbox-ai hosts update ct1               # sandbox-ai update auf ct1: alte -> neue Version
+sandbox-ai hosts update --all             # jeder Host der Liste, einer nach dem anderen, und eine Zusammenfassung
 sandbox-ai hosts remove ct1
 ```
 
@@ -2301,10 +2342,45 @@ Rechner). Jeder Host wird mit Ihren SSH-Schlüsseln erreicht:
 - jedes Argument wird einzeln gequotet;
 - `--identity DATEI` wählt einen Schlüssel, `--port N` einen Port.
 
+ssh lehnt eine Schlüsseldatei ab, die andere lesen können ("UNPROTECTED
+PRIVATE KEY FILE"). `hosts add` und `hosts test` (und die Hosts-Seiten der
+App und der Web-Oberfläche) machen einen solchen Schlüssel privat (`chmod
+600`), nennen die Datei und ihren alten Modus und versuchen die Verbindung
+erneut: den `--identity` des Hosts, sonst Ihre `~/.ssh/id_*`, und einen
+Schlüssel, den ssh als zu offen nennt. Geändert werden nur reguläre Dateien,
+die Ihnen gehören, nie über einen symbolischen Link (der wird mit dem Befehl
+genannt); ein `~/.ssh`, in das andere schreiben können, wird genannt, nicht
+geändert.
+
 Auf den Hosts lauscht nichts ins Netz: Sie brauchen nur sshd und sandbox-ai.
 Eine nicht interaktive SSH-Anmeldung liest unter Debian keine `~/.bashrc`,
 deshalb nimmt der Befehl ersatzweise `~/.local/bin/sandbox-ai` (wo `install.sh`
 es ablegt); `--command PFAD` nennt einen anderen Ort.
+
+### Die Hosts aktualisieren
+
+`sandbox-ai hosts update NAME...` (oder `--all`) führt auf jedem Host dessen
+eigenes `sandbox-ai update` aus: das Update von install.sh, geprüft gegen die
+Release-Schlüssel der Installation dort, als dieselbe Art Installation. Es
+zeigt pro Host die alte und die neue Version, was schiefging, und eine
+Zusammenfassung; `--version X.Y.Z` wählt ein Release, `--jobs N` aktualisiert
+N Hosts gleichzeitig, `--json` ist für Programme. `hosts list` zeigt die
+Version jedes Hosts und ob ein neueres Release da ist (das eigene `update
+--check` des Hosts, 10 Minuten gemerkt; `--refresh` fragt sofort, `--cached`
+fragt keinen Host).
+
+| Installation auf dem Host | Was `hosts update` tut |
+|---|---|
+| install.sh für einen Benutzer (`~/.local/share/sandbox-ai`) | `sandbox-ai update --user` als dieser Benutzer |
+| install.sh als root (`PREFIX/lib/sandbox-ai`) | `sudo -n sandbox-ai update --system --prefix PREFIX` mit `--sudo` oder der Einstellung des Hosts (`hosts set NAME --update-sudo on`, oder `hosts add ... --update-sudo`); ohne sie sagt es das |
+| ein Checkout, pip, ein Paket (pyz, AppImage) | nichts: es nennt die Installation und den Weg, sie zu aktualisieren (git, pip, die Release-Seite), oder sie mit install.sh zu installieren |
+
+`sudo -n` fragt nie nach einem Passwort. Will sudo dort eines, sagt `hosts
+update` das und führt das Update aus einem Terminal heraus dort mit `ssh -t
+... sudo` aus, wo sudo fragt; die App und die Web-Oberfläche öffnen es in
+einem Terminal-Tab. Eine Regel in sudoers (`NOPASSWD` für genau diesen
+Befehl) erspart die Frage. Dieser Rechner aktualisiert sich mit `sandbox-ai
+update` (`--all` lässt ihn aus).
 
 ## Projektkonfiguration und Wizard
 
@@ -3806,6 +3882,7 @@ sandbox-ai claude --canaries all                   # credentials, home und works
 sandbox-ai claude --no-canaries
 sandbox-ai canaries list                        # Läufe mit Canaries
 sandbox-ai canaries list LAUF [--tokens] [--json] # ihre Dateien, Tokens und was geschah
+sandbox-ai canaries log [LAUF] [--json]         # jedes Ereignis: durch welchen Prozess, neben dem Zug des Agenten
 sandbox-ai canaries resume LAUF                 # eine von einem Canary pausierte Sandbox fortsetzen
 ```
 
@@ -3893,6 +3970,17 @@ pausiert. Eine Pause friert den Podman-Pod oder jeden Prozess der
 Bubblewrap-Sandbox ein; `sandbox-ai canaries resume LAUF` (die Run-ID oder der
 Name des Starts; `sandbox-ai resume NAME` geht auch) setzt fort, `sandbox-ai net stop LAUF` beendet.
 Ein Stopp ist, was `sandbox-ai net stop` tut.
+
+**Das Canary-Log.** `sandbox-ai canaries log [LAUF] [--json]` (in der App: Aktivität, Reiter Canaries; in der
+Weboberfläche: Canaries) zeigt jedes Ereignis mit Zeit, Canary, Pfad und Aktion und wer es war: bei einem
+Token, das die Sandbox verließ, der Prozess, den Proxy oder DNS-Stub fanden; bei einem Dateiereignis die
+Prozesse, die der Supervisor gleich nach der inotify-Meldung mit der Datei offen fand (inotify selbst nennt
+niemanden: wer die Datei vor der Suche schon geöffnet, gelesen und geschlossen hat, steht ehrlich als
+`unknown` da). Jedes Ereignis ist mit dem Tool-Aufruf des Agenten im selben Zeitfenster (zuerst dem, der
+die Datei nennt), seinem Prompt-Zug und den Anfragen an den Modellanbieter kurz davor und danach verknüpft
+(der, die das Token trug, falls eine), über die IDs ihrer Einträge im
+[Aktivitätsverlauf](#aktivität-der-agenten) (oder Datei und Offset im Verbindungslog, wenn der Verlauf eine
+Anfrage nur mitzählte). Alles ist geschwärzt wie im Aktivitätslog; die Tokens des Laufs erscheinen nie.
 
 **Auswahl.** `--canaries KATEGORIEN` / `--no-canaries` auf der Befehlszeile
 oder in `"options"` der Projektdatei; der Schlüssel `"canaries":
@@ -4387,7 +4475,7 @@ Siehe [Projektkonfiguration](#projektkonfiguration-und-wizard) und
 | `sandbox-ai net untaint [LAUF]` | Den Taint des Laufs zurücknehmen: Die Regeln für Läufe mit Taint gelten nicht mehr, bis wieder nicht vertrauenswürdiger Inhalt hineinkommt (siehe [Regelwerke](#regelwerke)) |
 | `sandbox-ai devices list\|add\|remove [LAUF] PFAD\|usb:VID:PID[:SERIAL]`, `sandbox-ai limits [LAUF] [--memory GRÖSSE] [--cpus N] [--pids N]` | Einer laufenden Sandbox Geräte geben und wieder nehmen; ihre Limits ändern |
 | `sandbox-ai approvals list\|history [LAUF]`, `allow ID [--scope once\|run\|always]`, `deny ID`, `remembered`, `forget PROJEKT EINTRAG` | Die Fragen laufender Sandboxen beantworten; was je Projekt immer erlaubt wurde, und einen Eintrag davon vergessen |
-| `sandbox-ai canaries list [LAUF] [--tokens] [--json]`, `canaries resume LAUF` | Die [Köderdateien](#köderdateien-canaries) der Läufe und was mit ihnen geschah; eine von einem Canary pausierte Sandbox fortsetzen |
+| `sandbox-ai canaries list [LAUF] [--tokens] [--json]`, `canaries log [LAUF] [--json]`, `canaries resume LAUF` | Die [Köderdateien](#köderdateien-canaries) der Läufe und was mit ihnen geschah; jedes Ereignis mit Prozess, Tool-Aufruf und Modellanfragen; eine von einem Canary pausierte Sandbox fortsetzen |
 | `sandbox-ai secrets list\|set NAME [--from-env VAR]\|delete NAME\|backend` | Geheimnisse im System-Schlüsselbund, sonst in privaten Dateien |
 | `sandbox-ai git-logins add URL --secret NAME [--user USER]`, `list [--json]`, `remove URL`, `check [URL]` | Die Logins Ihrer Git-Server, vom Verbindungs-Proxy eingesetzt (siehe [Git-Logins](#git-logins-im-proxy-sandbox-ai-git-logins)) |
 | `sandbox-ai publish-logins add KIND --secret NAME [--url URL]`, `list [--json]`, `remove KIND`, `check [KIND]`, `kinds` | Logins für `--publish` (siehe [Veröffentlichen](#veröffentlichen-in-registries-und-forges-sandbox-ai-publish-logins---publish)) |
@@ -4410,7 +4498,8 @@ Siehe [Projektkonfiguration](#projektkonfiguration-und-wizard) und
 | `sandbox-ai session list\|attach\|pause\|resume\|stop\|delete` | Die ältere Form (`sandbox-session`, veraltet) |
 | `sandbox-ai mcp list` | Definierte MCP-Server und ihr Status |
 | `sandbox-ai mcp catalog`, `sandbox-ai mcp add NAME [-m ZIEL=HOST[:ro\|rw]] [-e VAR] [-n none\|full] [-M GRÖSSE] [-p N] [-v VPN]` | Server der MCP-Kataloge; einen als Container-Server hinzufügen (siehe [Lokale MCP-Server](#server-aus-einem-mcp-katalog)) |
-| `sandbox-ai mcp start NAME [--backend podman\|bwrap] [--vpn PROFIL]`, `sandbox-ai mcp stop NAME` | MCP-Server-Sandbox starten oder stoppen |
+| `sandbox-ai mcp start NAME [--backend podman\|bwrap] [--vpn PROFIL] [--for START [--restart]]`, `sandbox-ai mcp stop NAME` | MCP-Server-Sandbox starten oder stoppen (`--for`: für diesen Start, mit ihm verbunden) |
+| `sandbox-ai mcp attach NAME START [--restart] [--json]` | Einen MCP-Server mit einem behaltenen Agenten-Start verbinden (ein laufender: damit neu gestartet) |
 | `sandbox-ai wizard [new]` | Interaktive Projekteinrichtung; bietet an, eine vorhandene Konfiguration zu bearbeiten |
 | `sandbox-ai wizard edit [VERZ\|DATEI]` | Vorhandene Konfiguration eines Projekts ändern (Menü, Änderungen vor dem Schreiben) |
 | `sandbox-ai login AGENT [Launcher-Optionen] [-- Login-Argumente]`, `--status`, `AGENT --logout` | Login-Speicher für Sandboxes |

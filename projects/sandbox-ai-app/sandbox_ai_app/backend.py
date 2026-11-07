@@ -185,6 +185,9 @@ class SandboxAI:
                 spec = importlib.util.spec_from_file_location(f"sandbox_ai_app_{name}", self.directory / f"{name}.py")
                 module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(module)
+                if name == "presets" and hasattr(module, "EXPOSED_BEFORE"):
+                    # Extra preset directories where sandboxes wrote are skipped: the launcher knows where.
+                    module.EXPOSED_BEFORE = self.launcher.exposed_before
                 self._modules[name] = module
             return self._modules[name]
 
@@ -368,6 +371,31 @@ class SandboxAI:
         mcp = self.module("mcp")
         return [(name, mcp.status(name), d["image"] if "image" in d else " ".join(d.get("command", [])))
                 for name, d in sorted(mcp.definitions().items())]
+
+    def mcp_serving(self):
+        """{server: [start names]}: the agent starts that reach each MCP server now or at their next start ({} for
+        a sandbox-ai that cannot attach servers to starts)."""
+        mcp = self.module("mcp")
+        return mcp.serving() if hasattr(mcp, "serving") else {}
+
+    def mcp_attach_supported(self):
+        return hasattr(self.module("mcp"), "attach")
+
+    def mcp_attach_targets(self):
+        """[{"name", "state", "agent", "mcp"}] of the agent starts an MCP server can be attached to: the kept
+        ones (a run without a kept start keeps nothing to start again with)."""
+        starts = self.module("starts").entries(True, prune=False)
+        return [entry for entry in starts if entry.get("kind") != "mcp" and entry.get("directory")
+                and entry.get("state") != "damaged"]
+
+    def mcp_attach(self, name, start, restart=False):
+        """The result of `sandbox-ai mcp attach NAME START --json [--restart]` ({"attached", "message", ...})."""
+        status, out, err = self.call("mcp", "attach", name, start, "--json", *(["--restart"] if restart else []),
+                                     timeout=600)
+        try:
+            return json.loads(out)
+        except ValueError:
+            raise ValueError((err or out).strip()[-500:] or f"exit status {status}") from None
 
     def mcp_definitions(self):
         """{name: definition} of the MCP servers this user defined (mcp.json) and the built-in ones."""
@@ -956,6 +984,26 @@ class SandboxAI:
         except OSError:
             return False
 
+    def has_canary_log(self):
+        """This sandbox-ai has `sandbox-ai canaries log` (every canary event with its process and links)."""
+        try:
+            return "def show_log(" in (self.directory / "canary.py").read_text()
+        except OSError:
+            return False
+
+    def canary_log(self, run=None):
+        """`sandbox-ai canaries log [-- RUN] --json`: [one run's log] (every run's, without RUN), each with its
+        events, the process of each and the tool call, prompt turn and model requests linked to it."""
+        status, out, err = self.call("canaries", "log", "--json", *(["--", run] if run else []), timeout=60)
+        if status != 0:
+            raise ValueError((err or out).strip() or f"sandbox-ai canaries log: exit status {status}")
+        document = json.loads(out)
+        if isinstance(document, dict):
+            document = [document]
+        if not isinstance(document, list):
+            raise ValueError("sandbox-ai canaries log --json: not a log")
+        return document
+
     def trust_hooks_argv(self, name):
         """`sandbox-ai kits trust-hooks -- NAME`, for a terminal: it shows every hook and the full text of every
         file, and approves only after the human types yes there (never --yes from the app)."""
@@ -1213,6 +1261,31 @@ class SandboxAI:
         """argv of `sandbox-ai ARGS` on host NAME in a terminal (ssh -tt for another host)."""
         return list(self.module("hosts").argv(name, list(args), tty=True))
 
+    def host_update_supported(self):
+        return hasattr(self.module("hosts"), "update")
+
+    def host_statuses(self, refresh=False, cached=True):
+        """{name: {"version", "kind", "available", "update", "error", ...} or None} of the hosts' sandbox-ai, as
+        `sandbox-ai hosts list` keeps it (CACHED: no SSH at all; else asked when older than 10 minutes, REFRESH:
+        now)."""
+        hosts = self.module("hosts")
+        names = sorted(hosts.load())
+        return hosts.statuses(names, refresh=refresh, cached=cached and not refresh) if names else {}
+
+    def host_update(self, name, sudo=None):
+        """The result of `sandbox-ai hosts update NAME --json` ({"before", "after", "changed", "error",
+        "needs_sudo", "needs_password", "notes", "fixed"}); SUDO None: the host's own setting."""
+        args = ["hosts", "update", name, "--json", *(["--sudo"] if sudo else ["--no-sudo"] if sudo is False else [])]
+        status, out, err = self.call(*args, timeout=self.module("hosts").UPDATE_TIMEOUT + 60)
+        try:
+            return json.loads(out)[0]
+        except (ValueError, IndexError, KeyError, TypeError):
+            raise ValueError((err or out).strip()[-500:] or f"exit status {status}") from None
+
+    def host_update_terminal(self, name):
+        """argv of host NAME's update in a terminal tab, where sudo may ask for its password."""
+        return list(self.module("hosts").update_terminal(name))
+
     def checked(self, *args, timeout=120):
         status, out, err = self.call(*args, timeout=timeout)
         if status != 0:
@@ -1230,6 +1303,32 @@ class SandboxAI:
 
     def sandbox_defaults_file(self):
         return Path(self.launcher.defaults_file())
+
+    # -- extra preset directories (sandbox-ai presets dirs) --
+
+    def has_preset_dirs(self):
+        """This sandbox-ai reads presets from extra directories (defaults.json's preset_dirs)."""
+        try:
+            return "def dirs_main" in (self.directory / "presets.py").read_text()
+        except OSError:
+            return False
+
+    def preset_dirs(self):
+        """`sandbox-ai presets dirs list --json`: {"dirs": [{path, state, why, presets}], "yours", "builtin", ...}."""
+        status, out, err = self.call("presets", "dirs", "list", "--json", timeout=60)
+        if status != 0:
+            raise ValueError((err or out).strip() or f"sandbox-ai presets dirs list: exit status {status}")
+        document = json.loads(out)
+        if not isinstance(document, dict) or not isinstance(document.get("dirs"), list):
+            raise ValueError("sandbox-ai presets dirs list --json: not a list of directories")
+        return document
+
+    def preset_dir_command(self, action, path):
+        """`sandbox-ai presets dirs add|remove -- PATH`: its checks apply (an absolute directory, never one where
+        sandboxes write)."""
+        if action not in ("add", "remove") or not isinstance(path, str) or not os.path.isabs(path) or "\0" in path:
+            return 2, "", "invalid action or path"
+        return self.call("presets", "dirs", action, "--", path, timeout=60)
 
     def sandbox_defaults(self):
         """(document, problem): sandbox-ai's defaults file ({} without it); a broken file is a problem, never

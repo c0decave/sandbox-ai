@@ -6,7 +6,8 @@
   sandbox-ai defaults unset KEY           back to sandbox-ai's own default
 
 The keys are the launcher's: telemetry (off, strict, on), mode (lax ... paranoid), canaries (false or a list of
-categories), keep_days, subnet, subnet6. A value is checked by the launcher itself before the file is replaced
+categories), keep_days, subnet, subnet6, preset_dirs (extra preset directories; `sandbox-ai presets dirs add DIR`
+checks where each lies). A value is checked by the launcher itself before the file is replaced
 (atomically, mode 0600); the other keys stay as they are. An option given at a start wins over the file.
 The web interface and the desktop app change other hosts' defaults through this command.
 
@@ -91,6 +92,18 @@ def parse_value(text):
     return text
 
 
+def check_preset_dirs(value):
+    """Extra preset directories: never inside a folder sandboxes can or could write (presets.py's check)."""
+    spec = importlib.util.spec_from_file_location("sandbox_ai_presets_for_defaults", HERE / "presets.py")
+    presets = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(presets)
+    trees = presets.writable_trees()
+    for path in presets.check_dirs(value):
+        why = presets.unsafe_dir(path, trees)
+        if why:
+            raise ValueError(f"preset_dirs: {path} cannot hold presets: {why}")
+
+
 def describe():
     """What `show --json` adds to the values: the keys and the choices of each."""
     L = launcher()
@@ -126,6 +139,8 @@ def cli(argv, out=print):
     document, path = read()
     if a.command == "set":
         document[a.key] = parse_value(a.value)
+        if a.key == "preset_dirs":
+            check_preset_dirs(document[a.key])
     elif document.pop(a.key, None) is None:
         out(f"{a.key} was not set")
         return 0

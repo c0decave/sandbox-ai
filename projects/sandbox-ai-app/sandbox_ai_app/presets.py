@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import os
 from pathlib import Path
 import re
 
@@ -283,6 +284,21 @@ def role_keys(board):
     return keys
 
 
+def fitted_options(options, cpus=None):
+    """OPTIONS with --cpus no higher than this machine has (CPUS, default os.cpu_count()): a preset written for a
+    big machine would otherwise be refused by the launcher on a smaller one."""
+    available = cpus or os.cpu_count() or 1
+    options = list(options)
+    for index, option in enumerate(options[:-1]):
+        if option == "--cpus":
+            try:
+                if float(options[index + 1]) > available:
+                    options[index + 1] = str(available)
+            except ValueError:
+                pass  # a placeholder or "none": as it is
+    return options
+
+
 def build(sai, preset, directory=None, agent=None, values=None, grid=20, backend=None):
     """The board of PRESET for the project DIRECTORY, laid out. VALUES ({placeholder: value}): what the user
     filled in; given (even empty), optional placeholders left empty are left out. Without VALUES every
@@ -291,7 +307,7 @@ def build(sai, preset, directory=None, agent=None, values=None, grid=20, backend
     if preset.agents and agent not in preset.agents:
         agent = preset.agents[0]  # the preset is not for the agent of the settings: its first one
     task = (["--prompt", preset.prompt] if agent == "opencode" else [preset.prompt]) if preset.prompt else []
-    board = B.from_argv(sai, agent, list(preset.options), list(preset.agent_args) + task,
+    board = B.from_argv(sai, agent, fitted_options(preset.options), list(preset.agent_args) + task,
                         [str(directory)] if directory else [])
     for name in preset.mcp:
         if not any(n.props.get("name") == name for n in board.of_kind("mcp")):
@@ -512,7 +528,9 @@ def from_sandbox_ai(sai, document):
         "placeholders": [{"marker": markers[name], "label": str((spec or {}).get("label", name))[:200],
                           "hint": str((spec or {}).get("hint", ""))[:300], "optional": bool((spec or {}).get("optional")),
                           "follows": ""} for name, spec in values.items()],
-        "notes": [str(note)[:1000] for note in (document.get("notes") or []) + (document.get("needs") or [])]}
+        "notes": [str(note)[:1000] for note in (document.get("notes") or []) + (document.get("needs") or [])]
+                 + ([tr("From the preset directory {path}", path=str(document["_dir"])[:900])]
+                    if document.get("_origin") == "extra" and isinstance(document.get("_dir"), str) else [])}
     checked = from_document(sai, converted)  # the task is checked with the arguments, then kept apart
     import dataclasses
     return dataclasses.replace(checked, agent_args=(), prompt=checked.agent_args[0] if checked.agent_args else "",
@@ -520,14 +538,14 @@ def from_sandbox_ai(sai, document):
 
 
 def sandbox_ai_presets(sai):
-    """([Preset] of sandbox-ai's own presets (built-in and the user's), [problem]); none from a sandbox-ai without
-    presets."""
+    """([Preset] of sandbox-ai's own presets (built-in, from the extra preset directories and the user's),
+    [problem]); none from a sandbox-ai without presets."""
     try:
         module = sai.module("presets")
     except Exception:  # noqa: BLE001 - an older sandbox-ai: no presets of its own
         return [], []
     found, problems = [], []
-    for document in module.catalog().values():
+    for document in module.catalog(problems).values():
         try:
             found.append(from_sandbox_ai(sai, {**document, "_path": document.get("_path")}))
         except ValueError as exc:

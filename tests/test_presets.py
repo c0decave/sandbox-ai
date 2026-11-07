@@ -107,6 +107,122 @@ def test_yours_win_and_damaged_ones_are_skipped(own_config):
     assert len(damaged) == 1 and "broken.json" in damaged[0] and "notes" not in presets
 
 
+def write_defaults(own_config, **values):
+    path = own_config.parent / "defaults.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"version": 1, **values}))
+    path.chmod(0o600)
+    return path
+
+
+@pytest.fixture
+def no_sandboxes(monkeypatch):
+    """Where sandboxes write: nothing but what a test puts here."""
+    trees = []
+    monkeypatch.setattr(p, "EXPOSED_BEFORE", lambda: list(trees))
+    return trees
+
+
+def test_extra_preset_directories_in_their_order_between_yours_and_the_built_in(own_config, tmp_path, no_sandboxes):
+    first, second = tmp_path / "first", tmp_path / "second"
+    for directory, title in ((first, "First"), (second, "Second")):
+        directory.mkdir()
+        (directory / "shared.json").write_text(json.dumps(minimal(id="shared", title=title)))
+        (directory / "development.json").write_text(json.dumps(minimal(id="development", title=title)))
+    (second / "only-second.json").write_text(json.dumps(minimal(id="only-second")))
+    write_defaults(own_config, preset_dirs=[str(first), str(second)])
+    presets = p.catalog()
+    assert presets["shared"]["title"] == "First" and presets["shared"]["_origin"] == "extra"
+    assert presets["shared"]["_dir"] == str(first) and presets["only-second"]["_dir"] == str(second)
+    assert presets["development"]["title"] == "First", "an extra directory wins over a built-in preset"
+    assert presets["software-analysis"]["_origin"] == "built-in"
+    own_config.mkdir(parents=True)
+    (own_config / "shared.json").write_text(json.dumps(minimal(id="shared", title="Mine")))
+    assert p.catalog()["shared"]["_origin"] == "yours", "yours win over every extra directory"
+    assert p.public(p.catalog()["only-second"])["directory"] == str(second)
+
+
+def test_an_extra_directory_where_sandboxes_write_is_skipped(own_config, tmp_path, no_sandboxes):
+    workspace = tmp_path / "project"
+    inside = workspace / "presets"
+    inside.mkdir(parents=True)
+    (inside / "planted.json").write_text(json.dumps(minimal(id="planted")))
+    write_defaults(own_config, preset_dirs=[str(inside)])
+    assert "planted" in p.catalog()
+    no_sandboxes.append(workspace)
+    problems = []
+    assert "planted" not in p.catalog(problems)
+    assert any("skipped" in problem and str(workspace) in problem for problem in problems)
+    # Through a symlink to it: the same.
+    link = tmp_path / "link"
+    link.symlink_to(inside)
+    write_defaults(own_config, preset_dirs=[str(link)])
+    assert "planted" not in p.catalog()
+    # Not knowing where sandboxes write: no extra directory is trusted.
+    p.EXPOSED_BEFORE = lambda: (_ for _ in ()).throw(OSError("unreadable registry"))
+    problems = []
+    assert "planted" not in p.catalog(problems) and "cannot tell where sandboxes write" in problems[0]
+
+
+def test_symlinked_presets_and_rulesets_in_an_extra_directory_are_not_followed(own_config, tmp_path, no_sandboxes):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "target.json").write_text(json.dumps(minimal(id="linked")))
+    (elsewhere / "rules.json").write_text("{}")
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    (extra / "linked.json").symlink_to(elsewhere / "target.json")
+    (extra / "ruled.json").write_text(json.dumps(minimal(id="ruled", rules="ruled.rules.json")))
+    (extra / "ruled.rules.json").symlink_to(elsewhere / "rules.json")
+    (extra / "fine.json").write_text(json.dumps(minimal(id="fine")))
+    write_defaults(own_config, preset_dirs=[str(extra)])
+    problems = []
+    presets = p.catalog(problems)
+    assert "fine" in presets and "linked" not in presets and "ruled" not in presets
+    assert any("a symlink, not followed" in problem for problem in problems)
+    assert any("ruleset ruled.rules.json is a symlink" in problem for problem in problems)
+
+
+def test_a_damaged_preset_dirs_value_is_said_not_fatal(own_config):
+    write_defaults(own_config, preset_dirs="/not/a/list")
+    problems = []
+    assert "software-analysis" in p.catalog(problems) and "preset_dirs is a list" in problems[0]
+    with pytest.raises(ValueError, match="twice"):
+        p.check_dirs(["/a", "/a/"])
+    with pytest.raises(ValueError, match="absolute"):
+        p.check_dirs(["relative"])
+
+
+def test_the_dirs_commands(capsys, own_config, tmp_path, no_sandboxes):
+    team = tmp_path / "team"
+    team.mkdir()
+    (team / "team-tool.json").write_text(json.dumps(minimal(id="team-tool")))
+    assert p.main(["dirs"]) == 0
+    assert "no extra preset directories" in capsys.readouterr().out
+    assert p.main(["dirs", "add", str(team)]) == 0
+    assert f"preset directory {team} added (1 preset file(s))" in capsys.readouterr().out
+    document = json.loads((own_config.parent / "defaults.json").read_text())
+    assert document == {"version": 1, "preset_dirs": [str(team)]}
+    assert p.main(["dirs", "add", str(team)]) == 1 and "listed already" in capsys.readouterr().err
+    assert p.main(["list"]) == 0 and f"(from {team})" in capsys.readouterr().out
+    assert p.main(["show", "team-tool"]) == 0 and f"from {team}" in capsys.readouterr().out
+    assert p.main(["dirs", "list", "--json"]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert listed["dirs"] == [{"path": str(team), "state": "used", "why": None, "presets": 1}]
+    no_sandboxes.append(tmp_path)
+    assert p.main(["dirs", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["dirs"][0]["state"] == "skipped"
+    other = tmp_path / "other"
+    other.mkdir()
+    assert p.main(["dirs", "add", str(other)]) == 1
+    assert "cannot hold presets: it lies in" in capsys.readouterr().err
+    assert p.main(["dirs", "add", str(tmp_path / "missing")]) == 1 and "not a directory" in capsys.readouterr().err
+    assert p.main(["dirs", "add", str(p.BUILTIN)]) == 1
+    assert p.main(["dirs", "remove", str(team)]) == 0 and "removed" in capsys.readouterr().out
+    assert json.loads((own_config.parent / "defaults.json").read_text()) == {"version": 1}
+    assert p.main(["dirs", "remove", str(team)]) == 1 and "not listed" in capsys.readouterr().err
+
+
 def test_missing_names_what_to_add():
     preset = p.load("software-analysis")
     found = p.missing(preset, {}, "claude", mcp_names={"capa"})

@@ -1438,6 +1438,35 @@ class AddServerDialog(QDialog):
         return args
 
 
+class AttachServerDialog(QDialog):
+    """Attach to…: the agent start that gets an MCP server (sandbox-ai mcp attach), and whether a running one is
+    restarted for it now."""
+
+    def __init__(self, parent, name, targets):
+        super().__init__(parent)
+        self.setWindowTitle(tr("Attach {name} to…", name=name))
+        form = QFormLayout(self)
+        self.start = QComboBox()
+        for entry in targets:
+            used = name in (entry.get("mcp") or [])
+            self.start.addItem(printable(f"{entry['name']} ({entry.get('agent') or '?'}, {entry.get('state')})"
+                                         + (f" - {tr('uses it')}" if used else "")), entry["name"])
+        form.addRow(tr("Agent start"), self.start)
+        self.restart = QCheckBox(tr("Restart it now if it runs (the agent continues its conversation)"))
+        form.addRow(self.restart)
+        form.addRow(plain_label(tr("A running sandbox cannot take a new MCP server while it runs: its agent reads its "
+                                   "servers when it starts, and the server's socket is mounted at the start. The "
+                                   "server is kept in the start's options: without a restart it is there from its "
+                                   "next start on."), role="secondary"))
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def values(self):
+        return self.start.currentData(), self.restart.isChecked()
+
+
 class McpPage(QWidget):
     def __init__(self, sai):
         super().__init__()
@@ -1445,7 +1474,7 @@ class McpPage(QWidget):
         layout = QVBoxLayout(self)
         servers = QGroupBox(tr("Your MCP servers (use them with --mcp NAME)"))
         servers_layout = QVBoxLayout(servers)
-        self.servers = table([tr("Name"), tr("Status"), tr("Runs")])
+        self.servers = table([tr("Name"), tr("Status"), tr("Serves"), tr("Runs")])
         servers_layout.addWidget(self.servers)
         row = QHBoxLayout()
         self.server_buttons = []
@@ -1454,6 +1483,12 @@ class McpPage(QWidget):
             button.clicked.connect(lambda _=False, a=action: self.server(a))
             row.addWidget(button)
             self.server_buttons.append(button)
+        self.attach_button = QPushButton(tr("Attach to…"))
+        self.attach_button.setToolTip(tr("Connect the server to an agent start (sandbox-ai mcp attach)"))
+        self.attach_button.clicked.connect(self.attach)
+        self.attach_button.setEnabled(sai.mcp_attach_supported())
+        row.addWidget(self.attach_button)
+        self.server_buttons.append(self.attach_button)
         row.addStretch()
         servers_layout.addLayout(row)
         layout.addWidget(servers)
@@ -1488,12 +1523,49 @@ class McpPage(QWidget):
     def refresh(self):
         """The servers, read in the background (the window is not held up by it)."""
         # A read, not work: no owner, so it never holds up closing the window (busy()).
-        background(self.sai.mcp_servers, timeout=60, done=lambda rows, error: alive(self) and self.servers_read(rows, error))
+        background(self.servers_and_starts, timeout=60,
+                   done=lambda rows, error: alive(self) and self.servers_read(rows, error))
+
+    def servers_and_starts(self):
+        """[(name, status, the starts it serves, what runs)] of the defined MCP servers."""
+        try:
+            served = self.sai.mcp_serving()
+        except Exception:  # noqa: BLE001 - the starts could not be read: the servers are listed anyway
+            served = {}
+        return [(name, state, ", ".join(served.get(name, [])), what) for name, state, what in self.sai.mcp_servers()]
 
     def servers_read(self, rows, error):
         if error is not None:
-            rows = [(tr("(error)"), "", str(error))]
+            rows = [(tr("(error)"), "", "", str(error))]
         fill(self.servers, rows, ["ok" if r[1] == "running" else None for r in rows])
+
+    def attach(self):
+        name = selected(self.servers)
+        if not name:
+            inform(self, tr("Attach to…"), tr("Select a server first."))
+            return
+        try:
+            targets = self.sai.mcp_attach_targets()
+        except (OSError, ValueError) as exc:
+            warn(self, tr("Attach to…"), printable(str(exc)))
+            return
+        if not targets:
+            inform(self, tr("Attach to…"), tr("No kept agent start to attach it to: start one (a run "
+                                              "without a kept start takes no new server)."))
+            return
+        dialog = AttachServerDialog(self, name, targets)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        start, restart = dialog.values()
+        background(lambda: self.sai.mcp_attach(name, start, restart), owner=self, source=self.server_buttons,
+                   timeout=630, done=lambda result, error: self.attached(name, result, error))
+
+    def attached(self, name, result, error):
+        if error is not None:
+            warn(self, tr("Attach to…"), printable(str(error)))
+        else:
+            inform(self, tr("Attach to…"), printable(result.get("message") or ""))
+        self.refresh()
 
     def server(self, action):
         name = selected(self.servers)
@@ -2407,6 +2479,7 @@ class MainWindow(QMainWindow):
         action(help_menu, "tour", tr("Guided tour"), lambda: self.start_tour())
         action(help_menu, "area-tour", tr("Tour of this page"), lambda: self.start_area_tour(self.current_page()),
                ["F1"])
+        action(help_menu, "tour-about", tr("Tour about…"), lambda: self.tour_about(), ["Ctrl+F1"])
         areas = help_menu.addMenu(tr("Area tours"))
         from . import tours
         for key, title in PAGES:
@@ -2466,6 +2539,17 @@ class MainWindow(QMainWindow):
         if section:
             self.help.show_section(section)
         return self.help
+
+    def tour_about(self, text=""):
+        """Tour about…: the human types a topic; the matching tours start, the matching Help sections open on the
+        Help page (help_view.TourSearchDialog)."""
+        from .help_view import TourSearchDialog
+        dialog = TourSearchDialog(self, text)
+        dialog.tour_requested.connect(self.start_any_tour)
+        dialog.section_requested.connect(lambda ident: self.show_help(ident))
+        dialog.show()
+        self.tour_search = dialog
+        return dialog
 
     def start_any_tour(self, ident):
         """A tour from the Help page: a task tour by its id, or area:PAGE."""

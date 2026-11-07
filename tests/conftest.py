@@ -49,6 +49,7 @@ def private_runtime_state(request, tmp_path_factory, monkeypatch):
     if request.node.get_closest_marker("agent_live") is None:
         monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path_factory.mktemp("xdg-runtime")))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("xdg-state")))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path_factory.mktemp("xdg-cache")))  # e.g. hosts list's status
 
 
 @pytest.fixture(autouse=True)

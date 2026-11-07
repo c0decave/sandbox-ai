@@ -10,7 +10,7 @@ const state = {
 const AGENTS = ["claude", "codex", "opencode"];
 const PAGES = [
   ["starts", "Starts and sessions"], ["approvals", "Approvals"], ["terminals", "Terminals"],
-  ["doctor", "Doctor"], ["logs", "Logs"], ["llm", "LLM servers"], ["vpn", "VPN profiles"], ["settings", "Defaults"], ["hosts", "Hosts"],
+  ["doctor", "Doctor"], ["logs", "Logs"], ["llm", "LLM servers"], ["vpn", "VPN profiles"], ["kits", "Kits"], ["canaries", "Canaries"], ["settings", "Defaults"], ["hosts", "Hosts"],
 ];
 
 // --- small helpers ---------------------------------------------------------------------------------------
@@ -286,6 +286,23 @@ function show(page) {
 
 const pages = {};
 
+// An MCP server's "Attach to…": one of the host's kept agent starts gets it (sandbox-ai mcp attach), kept for its
+// later starts; a running one reaches it after a restart, done now when "restart" is ticked.
+function attachControls(s, starts) {
+  const server = s.name.replace(/^mcp-/, "");
+  const targets = starts.filter(t => t.kind !== "mcp" && t.directory && t.state !== "damaged");
+  const choose = el("select", { "aria-label": `Attach ${server} to` }, targets.map(t => el("option", { value: t.name }, `${t.name} (${t.state})`)));
+  const restart = el("input", { type: "checkbox" });
+  const attach = el("button", { disabled: !targets.length, title: targets.length ? "" : "no kept agent start on this host", onclick: (ev) => busy(ev.target, async () => {
+    try {
+      const r = await api("POST", hostPath(`/mcp/${encodeURIComponent(server)}/attach`), { start: choose.value, restart: restart.checked });
+      toast(r.attached === "after a restart" ? "warning" : "success", `${server} → ${r.start}`, r.message);
+      show("starts");
+    } catch (e) { failed(`Could not attach ${server}`)(e); }
+  }) }, "Attach to…");
+  return [attach, choose, el("label", { class: "hint", title: "a running start cannot take a new MCP server while it runs: it is restarted, and the agent continues its conversation" }, restart, " restart if it runs")];
+}
+
 pages.starts = async (main) => {
   main.append(el("h1", {}, `Starts and sessions on ${state.host}`), el("p", { class: "hint" }, "Loading…"));
   const starts = await api("GET", hostPath("/starts"));
@@ -306,8 +323,12 @@ pages.starts = async (main) => {
       el("button", { onclick: () => networkCard(main, s.name) }, "Network…"));
     if (s.state === "paused") actions.append(act("Resume", "resume"), act("Stop", "stop"));
     if (s.state === "stopped" && s.keep) actions.append(act("Resume", "resume"), act("Delete", "delete", { class: "danger" }));
+    if (s.kind === "mcp") actions.append(...attachControls(s, starts));
+    // which MCP servers a start reaches (or will at its next start), and whom a server serves
+    const mcpNote = s.kind === "mcp" ? ((s.serves || []).length ? `serves ${s.serves.join(", ")}` : "serves no start yet")
+      : (s.mcp || []).length ? `MCP: ${s.mcp.join(", ")}` : "";
     return el("tr", {}, el("td", { class: "mono" }, s.name), el("td", {}, s.agent || s.kind || ""), statusCell(s.state),
-      el("td", { class: "mono" }, s.workspace || ""), el("td", {}, s.home || ""), el("td", {}, (s.started || "").replace("T", " ").replace("Z", "")), actions);
+      el("td", { class: "mono" }, s.workspace || "", mcpNote ? el("div", { class: "hint" }, mcpNote) : null), el("td", {}, s.home || ""), el("td", {}, (s.started || "").replace("T", " ").replace("Z", "")), actions);
   });
   main.append(table(["Name", "Agent", "State", "Workspace", "HOME", "Started", ""], rows, "Nothing runs or is kept on this host."));
   // a new start: in a terminal of the page, detachable like every start (Ctrl-b d)
@@ -500,6 +521,153 @@ pages.llm = async (main) => {
     el("p", { class: "hint" }, "Then start an agent with --llm NAME (Options of a new start). A key is set on the server: sandbox-ai secrets set NAME, then sandbox-ai llm add … --api-key-secret NAME.")));
 };
 
+// Kits (sandbox-ai kits on that host): what each brings, and adding to a kit of yours. sandbox-ai's own kits are
+// read-only: with one of them (or none) chosen, what is added goes to a kit of yours, or a new one created first.
+const KIT_KINDS = { always: "always (sandbox-ai)", default: "always (default kit)", builtin: "built-in", user: "yours" };
+
+pages.kits = async (main) => {
+  main.append(el("h1", {}, `Kits on ${state.host}`), el("p", { class: "hint" }, "Loading…"));
+  const data = await api("GET", hostPath("/kits"));
+  const kits = (Array.isArray(data.kits) ? data.kits : []).filter(k => k && typeof k.name === "string");
+  const mine = kits.filter(k => k.kind === "user").map(k => k.name).sort();
+  clear(main).append(el("h1", {}, `Kits on ${state.host}`),
+    el("p", { class: "hint mono" }, data.kits_dir || ""),
+    el("p", { class: "hint" }, "Every change runs sandbox-ai kits on that host, with its checks. sandbox-ai's own and the built-in kits are read-only: what you add goes to a kit of yours."));
+  const output = el("div");
+  const result = (title, r) => { clear(output).append(notice(title, "ok"), el("pre", {}, (r && r.output) || "")); toast("success", title, ""); };
+  const listOf = (value) => Array.isArray(value) ? value.filter(v => typeof v === "string") : [];
+  const rows = kits.map(k => {
+    const own = k.kind === "user";
+    const brings = el("td", {});
+    for (const [agent, info] of Object.entries(k.agents || {})) {
+      if (!info || typeof info !== "object") continue;
+      const line = el("div", {}, el("strong", {}, `${agent}: `));
+      const entries = [...listOf(info.skills).map(s => ["skill", s]), ...listOf(info.plugins).map(p => ["plugin", p])];
+      if (!entries.length) line.append(el("span", { class: "hint" }, "nothing"));
+      for (const [kind, value] of entries) {
+        line.append(el("span", { class: "mono" }, `${kind} ${value}`));
+        if (own) line.append(" ", el("button", { class: "danger small", title: `Remove the ${kind} ${value} for ${agent}`, "aria-label": `Remove the ${kind} ${value} for ${agent}`,
+          onclick: (ev) => busy(ev.target, async () => {
+            if (!confirm(`Remove the ${kind} ${value} for ${agent} from the kit ${k.name}?`)) return;
+            const body = kind === "skill" ? { skill: value, agents: [agent] } : { plugin: value, agent };
+            try { result(`${k.name}: removed ${value}`, await api("POST", hostPath(`/kits/${encodeURIComponent(k.name)}/remove-${kind}`), body)); show("kits"); }
+            catch (e) { failed(`Could not remove ${value}`)(e); }
+          }) }, "×"));
+        line.append("  ");
+      }
+      if (info.error) line.append(el("span", { class: "status-bad" }, ` ✘ ${info.error}`));
+      brings.append(line);
+    }
+    return el("tr", {}, el("td", { class: "mono" }, k.name), el("td", {}, KIT_KINDS[k.kind] || String(k.kind || "")), brings,
+      el("td", { class: "actions" }, own ? el("button", { class: "danger", onclick: (ev) => busy(ev.target, async () => {
+        if (!confirm(`Delete the kit ${k.name} with everything in it? Projects that use it cannot start until --kit ${k.name} is removed.`)) return;
+        try { result(`${k.name} deleted`, await api("DELETE", hostPath(`/kits/${encodeURIComponent(k.name)}`), { confirm: true })); show("kits"); }
+        catch (e) { failed(`Could not delete ${k.name}`)(e); }
+      }) }, "Delete kit") : null));
+  });
+  main.append(table(["Kit", "Kind", "Brings", ""], rows, "No kits on this host."), output);
+
+  // a new kit
+  const newName = el("input", { id: "kit-new-name", placeholder: "my-kit", pattern: "[A-Za-z0-9][A-Za-z0-9_.-]{0,63}" });
+  const agentBoxes = (prefix) => AGENTS.map(a => el("label", {}, el("input", { type: "checkbox", value: a, checked: true, id: `${prefix}-${a}` }), " ", a));
+  const chosenAgents = (box) => [...box.querySelectorAll("input[type=checkbox]")].filter(b => b.checked).map(b => b.value);
+  const newAgents = el("div", { class: "row" }, agentBoxes("kit-new"));
+  const newStatus = el("div", { class: "wide" });
+  main.append(el("h2", {}, "New kit"), el("div", { class: "card" }, el("div", { class: "form" },
+    el("label", { for: "kit-new-name" }, "Name"), newName, el("span", {}, "For"), newAgents,
+    el("span"), el("button", { class: "primary", onclick: (ev) => busy(ev.target, async () => {
+      clear(newStatus);
+      try { result(`Kit ${newName.value.trim()} created`, await api("POST", hostPath("/kits"), { name: newName.value.trim(), agents: chosenAgents(newAgents) })); show("kits"); }
+      catch (e) { newStatus.append(notice(e.message, "error")); }
+    }) }, "Create"), newStatus)));
+
+  // adding to a kit of yours (or a new one)
+  const target = el("select", { id: "kit-target" }, mine.map(n => el("option", { value: n }, n)), el("option", { value: "" }, "a new kit…"));
+  const targetName = el("input", { id: "kit-target-name", placeholder: "my-kit", value: mine.length ? "" : "my-kit" });
+  const targetLabel = el("label", { for: "kit-target-name" }, "New kit's name");
+  const updateTarget = () => { const fresh = target.value === ""; targetName.hidden = !fresh; targetLabel.hidden = !fresh; };
+  target.addEventListener("change", updateTarget);
+  updateTarget();
+  const addStatus = el("div", { class: "wide" });
+  const send = (action, body, title) => async (ev) => busy(ev.target, async () => {
+    clear(addStatus);
+    const fresh = target.value === "";
+    const name = fresh ? targetName.value.trim() : target.value;
+    try { result(title(name), await api("POST", hostPath(`/kits/${encodeURIComponent(name)}/${action}`), Object.assign(body(), { create: fresh }))); show("kits"); }
+    catch (e) { addStatus.append(notice(e.message, "error")); }
+  });
+  const folder = el("input", { id: "kit-skill-path", class: "mono", placeholder: "/home/you/skills/review (on that host, with SKILL.md)" });
+  const folderAs = el("input", { id: "kit-skill-as", placeholder: "the folder's name" });
+  const skillName = el("input", { id: "kit-skill-name", placeholder: "release-notes", pattern: "[a-z0-9][a-z0-9-]{0,63}" });
+  const skillDescription = el("input", { id: "kit-skill-description", placeholder: "What it does and when the agent should use it (one line)" });
+  const skillAgents = el("div", { class: "row" }, agentBoxes("kit-skill"));
+  const plugin = el("input", { id: "kit-plugin", class: "mono", placeholder: "sandcastle@sandbox-ai, or an npm package for OpenCode" });
+  const pluginAgent = el("select", { id: "kit-plugin-agent" }, ["claude", "opencode"].map(a => el("option", { value: a }, a)));
+  const pluginSource = el("input", { id: "kit-plugin-source", class: "mono", placeholder: "OWNER/REPO or https://… (only for a marketplace the kit does not declare yet)" });
+  main.append(el("h2", {}, "Add to a kit of yours"), el("div", { class: "card" }, el("div", { class: "form" },
+    el("label", { for: "kit-target" }, "Kit"), target, targetLabel, targetName,
+    el("span", {}, "For"), skillAgents,
+    el("h3", { class: "wide" }, "A skill from a folder"),
+    el("label", { for: "kit-skill-path" }, "Folder"), folder, el("label", { for: "kit-skill-as" }, "Name in the kit"), folderAs,
+    el("span"), el("button", { class: "primary", onclick: send("add-skill", () => ({ path: folder.value.trim(), as: folderAs.value.trim(), agents: chosenAgents(skillAgents) }), n => `Skill copied into ${n}`) }, "Add skill from the folder"),
+    el("p", { class: "hint wide" }, "The kit gets a copy: links are not followed, special files are skipped. A folder where sandboxes can write is copied with a note: review it first."),
+    el("h3", { class: "wide" }, "A new skill"),
+    el("label", { for: "kit-skill-name" }, "Name"), skillName, el("label", { for: "kit-skill-description" }, "Description"), skillDescription,
+    el("span"), el("button", { class: "primary", onclick: send("new-skill", () => ({ skill: skillName.value.trim(), description: skillDescription.value.trim(), agents: chosenAgents(skillAgents) }), n => `New skill in ${n}`) }, "Write the skill (SKILL.md)"),
+    el("h3", { class: "wide" }, "A plugin"),
+    el("label", { for: "kit-plugin" }, "Plugin"), plugin, el("label", { for: "kit-plugin-agent" }, "Agent"), pluginAgent,
+    el("label", { for: "kit-plugin-source" }, "Marketplace source"), pluginSource,
+    el("span"), el("button", { class: "primary", onclick: send("add-plugin", () => ({ plugin: plugin.value.trim(), agent: pluginAgent.value, source: pluginSource.value.trim() }), n => `Plugin added to ${n}`) }, "Add plugin"),
+    addStatus),
+    el("p", { class: "hint" }, "Use a kit with --kit NAME (Options of a new start). Claude plugins are installed with sandbox-ai plugins claude on that host.")));
+};
+
+// the canary log: every opened decoy or token that left, by which process, with the agent's tool call, its prompt
+// turn and the model requests around it (sandbox-ai canaries log on that host; redacted there, tokens never shown)
+function canaryProcess(p) {
+  if (!p || p.unknown !== undefined || !Object.keys(p).length) return `unknown${p && p.unknown ? ` (${p.unknown})` : ""}`;
+  let text = `${p.comm || "?"} (pid ${p.pid ?? "?"}${p.ns_pid !== undefined && p.ns_pid !== p.pid ? `, ${p.ns_pid} in the sandbox` : ""})`;
+  if (Array.isArray(p.argv) && p.argv.length) text += `: ${p.argv.join(" ")}`;
+  if (Array.isArray(p.parents) && p.parents.length) text += ` ← ${p.parents.slice(0, 3).join(" ← ")}`;
+  return text;
+}
+
+function canaryLinks(e) {
+  const items = [];
+  for (const t of e.tool_calls || []) items.push(el("li", {}, `tool call (${t.match}): `, el("span", { class: "mono" }, t.summary || ""), ` — ${(t.time || "").replace("T", " ").replace("Z", "")}, activity ${t.id}`));
+  if (e.turn) items.push(el("li", {}, "prompt turn: ", el("span", {}, e.turn.summary || ""), ` — ${(e.turn.time || "").replace("T", " ").replace("Z", "")}, activity ${e.turn.id}`));
+  for (const r of e.requests || []) items.push(el("li", { class: r.position === "carried the token" ? "status-bad" : "" }, `model request (${r.position}): `,
+    el("span", { class: "mono" }, `${r.method || ""} ${r.url || r.host || ""}${r.status ? ` → ${r.status}` : ""}`),
+    ` — ${(r.time || "").replace("T", " ").replace("Z", "")}, ${r.activity_id ? `activity ${r.activity_id}` : `${r.log} @${r.offset}`}`));
+  return items;
+}
+
+pages.canaries = async (main) => {
+  main.append(el("h1", {}, `Canaries on ${state.host}`), el("p", { class: "hint" }, "Loading…"));
+  let logs;
+  try { logs = await api("GET", hostPath("/canaries")); }
+  catch (e) { clear(main).append(el("h1", {}, `Canaries on ${state.host}`), notice(e.status === 502 ? `${e.message} (an older sandbox-ai there has no canaries log: sandbox-ai update)` : e.message, "error")); return; }
+  clear(main).append(el("h1", {}, `Canaries on ${state.host}`),
+    el("p", { class: "hint" }, "Every decoy file opened and every canary token that left a sandbox: by which process (for a file, the one the supervisor found holding it open; inotify itself names nobody), with the agent's tool call, its prompt turn and the model requests around it."));
+  const events = (Array.isArray(logs) ? logs : []).flatMap(log => (log.events || []).map(e => Object.assign({ agent: log.agent, activity: log.activity }, e)));
+  if (!events.length) { main.append(el("p", { class: "hint" }, "No canary was touched on this host.")); return; }
+  const rows = [];
+  for (const e of events.slice().reverse()) {
+    const links = canaryLinks(e);
+    const detail = el("tr", { class: "canary-links hidden" }, el("td", { colspan: 7 },
+      links.length ? el("ul", {}, links) : el("p", { class: "hint" }, e.activity ? "Nothing of the agent's in that time window." : "No activity timeline for this run: nothing to link."),
+      (e.processes || []).length > 1 ? el("p", { class: "hint" }, `also open in: ${e.processes.slice(1).map(canaryProcess).join("; ")}`) : null));
+    const toggle = el("button", { "aria-expanded": "false", onclick: () => { const open = detail.classList.toggle("hidden"); toggle.setAttribute("aria-expanded", String(!open)); toggle.textContent = open ? "Show links" : "Hide links"; } }, "Show links");
+    rows.push(el("tr", { class: "canary-event" },
+      el("td", {}, (e.time || "").replace("T", " ").replace("Z", "")), el("td", { class: "mono" }, e.run || ""),
+      el("td", { class: "status-bad" }, `${e.event || "?"}${e.action ? ` (${e.action})` : ""}`),
+      el("td", { class: "mono" }, `${e.canary || "-"} ${e.path || ""}`),
+      el("td", {}, e.summary || e.error || ""), el("td", { class: "mono" }, canaryProcess(e.process)),
+      el("td", { class: "actions" }, toggle)), detail);
+  }
+  main.append(table(["Time", "Run", "Event", "Canary", "What", "Process", ""], rows));
+};
+
 pages.settings = async (main) => {
   main.append(el("h1", {}, `Defaults on ${state.host}`));
   const data = await api("GET", hostPath("/defaults"));
@@ -531,36 +699,117 @@ pages.settings = async (main) => {
     el("p", { class: "hint" }, "For every start on this host; an option given at a start wins.")));
 };
 
+// The version of a host's sandbox-ai and whether an update is there (hosts list's status; null: not asked yet).
+function versionText(s) {
+  if (!s) return "…";
+  if (!s.version) return s.error ? "unreachable" : "?";
+  if (["checkout", "pip", "package"].includes(s.kind)) return `${s.version} (${s.kind})`;
+  if (s.update) return `${s.version} → ${s.available} available`;
+  return s.update === false ? `${s.version}, up to date` : s.version;
+}
+
+// What a key made private (ssh refuses key files others can read) and what was only named.
+function keyNotices(r) {
+  return [...(r.fixed || []).map(f => notice(`${f.path} could be read by others (mode ${f.was}), which ssh refuses: made private (${f.now}).`, "ok")),
+    ...(r.warnings || []).map(w => notice(w, "warn"))];
+}
+
+// One host's update: its own signed sandbox-ai update; a sudo that wants a password is asked in a terminal tab.
+async function updateHost(name, output, sudo) {
+  const body = sudo === undefined ? {} : { sudo };
+  const r = await api("POST", `/api/hosts/${encodeURIComponent(name)}/update`, body);
+  output.append(...keyNotices(r));
+  if (r.changed) output.append(notice(`${name}: ${r.before || "?"} → ${r.after}${r.sudo ? " (sudo)" : ""}`, "ok"));
+  else if (r.error && !r.after) {
+    output.append(el("div", { class: "notice error", role: "alert" }, `${name}: not updated: ${r.error}`,
+      r.needs_password ? el("button", { onclick: () => openTerminal({ host: name, kind: "update" }, `update ${name}`) }, "Update in a terminal (sudo asks there)") : null,
+      r.needs_sudo ? el("button", { onclick: (ev) => busy(ev.target, () => updateHost(name, output, true).catch(failed(`Could not update ${name}`))) }, "Update with sudo") : null));
+  } else output.append(notice(`${name}: ${r.after || r.before}, up to date${r.error ? ` (${r.error})` : ""}`, r.error ? "warn" : "ok"));
+  for (const note of r.notes || []) output.append(notice(`${name}: ${note}`, "warn"));
+  return r;
+}
+
 pages.hosts = async (main) => {
   main.append(el("h1", {}, "Hosts"), el("p", { class: "hint" }, "Machines (or LXC containers) whose sandbox-ai this service manages over SSH, with your keys; nothing listens on them but sshd."));
-  const output = el("div");
-  const rows = state.hosts.map(h => el("tr", {}, el("td", { class: "mono" }, h.name), el("td", { class: "mono" }, h.kind === "local" ? "this machine" : `${h.ssh}${h.port && h.port !== 22 ? ":" + h.port : ""}`),
-    el("td", {}, h.description || ""), el("td", { class: "actions" },
-      el("button", { onclick: (ev) => busy(ev.target, async () => {
-        clear(output);
-        try {
-          const r = await api("POST", `/api/hosts/${encodeURIComponent(h.name)}/test`);
-          output.append(notice(r.error ? `${h.name}: ${r.error}` : `${h.name}: ${r.version}`, r.error ? "error" : "ok"));
-          if (r.doctor) output.append(table(["", "Check", "Detail"], r.doctor.filter(d => d.status !== "ok").map(d => el("tr", {}, statusCell(d.status), el("td", {}, d.check), el("td", {}, d.detail || ""))), "The doctor found nothing to do."));
-        } catch (e) { output.append(notice(e.message, "error")); }
-      }) }, "Test"),
-      h.kind === "local" ? null : el("button", { class: "danger", onclick: async () => { if (!confirm(`Remove ${h.name} from the list?`)) return; try { await api("DELETE", `/api/hosts/${encodeURIComponent(h.name)}`); render(); } catch (e) { failed(`Could not remove ${h.name}`)(e); } } }, "Remove"))));
-  main.append(table(["Name", "SSH", "Description", ""], rows), output);
+  const output = el("div", { "aria-live": "polite" });
+  const versions = {};
+  const versionCells = {};
+  const showVersions = (found) => {
+    Object.assign(versions, found);
+    for (const [name, cell] of Object.entries(versionCells)) cell.textContent = versionText(versions[name]);
+  };
+  const loadVersions = async (refresh) => {
+    try { showVersions(await api(refresh ? "POST" : "GET", "/api/hosts-status", refresh ? {} : undefined)); }
+    catch (e) { for (const cell of Object.values(versionCells)) cell.textContent = "?"; output.append(notice(`Versions: ${e.message}`, "error")); }
+  };
+  const remote = state.hosts.filter(h => h.kind !== "local");
+  const rows = state.hosts.map(h => {
+    const version = el("td", { class: "mono" }, h.kind === "local" ? "this machine" : "…");
+    if (h.kind !== "local") versionCells[h.name] = version;
+    return el("tr", {}, el("td", { class: "mono" }, h.name), el("td", { class: "mono" }, h.kind === "local" ? "this machine" : `${h.ssh}${h.port && h.port !== 22 ? ":" + h.port : ""}`),
+      version, el("td", {}, h.description || "", h.update_sudo ? el("span", { class: "hint" }, " (updates with sudo)") : null), el("td", { class: "actions" },
+        el("button", { onclick: (ev) => busy(ev.target, async () => {
+          clear(output);
+          try {
+            const r = await api("POST", `/api/hosts/${encodeURIComponent(h.name)}/test`);
+            output.append(...keyNotices(r));
+            output.append(notice(r.error ? `${h.name}: ${r.error}` : `${h.name}: ${r.version}${(r.fixed || []).length ? " (tried again after making the key private)" : ""}`, r.error ? "error" : "ok"));
+            if (r.doctor) output.append(table(["", "Check", "Detail"], r.doctor.filter(d => d.status !== "ok").map(d => el("tr", {}, statusCell(d.status), el("td", {}, d.check), el("td", {}, d.detail || ""))), "The doctor found nothing to do."));
+          } catch (e) { output.append(notice(e.message, "error")); }
+        }) }, "Test"),
+        h.kind === "local" ? null : el("button", { onclick: (ev) => busy(ev.target, async () => {
+          clear(output);
+          output.append(notice(`Updating ${h.name}…`));
+          try { await updateHost(h.name, output); } catch (e) { output.append(notice(`${h.name}: ${e.message}`, "error")); }
+          loadVersions(false);
+        }) }, "Update"),
+        h.kind === "local" ? null : el("button", { class: "danger", onclick: async () => { if (!confirm(`Remove ${h.name} from the list?`)) return; try { await api("DELETE", `/api/hosts/${encodeURIComponent(h.name)}`); render(); } catch (e) { failed(`Could not remove ${h.name}`)(e); } } }, "Remove")));
+  });
+  const progress = el("progress", { max: Math.max(remote.length, 1), value: 0, hidden: true, "aria-label": "Update progress" });
+  const updateAll = el("button", { class: "primary", disabled: !remote.length, onclick: (ev) => busy(ev.target, async () => {
+    clear(output);
+    progress.hidden = false; progress.value = 0;
+    let updated = 0, failedCount = 0;
+    for (const h of remote) {
+      output.append(notice(`Updating ${h.name} (${progress.value + 1} of ${remote.length})…`));
+      try { const r = await updateHost(h.name, output); if (r.changed) updated++; else if (r.error && !r.after) failedCount++; }
+      catch (e) { failedCount++; output.append(notice(`${h.name}: ${e.message}`, "error")); }
+      progress.value += 1;
+    }
+    output.append(notice(`${remote.length} hosts: ${updated} updated, ${remote.length - updated - failedCount} up to date, ${failedCount} not updated`, failedCount ? "warn" : "ok"));
+    progress.hidden = true;
+    loadVersions(false);
+  }) }, "Update all");
+  const check = el("button", { disabled: !remote.length, onclick: (ev) => busy(ev.target, () => loadVersions(true)) }, "Check versions");
+  main.append(table(["Name", "SSH", "sandbox-ai", "Description", ""], rows),
+    el("div", { class: "actions" }, updateAll, check, progress),
+    el("p", { class: "hint" }, "Update runs each host's own sandbox-ai update (signed, as install.sh installed it); a system installation updates with sudo -n, and when sudo wants a password a terminal tab asks for it. This machine updates with: sandbox-ai update."),
+    output);
+  if (remote.length) loadVersions(false);
   const fields = { name: el("input", { id: "host-name", placeholder: "ct101" }), ssh: el("input", { id: "host-ssh", class: "mono", placeholder: "user@192.168.1.101" }),
     port: el("input", { id: "host-port", type: "number", min: 1, max: 65535, placeholder: "22" }), identity: el("input", { id: "host-identity", class: "mono", placeholder: "~/.ssh/id_ed25519 (optional)" }),
-    description: el("input", { id: "host-description", placeholder: "Proxmox CT 101" }) };
+    description: el("input", { id: "host-description", placeholder: "Proxmox CT 101" }), update_sudo: el("input", { id: "host-update-sudo", type: "checkbox" }) };
   const status = el("div", { class: "wide" });
   main.append(el("h2", {}, "Add a host"), el("div", { class: "card" }, el("div", { class: "form" },
     el("label", { for: "host-name" }, "Name"), fields.name, el("label", { for: "host-ssh" }, "SSH"), fields.ssh,
     el("label", { for: "host-port" }, "Port"), fields.port, el("label", { for: "host-identity" }, "Key"), fields.identity,
     el("label", { for: "host-description" }, "Description"), fields.description,
+    el("label", { for: "host-update-sudo" }, "Update with sudo"), fields.update_sudo,
     el("span"), el("button", { class: "primary", onclick: (ev) => busy(ev.target, async () => {
       clear(status);
       const body = { name: fields.name.value.trim(), ssh: fields.ssh.value.trim(), identity: fields.identity.value.trim(), description: fields.description.value.trim() };
       if (fields.port.value) body.port = Number(fields.port.value);
-      try { await api("POST", "/api/hosts", body); render(); } catch (e) { status.append(notice(e.message, "error")); }
+      if (fields.update_sudo.checked) body.update_sudo = true;
+      try {
+        const r = await api("POST", "/api/hosts", body);
+        render();
+        // toasts: they outlast the page drawn anew
+        for (const f of r.fixed || []) toast("success", `Key of ${r.name} made private`, `${f.path} could be read by others (mode ${f.was}), which ssh refuses: now ${f.now}.`);
+        for (const w of r.warnings || []) toast("warning", `Keys of ${r.name}`, w);
+        if (r.connection) toast(r.connection.ok ? "success" : "error", `${r.name}: tried again`, r.connection.ok ? `The connection works: ${r.connection.version}` : r.connection.error);
+      } catch (e) { status.append(notice(e.message, "error")); }
     }) }, "Add"), status),
-    el("p", { class: "hint" }, "The service's user needs SSH access with a key (ssh-copy-id), and sandbox-ai installed there. The host key is learnt at the first contact and checked from then on.")));
+    el("p", { class: "hint" }, "The service's user needs SSH access with a key (ssh-copy-id), and sandbox-ai installed there. The host key is learnt at the first contact and checked from then on. A key file others can read (ssh refuses it) is made private when the host is added or tested.")));
 };
 
 // --- terminals -------------------------------------------------------------------------------------------

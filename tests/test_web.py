@@ -31,6 +31,7 @@ FAST = {"n": 1 << 10, "r": 8, "p": 1}  # quick scrypt for the tests (the real on
 def home(tmp_path, monkeypatch):
     for name, sub in (("XDG_CONFIG_HOME", "config"), ("XDG_STATE_HOME", "state"), ("XDG_DATA_HOME", "data")):
         monkeypatch.setenv(name, str(tmp_path / sub))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))  # ~/.ssh: the keys adding and testing a host may change
     monkeypatch.setattr(w, "SCRYPT", FAST)
     return tmp_path
 
@@ -311,6 +312,27 @@ def logged_in():
      ["vpn", "add", "mv", "--mullvad", "--account-secret=MULLVAD", "--location=se-sto"]),
     ("POST", "/api/hosts/ct1/vpn/home/check", {}, ["vpn", "check", "home"]),
     ("DELETE", "/api/hosts/ct1/vpn/home", None, ["vpn", "remove", "home"]),
+    # kits: the values after "--", options as --flag=VALUE
+    ("GET", "/api/hosts/ct1/kits", None, ["kits", "list", "--json"]),
+    ("POST", "/api/hosts/ct1/kits", {"name": "team", "agents": ["claude", "codex"]},
+     ["kits", "new", "--agent=claude", "--agent=codex", "--", "team"]),
+    ("POST", "/api/hosts/ct1/kits/team/add-skill", {"path": "/home/u/skills/review", "as": "review2",
+                                                    "agents": ["claude"]},
+     ["kits", "add-skill", "--as=review2", "--agent=claude", "--", "team", "/home/u/skills/review"]),
+    ("POST", "/api/hosts/ct1/kits/team/new-skill", {"skill": "notes", "description": "-when writing notes"},
+     ["kits", "new-skill", "--description=-when writing notes", "--", "team", "notes"]),
+    ("POST", "/api/hosts/ct1/kits/team/add-plugin", {"plugin": "egm@sandbox-ai", "agent": "claude",
+                                                     "source": "sandbox-ai"},
+     ["kits", "add-plugin", "--agent=claude", "--source=sandbox-ai", "--", "team", "egm@sandbox-ai"]),
+    ("POST", "/api/hosts/ct1/kits/team/add-plugin", {"plugin": "@scope/pkg@1.2", "agent": "opencode"},
+     ["kits", "add-plugin", "--agent=opencode", "--", "team", "@scope/pkg@1.2"]),
+    ("POST", "/api/hosts/ct1/kits/team/add-marketplace", {"marketplace": "tools", "source": "owner/repo"},
+     ["kits", "add-marketplace", "--", "team", "tools", "owner/repo"]),
+    ("POST", "/api/hosts/ct1/kits/team/remove-skill", {"skill": "notes", "agents": ["codex"]},
+     ["kits", "remove-skill", "--agent=codex", "--", "team", "notes"]),
+    ("POST", "/api/hosts/ct1/kits/team/remove-plugin", {"plugin": "egm@sandbox-ai"},
+     ["kits", "remove-plugin", "--", "team", "egm@sandbox-ai"]),
+    ("DELETE", "/api/hosts/ct1/kits/team", {"confirm": True}, ["kits", "delete", "--yes", "--", "team"]),
 ])
 def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     status, out = logged_in(method, path, data)
@@ -358,10 +380,87 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     ("POST", "/api/hosts/ct1/vpn", {"name": "ts", "kind": "tailscale", "login_server": "http://hs"}, 400),
     ("POST", "/api/hosts/ct1/vpn/--all/check", {}, 400),
     ("DELETE", "/api/hosts/ct1/vpn/a%20b", None, 400),
+    ("POST", "/api/hosts/ct1/kits", {"name": "-rf"}, 400),
+    ("POST", "/api/hosts/ct1/kits", {"name": "default"}, 400),
+    ("POST", "/api/hosts/ct1/kits", {"name": "team", "agents": ["bash"]}, 400),
+    ("POST", "/api/hosts/ct1/kits/team/add-skill", {"path": "relative/skill"}, 400),
+    ("POST", "/api/hosts/ct1/kits/team/add-skill", {"path": "/x", "as": "../up"}, 400),
+    ("POST", "/api/hosts/ct1/kits/--yes/add-skill", {"path": "/x"}, 400),
+    ("POST", "/api/hosts/ct1/kits/team/new-skill", {"skill": "Bad Name"}, 400),
+    ("POST", "/api/hosts/ct1/kits/team/new-skill", {"skill": "ok", "description": "two\nlines"}, 400),
+    ("POST", "/api/hosts/ct1/kits/team/add-plugin", {"plugin": "a b"}, 400),
+    ("POST", "/api/hosts/ct1/kits/team/add-plugin", {"plugin": "-x"}, 400),
+    ("POST", "/api/hosts/ct1/kits/team/add-skill", {"path": "/x", "create": "yes"}, 400),
+    ("POST", "/api/hosts/ct1/kits/team/trust-hooks", {}, 404),
+    ("DELETE", "/api/hosts/ct1/kits/team", None, 400),
 ])
 def test_what_is_refused_never_reaches_a_host(logged_in, method, path, data, status):
     assert logged_in(method, path, data)[0] == status
     assert logged_in.runner.calls == []
+
+
+def test_adding_to_a_new_kit_creates_it_first(logged_in):
+    """What is added while a built-in kit is chosen goes to a kit of yours: with create, a missing one is made
+    first; an existing one is not made again."""
+    logged_in.runner.answers[("kits", "list")] = (0, json.dumps({"kits": [{"name": "mine", "kind": "user"}]}), "")
+    status, out = logged_in("POST", "/api/hosts/ct1/kits/team/new-skill", {"skill": "notes", "create": True})
+    assert status == 200, out
+    assert [args for _, args in logged_in.runner.calls[1:]] == [["kits", "new", "--", "team"],
+                                                                ["kits", "new-skill", "--", "team", "notes"]]
+    del logged_in.runner.calls[:]
+    status, out = logged_in("POST", "/api/hosts/ct1/kits/mine/new-skill", {"skill": "notes", "create": True})
+    assert status == 200 and [args[1] for _, args in logged_in.runner.calls] == ["list", "new-skill"]
+    # When creating fails, nothing more runs.
+    logged_in.runner.answers[("kits", "new")] = (1, "", "sandbox-ai kits: no space left on device")
+    del logged_in.runner.calls[:]
+    status, out = logged_in("POST", "/api/hosts/ct1/kits/other/add-skill", {"path": "/x", "create": True})
+    assert status == 502 and "no space left" in out["error"]
+    assert [args[1] for _, args in logged_in.runner.calls] == ["list", "new"]
+
+
+def test_kits_end_to_end_through_the_real_command(tmp_path, monkeypatch):
+    """The web's kit actions against the real `sandbox-ai kits` (a private HOME): a new kit, a skill copied from a
+    folder (its symlink not followed), a new skill from the template, a refusal shown as the command says it."""
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {**os.environ, "HOME": str(home)}
+    for name in ("XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"):
+        env.pop(name, None)
+
+    def runner(host, args, timeout=120, input=None):
+        done = subprocess.run([sys.executable, "-I", str(ROOT / "sandbox" / "main.py"), *args], env=env,
+                              capture_output=True, text=True, timeout=timeout)
+        return done.returncode, done.stdout, done.stderr
+    api = w.Api(runner)
+    skill = tmp_path / "review"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: review\ndescription: reviews\n---\n")
+    (skill / "secret").symlink_to("/etc/hostname")
+    out = api.dispatch("POST", "/api/hosts/local/kits/team/add-skill", {"path": str(skill), "create": True,
+                                                                         "agents": ["claude"]})["output"]
+    assert "kit team: created" in out and "skill review copied for claude" in out and "symlink" in out
+    kit = home / ".local" / "share" / "sandbox-ai" / "kits" / "team"
+    assert (kit / "claude" / "skills" / "review" / "SKILL.md").is_file()
+    assert not os.path.lexists(kit / "claude" / "skills" / "review" / "secret")
+    api.dispatch("POST", "/api/hosts/local/kits/team/new-skill", {"skill": "notes", "description": "when noting",
+                                                                   "agents": ["claude"]})
+    assert 'description: "when noting"' in (kit / "claude" / "skills" / "notes" / "SKILL.md").read_text()
+    names = {k["name"]: k for k in api.dispatch("GET", "/api/hosts/local/kits", {})["kits"]}
+    assert names["team"]["kind"] == "user" and names["team"]["agents"]["claude"]["skills"] == ["notes", "review"]
+    with pytest.raises(w.Refused) as refused:
+        api.dispatch("POST", "/api/hosts/local/kits/team/add-skill", {"path": str(tmp_path / "missing")})
+    assert refused.value.status == 502 and "does not exist" in str(refused.value)
+    api.dispatch("DELETE", "/api/hosts/local/kits/team", {"confirm": True})
+    assert not kit.exists()
+
+
+def test_the_page_has_a_kits_page_that_adds_to_a_kit_of_yours():
+    script = (Path(w.__file__).parent / "web" / "app.js").read_text()
+    page = script.split("pages.kits = ")[1].split("pages.settings")[0]
+    assert '["kits", "Kits"]' in script and 'hostPath("/kits")' in script
+    for action in ("add-skill", "new-skill", "add-plugin", "remove-${kind}"):
+        assert action in page
+    assert "create: fresh" in page and "a new kit…" in page and "innerHTML" not in page
 
 
 def test_a_failing_host_says_why(logged_in):
@@ -680,7 +779,7 @@ def test_the_page_shows_results_and_errors_as_toasts_not_alerts():
     script = (WEB / "app.js").read_text()
     css = (WEB / "app.css").read_text()
     assert "alert(" not in script, "errors and results are toasts in the theme, not the browser's dialog"
-    assert script.count("confirm(") == 4, "confirmations stay confirm()"
+    assert script.count("confirm(") == 6, "confirmations stay confirm()"
     assert "function toast(level, title, text, options)" in script and 'role: level === "error" ? "alert" : "status"' in script
     assert ".innerHTML" not in script and "insertAdjacentHTML" not in script and "outerHTML" not in script
     for level, colour in (("success", "--ok"), ("warning", "--warn"), ("error", "--bad")):
@@ -1008,3 +1107,139 @@ def test_an_unchanged_static_file_is_answered_with_304(logged_in, tmp_path, monk
     (static / "app.js").write_text("// a new version\n")
     status, headers, body = svc.handle("GET", "/static/app.js", {**host, "If-None-Match": tag}, b"", "192.0.2.1")
     assert status == 200 and body == b"// a new version\n" and dict(headers)["ETag"] != tag
+
+
+# -- the canary log --
+
+CANARY_LOG = {"run": "claude-1", "agent": "claude", "status": "ended", "activity": True, "events": [
+    {"time": "2026-11-07T10:00:05Z", "run": "claude-1", "canary": "aws", "path": "/root/.aws/credentials",
+     "event": "read", "action": "report", "process": {"pid": 41, "comm": "cat", "argv": ["cat", "x"]},
+     "tool_calls": [{"id": "t2", "match": "names the file", "summary": "cat ~/.aws/credentials"}],
+     "turn": {"id": "p1", "summary": "tidy up"}, "requests": []}]}
+
+
+def test_the_canary_log_is_one_fixed_command(logged_in):
+    logged_in.runner.answers[("canaries", "log")] = (0, json.dumps(CANARY_LOG), "")
+    status, out = logged_in("GET", "/api/hosts/ct1/canaries/claude-1")
+    assert status == 200 and out == [CANARY_LOG]
+    assert logged_in.runner.calls[-1] == ("ct1", ["canaries", "log", "claude-1", "--json"])
+    logged_in.runner.answers[("canaries", "log")] = (0, json.dumps([CANARY_LOG]), "")
+    status, out = logged_in("GET", "/api/hosts/ct1/canaries")
+    assert status == 200 and out == [CANARY_LOG]
+    assert logged_in.runner.calls[-1] == ("ct1", ["canaries", "log", "--json"])
+    calls = len(logged_in.runner.calls)
+    for bad in ("--json", "-h", "a%20b"):
+        status, _ = logged_in("GET", f"/api/hosts/ct1/canaries/{bad}")
+        assert status == 400
+    assert len(logged_in.runner.calls) == calls, "nothing refused reaches the host"
+    # An older sandbox-ai without the command: an error the page explains.
+    logged_in.runner.answers[("canaries", "log")] = (2, "", "invalid choice: 'log'")
+    status, out = logged_in("GET", "/api/hosts/ct1/canaries")
+    assert status == 502 and "invalid choice" in out["error"]
+
+
+def test_the_page_has_a_canaries_page_with_the_links_of_each_event():
+    script = (Path(w.__file__).parent / "web" / "app.js").read_text()
+    page = script.split("pages.canaries")[1].split("pages.settings")[0]
+    assert '["canaries", "Canaries"]' in script and 'hostPath("/canaries")' in page
+    assert "status-bad" in page and "canaryLinks(e)" in page and "aria-expanded" in page
+    assert "innerHTML" not in script.split("function canaryProcess")[1].split("pages.settings")[0]
+    css = (Path(w.__file__).parent / "web" / "app.css").read_text()
+    assert ".canary-links.hidden { display: none; }" in css and "var(--bad)" in css.split(".canary-event")[1]
+
+
+# --- hosts: key files made private, the hosts' versions, their update ----------------------------------------
+
+def private_key(path, mode=0o644):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    marker = "PRIVATE" + " KEY-----"  # in two pieces: no key-looking line in the source (privacy check)
+    path.write_text(f"-----BEGIN OPENSSH {marker}\nnot a real key\n-----END OPENSSH {marker}\n")
+    path.chmod(mode)
+    return path
+
+
+def test_adding_and_testing_a_host_makes_its_key_private(logged_in, home):
+    key = private_key(home / "home/.ssh/id_ct1")
+    logged_in.runner.answers[("--version",)] = (0, "sandbox-ai 0.1.66\n", "")
+    logged_in.runner.answers[("doctor",)] = (0, "[]", "")
+    status, out = logged_in("POST", "/api/hosts", {"name": "ct1", "ssh": "root@192.0.2.10", "identity": str(key)})
+    assert status == 200 and out["fixed"] == [{"path": str(key), "was": "0644", "now": "0600"}], out
+    assert out["connection"] == {"ok": True, "version": "sandbox-ai 0.1.66", "error": None}
+    assert key.stat().st_mode & 0o777 == 0o600
+    key.chmod(0o604)
+    status, result = logged_in("POST", "/api/hosts/ct1/test")
+    assert result["ssh"] and result["fixed"][0]["was"] == "0604" and key.stat().st_mode & 0o777 == 0o600
+    status, out = logged_in("POST", "/api/hosts", {"name": "ct2", "ssh": "root@192.0.2.11", "identity": str(key),
+                                                   "update_sudo": True})
+    assert status == 200 and out["fixed"] == [] and "connection" not in out and out["update_sudo"] is True
+
+
+def test_the_hosts_update_and_their_versions(home):
+    secret = add_user()
+    asked, statuses = [], []
+
+    def updater(host, version=None, sudo=None):
+        asked.append((host, version, sudo))
+        if host == "gone":
+            raise ValueError("no host gone; see: sandbox-ai hosts list")
+        return {"name": host, "before": "0.1.60", "after": "0.1.66", "changed": True, "error": None}
+
+    def status_of(names, refresh=False):
+        statuses.append((names, refresh))
+        return {name: {"version": "0.1.60", "available": "0.1.66", "update": True, "ssh": "x", "port": 22}
+                for name in names}
+    svc = w.Service({"localhost:8443"}, api=w.Api(FakeRunner(), updater=updater, statuses=status_of))
+    _, headers, body = login(svc, secret)
+    ok = {**HEADERS, "Cookie": cookie_of(headers), "X-CSRF-Token": body["csrf"]}
+
+    def call(method, path, data=None):
+        status, _, out = svc.handle(method, path, ok, json.dumps(data).encode() if data is not None else b"",
+                                    "192.0.2.1")
+        return status, json.loads(out)
+    assert call("POST", "/api/hosts", {"name": "ct1", "ssh": "root@192.0.2.10"})[0] == 200
+    status, out = call("POST", "/api/hosts/ct1/update", {})
+    assert status == 200 and out["after"] == "0.1.66" and asked[-1] == ("ct1", None, None)
+    assert call("POST", "/api/hosts/ct1/update", {"sudo": True, "version": "0.1.67"})[0] == 200
+    assert asked[-1] == ("ct1", "0.1.67", True)
+    for data in ({"sudo": "yes"}, {"version": "1.2; id"}, {"version": ["0.1.67"]}):
+        assert call("POST", "/api/hosts/ct1/update", data)[0] == 400, data
+    assert call("POST", "/api/hosts/gone/update", {})[0] == 404
+    assert call("POST", "/api/hosts/x;y/update", {})[0] == 400
+    status, found = call("GET", "/api/hosts-status")
+    assert status == 200 and found == {"ct1": {"version": "0.1.60", "available": "0.1.66", "update": True}}
+    assert statuses[-1] == (["ct1"], False)
+    assert call("POST", "/api/hosts-status", {})[0] == 200 and statuses[-1] == (["ct1"], True)
+
+
+def test_the_update_terminal(home, monkeypatch):
+    hosts = w.module("hosts")
+    hosts.save({"ct1": hosts.check("ct1", {"ssh": "root@192.0.2.10"})})
+    seen = []
+    monkeypatch.setattr(hosts, "update_terminal", lambda host, version=None: seen.append((host, version)) or ["ssh"])
+    assert w.terminal_command({"host": "ct1", "kind": "update"}) == ("ct1", ["ssh"]) and seen == [("ct1", None)]
+    assert w.terminal_command({"host": "ct1", "kind": "update", "version": "0.1.67"})[0] == "ct1"
+    for query in ({"host": "local", "kind": "update"}, {"host": "ct1", "kind": "update", "version": "x"}):
+        with pytest.raises(w.Refused):
+            w.terminal_command(query)
+
+
+def test_the_hosts_page_updates_and_shows_versions():
+    script = (ROOT / "sandbox/web/app.js").read_text()
+    for needed in ('"/api/hosts-status"', "/update`", '"Update all"', 'kind: "update"', "update_sudo", "keyNotices"):
+        assert needed in script, needed
+
+
+def test_an_mcp_server_is_attached_to_a_start(logged_in):
+    status, out = logged_in("POST", "/api/hosts/ct1/mcp/demo/attach", {"start": "web", "restart": True})
+    assert status == 200 and logged_in.runner.calls[-1] == ("ct1", ["mcp", "attach", "demo", "web", "--json",
+                                                                    "--restart"])
+    assert logged_in("POST", "/api/hosts/local/mcp/demo/attach", {"start": "web"})[0] == 200
+    assert logged_in.runner.calls[-1] == ("local", ["mcp", "attach", "demo", "web", "--json"])
+    count = len(logged_in.runner.calls)
+    for path, data in (("/api/hosts/ct1/mcp/de mo/attach", {"start": "web"}), ("/api/hosts/ct1/mcp/demo/attach", {}),
+                       ("/api/hosts/ct1/mcp/demo/attach", {"start": "--all"}),
+                       ("/api/hosts/ct1/mcp/demo/attach", {"start": "web", "restart": "yes"})):
+        assert logged_in("POST", path, data)[0] == 400, (path, data)
+    assert len(logged_in.runner.calls) == count, "nothing refused reaches a host"
+    script = (ROOT / "sandbox/web/app.js").read_text()
+    assert "attachControls" in script and "/attach`" in script and "Attach to…" in script

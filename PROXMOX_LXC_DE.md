@@ -173,6 +173,20 @@ seinen Doctor neben Ihren eigenen (README, „Andere Hosts“).
 sandbox-ai hosts add ct1 user@ct1.lan --description "Proxmox 101"
 sandbox-ai hosts test ct1                 # SSH, seine sandbox-ai-Version, sein Doctor
 sandbox-ai hosts run ct1 -- list          # sandbox-ai list im Container
+sandbox-ai hosts list                     # seine sandbox-ai-Version, und ob ein Update da ist
+sandbox-ai hosts update ct1               # sein eigenes signiertes sandbox-ai-Update (--all: jeder Container)
 ```
 
 Der Container braucht nur sshd und sandbox-ai; sonst lauscht dort nichts.
+Eine Schlüsseldatei, die andere lesen können (ssh lehnt sie ab), machen
+`hosts add` und `hosts test` privat und versuchen es dann erneut.
+
+`hosts update` führt das eigene `sandbox-ai update` des Containers aus, so wie
+install.sh es dort installiert hat: für den Benutzer aus Abschnitt 2 braucht
+das kein root. Eine Systeminstallation (install.sh als root, in /usr/local)
+braucht sudo: `hosts update ct1 --sudo`, oder einmal `sandbox-ai hosts set ct1
+--update-sudo on`. sudo läuft als `sudo -n`, das nie fragt; will es ein
+Passwort, fragt `hosts update` in Ihrem Terminal über `ssh -t` (die App und
+die Weboberfläche in einem Terminal-Tab), oder eine sudoers-Regel für genau
+diesen Befehl (NOPASSWD) erspart die Frage. Eine Anmeldung als root
+(`root@ct1`) braucht beides nicht.

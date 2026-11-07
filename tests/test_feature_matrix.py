@@ -2403,6 +2403,35 @@ def a_presets_short_forms_are_refused_as_the_long_ones(m, dev):
 
 
 @presets_scenario
+def an_extra_preset_directory_is_used_but_never_one_the_agent_writes(m, dev):
+    """defaults.json's preset_dirs: a preset there starts; yours still win over it; a directory inside the
+    workspace (where the agent writes) gives no preset to start with."""
+    def preset(directory, ident, memory):
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"{ident}.json").write_text(json.dumps({"format": "sandbox-ai preset", "version": 1, "id": ident,
+                                                             "title": "Team", "description": "d",
+                                                             "options": ["--memory", memory]}))
+    defaults = Path(os.environ["HOME"]) / ".config" / "sandbox-ai" / "defaults.json"
+    defaults.parent.mkdir(parents=True, exist_ok=True)
+    team = m.tmp / "team-presets"
+    preset(team, "team-tool", "2g")
+    defaults.write_text(json.dumps({"version": 1, "preset_dirs": [str(team)]}))
+    defaults.chmod(0o600)
+    try:
+        assert m.plan("--preset", "team-tool")["limits"]["memory"] == "2g"
+        preset(Path(os.environ["HOME"]) / ".config" / "sandbox-ai" / "presets", "team-tool", "3g")
+        assert m.plan("--preset", "team-tool")["limits"]["memory"] == "3g"  # yours win
+        inside = m.work / "presets"
+        preset(inside, "planted", "1g")
+        defaults.write_text(json.dumps({"version": 1, "preset_dirs": [str(inside)]}))
+        m.refused("--preset", "planted", match="The preset planted \(extra\) .* lies inside")
+        defaults.write_text(json.dumps({"version": 1, "preset_dirs": ["relative/dir"]}))
+        m.refused("--preset", "team-tool", match="preset_dirs is a list of at most")
+    finally:
+        defaults.unlink()
+
+
+@presets_scenario
 def a_presets_first_task_reaches_the_agent(m, dev):
     run = m.run("--preset", "time-capsule", "--preset-value", "question=why is the sky blue")
     command = run.config["command"]
