@@ -1,6 +1,60 @@
 # sandbox-ai
 
-[English](README.md) · [Schnellstart-Tutorial](QUICKSTART_DE.md)
+[English](README.md) · [Schnellstart-Tutorial](QUICKSTART_DE.md) · [Lernvideo](docs/video/README.md)
+
+![Die Desktop-App von sandbox-ai: eine Sandbox auf der Tafel zusammengestellt](docs/screenshots/board.png)
+
+**Eine Zentrale für KI-Agenten: auf diesem Rechner oder auf jedem Host, den Sie verwalten, abgeschottet, beobachtet,
+und gefragt, bevor etwas hinausgeht.**
+
+1. **Jeder Agent an einem Ort.** Claude Code, Codex und OpenCode, jeder mit eigenem Login, eigenen Plugins und
+   MCP-Servern, gestartet von der Kommandozeile, aus der Desktop-App oder im Browser.
+2. **Zwei Sandbox-Schichten, geprüft.** Rootless Podman oder Bubblewrap, darin Firejail; der Lauf bricht ab, wenn
+   Namespaces, Capabilities, NoNewPrivs und Seccomp nicht bestätigt sind. Kein stiller Rückfall.
+3. **Nichts geht ungefragt hinaus.** Netzwerk standardmäßig zu, Freigaben pro Host, und für alles andere eine Frage
+   auf Ihrem Desktop: einmal, für den Lauf oder immer für das Projekt.
+4. **Geheimnisse betreten die Sandbox nie.** API-Schlüssel, Git- und Registry-Logins setzt der Proxy erst auf der
+   Leitung ein; der Agent sieht nur Platzhalter.
+5. **Jeder Push geprüft.** Jedes `git push` und jede Veröffentlichung wird auf Geheimnisse und private Daten
+   geprüft, bevor der Server sie sieht.
+6. **Sie sehen alles.** Verbindungen, Prompts, Tool-Aufrufe, Dateien und Prozesse je Lauf, live, mit dem Prozess
+   hinter jeder Verbindung; Köder-Dateien melden, wenn ein Agent nach Zugangsdaten sucht.
+7. **Setups grafisch bauen.** Teile auf die Tafel ziehen (Arbeitsordner, Netzwerk, MCP-Server, LLM-Server, VPN,
+   Geräte, Limits), Sicherheitswert und genaue Kommandozeile sehen, als eigene Vorlage speichern.
+8. **Viele Rechner, ein Fenster.** Andere Hosts und LXC-Container über SSH verwalten: ihre Sandboxen, Rückfragen,
+   Terminals und Updates, aus der App oder der Weboberfläche mit Passwort und TOTP.
+9. **Teams, Helfer und lange Läufe.** Lösbare Sitzungen, mit denen Sie sich von überall verbinden, Agenten-Teams mit
+   Aufgabentafel, lokale oder entfernte LLMs, Tor- und VPN-Profile, GPUs und USB-Geräte nach Regel.
+10. **Sicher als Vorgabe, streng auf Wunsch.** Sicherheitsmodi von `lax` bis `paranoid`, Regelsätze, Taint des Laufs
+    und die Richtlinie des Administrators, während der Agent arbeitet wie immer.
+
+## Ein Blick in die App
+
+| | |
+|---|---|
+| ![Start](docs/screenshots/launch.png) **Start**: Agent und Optionen wählen, sehen, was offen sein wird | ![Tafel](docs/screenshots/board.png) **Tafel**: eine Sandbox als Teile zum Ziehen und Verbinden, mit Sicherheitswert |
+| ![Sandboxen und Sitzungen](docs/screenshots/sandboxes.png) **Sandboxen & Sitzungen**: alles, was läuft, egal wie gestartet | ![Freigaben](docs/screenshots/approvals.png) **Freigaben**: was die Agenten fragen, mit einem Klick beantwortet |
+| ![Verbindungen](docs/screenshots/connections.png) **Verbindungen**: jede Anfrage mit dem Prozess dahinter | ![Aktivität](docs/screenshots/activity.png) **Aktivität**: Prompts, Tool-Aufrufe, Dateien und Netzwerk je Lauf |
+| ![Terminals](docs/screenshots/terminals.png) **Terminals**: in jede laufende Sitzung in einem Tab | ![Kits und Plugins](docs/screenshots/kits.png) **Kits & Plugins**: Skills, Plugins und Hooks für jeden Agenten |
+| ![Hosts](docs/screenshots/hosts.png) **Hosts**: andere Rechner über SSH im selben Fenster | ![Hilfe](docs/screenshots/help.png) **Hilfe**: jede Seite und jedes Konzept erklärt, auf Deutsch und Englisch, mit Touren |
+| ![Benachrichtigungen](docs/screenshots/notifications.png) **Benachrichtigungen** im Design: Warnungen und Fehler in seinen Farben | ![Weboberfläche](docs/screenshots/web.png) **Weboberfläche**: dasselbe im Browser, mit Passwort und TOTP |
+
+Die Bilder zeigen gestellte Demodaten (ein Projekt in einem temporären Ordner und ein Lauf mit zwei offenen Fragen).
+
+### In fünf Minuten loslegen
+
+```bash
+curl -fsSL https://github.com/c0decave/sandbox-ai/releases/latest/download/install.sh | bash   # oder AppImage / .app
+sandbox-ai doctor                      # prüft den Host: Podman oder Bubblewrap, Firejail, nftables
+sandbox-ai build claude                # das Image des Agenten (claude, codex oder opencode)
+sandbox-ai claude -w ~/src/meinprojekt # der Agent in seiner Sandbox; Ctrl-b d löst, er arbeitet weiter
+sandbox-ai-app                         # die Desktop-App: Start, Tafel, Freigaben, Terminals, Hilfe
+```
+
+In der App: Projektordner öffnen, auf **Start** den Agenten wählen (oder auf der **Tafel** ein Setup
+zusammenziehen), **In der App starten** drücken und unter **Freigaben** beantworten, was der Agent fragt.
+**Hilfe → Touren** führt durch den ersten Start, die eigene Vorlage, Freigaben und den Rest.
+
 
 Linux-Starter, die **Codex**, **Claude Code** und **OpenCode** in zwei
 Sandbox-Schichten ausführen, mit standardmäßig gesperrtem Netz:

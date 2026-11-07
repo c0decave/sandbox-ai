@@ -26,9 +26,9 @@ PAGES = ["launch", "board", "sandboxes", "approvals", "terminals", "connections"
          "kits", "mcp", "images", "credentials", "system", "hosts"]
 
 
-def stage(root):
-    """The throwaway HOME with a demo project and a staged run that asks two questions."""
-    home = root / "home" / "me"
+def stage(root, home=None):
+    """The throwaway HOME (HOME, else ROOT/home/me) with a demo project and a staged run that asks two questions."""
+    home = Path(home) if home else root / "home" / "me"
     project = home / "src" / "shop"
     project.mkdir(parents=True)
     (project / "README.md").write_text("# shop\n")
@@ -106,6 +106,8 @@ def main(argv=None):
     parser.add_argument("--out", required=True, help="folder for the PNG files (created)")
     parser.add_argument("--lang", choices=["en", "de", "both"], default="both")
     parser.add_argument("--size", default="1600x900", help="window size (default 1600x900)")
+    parser.add_argument("--home", help="the demo HOME to show in the pages, e.g. /home/me (must not exist; removed "
+                                       "afterwards); default: inside a temporary folder")
     parser.add_argument("--one", help=argparse.SUPPRESS)  # a child process: one language, environment prepared
     args = parser.parse_args(argv)
     out = Path(args.out).resolve()
@@ -118,18 +120,23 @@ def main(argv=None):
     for lang in (["en", "de"] if args.lang == "both" else [args.lang]):
         root = Path(tempfile.mkdtemp(prefix="sai-demo-"))
         try:
-            home, _ = stage(root)
+            if args.home and Path(args.home).exists():
+                raise SystemExit(f"capture_app: {args.home} exists already; give a demo HOME that does not")
+            home, _ = stage(root, args.home)
             env = {**os.environ, "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"),
                    "XDG_STATE_HOME": str(home / ".local" / "state"), "XDG_DATA_HOME": str(home / ".local" / "share"),
                    "XDG_CACHE_HOME": str(home / ".cache"), "XDG_RUNTIME_DIR": str(root / "runtime"),
                    "SANDBOX_AI_SECRETS": "file", "SANDBOX_AI_HOME": str(REPO),
                    "PATH": f"{REPO}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}"}
             # the child must not see this process's run directory as its own (it stages its pid there)
-            child = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--app", args.app, "--out", str(out),
+            child = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--app", str(Path(args.app).resolve()),
+                                    "--out", str(out),
                                     "--size", args.size, "--one", lang], env=env, cwd=str(home))
             status = status or child.returncode
         finally:
             shutil.rmtree(root, ignore_errors=True)
+            if args.home:
+                shutil.rmtree(args.home, ignore_errors=True)
     return status
 
 

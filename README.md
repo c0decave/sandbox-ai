@@ -1,6 +1,59 @@
 # sandbox-ai
 
-[Deutsch](README_DE.md) · [Quickstart tutorial](QUICKSTART.md)
+[Deutsch](README_DE.md) · [Quickstart tutorial](QUICKSTART.md) · [Learning video](docs/video/README.md)
+
+![The sandbox-ai desktop app: a sandbox put together on the Board](docs/screenshots/board.png)
+
+**One control centre for AI agents: on this machine or on every host you manage, sealed off, watched, and asked
+before anything leaves.**
+
+1. **Every agent, one place.** Claude Code, Codex and OpenCode, each with its own login, plugins and MCP servers,
+   started from the command line, the desktop app or the browser.
+2. **Two sandbox layers, verified.** Rootless Podman or Bubblewrap, then Firejail inside; the run stops unless the
+   namespaces, capabilities, NoNewPrivs and Seccomp are confirmed. No silent fallback.
+3. **Nothing leaves unasked.** Default-deny network, per-host allows, and a question on your desktop for anything
+   else: once, for the run, or always for the project.
+4. **Secrets never enter the sandbox.** API keys, Git and package-registry logins are put in by the proxy on the
+   wire; the agent only ever sees placeholders.
+5. **Every push checked.** Each `git push` and every publication is scanned for secrets and private data before the
+   server sees it.
+6. **You see everything.** Connections, prompts, tool calls, files and processes per run, live, with the process
+   behind each connection; decoy files tell you when an agent goes looking for credentials.
+7. **Build setups visually.** Drag parts onto the Board (workspaces, network, MCP servers, LLM servers, VPN, devices,
+   limits), get a security score and the exact command line, save it as your own preset.
+8. **Many machines, one window.** Manage other hosts and LXC containers over SSH: their sandboxes, approvals,
+   terminals and updates, from the app or the web interface with password and TOTP.
+9. **Teams, helpers and long runs.** Detachable sessions you can attach to from anywhere, agent teams with a task
+   board, local or remote LLMs, Tor and VPN profiles, GPUs and USB devices handed over by rule.
+10. **Safe by default, strict on demand.** Security modes from `lax` to `paranoid`, rulesets, run taint and an
+    administrator's policy, while the agent keeps working the way it always does.
+
+## A look at the app
+
+| | |
+|---|---|
+| ![Start a sandbox](docs/screenshots/launch.png) **Start**: pick the agent and options, see what will be open | ![The Board](docs/screenshots/board.png) **Board**: a sandbox as parts you drag and connect, with a security score |
+| ![Sandboxes and sessions](docs/screenshots/sandboxes.png) **Sandboxes & sessions**: everything that runs, however it was started | ![Approvals](docs/screenshots/approvals.png) **Approvals**: what the agents ask, answered in one click |
+| ![Connections](docs/screenshots/connections.png) **Connections**: every request with the process behind it | ![Activity](docs/screenshots/activity.png) **Activity**: prompts, tool calls, files and network per run |
+| ![Terminals](docs/screenshots/terminals.png) **Terminals**: attach to any running session in a tab | ![Kits and plugins](docs/screenshots/kits.png) **Kits & plugins**: skills, plugins and hooks for every agent |
+| ![Hosts](docs/screenshots/hosts.png) **Hosts**: other machines over SSH, in the same window | ![Help](docs/screenshots/help.png) **Help**: every page and concept explained, in English and German, with tours |
+| ![Notifications in the theme](docs/screenshots/notifications.png) **Notifications** in your theme: warnings and errors in its colours | ![The web interface](docs/screenshots/web.png) **Web interface**: the same from a browser, with password and TOTP |
+
+Screenshots show staged demo data (a project in a temporary folder and a run with two open questions).
+
+### Use it in five minutes
+
+```bash
+curl -fsSL https://github.com/c0decave/sandbox-ai/releases/latest/download/install.sh | bash   # or the AppImage / .app
+sandbox-ai doctor                      # checks the host: Podman or Bubblewrap, Firejail, nftables
+sandbox-ai build claude                # the agent's image (claude, codex or opencode)
+sandbox-ai claude -w ~/src/myproject   # the agent in its sandbox; Ctrl-b d detaches, it keeps working
+sandbox-ai-app                         # the desktop app: Start, Board, Approvals, Terminals, Help
+```
+
+In the app: open the project folder, choose the agent on **Start** (or drag a setup together on the **Board**),
+press **Start in the app**, and answer what the agent asks under **Approvals**. **Help → Tours** walks you through
+your first start, your own preset, approvals and the rest.
 
 Linux launchers that run **Codex**, **Claude Code** and **OpenCode** inside two
 sandbox layers, with a default-deny network:
