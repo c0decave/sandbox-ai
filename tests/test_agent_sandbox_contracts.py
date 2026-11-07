@@ -29,7 +29,10 @@ import ssl
 import threading
 import time
 import tempfile
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.9 and 3.10: the same parser as a package
+    import tomli as tomllib
 from unittest.mock import Mock
 
 import pytest

@@ -24,7 +24,14 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: "python -m pip install --require-hashes --only-binary :all: -r packaging/requirements-ci.txt"
       # Unit, contract, matrix and end-to-end tests; live sandbox tests need --agent-live.
-      - run: python -m pytest -q tests
+      - name: Tests (failures summarised as an annotation, readable through the API)
+        run: |
+          python -m pytest -q -rfE tests 2>&1 | tee pytest.txt; status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            failed=$(grep -E '^(FAILED|ERROR) ' pytest.txt | head -60 | cut -c1-300 | sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g')
+            echo "::error title=pytest failed::${failed:-no summary line; see the log}"
+          fi
+          exit "$status"
 
   package:
     runs-on: ubuntu-24.04  # ubuntu-latest is 26.04 since 2026-10-19: no Python 3.9 there
@@ -84,7 +91,13 @@ jobs:
       - name: Vendor xterm.js
         run: python scripts/vendor_xterm.py
       - name: Tests (offscreen, Qt required)
-        run: python -m pytest -v -rs tests 2>&1 | tee tests.txt; test "${PIPESTATUS[0]}" -eq 0
+        run: |
+          python -m pytest -v -rs -rfE tests 2>&1 | tee tests.txt; status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            failed=$(grep -E '^(FAILED|ERROR) ' tests.txt | head -60 | cut -c1-300 | sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g')
+            echo "::error title=app tests failed::${failed:-no summary line; see the log}"
+          fi
+          exit "$status"
       - name: No Qt test was skipped
         run: |
           if grep -E "SKIPPED.*(PySide6|QtWebEngine|QtCore|QtWidgets|SANDBOX_AI_HOME)" tests.txt; then

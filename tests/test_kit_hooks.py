@@ -10,7 +10,10 @@ import json
 import os
 from pathlib import Path
 import stat
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.9 and 3.10: the same parser as a package
+    import tomli as tomllib
 
 import pytest
 

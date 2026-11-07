@@ -3,7 +3,10 @@ default) sets the agents' own switches against usage statistics, error reports, 
 and update checks; strict also every other call that is not the model's; on leaves the agents' settings alone."""
 import json
 from pathlib import Path
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.9 and 3.10: the same parser as a package
+    import tomli as tomllib
 
 import pytest
 
