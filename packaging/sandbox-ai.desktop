@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=sandbox-ai
+GenericName=AI agent sandboxes
+Comment=Start, watch and answer AI agents in sandboxes
+Exec=sandbox-ai-app
+Icon=sandbox-ai
+Terminal=false
+Categories=Development;Security;

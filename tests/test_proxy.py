@@ -16,8 +16,10 @@ import socketserver
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import types
 
 import pytest
 
@@ -324,8 +326,12 @@ def test_other_tcp_is_relayed_and_counted(tmp_path, pki):
 
 
 def git(*args, cwd=None, env=None):
+    # Without the caller's Git settings: inside a sandbox, core.hooksPath (GIT_CONFIG_*) runs the sandbox's own
+    # pre-push check, which would refuse the test's pushes before they reach the proxy under test.
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
-                          env={**os.environ, "GIT_TERMINAL_PROMPT": "0", **(env or {})})
+                          env={**clean, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+                               "GIT_TERMINAL_PROMPT": "0", **(env or {})})
 
 
 @pytest.fixture
@@ -436,7 +442,7 @@ def test_https_push_to_a_public_host_is_checked(tmp_path, pki):
                      cwd=work, env={"GIT_SSL_CAINFO": str(pki["ca"])})
         assert pushed.returncode != 0 and "notes.txt" in pushed.stderr, pushed.stderr
         assert git("rev-parse", "--verify", "-q", "main", cwd=root / "repo.git").returncode != 0
-        record = next(r for r in proxy.records() if r.get("push"))
+        record = next(r for r in proxy.records(until=lambda r: r.get("push")) if r.get("push"))
         assert record["url"].startswith("https://git.example.org:") and not record["push"]["ok"]
     finally:
         proxy.close()
@@ -969,3 +975,511 @@ PATH_QUIRKS = [
 @pytest.mark.parametrize("target,expected", PATH_QUIRKS)
 def test_path_normalisation_corpus(target, expected):
     assert rt.normal_path(target) == expected
+
+
+class EchoAuthorization(Handler):
+    def do_GET(self):
+        body = json.dumps({"authorization": self.headers.get("Authorization")}).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def test_token_proxy_adds_the_token_only_to_git_requests_of_its_server(tmp_path, pki):
+    """--token-proxy: the agent's git sends no credentials; the proxy adds them for the token's HTTPS server and
+    Git's smart HTTP paths only, and the token never reaches the log."""
+    upstream = serve(EchoAuthorization, pki["server"])
+    port = upstream.server_address[1]
+    tokens = [{"host": "example.test", "port": port, "user": "x-access-token", "token": "tok-SECRET-123"}]
+    proxy = Proxy(tmp_path, pki, port, {"git_tokens": tokens})
+    expected = base64.b64encode(b"x-access-token:tok-SECRET-123").decode()
+
+    def get(target, extra=b""):
+        answer = https_request(proxy.port, pki["ca"], b"GET " + target + b" HTTP/1.1\r\nHost: example.test\r\n" + extra
+                               + b"Connection: close\r\n\r\n")
+        return json.loads(answer.split(b"\r\n\r\n", 1)[1])["authorization"]
+    try:
+        assert get(b"/o/r.git/info/refs?service=git-receive-pack") == f"Basic {expected}"
+        assert get(b"/o/r.git/info/refs?service=git-upload-pack") == f"Basic {expected}"
+        assert get(b"/api/v1/user") is None  # not a Git request: no token for the agent's API calls
+        assert get(b"/o/r.git/info/refs") is None  # dumb HTTP: no service
+        assert get(b"/o/r.git/info/refs?service=git-receive-pack", b"Authorization: Basic YWdlbnQ6eA==\r\n") == \
+            "Basic YWdlbnQ6eA=="  # the agent's own credentials are left alone
+        log = proxy.log.read_text()
+        assert "tok-SECRET-123" not in log and expected not in log and '"token_added": true' in log
+    finally:
+        proxy.close()
+        upstream.shutdown()
+    # Other servers, plain HTTP and other ports get nothing.
+    server = rt.ProxyServer.__new__(rt.ProxyServer)
+    server.config = {"git_tokens": tokens}
+    args = ("GET", "/o/r.git/info/refs", "/o/r.git/info/refs?service=git-upload-pack", [])
+    assert server.git_token("https", "evil.test", {"destination": f"127.0.0.1:{port}"}, *args) is None
+    assert server.git_token("http", "example.test", {"destination": f"127.0.0.1:{port}"}, *args) is None
+    assert server.git_token("https", "example.test", {"destination": "127.0.0.1:1"}, *args) is None
+    assert server.git_token("https", f"127.0.0.1:{port}", {"destination": f"127.0.0.1:{port}"}, *args) is None
+
+
+def plain_request(port, request):
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as raw:
+        raw.sendall(request)
+        data = b""
+        while True:
+            chunk = raw.recv(65536)
+            if not chunk:
+                return data
+            data += chunk
+
+
+def test_a_login_for_the_hosts_loopback_reaches_only_that_port_over_plain_http(tmp_path, pki):
+    """sandbox-ai git-logins for http://localhost:3000 (a local Gitea): the proxy adds the token to Git's requests
+    to that loopback port, which the sandbox reaches only as the host's; not to other paths, ports or servers."""
+    upstream = serve(EchoAuthorization)
+    port = upstream.server_address[1]
+    tokens = [{"host": "localhost", "port": port, "user": "ch", "token": "tok-LOOP-42", "loopback": True}]
+    proxy = Proxy(tmp_path, pki, port, {"git_tokens": tokens})
+    expected = base64.b64encode(b"ch:tok-LOOP-42").decode()
+
+    def get(target, extra=b""):
+        answer = plain_request(proxy.port, b"GET " + target + b" HTTP/1.1\r\nHost: localhost:%d\r\n" % port + extra
+                               + b"Connection: close\r\n\r\n")
+        return json.loads(answer.split(b"\r\n\r\n", 1)[1])["authorization"]
+    try:
+        assert get(b"/ch/sandbox-ai.git/info/refs?service=git-receive-pack") == f"Basic {expected}"
+        assert get(b"/api/v1/user") is None  # the agent's other requests: nothing
+        assert get(b"/ch/r.git/info/refs?service=git-upload-pack", b"Authorization: Basic YTpi\r\n") == "Basic YTpi"
+        log = proxy.log.read_text()
+        assert "tok-LOOP-42" not in log and expected not in log and '"token_added": true' in log
+    finally:
+        proxy.close()
+        upstream.shutdown()
+    server = rt.ProxyServer.__new__(rt.ProxyServer)
+    server.config = {"git_tokens": tokens}
+    args = ("GET", "/o/r.git/info/refs", "/o/r.git/info/refs?service=git-upload-pack", [])
+    # Another port, a non-loopback destination, or HTTPS: a loopback login is not for them.
+    assert server.git_token("http", "x", {"destination": f"127.0.0.1:{port + 1}"}, *args) is None
+    assert server.git_token("http", "x", {"destination": f"192.0.2.7:{port}"}, *args) is None
+    assert server.git_token("https", "localhost", {"destination": f"127.0.0.1:{port}"}, *args) is None
+    assert server.git_token("http", "x", {"destination": f"[::1]:{port}"}, *args) is not None
+    # An HTTPS login is never sent over plain http.
+    server.config = {"git_tokens": [{"host": "git.example.org", "port": 443, "user": "u", "token": "t", "loopback": False}]}
+    assert server.git_token("http", "git.example.org", {"destination": "192.0.2.8:443"}, *args) is None
+
+
+class EchoHeaders(Handler):
+    """Answers with the credential headers it got, for GET and POST alike, and keeps them in GOT: an answer to a
+    request the proxy added a key to reaches the client with the key masked."""
+    got = None
+
+    def answer(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        EchoHeaders.got = {"path": self.path, "authorization": self.headers.get("Authorization"),
+                           "x-api-key": self.headers.get("x-api-key"),
+                           "cf": self.headers.get_all("CF-Access-Client-Secret")}
+        body = json.dumps(EchoHeaders.got).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    do_GET = do_POST = answer
+
+
+LLM_KEY = "sk-llm-SECRET-0123456789abcdef"
+PLACEHOLDER = "sandbox-ai-llm-key-placeholder"
+
+
+def llm_entry(port, **changes):
+    return {"name": "gpu", "scheme": "https", "host": "example.test", "port": port, "addresses": ["127.0.0.1"],
+            "prefix": "/team", "placeholder": PLACEHOLDER, "key": LLM_KEY,
+            "headers": [["CF-Access-Client-Secret", "cf-SECRET-value"]], "ca": None, **changes}
+
+
+def test_llm_key_is_added_on_the_wire_for_its_endpoint_only(tmp_path, pki):
+    """--llm: the agent sends the placeholder; the proxy puts the key in its place (and the header secrets in) only
+    for the endpoint's verified name, port and path prefix. Neither the key nor a header secret reaches the log."""
+    upstream = serve(EchoHeaders, pki["server"])
+    port = upstream.server_address[1]
+    proxy = Proxy(tmp_path, pki, port, {"llm": [llm_entry(port)]})
+
+    def send(target, headers=b"", name="example.test", method=b"POST"):
+        answer = https_request(proxy.port, pki["ca"], method + b" " + target + b" HTTP/1.1\r\nHost: example.test\r\n"
+                               + headers + b"Content-Length: 2\r\nConnection: close\r\n\r\n{}", name=name)
+        assert json.loads(answer.split(b"\r\n\r\n", 1)[1])["path"] == target.decode()  # an answer came
+        return EchoHeaders.got
+    bearer = f"Authorization: Bearer {PLACEHOLDER}\r\n".encode()
+    try:
+        got = send(b"/team/v1/chat/completions", bearer + b"CF-Access-Client-Secret: from-the-agent\r\n")
+        assert got["authorization"] == f"Bearer {LLM_KEY}" and got["cf"] == ["cf-SECRET-value"]
+        got = send(b"/team/v1/messages", f"x-api-key: {PLACEHOLDER}\r\n".encode())
+        assert got["x-api-key"] == LLM_KEY and got["authorization"] is None  # where the agent put it
+        assert send(b"/team/v1/models", method=b"GET")["authorization"] == f"Bearer {LLM_KEY}"  # none sent: added
+        own = send(b"/team/v1/models", b"Authorization: Bearer agents-own-key\r\n", method=b"GET")
+        assert own["authorization"] == "Bearer agents-own-key"  # the agent's own credentials are left alone
+        outside = send(b"/other/v1/chat/completions", bearer)
+        assert outside["authorization"] == f"Bearer {PLACEHOLDER}" and outside["cf"] is None  # outside the prefix
+        log = proxy.log.read_text()
+        assert LLM_KEY not in log and "cf-SECRET-value" not in log and '"llm": "gpu"' in log
+    finally:
+        proxy.close()
+        upstream.shutdown()
+    # Another name, plain http to it, another port: nothing is added.
+    for scheme, origin, other_port in (("https", "evil.test", port), ("http", f"127.0.0.2:{port}", port),
+                                       ("https", "example.test", port + 1)):
+        head = b"POST /team/v1/x HTTP/1.1\r\n" + bearer + b"\r\n"
+        assert rt.llm_head([llm_entry(port)], scheme, origin, other_port, "/team/v1/x", head) == (head, None)
+
+
+def test_llm_key_over_plain_http_goes_by_the_pinned_address(tmp_path, pki):
+    upstream = serve(EchoHeaders)
+    port = upstream.server_address[1]
+    proxy = Proxy(tmp_path, pki, port, {"llm": [llm_entry(port, scheme="http", host="10.0.0.5", prefix="")]})
+    try:
+        with socket.create_connection(("127.0.0.1", proxy.port)) as sock:
+            sock.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: 10.0.0.5\r\nAuthorization: Bearer "
+                         + PLACEHOLDER.encode() + b"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            data = b""
+            while chunk := sock.recv(65536):
+                data += chunk
+        assert EchoHeaders.got["authorization"] == f"Bearer {LLM_KEY}"
+        assert json.loads(data.split(b"\r\n\r\n", 1)[1])["authorization"] == "Bearer " + "*" * len(LLM_KEY)
+        assert LLM_KEY not in proxy.log.read_text()
+    finally:
+        proxy.close()
+        upstream.shutdown()
+
+
+def test_llm_endpoint_with_its_own_ca(tmp_path, pki):
+    """A server signed by its own CA: trusted for the endpoint (name and port) only, not for any other server."""
+    upstream = serve(EchoHeaders, pki["server"])
+    port = upstream.server_address[1]
+    ca = (pki["run"].parent / "upstream-run" / "ca.pem").read_text()
+    system = ssl.create_default_context()  # does not know the upstream CA
+    for entries, works in (([], False), ([llm_entry(port, ca=ca)], True), ([llm_entry(port + 1, ca=ca)], False),
+                           ([llm_entry(port, ca=ca, host="other.test")], False)):
+        log = tmp_path / f"c-{len(entries)}-{works}-{entries[0]['port'] if entries else 0}.jsonl"
+        fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        server = rt.ProxyServer({"body_limit": 65536, "allow": {"loopback": [port]}, "llm": entries}, fd,
+                                run_dir=pki["run"], destination=lambda sock: ("127.0.0.1", port), upstream=system)
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        server.serve([listener])
+        try:
+            try:
+                answer = https_request(listener.getsockname()[1], pki["ca"], b"GET /team/v1/models HTTP/1.1\r\n"
+                                       b"Host: example.test\r\nConnection: close\r\n\r\n")
+            except (OSError, ssl.SSLError):
+                answer = b""  # the proxy refused before the agent's handshake ended
+            assert answer.startswith(b"HTTP/1.1 200") == works
+            if not works:
+                time.sleep(0.2)
+                assert "tls-upstream-failed" in log.read_text()
+        finally:
+            listener.close()
+            os.close(fd)
+    upstream.shutdown()
+
+
+def test_api_key_is_added_on_the_wire_for_its_host_only(tmp_path, pki):
+    """--api-key: the agent sends the placeholder in a credential header; the proxy puts the key there for the key's
+    verified host and port only. The key never reaches the log, not even when the server echoes it (an answer goes
+    to the agent as it came: a server that echoes credentials back is one to give no key to)."""
+    upstream = serve(EchoHeaders, pki["server"])
+    port = upstream.server_address[1]
+    key, placeholder = "devto-SECRET-0123456789", "sandbox-ai-api-key-placeholder-DEVTO_API_KEY"
+    proxy = Proxy(tmp_path, pki, port, {"api_keys": [{"host": "example.test", "port": port, "name": "DEVTO_API_KEY",
+                                                      "placeholder": placeholder, "key": key}]})
+
+    def send(headers, name="example.test"):
+        answer = https_request(proxy.port, pki["ca"], b"POST /api/articles HTTP/1.1\r\nHost: example.test\r\n"
+                               + headers + b"Content-Length: 2\r\nConnection: close\r\n\r\n{}", name=name)
+        assert key.encode() not in answer  # masked on the way back
+        return answer, EchoHeaders.got
+    try:
+        _, got = send(f"X-API-Key: {placeholder}\r\n".encode())
+        assert got["x-api-key"] == key and got["authorization"] is None  # where the agent put it, nothing added
+        _, got = send(f"Authorization: Bearer {placeholder}\r\n".encode())
+        assert got["authorization"] == f"Bearer {key}"
+        log = proxy.log.read_text()
+        assert key not in log and '"api_keys": ["DEVTO_API_KEY"]' in log
+        _, untouched = send(b"Authorization: Bearer agents-own\r\n")
+        assert untouched["authorization"] == "Bearer agents-own"
+    finally:
+        proxy.close()
+        upstream.shutdown()
+
+
+class EchoesCredentials(Handler):
+    """A server that echoes the credential it got: in a header and in the body, with a length or chunked (the
+    query says which), and notes what reached it."""
+    received = []
+
+    def do_GET(self):
+        credential = self.headers.get("Authorization") or ""
+        EchoesCredentials.received.append((credential, self.headers.get("Accept-Encoding")))
+        body = (json.dumps({"you sent": credential}) + " " * 5000 + credential).encode()
+        self.send_response(200)
+        self.send_header("X-Echo", credential)
+        if "chunked" in self.path:
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            for start in range(0, len(body), 7):  # small chunks: the key crosses their ends
+                piece = body[start:start + 7]
+                self.wfile.write(b"%x\r\n" % len(piece) + piece + b"\r\n")
+            self.wfile.write(b"0\r\n\r\n")
+        else:
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+
+def read_answer(data):
+    """(head, body) of one HTTP/1.1 answer, a chunked body decoded."""
+    head, _, rest = data.partition(b"\r\n\r\n")
+    if b"transfer-encoding: chunked" not in head.lower():
+        return head, rest
+    body = b""
+    while True:
+        size, _, rest = rest.partition(b"\r\n")
+        size = int(size.split(b";")[0], 16)
+        if size == 0:
+            return head, body
+        body, rest = body + rest[:size], rest[size + 2:]
+
+
+@pytest.mark.parametrize("framing", ["length", "chunked"])
+def test_an_answer_never_gives_the_agent_a_key_the_proxy_added(tmp_path, pki, framing):
+    """--api-key and --publish: the proxy asks for an uncompressed answer and masks its own keys in it (header and
+    body, also across chunk ends), with stars of the same length, so the framing stays right."""
+    EchoesCredentials.received = []
+    upstream = serve(EchoesCredentials, pki["server"])
+    port = upstream.server_address[1]
+    key, placeholder = "registry-SECRET-0123456789abcdef", "sandbox-ai-api-key-placeholder-TOKEN"
+    proxy = Proxy(tmp_path, pki, port, {"api_keys": [{"host": "example.test", "port": port, "name": "TOKEN",
+                                                      "placeholder": placeholder, "key": key}]})
+    try:
+        answer = https_request(proxy.port, pki["ca"], f"GET /{framing} HTTP/1.1\r\nHost: example.test\r\n"
+                               f"Authorization: Bearer {placeholder}\r\nAccept-Encoding: gzip\r\n"
+                               "Connection: close\r\n\r\n".encode())
+        head, body = read_answer(answer)
+        assert EchoesCredentials.received == [(f"Bearer {key}", "identity")]  # the server got the key, uncompressed
+        assert key.encode() not in answer and b"*" * len(key) in head and body.endswith(b"*" * len(key))
+        assert len(body) == len(json.dumps({"you sent": f"Bearer {key}"})) + 5000 + len(f"Bearer {key}")
+        assert key not in proxy.log.read_text()
+    finally:
+        proxy.close()
+        upstream.shutdown()
+
+
+def test_an_answer_to_a_request_without_an_added_key_is_left_alone(tmp_path, pki):
+    EchoesCredentials.received = []
+    upstream = serve(EchoesCredentials, pki["server"])
+    port = upstream.server_address[1]
+    proxy = Proxy(tmp_path, pki, port, {"api_keys": [{"host": "example.test", "port": port, "name": "TOKEN",
+                                                      "placeholder": "sandbox-ai-api-key-placeholder-TOKEN",
+                                                      "key": "registry-SECRET-0123456789abcdef"}]})
+    try:
+        answer = https_request(proxy.port, pki["ca"], b"GET /length HTTP/1.1\r\nHost: example.test\r\n"
+                               b"Authorization: Bearer agents-own\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n")
+        assert EchoesCredentials.received == [("Bearer agents-own", "gzip")]  # its own choice of encoding stays
+        assert answer.endswith(b"Bearer agents-own")
+    finally:
+        proxy.close()
+        upstream.shutdown()
+
+
+# --- nothing waits for good ------------------------------------------------------------------------
+
+
+def test_send_all_gives_up_on_a_peer_that_reads_nothing(monkeypatch):
+    """A peer that keeps a zero window (never reads) ends the send after the idle time, as a broken connection,
+    instead of retrying forever."""
+    monkeypatch.setattr(rt, "IDLE_TIMEOUT", 0.3)
+    left, right = socket.socketpair()
+    left.setblocking(False)
+    outcome = []
+
+    def send():
+        try:
+            rt.send_all(left, b"x" * (8 << 20))
+            outcome.append("sent")
+        except OSError as exc:
+            outcome.append(exc)
+    thread = threading.Thread(target=send, daemon=True)
+    try:
+        started = time.monotonic()
+        thread.start()
+        thread.join(5)
+        assert not thread.is_alive(), "send_all still waits for a peer that reads nothing"
+        assert isinstance(outcome[0], socket.timeout) and time.monotonic() - started < 3
+    finally:
+        right.close()
+        thread.join(5)
+        left.close()
+
+
+def no_thread_for(monkeypatch, name, times=1):
+    """threading.Thread.start fails as at the sandbox's process limit ("can't start new thread") for the first
+    TIMES threads whose target is called NAME."""
+    real, left = threading.Thread, [times]
+
+    class Failing(real):
+        def start(self):
+            if getattr(self._target, "__name__", "") == name and left[0] > 0:
+                left[0] -= 1
+                raise RuntimeError("can't start new thread")
+            return super().start()
+    monkeypatch.setattr(threading, "Thread", Failing)
+
+
+def first_answer(address, family=socket.AF_INET, send=b"", timeout=3):
+    """What a client of ADDRESS gets: its first bytes, b"" when it is closed at once, None when nobody answers."""
+    with socket.socket(family, socket.SOCK_STREAM) as client:
+        client.settimeout(timeout)
+        try:
+            client.connect(address)
+            client.sendall(send)
+            return client.recv(4096)
+        except ConnectionError:
+            return b""
+        except OSError:
+            return None
+
+
+def test_a_thread_that_cannot_start_does_not_end_the_proxys_accept_loop(monkeypatch):
+    """At the process limit a connection's thread may not start: that connection is closed, the next ones are still
+    served (the loop does not end with the listener left open and connections hanging in its backlog)."""
+    def handle(client):
+        with client:
+            client.sendall(b"served")
+    no_thread_for(monkeypatch, "handle")
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    threading.Thread(target=rt.ProxyServer.accept_loop, args=(types.SimpleNamespace(handle=handle), listener),
+                     daemon=True).start()
+    try:
+        assert first_answer(listener.getsockname()) == b""
+        assert first_answer(listener.getsockname()) == b"served"
+    finally:
+        listener.close()
+
+
+def test_a_thread_that_cannot_start_does_not_end_the_hook_server(monkeypatch):
+    no_thread_for(monkeypatch, "answer")
+    directory = Path(tempfile.mkdtemp(prefix="hooks-", dir="/tmp"))
+    server, stop = rt.HookServer(rt.Ruleset([])), threading.Event()
+    thread = threading.Thread(target=server.serve, args=(directory / "decide.sock", stop), daemon=True)
+    thread.start()
+    try:
+        assert server.ready.wait(5)
+        path = str(directory / "decide.sock")
+        assert first_answer(path, socket.AF_UNIX, b"{}\n") == b""
+        answer = first_answer(path, socket.AF_UNIX, b"{}\n")
+        assert answer and "decision" in json.loads(answer), answer
+    finally:
+        stop.set()
+        thread.join(5)
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def test_a_thread_that_cannot_start_does_not_end_the_supervisors_answers(monkeypatch):
+    """serve_asks: a question whose thread cannot start is refused at once; the next ones are answered."""
+    no_thread_for(monkeypatch, "answer")
+    supervisor_end, proxy_end = socket.socketpair()
+    threading.Thread(target=rt.serve_asks, args=(supervisor_end, None), daemon=True).start()
+    proxy_end.settimeout(5)
+    lines = proxy_end.makefile("r")
+    try:
+        for ident in (1, 2):
+            proxy_end.sendall((json.dumps({"id": ident, "kind": "who", "peer": ["127.0.0.1", 1]}) + "\n").encode())
+        first, second = json.loads(lines.readline()), json.loads(lines.readline())
+        assert first["id"] == 1 and first["decision"] == "deny"
+        assert second["id"] == 2 and "process" in second
+    finally:
+        proxy_end.close()
+        supervisor_end.close()
+
+
+def test_a_supervisor_that_reads_nothing_fails_the_question_instead_of_wedging_the_proxy(monkeypatch):
+    """AskChannel sends under its lock: a supervisor that stops reading would hold that lock in sendall for good, and
+    with it every connection that asks or looks up its process. A send that cannot go out in time fails its request
+    (refused at once); later ones do not wait for the stalled channel again, and once the supervisor reads again the
+    channel works (the cut-off line is ended first)."""
+    monkeypatch.setattr(rt, "ASK_SEND_SECONDS", 0.3, raising=False)
+    supervisor_end, proxy_end = socket.socketpair()
+    channel = rt.AskChannel(proxy_end, timeout=30)
+    answers = []
+
+    def ask(size):
+        answers.append(channel("push", {"message": "x" * size}))
+    try:
+        for size in (8 << 20, 10):
+            started = time.monotonic()
+            worker = threading.Thread(target=ask, args=(size,), daemon=True)
+            worker.start()
+            worker.join(5)
+            assert not worker.is_alive(), "the question waits for good"
+            assert answers[-1]["decision"] == "deny" and time.monotonic() - started < 3
+        # The supervisor reads again: what it gets ends the cut-off line before the next question.
+        received = []
+
+        def read():
+            with contextlib.suppress(OSError, ValueError):
+                for line in supervisor_end.makefile("r", encoding="utf-8"):
+                    with contextlib.suppress(ValueError):
+                        message = json.loads(line)
+                        received.append(message)
+                        if message.get("kind") == "who":
+                            supervisor_end.sendall((json.dumps({"id": message["id"], "process": {"pid": 7}}) + "\n").encode())
+        threading.Thread(target=read, daemon=True).start()
+        # A request while the reader still drains the backlog fails at once (the channel does not wait again
+        # while stalled); once there is room, one goes through.
+        deadline, answer = time.monotonic() + 5, None
+        while answer is None and time.monotonic() < deadline:
+            answer = channel.request("who", {"peer": ["127.0.0.1", 1]}).result(5)
+            if answer is None:
+                time.sleep(0.05)
+        assert answer is not None
+        assert received[-1]["kind"] == "who"
+    finally:
+        proxy_end.close()
+        supervisor_end.close()
+
+
+def test_a_privacy_check_that_does_not_answer_refuses_the_push_in_time(tmp_path, pki, monkeypatch):
+    """check_push waits for the checker under check_lock: a check that does not answer within PUSH_CHECK_SECONDS
+    refuses its push (clearly), and the next push is not held either: refused while the checker is still busy, then
+    checked as usual once it caught up, with its own answer, never the late answer to the earlier push."""
+    monkeypatch.setattr(rt, "PUSH_CHECK_SECONDS", 0.5, raising=False)
+    stand_in = tmp_path / "checker.py"
+    stand_in.write_text("import json, sys, time\n"
+                        "for number, line in enumerate(sys.stdin):\n"
+                        "    if number == 0:\n"
+                        "        time.sleep(2)\n"
+                        "    print(json.dumps({'ok': number > 0, 'message': f'answer {number}'}), flush=True)\n")
+    checker = subprocess.Popen([sys.executable, "-I", str(stand_in)], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    proxy = Proxy(tmp_path, pki, 1, {"push_check": True}, checker=checker)
+    line = b"0" * 40 + b" " + b"1" * 40 + b" refs/heads/main\0report-status\n"
+    body = b"%04x" % (len(line) + 4) + line + b"0000"
+
+    def check():
+        return proxy.server.check_push("http://example.test/repo.git/git-receive-pack", [], [(body, body)], [], set())[0]
+    try:
+        started = time.monotonic()
+        verdict = check()
+        assert not verdict["ok"] and "did not answer within" in verdict["message"], verdict
+        assert time.monotonic() - started < 1.5
+        started = time.monotonic()
+        verdict = check()
+        assert not verdict["ok"] and "still busy" in verdict["message"] and time.monotonic() - started < 1, verdict
+        time.sleep(2.5)  # the checker caught up
+        verdict = check()
+        assert verdict["ok"] and verdict["message"] == "answer 1", verdict
+    finally:
+        proxy.close()
+        checker.stdin.close()
+        checker.wait(5)

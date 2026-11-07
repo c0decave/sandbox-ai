@@ -1,0 +1,23 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "time-capsule",
+  "title": "Time capsule",
+  "description": "Git archaeology, read-only, only the provider: why did a line, a bug or a decision come to be?",
+  "category": "fun",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--workspace-ro"
+  ],
+  "values": {
+    "question": {
+      "label": "What to find out",
+      "kind": "text"
+    }
+  },
+  "prompt": "You are a code archaeologist. Using only git (log, blame, bisect in a copy under /tmp, show), answer: {question}. Tell the story with commit hashes, dates and the people's own words from the messages."
+}

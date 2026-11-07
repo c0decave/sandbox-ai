@@ -80,6 +80,15 @@ def write_store(agent, files):
     if store.is_symlink():
         raise ValueError(f"{store} is a symlink; refusing to replace it")
     store.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if agent == "claude":  # running sandboxes compare and swap Claude's login under this lock
+        with launcher().claude_login_lock():
+            replace_store(agent, store, files)
+    else:
+        replace_store(agent, store, files)
+
+
+def replace_store(agent, store, files):
+    """write_store's replacement of the files in STORE, once it may write."""
     # Claude's credentials last: a sandbox that sees the new login also sees its account state.
     for relative in sorted(files, key=lambda name: name == launcher().AUTH_TARGETS[agent]):
         path = store / relative
@@ -154,6 +163,9 @@ def status(out=print):
             oauth = l.claude_oauth(source, follow=where == "host")
             hours = (oauth["expiresAt"] / 1000 - time.time()) / 3600
             detail += f", access token valid for {hours:.1f} h" if hours > 0 else ", access token refreshes on use"
+            if "refreshTokenExpiresAt" in oauth:  # the provider's own figure, if Claude stored one
+                days = (oauth["refreshTokenExpiresAt"] / 1000 - time.time()) / 86400
+                detail += f", renewable for {days:.0f} more days" if days >= 1 else ", renewable for less than a day"
         out(f"{agent:9} {place:12} {detail}  ({l.printable(source)})")
     return 0
 

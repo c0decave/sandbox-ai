@@ -1,0 +1,31 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "data-ml",
+  "title": "Data and machine learning",
+  "description": "PyPI and Hugging Face open, more memory; the GPU if you give one.",
+  "category": "development",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--allow-pypi",
+    "--allow-host",
+    "huggingface.co",
+    "--allow-host",
+    "cdn-lfs.huggingface.co",
+    "--memory",
+    "16g",
+    "--gpu",
+    "{gpu}"
+  ],
+  "values": {
+    "gpu": {
+      "label": "GPU (nvidia, dri or rocm)",
+      "kind": "text",
+      "optional": true
+    }
+  }
+}

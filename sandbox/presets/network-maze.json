@@ -1,0 +1,35 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "network-maze",
+  "title": "Network maze",
+  "description": "A sandbox network of its own, real DNS, one TCP target and optionally a VPN, all at once: does everything work together?",
+  "category": "testing",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--subnet",
+    "10.77.0.0/24",
+    "--dns",
+    "--allow-tcp",
+    "{tcp}",
+    "--vpn",
+    "{vpn}"
+  ],
+  "values": {
+    "tcp": {
+      "label": "A TCP target IP:PORT",
+      "kind": "host",
+      "default": "192.0.2.10:443"
+    },
+    "vpn": {
+      "label": "VPN profile (sandbox-ai vpn list)",
+      "kind": "vpn",
+      "optional": true
+    }
+  },
+  "prompt": "Map what this sandbox can reach: its addresses and routes, DNS, the allowed TCP target, the provider. Try a few things that should be refused and say what refused them. Write /work/network-map.md."
+}

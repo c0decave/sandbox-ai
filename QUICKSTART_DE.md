@@ -18,27 +18,30 @@ Standard-Backend braucht funktionierendes rootless Podman mit `pasta`;
 sandbox-ai doctor         # was auf diesem Host fehlt und wie man es behebt
 ```
 
-Das legt die Befehle in `~/.local/bin` (und `~/.bin`, falls vorhanden) und die
-Dateien in `~/.local/share/sandbox-ai` ab. Ohne `--from` lädt es das neueste
+Das legt die Befehle in `~/.local/bin` (und `~/.bin`, falls vorhanden), dieses
+Verzeichnis in `~/.bashrc` auf Ihren `PATH` (`--no-modify-rc` lässt die Datei in
+Ruhe) und die Dateien in `~/.local/share/sandbox-ai` ab. Öffnen Sie danach ein
+neues Terminal. Ohne `--from` lädt es das neueste
 Release (`--source URL` wählt das Repository). Alles funktioniert auch direkt
-aus dem Checkout als `./claude-sandbox` usw., wie unten; nur darf der Checkout
-selbst nie ein Workspace sein.
+aus dem Checkout als `./sandbox-ai claude` usw., wie unten; nur darf der Checkout
+selbst nie ein Workspace sein. Die Tab-Vervollständigung für bash, zsh und fish
+kommt mit (`sandbox-ai completion install` richtet sie erneut ein).
 
 ## 1. Images bauen
 
 ```bash
-./sandbox-build-image all
+./sandbox-ai build all
 ```
 
 Das baut `localhost/codex-sandbox`, `localhost/claude-sandbox` und
 `localhost/opencode-sandbox` mit den neuesten Agent-Versionen auf der aktuellen
-Node.js-LTS. Nur Benötigtes bauen: `./sandbox-build-image claude`.
+Node.js-LTS. Nur Benötigtes bauen: `./sandbox-ai build claude`.
 Derselbe Befehl aktualisiert später.
 
 ## 2. Isolation prüfen
 
 ```bash
-./claude-sandbox --workspace "$HOME/src/sandbox-demo" --offline --probe
+./sandbox-ai claude --workspace "$HOME/src/sandbox-demo" --offline --probe
 ```
 
 Erwartet ist JSON mit `"verified": true`: äußere Sandbox, Firejail und Firewall
@@ -64,7 +67,7 @@ darunter die Demo `/sandcastle`, einmal `sandbox-ai plugins claude` ausführen.
 Dann:
 
 ```bash
-./claude-sandbox --workspace "$HOME/src/sandbox-demo"
+./sandbox-ai claude --workspace "$HOME/src/sandbox-demo"
 ```
 
 Die Startzeilen zeigen, was in die Sandbox kopiert wurde, und für Claude, wie
@@ -81,7 +84,7 @@ erscheint in `~/src/sandbox-demo`. Der Agent erreicht nur seinen Provider. Eine
 einmalige Aufgabe ausprobieren:
 
 ```bash
-./codex-sandbox --workspace "$HOME/src/sandbox-demo" \
+./sandbox-ai codex --workspace "$HOME/src/sandbox-demo" \
   -- exec --skip-git-repo-check 'Schreibe Hallo in hello.txt und lies die Datei zur Kontrolle.'
 cat "$HOME/src/sandbox-demo/hello.txt"
 ```
@@ -91,7 +94,7 @@ Sehen, was passieren würde, ohne etwas zu starten? `--dry-run` anhängen.
 ## 4. Das Projekt mit dem Wizard einrichten
 
 ```bash
-./sandbox-wizard
+./sandbox-ai wizard
 ```
 
 ```text
@@ -118,7 +121,7 @@ Further options (read-only workspaces, persistent HOME, mounts, variables, MCP, 
 Write configuration [Y/n]:
 Wrote the token to /home/me/.config/sandbox-ai/tokens/http-localhost-3000 (mode 0600; the project configuration names only this file)
 Wrote and trusted /home/ich/src/sandbox-demo/.sandbox-ai.json
-Start with: ./claude-sandbox --workspace /home/ich/src/sandbox-demo
+Start with: ./sandbox-ai claude --workspace /home/ich/src/sandbox-demo
 ```
 
 Antworten lassen sich wie in einer Shell bearbeiten (Backspace, Pfeiltasten,
@@ -132,30 +135,31 @@ Mit `variable` bleibt der Token stattdessen in einer Host-Variable.
 
 Ab jetzt wendet der Starter diese Einstellungen automatisch an; Optionen auf
 der Kommandozeile haben weiterhin Vorrang. Später ändern Sie die Konfiguration
-mit `sandbox-wizard edit ~/src/sandbox-demo`: Es zeigt die Teile als Menü,
+mit `sandbox-ai wizard edit ~/src/sandbox-demo`: Es zeigt die Teile als Menü,
 fragt mit den aktuellen Werten als Vorgabe erneut und zeigt vor dem Schreiben,
 was sich ändert. Ändert sich die Datei oder klonen
-Sie ein Projekt, das eine enthält: prüfen und mit `./sandbox-wizard trust DATEI`
+Sie ein Projekt, das eine enthält: prüfen und mit `./sandbox-ai wizard trust DATEI`
 bestätigen. Eine nicht vertraute Datei wird nie angewendet.
 
 ## 5. In einer Session arbeiten, die Sie verlassen und fortsetzen können
 
 ```bash
-./claude-sandbox --workspace "$HOME/src/sandbox-demo" --session demo
+./sandbox-ai claude --workspace "$HOME/src/sandbox-demo" --name demo
 ```
 
 Sie sind jetzt mit tmux in der Sandbox verbunden: Fenster `agent` führt Claude
 aus, Fenster `shell` ist eine bash in derselben Sandbox (`Ctrl-b n` wechselt).
 `Ctrl-b d` löst die Verbindung; der Agent arbeitet weiter, auch wenn Sie das
-Terminal schließen.
+Terminal schließen. Jeder Start funktioniert so; ohne `--name` heißt er
+`claude-sandbox-demo-xxxx`.
 
 ```bash
-./sandbox-session list            # NAME  AGENT  BACKEND  STATUS  …
-./sandbox-session attach demo     # wieder verbinden
-./sandbox-session pause demo      # alles einfrieren, z. B. um die CPU freizugeben
-./sandbox-session resume demo     # genau dort weitermachen
-./sandbox-session stop demo       # beenden; Dateien und HOME bleiben
-./sandbox-session resume demo     # später: Neustart, Claude setzt das Gespräch fort
+./sandbox-ai list                  # NAME  KIND  AGENT  STATE  HOME  STARTED  WORKSPACE
+./sandbox-ai attach demo           # wieder verbinden
+./sandbox-ai pause demo            # alles einfrieren, z. B. um die CPU freizugeben
+./sandbox-ai resume demo           # genau dort weitermachen
+./sandbox-ai stop demo             # beenden; Dateien und HOME bleiben
+./sandbox-ai resume demo           # später: eine neue Sandbox, Claude setzt das Gespräch fort
 ```
 
 ## 6. Optional: ein lokales LLM mit OpenCode
@@ -174,13 +178,27 @@ Hosts angeben (nicht `127.0.0.1`), die Liste sortieren und ein Modell wählen:
 
 OpenCode spricht danach nur mit diesem Server; sonst verlässt nichts die
 Sandbox. Modelle ohne Wizard auflisten:
-`./sandbox-wizard models --kind ollama --host IP`.
+`./sandbox-ai wizard models --kind ollama --host IP`.
+
+**Für jeden Agenten und für Server anderswo** (ein anderer Rechner, ein VPN,
+das Internet, mit API-Schlüssel): den Server einmal anlegen und mit `--llm`
+starten. Der Schlüssel bleibt in `sandbox-ai secrets`; der Agent sieht nur
+einen Platzhalter.
+
+```bash
+sandbox-ai llm add gpu --kind ollama --url http://192.168.1.20:11434
+sandbox-ai llm check gpu --agent claude      # Claude braucht Ollama 0.14 oder neuer
+./sandbox-ai claude --llm gpu:qwen2.5-coder:14b --no-provider-defaults
+```
+
+Auch der Wizard bietet angelegte Server an. Einzelheiten: README_DE,
+„LLM-Server: lokal und entfernt“.
 
 ## 7. Optional: GUI-Programme und Browser-Tests
 
 ```bash
 mkdir -p "$HOME/.local/state/sandbox-ai/vnc-demo"
-./codex-sandbox --workspace "$HOME/src/sandbox-demo" --egress-all-allow \
+./sandbox-ai codex --workspace "$HOME/src/sandbox-demo" --egress-all-allow \
   --gui-vnc "$HOME/.local/state/sandbox-ai/vnc-demo" --binary /bin/bash
 # darin:
 uvx --from playwright playwright install chromium
@@ -198,10 +216,10 @@ Währenddessen das Display mit
 ## 8. Optional: ein MCP-Server in eigener Sandbox
 
 ```bash
-./claude-sandbox --workspace "$HOME/src/sandbox-demo" --mcp demo \
+./sandbox-ai claude --workspace "$HOME/src/sandbox-demo" --mcp demo \
   -- -p 'Rufe das version-Tool des MCP-Servers demo auf und zeige das Ergebnis.'
-./sandbox-mcp list
-./sandbox-mcp stop demo
+./sandbox-ai mcp list
+./sandbox-ai mcp stop demo
 ```
 
 Der eingebaute Server `demo` läuft in einer eigenen Sandbox und antwortet mit
@@ -219,6 +237,54 @@ cd ~/src/sandbox-demo && sandbox-ai logs   # gesperrte Ziele mit der passenden F
 Die rohen JSON-Zeilen liegen als `egress-denied.jsonl` und `files.jsonl` im
 Log-Verzeichnis unter `~/.local/state/sandbox-ai/logs/`.
 
+## 10. Optional: mit einem Preset starten
+
+```bash
+sandbox-ai presets list                          # Analyse, Entwicklung, Tests, Spaß
+sandbox-ai presets show software-analysis        # was es setzt und was es fragt
+sandbox-ai claude --workspace "$HOME/src/sandbox-demo" \
+  --preset software-analysis --preset-value samples=~/samples
+sandbox-ai demo-device start                     # ein emuliertes serielles Gerät auf 127.0.0.1:4000
+sandbox-ai claude --workspace "$HOME/src/sandbox-demo" --preset hardware-analysis
+```
+
+Ein Preset besteht aus Optionen, MCP-Servern und einer ersten Aufgabe; die
+Kommandozeile gewinnt gegen es. `sandbox-ai presets check NAME` nennt die
+MCP-Server, die noch hinzuzufügen sind.
+
+## 11. Optional: während des Laufs etwas ändern
+
+```bash
+sandbox-ai net allow --allow-host pypi.org       # mehr Ziele, bis die Sandbox endet
+sandbox-ai net allow --allow-host-port 3000      # ein Dienst auf diesem Host, über ein Relay
+sandbox-ai net allow --git-token-env http://localhost:3000=SANDBOX_GIT_TOKEN   # ein Git-Login
+sandbox-ai net allow --allow-host api.osv.dev --keep   # auch für die nächsten Starts
+sandbox-ai net show                              # was dazukam
+```
+
+Noch besser: Bewahren Sie Ihre Git-Logins außerhalb jeder Sandbox auf. Der
+Verbindungs-Proxy fügt sie in Gits Anfragen ein, und kein Token kommt je in eine
+Sandbox:
+
+```bash
+sandbox-ai secrets set GITEA_TOKEN
+sandbox-ai git-logins add http://localhost:3000 --secret GITEA_TOKEN --user sie
+```
+
+API-Schlüssel gehen genauso: Mit `--api-key dev.to=DEVTO_API_KEY` ist
+`$DEVTO_API_KEY` beim Agenten nur ein Platzhalter, und der Proxy setzt den
+gespeicherten Schlüssel erst auf der Leitung ein, nur für HTTPS an diesen Host.
+Für npm, PyPI, crates.io, GitLab und GitHub: `sandbox-ai publish-logins add pypi
+--secret PYPI_TOKEN`, dann mit `--publish pypi` starten; jede Veröffentlichung wird
+vorher erfragt. Mehrere Konten (ein öffentliches, eines für die Arbeit, keines
+für eine Recherche) sind Identitäten: `sandbox-ai identities add NAME ...`, dann
+`--identity NAME`.
+
+Nahe der Speichergrenze warnt der Launcher Sie, und der Agent kann
+`/sandbox/session/memory.json` lesen; bei 95 % beendet er den größten Test oder
+Build, damit die Sandbox überlebt. `sandbox-ai web` bietet all das als Webseite
+(Passwort und Einmalcode), auch für andere Rechner über SSH (`sandbox-ai hosts`).
+
 ## Die wichtigsten Optionen
 
 | Option | Zweck |
@@ -227,7 +293,9 @@ Log-Verzeichnis unter `~/.local/state/sandbox-ai/logs/`.
 | `--session NAME` | Lösbare Session (siehe Schritt 5) |
 | `--dangerously-skip-permissions` | Keine Rückfragen; die Sandbox bleibt in Kraft |
 | `--allow-github`, `--allow-pypi`, `--allow-host HOST` | Einzelne HTTPS-Ziele öffnen |
-| `--allow-host-port PORT` | Dienst auf dem eigenen Host erreichen, etwa einen lokalen Git-Server |
+| `--allow-host-port PORT` | Dienst auf dem eigenen Host erreichen, etwa einen lokalen Git-Server (während des Laufs: `net allow --allow-host-port`) |
+| `--model opus`, `--effort high` | Modell und Gründlichkeit des Agenten, in seinen eigenen Worten (Claude Code, Codex) |
+| `--preset NAME`, `--preset-value K=V` | Mit einem Preset starten (siehe Schritt 10) |
 | `--git-token-env URL=NAME`, `--git-identity` | Aus der Sandbox pushen, z. B. `http://localhost:3000=SANDBOX_GIT_TOKEN` |
 | `--git-token-env https://github.com=NAME` | Nach GitHub pushen |
 | `--git-credentials ~/.git-credentials` | Vorhandene Git-Logins nutzen (der Agent kann sie lesen) |
@@ -243,14 +311,14 @@ Auf ein lokales Gitea oder Forgejo auf Port 3000 pushen:
 
 ```bash
 export SANDBOX_GIT_TOKEN=...   # Gitea: Einstellungen -> Anwendungen
-./claude-sandbox --workspace "$HOME/src/sandbox-demo" \
+./sandbox-ai claude --workspace "$HOME/src/sandbox-demo" \
   --git-token-env http://localhost:3000=SANDBOX_GIT_TOKEN --git-identity
 ```
 
-`./claude-sandbox --help` listet jede Option; die
+`./sandbox-ai claude --help` listet jede Option; die
 [Optionsübersicht](README_DE.md#optionsübersicht) der README fasst alle
-zusammen, dazu `sandbox-session`, `sandbox-mcp`, `sandbox-wizard` und
-`sandbox-build-image`.
+zusammen, dazu `sandbox-ai list`, `sandbox-ai mcp`, `sandbox-ai wizard` und
+`sandbox-ai build`.
 
 ## Weiter
 

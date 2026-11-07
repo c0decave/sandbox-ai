@@ -201,18 +201,22 @@ class SandboxTests(unittest.TestCase):
             with self.subTest(agent=agent):
                 a = s.parse_args([agent, "--dangerously-skip-permissions", "--", "exec", "task"])
                 self.assertEqual(s.agent_command(a, agent), command)
+        # The Git helper for logins added during the run is there in every start (sandbox-ai net allow --git-token-*).
+        helper = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "credential.helper", "GIT_CONFIG_VALUE_0": s.RUNTIME_GIT_HELPER}
         self.assertEqual(s.agent_environment(s.parse_args(["claude", "--dangerously-skip-permissions", "--privacy-check", "off",
                                                            "--no-proxy"])),
-                         {"IS_SANDBOX": "1"})
+                         {**s.TELEMETRY_ENV["claude"]["off"], **helper, "IS_SANDBOX": "1"})
         env = s.agent_environment(s.parse_args(["opencode", "--dangerously-skip-permissions"]))
         self.assertEqual(json.loads(env["OPENCODE_PERMISSION"]), {"*": "allow"})
-        self.assertEqual(s.agent_environment(s.parse_args(["claude", "--privacy-check", "off", "--no-proxy"])), {})
+        self.assertEqual(s.agent_environment(s.parse_args(["claude", "--privacy-check", "off", "--no-proxy"])),
+                         {**s.TELEMETRY_ENV["claude"]["off"], **helper})
         # With the proxy (the default) TLS libraries are pointed at the bundle with the session CA.
         env = s.agent_environment(s.parse_args(["claude", "--privacy-check", "off"]))
         self.assertEqual(env["SSL_CERT_FILE"], "/run/sandbox-ca/bundle.pem")
         self.assertEqual(env["GIT_SSL_CAINFO"], "/run/sandbox-ca/bundle.pem")
         self.assertEqual(env["NODE_EXTRA_CA_CERTS"], "/run/sandbox-ca/ca.pem")
-        self.assertEqual(s.agent_environment(s.parse_args(["claude", "--privacy-check", "off", "--offline"])), {})
+        self.assertEqual(s.agent_environment(s.parse_args(["claude", "--privacy-check", "off", "--offline"])),
+                         {**s.TELEMETRY_ENV["claude"]["off"], **helper})
 
     def test_dangerously_skip_permissions_not_duplicated_or_used_in_probe(self):
         a = s.parse_args(["claude", "--dangerously-skip-permissions", "--", "--dangerously-skip-permissions", "-p", "x"])
@@ -401,6 +405,7 @@ class SandboxTests(unittest.TestCase):
         stop = threading.Event()
         stop.seen, stop.threads = {"seen"}, [Mock(), Mock()]
         with tempfile.TemporaryDirectory() as logs, patch.object(sr, "LOG_DIR", Path(logs)), \
+                patch.object(s.RUNTIME, "SESSION_CONFIG", Path(logs) / "absent.json"), \
                 patch.object(s.os, "getpid", return_value=1), patch.object(s.RUNTIME.ctypes, "CDLL", return_value=Mock(prctl=Mock(return_value=0))), \
                 patch.object(s.subprocess, "run"), patch.object(s.subprocess, "Popen"), patch.object(sr, "namespace_state", return_value={}), \
                 patch.object(sr, "firejail_command", return_value=["fj"]), patch.object(sr, "wait_child", return_value=7), \
@@ -465,7 +470,7 @@ class SandboxTests(unittest.TestCase):
                     patch.object(s, "run_pod", return_value=5), patch.object(s, "claude_writeback", side_effect=OSError("disk full")), \
                     contextlib.redirect_stderr(io.StringIO()) as stderr:
                 self.assertEqual(s.main(["claude", "--workspace", str(Path(d) / "w"), "--offline"]), 5)
-            self.assertIn("could not write back Claude credentials: disk full", stderr.getvalue())
+            self.assertIn("could not write back the Claude login: disk full", stderr.getvalue())
 
     def test_existing_log_dir_is_tightened_to_0700(self):
         with tempfile.TemporaryDirectory() as d:
@@ -619,6 +624,7 @@ class SandboxTests(unittest.TestCase):
             config.write_text(json.dumps({"display": ":99", "screen": "1x1x24", "vnc": False}))
             processes = [Mock(), Mock()]
             with patch.object(sr, "GUI_CONFIG", config), patch.object(sr, "LOG_DIR", Path(d) / "absent"), \
+                    patch.object(s.RUNTIME, "SESSION_CONFIG", Path(d) / "absent.json"), \
                     patch.object(s.os, "getpid", return_value=1), patch.object(s.RUNTIME.ctypes, "CDLL", return_value=Mock(prctl=Mock(return_value=0))), \
                     patch.object(s.subprocess, "run"), patch.object(s.subprocess, "Popen"), patch.object(sr, "namespace_state", return_value={}), \
                     patch.object(sr, "firejail_command", return_value=["fj"]), patch.object(sr, "wait_child", return_value=3), \
@@ -700,19 +706,29 @@ class SandboxTests(unittest.TestCase):
                     s.main([*base, "--backend", "bwrap"])
 
     def test_tmux_flag_reaches_session_config_and_dry_run(self):
+        # In a terminal a tmux start runs as a detachable session: a supervisor runs the sandbox in detached
+        # tmux (config "detached"), and this terminal attaches.
         with tempfile.TemporaryDirectory() as d:
+            with patch.object(s, "load_sessions_module") as load, patch.object(s.sys.stdin, "isatty", return_value=True), \
+                    patch.object(s.os, "geteuid", return_value=1000), contextlib.redirect_stderr(io.StringIO()):
+                load.return_value.start.return_value = 0
+                self.assertEqual(s.main(["claude", "--workspace", d + "/w", "--offline", "--no-auth", "--tmux"]), 0)
+            a, argv = load.return_value.start.call_args.args
+            self.assertTrue(a.tmux)
+            self.assertRegex(a.start_name, r"^claude-w-[0-9a-f]{4}$")
             seen = {}
             def inspect(a, session, home):
                 seen.update(json.loads((session / "config.json").read_text()))
                 return 0
             with patch.object(s.os, "geteuid", return_value=1000), patch.object(s.shutil, "which", side_effect=lambda n: "/usr/bin/" + n), \
-                    patch.object(s, "run_pod", side_effect=inspect), patch.object(s.sys.stdin, "isatty", return_value=True), \
+                    patch.object(s, "run_pod", side_effect=inspect), patch.object(s.sys.stdin, "isatty", return_value=False), \
                     contextlib.redirect_stderr(io.StringIO()):
-                s.main(["claude", "--workspace", d + "/w", "--offline", "--no-auth", "--tmux"])
-            self.assertTrue(seen["tmux"])
+                s.main(["claude", "--workspace", d + "/w", "--offline", "--no-auth", "--tmux-socket-dir", d + "/tmux"])
+            self.assertEqual(seen["tmux"], "detached")
             with contextlib.redirect_stdout(io.StringIO()) as stdout:
                 s.main(["claude", "--tmux", "--dry-run"])
-            self.assertTrue(json.loads(stdout.getvalue())["tmux"])
+            plan = json.loads(stdout.getvalue())
+            self.assertTrue(plan["tmux"] and plan["detachable"])
 
     def test_claude_can_reach_its_oauth_refresh_endpoints(self):
         hosts = s.allowed_hosts(s.parse_args(["claude"]))
@@ -1002,6 +1018,22 @@ class SandboxTests(unittest.TestCase):
             os.environ.pop("CLAUDE_CONFIG_DIR", None)
             code = s.main(["claude", "--workspace", str(Path(d) / "w"), "--offline", *options])
         return code, stderr.getvalue()
+
+    def test_review_one_state_dir_one_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            host, state = self.claude_host(d), Path(d) / "state"
+            seen = []
+
+            def agent(home):  # the lock is held while the agent runs
+                with self.assertRaisesRegex(ValueError, "in use by another run"), s.state_dir_lock(home):
+                    pass
+                seen.append(home)
+            code, _ = self.run_claude(d, host, agent, ["--state-dir", str(state)])
+            self.assertEqual((code, seen), (5, [state]))
+            with s.state_dir_lock(state):
+                with self.assertRaisesRegex(ValueError, f"--state-dir {state} is in use by another run"):
+                    self.run_claude(d, host, lambda home: self.fail("started on a locked HOME"),
+                                    ["--state-dir", str(state)])
 
     def test_review_writeback_survives_hostile_sandbox_files(self):
         hostile = {"nested": lambda c: c.write_text("[" * 100000),

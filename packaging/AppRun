@@ -1,0 +1,32 @@
+#!/bin/sh
+# AppRun of the sandbox-ai AppImage: the app (sandbox-ai-app) by default, the command line with
+#   sandbox-ai-ARCH.AppImage cli ARGS...
+# or when the AppImage is called by the name sandbox-ai (a link: ln -s ~/.local/bin/sandbox-ai-x86_64.AppImage
+# ~/.local/bin/sandbox-ai). usr/lib/sandbox-ai/boot.py (scripts/dist_boot.py) copies the Python and sandbox-ai
+# into ${XDG_CACHE_HOME:-~/.cache}/sandbox-ai/appimage/ once, checks that copy at every start and runs it from
+# there: sessions and kept starts go on after the AppImage has ended (its mount goes away with it).
+set -eu
+here=${APPDIR:-$(dirname -- "$(readlink -f -- "$0")")}
+here=$(cd -- "$here" && pwd -P)
+# Nothing runs from a folder another user could have prepared or can change: --appimage-extract-and-run reuses
+# ${TMPDIR:-/tmp}/appimage_extracted_<hash> if it exists. The folders from the Python up to / must belong to you or
+# root and be writable by nobody else (a sticky folder of root's, like /tmp, is fine).
+safe_folder() {  # FOLDER: exits with a message unless it is safe
+  set -- "$1" $(stat -c '%u %a' -- "$1") || exit 1
+  if [ "$2" != "$(id -u)" ] && [ "$2" != 0 ]; then
+    echo "sandbox-ai: $1 belongs to another user; the AppImage does not run from there" >&2
+    exit 1
+  fi
+  if [ $((0$3 & 0022)) != 0 ] && ! { [ "$2" = 0 ] && [ $((0$3 & 01000)) != 0 ]; }; then
+    echo "sandbox-ai: $1 is writable by others; the AppImage does not run from there" \
+      "(extract-and-run: TMPDIR=\$(mktemp -d) ./sandbox-ai-ARCH.AppImage --appimage-extract-and-run ...)" >&2
+    exit 1
+  fi
+}
+dir="$here/usr/lib/sandbox-ai/tree/python/bin"
+while :; do
+  safe_folder "$dir"
+  [ "$dir" = / ] && break
+  dir=$(dirname -- "$dir")
+done
+exec "$here/usr/lib/sandbox-ai/tree/python/bin/python3" -I "$here/usr/lib/sandbox-ai/boot.py" "$@"

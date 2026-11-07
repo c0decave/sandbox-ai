@@ -1,0 +1,18 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "docs-writer",
+  "title": "Documentation writer",
+  "description": "Write and build documentation (MkDocs, Sphinx) with PyPI and GitHub open.",
+  "category": "development",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--allow-pypi",
+    "--allow-github"
+  ],
+  "prompt": "Read the code and the existing documentation, then improve the documentation where it is missing, wrong or unclear. Build it to check it (mkdocs build or sphinx-build) and list what you changed."
+}

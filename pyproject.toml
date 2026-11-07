@@ -45,8 +45,10 @@ package-dir = { "sandbox_ai" = "sandbox" }
 packages = ["sandbox_ai"]
 
 [tool.setuptools.package-data]
-sandbox_ai = ["Containerfile.*", "build_image.sh", "templates/*/*.md", "templates/*/*.json",
-              "templates/*/skills/*/SKILL.md", "builtin/*/skills/*/SKILL.md", "marketplace/.claude-plugin/*",
+sandbox_ai = ["Containerfile.*", "build_image.sh", "release-signers", "mcp-signers", "web/*", "presets/*.json",
+              "templates/*/*.md", "templates/*/*.json",
+              "templates/*/skills/*/SKILL.md", "builtin/*/skills/*/SKILL.md", "builtin/kits/*/*/marketplaces.json",
+              "marketplace/.claude-plugin/*",
               "marketplace/plugins/*/.claude-plugin/*", "marketplace/plugins/*/commands/*"]
 
 [tool.setuptools.dynamic]

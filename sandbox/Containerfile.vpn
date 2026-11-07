@@ -1,0 +1,38 @@
+# The VPN container of sandbox-ai (`sandbox-ai build vpn`): one tunnel in front of a sandbox. WireGuard (the
+# kernel's where its module is loaded, else wireguard-go over /dev/net/tun), OpenVPN, Tailscale and Tor (with
+# obfs4proxy for bridges and the GeoIP files for exit countries), nftables for the kill switch and python3 for the
+# runtime (sandbox/vpn_runtime.py, mounted read-only at /vpn at every
+# start, so a new sandbox-ai version needs no rebuild). No agent and no other tools.
+ARG DEBIAN_IMAGE=docker.io/library/debian:bookworm-slim
+# wireguard-go is built from source (Debian has no package); pin with
+# --build-arg WIREGUARD_GO_VERSION=v0.0.YYYYMMDD.
+ARG GO_IMAGE=docker.io/library/golang:1-bookworm
+# Tailscale's own static binaries, from its official image; pin with --build-arg TAILSCALE_IMAGE=...:vX.Y.Z.
+ARG TAILSCALE_IMAGE=docker.io/tailscale/tailscale:stable
+
+FROM ${GO_IMAGE} AS wireguard-go
+ARG WIREGUARD_GO_VERSION=latest
+RUN CGO_ENABLED=0 GOBIN=/out go install "golang.zx2c4.com/wireguard@${WIREGUARD_GO_VERSION}" \
+    && mv /out/wireguard /out/wireguard-go
+
+FROM ${TAILSCALE_IMAGE} AS tailscale
+
+FROM ${DEBIAN_IMAGE}
+# Tor's user first, with the fixed uid that the kill switch and the agent's firewall know its packets by
+# (vpn_runtime.TOR_UID, meta skuid): Debian's tor package keeps an existing debian-tor with a system uid and the
+# home /var/lib/tor.
+RUN groupadd --system --gid 950 debian-tor \
+    && useradd --system --uid 950 --gid 950 --home-dir /var/lib/tor --no-create-home --shell /bin/false debian-tor
+# Debian's packages of the base image's release, as the other tools (pin the release with DEBIAN_IMAGE).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 ca-certificates iproute2 nftables wireguard-tools openvpn tor tor-geoipdb obfs4proxy \
+    && rm -rf /var/lib/apt/lists/* \
+    && test "$(id -u debian-tor)" = 950
+COPY --from=wireguard-go /out/wireguard-go /usr/local/bin/wireguard-go
+COPY --from=tailscale /usr/local/bin/tailscale /usr/local/bin/tailscaled /usr/local/bin/
+# openvpn --version exits non-zero on some releases; the pipe keeps the check to "it runs".
+RUN wg --version && wireguard-go --version && (openvpn --version | head -n 1) && tailscale version \
+    && tor --version && obfs4proxy -version && nft --version && python3 --version
+RUN mkdir -p /vpn /var/lib/tailscale /run/tailscale
+LABEL sandbox-ai.role=vpn
+ENTRYPOINT ["/usr/bin/python3", "-I", "/vpn/vpn_runtime.py"]

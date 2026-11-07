@@ -26,7 +26,9 @@ jobs:
       matrix:
         backend: [podman, bwrap]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1, published 2026-07-20
+        with:
+          persist-credentials: false
       - name: Host packages
         run: |
           sudo apt-get update -q
@@ -83,7 +85,7 @@ jobs:
               text = text.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
               print(f"::error title={name}::{text[-3500:]}")
           PY
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2, published 2026-10-07
         if: always()
         with:
           name: live-${{ matrix.backend }}

@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
-"""Named, detachable sandbox sessions: start, attach, pause, resume, stop.
+"""Detachable sandbox sessions: start, attach, pause, resume, stop.
 
-A session runs the normal launcher as a background supervisor. Inside the
-sandbox the guard starts a detached tmux session (windows "agent" and
-"shell"), so terminals can attach and detach while the agent keeps working.
-State lives in $XDG_STATE_HOME/sandbox-ai/sessions/NAME:
+Every interactive start is one (named automatically, or with --name/--session). A session runs the normal
+launcher as a background supervisor. Inside the sandbox the guard starts a detached tmux session (windows
+"agent" and "shell"), so terminals can attach and detach while the agent keeps working; closing the terminal
+detaches.
+State lives in $XDG_STATE_HOME/sandbox-ai/sessions/ID (ID: the session's first name; after a rename,
+session.json's "name" is its name):
 
-  session.json     agent, launcher options, supervisor PID, pod name
-  home/            persistent sandbox HOME (--state-dir)
+  session.json     agent, launcher options, name, supervisor PID, pod name
+  home/            persistent sandbox HOME (--state-dir), when the session keeps it ("keep")
   tmux/            tmux socket directory, bound at /sandbox/tmux
   supervisor.log   launcher output
   paused           present while the session is frozen
+  exit.json        run, exit status and end of its last run (written by the launcher)
+
+A session that does not keep its HOME is removed once it has ended; its history stays (starts.py).
 """
 import argparse
 import contextlib
@@ -23,8 +28,11 @@ import re
 import shlex
 import shutil
 import signal
+import socket
+import stat
 import subprocess
 import sys
+import secrets
 import tempfile
 import time
 from types import SimpleNamespace
@@ -32,6 +40,8 @@ from types import SimpleNamespace
 HERE = Path(__file__).resolve().parent
 PROC = Path("/proc")
 READY_TIMEOUT = 120
+DETACH_GRACE = 3   # seconds the terminal relay may take to go once the agent ended
+ENDING_WAIT = 60   # seconds a supervisor may take to clean up after its agent ended
 # Restarting a stopped session continues the agent's most recent conversation.
 CONTINUE_ARGS = {"claude": ["--continue"], "codex": ["resume", "--last"], "opencode": ["--continue"]}
 # Agent arguments that run one task and exit; repeating them on a restart would run it again.
@@ -49,6 +59,18 @@ VALUE_OPTIONS = {
 SESSION_OPTIONS = {"claude": {"--continue", "-c", "--resume", "-r", "--session-id"},
                    "codex": set(), "opencode": {"--continue", "-c", "--session", "-s"}}
 _launcher = None
+_starts = None
+
+
+def starts():
+    """starts.py (names, history), sharing this module's launcher."""
+    global _starts
+    if _starts is None:
+        spec = importlib.util.spec_from_file_location("sandbox_starts_for_sessions", HERE / "starts.py")
+        _starts = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_starts)
+        _starts._modules["agent_sandbox"] = launcher()
+    return _starts
 
 
 def launcher():
@@ -65,19 +87,76 @@ def root():
 
 
 def session_dir(name):
-    if not re.fullmatch(launcher().SESSION_NAME, name):
-        raise ValueError(f"Invalid session name: {name!r}")
+    """The directory of the session whose id (its first name) is NAME."""
+    if not isinstance(name, str) or not re.fullmatch(launcher().START_ID, name):
+        raise ValueError(f"Invalid session name: {launcher().printable(str(name))!r}")
     return root() / name
+
+
+def display(key, data):
+    """The name of the session KEY: session.json's "name" (after a rename), else its id."""
+    name = data.get("name") if isinstance(data, dict) else None
+    return name if isinstance(name, str) and re.fullmatch(launcher().SESSION_NAME, name) else key
+
+
+def resolve(name):
+    """The id of the session called NAME: by its name first, then by its id; ValueError if there is none."""
+    if not isinstance(name, str):
+        raise ValueError("No session named None")
+    by_id = None
+    if root().is_dir():
+        for directory in sorted(root().iterdir()):
+            if directory.is_symlink() or not re.fullmatch(launcher().START_ID, directory.name):
+                continue
+            try:
+                data = json.loads((directory / "session.json").read_text())
+            except (OSError, ValueError):
+                data = None
+            if data is not None and display(directory.name, data) == name:
+                return directory.name
+            if directory.name == name and (directory / "session.json").exists():
+                by_id = name
+    if by_id is None:
+        raise ValueError(f"No session named {launcher().printable(name)}")
+    return by_id
+
+
+def new_key(name):
+    """The id for a new session called NAME: NAME, or NAME-xxxx when a renamed session has that directory."""
+    key = name
+    while (root() / key).exists() or (root() / key).is_symlink():
+        key = f"{name}-{secrets.token_hex(2)}"
+    return key
+
+
+def rename(key, name):
+    """Call the session KEY NAME from now on (its id, directory and pod stay)."""
+    with session_lock(key):
+        data = load(key)
+        data["name"] = name
+        save(key, data)
 
 
 def now():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def activity_event(name, event):
+    """Note EVENT (pause, resume, attach, detach) of the running session NAME in its timeline (activity.py;
+    never fails)."""
+    try:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_activity_for_sessions", HERE / "activity.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.session_event(name, event, launcher().runs_dir())
+    except Exception:  # noqa: BLE001 - the session command matters more than its timeline
+        return False
+
+
 def load(name):
     path = session_dir(name) / "session.json"
     if not path.is_file():
-        raise ValueError(f"No session named {name}")
+        raise ValueError(f"No session named {launcher().printable(name)}")
     return json.loads(path.read_text())
 
 
@@ -89,8 +168,14 @@ def save(name, data):
     os.replace(temporary, directory / "session.json")
 
 
+# What names a start (or says whether it keeps its HOME) rather than configures its sandbox: not saved with its
+# options; the switches take no value.
+START_OPTIONS = ("--session", "--name", "--project-name")
+START_SWITCHES = ("--keep", "--no-keep")
+
+
 def split_argv(argv):
-    """Launcher options without the agent, --session and agent arguments."""
+    """Launcher options without the agent, the naming options (START_OPTIONS) and agent arguments."""
     options, agent_args = list(argv[1:]), []
     if "--" in options:
         position = options.index("--")
@@ -99,23 +184,25 @@ def split_argv(argv):
     for value in options:
         if skip:
             skip = False
-        elif value == "--session":
+        elif value in START_OPTIONS:
             skip = True
-        elif not value.startswith("--session="):
+        elif value not in START_SWITCHES and not value.startswith(tuple(option + "=" for option in START_OPTIONS)):
             kept.append(value)
     return kept, agent_args
 
 
 def alive(name, data):
-    """The supervisor PID still runs this session's launcher (not a reused PID)."""
-    pid = data.get("pid")
-    if not pid:
-        return False
-    try:
-        cmdline = (PROC / str(pid) / "cmdline").read_bytes().split(b"\0")
-    except OSError:
-        return False
+    """The supervisor PID still runs this session's launcher (not a reused PID). A start in the foreground (a
+    task) is its own launcher: the recorded PID of that start time, running agent_sandbox.py."""
+    cmdline = launcher().process_cmdline(data.get("pid"), data.get("pid_start"), PROC)
+    if foreground(data):
+        return data.get("pid_start") is not None and any(arg.endswith(b"agent_sandbox.py") for arg in cmdline)
     return os.fsencode(str(session_dir(name) / "tmux")) in cmdline
+
+
+def foreground(data):
+    """A start that runs (or last ran) in the foreground of a terminal or script: no tmux, nothing to attach."""
+    return data.get("mode") == "foreground"
 
 
 def status(name, data):
@@ -154,11 +241,13 @@ def mcp_supervisor(pid):
         return False
 
 
-def signal_tree(pid, sig):
+def signal_tree(pid, sig, include_root=True):
+    """SIG to PID and its descendants (not MCP servers); without INCLUDE_ROOT to the descendants only (a
+    launcher in a terminal must not stop itself: the shell would take the terminal back)."""
     # Parents first, so a stopped parent cannot fork unseen children; a
     # second pass catches anything created during the first.
     for _ in range(2 if sig == signal.SIGSTOP else 1):
-        for target in [pid, *descendants(pid)]:
+        for target in [*([pid] if include_root else []), *descendants(pid)]:
             try:
                 os.kill(target, sig)
             except ProcessLookupError:
@@ -218,6 +307,30 @@ def leading_options(agent, args):
 
 
 @contextlib.contextmanager
+def names_lock():
+    """Exclusive, waiting lock over every start's choice of a name: the check that a name is free and the
+    session.json that takes it are one step (two starts with the same --name at once: the second is refused)."""
+    root().mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(root() / ".names.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def claim_name(key, name, data):
+    """Save DATA as session KEY's session.json, NAME being free for it: under names_lock, checked again against
+    every other start's name (a start of the same name may have saved its own since the name was first checked;
+    another id of that name is fine, new_key chose this one beside it)."""
+    with names_lock():
+        for entry in starts().entries():
+            if entry.get("id") != key and entry.get("name") == name and entry.get("state") != "damaged":
+                raise ValueError(f"The name {launcher().printable(name)} was taken meanwhile; choose another")
+        save(key, data)
+
+
+@contextlib.contextmanager
 def session_lock(name, create=False):
     """Exclusive lock for commands that change a session's state; a second one fails at once.
 
@@ -226,14 +339,14 @@ def session_lock(name, create=False):
     if create:
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     elif not directory.is_dir():
-        raise ValueError(f"No session named {name}")
+        raise ValueError(f"No session named {launcher().printable(name)}")
     fd = os.open(directory / ".lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise ValueError(f"Session {name} is being started or stopped by another command; "
-                             "try again in a moment") from None
+            raise ValueError(f"Session {launcher().printable(name)} is being started or stopped by another "
+                             "command; try again in a moment") from None
         yield
     finally:
         os.close(fd)
@@ -243,6 +356,116 @@ def attach_if_terminal(name):
     if sys.stdin.isatty() and sys.stdout.isatty():
         return attach(name)
     return 0
+
+
+def keeps_home(data):
+    """The session keeps its HOME (sessions of versions before 0.1.30 always do)."""
+    return data.get("keep", True) is not False
+
+
+def relay_listening(socket_path):
+    """The sandbox's terminal relay still accepts connections (the sandbox runs). The socket is checked like
+    attach_client does: the directory is writable from the sandbox."""
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        fd = os.open(socket_path, os.O_PATH | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+                return False
+            client.settimeout(2)
+            client.connect(f"/proc/self/fd/{fd}")
+        finally:
+            os.close(fd)
+        return True
+    except OSError:
+        return False
+    finally:
+        client.close()
+
+
+def begin(a, argv):
+    """A kept start in the foreground (a task, no terminal, --no-tmux): its directory, HOME and session.json,
+    made by the launcher that runs it right here (plan_kept_home chose a.start_key and a.state_dir)."""
+    key = a.start_key
+    directory = session_dir(key)
+    with session_lock(key, create=True):
+        if (directory / "session.json").exists():
+            raise ValueError(f"The name {launcher().printable(a.start_name)} was taken meanwhile; choose another")
+        for path in (directory, directory / "home"):
+            path.mkdir(mode=0o700, parents=True, exist_ok=True)
+            path.chmod(0o700)
+        options, agent_args = split_argv(argv)
+        pid = os.getpid()
+        data = {"agent": a.agent, "options": options, "agent_args": agent_args, "backend": a.backend,
+                "podman_url": a.podman_url, "workspace": a.workspace, "cwd": os.getcwd(), "created": now(),
+                "ready": True, "name": a.start_name, "project": launcher().project_label(a), "keep": True,
+                "mode": "foreground", "pid": pid, "pid_start": launcher().process_start(pid, PROC), "started": now(),
+                "run": a.run_id, "pod": launcher().pod_name(a) if a.backend == "podman" else None}
+        claim_name(key, a.start_name, data)
+
+
+def discard_unstarted(a):
+    """The launcher's cleanup of a kept start in the foreground: if it never got as far as running (refused or
+    failed before it registered), its directory goes again; it was never a start to come back to."""
+    if getattr(a, "control_dir", None) is None and getattr(a, "start_key", None):
+        shutil.rmtree(session_dir(a.start_key), ignore_errors=True)
+
+
+def exit_status(name, data):
+    """The exit status of the session's last run (exit.json, written by its launcher), or None."""
+    try:
+        ended = json.loads((session_dir(name) / "exit.json").read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(ended, dict) or ended.get("run") != current_run(name, data):
+        return None
+    status = ended.get("status")
+    return status if isinstance(status, int) and not isinstance(status, bool) else None
+
+
+def prune(name, locked=False):
+    """Remove the session NAME if it has ended and does not keep its HOME (its history stays); True if
+    removed. Under the session's lock (LOCKED: the caller holds it): a session being started (saved, no
+    supervisor yet) holds it and looks stopped, so it is left alone, never removed under its starting
+    supervisor."""
+    def remove():
+        data = load(name)
+        if keeps_home(data) or status(name, data) != "stopped":
+            return False
+        shutil.rmtree(session_dir(name), onerror=make_writable_and_retry)
+        return True
+    try:
+        if locked:
+            return remove()
+        with session_lock(name):
+            return remove()
+    except (OSError, ValueError):  # gone, damaged, or being started or stopped by another command
+        return False
+
+
+def after_attach(name):
+    """The terminal came back from the session NAME: either it detached (the sandbox runs on; a hint how to come
+    back, 0), or the agent ended (wait for the supervisor's cleanup; its exit status)."""
+    data = load(name)
+    shown = launcher().printable(display(name, data))
+    socket_path = session_dir(name) / "tmux" / "attach.sock"
+    deadline = time.monotonic() + DETACH_GRACE
+    while alive(name, data) and relay_listening(socket_path):
+        if time.monotonic() >= deadline:
+            print(f"agent-sandbox: detached from {shown}; it keeps running. Back: sandbox-ai attach {shown}, "
+                  f"end it: sandbox-ai stop {shown}", file=sys.stderr)
+            return 0
+        time.sleep(0.5)
+    deadline = time.monotonic() + ENDING_WAIT
+    while alive(name, data) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    if alive(name, data):
+        print(f"agent-sandbox: {shown} is still cleaning up; see: sandbox-ai list", file=sys.stderr)
+        return 0
+    result = exit_status(name, data)
+    prune(name)
+    return result or 0
 
 
 def parsed(data):
@@ -304,95 +527,137 @@ def clear_stale_pod(name, data):
               file=sys.stderr)
 
 
-def launch(name, data, agent_args, a=None):
-    """Start the session's supervisor. A: the merged launcher arguments if the caller has them."""
+def launch(name, data, agent_args, a=None, event="rebirth"):
+    """Start the session's supervisor. A: the merged launcher arguments if the caller has them. EVENT: what the
+    history notes (start, rebirth)."""
     directory = session_dir(name)
-    data["pod"] = f"agent-session-{name}"
     a = a or effective(data)[0]
     if a is not None:
         # pause/stop must reach the sandbox the launcher creates, wherever its settings came from.
         data.update(backend=a.backend, podman_url=a.podman_url)
-    clear_stale_pod(name, data)
+    if data.get("pod") and not foreground(data):
+        clear_stale_pod(name, data)  # the last run's pod, if its supervisor died without removing it
+    # Every run of a session is a run of its own: a new run id (and pod), linked to the name by its history.
+    # A task that is brought back comes back as a session.
+    run = f"{data['agent']}-{secrets.token_hex(4)}"
+    data.update(pod=f"agent-{run}", run=run, mode="tmux")
     # Without agent arguments the project configuration's agent_args apply.
+    # Without a kept HOME the launcher makes a fresh one and discards it at the end.
     cmd = [sys.executable, "-I", str(HERE / "agent_sandbox.py"), data["agent"], *data["options"],
-           "--state-dir", str(directory / "home"), "--tmux-socket-dir", str(directory / "tmux"),
-           "--pod-name", data["pod"], *(["--", *agent_args] if agent_args else [])]
+           *(["--state-dir", str(directory / "home")] if keeps_home(data) else []),
+           "--tmux-socket-dir", str(directory / "tmux"),
+           "--pod-name", data["pod"], "--start-id", name, *(["--", *agent_args] if agent_args else [])]
     (directory / "paused").unlink(missing_ok=True)
+    (directory / "exit.json").unlink(missing_ok=True)
     # The sandbox can write tmux/ and HOME: start from a fresh socket directory (a stale socket would
     # look ready at once; a directory in its place would block the start) and a private HOME again.
     shutil.rmtree(directory / "tmux", ignore_errors=True)
     (directory / "tmux").mkdir(mode=0o700, exist_ok=True)
-    (directory / "home").chmod(0o700)
+    if keeps_home(data):
+        (directory / "home").mkdir(mode=0o700, exist_ok=True)
+        (directory / "home").chmod(0o700)
     with open(directory / "supervisor.log", "ab") as log:
         # Own session: closing the terminal no longer ends the sandbox.
         process = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                                    start_new_session=True, cwd=data["cwd"])
-    data.update(pid=process.pid, started=now())
+    data.update(pid=process.pid, pid_start=launcher().process_start(process.pid, PROC), started=now())
     save(name, data)
-    wait_ready(directory, process)
+    shown = display(name, data)
+    starts().record(shown, event, name, run, agent=data["agent"], workspace=data.get("workspace"))
+    try:
+        wait_ready(directory, process)
+    except RuntimeError:
+        if process.poll() is not None:
+            starts().record(shown, "exit", name, run, status=process.returncode)
+        raise
     if not data.get("ready"):
         data["ready"] = True
         save(name, data)
-    print(f"agent-sandbox: session {name} is running. Detach: Ctrl-b d. "
-          f"Re-attach: sandbox-session attach {name}", file=sys.stderr)
+    print(f"agent-sandbox: {launcher().printable(shown)} is running. Detach: Ctrl-b d (or close the terminal). "
+          f"Re-attach: sandbox-ai attach {launcher().printable(shown)}", file=sys.stderr)
     return 0
 
 
 def start(a, argv):
-    """Entry point for `<agent>-sandbox --session NAME ...`."""
-    created = not session_dir(a.session).exists()
+    """Entry point for every interactive start (named a.start_name) and for `--session NAME`: a stopped session
+    of that name restarts, else a new one begins (in a directory of its own: KEY)."""
+    if a.session is None:
+        key = new_key(a.start_name)
+    else:
+        try:
+            key = resolve(a.session)
+        except ValueError:
+            key = new_key(a.session)
+    created = not session_dir(key).exists()
     try:
-        with session_lock(a.session, create=True):
-            result = start_locked(a, argv)
+        with session_lock(key, create=True):
+            result = start_locked(a, argv, key)
     except BaseException:
         # A start that failed before anything was saved leaves no empty, unlisted directory behind.
-        if created and not (session_dir(a.session) / "session.json").exists():
-            shutil.rmtree(session_dir(a.session), ignore_errors=True)
+        if created and not (session_dir(key) / "session.json").exists():
+            shutil.rmtree(session_dir(key), ignore_errors=True)
         raise
     # Attached after the lock is released: stop/pause from another terminal must work meanwhile.
-    return result if result else attach_if_terminal(a.session)
+    return result if result else attach_if_terminal(key)
 
 
-def start_locked(a, argv):
-    name = a.session
+def start_locked(a, argv, key=None):
+    name = key or a.session
     directory = session_dir(name)
+    if (directory / "session.json").exists() and a.session is None:
+        # Taken between the check of the name and now (another start of the same name).
+        raise ValueError(f"The name {launcher().printable(a.start_name)} was taken meanwhile; choose another")
     if (directory / "session.json").exists():
         data = load(name)
         state = status(name, data)
         if state != "stopped":
-            raise ValueError(f"Session {name} is {state}; attach with: sandbox-session attach {name}")
+            raise ValueError(f"Session {launcher().printable(display(name, data))} is {state}; attach with: "
+                             f"sandbox-ai attach {launcher().printable(display(name, data))}")
+        shown = launcher().printable(display(name, data))
         if data["agent"] != a.agent:
-            raise ValueError(f"Session {name} belongs to {data['agent']}, not {a.agent}")
+            raise ValueError(f"Session {shown} belongs to {data['agent']}, not {a.agent}")
         options, agent_args = split_argv(argv)
         if (options and options != data["options"]) or agent_args:
             # A restart reuses the saved options and continues the last conversation.
             ignored = (options if options != data["options"] else []) + (["--", *agent_args] if agent_args else [])
             given = launcher().printable(shlex.join(ignored))
-            print(f"agent-sandbox: warning: session {name} keeps the options it was created with "
+            print(f"agent-sandbox: warning: session {shown} keeps the options it was created with "
                   f"({launcher().printable(shlex.join(data['options'])) or 'none'}); ignored now: {given or 'none'}. "
                   "Use a new session name for other options.", file=sys.stderr)
-        print(f"agent-sandbox: resuming stopped session {name} with its saved options", file=sys.stderr)
+        print(f"agent-sandbox: resuming stopped session {shown} with its saved options", file=sys.stderr)
+        review_home(name, data)
         document = getattr(a, "project_document", None) or {}
         return launch(name, data, restart_args(data, document.get("agent_args", []), bool(a.binary)), a)
     options, agent_args = split_argv(argv)
-    for path in (directory, directory / "home", directory / "tmux"):
+    keep = a.session is not None or bool(getattr(a, "keep_home", False))
+    for path in (directory, *([directory / "home"] if keep else []), directory / "tmux"):
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
         path.chmod(0o700)
     data = {"agent": a.agent, "options": options, "agent_args": agent_args, "backend": a.backend,
             "podman_url": a.podman_url, "workspace": a.workspace, "cwd": os.getcwd(), "created": now(),
-            "ready": False}
-    save(name, data)
-    return launch(name, data, agent_args, a)
+            "ready": False, "name": a.session if a.session is not None else a.start_name,
+            "project": launcher().project_label(a), "keep": keep, "mode": "tmux"}
+    claim_name(name, data["name"], data)  # refused if a start of the same name saved its own meanwhile
+    return launch(name, data, agent_args, a, event="start")
 
 
 def attach(name):
     data = load(name)
     state = status(name, data)
+    shown = launcher().printable(display(name, data))
+    if foreground(data) and state != "stopped":
+        raise ValueError(f"{shown} runs without tmux (a task, no terminal, or --no-tmux): there is no terminal to "
+                         f"attach to; it ends with its task, or with: sandbox-ai stop {shown}")
     if state != "running":
-        raise ValueError(f"Session {name} is {state}; run: sandbox-session resume {name}")
+        raise ValueError(f"Session {shown} is {state}; run: sandbox-ai resume {shown}")
     # Only terminal bytes cross: the tmux client runs inside the sandbox, so
     # nothing the agent's tmux server requests can execute on the host.
-    return launcher().attach_client(str(session_dir(name) / "tmux" / "attach.sock"))
+    activity_event(name, "attach")
+    try:
+        launcher().attach_client(str(session_dir(name) / "tmux" / "attach.sock"))
+    finally:
+        activity_event(name, "detach")
+    return after_attach(name)
 
 
 def pause(name):
@@ -404,15 +669,23 @@ def pause_locked(name):
     data = load(name)
     state = status(name, data)
     if state != "running":
-        raise ValueError(f"Session {name} is {state}, not running")
+        raise ValueError(f"Session {launcher().printable(display(name, data))} is {state}, not running")
     if parsed(data).backend == "podman":
         subprocess.run(launcher().podman_command(parsed(data), "pod", "pause", data["pod"]), check=True,
                        stdout=subprocess.DEVNULL)
     else:
-        signal_tree(data["pid"], signal.SIGSTOP)
+        # A task's launcher holds a terminal: only what runs below it stops.
+        signal_tree(data["pid"], signal.SIGSTOP, include_root=not foreground(data))
     (session_dir(name) / "paused").touch()
-    print(f"agent-sandbox: session {name} paused", file=sys.stderr)
+    activity_event(name, "pause")
+    starts().record(display(name, data), "pause", name, current_run(name, data))
+    print(f"agent-sandbox: session {launcher().printable(display(name, data))} paused", file=sys.stderr)
     return 0
+
+
+def current_run(name, data):
+    """The run id of the session's supervisor (versions before 0.1.30 did not record it)."""
+    return data.get("run") if isinstance(data.get("run"), str) else f"session-{name}"
 
 
 def thaw(name, data):
@@ -420,7 +693,7 @@ def thaw(name, data):
         subprocess.run(launcher().podman_command(parsed(data), "pod", "unpause", data["pod"]), check=True,
                        stdout=subprocess.DEVNULL)
     else:
-        signal_tree(data["pid"], signal.SIGCONT)
+        signal_tree(data["pid"], signal.SIGCONT, include_root=not foreground(data))
     (session_dir(name) / "paused").unlink(missing_ok=True)
 
 
@@ -433,18 +706,93 @@ def resume(name):
 def resume_locked(name):
     data = load(name)
     state = status(name, data)
+    shown = launcher().printable(display(name, data))
     if state == "paused":
         thaw(name, data)
-        print(f"agent-sandbox: session {name} resumed", file=sys.stderr)
+        activity_event(name, "resume")
+        starts().record(display(name, data), "resume", name, current_run(name, data))
+        print(f"agent-sandbox: session {shown} resumed", file=sys.stderr)
         return 0, False
     if state == "running":
-        print(f"agent-sandbox: session {name} is already running", file=sys.stderr)
+        print(f"agent-sandbox: session {shown} is already running", file=sys.stderr)
         return 0, False
-    print(f"agent-sandbox: restarting stopped session {name}; the agent continues its last conversation",
+    if not keeps_home(data):
+        prune(name, locked=True)  # resume holds the session's lock
+        raise ValueError(f"{shown} has ended and its HOME was discarded (it was started with --no-keep); "
+                         "start anew")
+    check_keep_policy(shown)
+    review_home(name, data)
+    print(f"agent-sandbox: restarting stopped session {shown}; the agent continues its last conversation",
           file=sys.stderr)
     a, document = effective(data)
     args = restart_args(data, (document or {}).get("agent_args", []), bool(a and a.binary))
     return launch(name, data, args, a), True
+
+
+def home_review():
+    spec = importlib.util.spec_from_file_location("sandbox_home_review_for_sessions", HERE / "home_review.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def review_home(name, data):
+    """Before a kept HOME starts again: name what changed in its start files since its last start (compared with
+    the manifest its launcher recorded then), keep that review for --review-home, and in a terminal let the user
+    stop here. Raises ValueError when the user says no."""
+    if not keeps_home(data):
+        return None
+    reviews = home_review()
+    review = reviews.compare(session_dir(name) / "home", session_dir(name), with_diffs=True)
+    if review is None:
+        return None  # started before 0.1.30: no manifest yet (the coming start records one)
+    reviews.save_review(session_dir(name), review)
+    shown = launcher().printable(display(name, data))
+    lines = reviews.notice(review, display(name, data), launcher().printable)
+    for line in lines:
+        print(f"agent-sandbox: {line}", file=sys.stderr)
+    # Not complete (more files than checked) asks too: what was not checked may have changed.
+    if (review["changes"] or not review["complete"]) and sys.stdin.isatty() and sys.stdout.isatty():
+        try:
+            answer = input(f"agent-sandbox: start {shown} anyway? [Y/n] ").strip().lower()
+        except EOFError:
+            answer = "n"
+        if answer in ("n", "no", "nein"):
+            raise ValueError(f"{shown} was not started; see the changes with: sandbox-ai resume {shown} "
+                             "--review-home")
+    return review
+
+
+def review(name, as_json=False, out=print):
+    """What changed in the start files of the HOME of NAME: since its last start (stopped: what the next resume
+    will name), or what its latest start found (running or paused)."""
+    data = load(name)
+    shown = display(name, data)
+    if not keeps_home(data):
+        raise ValueError(f"{launcher().printable(shown)} keeps no HOME: there is nothing to review")
+    state = status(name, data)
+    reviews = home_review()
+    if state == "stopped":
+        found = reviews.compare(session_dir(name) / "home", session_dir(name), with_diffs=True)
+    else:
+        found = reviews.saved_review(session_dir(name))
+    if as_json:
+        out(json.dumps({"name": shown, "id": name, "state": state, "pending": state == "stopped", "review": found},
+                       indent=2))
+        return 0
+    if state != "stopped":
+        out(f"{launcher().printable(shown)} is {state}; what its latest start found:")
+    reviews.report(found, shown, launcher().printable, out)
+    return 0
+
+
+def check_keep_policy(shown):
+    """Refuse to bring back a kept HOME when the administrator's policy forbids kept HOMEs (forbid_keep)."""
+    policy = launcher().load_policy()
+    if policy.get("forbid_keep") is True:
+        raise ValueError(f"{shown} has a kept HOME, and the administrator's policy forbids using one (forbid_keep in "
+                         f"{launcher().POLICY_FILE}); start anew (its HOME is discarded then), or remove it: "
+                         f"sandbox-ai delete {shown} --yes")
 
 
 def stop(name, timeout=30):
@@ -455,11 +803,14 @@ def stop(name, timeout=30):
 def stop_locked(name, timeout):
     data = load(name)
     state = status(name, data)
+    shown = launcher().printable(display(name, data))
     if state == "stopped":
-        print(f"agent-sandbox: session {name} is not running", file=sys.stderr)
+        print(f"agent-sandbox: session {shown} is not running", file=sys.stderr)
         return 0
     if state == "paused":
         thaw(name, data)
+    activity_event(name, "stop")
+    starts().record(display(name, data), "stop", name, current_run(name, data))
     # The supervisor forwards SIGTERM and runs the normal cleanup, including
     # pod removal and the Claude credential write-back. State stays on disk.
     os.kill(data["pid"], signal.SIGTERM)
@@ -473,7 +824,7 @@ def stop_locked(name, timeout):
             clear_stale_pod(name, data)  # only this session's own, labelled pod
         except (ValueError, subprocess.CalledProcessError) as exc:
             print(f"agent-sandbox: {exc}", file=sys.stderr)
-    print(f"agent-sandbox: session {name} stopped; state kept in {session_dir(name)}", file=sys.stderr)
+    print(f"agent-sandbox: session {shown} stopped; state kept in {session_dir(name)}", file=sys.stderr)
     return 0
 
 
@@ -484,13 +835,28 @@ def delete(name, yes=False):
 
 def delete_locked(name, yes):
     data = load(name)
+    shown = launcher().printable(display(name, data))
     if status(name, data) != "stopped":
-        raise ValueError(f"Stop session {name} before deleting it")
+        raise ValueError(f"Stop session {shown} before deleting it")
     if not yes:
         raise ValueError(f"Deleting removes {session_dir(name)} including its HOME; repeat with --yes")
+    home = session_dir(name) / "home"
     shutil.rmtree(session_dir(name), onerror=make_writable_and_retry)
-    print(f"agent-sandbox: session {name} deleted", file=sys.stderr)
+    forget_canaries(home)
+    starts().record(display(name, data), "delete", name)
+    print(f"agent-sandbox: session {shown} deleted", file=sys.stderr)
     return 0
+
+
+def forget_canaries(home):
+    """The record of a kept HOME's canary files (canary.py keeps it outside the HOME) goes with the HOME."""
+    try:
+        spec = importlib.util.spec_from_file_location("sandbox_canary_for_sessions", HERE / "canary.py")
+        canary = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(canary)
+        canary.home_state(home).unlink(missing_ok=True)
+    except (OSError, ImportError, AttributeError):
+        pass  # nothing recorded, or no canaries in this version
 
 
 def make_writable_and_retry(function, path, _):
@@ -510,20 +876,32 @@ def rows():
     if root().is_dir():
         for directory in sorted(root().iterdir()):
             try:
+                if prune(directory.name):
+                    continue
+            except ValueError:
+                pass  # not a session's id: shown as damaged below if it holds a session.json
+            try:
                 data = json.loads((directory / "session.json").read_text())
-                result.append([directory.name, data["agent"], data["backend"], status(directory.name, data),
-                               data["workspace"], data["created"]])
+                result.append([display(directory.name, data), data["agent"], data["backend"],
+                               status(directory.name, data), data["workspace"], data["created"]])
             except (OSError, ValueError, KeyError, TypeError):
                 if (directory / "session.json").exists():
                     result.append([directory.name, "?", "?", "damaged", "-", "-"])
     return result
 
 
-def list_sessions():
-    table = [["NAME", "AGENT", "BACKEND", "STATUS", "WORKSPACE", "CREATED"], *rows()]
-    widths = [max(len(row[i]) for row in table) for i in range(len(table[0]))]
-    for row in table:
-        print("  ".join(value.ljust(width) for value, width in zip(row, widths)).rstrip())
+def list_sessions(out=print):
+    spec = importlib.util.spec_from_file_location("sandbox_ai_textout_for_sessions", HERE / "textout.py")
+    t = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(t)
+    found = rows()
+    colours = {"running": "ok", "paused": "warn"}
+    # The workspace last: it is the longest and wraps at the terminal's width.
+    t.table(["NAME", "AGENT", "BACKEND", "STATUS", "CREATED", "WORKSPACE"],
+            [[launcher().printable(name), agent, backend,
+              t.style(status, colours.get(status.split()[0] if status else "", "muted")), created,
+              launcher().printable(str(workspace))] for name, agent, backend, status, workspace, created in found],
+            out, indent=0, empty="no sessions; start one with: sandbox-ai AGENT --session NAME")
     return 0
 
 
@@ -544,9 +922,10 @@ def cli(argv):
     a = p.parse_args(argv)
     if a.command == "list":
         return list_sessions()
+    key = resolve(a.name)
     if a.command == "delete":
-        return delete(a.name, a.yes)
-    return {"attach": attach, "pause": pause, "resume": resume, "stop": stop}[a.command](a.name)
+        return delete(key, a.yes)
+    return {"attach": attach, "pause": pause, "resume": resume, "stop": stop}[a.command](key)
 
 
 if __name__ == "__main__":

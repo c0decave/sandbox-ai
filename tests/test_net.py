@@ -3,6 +3,9 @@ import importlib.util
 import json
 import os
 import shutil
+import signal
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 import threading
@@ -15,6 +18,12 @@ SPEC = importlib.util.spec_from_file_location("sandbox_net", ROOT / "sandbox/net
 net = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(net)
 rt = net.launcher().RUNTIME
+
+
+@pytest.fixture(autouse=True)
+def no_login_runtime(tmp_path, monkeypatch):
+    """The runs of a real login session (/run/user/UID) stay out of these tests."""
+    monkeypatch.setattr(net, "USER_RUNTIME", tmp_path / "run-user")
 
 
 @pytest.fixture
@@ -39,7 +48,7 @@ def sandbox(tmp_path, monkeypatch):
     deadline = time.monotonic() + 5
     while not (run / "control.sock").exists() and time.monotonic() < deadline:
         time.sleep(0.02)
-    yield {"run": run, "hosts": session / "hosts", "applied": applied, "allow": allow, "inode": (session / "hosts").stat().st_ino}
+    yield {"run": run, "hosts": session / "hosts", "applied": applied, "allow": allow, "network": network, "inode": (session / "hosts").stat().st_ino}
     stop.set()
     thread.join(5)
     shutil.rmtree(short, ignore_errors=True)
@@ -56,15 +65,29 @@ def run_net(argv):
 
 
 def test_list_and_show(sandbox, tmp_path):
-    assert run_net(["list"]) == (0, [f"codex-1234abcd: codex in {tmp_path / 'app'} (since now)"])
-    assert run_net(["show"]) == (0, ["allowed during this run: nothing"])
+    status, lines = run_net(["list"])
+    assert status == 0 and lines[0].split() == ["RUN", "NAME", "AGENT", "SINCE", "WORKSPACE"]
+    assert lines[1].split() == ["codex-1234abcd", "-", "codex", "now", str(tmp_path / "app")]
+    status, lines = run_net(["show"])
+    assert status == 0 and "allowed during this run" in lines[0] and "0 destinations" in lines[0]
+    assert "nothing beyond its start options" in lines[1]
+    status, lines = run_net(["list", "--json"])
+    assert json.loads("\n".join(lines))[0]["run"] == "codex-1234abcd"
+    assert json.loads("\n".join(lines))[0]["name"] is None  # registered by an older version: no name
+    status, lines = run_net(["show", "--json"])
+    assert json.loads("\n".join(lines)) == {"run": "codex-1234abcd", "all_ports": [], "dns": [], "git": [], "host_ports": [], "https": [], "tcp": []}
 
 
 def test_allow_host_reaches_firewall_proxy_and_hosts_in_place(sandbox):
     status, lines = run_net(["allow", "--allow-host", "example.org", "--allow-tcp", "192.0.2.9:5432"])
     assert status == 0
-    assert "192.0.2.50/32 (TCP/443)" in lines[0] and "192.0.2.9:5432 (TCP)" in lines[0]
-    assert "start with: --allow-host example.org --allow-tcp 192.0.2.9:5432" in lines[1]
+    text = "\n".join(lines)
+    # Grouped by kind; the HTTPS address under the name it was allowed for, the TCP one with its port.
+    assert any(line.split()[:4] == ["example.org", "1", "0", "192.0.2.50"] for line in lines), text
+    assert any(line.split()[:2] == ["192.0.2.9", "5432"] for line in lines), text
+    assert "/32" not in text and "start with: --allow-host example.org --allow-tcp 192.0.2.9:5432" in lines[-1]
+    status, lines = run_net(["show", "--json"])
+    assert json.loads("\n".join(lines))["https"] == [{"address": "192.0.2.50", "names": ["example.org"]}]
     assert "tcp dport 443 accept" in sandbox["applied"][-1]
     assert json.loads(sandbox["allow"].read_text())["https"] == ["192.0.2.50/32"]
     # Same file (the sandbox has it bound), the new name added, the old ones kept.
@@ -72,7 +95,7 @@ def test_allow_host_reaches_firewall_proxy_and_hosts_in_place(sandbox):
     assert sandbox["hosts"].read_text().splitlines() == ["127.0.0.1 localhost", "192.0.2.1 api.openai.com",
                                                          "192.0.2.50 example.org"]
     status, lines = run_net(["revoke", "--allow-host", "example.org"])
-    assert status == 0 and "192.0.2.50" not in lines[0]
+    assert status == 0 and "192.0.2.50" not in "\n".join(lines)
     assert "example.org" not in sandbox["hosts"].read_text() and "api.openai.com" in sandbox["hosts"].read_text()
 
 
@@ -85,6 +108,21 @@ def test_refusals(sandbox, capsys):
     assert "was not allowed during this run" in capsys.readouterr().err
     assert run_net(["show", "other-run"])[0] == 1
     assert sandbox["applied"] == []
+
+
+def test_allow_inside_the_sandbox_subnet_is_refused(sandbox, capsys):
+    """A run with --subnet: destinations inside the sandbox's own network would reach its gateway or DNS
+    forwarder, so `allow` refuses them as the launcher does at the start; elsewhere it works as before."""
+    record = json.loads((sandbox["run"] / "run.json").read_text())
+    (sandbox["run"] / "run.json").write_text(json.dumps({**record, "subnets": ["10.20.0.0/24", "fd20::/64"]}))
+    for options in (["--allow-tcp", "10.20.0.2:22"], ["--allow", "10.0.0.0/8"], ["--allow-tcp", "[fd20::3]:53"]):
+        assert run_net(["allow", *options])[0] == 1, options
+        assert "lies inside the sandbox's own network" in capsys.readouterr().err
+    resolver = lambda hosts: {host: ["10.20.0.7"] for host in hosts}  # noqa: E731
+    assert net.main(["allow", "--allow-host", "inside.example"], out=lambda line: None, resolver=resolver) == 1
+    assert sandbox["applied"] == [] and "inside.example" not in sandbox["hosts"].read_text()
+    assert run_net(["allow", "--allow-tcp", "10.21.0.2:22"])[0] == 0
+    assert run_net(["revoke", "--allow-tcp", "10.21.0.2:22"])[0] == 0
 
 
 def test_choose_and_stale_runs(tmp_path, monkeypatch):
@@ -102,6 +140,18 @@ def test_choose_and_stale_runs(tmp_path, monkeypatch):
         net.choose(found, "zzz")
 
 
+def test_choose_by_name(tmp_path):
+    """A run is named by its id or by the name of its start (sandbox-ai list)."""
+    runs = {"claude-1": {"run": "claude-1", "name": "review"}, "codex-2": {"run": "codex-2", "name": "twin"},
+            "codex-3": {"run": "codex-3", "name": "twin"}}
+    assert net.choose(runs, "review")["run"] == "claude-1"
+    assert net.choose(runs, "codex-2")["run"] == "codex-2"  # the id wins
+    with pytest.raises(ValueError, match="several sandboxes are named twin; name one by its run: codex-2, codex-3"):
+        net.choose(runs, "twin")
+    with pytest.raises(ValueError, match=r"no running sandbox 'x\\x1b'"):
+        net.choose(runs, "x\x1b")  # escaped in the message
+
+
 def test_revoke_keeps_start_entries_and_names_sharing_an_address(sandbox, monkeypatch):
     # api.openai.com was pinned at the start; allowing and revoking it during the run leaves that entry.
     lines = []
@@ -114,3 +164,849 @@ def test_revoke_keeps_start_entries_and_names_sharing_an_address(sandbox, monkey
     assert net.main(["revoke", "-A", "a.example.org"], out=lines.append) == 0
     assert json.loads(sandbox["allow"].read_text())["https"] == ["192.0.2.60/32"]
     assert "b.example.org" in sandbox["hosts"].read_text() and "a.example.org" not in sandbox["hosts"].read_text()
+
+
+# --- runs registered elsewhere, net stop ---------------------------------------------------------------
+
+def register(directory, name, **fields):
+    (directory / name).mkdir(parents=True)
+    record = {"run": name, "agent": "claude", "workspace": "/w", "session": None, **fields}
+    (directory / name / "run.json").write_text(json.dumps(record))
+    return directory / name
+
+
+def now():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+@pytest.fixture
+def child():
+    """Start harmless processes; those with LAUNCHER have an argument ending in agent_sandbox.py, like a launcher."""
+    started = []
+
+    def start(launcher=True):
+        extra = [str(ROOT / "sandbox/agent_sandbox.py"), "claude"] if launcher else []
+        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", *extra])
+        started.append(process)
+        return process
+    yield start
+    for process in started:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+
+
+def test_running_finds_runs_registered_under_another_runtime_dir(tmp_path, monkeypatch):
+    (tmp_path / "runtime").mkdir()
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
+    state = Path(os.environ["XDG_STATE_HOME"]) / "sandbox-ai" / "runs"
+    user = tmp_path / "run-user" / str(os.getuid())
+    register(state, "claude-1", pid=os.getpid(), workspace="/w/state")
+    register(state, "both", pid=os.getpid(), workspace="/w/state")
+    register(net.launcher().runs_dir(), "both", pid=os.getpid(), workspace="/w/runtime")
+    register(user / "sandbox-ai" / "runs", "codex-2", pid=os.getpid())
+    register(user / "sandbox-ai" / "runs", "dead", pid=2 ** 22 + 7)
+    found = net.running()
+    assert set(found) == {"claude-1", "both", "codex-2"}
+    assert found["both"]["workspace"] == "/w/runtime"  # launcher().runs_dir() first
+    assert found["claude-1"]["directory"] == str(state / "claude-1")
+    assert not (user / "sandbox-ai" / "runs" / "dead").exists()
+    # Without XDG_RUNTIME_DIR the launcher registers in the state directory; the login session's is still read.
+    monkeypatch.delenv("XDG_RUNTIME_DIR")
+    assert net.run_dirs() == [state, user / "sandbox-ai" / "runs"]
+    assert set(net.running()) == {"claude-1", "both", "codex-2"}
+    # One directory reached under two names is read once.
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(user))
+    assert net.run_dirs() == [user / "sandbox-ai" / "runs", state]
+
+
+def test_register_run_records_the_start_time_of_its_pid(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    l = net.launcher()
+    a = l.parse_args(["claude", "--workspace", str(tmp_path / "app")])
+    l.validate(a)
+    record = json.loads((l.register_run(a, "claude-1234abcd", tmp_path / "session") / "run.json").read_text())
+    assert record["pid"] == os.getpid() and record["pid_start"] == l.process_start(os.getpid())
+
+
+def test_stop_ends_a_one_off_sandbox(child, capsys):
+    process = child()
+    runs = net.launcher().runs_dir()
+    register(runs, "claude-0badc0de", pid=process.pid, pid_start=net.launcher().process_start(process.pid),
+             started=now())
+    lines = []
+    assert net.main(["stop", "claude-0badc0de", "--wait", "10"], out=lines.append) == 0
+    assert process.wait(5) == -signal.SIGTERM
+    assert lines == [f"claude-0badc0de: stopped (its launcher, PID {process.pid}, cleaned up and ended)"]
+    # Gone now; RUN is required (no guessing).
+    assert net.main(["stop", "claude-0badc0de"], out=lines.append) == 1
+    assert "no running sandbox" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as exit_:
+        net.main(["stop"])
+    assert exit_.value.code == 2
+
+
+def test_stop_of_an_old_record_checks_the_start_time(child):
+    """Records of older versions have no pid_start: the process must have started before the registration."""
+    process = child()
+    record = {"run": "claude-1", "pid": process.pid, "started": now(), "session": None}
+    assert net.launcher_process(record)[0] == process.pid
+    with pytest.raises(ValueError, match="started after claude-1 registered"):
+        net.launcher_process(dict(record, started="2020-01-01T00:00:00Z"))
+    with pytest.raises(ValueError, match="no start time"):
+        net.launcher_process(dict(record, started=None))
+    lines = []
+    assert net.stop(record, 0, out=lines.append) == 0 and "asked its launcher" in lines[0]
+    assert process.wait(5) == -signal.SIGTERM
+
+
+def test_stop_refusals(child, monkeypatch, capsys):
+    process, other = child(), child(launcher=False)
+    start = net.launcher().process_start(process.pid)
+    runs = net.launcher().runs_dir()
+    register(runs, "claude-reused", pid=process.pid, pid_start=start + 1, started=now())
+    register(runs, "claude-other", pid=other.pid, pid_start=net.launcher().process_start(other.pid), started=now())
+    register(runs, "web", pid=process.pid, pid_start=start, started=now(), session="web")
+    register(runs, "mcp-ddg", pid=process.pid, pid_start=start, started=now())
+    expected = {"claude-reused": "not the launcher of claude-reused any more",
+                "claude-other": "does not run a sandbox-ai launcher",
+                "web": "use: sandbox-ai stop web",
+                "mcp-ddg": "use: sandbox-ai mcp stop ddg"}
+    for name, message in expected.items():
+        assert net.main(["stop", name, "--wait", "0"], out=lambda line: None) == 1
+        assert message in capsys.readouterr().err
+    record = {"run": "claude-1", "pid": process.pid, "pid_start": start, "started": now()}
+    with monkeypatch.context() as patched:
+        patched.setattr(net.os, "getuid", lambda: os.geteuid() + 4242)
+        with pytest.raises(ValueError, match="belongs to another user"):
+            net.launcher_process(record)
+    for pid in (None, True, 1, "12"):
+        with pytest.raises(ValueError, match="no usable PID"):
+            net.launcher_process(dict(record, pid=pid))
+    with pytest.raises(SystemExit):
+        net.main(["stop", "claude-1", "--wait", "-1"])
+    time.sleep(0.2)
+    assert process.poll() is None and other.poll() is None  # nothing was signalled
+
+
+def mode_record(name):
+    """The security mode of a run as the launcher writes it to run.json (and, when strict, config.json)."""
+    l = net.launcher()
+    argv = ["codex", "--mode", name, "--no-config"]
+    a = l.MODES.apply(l.launcher_namespace(), argv, l.parse_args(argv), None, None, {}, {})
+    return l.MODES.runtime_record(l.launcher_namespace(), a)
+
+
+def test_mode_records():
+    presets = [f"--allow-{p}" for p in net.launcher().PRESETS]
+    for name in ("high", "paranoid"):
+        record = mode_record(name)
+        assert record["refuses"] == ["--allow", "--allow-host", "--allow-tcp", "--dns", "--allow-host-port", *presets]
+        assert record["origin"] == "--mode" and record["approval_scope"] == {"high": "run", "paranoid": "once"}[name]
+    for name in ("lax", "low", "medium"):
+        assert mode_record(name)["refuses"] == [] and mode_record(name)["approval_scope"] == "always"
+
+
+@pytest.mark.parametrize("mode", ["high", "paranoid"])
+def test_allow_keeps_to_the_mode_of_the_run(sandbox, capsys, mode):
+    """A run started in a strict mode: `sandbox-ai net allow` opens nothing the mode refuses at the start."""
+    record = json.loads((sandbox["run"] / "run.json").read_text())
+    (sandbox["run"] / "run.json").write_text(json.dumps({**record, "mode": mode_record(mode)}))
+    for options, named in ((["--allow-host", "example.org"], "--allow-host"), (["--allow-github"], "--allow-github"),
+                           (["--allow-tcp", "192.0.2.9:5432"], "--allow-tcp"), (["--allow", "192.0.2.0/24"], "--allow"),
+                           (["--dns"], "--dns"), (["--nameserver", "9.9.9.9"], "--dns")):
+        assert run_net(["allow", *options])[0] == 1, options
+        err = capsys.readouterr().err
+        assert f"{named} widens the security mode {mode} of codex-1234abcd (--mode)" in err
+        assert "answer its questions instead" in err and "--mode medium" in err
+    assert sandbox["applied"] == [] and "example.org" not in sandbox["hosts"].read_text()
+    assert run_net(["show"])[0] == 0
+    # A run of a laxer mode (or one without a recorded mode, from before modes) is changed as before.
+    (sandbox["run"] / "run.json").write_text(json.dumps({**record, "mode": mode_record("low")}))
+    assert run_net(["allow", "--allow-tcp", "192.0.2.9:5432"])[0] == 0
+
+
+def test_a_forged_control_request_meets_the_mode(tmp_path):
+    """The supervisor checks the mode itself: a request written to the control socket by hand, past
+    `sandbox-ai net`, is refused the same way; revoke and show still work."""
+    short = Path(tempfile.mkdtemp(prefix="net-", dir="/tmp"))
+    applied, stop = [], threading.Event()
+    network = rt.RuntimeNetwork({"loopback": []}, tmp_path / "allow.json", applied.append)
+    thread = threading.Thread(target=rt.control_server, args=(short / "control.sock", network, stop, [],
+                                                              mode_record("high")), daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 5
+        while not (short / "control.sock").exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        for field, value, option in (("https", ["203.0.113.5/32"], "--allow-host"), ("tcp", [["192.0.2.9", 22]], "--allow-tcp"),
+                                     ("nets", ["0.0.0.0/0"], "--allow")):
+            with pytest.raises(ValueError, match=f"refused: {option} widens the security mode high of this run"):
+                net.ask(short, {"op": "allow", "nets": [], "https": [], "tcp": [], field: value})
+        assert applied == []
+        assert net.ask(short, {"op": "show"})["https"] == []
+        assert net.ask(short, {"op": "revoke", "nets": [], "https": ["203.0.113.5/32"], "tcp": []})["ok"]
+    finally:
+        stop.set()
+        thread.join(5)
+        shutil.rmtree(short, ignore_errors=True)
+    assert rt.mode_refusal(None, {"op": "allow", "https": ["203.0.113.5/32"]}) is None
+    assert rt.mode_refusal(mode_record("lax"), {"op": "allow", "https": ["203.0.113.5/32"]}) is None
+    assert rt.narrowest_scope("always", "run") == "run" and rt.narrowest_scope("run", "once") == "once"
+    assert rt.narrowest_scope("always", "bogus") == "once"
+
+
+
+# --- DNS during the run (sandbox-ai net allow --dns) ----------------------------------------------------------
+
+def test_allow_dns_opens_port_53_of_the_nameservers_only(sandbox):
+    status, lines = run_net(["allow", "--dns"])
+    assert status == 0, lines
+    rules = sandbox["applied"][-1]
+    for server in net.launcher().DEFAULT_NAMESERVERS:
+        assert f"ip daddr {server} udp dport 53 accept" in rules and f"ip daddr {server} tcp dport 53 accept" in rules
+    assert "dport 443" not in rules, "names resolve; their addresses stay closed"
+    allow = json.loads(sandbox["allow"].read_text())
+    assert ["1.1.1.1", 53] in allow["tcp"], "DNS over TCP passes the proxy to them"
+    assert "--dns" in lines[-1] and "DNS (port 53)" in "\n".join(lines)
+    status, lines = run_net(["show", "--json"])
+    assert json.loads("\n".join(lines))["dns"] == sorted(net.launcher().DEFAULT_NAMESERVERS)
+    assert run_net(["allow", "--nameserver", "9.9.9.9", "--nameserver", "2620:fe::fe"])[0] == 0
+    assert "ip6 daddr 2620:fe::fe udp dport 53 accept" in sandbox["applied"][-1]
+    assert run_net(["revoke", "--dns"])[0] == 0
+    rules = sandbox["applied"][-1]
+    assert "1.1.1.1" not in rules and "9.9.9.9 udp dport 53" in rules
+    assert run_net(["revoke", "--nameserver", "9.9.9.9", "--nameserver", "2620:fe::fe"])[0] == 0
+    assert "dport 53" not in sandbox["applied"][-1]
+
+
+def test_dns_refusals(sandbox, capsys):
+    for options, message in ((["--nameserver", "dns.google"], "an IP address"),
+                             (["--nameserver", "fe80::1%eth0"], "scope ID"), ([], "--dns")):
+        assert run_net(["allow", *options])[0] == 1
+        assert message in capsys.readouterr().err
+    assert sandbox["applied"] == []
+    with pytest.raises(ValueError):
+        rt.runtime_change({"nets": set(), "https": set(), "tcp": set()}, {"op": "allow", "dns": ["1.1.1.1"] * 9})
+    network = rt.RuntimeNetwork({}, None, lambda script: None)
+    network.dns_stub = False
+    with pytest.raises(ValueError, match="no DNS stub"):
+        network.change({"op": "allow", "dns": ["1.1.1.1"]})
+    network = rt.RuntimeNetwork({}, None, lambda script: None, within=["10.0.0.0/8"])
+    with pytest.raises(ValueError, match="outside the networks"):
+        network.change({"op": "allow", "dns": ["1.1.1.1"]})
+    assert network.change({"op": "allow", "dns": ["10.0.0.53"]})["dns"] == ["10.0.0.53"]
+
+
+def test_the_policy_forbids_dns_at_run_time(tmp_path):
+    short = Path(tempfile.mkdtemp(prefix="net-", dir="/tmp"))
+    network = rt.RuntimeNetwork({}, None, lambda script: None)
+    stop = threading.Event()
+    thread = threading.Thread(target=rt.control_server, args=(short / "control.sock", network, stop, ["--nameserver"]),
+                              daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 5
+        while not (short / "control.sock").exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        with pytest.raises(ValueError, match="not allowed by the administrator's policy"):
+            net.ask(short, {"op": "allow", "nets": [], "https": [], "tcp": [], "dns": ["1.1.1.1"]})
+    finally:
+        stop.set()
+        thread.join(5)
+        shutil.rmtree(short, ignore_errors=True)
+
+
+def query(name, ident=b"\x12\x34"):
+    labels = b"".join(bytes([len(part)]) + part.encode() for part in name.split("."))
+    return ident + b"\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + labels + b"\x00\x00\x01\x00\x01"
+
+
+def test_the_dns_stub_forwards_what_was_allowed_and_logs_it(tmp_path, monkeypatch):
+    """The stub in the sandbox: pinned names stay answered by /etc/hosts (NXDOMAIN here), other names go to
+    the allowed nameserver once DNS was allowed, each one logged; a name carrying a canary token never leaves."""
+    import socket
+    monkeypatch.setattr(rt, "LOG_DIR", tmp_path)
+    upstream = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    upstream.bind(("127.0.0.1", 0))
+    asked = []
+
+    def answer():
+        while True:
+            try:
+                data, peer = upstream.recvfrom(4096)
+            except OSError:
+                return
+            asked.append(data)
+            try:
+                upstream.sendto(data[:2] + b"\x81\x80" + data[4:] + b"ANSWER", peer)
+            except OSError:
+                return
+    threading.Thread(target=answer, daemon=True).start()
+    stub = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    stub.bind(("127.0.0.1", 0))
+    port = stub.getsockname()[1]
+    stub.close()
+    servers = []
+
+    class Canaries:
+        def lookup(self, name, found=None):
+            return {"canary": "aws"} if "akiaexample" in name else None
+    stop = threading.Event()
+    thread = threading.Thread(target=rt.dns_logger, args=({"api.openai.com"}, port, stop, None, (), None, Canaries(),
+                                                         lambda: list(servers), upstream.getsockname()[1]), daemon=True)
+    thread.start()
+    client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # The stub waits up to 2 s for a nameserver that does not answer; a query sent before it is bound is lost
+    # (an unconnected UDP socket gets no "refused"), so each try waits 3 s, not longer.
+    client.settimeout(3)
+
+    def ask_stub(name):
+        for _ in range(50):
+            try:
+                client.sendto(query(name), ("127.0.0.1", port))
+                return client.recvfrom(4096)[0]
+            except (ConnectionRefusedError, socket.timeout):
+                time.sleep(0.05)
+        raise AssertionError("the stub did not answer")
+    try:
+        assert ask_stub("example.org")[3] & 0x0F == 3, "NXDOMAIN while DNS is not allowed"
+        servers.append("127.0.0.1")
+        assert ask_stub("example.org").endswith(b"ANSWER"), "forwarded"
+        assert ask_stub("api.openai.com")[3] & 0x0F == 3 and len(asked) == 1, "pinned names stay in /etc/hosts"
+        assert ask_stub("akiaexample123.evil.example")[3] & 0x0F == 3 and len(asked) == 1, "a canary never leaves"
+        logged = [json.loads(line) for line in (tmp_path / "dns.jsonl").read_text().splitlines()]
+        assert [(r["host"], r["forwarded"]) for r in logged] == [("example.org", "127.0.0.1")]
+        servers[:] = ["127.0.0.2"]  # nobody answers there (the stand-in listens on 127.0.0.1 only)
+        assert ask_stub("second.example")[3] & 0x0F == 3, "no nameserver answered: NXDOMAIN"
+        assert json.loads((tmp_path / "dns.jsonl").read_text().splitlines()[-1])["error"] == "no nameserver answered"
+    finally:
+        stop.set()
+        thread.join(5)
+        client.close()
+        upstream.close()
+
+
+# --- Git logins during the run (sandbox-ai net allow --git-token-*) --------------------------------------------
+
+TOKEN = "gitea_0123456789abcdef"
+
+
+def git_ready(sandbox, **fields):
+    record = json.loads((sandbox["run"] / "run.json").read_text())
+    (sandbox["run"] / "run.json").write_text(json.dumps({**record, "runtime_git_tokens": True, **fields}))
+    return Path(record["session_dir"]) / net.launcher().RUNTIME_GIT_TOKENS
+
+
+def git_fill(tokens, url, extra_config=()):
+    """`git credential fill` for URL with the sandbox's helper reading TOKENS, as the launcher configures it
+    (GIT_CONFIG_* variables, the helper first): what Git would send."""
+    helper = ("!python3 -I -c 'import importlib.util, sys; spec = importlib.util.spec_from_file_location(\"rt\", "
+              f"\"{ROOT / 'sandbox/runtime.py'}\"); rt = importlib.util.module_from_spec(spec); "
+              f"spec.loader.exec_module(rt); sys.exit(rt.git_credential(sys.argv[1], path=\"{tokens}\"))'")
+    entries = [("credential.helper", helper), *extra_config]
+    env = {"PATH": os.environ["PATH"], "HOME": str(tokens.parent), "GIT_TERMINAL_PROMPT": "0",
+           "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_COUNT": str(len(entries))}
+    for index, (key, value) in enumerate(entries):
+        env[f"GIT_CONFIG_KEY_{index}"], env[f"GIT_CONFIG_VALUE_{index}"] = key, value
+    result = subprocess.run(["git", "credential", "fill"], input=f"url={url}\n\n", text=True, capture_output=True,
+                            env=env, timeout=30)
+    return result.returncode, dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+
+
+def test_allow_git_token_gives_the_running_sandbox_a_login(sandbox, monkeypatch, capsys):
+    tokens = git_ready(sandbox)
+    monkeypatch.setenv("GITEA_TOKEN", TOKEN)
+    status, lines = run_net(["allow", "--git-token-env", "http://localhost:3000=GITEA_TOKEN"])
+    text = "\n".join(lines)
+    assert status == 0, capsys.readouterr().err
+    # Listed by server and user, never the token; a loopback server needs its port forwarded from the start.
+    assert "http://localhost:3000" in text and "x-access-token" in text and TOKEN not in text
+    assert "--allow-host-port 3000" in text and "start with: --git-token-env http://localhost:3000=GITEA_TOKEN" in text
+    assert tokens.stat().st_mode & 0o777 == 0o600
+    assert json.loads(tokens.read_text())["logins"] == [{"url": "http://localhost:3000", "user": "x-access-token",
+                                                         "token": TOKEN}]
+    assert sandbox["applied"] == []  # nothing opened: the loopback is not the firewall's
+    status, lines = run_net(["show", "--json"])
+    assert json.loads("\n".join(lines))["git"] == [{"url": "http://localhost:3000", "user": "x-access-token"}]
+    # Git in the sandbox: the helper answers for that server (path and default ports do not matter) and no other.
+    assert git_fill(tokens, "http://localhost:3000/ch/repo.git") == \
+        (0, {"protocol": "http", "host": "localhost:3000", "username": "x-access-token",
+             "password": TOKEN})
+    assert git_fill(tokens, "http://localhost:3001/repo.git")[0] != 0  # no login: Git gives up (no prompt)
+    assert git_fill(tokens, "http://other@localhost:3000/repo.git")[0] != 0  # another user named in the URL
+    # A login given at the start (its own helper after the empty value) wins over the run's.
+    start = [("credential.http://localhost:3000.helper", ""),
+             ("credential.http://localhost:3000.helper", "!f() { echo username=start; echo password=start-token; }; f")]
+    assert git_fill(tokens, "http://localhost:3000/repo.git", start)[1]["password"] == "start-token"
+    # Revoked: the file keeps the others; a second revoke says there is none.
+    status, lines = run_net(["revoke", "--git-token-env", "http://localhost:3000=ANY"])
+    assert status == 0 and json.loads(tokens.read_text())["logins"] == []
+    assert git_fill(tokens, "http://localhost:3000/repo.git")[0] != 0
+    assert run_net(["revoke", "--git-token-env", "http://localhost:3000=ANY"])[0] == 1
+    assert "no Git login for http://localhost:3000" in capsys.readouterr().err
+
+
+def test_allow_git_token_for_github_opens_its_hosts(sandbox, monkeypatch, tmp_path):
+    tokens = git_ready(sandbox)
+    token_file = tmp_path / "gh-token"
+    token_file.write_text("ghp_" + "a" * 36 + "\n")
+    token_file.chmod(0o600)
+    status, lines = run_net(["allow", "--git-token-file", f"https://github.com={token_file}"])
+    assert status == 0
+    # As at the start: a token for github.com opens the GitHub preset (pinned names, TCP/443).
+    assert "tcp dport 443 accept" in sandbox["applied"][-1]
+    assert "github.com" in sandbox["hosts"].read_text()
+    assert json.loads(tokens.read_text())["logins"][0]["token"] == "ghp_" + "a" * 36
+    # Another login is added beside it; the same server again replaces its token.
+    monkeypatch.setenv("OTHER", "glpat-" + "b" * 20)
+    assert run_net(["allow", "--git-token-env", "https://git.example.org=OTHER"])[0] == 0
+    assert [entry["url"] for entry in json.loads(tokens.read_text())["logins"]] == \
+        ["https://github.com", "https://git.example.org"]
+    assert "git.example.org" in sandbox["hosts"].read_text()
+    monkeypatch.setenv("OTHER", "glpat-" + "c" * 20)
+    assert run_net(["allow", "--git-token-env", "https://git.example.org=OTHER"])[0] == 0
+    logins = json.loads(tokens.read_text())["logins"]
+    assert len(logins) == 2 and logins[-1]["token"] == "glpat-" + "c" * 20
+
+
+def test_allow_git_token_refusals(sandbox, monkeypatch, capsys):
+    tokens = git_ready(sandbox, runtime_git_tokens=False)
+    monkeypatch.setenv("GITEA_TOKEN", TOKEN)
+    # A run started with --token-proxy or by an older sandbox-ai has no helper to read it.
+    assert run_net(["allow", "--git-token-env", "http://localhost:3000=GITEA_TOKEN"])[0] == 1
+    assert "takes no Git login during the run" in capsys.readouterr().err
+    git_ready(sandbox)
+    for argv, message in (
+            (["--git-token-env", "http://localhost:3000=UNSET_VARIABLE"], "Host variable is not set: UNSET_VARIABLE"),
+            (["--git-token-env", "http://git.example.org=GITEA_TOKEN"], "plain http would send the token"),
+            (["--git-token-env", "https://git.example.org/path=GITEA_TOKEN"], "without a path"),
+            (["--git-token-env", "https://a.example=GITEA_TOKEN", "--git-token-env", "https://a.example=OTHER"],
+             "given twice"),
+            (["--git-token-secret", "https://a.example=NO_SUCH_SECRET_HERE"], "no secret NO_SUCH_SECRET_HERE")):
+        assert run_net(["allow", *argv])[0] == 1, argv
+        assert message in capsys.readouterr().err, argv
+    monkeypatch.setenv("BAD", "two words")
+    assert run_net(["allow", "--git-token-env", "https://a.example=BAD"])[0] == 1
+    assert "does not look like an access token" in capsys.readouterr().err
+    assert not tokens.exists() and sandbox["applied"] == []  # nothing written, nothing opened
+    # The administrator's policy forbids the option at the start: then during the run too.
+    monkeypatch.setattr(net.launcher(), "load_policy", lambda path=None: {"forbid": ["--git-token-env"]})
+    assert run_net(["allow", "--git-token-env", "http://localhost:3000=GITEA_TOKEN"])[0] == 1
+    assert "forbidden by the administrator's policy" in capsys.readouterr().err
+    assert not tokens.exists()
+
+
+def test_allow_git_token_keeps_to_the_mode_of_the_run(sandbox, monkeypatch, capsys):
+    """A strict mode refuses the GitHub preset at the start; a GitHub token during the run opens it, so it is
+    refused as well (no login written)."""
+    tokens = git_ready(sandbox, mode=mode_record("high"))
+    monkeypatch.setenv("GH", "ghp_" + "a" * 36)
+    assert run_net(["allow", "--git-token-env", "https://github.com=GH"])[0] == 1
+    assert "widens the security mode" in capsys.readouterr().err
+    assert not tokens.exists() and sandbox["applied"] == []
+
+
+# --- host ports relayed during the run (sandbox-ai net allow --allow-host-port) --------------------------------
+
+@pytest.fixture
+def host_service():
+    """A TCP service on the host's loopback that answers each line with "host:" and the line."""
+    server = __import__("socket").socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(8)
+    port = server.getsockname()[1]
+    stop = threading.Event()
+
+    def serve():
+        server.settimeout(0.2)
+        while not stop.is_set():
+            try:
+                connection, _ = server.accept()
+            except OSError:
+                continue
+            with connection:
+                data = b""
+                while not data.endswith(b"\n"):
+                    chunk = connection.recv(1024)
+                    if not chunk:
+                        break
+                    data += chunk
+                connection.sendall(b"host:" + data)
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    yield port
+    stop.set()
+    thread.join(2)
+    server.close()
+
+
+def relay_ready(sandbox, monkeypatch, **fields):
+    """The run of SANDBOX able to relay: its supervisor's relays listen on free ports of their own (the host's port
+    and the sandbox's share this machine's loopback in a test), its launcher is this test process."""
+    record = json.loads((sandbox["run"] / "run.json").read_text())
+    (sandbox["run"] / "run.json").write_text(json.dumps({**record, "host_relay": True, **fields}))
+    network = sandbox["network"]
+    network.relay_dir = sandbox["run"]
+    listening = {}
+
+    def factory(port, directory):
+        free = __import__("socket").socket()
+        free.bind(("127.0.0.1", 0))
+        listen = free.getsockname()[1]
+        free.close()
+        listening[port] = listen
+        return rt.PortRelay(port, directory, listen_port=listen)
+    network.relay_factory = factory
+    own = (os.getpid(), net.process_state(os.getpid())[1])
+    monkeypatch.setattr(net, "launcher_process", lambda record: own)
+    return listening
+
+
+def talk(port, line=b"ping\n"):
+    import socket as _socket
+    with _socket.create_connection(("127.0.0.1", port), timeout=10) as client:
+        client.sendall(line)
+        data = b""
+        while True:
+            chunk = client.recv(1024)
+            if not chunk:
+                return data
+            data += chunk
+
+
+def test_allow_host_port_relays_the_hosts_port_until_revoked(sandbox, monkeypatch, host_service, capsys):
+    listening = relay_ready(sandbox, monkeypatch)
+    status, lines = run_net(["allow", "--allow-host-port", str(host_service)])
+    assert status == 0, capsys.readouterr().err
+    text = "\n".join(lines)
+    assert "Host ports (relayed)" in text and f"start with: --allow-host-port {host_service}" in text
+    sock_path, info = net.relay_files(sandbox["run"], host_service)
+    assert sock_path.exists() and stat_mode(sock_path) == 0o600 and stat_mode(info) == 0o600
+    relay = net.relay_running(sandbox["run"], host_service)
+    assert relay is not None
+    # The agent's connection in the sandbox reaches the host's service, both ways, more than once.
+    for word in (b"ping\n", b"second\n"):
+        assert talk(listening[host_service], word) == b"host:" + word
+    status, lines = run_net(["show", "--json"])
+    assert json.loads("\n".join(lines))["host_ports"] == [host_service]
+    # The proxy may reach it (its allow-list), as a port forwarded at the start.
+    assert host_service in json.loads(sandbox["allow"].read_text())["loopback"]
+    # Allowing it again keeps the one relay.
+    assert run_net(["allow", "--allow-host-port", str(host_service)])[0] == 0
+    assert net.relay_running(sandbox["run"], host_service) == relay
+    # Revoked: the sandbox's end is closed, the host relay ends, its files go.
+    assert run_net(["revoke", "--allow-host-port", str(host_service)])[0] == 0
+    with pytest.raises(OSError):
+        talk(listening[host_service])
+    deadline = time.monotonic() + 5
+    while not net.ended(*relay) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert net.ended(*relay) and not sock_path.exists() and not info.exists()
+    assert host_service not in json.loads(sandbox["allow"].read_text())["loopback"]
+
+
+def stat_mode(path):
+    return os.stat(path).st_mode & 0o777
+
+
+def test_the_host_relay_ends_with_the_run(sandbox, monkeypatch, host_service):
+    """The launcher ends: the host relay sees it and ends too (no relay outlives its run)."""
+    relay_ready(sandbox, monkeypatch)
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        monkeypatch.setattr(net, "launcher_process", lambda record: (child.pid, net.process_state(child.pid)[1]))
+        assert run_net(["allow", "--allow-host-port", str(host_service)])[0] == 0
+        relay = net.relay_running(sandbox["run"], host_service)
+        assert relay is not None
+    finally:
+        child.kill()
+        child.wait()
+    deadline = time.monotonic() + 5
+    while not net.ended(*relay) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert net.ended(*relay) and not net.relay_files(sandbox["run"], host_service)[0].exists()
+
+
+def test_allow_host_port_refusals(sandbox, monkeypatch, host_service, capsys):
+    relay_ready(sandbox, monkeypatch, host_relay=False)
+    assert run_net(["allow", "--allow-host-port", str(host_service)])[0] == 1
+    assert "started by a sandbox-ai older than 0.1.37" in capsys.readouterr().err
+    relay_ready(sandbox, monkeypatch)
+    for value in ("0", "65536", "http"):
+        with pytest.raises(SystemExit):
+            net.main(["allow", "--allow-host-port", value], out=lambda line: None)
+    # A port forwarded since the start: refused by the supervisor, and the host relay is not left behind.
+    sandbox["network"].base = {"loopback": [host_service]}
+    assert run_net(["allow", "--allow-host-port", str(host_service)])[0] == 1
+    assert "forwarded since the start already" in capsys.readouterr().err
+    assert net.relay_running(sandbox["run"], host_service) is None
+    sandbox["network"].base = {"loopback": []}
+    # The administrator's policy and the run's security mode, as for the other options.
+    monkeypatch.setattr(net.launcher(), "load_policy", lambda path=None: {"forbid": ["--allow-host-port"]})
+    assert run_net(["allow", "--allow-host-port", str(host_service)])[0] == 1
+    assert "forbidden by the administrator's policy" in capsys.readouterr().err
+    monkeypatch.setattr(net.launcher(), "load_policy", lambda path=None: {})
+    relay_ready(sandbox, monkeypatch, mode=mode_record("high"))
+    assert run_net(["allow", "--allow-host-port", str(host_service)])[0] == 1
+    assert "widens the security mode" in capsys.readouterr().err
+    assert net.relay_running(sandbox["run"], host_service) is None and sandbox["network"].relays == {}
+
+
+def test_the_supervisor_refuses_relays_it_must_not_open(tmp_path):
+    """A request written by hand meets the policy and the mode in the supervisor too."""
+    short = Path(tempfile.mkdtemp(prefix="net-", dir="/tmp"))
+    network = rt.RuntimeNetwork({}, None, lambda script: None)
+    network.relay_dir = short
+    stop = threading.Event()
+    thread = threading.Thread(target=rt.control_server, args=(short / "control.sock", network, stop,
+                                                              ["--allow-host-port"]), daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 5
+        while not (short / "control.sock").exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        with pytest.raises(ValueError, match="not allowed by the administrator's policy"):
+            net.ask(short, {"op": "allow", "nets": [], "https": [], "tcp": [], "host_ports": [3000]})
+        assert network.relays == {}
+    finally:
+        stop.set()
+        thread.join(5)
+        shutil.rmtree(short, ignore_errors=True)
+
+
+def test_the_web_interfaces_port_is_never_relayed(sandbox, monkeypatch, capsys):
+    """As at the start: sandbox-ai web controls every sandbox, so no sandbox reaches its port, not during a run."""
+    relay_ready(sandbox, monkeypatch)
+    monkeypatch.setattr(net.launcher(), "web_service_port", lambda: 8443)
+    assert run_net(["allow", "--allow-host-port", "8443"])[0] == 1
+    assert "the web interface (sandbox-ai web) listens there" in capsys.readouterr().err
+    assert net.relay_running(sandbox["run"], 8443) is None and sandbox["network"].relays == {}
+
+
+def project_file(tmp_path):
+    (tmp_path / "app").mkdir(exist_ok=True)
+    return tmp_path / "app" / ".sandbox-ai.json"
+
+
+def test_allow_keep_writes_the_project_file_and_trusts_it(sandbox, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    path = project_file(tmp_path)
+    status, lines = run_net(["allow", "--allow-host", "api.osv.dev", "--allow-pypi", "--keep"])
+    assert status == 0 and "kept in" in lines[-1] and "(trusted)" in lines[-1]
+    document = json.loads(path.read_text())
+    assert document == {"version": 1, "agent": "codex", "options": ["--allow-host", "api.osv.dev", "--allow-pypi"]}
+    import hashlib
+    assert net.launcher().trusted_configs()[str(path)] == hashlib.sha256(path.read_bytes()).hexdigest()
+    # Again, with one more: added once, the rest not twice.
+    status, lines = run_net(["allow", "--allow-host", "api.osv.dev", "--allow-host", "osv.dev", "--keep"])
+    assert status == 0 and lines[-1].endswith("--allow-host osv.dev")
+    assert json.loads(path.read_text())["options"] == ["--allow-host", "api.osv.dev", "--allow-pypi",
+                                                       "--allow-host", "osv.dev"]
+    status, lines = run_net(["allow", "--allow-host", "osv.dev", "--keep"])
+    assert status == 0 and "already has it" in lines[-1]
+
+
+def test_allow_keep_never_trusts_what_the_agent_changed(sandbox, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    path = project_file(tmp_path)
+    path.write_text(json.dumps({"version": 1, "agent": "codex", "options": ["--allow-pypi"]}))
+    net.launcher().trust_config(path)
+    path.write_text(json.dumps({"version": 1, "agent": "codex", "options": ["--egress-all-allow"]}))  # the agent
+    status, _ = run_net(["allow", "--allow-host", "api.osv.dev", "--keep"])
+    assert status == 1 and "is not what you trusted" in capsys.readouterr().err
+    assert "--egress-all-allow" in path.read_text() and "api.osv.dev" not in path.read_text()
+    shown = json.loads("\n".join(run_net(["show", "--json"])[1]))
+    assert shown["https"] == [] and "api.osv.dev" not in sandbox["hosts"].read_text()  # the run unchanged too
+    # Another agent's file, a link: nothing kept either.
+    path.write_text(json.dumps({"version": 1, "agent": "claude", "options": []}))
+    net.launcher().trust_config(path)
+    assert run_net(["allow", "--allow-host", "api.osv.dev", "--keep"])[0] == 1
+    assert "is for claude, this run is codex" in capsys.readouterr().err
+    path.unlink()
+    (tmp_path / "elsewhere.json").write_text("{}")
+    path.symlink_to(tmp_path / "elsewhere.json")
+    assert run_net(["allow", "--allow-host", "api.osv.dev", "--keep"])[0] == 1
+    assert "symlink" in capsys.readouterr().err and (tmp_path / "elsewhere.json").read_text() == "{}"
+
+
+def test_allow_keep_keeps_a_login_as_its_reference_only(sandbox, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    args = net.parser().parse_args(["allow", "--allow-host", "x.example", "--git-token-env",
+                                    "https://git.example.org=GIT_TOKEN", "--dns", "--keep"])
+    assert net.kept_options(args, [3000]) == ["--allow-host", "x.example", "--dns", "--allow-host-port", "3000",
+                                              "--git-token-env", "https://git.example.org=GIT_TOKEN"]
+
+
+# --- nothing waits for good ------------------------------------------------------------------------
+
+
+def test_a_relayed_connection_ends_when_one_side_stays_quiet(monkeypatch):
+    """A relayed connection (join_streams: the sandbox's and the host's end) whose one side ended while the other
+    never closes, or whose two sides both stay quiet, ends after a grace or idle time: its threads and its slot of
+    RELAY_CONNECTIONS are not kept for good."""
+    import socket as _socket
+    monkeypatch.setattr(rt, "IDLE_TIMEOUT", 0.6)
+    monkeypatch.setattr(rt, "RELAY_GRACE", 0.3, raising=False)
+    for half_closed in (True, False):
+        agent, sandbox_end = _socket.socketpair()
+        host_end, service = _socket.socketpair()
+        worker = threading.Thread(target=rt.join_streams, args=(sandbox_end, host_end), daemon=True)
+        worker.start()
+        try:
+            agent.sendall(b"request")
+            assert service.recv(100) == b"request"
+            if half_closed:
+                agent.shutdown(_socket.SHUT_WR)
+                assert service.recv(100) == b""  # the service sees the end and then never closes
+            worker.join(5)
+            assert not worker.is_alive(), "the join waits for good" + (" after a half-close" if half_closed else "")
+        finally:
+            for sock in (agent, service):
+                sock.close()
+            worker.join(5)
+
+
+def test_an_nft_that_never_finishes_fails_the_change(tmp_path, monkeypatch):
+    """The firewall change runs under the network's lock: an nft that hangs is stopped after NFT_SECONDS and the
+    change fails as one nft refused (the state stays, the lock is free again), instead of holding every later change
+    and approval."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "nft").write_text("#!/bin/sh\nexec sleep 30\n")
+    (bin_dir / "nft").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    monkeypatch.setattr(rt, "NFT_SECONDS", 0.5, raising=False)
+    network = rt.RuntimeNetwork({}, None)
+    outcome = []
+
+    def change():
+        try:
+            outcome.append(network.change({"op": "allow", "nets": ["192.0.2.0/24"]}))
+        except (OSError, subprocess.CalledProcessError) as exc:
+            outcome.append(exc)
+    worker = threading.Thread(target=change, daemon=True)
+    worker.start()
+    worker.join(5)
+    assert not worker.is_alive(), "the change waits for nft for good"
+    assert isinstance(outcome[0], OSError) and "nft" in str(outcome[0]), outcome
+    assert network.shown()["nets"] == [] and network.nameservers() == []
+
+
+def test_a_thread_that_cannot_start_does_not_end_a_port_relay(tmp_path, monkeypatch):
+    """At the process limit a connection's thread may not start: that connection is closed and its slot given back,
+    the next ones are still relayed (the listener does not stay open with connections hanging in its backlog)."""
+    import socket as _socket
+    real, left = threading.Thread, [1]
+
+    class Failing(real):
+        def start(self):
+            if getattr(self._target, "__name__", "") == "handle" and left[0]:
+                left[0] -= 1
+                raise RuntimeError("can't start new thread")
+            return super().start()
+    monkeypatch.setattr(threading, "Thread", Failing)
+    directory = Path(tempfile.mkdtemp(prefix="relay-", dir="/tmp"))
+    host = _socket.socket(_socket.AF_UNIX)
+    host.bind(str(directory / "relay-5999.sock"))
+    host.listen()
+
+    def host_side():
+        while True:
+            try:
+                connection, _ = host.accept()
+            except OSError:
+                return
+            with connection:
+                connection.sendall(b"served")
+    threading.Thread(target=host_side, daemon=True).start()
+    free = _socket.socket()
+    free.bind(("127.0.0.1", 0))
+    listen = free.getsockname()[1]
+    free.close()
+    relay = rt.PortRelay(5999, directory, limit=1, listen_port=listen)
+
+    def first_answer():
+        with _socket.create_connection(("127.0.0.1", listen), timeout=3) as client:
+            try:
+                return client.recv(100)
+            except ConnectionError:
+                return b""
+            except OSError:
+                return None
+    try:
+        assert first_answer() == b"", "closed: no thread for it"
+        assert first_answer() == b"served", "the next connection is relayed, its slot was given back"
+    finally:
+        relay.close()
+        host.close()
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def test_a_dead_nameserver_does_not_stall_the_dns_stub(tmp_path, monkeypatch):
+    """The stub forwards beside its loop (a few at once), and a nameserver that did not answer is skipped for a
+    while when another one is there: one dead nameserver (2 s per try) neither holds the other lookups nor slows
+    every later one. Each forwarded name is still logged before its answer goes out."""
+    import contextlib
+    import socket
+    monkeypatch.setattr(rt, "LOG_DIR", tmp_path)
+    upstream = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    upstream.bind(("127.0.0.1", 0))
+    upstream_port = upstream.getsockname()[1]
+    dead = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    dead.bind(("127.0.0.2", upstream_port))  # takes the queries and never answers
+
+    def answer():
+        while True:
+            try:
+                data, peer = upstream.recvfrom(4096)
+                upstream.sendto(data[:2] + b"\x81\x80" + data[4:] + b"ANSWER", peer)
+            except OSError:
+                return
+    threading.Thread(target=answer, daemon=True).start()
+    stub = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    stub.bind(("127.0.0.1", 0))
+    port = stub.getsockname()[1]
+    stub.close()
+    stop = threading.Event()
+    thread = threading.Thread(target=rt.dns_logger, args=({"api.openai.com"}, port, stop, None, (), None, None,
+                                                         lambda: ["127.0.0.2", "127.0.0.1"], upstream_port), daemon=True)
+    thread.start()
+    clients = [socket.socket(socket.AF_INET, socket.SOCK_DGRAM) for _ in range(3)]
+    for client in clients:
+        client.settimeout(10)
+
+    def ask(client, name):
+        """(answer, seconds it took)"""
+        for _ in range(50):
+            started = time.monotonic()
+            try:
+                client.sendto(query(name), ("127.0.0.1", port))
+                return client.recvfrom(4096)[0], time.monotonic() - started
+            except ConnectionRefusedError:
+                time.sleep(0.05)  # not bound yet
+        raise AssertionError("the stub did not answer")
+    try:
+        clients[0].settimeout(0.5)  # a query sent before the stub is bound is lost (no "refused" for it)
+        for _ in range(40):
+            with contextlib.suppress(socket.timeout):
+                ask(clients[0], "api.openai.com")
+                break
+        first = []
+        slow = threading.Thread(target=lambda: first.append(ask(clients[1], "first.example")), daemon=True)
+        slow.start()
+        time.sleep(0.2)  # the stub is waiting for the dead nameserver now
+        answer_, took = ask(clients[2], "api.openai.com")
+        assert answer_[3] & 0x0F == 3 and took < 1.0, f"a pinned name waited {took:.1f} s behind a forwarded one"
+        slow.join(10)
+        assert first and first[0][0].endswith(b"ANSWER")
+        answer_, took = ask(clients[2], "second.example")
+        assert answer_.endswith(b"ANSWER") and took < 1.0, f"the dead nameserver was asked again ({took:.1f} s)"
+        logged = [json.loads(line) for line in (tmp_path / "dns.jsonl").read_text().splitlines()]
+        assert [(r["host"], r["forwarded"]) for r in logged] == [("first.example", "127.0.0.1"),
+                                                                 ("second.example", "127.0.0.1")]
+    finally:
+        stop.set()
+        thread.join(5)
+        for sock in (*clients, upstream, dead):
+            sock.close()

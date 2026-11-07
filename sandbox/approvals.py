@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """sandbox-ai approvals: answer what running sandboxes ask.
 
-  sandbox-ai approvals list                      open questions of every running sandbox
+  sandbox-ai approvals list [--json]             open questions of every running sandbox
   sandbox-ai approvals allow ID [--scope once|run|always]
   sandbox-ai approvals deny ID [--scope run|once]
   sandbox-ai approvals history [RUN]             questions and their answers
@@ -9,13 +9,17 @@
   sandbox-ai approvals forget PROJECT ENTRY       forget one of them (a host name or IP:PORT)
 
 A sandbox asks (with --ask, the default) when its agent connects to a destination the options do not
-allow, looks up a name they do not pin, or pushes commits the privacy check has warnings about. Without
-an answer within 60 seconds the question is refused. Scopes: once (this connection), run (until the
+allow, looks up a name they do not pin, pushes commits the privacy check has warnings about, or sends a
+request an "ask" rule holds; an MCP server asks about tool calls its rules hold; a device rule asks before a
+device is attached (`sandbox-ai devices add`, --device, a replug). Without an answer within
+60 seconds the question is refused. Scopes: once (this connection), run (until the
 sandbox ends), always (also every later start of this project; kept in
 ~/.config/sandbox-ai/approved.json). A name allowed after a lookup is reached by the agent's next try
 (for lookups once means run: the name stays pinned); only its public addresses are opened. A deny counts
 for the rest of the run (--scope once: the agent may ask again). The name in a connection question is the
-one the agent sends: it is not verified, and what is allowed is the address.
+one the agent sends: what is allowed is the address, and "always" keeps the name only when the sandbox
+proved it (its own pin, or the real server's certificate on the approved connection); the question says
+which it will be.
 
 Standard library only.
 """
@@ -33,9 +37,23 @@ import socket
 import subprocess
 import sys
 import urllib.parse
+import threading
 import time
 
 HERE = Path(__file__).resolve().parent
+
+
+_textout = None
+
+
+def textout():
+    """sandbox/textout.py (aligned tables, colour for terminals), loaded by path like the other modules."""
+    global _textout
+    if _textout is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_textout_for_approvals", Path(__file__).resolve().parent / "textout.py")
+        _textout = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_textout)
+    return _textout
 ID = re.compile(r"[0-9]{1,12}-[0-9]{1,10}-[0-9]{1,10}")
 REQUEST_LIMIT = 8192  # one browser request from the sandbox: {"url": ...}
 # Printable ASCII only (no spaces, controls, look-alike letters), and no user part: https://github.com@evil.example/
@@ -75,8 +93,9 @@ def approved_file():
     return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "sandbox-ai" / "approved.json"
 
 
-def approved_for(workspace):
-    """{"hosts": [...], "tcp": ["IP:PORT", ...]} always allowed for the project WORKSPACE."""
+def approved_for(workspace, blocked=False):
+    """{"hosts": [...], "tcp": ["IP:PORT", ...]} always allowed for the project WORKSPACE (BLOCKED: always
+    blocked: refused at once, without a question)."""
     try:
         data = json.loads(approved_file().read_text())
     except (OSError, ValueError):
@@ -84,9 +103,14 @@ def approved_for(workspace):
     entry = data.get(str(Path(workspace).resolve())) if isinstance(data, dict) else None
     if not isinstance(entry, dict):
         return {"hosts": [], "tcp": []}
-    hosts = [h for h in entry.get("hosts", []) if isinstance(h, str) and HOST.fullmatch(h)]
-    tcp = [t for t in entry.get("tcp", []) if isinstance(t, str) and valid_tcp(t)]
+    prefix = "blocked_" if blocked else ""
+    hosts = [h for h in entry.get(prefix + "hosts", []) if isinstance(h, str) and HOST.fullmatch(h)]
+    tcp = [t for t in entry.get(prefix + "tcp", []) if isinstance(t, str) and valid_tcp(t)]
     return {"hosts": hosts, "tcp": tcp}
+
+
+def blocked_for(workspace):
+    return approved_for(workspace, blocked=True)
 
 
 def valid_tcp(value):
@@ -120,35 +144,79 @@ def approved_store():
         os.replace(temporary, path)
 
 
-def remember(workspace, host=None, tcp=None):
+def remember(workspace, host=None, tcp=None, blocked=False, details=None):
     with approved_store() as data:
-        remember_in(data, workspace, host, tcp)
+        remember_in(data, workspace, host, tcp, blocked, details)
 
 
-def remember_in(data, workspace, host=None, tcp=None):
+def detail_key(field, value):
+    """The key of an entry's details: "hosts:NAME", "blocked_tcp:IP:PORT", ..."""
+    return f"{field}:{value}"
+
+
+def remember_in(data, workspace, host=None, tcp=None, blocked=False, details=None):
+    """Remember HOST or TCP as allowed (or, BLOCKED, as blocked) always for WORKSPACE; one excludes the other.
+    DETAILS ({"added", "question", "kind", "verified", "destination", "why"}) say where it came from."""
     if host is not None and not HOST.fullmatch(host):
         raise ValueError(f"not a host name to remember: {shown(host)}")
     if tcp is not None and not valid_tcp(tcp):
         raise ValueError(f"not an address to remember: {shown(tcp)}")
     entry = data.setdefault(str(Path(workspace).resolve()), {"hosts": [], "tcp": []})
-    if host and host not in entry["hosts"]:
-        entry["hosts"].append(host)
-    if tcp and tcp not in entry["tcp"]:
-        entry["tcp"].append(tcp)
+    keep, drop = ("blocked_", "") if blocked else ("", "blocked_")
+    notes = entry.get("details")
+    if not isinstance(notes, dict):
+        notes = entry["details"] = {}
+    for field, value in (("hosts", host), ("tcp", tcp)):
+        if value:
+            values = entry.setdefault(keep + field, [])
+            if value not in values:
+                values.append(value)
+            if value in entry.get(drop + field, []):
+                entry[drop + field] = [v for v in entry[drop + field] if v != value]
+                notes.pop(detail_key(drop + field, value), None)
+            notes[detail_key(keep + field, value)] = {"added": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                                                      **(details or {})}
 
 
 def remembered():
-    """{project: {"hosts": [...], "tcp": [...]}} of everything approved "always" (valid entries only)."""
+    """{project: {"hosts": [...], "tcp": [...], "blocked_hosts", "blocked_tcp", "details"}} of everything approved
+    or blocked "always" (valid entries only); details: {"hosts:NAME": {"added", "question", ...}} where known."""
     try:
         data = json.loads(approved_file().read_text())
     except (OSError, ValueError, RecursionError):
         return {}
     result = {}
     for project in sorted(data) if isinstance(data, dict) else []:
-        entry = approved_for(project)
-        if entry["hosts"] or entry["tcp"]:
-            result[project] = entry
+        entry, blocked = approved_for(project), blocked_for(project)
+        if entry["hosts"] or entry["tcp"] or blocked["hosts"] or blocked["tcp"]:
+            known = data[project].get("details") if isinstance(data[project], dict) else None
+            listed = {detail_key(field, value) for field, values in (
+                ("hosts", entry["hosts"]), ("tcp", entry["tcp"]), ("blocked_hosts", blocked["hosts"]),
+                ("blocked_tcp", blocked["tcp"])) for value in values}
+            details = {key: value for key, value in (known.items() if isinstance(known, dict) else [])
+                       if key in listed and isinstance(value, dict)}
+            result[project] = {**entry, "blocked_hosts": blocked["hosts"], "blocked_tcp": blocked["tcp"],
+                               "details": details}
     return result
+
+
+def origin_of(details, field="tcp"):
+    """What the entry of FIELD (hosts, tcp, blocked_...) is and where it came from, for `remembered`: "name,
+    verified by its certificate; added TIME from question ID (connect to IP:PORT)"; what came from a question
+    is escaped (see shown)."""
+    kind = "name" if field.endswith("hosts") else "address"
+    if not isinstance(details, dict) or not details:
+        return f"{kind}; added before sandbox-ai kept details"
+    what = {"certificate": "name, verified by its certificate", "pinned": "name, pinned by sandbox-ai",
+            "lookup": "name, from a lookup question"}.get(details.get("verified"), kind)
+    if details.get("why"):
+        what += f" ({shown(details['why'], 200)})"
+    text = f"{what}; added {shown(details.get('added', '?'), 40)}"
+    if details.get("question"):
+        text += f" from question {shown(details['question'], 40)}"
+        if details.get("asked"):
+            text += f" ({shown(details['asked'], 300)})"
+    return text
 
 
 def forget(project, value):
@@ -160,20 +228,35 @@ def forget(project, value):
         if not isinstance(entry, dict):
             return False
         found = False
-        for field in ("hosts", "tcp"):
+        fields = ("hosts", "tcp", "blocked_hosts", "blocked_tcp")
+        for field in fields:
             values = entry.get(field) if isinstance(entry.get(field), list) else []
             if value in values:
                 entry[field] = [v for v in values if v != value]
+                if isinstance(entry.get("details"), dict):
+                    entry["details"].pop(detail_key(field, value), None)
                 found = True
-        if not any(entry.get(field) for field in ("hosts", "tcp")):
+        if not any(entry.get(field) for field in fields):
             del data[key]
         return found
 
 
+def mcp_runs(state_root=None):
+    """{"mcp-NAME": record} of the MCP servers that can ask (an approvals directory in their state directory);
+    a record names the directory as a run's does, so listing and answering work alike."""
+    root = Path(state_root or os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "sandbox-ai" / "mcp"
+    try:
+        servers = sorted(path for path in root.iterdir() if (path / "approvals").is_dir())
+    except OSError:
+        return {}
+    return {f"mcp-{path.name}": {"directory": str(path), "run": f"mcp-{path.name}", "mcp": path.name}
+            for path in servers}
+
+
 def questions(runs=None, answered=False):
-    """[(run, record, question)] of the running sandboxes; open ones only unless ANSWERED."""
+    """[(run, record, question)] of the running sandboxes and MCP servers; open ones only unless ANSWERED."""
     found = []
-    for name, record in (runs if runs is not None else net().running()).items():
+    for name, record in (runs if runs is not None else {**net().running(), **mcp_runs()}).items():
         directory = Path(record["directory"]) / "approvals"
         try:
             files = sorted(directory.glob("*.json"))
@@ -201,20 +284,97 @@ def questions(runs=None, answered=False):
 
 
 def describe(question):
-    """One line about QUESTION; everything the agent chose is escaped (see shown)."""
+    """One line about QUESTION and who asks; everything the agent chose is escaped (see shown)."""
+    return what(question) + because(question) + asked_by(question)
+
+
+def always(question):
+    """"; Allow always: ..." for a connection question: what an "always" answer would remember (the
+    supervisor's verdict, see ApprovalBroker.remembers); "" for questions of older versions."""
+    remembers = question.get("remembers")
+    if not isinstance(remembers, dict) or not remembers.get("tcp"):
+        return ""
+    address = shown(remembers["tcp"], 60)
+    name = shown(remembers.get("host"), 253)
+    how = remembers.get("verified")
+    if how == "certificate":
+        return f"; Allow always: {name} (verified by its certificate)"
+    if how == "pinned":
+        return f"; Allow always: {name} (verified: sandbox-ai pinned it to this address)"
+    if how == "on connection":
+        return f"; Allow always: {name} if its certificate proves it on this connection, else {address} (address only)"
+    why = remembers.get("why") or "the name is the agent's claim and could not be verified"
+    return f"; Allow always: {address} (address only: {shown(why, 200)})"
+
+
+def because(question):
+    """"; asked because untrusted content from X entered this run at T" for a question a rule for tainted runs
+    holds, else ""."""
+    taint = question.get("taint")
+    if not isinstance(taint, dict) or not taint.get("tainted"):
+        return ""
+    source = taint.get("source") if isinstance(taint.get("source"), dict) else {}
+    return f"; asked because untrusted content from {shown(source.get('what', '?'), 200)} entered this run at " \
+           f"{shown(taint.get('since', '?'), 40)}"
+
+
+def asked_by(question):
+    """", asked by NAME (pid N) in RUN" for a question that names the process behind it, else "". The PID is
+    the one the agent's own tools show (inside Firejail); name and command line are the process's own
+    choice, shown escaped."""
+    process = question.get("process")
+    if not isinstance(process, dict):
+        return ""
+    sandbox = question.get("sandbox") if isinstance(question.get("sandbox"), dict) else {}
+    where = sandbox.get("run") or sandbox.get("pod")
+    where = f" in {shown(where, 80)}" if where else ""
+    if "unknown" in process:
+        return f"; asked by a process not identified ({shown(process['unknown'], 120)}){where}"
+    pid = process.get("ns_pid") or process.get("pid")
+    exe = process.get("exe")
+    return f"; asked by {shown(process.get('comm', '?'), 64)} (pid {shown(pid, 12)}" + \
+        (f", {shown(exe, 200)}" if exe else "") + f"){where}"
+
+
+def what(question):
+    """What QUESTION asks for."""
     kind = question.get("kind")
     if kind == "connect":
         host, protocol = question.get("host"), question.get("protocol")
         text = f"connect to {shown(question.get('destination'))}"
         if protocol and protocol != "tcp":
             text += f" ({shown(protocol, 10)})"
-        return text + (f", named {shown(host)} by the agent (not verified)" if host else "")
+        return text + (f", named {shown(host)} by the agent (not verified)" if host else "") + always(question)
     if kind == "dns":
         return f"look up {shown(question.get('name'))}"
     if kind == "push":
         refs = question.get("refs") if isinstance(question.get("refs"), list) else []
         return f"push {', '.join(shown(r, 200) for r in refs[:10])} to {shown(question.get('url'), 500)} " \
                "despite privacy warnings"
+    if kind == "http":
+        return f"{shown(question.get('method'), 20)} {shown(question.get('url'), 500)} (rule " \
+               f"{shown(question.get('rule'), 80)} of {shown(question.get('ruleset'), 120)})"
+    if kind == "mcp":
+        return f"call the MCP tool {shown(question.get('tool'), 128)} of {shown(question.get('server'), 40)} with " \
+               f"{shown(question.get('arguments'), 300)} (rule {shown(question.get('rule'), 80)} of " \
+               f"{shown(question.get('ruleset'), 120)})"
+    if kind == "device":
+        nodes = question.get("nodes") if isinstance(question.get("nodes"), list) else []
+        device = " ".join(shown(part, 120) for part in (
+            question.get("usb") and f"usb {question['usb']}", question.get("product") and f"\"{question['product']}\"",
+            question.get("serial") and f"serial {question['serial']}", question.get("port") and
+            f"port {question['port']}") if part)
+        return (f"{'re-attach' if question.get('replug') else 'attach'} the device "
+                f"{', '.join(shown(n, 200) for n in nodes[:10]) or shown(question.get('value'))}"
+                + (f" ({device})" if device else "") + f", given as {shown(question.get('value'), 300)} (rule "
+                f"{shown(question.get('rule'), 80)} of {shown(question.get('ruleset'), 120)}; what a device reports "
+                "about itself can be claimed by another)")
+    if kind == "canary":  # canary.py: a decoy file was read, or a token of one left the sandbox
+        return f"canary {shown(question.get('canary'), 40)}: {shown(question.get('summary'), 500)}"
+    if kind == "tool":
+        return f"let {shown(question.get('agent'), 20)} use its tool {shown(question.get('tool'), 128)} with " \
+               f"{shown(question.get('arguments'), 300)} (rule {shown(question.get('rule'), 80)} of " \
+               f"{shown(question.get('ruleset'), 120)})"
     if kind == "browser":
         url = question.get("url")
         try:
@@ -234,7 +394,9 @@ def origin(record):
     if workspace == home or workspace.startswith(home + "/"):
         workspace = "~" + workspace[len(home):]
     parts = [shown(workspace, 200)] if workspace else []
-    if record.get("session"):
+    if record.get("name"):
+        parts.append(f"name {shown(record.get('name'), 80)}")
+    elif record.get("session"):
         parts.append(f"session {shown(record.get('session'), 80)}")
     name = shown(record.get("run"), 80) if record.get("run") else ""
     return f"{name} ({', '.join(parts)})" if name and parts else name or ", ".join(parts)
@@ -282,10 +444,8 @@ def answer(ident, decision, scope="once", runs=None, resolver=resolve, opener=No
     a name is resolved and pinned, a browser is opened, an "always" is remembered for the project."""
     if decision not in ("allow", "deny") or scope not in ("once", "run", "always"):
         raise ValueError("decision allow|deny, scope once|run|always")
-    if decision == "deny" and scope == "always":
-        raise ValueError("a deny lasts at most for the run (--scope run or once)")
     widest = policy_scope()
-    if SCOPES.index(scope) > SCOPES.index(widest):
+    if decision == "allow" and SCOPES.index(scope) > SCOPES.index(widest):
         raise ValueError(f"the administrator's policy allows answers up to --scope {widest}")
     matches = [entry for entry in questions(runs) if entry[2].get("id") == ident]
     if len(matches) > 1:
@@ -294,12 +454,34 @@ def answer(ident, decision, scope="once", runs=None, resolver=resolve, opener=No
     for name, record, question in matches:
         kind = question.get("kind")
         notes = []
+        # The run's security mode (run.json) caps answers too; its supervisor holds the same cap.
+        mode = record.get("mode") if isinstance(record, dict) and isinstance(record.get("mode"), dict) else {}
+        cap = mode.get("approval_scope", "always")
+        if decision == "allow" and cap in SCOPES and SCOPES.index(scope) > SCOPES.index(cap):
+            scope, notes = cap, [f"the security mode {shown(mode.get('name'), 20)} of this run approves at most "
+                                 f"for {'the run' if cap == 'run' else 'once'}"]
         if decision == "allow" and kind == "push" and scope == "always":
             scope, notes = "run", ["pushes are approved at most for the run"]
+        if decision == "allow" and kind in ("http", "mcp", "tool") and scope == "always":
+            scope, notes = "run", ["requests and tool calls are approved at most for the run (an MCP server's run "
+                                   "lasts until it stops); to allow them always, write a rule"]
+        if decision == "allow" and kind == "device" and scope == "always":
+            scope, notes = "run", ["a device is approved at most for the run (with run, a replug is not asked "
+                                   "about again); to allow it always, write a device rule"]
         if decision == "allow" and kind == "dns" and scope == "once":
             scope, notes = "run", ["a name stays pinned for the run"]
-        reply = {"decision": decision, "scope": scope}
         later = None  # remembered for the project once the sandbox has applied the answer
+        if decision == "deny" and scope == "always":
+            # Blocked for this project: refused at once at every later start; in this run it counts for the run.
+            scope = "run"
+            if kind == "dns" and isinstance(question.get("name"), str) and HOST.fullmatch(question["name"]):
+                later = {"host": question["name"], "blocked": True}
+            elif kind == "connect":
+                address, port = str(question.get("address", "")), int(question.get("port", 0))
+                later = {"tcp": f"[{address}]:{port}" if ":" in address else f"{address}:{port}", "blocked": True}
+            else:
+                notes.append("only names and addresses are blocked always; this one is denied for the run")
+        reply = {"decision": decision, "scope": scope}
         if decision == "allow" and kind == "dns":
             host = question.get("name")
             if not isinstance(host, str) or not HOST.fullmatch(host):
@@ -314,9 +496,10 @@ def answer(ident, decision, scope="once", runs=None, resolver=resolve, opener=No
             if scope == "always":
                 later = {"host": host}
         elif decision == "allow" and kind == "connect" and scope == "always":
-            # What was approved is the address (the name came from the agent): that is remembered.
+            # The address, unless the sandbox proves the name the agent sent (its .done says, see below).
             address, port = str(question.get("address", "")), int(question.get("port", 0))
             later = {"tcp": f"[{address}]:{port}" if ":" in address else f"{address}:{port}"}
+            wait = max(wait, VERIFY_WAIT)
         elif decision == "allow" and kind == "browser":
             url = question.get("url", "")
             if not isinstance(url, str) or not URL.fullmatch(url):
@@ -332,8 +515,14 @@ def answer(ident, decision, scope="once", runs=None, resolver=resolve, opener=No
             # Only what the sandbox accepted is remembered: a question that timed out meanwhile, or an answer the
             # supervisor could not apply, must not open the next start.
             result = wait_done(path.with_suffix(".done"), wait)
-            if result.get("decision") == "allow":
-                remember(record["workspace"], **later)
+            details = {"question": ident, "kind": kind, "asked": what({**question, "remembers": None})[:300]}
+            if kind == "dns":
+                details["verified"] = "lookup"
+            if kind == "connect" and not later.get("blocked"):
+                later, details, note = proven(question, result, later, details)
+                notes += [note] if note else []
+            if result.get("decision") == ("deny" if later.get("blocked") else "allow"):
+                remember(record["workspace"], **later, details=details)
             else:
                 notes.append("not remembered for the project: the sandbox did not apply it ("
                              f"{shown(result.get('reason', 'no reply'), 200)})")
@@ -341,6 +530,43 @@ def answer(ident, decision, scope="once", runs=None, resolver=resolve, opener=No
             + "".join(f"\n  {shown(note, 1000)}" for note in notes))
         return reply
     raise ValueError(f"no open question {ident}; see sandbox-ai approvals list")
+
+
+VERIFY_WAIT = 30  # seconds: an "always" for a name waits for the sandbox's certificate check (15 s at most)
+
+
+def proven(question, result, later, details):
+    """(what to remember, its details, a note) for "Allow always" on connection QUESTION: the name when the
+    sandbox's answer (RESULT, its .done) says it proved the name the question offered, by a certificate or its
+    own pin, and the administrator's policy allows the name; else the address LATER, with why."""
+    offered = question.get("remembers") if isinstance(question.get("remembers"), dict) else {}
+    remember = result.get("remember") if isinstance(result.get("remember"), dict) else {}
+    name = remember.get("host")
+    proved = remember.get("verified") in ("certificate", "pinned")
+    details = {**details, "destination": later["tcp"]}
+    if proved and isinstance(name, str) and HOST.fullmatch(name) and name == offered.get("host"):
+        if not policy_allows_host(name):
+            return later, {**details, "why": "the administrator's policy does not list the name"}, \
+                f"remembered as the address: {name} is not among the hosts the administrator's policy allows"
+        return {"host": name}, {**details, "verified": remember["verified"]}, \
+            f"remembered as the name {name} ({'verified by its certificate' if remember['verified'] == 'certificate' else 'pinned by sandbox-ai'}): later starts resolve it"
+    why = remember.get("why") or offered.get("why") or "the name could not be verified"
+    return later, {**details, "why": why}, f"remembered as the address {later['tcp']}: {why}"
+
+
+def launcher_module():
+    spec = importlib.util.spec_from_file_location("agent_sandbox_for_approvals", HERE / "agent_sandbox.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def policy_allows_host(name):
+    """NAME lies inside the administrator's ceiling (allow_hosts, when allow_within is set), or there is none."""
+    launcher = launcher_module()
+    policy = launcher.load_policy()
+    return launcher.within_ceiling(argparse.Namespace(policy={key: policy[key] for key in ("allow_within", "allow_hosts")
+                                                              if key in policy}), host=name)
 
 
 def open_browser(url):
@@ -353,10 +579,58 @@ def open_browser(url):
     raise ValueError("no program to open a browser (xdg-open)")
 
 
-def watch(directory, stop, notify=None, interval=1.0, burst=3):
+QUESTION_ACTIONS = (("once", "allow", "once", "Allow"), ("always", "allow", "always", "Allow always"),
+                    ("deny", "deny", "run", "Block"), ("never", "deny", "always", "Block always"))
+BROWSER_ACTIONS = (("open", "allow", "once", "Open"), ("ignore", "deny", "once", "Ignore"))
+_actions_supported = None
+
+
+def notify_actions():
+    """notify-send can show buttons and report the one clicked (libnotify 0.7.9 and later)."""
+    global _actions_supported
+    if _actions_supported is None:
+        try:
+            text = subprocess.run(["notify-send", "--help"], capture_output=True, text=True, timeout=5,
+                                  stdin=subprocess.DEVNULL).stdout if shutil.which("notify-send") else ""
+        except (OSError, subprocess.SubprocessError):
+            text = ""
+        _actions_supported = "--action" in text and "--wait" in text
+    return _actions_supported
+
+
+def desktop_question(title, text, ident, actions=QUESTION_ACTIONS, answer_with=None, seconds=60, runner=None):
+    """A notification with buttons; the button clicked answers question IDENT as `sandbox-ai approvals` would
+    (Allow, Allow always, Block, Block always). "Allow always" is left out when the administrator's policy caps
+    the scope. Runs until clicked or expired (one thread per question)."""
+    import html
+    if not any(scope == "always" for _, decision, scope, _ in actions if decision == "allow") or \
+            policy_scope() == "always":
+        offered = actions
+    else:
+        offered = [action for action in actions if not (action[1] == "allow" and action[2] == "always")]
+    text = html.escape("".join(c if c == "\n" or c.isprintable() else "?" for c in text[:1000]), quote=False)
+    command = ["notify-send", "--app-name=sandbox-ai", "--urgency=critical", "--wait",
+               f"--expire-time={seconds * 1000}", *[f"--action={name}={label}" for name, _, _, label in offered],
+               title, text]
+    try:
+        chosen = (runner or subprocess.run)(command, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                            timeout=seconds + 5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for name, decision, scope, _ in offered:
+        if chosen == name:
+            with contextlib.suppress(ValueError, OSError):
+                (answer_with or answer)(ident, decision, scope, out=lambda line: None)
+            return name
+    return None
+
+
+def watch(directory, stop, notify=None, interval=1.0, burst=3, buttons=None):
     """Notify (notify-send) about every new question in DIRECTORY until STOP is set (the launcher runs this
     while its sandbox runs: the agent's terminal is busy with the agent). More than BURST new questions at
     once give one notification; browser requests are announced by serve_browser."""
+    if buttons is None and notify is None and notify_actions():
+        buttons = desktop_question  # buttons in the notification answer it
     notify = notify or desktop_notification
     seen = set()
     asker = origin(run_record(directory))
@@ -375,14 +649,17 @@ def watch(directory, stop, notify=None, interval=1.0, burst=3):
                 question = json.loads(path.read_text())
             except (OSError, ValueError):
                 continue
-            if isinstance(question, dict) and question.get("kind") != "browser":
+            if isinstance(question, dict) and question.get("kind") not in ("browser", "canary"):  # they notify themselves
                 fresh.append(question)
         seen &= {path.name for path in files}
         if len(fresh) > burst:
             notify(title, f"{len(fresh)} new questions\nsandbox-ai approvals list")
             continue
-        for question in fresh:
-            notify(title, f"{describe(question)}\nsandbox-ai approvals allow {shown(question.get('id'))}")
+        for item in fresh:
+            if buttons is not None:
+                threading.Thread(target=buttons, args=(title, describe(item), item.get("id")), daemon=True).start()
+            else:
+                notify(title, f"{describe(item)}\nsandbox-ai approvals allow {shown(item.get('id'))}")
 
 
 def desktop_notification(title, text):
@@ -435,7 +712,13 @@ def serve_browser(socket_path, approvals_dir, stop, notify=None, limit=20, liste
                     path.with_name(f".{ident}.json").write_text(json.dumps(question))
                     os.replace(path.with_name(f".{ident}.json"), path)
                     asker = origin(run_record(approvals_dir))
-                    notify(f"sandbox-ai: open a URL? ({asker})" if asker else "sandbox-ai: open a URL?", f"{url[:300]}\nsandbox-ai approvals allow {ident}")
+                    if notify is desktop_notification and notify_actions():
+                        threading.Thread(target=desktop_question, daemon=True, args=(
+                            f"sandbox-ai: open a URL? ({asker})" if asker else "sandbox-ai: open a URL?",
+                            url[:300], ident, BROWSER_ACTIONS)).start()
+                    else:
+                        notify(f"sandbox-ai: open a URL? ({asker})" if asker else "sandbox-ai: open a URL?",
+                               f"{url[:300]}\nsandbox-ai approvals allow {ident}")
                     reply = {"ok": True, "message": "sandbox-ai: asked the human to open it in their browser "
                                                     f"(question {ident}); nothing opens without their answer"}
             except (OSError, ValueError, RecursionError) as exc:
@@ -468,7 +751,8 @@ def main(argv, out=print):
                                      formatter_class=argparse.RawDescriptionHelpFormatter,
                                      epilog="\n\n".join(__doc__.split("\n\n")[1:3]))
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("list", help="open questions")
+    open_ones = commands.add_parser("list", help="open questions")
+    open_ones.add_argument("-j", "--json", action="store_true", help="as JSON, for scripts and the web interface")
     history = commands.add_parser("history", help="questions with their answers")
     history.add_argument("run", nargs="?")
     for name in ("allow", "deny"):
@@ -477,8 +761,9 @@ def main(argv, out=print):
         if name == "allow":
             command.add_argument("-s", "--scope", choices=["once", "run", "always"], default="once")
         else:
-            command.add_argument("-s", "--scope", choices=["run", "once"], default="run",
-                                 help="run (default): not asked again in this run; once: may be asked again")
+            command.add_argument("-s", "--scope", choices=["run", "once", "always"], default="run",
+                                 help="run (default): not asked again in this run; once: may be asked again; "
+                                      "always: also refused without a question at every later start of the project")
     listing = commands.add_parser("remembered", help="what was allowed always, per project")
     listing.add_argument("-j", "--json", action="store_true")
     forgetting = commands.add_parser("forget", help="forget an entry allowed always")
@@ -491,31 +776,49 @@ def main(argv, out=print):
             if args.json:
                 out(json.dumps(known, indent=2))
             elif not known:
-                out("nothing is allowed always")
+                out("nothing is allowed or blocked always")
             for project, entry in ({} if args.json else known).items():
                 out(shown(project, 1000))
-                for value in entry["hosts"] + entry["tcp"]:
-                    out(f"  {shown(value)}")
+                details = entry.get("details", {})
+                for verb, fields in (("allow", ("hosts", "tcp")), ("block", ("blocked_hosts", "blocked_tcp"))):
+                    for field in fields:
+                        for value in entry[field]:
+                            out(f"  {verb} {shown(value)}  {origin_of(details.get(detail_key(field, value)), field)}")
             return 0
         if args.command == "forget":
             if not forget(args.project, args.entry):
                 raise ValueError(f"{shown(args.entry)} is not remembered for {shown(args.project, 1000)}")
             out(f"forgot {shown(args.entry)} for {shown(args.project, 1000)}; it applies from the next start")
             return 0
+        if args.command == "list" and args.json:
+            # Everything the agent chose comes escaped (describe, origin), as in the table.
+            out(json.dumps([{"id": shown(q.get("id")), "run": shown(name), "sandbox": origin(record),
+                             "kind": shown(q.get("kind")), "time": shown(q.get("time")), "question": describe(q),
+                             "always": always(q).removeprefix("; ")}
+                            for name, record, q in questions()], indent=2))
+            return 0
         if args.command == "list":
             pending = questions()
-            if not pending:
-                out("no open questions")
-            for _, record, question in pending:
-                out(f"{shown(question.get('id'))}  {origin(record)}  {describe(question)}")
+            textout().table(["ID", "SANDBOX", "QUESTION"],
+                            [[shown(q.get("id")), origin(record), describe(q)] for _, record, q in pending],
+                            out, indent=0, empty="no open questions")
+            if pending:
+                out(textout().style("answer: sandbox-ai approvals allow|deny ID [--scope once|run|always]", "muted"))
             return 0
         if args.command == "history":
+            t, rows = textout(), []
             for name, _, question in questions(answered=True):
                 if args.run and name != args.run:
                     continue
                 result = question.get("result", {})
-                out(f"{shown(question.get('time'))}  {shown(name)}  {describe(question)}  -> "
-                    f"{shown(result.get('decision', 'open'))} ({shown(result.get('reason', ''))})")
+                decision = shown(result.get("decision", "open"))
+                kind = {"allow": "ok", "deny": "bad"}.get(result.get("decision"), "warn")
+                rows.append([shown(question.get("time")), shown(name), t.style(decision, kind),
+                             shown(result.get("scope", "")), describe(question), shown(result.get("reason", ""))])
+            # The question last: it is the longest and wraps at the terminal's width.
+            t.table(["TIME", "SANDBOX", "ANSWER", "SCOPE", "REASON", "QUESTION"],
+                    [row[:4] + [row[5] or "-", row[4]] for row in rows] if rows else [], out, indent=0,
+                    empty="no answered questions")
             return 0
         answer(args.id, args.command, args.scope, out=out)
         return 0

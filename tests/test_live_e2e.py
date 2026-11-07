@@ -179,7 +179,8 @@ def test_live_mcp_server_from_the_catalog(request, backend, tmp_path):
     samples = tmp_path / "samples"
     samples.mkdir()
     (samples / "a.txt").write_text("hello yara\n")
-    added = subprocess.run([str(ROOT / "sandbox-mcp"), "add", "hub:yara", "--mount", f"/work={samples}"],
+    # The axross hub's catalog is not signed with an MCP key yet: taken explicitly (sandbox/mcp-signers).
+    added = subprocess.run([str(ROOT / "sandbox-mcp"), "add", "hub:yara", "--unsigned", "--mount", f"/work={samples}"],
                            capture_output=True, text=True, env=env, timeout=600)
     assert added.returncode == 0, added.stdout + added.stderr
     started = subprocess.run([str(ROOT / "sandbox-mcp"), "start", "yara"], capture_output=True, text=True, env=env,

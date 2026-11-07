@@ -90,7 +90,8 @@ def test_startup_matrix(agent, backend, auth, workspace_exists, tmp_path, monkey
     monkeypatch.setattr(s, "auth_sources", lambda name: [(source, s.AUTH_TARGETS[name])])
     monkeypatch.setattr(s.os, "geteuid", lambda: 1000)
     monkeypatch.setattr(s.shutil, "which", lambda name: fake_tool(tmp_path, name))
-    options = [agent, "--backend", backend, "--workspace", str(workspace), "--offline"]
+    # --no-keep: the HOME goes with the run (kept by default since 0.1.30: see the feature matrix).
+    options = [agent, "--backend", backend, "--workspace", str(workspace), "--offline", "--no-keep"]
     if auth == "none":
         options += ["--no-auth"]
     elif auth == "explicit":
@@ -113,11 +114,18 @@ def test_startup_matrix(agent, backend, auth, workspace_exists, tmp_path, monkey
             target.write_text('{"fixture":"sandbox refreshed copy"}')
         assert config["command"][0] == (agent if backend == "podman" else fake_tool(tmp_path, agent))
         assert (config["command"][1:3] == ["--sandbox", "danger-full-access"]) == (agent == "codex")
-        # Only the privacy hooks and the run's name: no variable of the host crosses by default.
+        # Only the Git helper for logins added during the run, the privacy hooks and the run's name: no variable of
+        # the host crosses by default.
         assert re.fullmatch(rf"{agent}-[0-9a-f]{{8}}", config["env"]["SANDBOX_AI_RUN"])
-        assert config["env"] == {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath",
-                                 "GIT_CONFIG_VALUE_0": s.PRIVACY_HOOKS,
-                                 "SANDBOX_AI_RUN": config["env"]["SANDBOX_AI_RUN"]} and not config["probe"]
+        # (and the agent's switches against its telemetry, --telemetry off: test_telemetry.py).
+        telemetry = s.TELEMETRY_ENV[agent]["off"]
+        assert {k: v for k, v in config["env"].items() if k not in telemetry and k != "OPENCODE_CONFIG_CONTENT"} == {
+            "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "credential.helper", "GIT_CONFIG_VALUE_0": s.RUNTIME_GIT_HELPER,
+            "GIT_CONFIG_KEY_1": "core.hooksPath", "GIT_CONFIG_VALUE_1": s.PRIVACY_HOOKS,
+            "SANDBOX_AI_RUN": config["env"]["SANDBOX_AI_RUN"]} and not config["probe"]
+        assert all(config["env"][k] == v for k, v in telemetry.items())
+        assert json.loads(config["env"].get("OPENCODE_CONFIG_CONTENT", "{}")) == (
+            s.OPENCODE_TELEMETRY_CONFIG if agent == "opencode" else {})
         # Registered for `sandbox-ai net` while it runs.
         assert json.loads((s.runs_dir() / config["env"]["SANDBOX_AI_RUN"] / "run.json").read_text())["agent"] == agent
         hooks = session / "privacy" / "hooks"

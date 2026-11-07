@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -58,10 +59,57 @@ def test_check_subids(scenario, tmp_path):
     (tmp_path / "subuid").write_text({"happy": "me:100000:65536\n", "sad": "other:100000:65536\n",
                                       "edge": "1000:100000:70000\nme:1:10\n"}[scenario])
     (tmp_path / "subgid").write_text("me:100000:65536\n")
-    status, _, detail, hint = doctor.check_subids("me", 1000, tmp_path)
+    (tmp_path / "proc").mkdir()
+    for name in ("uid_map", "gid_map"):  # a host: every ID
+        (tmp_path / "proc" / name).write_text("         0          0 4294967295\n")
+    status, _, detail, hint = doctor.check_subids("me", 1000, tmp_path, tmp_path / "proc")
     assert status == {"happy": "ok", "sad": "fail", "edge": "ok"}[scenario]
     if scenario == "sad":
         assert "usermod" in hint and "subuid: 0" in detail
+
+
+def test_delegated_ids_outside_an_unprivileged_container(tmp_path):
+    """Proxmox pct, unprivileged: the container has the IDs 0-65535 only; 100000-165535 cannot be mapped (newuidmap:
+    write to uid_map failed: Operation not permitted)."""
+    (tmp_path / "subuid").write_text("me:100000:65536\n")
+    (tmp_path / "subgid").write_text("me:100000:65536\n")
+    (tmp_path / "proc").mkdir()
+    for name in ("uid_map", "gid_map"):
+        (tmp_path / "proc" / name).write_text("         0     100000      65536\n")
+    status, _, detail, hint = doctor.check_subids("me", 1000, tmp_path, tmp_path / "proc")
+    assert status == "fail" and "100000-165535" in detail and "only the IDs 0-65535" in detail
+    assert "lxc.idmap: u 0 100000 1065536" in hint and "podman system migrate" in hint
+    # The container got more IDs: fine.
+    for name in ("uid_map", "gid_map"):
+        (tmp_path / "proc" / name).write_text("         0     100000    1065536\n")
+    assert doctor.check_subids("me", 1000, tmp_path, tmp_path / "proc")[0] == "ok"
+
+
+def test_a_smaller_range_inside_a_small_container_cannot_build(tmp_path):
+    """The container has 0-65535 and the range fits (10000-59999): Podman starts, but apt in every image build
+    drops to group 65534 ("setgroups 65534 failed - Invalid argument"). A failure, with the container's ID map as
+    the way out; never the advice to add 100000-165535, which cannot exist there."""
+    (tmp_path / "proc").mkdir()
+    for name in ("uid_map", "gid_map"):
+        (tmp_path / "proc" / name).write_text("         0     100000      65536\n")
+    for name in ("subuid", "subgid"):
+        (tmp_path / name).write_text("me:10000:50000\n")
+    status, _, detail, hint = doctor.check_subids("me", 1000, tmp_path, tmp_path / "proc")
+    assert status == "fail" and "50000" in detail and "setgroups 65534" in detail
+    assert "usermod" not in hint and "lxc.idmap" in hint, "100000-165535 does not exist here: more IDs from the host"
+    assert "podman system reset" in hint, "images of the old IDs: only a fresh storage helps (Permission denied)"
+    assert "sudo rm -rf ~/.local/share/containers/storage" in hint, "when the reset itself cannot remove them"
+    # On a host with every ID a small range is a mistake usermod fixes.
+    for name in ("uid_map", "gid_map"):
+        (tmp_path / "proc" / name).write_text("         0          0 4294967295\n")
+    for name in ("subuid", "subgid"):
+        (tmp_path / name).write_text("me:100000:50000\n")
+    status, _, _, hint = doctor.check_subids("me", 1000, tmp_path, tmp_path / "proc")
+    assert status == "fail" and "usermod" in hint
+    # 65534 reach the ID 65534: enough.
+    for name in ("subuid", "subgid"):
+        (tmp_path / name).write_text("me:100000:65534\n")
+    assert doctor.check_subids("me", 1000, tmp_path, tmp_path / "proc")[0] == "ok"
 
 
 def test_check_userns(scenario, tmp_path):
@@ -93,7 +141,7 @@ def test_check_image(scenario, monkeypatch):
     status, _, detail, hint = doctor.check_image("claude")
     assert status == {"happy": "ok", "sad": "warn", "edge": "ok"}[scenario]
     assert ("claude 1.0.42" in detail) == (scenario == "happy")
-    assert ("sandbox-build-image claude" in hint) == (scenario != "happy")
+    assert ("sandbox-ai build claude" in hint) == (scenario != "happy")
 
 
 def test_check_login(scenario, tmp_path, monkeypatch):
@@ -399,9 +447,153 @@ def test_logs_telemetry_counts_models_pushes_credentials_and_processes(tmp_path,
     (state / "sandbox-ai/mcp/ddg").mkdir(parents=True)
     (state / "sandbox-ai/mcp/ddg/supervisor.log").write_text(
         'noise\nsandbox-ai-mcp-call {"time": "t", "tool": "web_search", "arguments": "{}"}\n')
-    assert logs.tool_calls(state) == {"ddg": [("t", "web_search")]}
+    (state / "sandbox-ai/mcp/ddg/mcp-calls.jsonl").write_text("\n".join(json.dumps(r) for r in [
+        {"time": "u", "event": "call", "tool": "fetch", "decision": "deny"},
+        {"time": "v", "event": "result", "tool": "fetch"}, {"time": "w", "event": "refused"}]) + "\n")
+    assert logs.tool_calls(state) == {"ddg": [("t", "web_search", "allow"), ("u", "fetch", "deny")]}
     assert logs.report({**logs.summarize(tmp_path), "telemetry": seen, "tool_calls": logs.tool_calls(state)},
                        out=print) == 0
     out = capsys.readouterr().out
     assert "Model calls: 2x claude-opus-5-5; tokens: input_tokens 150, output_tokens 25" in out
-    assert "MCP ddg: 1 tool call(s): web_search" in out
+    assert "MCP ddg: 2 tool call(s), 1 not allowed outright: fetch, web_search" in out
+
+
+def test_check_user_session(tmp_path):
+    import socket as sockets
+    (tmp_path / "1000").mkdir()
+    status, _, detail, hint = doctor.check_user_session(1000, tmp_path)
+    assert status == "warn" and "not enforced" in detail and "cgroupfs" in detail and "enable-linger" in hint
+    assert "dbus-user-session" in hint and "not with su or sudo" in hint
+    (tmp_path / "1000" / "bus").touch()  # a file is no bus
+    assert doctor.check_user_session(1000, tmp_path)[0] == "warn"
+    (tmp_path / "1000" / "bus").unlink()
+    server = sockets.socket(sockets.AF_UNIX)
+    server.bind(str(tmp_path / "1000" / "bus"))
+    try:
+        assert doctor.check_user_session(1000, tmp_path)[0] == "ok"
+    finally:
+        server.close()
+    (tmp_path / "1000" / "bus").unlink()
+    assert "cgroupfs" not in doctor.check_user_session(1000, tmp_path, backend="bwrap")[2], "bwrap builds nothing"
+    assert doctor.check_user_session(1000, tmp_path, podman_url="unix:///x")[0] == "skip", "a remote engine's own"
+
+
+def subids(tmp_path, subuid, subgid=None, mapped="0 0 4294967295", backend="podman"):
+    (tmp_path / "proc").mkdir(exist_ok=True)
+    for name in ("uid_map", "gid_map"):
+        (tmp_path / "proc" / name).write_text(mapped + "\n")
+    (tmp_path / "subuid").write_text(subuid)
+    (tmp_path / "subgid").write_text(subgid if subgid is not None else subuid)
+    return doctor.check_subids("me", 1000, tmp_path, tmp_path / "proc", backend=backend)
+
+
+def test_ranges_the_kernel_refuses_are_failures(tmp_path):
+    """newuidmap writes "0 <own> 1" and every range: one holding the user's own ID, 0, or another range is
+    refused ("write to uid_map failed: Invalid argument"), however large it is."""
+    status, _, detail, _ = subids(tmp_path, "me:0:65536\n", mapped="0 100000 65536")
+    assert status == "fail" and "holds your own ID 1000" in detail
+    status, _, detail, _ = subids(tmp_path, "me:0:900\nme:2000:65000\n")
+    assert status == "fail" and "holds ID 0 (root)" in detail
+    status, _, detail, hint = subids(tmp_path, "me:100000:50000\nme:100000:65536\n")  # usermod added a second line
+    assert status == "fail" and "overlap" in detail and "only line" in hint and "removing older lines" in hint
+
+
+def test_ranges_count_together(tmp_path):
+    """Podman uses every line: split around the user's own ID, 65534 in all reach ID 65534."""
+    assert subids(tmp_path, "me:1:999\nme:1001:64535\n", mapped="0 100000 65536")[0] == "ok"
+    assert subids(tmp_path, "me:100000:32768\nme:200000:32768\n")[0] == "ok"
+    status, _, detail, _ = subids(tmp_path, "me:100000:32768\n")
+    assert status == "fail" and "32768" in detail
+
+
+def test_bubblewrap_needs_one_line_of_65536(tmp_path):
+    split = "me:100000:32768\nme:200000:32768\n"
+    assert subids(tmp_path, split, backend="podman")[0] == "ok"
+    status, _, detail, _ = subids(tmp_path, split, backend="bwrap")
+    assert status == "fail" and "one line of at least 65536" in detail
+    assert subids(tmp_path, "me:100000:65536\n", backend="both")[0] == "ok"
+
+
+def test_the_advice_names_only_ids_the_system_has(tmp_path):
+    """A container with 140000 IDs has no 100000-165535: more IDs from its host, not a usermod past its top."""
+    status, _, _, hint = subids(tmp_path, "me:10000:5000\n", mapped="0 100000 140000")
+    assert status == "fail" and "lxc.idmap" in hint and "usermod" not in hint
+    status, _, _, hint = subids(tmp_path, "me:10000:5000\n", mapped="0 100000 300000")
+    assert status == "fail" and "usermod" in hint
+
+
+def test_check_newuidmap(tmp_path):
+    plain = tmp_path / "newuidmap"
+    plain.write_text("")
+    plain.chmod(0o755)
+    status, _, detail, hint = doctor.check_newuidmap(lambda name: str(plain))
+    assert status == "fail" and "neither setuid root nor file capabilities" in detail and "uidmap" in hint
+    assert doctor.check_newuidmap(lambda name: None)[2] == "newuidmap not found"
+    real = shutil.which("newuidmap")
+    if real and (os.stat(real).st_mode & 0o4000 or _has_caps(real)):
+        assert doctor.check_newuidmap()[0] == "ok"
+
+
+def _has_caps(path):
+    try:
+        os.getxattr(path, "security.capability")
+        return True
+    except OSError:
+        return False
+
+
+RESULTS = [("ok", "Podman", "rootless, 5.4.2", ""), ("warn", "Login claude", "no login", "sandbox-ai login claude"),
+           ("fail", "Delegated UID/GID ranges", "fewer than 65534 " + "and more words " * 12, "give this system more IDs"),
+           ("skip", "VPN", "no profiles", ""), ("ok", "Git identity", "me", "")]
+
+
+def test_doctor_is_a_table_by_section_in_colour(monkeypatch):
+    monkeypatch.setenv("COLUMNS", "80")
+    lines = []
+    assert doctor.report(RESULTS, lines.append, colour=True) == 1
+    text = "\n".join(lines)
+    assert "\033[32mok  \033[0m" in text, "ok in green"
+    assert "\033[38;5;208mWARN\033[0m" in text and "\033[38;5;208m-> sandbox-ai login claude\033[0m" in text, "orange"
+    assert "\033[31mFAIL\033[0m" in text and "\033[90m--  \033[0m" in text, "problems red, not checked grey"
+    assert lines[-1] == "\033[31m1 problem(s), 1 warning(s)\033[0m", "the summary in the colour of the worst"
+    sections = [line for line in lines if line.startswith("\033[36m")]
+    assert [s.replace("\033[36m", "").replace("\033[0m", "") for s in sections] == ["Engine", "Agents", "Project"]
+    plain = []
+    doctor.report(RESULTS, plain.append, colour=False)
+    assert not any("\033" in line for line in plain)
+    assert all(len(line) <= 80 for line in plain), "wrapped at the terminal's width"
+    detail = next(i for i, line in enumerate(plain) if "FAIL" in line)
+    assert plain[detail + 1].startswith(" " * 34) and "more words" in plain[detail + 1], "continued under itself"
+    ok = []
+    doctor.report([RESULTS[0]], ok.append, colour=True)
+    assert ok[-1] == "\033[32mEverything needed is in place.\033[0m"
+
+
+def test_doctor_plain_and_without_colour(monkeypatch, capsys):
+    lines = []
+    doctor.report(RESULTS, lines.append, colour=False, plain=True)
+    assert lines[0] == "ok    Podman                    rootless, 5.4.2", "one line per check, as before"
+    assert lines[2] == " " * 32 + "-> sandbox-ai login claude"  # under the result, as before
+    monkeypatch.setattr(doctor, "checks", lambda backend, podman_url: RESULTS)
+    monkeypatch.setenv("FORCE_COLOR", "1")  # even then --no-color wins
+    assert doctor.cli(["--no-color"]) == 1
+    assert "\033" not in capsys.readouterr().out
+    doctor.cli([])
+    assert "\033[38;5;208mWARN" in capsys.readouterr().out
+    monkeypatch.delenv("FORCE_COLOR")
+    monkeypatch.setenv("NO_COLOR", "1")
+    doctor.cli([])
+    assert "\033" not in capsys.readouterr().out
+
+
+def test_check_pasta_needs_dev_net_tun(tmp_path):
+    """pasta without /dev/net/tun (an LXC container whose host passes none in) fails every start."""
+    which = lambda name: "/usr/bin/pasta"  # noqa: E731
+    status, _, detail, hint = doctor.check_pasta(which=which, tun=tmp_path / "tun")
+    assert status == "fail" and "is missing" in detail and "lxc.mount.entry: /dev/net/tun" in hint
+    (tmp_path / "tun").write_text("")  # a file is no device
+    assert doctor.check_pasta(which=which, tun=tmp_path / "tun")[0] == "fail"
+    if os.path.exists("/dev/null"):  # a character device stands in for the tun device
+        assert doctor.check_pasta(which=which, tun=Path("/dev/null"))[0] == "ok"
+    assert doctor.check_pasta(which=lambda name: None)[2] == "not found"
+    assert doctor.check_pasta("unix:///x")[0] == "skip"

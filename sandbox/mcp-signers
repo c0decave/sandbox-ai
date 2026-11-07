@@ -1,0 +1,12 @@
+# Keys that sign the catalog of sandbox-ai-mcp (ssh-keygen ALLOWED SIGNERS format).
+#
+# A catalog's catalog.json.sig must verify against one of these keys before `sandbox-ai mcp add` takes an
+# entry of it: the signature says the servers were built from their pinned sources, audited (PROVENANCE.md)
+# and passed their checks with sandbox-ai under Podman and Bubblewrap (the catalog's scripts/sign_catalog.py
+# refuses to sign otherwise), and it covers each image digest and rootfs hash. Each line:
+#
+#   mcp@sandbox-ai namespaces="sandbox-ai-mcp" ssh-ed25519 AAAA... comment
+#
+# Make a key with: ssh-keygen -t ed25519 -f ~/.config/sandbox-ai/mcp-signing-key -C "sandbox-ai-mcp"
+# and add the line for its .pub here (README, "Signed MCP servers").
+mcp@sandbox-ai namespaces="sandbox-ai-mcp" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBnhgaPUYUKqV9BD7PmdSluu1jRmEgzGo8NEW6XNisEJ sandbox-ai-mcp

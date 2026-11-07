@@ -1,0 +1,31 @@
+#!/bin/sh
+# sandbox-ai.app/Contents/MacOS/sandbox-ai-app: the app (the bundle's executable). `sandbox-ai-app cli ARGS...`
+# runs the command line instead, like the AppImage.
+set -eu
+self=$0
+while [ -L "$self" ]; do
+  target=$(readlink -- "$self")
+  case $target in /*) self=$target ;; *) self=$(dirname -- "$self")/$target ;; esac
+done
+macos=$(cd -- "$(dirname -- "$self")" && pwd -P)
+contents=$(dirname -- "$macos")
+if [ "${1:-}" = cli ]; then
+  shift
+  exec "$macos/sandbox-ai" "$@"
+fi
+PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:/opt/podman/bin"
+export PATH
+# The package and the copy sandbox-ai runs in: no workspace, rw mount or --state-dir may hold them.
+SANDBOX_AI_PACKAGE=$(dirname -- "$contents") SANDBOX_AI_PACKAGE_COPY="$resources/sandbox-ai"
+export SANDBOX_AI_PACKAGE SANDBOX_AI_PACKAGE_COPY
+resources="$contents/Resources"
+# The sandbox-ai inside (yours, if SANDBOX_AI_HOME names one); a start at login runs this file.
+SANDBOX_AI_HOME=${SANDBOX_AI_HOME:-$resources/sandbox-ai}
+SANDBOX_AI_APP_PACKAGE_LAUNCHER="$macos/sandbox-ai-app"
+export SANDBOX_AI_HOME SANDBOX_AI_APP_PACKAGE_LAUNCHER
+# -B: nothing is written into the app (compiled when built). -I: neither the current folder nor PYTHON* variables reach the import path; the app and PySide6 by path.
+exec "$resources/python/bin/python3" -I -B -c 'import runpy, sys
+sys.path[0:0] = [sys.argv[2], sys.argv[1]]
+sys.argv = ["sandbox-ai-app", *sys.argv[3:]]
+runpy.run_module("sandbox_ai_app", run_name="__main__", alter_sys=True)' \
+  "$resources/pyside" "$resources/sandbox-ai/projects/sandbox-ai-app" "$@"

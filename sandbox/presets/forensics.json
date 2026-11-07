@@ -1,0 +1,33 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "forensics",
+  "title": "Forensics and incident response",
+  "description": "Evidence read-only, the agent reaching only its provider in the security mode high, decoy credentials that report any attempt to use them; The Sleuth Kit, ExifTool and YARA as MCP servers.",
+  "category": "analysis",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--mode",
+    "high",
+    "--mount",
+    "{evidence}:/mnt/evidence:ro",
+    "--canaries",
+    "all"
+  ],
+  "mcp": [
+    "hub:sleuthkit",
+    "hub:exiftool",
+    "hub:yara"
+  ],
+  "values": {
+    "evidence": {
+      "label": "Folder with the evidence (images, files)",
+      "kind": "folder"
+    }
+  },
+  "prompt": "Examine the evidence in /mnt/evidence: file systems (Sleuth Kit), metadata (ExifTool), known malware (YARA). Keep a timeline. Never modify the evidence. Write /work/case-notes.md with what you found and how."
+}

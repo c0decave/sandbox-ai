@@ -1,0 +1,17 @@
+# PySide6 for the AppImage and the macOS app, installed with: pip install --require-hashes --only-binary :all:
+# PySide6 6.12.0, uploaded to PyPI on 2026-10-08 (at least 14 days before it was pinned, see pins.sh); the
+# packages bring Python 3.13, so the 6.12.0 crash below Python 3.12 does not apply. Hashes: Linux x86_64
+# (manylinux_2_34: glibc 2.34+), Linux aarch64 (manylinux_2_39: glibc 2.39+), macOS 14+ universal2.
+#
+# Not included: PySide6-Addons and PySide6-WebEngine (QtWebEngine for the app's terminal tabs, 6.12.0.140): they
+# would add about 176 MB of wheels on Linux and 340 MB on macOS, almost three times the size of the package,
+# for one optional page (install.sh also installs them only with --app-terminal). Without them the app opens
+# terminals in a terminal window.
+pyside6-essentials==6.12.0 \
+    --hash=sha256:16f4b5e41daf49235ae048458243da9efe5f3d8040f9cc5aa454ce69893d3bd9 \
+    --hash=sha256:08c5841063fc1df69b7fa1ee405f539e66576a83fc48004be3e2c5e35ccbfa69 \
+    --hash=sha256:0867b709a724db28b161227c7d6ecb5ed10cc09226a53542417ac6dee1308239
+shiboken6==6.12.0 \
+    --hash=sha256:3bde565bb0890044b5c7f63808adddede5abc241e9395a2bfed61919884d6240 \
+    --hash=sha256:ff72a72b3277b418902d562b987b33a6f6818bed9fe40a49d634d09bc67f620e \
+    --hash=sha256:47105e05baf57d35453e07d240bbe59cb4b8d9565377ea5134ff9fb37d4f5c02

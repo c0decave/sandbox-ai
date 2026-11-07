@@ -1,0 +1,9 @@
+# Keys that sign sandbox-ai releases (ssh-keygen ALLOWED SIGNERS format, see RELEASING.md).
+#
+# A release signs its SHA256SUMS with one of these keys (SHA256SUMS.sig). install.sh and
+# `sandbox-ai update` accept a release only when the signature verifies against the keys of the
+# tree that is installed now; the new tree's keys count from the next update on. As long as no key
+# is listed here, updates are checked against SHA256SUMS only.
+#
+# One key per line, exactly in this form (scripts/release_key.sh show prints it):
+#   release@sandbox-ai namespaces="sandbox-ai-release" ssh-ed25519 AAAA... [comment]

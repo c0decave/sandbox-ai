@@ -1,0 +1,19 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "onboarding-buddy",
+  "title": "Onboarding buddy",
+  "description": "A guided tour of the project for a new team member, with screenshots from a virtual screen.",
+  "category": "development",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--gui",
+    "--allow-pypi",
+    "--allow-npm"
+  ],
+  "prompt": "Make an onboarding guide for someone new to this project: set it up from scratch, run it, take screenshots of what they will see (the virtual display :99, e.g. with import or scrot), and write /work/onboarding/README.md with the steps, the screenshots and the five things that surprised you."
+}

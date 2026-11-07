@@ -139,7 +139,7 @@ def test_mcp_bridge_reports_missing_socket(tmp_path):
 # --- launcher integration --------------------------------------------------
 
 def test_agent_injection_per_agent(scenario):
-    bridge = ["-I", "/sandbox/runtime.py", "--internal-mcp-bridge", "/sandbox/mcp/demo/server.sock"]
+    bridge = ["-I", "/sandbox/runtime.py", "--internal-mcp-bridge", "/run/sandbox-mcp/demo/server.sock"]
     if scenario == "happy":
         a = s.parse_args(["claude", "--mcp", "demo", "--", "-p", "hi"])
         cmd = s.agent_command(a, "claude")
@@ -148,14 +148,15 @@ def test_agent_injection_per_agent(scenario):
     elif scenario == "sad":
         # Custom binaries and probes get nothing injected.
         assert s.agent_command(s.parse_args(["claude", "--mcp", "demo", "--binary", "/bin/sh"]), "/bin/sh") == ["/bin/sh"]
-        assert "OPENCODE_CONFIG_CONTENT" not in s.agent_environment(s.parse_args(["opencode"]))
+        assert set(json.loads((s.agent_environment(s.parse_args(["opencode"]))).get("OPENCODE_CONFIG_CONTENT", "{}"))) <= set(s.OPENCODE_TELEMETRY_CONFIG)  # only --telemetry off's settings
     else:
         cmd = s.agent_command(s.parse_args(["codex", "--mcp", "demo", "--mcp", "fs", "--", "exec", "x"]), "codex")
         assert cmd[1:5] == ["-c", 'mcp_servers.demo.command="python3"', "-c", f"mcp_servers.demo.args={json.dumps(bridge)}"]
         assert 'mcp_servers.fs.command="python3"' in cmd and cmd[-2:] == ["exec", "x"]
         env = s.agent_environment(s.parse_args(["opencode", "--mcp", "demo"]))
         assert json.loads(env["OPENCODE_CONFIG_CONTENT"]) == {
-            "mcp": {"demo": {"type": "local", "command": ["python3", *bridge], "enabled": True}}}
+            "mcp": {"demo": {"type": "local", "command": ["python3", *bridge], "enabled": True}},
+            **s.OPENCODE_TELEMETRY_CONFIG}
 
 
 def test_mcp_socket_dirs_are_mounted_read_only(tmp_path):
@@ -163,10 +164,10 @@ def test_mcp_socket_dirs_are_mounted_read_only(tmp_path):
     s.validate(a)
     host = s.mcp_socket_dir("demo")
     _, run = s.pod_commands(a, "pod", tmp_path, tmp_path / "home")
-    assert f"type=bind,src={host},dst=/sandbox/mcp/demo,ro,nodev" in run
+    assert f"type=bind,src={host},dst=/sandbox/mcp-upstream/demo,ro,nodev" in run
     a.backend = "bwrap"
     cmd = s.bwrap_command(a, tmp_path, tmp_path / "home")
-    index = cmd.index("/sandbox/mcp/demo")
+    index = cmd.index("/sandbox/mcp-upstream/demo")
     assert cmd[index - 2:index] == ["--ro-bind", str(host)]
     server = s.parse_args(["codex", "--workspace", str(tmp_path / "w"), "--mcp-socket-dir", str(tmp_path / "sock")])
     s.validate(server)
@@ -226,10 +227,21 @@ def test_definitions(scenario, tmp_path):
             m.definitions()
 
 
-def fake_supervisor(tmp_path, pid, name):
+def fake_supervisor(tmp_path, pid, name, start=None):
     entry = tmp_path / "proc" / str(pid)
     entry.mkdir()
     (entry / "cmdline").write_bytes(b"python3\0--mcp-socket-dir\0" + os.fsencode(str(s.mcp_socket_dir(name))) + b"\0")
+    if start is not None:
+        (entry / "stat").write_text(f"{pid} (python3) S 1" + " 0" * 17 + f" {start} 4096\n")  # start: field 22
+
+
+def test_status_compares_the_start_time(scenario, tmp_path):
+    fake_supervisor(tmp_path, 66, "demo", start=7000)
+    state = {"happy": {"pid": 66, "pid_start": 7000}, "sad": {"pid": 66, "pid_start": 6999},
+             "edge": {"pid": 66}}[scenario]
+    m.save_state("demo", state)
+    # sad: same PID and command line, but a later process; edge: a record of an older version.
+    assert m.status("demo") == {"happy": "running", "sad": "stopped", "edge": "running"}[scenario]
 
 
 def test_ensure_running(scenario, tmp_path, monkeypatch):
@@ -255,14 +267,19 @@ def test_ensure_running(scenario, tmp_path, monkeypatch):
         with pytest.raises(ValueError, match="Unknown MCP server: nope"):
             m.ensure_running("nope", a)
         return
-    launched = {}
+    launched, readers = {}, []
     def popen(cmd, **kwargs):
+        if "--internal-log" in cmd:  # the log reader: the supervisor's output goes through it
+            readers.append(cmd)
+            return Mock(pid=4320)
         launched.update(cmd=cmd, **kwargs)
         (s.mcp_socket_dir("demo") / "server.sock").touch()
+        fake_supervisor(tmp_path, 4321, "demo", start=31337)
         return Mock(pid=4321, poll=Mock(return_value=None))
     monkeypatch.setattr(m.subprocess, "Popen", popen)
     monkeypatch.setattr(m.launcher(), "remove_stale_pod", Mock(return_value=False))
     assert m.ensure_running("demo", a) == "started"
+    assert readers == [[sys.executable, "-I", str(ROOT / "sandbox/mcp.py"), "--internal-log", str(m.state_dir("demo"))]]
     cmd = launched["cmd"]
     assert cmd[3] == "codex" and "--no-auth" in cmd and "--no-provider-defaults" in cmd
     assert cmd[cmd.index("--mcp-socket-dir") + 1] == str(s.mcp_socket_dir("demo"))
@@ -273,7 +290,7 @@ def test_ensure_running(scenario, tmp_path, monkeypatch):
     # A fixed, labelled pod name: a pod left by a crashed supervisor can be found and removed.
     assert cmd[cmd.index("--pod-name") + 1] == "agent-mcp-demo"
     m.launcher().remove_stale_pod.assert_called_once_with(a, "agent-mcp-demo", s.mcp_socket_dir("demo").resolve())
-    assert m.load_state("demo")["pid"] == 4321
+    assert m.load_state("demo")["pid"] == 4321 and m.load_state("demo")["pid_start"] == 31337
     assert s.mcp_socket_dir("demo").stat().st_mode & 0o777 == 0o700
 
 
@@ -423,9 +440,39 @@ def test_server_lock_serializes_starts(scenario, tmp_path, monkeypatch):
 DIGEST = "sha256:" + "a" * 64
 
 
-def catalog(tmp_path, entries):
+@pytest.fixture(scope="session")
+def mcp_key(tmp_path_factory):
+    """An MCP signing key for the tests (the real ones are in sandbox/mcp-signers)."""
+    directory = tmp_path_factory.mktemp("mcp-key")
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "test", "-f", str(directory / "key")],
+                   check=True)
+    kind, key = (directory / "key.pub").read_text().split()[:2]
+    k = m.release_keys()
+    (directory / "signers").write_text(k.line(kind, key, k.MCP) + "\n")
+    return directory
+
+
+@pytest.fixture(autouse=True)
+def trusted_mcp_key(mcp_key, monkeypatch):
+    monkeypatch.setitem(m.release_keys().MCP, "signers", mcp_key / "signers")
+    SIGNING_KEY[:] = [mcp_key / "key"]
+    return mcp_key
+
+
+SIGNING_KEY = []
+
+
+def sign(path, key=None, ring=None):
+    k = m.release_keys()
+    data = Path(path).read_bytes()
+    Path(str(path) + ".sig").write_bytes(k.sign(data, key or SIGNING_KEY[0], ring or k.MCP))
+
+
+def catalog(tmp_path, entries, signed=True):
     path = tmp_path / "catalog.json"
     path.write_text(json.dumps({"schema": "axross-mcp-catalog", "version": 1, "entries": entries}))
+    if signed:
+        sign(path)
     return [("t", str(path))]
 
 
@@ -511,7 +558,9 @@ def test_image_server_starts_as_a_bridge_on_the_host(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="needs the variable KEY"):
         m.ensure_running("ddg", a)
     monkeypatch.setenv("KEY", "value")
+    fake_supervisor(tmp_path, os.getpid(), "ddg", start=4242)
     assert m.ensure_running("ddg", a) == "started"
+    assert m.load_state("ddg")["pid_start"] == 4242
     cmd, kwargs = started[-1]
     assert cmd[2:4] == [str(ROOT / "sandbox/runtime.py"), "--internal-mcp-serve"]
     assert cmd[4] == str(s.mcp_socket_dir("ddg") / "server.sock") and cmd[5] == "--"
@@ -525,8 +574,11 @@ def test_catalog_command_lists_both_catalogs(tmp_path, capsys):
     second.write_text(json.dumps({"schema": "axross-mcp-catalog", "version": 1, "entries": [{**BINWALK, "digest": None}]}))
     assert m.cli(["catalog", "-c", str(first), "-c", str(second), "-c", str(tmp_path / "missing.json")]) == 0
     captured = capsys.readouterr()
-    assert "c0:duckduckgo  [allowlist html.duckduckgo.com:443]  DuckDuckGo search" in captured.out
-    assert "c1:binwalk  [none]  binwalk  (not published yet)" in captured.out
+    assert "c0:duckduckgo  [allowlist html.duckduckgo.com:443]  DuckDuckGo search  unsigned" in captured.out
+    assert "c1:binwalk  [none]  binwalk  (not published yet)  unsigned" in captured.out
+    sign(first)
+    assert m.cli(["catalog", "-c", str(first)]) == 0
+    assert "DuckDuckGo search  signed" in capsys.readouterr().out
     assert "catalog not read" in captured.err
 
 
@@ -597,3 +649,243 @@ def test_image_servers_obey_the_policy(monkeypatch):
     with pytest.raises(ValueError, match="network full is not allowed"):
         m.check_image_policy("fetch", {"image": "x", "network": "full"})
     m.check_image_policy("bw", {"image": "x"})  # no network: fine
+
+
+def test_the_catalog_in_sandbox_ais_own_tree_comes_first(tmp_path):
+    (tmp_path / "projects" / "sandbox-ai-mcp").mkdir(parents=True)
+    local = tmp_path / "projects" / "sandbox-ai-mcp" / "catalog.json"
+    local.write_text(json.dumps({"schema": "axross-mcp-catalog", "version": 1, "entries": [{"name": "x"}]}))
+    chosen = dict(m.default_catalogs(tmp_path))
+    assert chosen["mcp"] == str(local) and chosen["hub"].startswith("https://")
+    assert dict(m.default_catalogs(tmp_path / "elsewhere"))["mcp"].startswith("https://")
+
+
+def test_an_unpublished_catalog_is_named_as_such():
+    import urllib.error
+
+    def missing(url):
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+    found, problems = m.catalog_entries([("mcp", "https://example.org/catalog.json")], fetch=missing)
+    assert found == [] and "not published there (yet)" in problems[0] and "--catalog" in problems[0]
+
+
+# --- VPN in front of an MCP server -------------------------------------------------------------------------
+
+def test_image_server_vpn_needs_network_full_and_a_profile_name():
+    image = f"ghcr.io/a/b@{DIGEST}"
+    assert m.validated_image({"image": image, "network": "full", "vpn": "corp"}, "t")["vpn"] == "corp"
+    with pytest.raises(ValueError, match="a VPN needs network full"):
+        m.validated_image({"image": image, "vpn": "corp"}, "t")
+    with pytest.raises(ValueError, match="vpn must name a VPN profile"):
+        m.validated_image({"image": image, "network": "full", "vpn": "../x"}, "t")
+    definition = m.definition_from_entry({**ENTRY, "network": "none"}, network="full", vpn="corp")
+    assert definition["vpn"] == "corp"
+    assert "--network=container:sandbox-ai-vpn-mcp-ddg" in m.image_command(definition, vpn_container="sandbox-ai-vpn-mcp-ddg")
+    assert f"--network={s.POD_NETWORK}" in m.image_command(definition)
+
+
+def test_image_server_with_a_vpn_starts_behind_its_container(tmp_path, monkeypatch):
+    config = m.config_file()
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"ddg": {"image": f"ghcr.io/a/b@{DIGEST}", "network": "full", "vpn": "corp"},
+                                  "plain": {"image": f"ghcr.io/a/b@{DIGEST}", "network": "full"}}))
+    started = []
+
+    class Process:
+        pid = os.getpid()
+
+        def poll(self):
+            return None
+    monkeypatch.setattr(m.subprocess, "Popen", lambda cmd, **kw: started.append(cmd) or Process())
+    monkeypatch.setattr(m, "wait_for_socket", lambda *a, **kw: None)
+    fake_supervisor(tmp_path, os.getpid(), "ddg", start=4242)
+    assert m.ensure_running("ddg", s.parse_args(["codex"])) == "started"
+    cmd = started[-1]
+    sock = s.mcp_socket_dir("ddg")
+    assert cmd[1:7] == ["-I", str(ROOT / "sandbox/vpn.py"), "--internal-mcp-vpn", "corp", "sandbox-ai-vpn-mcp-ddg",
+                        str(sock.resolve())]
+    bridge = cmd[cmd.index("--") + 1:]
+    assert bridge[2:5] == [str(ROOT / "sandbox/runtime.py"), "--internal-mcp-serve", str(sock / "server.sock")]
+    assert "--network=container:sandbox-ai-vpn-mcp-ddg" in bridge and m.load_state("ddg")["vpn"] == "corp"
+    # mcp start --vpn puts a VPN in front of a server whose definition has none.
+    assert m.ensure_running("plain", s.parse_args(["codex"]), vpn="home") == "started"
+    assert started[-1][4] == "home" and m.load_state("plain")["vpn"] == "home"
+
+
+def test_mcp_start_vpn_for_a_command_server(tmp_path, monkeypatch):
+    launched = {}
+
+    def popen(cmd, **kwargs):
+        if "--internal-log" in cmd:  # the log reader (mcp.start_logged)
+            return Mock(pid=4320)
+        launched["cmd"] = cmd
+        (s.mcp_socket_dir("demo") / "server.sock").touch()
+        fake_supervisor(tmp_path, 4321, "demo", start=1)
+        return Mock(pid=4321, poll=Mock(return_value=None))
+    monkeypatch.setattr(m.subprocess, "Popen", popen)
+    monkeypatch.setattr(m.launcher(), "remove_stale_pod", Mock(return_value=False))
+    a = s.parse_args(["codex", "--backend", "podman"])
+    with pytest.raises(ValueError, match="profile name"):
+        m.ensure_running("demo", a, vpn="bad name")
+    assert m.ensure_running("demo", a, vpn="corp") == "started"
+    cmd = launched["cmd"]
+    options = cmd[:cmd.index("--")]
+    assert options[options.index("--vpn") + 1] == "corp" and m.load_state("demo")["vpn"] == "corp"
+    # Running, but without that VPN: not silently reused.
+    with pytest.raises(ValueError, match="running without the VPN home"):
+        m.ensure_running("demo", a, vpn="home")
+    assert m.ensure_running("demo", a, vpn="corp") == "running"
+
+
+def test_image_servers_and_the_vpn_policy(monkeypatch):
+    l = m.launcher()
+    image = {"image": "x", "network": "full"}
+    monkeypatch.setattr(l, "load_policy", lambda path=None: {"version": 1, "require_vpn": True})
+    with pytest.raises(ValueError, match="requires a VPN for network full"):
+        m.check_image_policy("fetch", image)
+    m.check_image_policy("fetch", {**image, "vpn": "corp"})
+    m.check_image_policy("bw", {"image": "x"})  # no network, no VPN needed
+    monkeypatch.setattr(l, "load_policy", lambda path=None: {"version": 1, "require_vpn": ["corp"]})
+    with pytest.raises(ValueError, match=r"requires a VPN for network full \(corp\)"):
+        m.check_image_policy("fetch", {**image, "vpn": "home"})
+    monkeypatch.setattr(l, "load_policy", lambda path=None: {"version": 1, "forbid": ["--vpn"]})
+    with pytest.raises(ValueError, match="--vpn is not allowed"):
+        m.check_image_policy("fetch", {**image, "vpn": "corp"})
+
+
+def test_mcp_cli_passes_the_vpn(monkeypatch):
+    calls = []
+    monkeypatch.setattr(m, "ensure_running", lambda name, a, vpn=None: calls.append((name, vpn)))
+    monkeypatch.setattr(m, "add", lambda *args, **kwargs: calls.append(("add", kwargs.get("vpn"))))
+    assert m.cli(["start", "demo", "--vpn", "corp"]) == 0
+    assert m.cli(["add", "duckduckgo", "--network", "full", "--vpn", "corp"]) == 0
+    assert calls == [("demo", "corp"), ("add", "corp")]
+
+
+
+# --- signed catalogs (sandbox/mcp-signers) ---------------------------------------------------------------------
+
+def test_a_signed_catalog_is_taken_and_the_definition_says_by_whom(tmp_path):
+    sources = catalog(tmp_path, [ENTRY])
+    definition = m.add("duckduckgo", network="full", catalogs=sources, pull=False, out=lambda line: None)
+    k = m.release_keys()
+    (kind, key), = k.load(ring=k.MCP)
+    assert definition["signed_by"] == k.fingerprint(key)
+    assert m.definitions()["duckduckgo"]["signed_by"] == k.fingerprint(key)
+
+
+def test_an_unsigned_catalog_only_on_request(tmp_path):
+    sources = catalog(tmp_path, [ENTRY], signed=False)
+    with pytest.raises(ValueError, match="not signed by a trusted key .*--unsigned adds it anyway"):
+        m.add("duckduckgo", network="full", catalogs=sources, pull=False, out=lambda line: None)
+    out = []
+    definition = m.add("duckduckgo", network="full", catalogs=sources, pull=False, out=out.append, unsigned=True)
+    assert definition["signed_by"] is None and any("added unsigned" in line for line in out)
+
+
+@pytest.mark.parametrize("how", ["changed", "other key", "release namespace", "garbage"])
+def test_a_signature_that_does_not_verify_is_refused_even_unsigned(tmp_path, how, mcp_key):
+    sources = catalog(tmp_path, [ENTRY])
+    path = Path(sources[0][1])
+    k = m.release_keys()
+    if how == "changed":  # a digest swapped after signing
+        path.write_text(path.read_text().replace(DIGEST, "sha256:" + "1" * 64))
+    elif how == "other key":
+        other = tmp_path / "other"
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(other)], check=True)
+        sign(path, other)
+    elif how == "release namespace":  # a release signature (or any other) is no catalog signature
+        sign(path, mcp_key / "key", k.RELEASE)
+    else:
+        Path(str(path) + ".sig").write_text("not a signature")
+    for unsigned in (False, True):
+        with pytest.raises(ValueError, match="signature does not verify"):
+            m.add("duckduckgo", network="full", catalogs=sources, pull=False, out=lambda line: None, unsigned=unsigned)
+    assert "duckduckgo" not in m.definitions()
+
+
+def test_without_a_trusted_key_nothing_is_signed(tmp_path, monkeypatch):
+    sources = catalog(tmp_path, [ENTRY])
+    monkeypatch.setitem(m.release_keys().MCP, "signers", tmp_path / "no-signers")
+    (entry,) = [e for _, e in m.catalog_entries(sources)[0]]
+    assert entry["_signature"]["state"] == "unsigned" and "no MCP signing key" in entry["_signature"]["reason"]
+
+
+def test_the_shipped_signers_file_is_well_formed():
+    k = m.release_keys()
+    assert k.load(ring=k.MCP) == k.parse(k.MCP["signers"].read_text(), "mcp-signers", k.MCP)
+    with pytest.raises(ValueError, match="mcp@sandbox-ai"):
+        k.parse('release@sandbox-ai namespaces="sandbox-ai-release" ssh-ed25519 AAAA', "x", k.MCP)
+
+
+def test_a_server_that_ignores_the_end_of_its_input_gives_its_slot_back(tmp_path, monkeypatch):
+    """An instance whose agent connection ended gets its stdin closed; one that does not exit on that is stopped after
+    a grace time, and its slot of MCP_INSTANCE_LIMIT is free again (else, after the limit, every connection is
+    refused for good)."""
+    rt = s.RUNTIME
+    monkeypatch.setattr(rt, "MCP_INSTANCE_LIMIT", 1)
+    monkeypatch.setattr(rt, "MCP_EOF_GRACE", 0.5, raising=False)
+    server = tmp_path / "stubborn.py"
+    server.write_text("import sys, time\nfor line in sys.stdin:\n    print(line, end='', flush=True)\ntime.sleep(30)\n")
+    short = Path(tempfile.mkdtemp(prefix="mcp-", dir="/tmp"))
+    sock = short / "s.sock"
+    threading.Thread(target=rt.mcp_serve, args=(str(sock), [sys.executable, "-I", str(server)]),
+                     kwargs={"cwd": "/", "out": io.StringIO()}, daemon=True).start()
+    deadline = time.monotonic() + 5
+    while not sock.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    ping = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}) + "\n"
+
+    def talk():
+        with socket.socket(socket.AF_UNIX) as client:
+            client.settimeout(5)
+            client.connect(str(sock))
+            try:
+                client.sendall(ping.encode())
+                return client.makefile("r").readline()
+            except ConnectionError:
+                return ""  # refused: closed at once
+    assert talk() == ping
+    deadline, answer = time.monotonic() + 10, ""
+    while answer != ping and time.monotonic() < deadline:
+        answer = talk()  # refused (closed at once) while the first instance still holds the slot
+        time.sleep(0.1)
+    assert answer == ping, "the slot of the instance that ignored its end of input never came back"
+
+
+def test_a_thread_that_cannot_start_does_not_end_the_mcp_server(monkeypatch):
+    """At the process limit a connection's thread may not start: that connection is closed and its slot given back;
+    the next ones are still served (mcp_serve does not end with its socket left open)."""
+    rt = s.RUNTIME
+    monkeypatch.setattr(rt, "MCP_INSTANCE_LIMIT", 1)
+    real, left = threading.Thread, [1]
+
+    class Failing(real):
+        def start(self):
+            if getattr(self._target, "__name__", "") == "run" and left[0]:
+                left[0] -= 1
+                raise RuntimeError("can't start new thread")
+            return super().start()
+    monkeypatch.setattr(threading, "Thread", Failing)
+    short = Path(tempfile.mkdtemp(prefix="mcp-", dir="/tmp"))
+    sock = short / "s.sock"
+    threading.Thread(target=rt.mcp_serve, args=(str(sock), ["cat"]), kwargs={"cwd": "/", "out": io.StringIO()},
+                     daemon=True).start()
+    deadline = time.monotonic() + 5
+    while not sock.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    ping = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}) + "\n"
+
+    def talk():
+        with socket.socket(socket.AF_UNIX) as client:
+            client.settimeout(3)
+            client.connect(str(sock))
+            try:
+                client.sendall(ping.encode())
+                return client.makefile("r").readline()
+            except ConnectionError:
+                return ""
+            except OSError:
+                return None
+    assert talk() == "", "closed: no thread for it"
+    assert talk() == ping, "the next connection is served, its slot was given back"

@@ -8,12 +8,16 @@ detachable sessions and the MCP serve/bridge ends. The host launcher (agent_sand
 loads it for the few helpers both sides share, never the other way round.
 """
 import base64
+import binascii
 import contextlib
+import errno
 import fnmatch
 import ctypes
 import fcntl
 import hashlib
 import ipaddress
+import io
+import itertools
 import json
 import os
 import posixpath
@@ -21,6 +25,7 @@ from pathlib import Path
 import re
 import secrets
 import select
+import shutil
 import shlex
 import signal
 import socket
@@ -43,6 +48,7 @@ GUI_CONFIG = Path("/sandbox/session/gui.json")
 SESSION_CONFIG = Path("/sandbox/session/config.json")
 # Display helpers run without any capability or privilege gain.
 DROP_ALL = ["setpriv", "--bounding-set=-all", "--inh-caps=-all", "--ambient-caps=-all", "--no-new-privs", "--"]
+FILE_RECENT_LIMIT = 4096
 INOTIFY_EVENTS = {0x8: "write", 0x10: "read", 0x100: "create", 0x200: "delete", 0x40: "move-from", 0x80: "move-to"}
 
 
@@ -185,15 +191,14 @@ def tool_call_record(line):
     if not isinstance(message, dict) or message.get("method") != "tools/call":
         return None
     params = message.get("params") if isinstance(message.get("params"), dict) else {}
-    # Shorten the values, not the JSON text: a multi-MB write_file must not stall the call, and a cut inside a
-    # string would leave "client_secret": "... without its closing quote, unmatched by the redaction.
-    arguments = redact_text(json.dumps(shortened(params.get("arguments", {})), ensure_ascii=False))
     return {"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "tool": str(params.get("name", ""))[:200],
-            "arguments": arguments[:2000] + ("..." if len(arguments) > 2000 else "")}
+            "arguments": McpGateway.arguments(params.get("arguments", {}))}
 
 
 MCP_LINE_LIMIT = 64 << 20  # one JSON-RPC message from the client
 MCP_INSTANCE_LIMIT = 16  # server instances (connections) at once
+MCP_EOF_GRACE = 10  # seconds an instance has to exit once its input ended, before it is terminated
+MCP_PENDING_LIMIT = 1000  # requests of one connection the server has not answered yet
 
 
 def relay_server_stderr(stream, out=None):
@@ -224,10 +229,378 @@ def mounts_changed(mounts):
     return None
 
 
-def mcp_serve(socket_path, command, cwd="/work", out=None):
-    """Server sandbox: one instance of the stdio MCP server per connection. Every tool call an agent makes
-    is written as a line `sandbox-ai-mcp-call {json}` to OUT (stderr: the server's supervisor.log)."""
+class McpGateway:
+    """The checks of one MCP server's tool calls, shared by its connections: the rules of the gateway
+    configuration ({"server", "rules", "approvals"}), the questions to the human and the records. Records
+    and questions are lines on OUT (stderr): on the host, the supervisor's log reader (mcp.py) writes them
+    to mcp-calls.jsonl and into the approvals directory, which this side can only read for the answers."""
+
+    def __init__(self, config=None, out=None, asker=None, taint=None, plain=False):
+        config = config or {}
+        # ASKER (the run's broker) and TAINT exist where the run is known: the supervisor's relay. PLAIN: records
+        # as JSON lines (a log file) rather than prefixed lines for the log reader on the host.
+        self.asker, self.taint, self.plain = asker, taint, plain
+        self.server = str(config.get("server") or "")
+        self.rules = Ruleset(config.get("rules", []))
+        self.approvals = Path(config["approvals"]) if config.get("approvals") else None
+        self.timeout = int(config.get("timeout", APPROVAL_SECONDS))
+        self.out = out or sys.stderr
+        self.lock = threading.Lock()
+        # Answers for "run" (or "always", which is capped to it): until the server stops.
+        self.decided, self.asked, self.token = {}, 0, secrets.randbelow(10 ** 9)
+        self.who = Attribution()
+
+    def client(self, connection):
+        """{"process": ...} of the agent's process at the other end of CONNECTION, as the kernel reports it
+        (SO_PEERCRED). The relay on the host (image servers) sees it; one in a server sandbox sees no process
+        of another sandbox (PID 0). Which agent sandbox connected is not known here."""
+        try:
+            pid, uid, _ = Attribution.peer(connection)
+        except OSError:
+            return {"process": {"unknown": "no peer credentials"}}
+        if pid <= 0:
+            return {"process": {"unknown": "the client runs in another sandbox (its process is not visible here)",
+                                "uid": uid}}
+        info = self.who.process(pid)
+        return {"process": info or {"unknown": "the client process ended", "pid": pid, "uid": uid}}
+
+    def emit(self, kind, record):
+        """A record line (KIND sandbox-ai-mcp-call or sandbox-ai-mcp-ask); JSON keeps it on one line."""
+        record = {"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                  **({"server": self.server} if self.server else {}), **record}
+        line = json.dumps(record, ensure_ascii=False, default=repr)
+        with self.lock:
+            print(line if self.plain else f"{kind} {line}", file=self.out, flush=True)
+
+    @staticmethod
+    def arguments(arguments):
+        """ARGUMENTS as the log and questions show them: shortened values (not JSON text: a multi-MB write_file
+        must not stall the call, and a cut inside a string would leave "client_secret": "... without its
+        closing quote, unmatched by the redaction), redacted, at most 2000 characters."""
+        text = redact_text(json.dumps(shortened(arguments), ensure_ascii=False, default=repr))
+        return text[:2000] + ("..." if len(text) > 2000 else "")
+
+    def decide(self, tool, arguments, ident, client=None):
+        """(allowed, reason) for a call of TOOL, asking the human where a rule says ask; the call is recorded
+        with CLIENT, the calling process (see client)."""
+        state = self.taint.shown() if self.taint is not None else None
+        verdict = self.rules.mcp(self.server, tool, arguments, state)
+        record = {"event": "call", "id": ident, "tool": tool[:200], "arguments": self.arguments(arguments),
+                  **(client or {}), **({"tainted": state.get("since")} if state and state.get("tainted") else {})}
+        if self.rules.mcp_active:
+            record.update(decision=verdict["decision"], rule=verdict["rule"], ruleset=verdict["ruleset"])
+        allowed, reason = verdict["decision"] == "allow", verdict["reason"]
+        if verdict["decision"] == "ask":
+            answer = self.ask(tool, record["arguments"], verdict, client)
+            record["approval"] = {k: answer.get(k) for k in ("decision", "scope", "reason")}
+            if answer.get("question"):
+                record["question"] = answer["question"]
+            allowed = answer.get("decision") == "allow"
+            if not allowed:
+                reason = f"not approved ({answer.get('reason', 'refused')}): {reason}"
+        if not allowed:
+            record["reason"] = reason
+        self.emit("sandbox-ai-mcp-call", record)
+        return allowed, reason
+
+    def ask(self, tool, arguments, verdict, client=None):
+        """The human's answer about a call (kind "mcp"), through the log reader on the host; refused after the
+        timeout. CLIENT: the calling process, shown in the question."""
+        if self.asker is not None:  # the run's broker: it asks, waits and remembers answers for the run
+            answer = self.asker("mcp", {"server": self.server, "tool": tool, "arguments": arguments,
+                                        "rule": verdict["rule"], "ruleset": verdict["ruleset"],
+                                        "reason": printable_text(verdict["reason"], 1000),
+                                        **({"taint": verdict["taint"]} if verdict.get("taint") else {}), **(client or {})})
+            answer = answer if isinstance(answer, dict) else {}
+            return {"decision": answer.get("decision", "deny"), "scope": answer.get("scope", "once"),
+                    "reason": answer.get("reason", "no answer")}
+        key = (verdict["ruleset"], verdict["rule"], tool)
+        with self.lock:
+            if key in self.decided:
+                return self.decided[key]
+            if self.approvals is None:
+                return {"decision": "deny", "scope": "once", "reason": "this server cannot ask (no approvals directory)"}
+            if self.asked >= RUN_QUESTIONS:
+                return {"decision": "deny", "scope": "once", "reason": "too many questions"}
+            self.asked += 1
+            ident = f"{int(time.time())}-{self.token}-{self.asked}"
+        self.emit("sandbox-ai-mcp-ask", {"id": ident, "kind": "mcp", "timeout": self.timeout, "tool": tool,
+                                         "arguments": arguments, "rule": verdict["rule"], "ruleset": verdict["ruleset"],
+                                         "reason": printable_text(verdict["reason"], 1000), **(client or {})})
+        deadline, answer = time.monotonic() + self.timeout, None
+        while time.monotonic() < deadline:
+            answer = self.answer(ident)
+            if answer:
+                break
+            time.sleep(0.2)
+        answer = {**(answer or {"decision": "deny", "scope": "once", "reason": f"no answer within {self.timeout} s"}),
+                  "question": ident}
+        if answer["scope"] in ("run", "always"):
+            with self.lock:  # later calls are not asked: their records name no question
+                self.decided[key] = {**{k: v for k, v in answer.items() if k != "question"}, "scope": "run"}
+        return answer
+
+    def observe(self, tool):
+        """The result of TOOL arrives: if a ruleset marks its results untrusted, the run is tainted first."""
+        if self.taint is not None and tool:
+            source = self.rules.untrusted_tool(self.server, tool)
+            if source:
+                self.taint.mark(source)
+
+    def answer(self, ident):
+        try:
+            data = json.loads((self.approvals / f"{ident}.answer").read_text())
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict) or data.get("decision") not in ("allow", "deny"):
+            return {"decision": "deny", "scope": "once", "reason": "unreadable answer"}
+        return {"decision": data["decision"], "scope": data.get("scope") if data.get("scope") in SCOPES else "once",
+                "reason": "answered"}
+
+
+class McpConnection:
+    """One agent connection through the relay. The agent's lines are checked and passed on re-encoded, so that
+    the server parses exactly what was checked; the server's lines go back with tools/list filtered and the
+    results of tool calls recorded."""
+    GATED = ("tools/call", "tools/list")
+
+    def __init__(self, gateway, connection, process):
+        self.gateway, self.connection, self.process = gateway, connection, process
+        self.write_lock, self.lock = threading.Lock(), threading.Lock()
+        self.pending = {}  # JSON of a request's id: {"method", "tool", "started"}
+        self.client = gateway.client(connection)
+
+    def send(self, data):
+        with self.write_lock:
+            self.connection.sendall(data)
+
+    def reply(self, ident, error=None, result=None):
+        message = {"jsonrpc": "2.0", "id": ident,
+                   **({"error": {"code": error[0], "message": error[1]}} if error else {"result": result})}
+        with contextlib.suppress(OSError):
+            self.send((json.dumps(message) + "\n").encode())
+
+    def refuse(self, ident, code, reason, **details):
+        """Answer a message here instead of passing it on, and record why (and who sent it)."""
+        self.gateway.emit("sandbox-ai-mcp-call", {"event": "refused", "reason": reason, **details, **self.client})
+        self.reply(ident, error=(code, f"sandbox-ai: {reason}"))
+
+    def forward(self, message):
+        self.process.stdin.write((json.dumps(message) + "\n").encode())
+        self.process.stdin.flush()
+
+    def client_line(self, line):
+        """Check one line from the agent: pass it on, or answer it here."""
+        if not line.strip():
+            return
+        try:
+            message, duplicated = Ruleset.parse_json(line.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            # Not forwarded: a server reading JSON across lines could find a message here the relay never saw.
+            return self.refuse(None, -32700, "not one JSON message on this line")
+        if isinstance(message, list):
+            methods = sorted({str(m.get("method"))[:100] for m in message if isinstance(m, dict) and "method" in m})
+            return self.refuse(None, -32600, "JSON-RPC batches are not passed on (MCP has none since 2025-06-18)",
+                               methods=methods[:20], messages=len(message))
+        if not isinstance(message, dict):
+            return self.refuse(None, -32600, "not a JSON-RPC object")
+        ident = message.get("id", MISSING)
+        # Strings and integers a server keeps as they are only: an id it may rewrite (1.0 as 1, an integer beyond
+        # 2^53 in JavaScript) would not match its reply, which then passes without the gateway seeing it.
+        if ident is not MISSING and ident is not None and (isinstance(ident, bool) or not isinstance(ident, (str, int))
+                                                           or isinstance(ident, int) and abs(ident) > (1 << 53) - 1):
+            return self.refuse(None, -32600, "an id is a string or an integer (at most 2^53 - 1)")
+        shown = None if ident is MISSING else ident
+        if duplicated:
+            return self.refuse(shown, -32600, "a key given twice (servers read such messages differently)")
+        method = message.get("method")
+        if isinstance(method, str) and method not in self.GATED and method.strip().casefold() in self.GATED:
+            return self.refuse(shown, -32601, f"no method {method[:100]!r} (method names are exact)")
+        if method == "notifications/cancelled" and isinstance(message.get("params"), dict):
+            with self.lock, contextlib.suppress(TypeError, ValueError):
+                self.pending.pop(json.dumps(message["params"].get("requestId")), None)
+        if isinstance(method, str) and ident is not MISSING:
+            key = json.dumps(ident)
+            with self.lock:
+                if key in self.pending:
+                    return self.refuse(shown, -32600, "the id of a request still open")
+                if len(self.pending) >= MCP_PENDING_LIMIT:
+                    return self.refuse(shown, -32000, f"more than {MCP_PENDING_LIMIT} requests open")
+                self.pending[key] = {"method": method, "started": time.monotonic()}
+        if method == "tools/call":
+            return self.call(message, ident)
+        self.forward(message)
+
+    def call(self, message, ident):
+        params = message.get("params")
+        key = None if ident is MISSING else json.dumps(ident)
+        shown = None if ident is MISSING else ident
+
+        def refused(code, reason):
+            with self.lock:
+                self.pending.pop(key, None)
+            self.refuse(shown, code, reason)
+        if not isinstance(params, dict) or not isinstance(params.get("name"), str):
+            return refused(-32602, "tools/call needs params.name")
+        tool, arguments = params["name"], params.get("arguments", {})
+        if not isinstance(arguments, dict):
+            return refused(-32602, "params.arguments must be an object")
+        if self.gateway.rules.mcp_active and not TOOL_NAME.fullmatch(tool):
+            return refused(-32602, "tool names have 1 to 128 of A-Z a-z 0-9 _ - . : /")
+        if key is not None:
+            with self.lock:
+                if key in self.pending:
+                    self.pending[key]["tool"] = tool[:200]
+        allowed, reason = self.gateway.decide(tool, arguments, shown, self.client)
+        if allowed:
+            return self.forward(message)
+        with self.lock:
+            self.pending.pop(key, None)
+        if key is not None:  # a call without id (a notification) gets no answer, and is not run either
+            self.reply(ident, result={"content": [{"type": "text", "text": f"sandbox-ai: {reason}"}], "isError": True})
+
+    def pump(self):
+        """The server's lines back to the agent until it ends."""
+        with contextlib.suppress(OSError, ValueError):
+            for line in iter(lambda: self.process.stdout.readline(MCP_LINE_LIMIT + 1), b""):
+                self.send(self.server_line(line))
+
+    def server_line(self, line):
+        if not self.pending:
+            return line
+        message = None
+        if len(line) <= MCP_LINE_LIMIT:
+            with contextlib.suppress(ValueError, RecursionError):
+                message = json.loads(line)
+        if not isinstance(message, dict):
+            # Not readable (too long, too deep, not JSON): it may be any pending call's result, so each pending
+            # call counts as answered by its tool before the agent reads it (an untrusted one taints: fail closed).
+            with self.lock:
+                calls = [request.get("tool") for request in self.pending.values() if request["method"] == "tools/call"]
+            for tool in calls:
+                self.gateway.observe(tool)
+            return line
+        if "method" in message or "id" not in message:
+            return line
+        with self.lock:
+            request = self.pending.pop(json.dumps(message["id"]), None)
+            calls = [r.get("tool") for r in self.pending.values() if r["method"] == "tools/call"] if request is None else []
+        if request is None:
+            for tool in calls:  # a reply that matches no call may be any pending call's: fail closed, as above
+                self.gateway.observe(tool)
+            return line
+        if request["method"] == "tools/list":
+            return self.filtered(message, line)
+        if request["method"] == "tools/call":
+            self.gateway.observe(request.get("tool"))  # before the agent reads the result
+            result = message.get("result") if isinstance(message.get("result"), dict) else {}
+            self.gateway.emit("sandbox-ai-mcp-call", {
+                "event": "result", "id": message["id"], "tool": request.get("tool"), "bytes": len(line),
+                "is_error": "error" in message or result.get("isError") is True,
+                "ms": int((time.monotonic() - request["started"]) * 1000)})
+        return line
+
+    def filtered(self, message, line):
+        """A tools/list answer without the tools every call of which is denied."""
+        result = message.get("result")
+        tools = result.get("tools") if isinstance(result, dict) else None
+        if not isinstance(tools, list):
+            return line
+        hidden = [tool["name"] for tool in tools if isinstance(tool, dict) and isinstance(tool.get("name"), str)
+                  and self.gateway.rules.hidden(self.gateway.server, tool["name"])]
+        if not hidden:
+            return line
+        self.gateway.emit("sandbox-ai-mcp-call", {"event": "list", "hidden": [name[:200] for name in hidden[:100]]})
+        kept = [tool for tool in tools if not (isinstance(tool, dict) and tool.get("name") in hidden)]
+        return (json.dumps({**message, "result": {**result, "tools": kept}}) + "\n").encode()
+
+
+MCP_RUN_DIR = Path("/run/sandbox-mcp")              # agent side: the supervisor's per-run relays
+MCP_UPSTREAM_DIR = Path("/sandbox/mcp-upstream")    # supervisor side: the servers' sockets, hidden from the agent
+
+
+class McpSocket:
+    """A running MCP server's socket in the place of a server process (mcp_serve's SPAWN): stdin and stdout
+    are its two directions; closing stdin ends the requests, so the server's end finishes its answers."""
+
+    class Input:
+        def __init__(self, sock):
+            self.sock, self.stream = sock, sock.makefile("wb")
+
+        def write(self, data):
+            return self.stream.write(data)
+
+        def flush(self):
+            self.stream.flush()
+
+        def close(self):
+            with contextlib.suppress(OSError):
+                self.stream.close()
+                self.sock.shutdown(socket.SHUT_WR)
+
+    def __init__(self, path):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            self.sock.connect(str(path))
+        except OSError:
+            self.sock.close()
+            raise
+        self.stdin, self.stdout = self.Input(self.sock), self.sock.makefile("rb")
+
+    def wait(self):
+        return 0
+
+    def close(self):
+        with contextlib.suppress(OSError):
+            self.sock.close()
+
+
+def start_hook_server(config, broker=None, taint=None, secret_values=(), path=None, log=None, stop=None):
+    """The supervisor's answer to the agent's hooks (see HookServer) on PATH (HOOK_SOCKET) until STOP is set, with
+    CONFIG's rules {"agent", "rules": [rulesets]}; LOG: tools.jsonl in the log directory. Returns once the socket
+    is open to the agent."""
+    path = Path(path or HOOK_SOCKET)
+    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    log = log or (LOG_DIR / "tools.jsonl" if LOG_DIR.is_dir() else None)
+    server = HookServer(Ruleset(config.get("rules", [])), broker, taint, log, secret_values)
+    thread = threading.Thread(target=server.serve, args=(path, stop), daemon=True)
+    thread.start()
+    server.ready.wait(5)
+    return thread
+
+
+def start_mcp_relays(relays, broker=None, taint=None, who=None, run_dir=None, upstream_dir=None, log=None):
+    """The supervisor's MCP relays of this run, one per server (RELAYS: {name: gateway configuration}): the
+    agent's bridge reaches RUN_DIR/NAME/server.sock, the relay the server's socket in UPSTREAM_DIR (hidden from
+    the agent, so it cannot go around). Here the run is known: the rules for tainted runs hold, questions go
+    to the run's BROKER, results of untrusted tools taint the run, calls are logged to LOG (mcp-calls.jsonl)."""
+    run_dir, upstream_dir = Path(run_dir or MCP_RUN_DIR), Path(upstream_dir or MCP_UPSTREAM_DIR)
+    if not relays:
+        return []
+    log = log or (LOG_DIR / "mcp-calls.jsonl" if LOG_DIR.is_dir() else None)
+    out = open(log, "a", buffering=1) if log else open(os.devnull, "w")  # noqa: SIM115 - lives with the run
+    threads = []
+    for name, config in relays.items():
+        directory = run_dir / name
+        directory.mkdir(mode=0o755, parents=True, exist_ok=True)
+        gate = McpGateway(config, out, asker=broker.ask if broker is not None else None, taint=taint, plain=True)
+        upstream = upstream_dir / name / "server.sock"
+        thread = threading.Thread(target=mcp_serve, daemon=True, args=(str(directory / "server.sock"), None),
+                                  kwargs={"gateway": gate, "spawn": lambda path=upstream: McpSocket(path)})
+        thread.start()
+        threads.append(thread)
+        deadline = time.monotonic() + 5
+        while not (directory / "server.sock").exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+    return threads
+
+
+def mcp_serve(socket_path, command, cwd="/work", out=None, gateway=None, spawn=None):
+    """Server sandbox: one instance of the stdio MCP server per connection, behind the gateway (GATEWAY: its
+    configuration, see McpGateway). Every tool call is written as a line `sandbox-ai-mcp-call {json}` to OUT
+    (stderr: on the host, mcp.py writes these to the server's mcp-calls.jsonl)."""
     out = out or sys.stderr
+    gate = gateway if isinstance(gateway, McpGateway) else McpGateway(gateway, out)
     server = listen_unix(socket_path)
     slots = threading.BoundedSemaphore(MCP_INSTANCE_LIMIT)
     mounts = json.loads(os.environ.get("SANDBOX_AI_MCP_MOUNTS") or "[]")  # an image server's host folders
@@ -249,13 +622,19 @@ def mcp_serve(socket_path, command, cwd="/work", out=None):
         def run(connection=connection):
             with connection:
                 try:
-                    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=connection.fileno(), cwd=cwd,
-                                               stderr=subprocess.PIPE)
-                    threading.Thread(target=relay_server_stderr, args=(process.stderr,), daemon=True).start()
+                    if spawn is not None:  # a running server's socket (the supervisor's per-run relay)
+                        process = spawn()
+                    else:
+                        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, cwd=cwd,
+                                                   stderr=subprocess.PIPE)
+                        threading.Thread(target=relay_server_stderr, args=(process.stderr,), daemon=True).start()
                 except OSError as exc:
                     print(f"agent-sandbox: MCP server failed: {exc}", file=sys.stderr)
                     slots.release()
                     return
+                session = McpConnection(gate, connection, process)
+                pump = threading.Thread(target=session.pump, daemon=True)
+                pump.start()
                 try:
                     stream = connection.makefile("rb")
                     while True:
@@ -266,19 +645,28 @@ def mcp_serve(socket_path, command, cwd="/work", out=None):
                             print(f"agent-sandbox: MCP message over {MCP_LINE_LIMIT >> 20} MiB; connection closed",
                                   file=sys.stderr)
                             break
-                        record = tool_call_record(line)
-                        if record:
-                            print("sandbox-ai-mcp-call " + json.dumps(record, ensure_ascii=False), file=out, flush=True)
-                        process.stdin.write(line)
-                        process.stdin.flush()
+                        session.client_line(line)
                 except (OSError, ValueError):
                     pass
                 finally:
-                    with contextlib.suppress(OSError):
-                        process.stdin.close()
-                    process.wait()
-                    slots.release()
-        threading.Thread(target=run, daemon=True).start()
+                    try:
+                        with contextlib.suppress(OSError):
+                            process.stdin.close()
+                        if isinstance(process, subprocess.Popen):
+                            # A server that ignores the end of its input is stopped: it must not keep its slot.
+                            stop_process(process, grace=MCP_EOF_GRACE)
+                        else:
+                            process.wait()
+                        pump.join(30)  # the server's last answers reach the agent before the connection closes
+                        getattr(process, "close", lambda: None)()
+                    finally:
+                        slots.release()
+        try:
+            threading.Thread(target=run, daemon=True).start()
+        except RuntimeError:  # no thread to be had (the sandbox's process limit): this connection only
+            connection.close()
+            slots.release()
+            time.sleep(0.1)
 
 
 def mcp_bridge(socket_path):
@@ -362,26 +750,60 @@ def inner_bootstrap():
     subprocess.run(["nft", "list", "table", "inet", "agent_sandbox"], check=True, stdout=subprocess.DEVNULL)
     cfg = json.loads(SESSION_CONFIG.read_text()) if SESSION_CONFIG.exists() else {}
     before = namespace_state()
-    base = json.loads((PROXY_DIR / "proxy.json").read_text()).get("allow", {}) if cfg.get("proxy") else {}
+    proxy_config = json.loads((PROXY_DIR / "proxy.json").read_text()) if cfg.get("proxy") else {}
+    base = proxy_config.get("allow", {})
     policy = cfg.get("policy") or {}
     network = RuntimeNetwork(base, PROXY_RUN / "allow.json" if cfg.get("proxy") else None,
                              within=policy.get("allow_within"))
-    broker = ApprovalBroker(CONTROL_DIR / "approvals", network, max_scope=cfg.get("ask_max_scope", "always")) \
+    # A strict security mode (the launcher's modes.py): it caps answers and refuses what `sandbox-ai net` would open.
+    mode = cfg.get("mode") if isinstance(cfg.get("mode"), dict) else None
+    scope = narrowest_scope(cfg.get("ask_max_scope", "always"), (mode or {}).get("approval_scope", "always"))
+    broker = ApprovalBroker(CONTROL_DIR / "approvals", network, max_scope=scope, blocked=cfg.get("ask_blocked"),
+                            no_inspect=proxy_config.get("no_inspect", [])) \
         if cfg.get("ask") and CONTROL_DIR.is_dir() else None
-    loggers = start_loggers(broker, cfg.get("ask_quiet", [])) if LOG_DIR.is_dir() else None
+    # Which process a connection, lookup or dropped packet belongs to: read here, where /proc shows them all.
+    env = cfg.get("env", {})
+    who = Attribution(sandbox=cfg.get("sandbox"), debug=bool(cfg.get("log_debug")),
+                      secret_values=[env[name] for name in cfg.get("secret_names", []) if name in env])
+    canaries = Canaries.load() if CONTROL_DIR.is_dir() else None  # decoy files of the run (canary.py)
+    loggers = start_loggers(broker, cfg.get("ask_quiet", []), who, canaries, network) if LOG_DIR.is_dir() else None
+    network.dns_stub = loggers is not None  # `sandbox-ai net allow --dns` needs it (resolv.conf names it)
+    # `sandbox-ai net allow --allow-host-port`: the host relays listen in the control directory; with the proxy
+    # the relayed ports go through it (the relay chain of the firewall).
+    network.relay_dir = CONTROL_DIR if CONTROL_DIR.is_dir() else None
+    network.proxied = bool(cfg.get("proxy"))
+    held_loopback = hold_unserved_loopback(base.get("loopback", []))  # before the agent starts; kept for the run
+    # The run's taint (see Taint): the proxy reads its mirror; its events go to the connection log.
+    taint = Taint(mirror=PROXY_RUN / "taint.json" if cfg.get("proxy") else None,
+                  log=LOG_DIR / cfg["proxy"]["log"] if cfg.get("proxy") and LOG_DIR.is_dir() else None)
     gui, proxy, control = [], None, None
     try:
+        if canaries is not None:
+            canaries.start()
         if cfg.get("proxy"):
-            proxy = start_proxy(cfg["proxy"], broker)
+            proxy = start_proxy(cfg["proxy"], broker, who, taint)
         if CONTROL_DIR.is_dir():
             control = threading.Event()
             threading.Thread(target=control_server, daemon=True,
-                             args=(CONTROL_DIR / "control.sock", network, control, policy.get("forbid", []))).start()
+                             args=(CONTROL_DIR / "control.sock", network, control, policy.get("forbid", []),
+                                   mode, taint)).start()
+        start_mcp_relays(cfg.get("mcp_relay") or {}, broker, taint, who)
+        problem = hook_problem(cfg)
+        if problem:
+            print(f"agent-sandbox: {problem}", file=sys.stderr)
+            return 1
+        if cfg.get("hooks") is not None:  # the agent's hooks: their rules, the human's questions, tools.jsonl
+            start_hook_server(cfg["hooks"], broker, taint,
+                              [env[name] for name in cfg.get("secret_names", []) if name in env])
         if GUI_CONFIG.exists():
             gui = start_gui(json.loads(GUI_CONFIG.read_text()))
+        if AUDIO_CONFIG.exists():
+            gui += start_audio(json.loads(AUDIO_CONFIG.read_text()))  # stopped with the display at the end
         # Built only now: the blacklist names the proxy's directories, which exist from here on.
         cmd = firejail_command(before)
-        return wait_child(subprocess.Popen(cmd, env=base_env(), close_fds=True))
+        child = subprocess.Popen(cmd, env=base_env(), close_fds=True)
+        oom_first(child.pid)  # an out-of-memory kill takes the agent's processes before PID 1 (the whole run)
+        return wait_child(child)
     finally:
         for process in gui:
             stop_process(process)
@@ -389,6 +811,9 @@ def inner_bootstrap():
             stop_process(proxy)
         if control:
             control.set()
+        network.close_relays()
+        if canaries is not None:
+            canaries.close()
         if loggers:
             loggers.set()
             for thread in loggers.threads:
@@ -426,6 +851,48 @@ def start_gui(cfg):
     return processes
 
 
+AUDIO_CONFIG = Path("/sandbox/session/audio.json")
+AUDIO_DIR = Path("/tmp/sandbox-audio")
+AUDIO_SOCKET = AUDIO_DIR / "native"
+AUDIO_UID = 2  # PulseAudio refuses to run as root (the sandbox's uid 0): a user of its own, as the proxy has
+
+
+def audio_command(socket_path=AUDIO_SOCKET):
+    """PulseAudio as AUDIO_UID without capabilities: a null sink (what is played can be recorded from its monitor,
+    nothing reaches a sound card) and the native protocol on SOCKET_PATH for the agent's programs."""
+    return [*DROP_ALL[:1], f"--reuid={AUDIO_UID}", f"--regid={AUDIO_UID}", "--clear-groups", *DROP_ALL[1:],
+            # --disallow-module-loading: a client (the agent) loads nothing more into this process, which runs
+            # outside Firejail (a module is a shared library: its code would run here).
+            "pulseaudio", "--daemonize=no", "--exit-idle-time=-1", "--disallow-exit", "--disallow-module-loading",
+            "--disable-shm=yes", "--use-pid-file=no", "-n",
+            "--load=module-null-sink sink_name=sandbox sink_properties=device.description=sandbox",
+            f"--load=module-native-protocol-unix socket={socket_path} auth-anonymous=1",
+            "--load=module-always-sink"]
+
+
+def start_audio(cfg, which=shutil.which, popen=subprocess.Popen, directory=AUDIO_DIR, uid=AUDIO_UID):
+    """--audio: a sound server only inside the sandbox, before the agent; [] (and a note) when the image has none.
+    Not fail-closed as the display is: without it nothing is opened, the agent's programs just find no sound."""
+    if not which("pulseaudio"):
+        print("agent-sandbox: --audio: this image has no PulseAudio; make one with: sandbox-ai images recipe media "
+              "--from AGENT, then start with --image-variant media", file=sys.stderr)
+        return []
+    directory.mkdir(mode=0o755, exist_ok=True)
+    with contextlib.suppress(OSError):
+        os.chown(directory, uid, uid)
+    socket_path = directory / "native"
+    errors = tempfile.TemporaryFile()
+    env = {"HOME": str(directory), "XDG_RUNTIME_DIR": str(directory), "PATH": base_env()["PATH"]}
+    process = popen(audio_command(socket_path), env=env, stdout=subprocess.DEVNULL, stderr=errors)
+    try:
+        wait_for_unix_listener(socket_path, process, errors, "pulseaudio")
+    except RuntimeError as exc:
+        stop_process(process)
+        print(f"agent-sandbox: --audio: {exc}", file=sys.stderr)
+        return []
+    return [process]
+
+
 def wait_for_unix_listener(path, process, errors, name, timeout=15.0):
     """Wait until PROCESS accepts connections on the Unix socket PATH; RuntimeError with what it wrote to
     ERRORS (a file) if it exits or does not get there within TIMEOUT."""
@@ -452,16 +919,18 @@ def log_event(name, record):
         stream.write(json.dumps(record) + "\n")
 
 
-def start_loggers(broker=None, quiet=()):
-    # Runs in PID 1 outside Firejail; the agent cannot see LOG_DIR.
+def start_loggers(broker=None, quiet=(), who=None, canaries=None, network=None):
+    # Runs in PID 1 outside Firejail; the agent cannot see LOG_DIR. WHO (an Attribution) names the process
+    # behind a refused lookup or a dropped packet; CANARIES (Canaries) checks the names looked up.
     cfg = json.loads(SESSION_CONFIG.read_text())
     stop = threading.Event()
     stop.seen = set()
     stop.threads = []
     def denied_loop():
         while not stop.wait(1):
-            poll_denied(stop.seen)
-    loggers = [(denied_loop, ()), (dns_logger, (set(cfg["pinned"]), 53, stop, broker, quiet)), (process_logger, (stop, 0.5, Path("/proc"),
+            poll_denied(stop.seen, who)
+    dns = (set(cfg["pinned"]), 53, stop, broker, quiet, who, canaries, network.nameservers if network else None)
+    loggers = [(denied_loop, ()), (dns_logger, dns), (process_logger, (stop, 0.5, Path("/proc"),
                                                                      [cfg.get("env", {})[k] for k in cfg.get("secret_names", [])
                                                                       if k in cfg.get("env", {})]))]
     if cfg["watch"]:  # file access only with an explicit --log-dir
@@ -519,7 +988,9 @@ def process_logger(stop, interval=0.5, proc=Path("/proc"), secret_values=(), lim
         seen &= current
 
 
-def poll_denied(seen):
+def poll_denied(seen, who=None):
+    """egress-denied.jsonl: each destination the firewall dropped (first time), with the process whose socket
+    is connected to it (WHO, an Attribution; a TCP socket waits in SYN_SENT while it retries)."""
     for version in (4, 6):
         result = subprocess.run(["nft", "-j", "list", "set", "inet", "agent_sandbox", f"denied{version}"],
                                 text=True, capture_output=True)
@@ -532,7 +1003,8 @@ def poll_denied(seen):
                 key = tuple(elem["concat"]) if isinstance(elem, dict) and "concat" in elem else None
                 if key and key not in seen:
                     seen.add(key)
-                    log_event("egress-denied.jsonl", {"address": key[0], "protocol": key[1], "port": key[2]})
+                    found = who.by_remote(key[1], key[0], key[2]) if who is not None else {}
+                    log_event("egress-denied.jsonl", {"address": key[0], "protocol": key[1], "port": key[2], **found})
 
 
 def dns_reply(query):
@@ -548,24 +1020,88 @@ def dns_reply(query):
     return ".".join(labels).lower(), query[:2] + struct.pack("!HHHHH", flags, 1, 0, 0, 0) + query[12:end + 5]
 
 
-def dns_logger(pinned, port=53, stop=None, broker=None, quiet=()):
-    # Unpinned names never get an address; this stub records the attempt and, with approvals, files a
-    # question (the lookup itself is answered at once: a retry after the approval reaches the name).
+DNS_WORKERS = 8      # lookups the DNS stub forwards at once
+DNS_BACKOFF = 30.0   # seconds a nameserver that did not answer is skipped while another one is there to ask
+
+
+def forward_dns(query, servers, timeout=2.0, port=53, failed=None):
+    """(answer, server) of the first of SERVERS (UDP PORT) to answer QUERY with the query's id, or None. FAILED
+    ({server: when it last did not answer}, kept by the caller): a server that did not answer within DNS_BACKOFF
+    seconds is skipped while another one is there; when all did not, they are asked, the longest failed first."""
+    if failed is not None:
+        now = time.monotonic()
+        servers = [s for s in servers if now - failed.get(s, -DNS_BACKOFF) >= DNS_BACKOFF] or \
+            sorted(servers, key=lambda s: failed.get(s, 0.0))
+    for server in servers:
+        family = socket.AF_INET6 if ":" in server else socket.AF_INET
+        with contextlib.suppress(OSError):
+            with socket.socket(family, socket.SOCK_DGRAM) as upstream:
+                upstream.settimeout(timeout)
+                upstream.connect((server, port))  # answers from anywhere else are not taken
+                upstream.send(query)
+                answer = upstream.recv(4096)
+                if len(answer) >= 12 and answer[:2] == query[:2]:
+                    if failed is not None:
+                        failed.pop(server, None)
+                    return answer, server
+        if failed is not None:
+            failed[server] = time.monotonic()
+    return None
+
+
+def dns_logger(pinned, port=53, stop=None, broker=None, quiet=(), who=None, canaries=None, forward=None,
+               upstream_port=53):
+    # Unpinned names never get an address unless DNS was allowed during the run (FORWARD: the nameservers
+    # `sandbox-ai net allow --dns` gave): then the stub asks them, and every name it forwards is logged
+    # (dns.jsonl). Otherwise it records the attempt and, with approvals, files a question (the lookup is
+    # answered at once: a retry after the approval reaches the name). A name with a canary token is never
+    # forwarded. WHO (an Attribution) names the process that asked: its UDP socket is still open.
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("127.0.0.1", port))
     if stop is not None:
         sock.settimeout(0.2)
+    # Forwarded lookups wait for nameservers (2 s each that does not answer): beside this loop, DNS_WORKERS at
+    # once, so a dead nameserver holds neither the other lookups nor the pinned names; FAILED: its back-off.
+    failed, workers = {}, threading.BoundedSemaphore(DNS_WORKERS)
+
+    def forwarded(query, peer, name, reply, servers):
+        try:
+            found = who.lookup("udp", peer[0], peer[1]) if who is not None else {}
+            if canaries is not None and canaries.lookup(name, found):
+                sock.sendto(reply, peer)  # the token stays here
+                return
+            answered = forward_dns(query, servers, port=upstream_port, failed=failed)
+            # Logged before the answer goes out: once a program has its address, the record of it exists.
+            log_event("dns.jsonl", {"host": name, "forwarded": answered[1] if answered else None,
+                                    **({} if answered else {"error": "no nameserver answered"}), **found})
+            sock.sendto(answered[0] if answered else reply, peer)
+        except (OSError, ValueError, RuntimeError):
+            pass
+        finally:
+            workers.release()
     while stop is None or not stop.is_set():
         try:
             query, peer = sock.recvfrom(4096)
             name, reply = dns_reply(query)
+            servers = forward() if forward is not None and name not in pinned else []
+            if servers:
+                if not workers.acquire(blocking=False):
+                    continue  # DNS_WORKERS lookups wait for nameservers already: the client asks again
+                try:
+                    threading.Thread(target=forwarded, args=(query, peer, name, reply, servers), daemon=True).start()
+                except RuntimeError:  # no thread to be had (the sandbox's process limit): the client asks again
+                    workers.release()
+                continue
             sock.sendto(reply, peer)
             if name not in pinned:
-                log_event("egress-denied.jsonl", {"host": name, "reason": "not in allowed hosts"})
+                found = who.lookup("udp", peer[0], peer[1]) if who is not None else {}
+                log_event("egress-denied.jsonl", {"host": name, "reason": "not in allowed hosts", **found})
+                if canaries is not None:
+                    canaries.lookup(name, found)
                 if broker is not None and re.fullmatch(r"(?=.{1,253}$)(?:[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9])?\.)+"
                                                        r"[a-z][a-z0-9-]{0,62}", name) and \
                         not any(name == q or name.endswith("." + q) for q in quiet):
-                    broker.ask("dns", {"name": name}, wait=False)
+                    broker.ask("dns", {"name": name, **found}, wait=False)
         except (OSError, ValueError, IndexError, struct.error, RuntimeError):
             continue
     sock.close()
@@ -616,6 +1152,9 @@ def file_logger(roots, stop=None):
             if event & 0x4000:
                 log_event("files.jsonl", {"error": "event queue overflow; events lost"})
                 continue
+            if event & 0x8000:  # IN_IGNORED: the watch is gone (directory removed): forget its path
+                paths.pop(wd, None)
+                continue
             path = os.path.join(paths.get(wd, "?"), name)
             if event & 0x40000000:  # directory
                 if event & (0x100 | 0x80):
@@ -625,17 +1164,41 @@ def file_logger(roots, stop=None):
             action = next((label for bit, label in INOTIFY_EVENTS.items() if event & bit), None)
             now = time.monotonic()
             if action and now - recent.get((action, path), -2) >= 2:
+                if len(recent) >= FILE_RECENT_LIMIT:  # only the last 2 s matter; a long run touches millions of paths
+                    recent = {key: seen for key, seen in recent.items() if now - seen < 2}
+                    while len(recent) >= FILE_RECENT_LIMIT:
+                        recent.pop(next(iter(recent)))
                 recent[(action, path)] = now
                 log_event("files.jsonl", {"action": action, "path": path})
     os.close(fd)
 
 
+OOM_MARGIN = 300
+
+
+def oom_first(pid, proc=Path("/proc"), margin=OOM_MARGIN):
+    """Raise PID's oom_score_adj MARGIN above the supervisor's, so the kernel's OOM killer picks the agent's
+    processes (which inherit it) before PID 1, whose death ends the whole run. Raising needs no privilege;
+    lowering the supervisor's own would (CAP_SYS_RESOURCE of the host). The value written, or None."""
+    try:
+        own = int((proc / "self" / "oom_score_adj").read_text().strip())
+        value = max(-1000, min(1000, own + margin))
+        (proc / str(int(pid)) / "oom_score_adj").write_text(f"{value}\n")
+        return value
+    except (OSError, ValueError, TypeError):
+        return None  # no /proc, or the process ended: the run goes on as before
+
+
 def firejail_command(before):
     help_text = subprocess.run(["firejail", "--help"], check=True, text=True, capture_output=True).stdout
     command = ["firejail", "--noprofile", "--quiet", "--caps.drop=all", "--nonewprivs", "--seccomp"]
-    for private in (LOG_DIR, VNC_DIR, PROXY_DIR, PROXY_RUN, CONTROL_DIR):
+    for private in (LOG_DIR, VNC_DIR, PROXY_DIR, PROXY_RUN, CONTROL_DIR, MCP_UPSTREAM_DIR):
         if private.is_dir():
             command.append(f"--blacklist={private}")
+    # The supervisor's sockets for the agent: reachable, not replaceable (the agent runs as the same user).
+    for shared in (MCP_RUN_DIR, HOOK_DIR):
+        if shared.is_dir():
+            command.append(f"--read-only={shared}")
     # New releases always exec directly and reject the former shell option.
     if "--shell=" in help_text:
         command.append("--shell=none")
@@ -701,6 +1264,7 @@ SYSTEM_BUNDLES = ("/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-b
 HEAD_LIMIT = 64 << 10
 ADVERT_LIMIT = 16 << 20
 COMMANDS_LIMIT = 1 << 20
+PUSH_CHECK_SECONDS = 600  # one push's privacy check, at most (each of its Git commands has 300 s in privacy.py)
 PEEK_TIMEOUT = 1.0
 IDLE_TIMEOUT = 3600
 ZERO_ID = re.compile(rb"0{40}|0{64}")
@@ -868,11 +1432,34 @@ def original_destination(sock):
     return socket.inet_ntoa(raw[4:8]), struct.unpack("!H", raw[2:4])[0]
 
 
+# The loopback addresses at which the sandbox reaches the host's ports (pasta's forwards, the relay): only these.
+# Another 127.x address is the sandbox's own, where the agent can listen itself.
+HOST_LOOPBACK = ("127.0.0.1", "::1")
+
+
+def hold_unserved_loopback(ports):
+    """[socket]: for each host port forwarded at the start, [::1]:PORT taken here when pasta does not serve it there
+    (a host without IPv6 gives pasta none). Otherwise the agent could listen at [::1]:PORT itself, and the proxy,
+    which counts ::1 as the host's (HOST_LOOPBACK), would hand that port's Git login to it. Held, never listening,
+    until the run ends: a connection there is refused."""
+    held = []
+    for port in ports:
+        sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        try:
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            sock.bind(("::1", int(port)))
+        except OSError:  # pasta serves it (EADDRINUSE), or there is no IPv6 loopback at all: nothing to hold
+            sock.close()
+            continue
+        held.append(sock)
+    return held
+
+
 def allowed_destination(allow, address, port):
     """True if the firewall lets the proxy reach ADDRESS:PORT (ALLOW from the launcher's proxy.json)."""
     ip = ipaddress.ip_address(address)
     if ip.is_loopback:
-        return port in allow.get("loopback", [])
+        return str(ip) in HOST_LOOPBACK and port in allow.get("loopback", [])
     if allow.get("all"):
         return True
     if any(ip in ipaddress.ip_network(net, strict=False) for net in allow.get("nets", [])):
@@ -1095,15 +1682,24 @@ def header(headers, name):
 
 
 def send_all(sock, data):
-    """sendall that also works on a non-blocking (TLS) socket."""
+    """sendall that also works on a non-blocking (TLS) socket. A peer that takes nothing for IDLE_TIMEOUT
+    seconds (a zero window) raises socket.timeout, an OSError: a broken connection to the callers."""
     view = memoryview(data)
+    deadline = time.monotonic() + IDLE_TIMEOUT
     while view:
         try:
-            view = view[sock.send(view):]
+            sent = sock.send(view)
         except (ssl.SSLWantWriteError, BlockingIOError):
-            select.select([], [sock], [], IDLE_TIMEOUT)
+            waiting = ([], [sock])
         except ssl.SSLWantReadError:
-            select.select([sock], [], [], IDLE_TIMEOUT)
+            waiting = ([sock], [])
+        else:
+            view = view[sent:]
+            deadline = time.monotonic() + IDLE_TIMEOUT  # progress: the idle time starts again
+            continue
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not any(select.select(*waiting, [], remaining)[:2]):
+            raise socket.timeout(f"the peer took nothing for {IDLE_TIMEOUT} s")
 
 
 def relay(left, right, counts, idle=IDLE_TIMEOUT, grace=30):
@@ -1303,11 +1899,12 @@ def normal_path(target):
     return "" if path == "/" else path.rstrip("/")
 
 
-def path_matches(pattern, path):
-    """PATH matches PATTERN: * stands for any characters within one segment, ** for any, slashes included."""
-    expression = "".join(".*" if part == "**" else "[^/]*" if part == "*" else re.escape(part)
-                         for part in re.split(r"(\*\*|\*)", pattern))
-    return re.fullmatch(expression, path or "/") is not None
+def path_matches(pattern, path, ignore_case=False):
+    """PATH matches PATTERN: * stands for any characters within one segment, ** for any, slashes included; a
+    /** at the end or between slashes also matches no segment at all (/gists/** covers POST /gists)."""
+    expression = "".join("(?:/.*)?" if part == "/**" else ".*" if part == "**" else "[^/]*" if part == "*"
+                         else re.escape(part) for part in re.split(r"(/\*\*(?=/|$)|\*\*|\*)", pattern))
+    return re.fullmatch(expression, path or "/", re.S | (re.I if ignore_case else 0)) is not None
 
 
 def is_address_origin(origin):
@@ -1329,14 +1926,170 @@ def host_name(value):
     return value.rsplit(":", 1)[0] if value.count(":") == 1 else value
 
 
+LLM_KEY_HEADERS = ("authorization", "x-api-key", "api-key")
+
+
+def llm_head(entries, scheme, origin, port, path, head):
+    """--llm: (HEAD, endpoint name) with the endpoint's key where the agent sent the placeholder (or as a Bearer token
+    where it sent no credentials) and its header secrets in place of the agent's own; (HEAD, None) unchanged for
+    every other request. Only over the endpoint's scheme and port, to its verified name (HTTPS) or one of its
+    pinned addresses (plain http), below its path prefix."""
+    for entry in (entries or []) if head.endswith(b"\r\n\r\n") else []:
+        if scheme != entry["scheme"] or port != entry["port"]:
+            continue
+        if scheme == "https" and origin.lower() != entry["host"]:
+            continue
+        if scheme == "http" and origin.rsplit(":", 1)[0].strip("[]") not in entry["addresses"]:
+            continue
+        prefix = entry.get("prefix", "")
+        if prefix and path != prefix and not path.startswith(prefix + "/"):
+            continue
+        lines = head[:-4].split(b"\r\n")
+        own = {name.lower().encode() for name, _ in entry["headers"]}
+        placeholder, key = entry["placeholder"].encode(), (entry.get("key") or "").encode()
+        kept, credentials = [lines[0]], False
+        for line in lines[1:]:
+            name, _, value = line.partition(b":")
+            name = name.lower()
+            if name in own:
+                continue
+            if name.decode("latin-1") in LLM_KEY_HEADERS:
+                if placeholder in value:
+                    if not key:
+                        continue  # no key for this server: the placeholder goes nowhere
+                    line = line[:len(name)] + b":" + value.replace(placeholder, key)
+                credentials = True
+            kept.append(line)
+        if key and not credentials:
+            kept.append(b"Authorization: Bearer " + key)
+        kept += [f"{name}: {value}".encode("latin-1") for name, value in entry["headers"]]
+        return b"\r\n".join(kept) + b"\r\n\r\n", entry["name"]
+    return head, None
+
+
+API_KEY_HEADERS = LLM_KEY_HEADERS + ("private-token",)  # GitLab's own
+
+
+def basic_with_key(value, entries):
+    """VALUE of an Authorization header ("Basic B64"), with each entry's key in place of its placeholder inside the
+    decoded user:password (PyPI's __token__:TOKEN), re-encoded; (VALUE, []) when it holds none."""
+    scheme, _, encoded = value.strip().partition(b" ")
+    if scheme.lower() != b"basic":
+        return value, []
+    try:
+        decoded = base64.b64decode(encoded.strip(), validate=True)
+    except (ValueError, binascii.Error):
+        return value, []
+    added = []
+    for entry in entries:
+        placeholder = entry["placeholder"].encode()
+        if placeholder in decoded:
+            decoded = decoded.replace(placeholder, entry["key"].encode())
+            added.append(entry["name"])
+    return (b" Basic " + base64.b64encode(decoded), added) if added else (value, [])
+
+
+def api_key_head(entries, scheme, origin, port, head):
+    """--api-key and --publish: (HEAD, [names]) with each key in place of its placeholder, in a credential header of
+    an HTTPS request to the key's verified host and port only (inside a Basic login for an entry marked "basic");
+    other headers, the body and every other request keep the placeholder."""
+    added = []
+    if scheme != "https" or not head.endswith(b"\r\n\r\n"):
+        return head, added
+    mine = [entry for entry in entries or [] if entry["port"] == port and origin.lower() == entry["host"]]
+    if not mine:
+        return head, added
+    lines = head[:-4].split(b"\r\n")
+    for index, line in enumerate(lines[1:], 1):
+        name, sep, value = line.partition(b":")
+        if not sep or name.strip().lower().decode("latin-1") not in API_KEY_HEADERS:
+            continue
+        basic = [entry for entry in mine if entry.get("basic")]
+        if basic and name.strip().lower() == b"authorization":
+            value, inside = basic_with_key(value, basic)
+            added += inside
+        for entry in mine:
+            placeholder = entry["placeholder"].encode()
+            if placeholder in value:
+                value = value.replace(placeholder, entry["key"].encode())
+                added.append(entry["name"])
+        lines[index] = name + b":" + value
+    return b"\r\n".join(lines) + b"\r\n\r\n", added
+
+
+class Scrubber:
+    """Masks SECRETS (bytes) in a stream of pieces, with stars of the same length, so that lengths and chunk sizes
+    stay right: keeps back the last bytes that could begin one until the next piece or the end."""
+
+    def __init__(self, secrets):
+        self.secrets = sorted({s for s in secrets if s}, key=len, reverse=True)
+        self.keep = max((len(s) for s in self.secrets), default=1) - 1
+        self.pending, self.masked = b"", 0
+
+    def mask(self, data):
+        for secret in self.secrets:
+            if secret in data:
+                self.masked += data.count(secret)
+                data = data.replace(secret, b"*" * len(secret))
+        return data
+
+    def feed(self, data):
+        data = self.mask(self.pending + data)
+        if self.keep and len(data) > self.keep:
+            data, self.pending = data[:-self.keep], data[-self.keep:]
+        elif self.keep:
+            data, self.pending = b"", data
+        return data
+
+    def flush(self):
+        data, self.pending = self.mask(self.pending), b""
+        return data
+
+
+def scrubbed_pieces(pieces, scrubber, chunked):
+    """The raw pieces of an answer's body with SCRUBBER applied to the payload. Chunked: newly framed (what is kept
+    back must not cross a chunk's end); otherwise the bytes keep their places, so a length stays right."""
+    for raw, payload in pieces:
+        if chunked:
+            if payload:
+                data = scrubber.feed(payload)
+                if data:
+                    yield b"%x\r\n" % len(data) + data + b"\r\n", payload
+            elif re.match(rb"0+(?:;[^\r\n]*)?\r\n", raw):  # the last chunk and its trailer: what was kept back first
+                rest = scrubber.flush()
+                if rest:
+                    yield b"%x\r\n" % len(rest) + rest + b"\r\n", b""
+                yield scrubber.mask(raw), b""
+            continue
+        data = scrubber.feed(raw)
+        if data:
+            yield data, payload
+    if not chunked:
+        rest = scrubber.flush()
+        if rest:
+            yield rest, b""
+
+
+def identity_head(head):
+    """HEAD asking for an uncompressed answer: one the proxy added a credential to is scrubbed of it on the way
+    back, which needs its bytes as they are."""
+    head = re.sub(rb"(?im)^accept-encoding:[^\r\n]*\r\n", b"", head)
+    return head[:-2] + b"Accept-Encoding: identity\r\n\r\n"
+
+
 class ProxyServer:
     """Connections of one sandbox run; one thread per connection."""
 
     def __init__(self, config, log_fd, checker=None, run_dir=PROXY_RUN, destination=original_destination,
-                 upstream=None, asker=None):
+                 upstream=None, asker=None, who=None):
         self.config, self.log_fd, self.checker, self.run_dir = config, log_fd, checker, run_dir
-        self.asker = asker
+        # ASKER puts questions to the supervisor; WHO (the same channel, also with --ask off) asks it which
+        # process a connection belongs to. DEBUG (--log-debug) logs more of what a refused client sent.
+        self.asker, self.who, self.debug = asker, who, bool(config.get("debug"))
         self.destination, self.lock, self.check_lock = destination, threading.Lock(), threading.Lock()
+        # The checker's answers come in the order of the requests; the late ones to checks that took too long
+        # (CHECKER_OWED of them) are read and dropped before the next request (under check_lock).
+        self.checker_buffer, self.checker_owed = b"", 0
         self.counter, self.contexts, self.adverts, self.verified = 0, {}, {}, {}
         self.allow_file = Path(config.get("allow_file", "")) if config.get("allow_file") else None
         self.allow_mtime = None
@@ -1344,14 +2097,172 @@ class ProxyServer:
         self.upstream_cafile = str(system) if system.is_file() and system.stat().st_size else None
         self.upstream = upstream or ssl.create_default_context(cafile=self.upstream_cafile)
         self.upstream.set_alpn_protocols(["http/1.1"])
+        # The launcher's rulesets, then --allow-http as one more (an allow-list per host); a rule that does not
+        # compile stops the proxy, and with it the sandbox.
+        sources, pinned = list(config.get("rules", [])), dict(config.get("pinned", {}))
+        legacy = config.get("http_rules", [])
+        if legacy:
+            sources.append({"name": "--allow-http", "version": 1, "http": [
+                {"id": f"allow-http-{index}", "host": rule["host"], "methods": rule["methods"], "path": rule["path"],
+                 "decision": "allow"} for index, rule in enumerate(legacy, 1)]})
+            for rule in legacy:
+                pinned[rule["host"]] = [*pinned.get(rule["host"], []), *rule.get("addresses", [])]
+        self.rules = Ruleset(sources, pinned, config.get("providers", []))
+        # The run's taint, as the supervisor keeps it (taint_file, re-read on change); without a supervisor (tests)
+        # the proxy keeps its own.
+        self.taint_file = Path(config["taint_file"]) if config.get("taint_file") else None
+        self.taint_mtime, self.taint_state, self.local_taint = None, {"tainted": False}, None
 
     # -- bookkeeping --
 
     def log(self, record):
-        record = {"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **record}
-        line = (json.dumps(record, ensure_ascii=False) + "\n").encode()
+        record = self.resolve({"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **record})
+        line = json.dumps(record, ensure_ascii=False)
+        for value in self.own_secrets():
+            line = line.replace(value, "[redacted]")
+        line = (line + "\n").encode()
         with self.lock:
             os.write(self.log_fd, line)
+
+    def own_secrets(self):
+        """The credentials the proxy adds itself (--llm keys and header secrets, --token-proxy tokens), longest first,
+        also as JSON escapes them: never logged, not even when a server echoes one back."""
+        if getattr(self, "_own_secrets", None) is None:
+            entries = self.config.get("llm") or []
+            values = [entry.get("key") for entry in entries] + [value for entry in entries
+                                                                for _, value in entry.get("headers", [])]
+            values += [entry.get("token") for entry in self.config.get("git_tokens") or []]
+            values += [entry.get("key") for entry in self.config.get("api_keys") or []]
+            found = {form for value in values if isinstance(value, str) and len(value) >= 4
+                     for form in (value, json.dumps(value, ensure_ascii=False)[1:-1])}
+            self._own_secrets = sorted(found, key=len, reverse=True)
+        return self._own_secrets
+
+    def attribute(self, client):
+        """The supervisor's lookup of the process behind CLIENT (Attribution), started now and read when a
+        record is written; None without a channel."""
+        if self.who is None:
+            return None
+        with contextlib.suppress(OSError):
+            address, port = client.getpeername()[:2]
+            return self.who.request("who", {"peer": [address, port]})
+        return None
+
+    @staticmethod
+    def resolve(record, timeout=None):
+        """RECORD with its pending lookup replaced, in place, by the answer: "process" (or {"unknown": why})
+        and "sandbox". A late answer is unknown for this record, never a delay of the connection."""
+        pending = record.get("process")
+        if isinstance(pending, Pending):
+            answer = pending.result(ATTRIBUTION_WAIT if timeout is None else timeout) or {}
+            record["process"] = answer["process"] if isinstance(answer.get("process"), dict) else \
+                {"unknown": "no answer in time"}
+            if isinstance(answer.get("sandbox"), dict):
+                record["sandbox"] = answer["sandbox"]
+        return record
+
+    def asked_by(self, record):
+        """{"process", "sandbox"} of RECORD's connection, for a question: the human sees who asks."""
+        self.resolve(record)
+        return {key: record[key] for key in ("process", "sandbox") if key in record}
+
+    def refuse(self, client, entry, reset=False):
+        """Close CLIENT (with a reset: no lingering half-open connection), then log ENTRY. The lookup gets a few
+        milliseconds first (the kernel forgets the client's socket once it is reset), never more."""
+        self.resolve(entry, REFUSAL_WAIT)
+        with contextlib.suppress(OSError):
+            if reset:
+                client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            client.close()
+        self.log(entry)
+
+    @staticmethod
+    def client_hello(data):
+        """What a TLS ClientHello at the start of DATA claims, for the log: {"sni", "alpn", "version",
+        "versions", "ciphers", "extensions"}; None for anything else. Never used for a decision."""
+        try:
+            if len(data) < 5 or data[0] != 0x16:
+                return None
+            body = data[5:5 + struct.unpack("!H", data[3:5])[0]]
+            if len(body) < 40 or body[0] != 1:
+                return None
+            result = {"sni": None, "alpn": [], "version": "0x" + body[4:6].hex(), "versions": [], "ciphers": 0,
+                      "extensions": []}
+            pos = 38 + 1 + body[38]                                   # random, session id
+            size = struct.unpack("!H", body[pos:pos + 2])[0]
+            result["ciphers"], pos = size // 2, pos + 2 + size
+            pos += 1 + body[pos]                                      # compression methods
+            end = min(len(body), pos + 2 + struct.unpack("!H", body[pos:pos + 2])[0])
+            pos += 2
+            while pos + 4 <= end and len(result["extensions"]) < 64:
+                kind, size = struct.unpack("!HH", body[pos:pos + 4])
+                value, pos = body[pos + 4:pos + 4 + size], pos + 4 + size
+                result["extensions"].append(kind)
+                if kind == 0 and len(value) > 5:
+                    result["sni"] = printable_text(value[5:5 + struct.unpack("!H", value[3:5])[0]].decode("latin-1"), 253)
+                elif kind == 16 and len(value) > 2:
+                    index = 2
+                    while index < len(value) and len(result["alpn"]) < 10:
+                        result["alpn"].append(printable_text(value[index + 1:index + 1 + value[index]].decode("latin-1"), 50))
+                        index += 1 + value[index]
+                elif kind == 43 and value:
+                    result["versions"] = ["0x" + value[1 + i:3 + i].hex() for i in range(0, min(value[0], 32), 2)]
+            return result
+        except (IndexError, struct.error):
+            return None
+
+    def origin(self, first):
+        """What the first bytes of a refused connection tell, for its record: the server name (SNI) and ALPN
+        of a ClientHello, or the request line and Host of plain HTTP; the agent's claims, escaped. In debug
+        mode also the ClientHello's version, cipher count and extensions."""
+        hello = self.client_hello(first or b"")
+        if hello:
+            details = {"sni": hello["sni"], "alpn": hello["alpn"]} if hello["sni"] else {"alpn": hello["alpn"]}
+            if self.debug:
+                details["client_hello"] = {key: hello[key] for key in ("version", "versions", "ciphers", "extensions")}
+            return details
+        if first and self.http_host(first):
+            line = LEADING_CRLF.sub(b"", first).split(b"\r\n", 1)[0].decode("latin-1")
+            return {"http_host": printable_text(self.http_host(first), 253),
+                    "request_line": printable_text(redact_text(line), 500)}
+        return {}
+
+    def taint(self):
+        """The run's taint state if it is tainted, else None."""
+        if self.taint_file is not None:
+            try:
+                mtime = self.taint_file.stat().st_mtime_ns
+                if mtime != self.taint_mtime:
+                    self.taint_state, self.taint_mtime = json.loads(self.taint_file.read_text()), mtime
+                    if self.local_taint and mtime != self.local_taint.get("_mirror"):
+                        self.local_taint = None  # the supervisor's record is newer: it decides (untaint included)
+            except FileNotFoundError:
+                self.taint_state = {"tainted": False}
+            except (OSError, ValueError):
+                pass
+            state = self.taint_state if isinstance(self.taint_state, dict) else {"tainted": False}
+            if self.local_taint and not state.get("tainted"):
+                # The supervisor did not answer in time when this proxy saw untrusted content: tainted all the same
+                # (the mirror catches up once the supervisor records it).
+                state = self.local_taint
+        else:
+            state = self.local_taint or {"tainted": False}
+        return state if state.get("tainted") else None
+
+    def observe(self, facts, any_path=False):
+        """Untrusted content arrives (FACTS: of the request whose response comes, or of a connection whose
+        content is not seen): the run is tainted before the agent reads it. The supervisor records it and
+        answers before the proxy goes on, so the agent's next request already meets the rules for tainted runs."""
+        source = self.rules.untrusted_http(facts, any_path)
+        if source is None or self.taint() is not None:
+            return
+        if self.who is not None:
+            answer = self.who.request("taint", {"source": source}).result(2.0) or {}
+            if isinstance(answer.get("taint"), dict):
+                self.taint_state, self.taint_mtime = answer["taint"], None
+                return
+        self.local_taint = {"tainted": True, "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            "source": source, "sources": 1, "_mirror": self.taint_mtime}
 
     def allow(self):
         """The allow-list, re-read when `sandbox-ai net` changed it during the run."""
@@ -1415,7 +2326,11 @@ class ProxyServer:
             except OSError:
                 time.sleep(0.1)  # e.g. out of file descriptors: no busy loop
                 continue
-            threading.Thread(target=self.handle, args=(client,), daemon=True).start()
+            try:
+                threading.Thread(target=self.handle, args=(client,), daemon=True).start()
+            except RuntimeError:  # no thread to be had (the sandbox's process limit): this connection only
+                client.close()
+                time.sleep(0.1)
 
     def handle(self, client):
         with self.lock:
@@ -1427,29 +2342,43 @@ class ProxyServer:
         try:
             address, port = self.destination(client)
             record["destination"] = f"[{address}]:{port}" if ":" in address else f"{address}:{port}"
+            with contextlib.suppress(OSError):
+                source = client.getpeername()
+                record["source"] = f"[{source[0]}]:{source[1]}" if ":" in source[0] else f"{source[0]}:{source[1]}"
+            pending = self.attribute(client)  # looked up meanwhile; read when the first record is written
+            if pending is not None:
+                record["process"] = pending
             first = None
             if not allowed_destination(self.allow(), address, port):
                 answer = None
+                # What the agent wants, for the question and the record: the server name it sends, if any. Without
+                # a question, only briefly: a refusal is not held up for the log.
+                first = self.peek(client) if self.asker is not None else self.peek(client, wait=0.2, complete=1.0)
                 if self.asker is not None:
-                    # The question names what the agent wants: the server name it sends, if any.
-                    first = self.peek(client)
                     # The name is what the agent sends: shown only if it is a plain host name, and never
                     # verified (the human approves the address, which is what the firewall opens).
                     name = question_name(client_hello_sni(first)[1] or self.http_host(first))
                     protocol = ("ssh" if first.startswith(b"SSH-") else "tls" if first[:1] == b"\x16"
                                 else "http" if self.http_host(first) else "tcp")
                     question = {"destination": record["destination"], "address": address, "port": port,
-                                "protocol": protocol}
+                                "protocol": protocol, **self.asked_by(record)}
                     answer = self.asker("connect", {**question, **({"host": name} if name else {})})
                     record["approval"] = {k: answer.get(k) for k in ("decision", "scope", "reason")}
                 if not answer or answer.get("decision") != "allow" or not allowed_destination(self.allow(), address, port):
-                    self.log({**record, "event": "denied", "reason": "not allowed by the network options"
-                              if not answer else f"not approved ({answer.get('reason', 'refused')})"})
-                    client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                    self.refuse(client, {**record, **self.origin(first), "event": "denied",
+                                         "reason": "not allowed by the network options"
+                                         if not answer else f"not approved ({answer.get('reason', 'refused')})"},
+                                reset=True)
                     return
             first = self.peek(client) if first is None else first
+            hello = self.client_hello(first)
+            if hello and hello["alpn"]:
+                record["alpn"] = hello["alpn"]
+            if hello and self.debug:
+                record["client_hello"] = {key: hello[key] for key in ("version", "versions", "ciphers", "extensions")}
             if first.startswith(b"SSH-") and self.ssh_refused(address, port):
-                self.log({**record, "event": "denied", "protocol": "ssh", "reason": self.ssh_refused(address, port)})
+                self.refuse(client, {**record, "event": "denied", "protocol": "ssh",
+                                     "reason": self.ssh_refused(address, port)})
                 return
             if not self.passthrough_allowed(first, address, port, record):
                 return
@@ -1480,6 +2409,8 @@ class ProxyServer:
                     self.log({**record, "event": "denied", "protocol": "ssh", "reason": reason})
                     return
             kind, name = client_hello_sni(first)
+            if kind == "tls" and canary_sni(self, client, name, record):
+                return
             upstream.settimeout(IDLE_TIMEOUT)
             client.settimeout(IDLE_TIMEOUT)
             if first and first_bytes_state(first) == "more":
@@ -1489,6 +2420,7 @@ class ProxyServer:
             if kind == "tls":
                 record["host"] = name
                 if host_matches(name, self.config.get("no_inspect", [])):
+                    self.observe(Ruleset.request(name or f"{address}:{port}", "GET", "/", [], address), any_path=True)
                     counts = [0, 0]
                     relay(client, upstream, counts)
                     self.log({**record, "event": "tls-passthrough", "bytes_out": counts[0], "bytes_in": counts[1],
@@ -1504,6 +2436,8 @@ class ProxyServer:
             elif first and (port in HTTP_PORTS or self.has_http_rules(address)):
                 self.log({**record, "event": "denied", "reason": f"neither HTTP nor TLS on port {port}"})
             else:
+                self.observe(Ruleset.request(f"[{address}]:{port}" if ":" in address else f"{address}:{port}", "GET",
+                                             "/", [], address), any_path=True)
                 counts = [0, 0]
                 relay(client, upstream, counts)
                 self.log({**record, "event": "tcp",
@@ -1574,14 +2508,37 @@ class ProxyServer:
             if data:
                 time.sleep(0.05)
 
+    def upstream_context(self, name, port):
+        """How the real server is checked: against the system's CAs, an --llm endpoint also against its own CA."""
+        for entry in self.config.get("llm") or []:
+            if entry.get("ca") and entry["scheme"] == "https" and entry["port"] == port and entry["host"] == name.lower():
+                with self.lock:
+                    contexts = self.__dict__.setdefault("llm_contexts", {})
+                    if entry["name"] not in contexts:
+                        context = ssl.create_default_context(cafile=self.upstream_cafile)
+                        context.load_verify_locations(cadata=entry["ca"])
+                        context.set_alpn_protocols(["http/1.1"])
+                        contexts[entry["name"]] = context
+                    return contexts[entry["name"]]
+        return self.upstream
+
+    def prove(self, record, address, port, name, ok):
+        """Tell the supervisor whether the certificate of a connection the human approved is valid for the
+        server name the agent sent: what lets "Allow always" remember the name instead of the address."""
+        approval = record.get("approval")
+        if name and self.who is not None and isinstance(approval, dict) and approval.get("decision") == "allow":
+            self.who.send("verified", {"address": address, "port": port, "name": name, "ok": bool(ok)})
+
     def intercept(self, client, upstream, name, address, record, started, port=443):
         try:
-            server = self.upstream.wrap_socket(upstream, server_hostname=name or address)
+            server = self.upstream_context(name or address, port).wrap_socket(upstream, server_hostname=name or address)
         except (ssl.SSLError, OSError) as exc:
+            self.prove(record, address, port, name, False)
             self.log({**record, "event": "tls-upstream-failed", "error": str(exc),
                       "hint": f"the server's certificate is not trusted; --no-inspect {name or address} passes "
                               "this connection through unopened"})
             return
+        self.prove(record, address, port, name, True)
         try:
             context = self.server_context(name or address)
             agent = context.wrap_socket(client, server_side=True)
@@ -1638,6 +2595,7 @@ class ProxyServer:
         if stream.buffer and (port in HTTP_PORTS or self.has_http_rules(address)):
             self.log({**record, "event": "denied", "reason": f"not HTTP inside TLS on port {port}"})
             return
+        self.observe(Ruleset.request(name or f"{address}:{port}", "GET", "/", [], address), any_path=True)
         counts = [len(stream.buffer), len(greeting)]
         if stream.buffer:
             send_all(server, stream.buffer)
@@ -1647,38 +2605,75 @@ class ProxyServer:
         self.log({**record, "event": "tls", "bytes_out": counts[0], "bytes_in": counts[1],
                   "ms": int((time.monotonic() - started) * 1000)})
 
+    def git_token(self, scheme, origin, record, method, path, target, headers):
+        """The Basic credentials (bytes) the proxy adds to this request (--token-proxy, sandbox-ai git-logins), or
+        None: over HTTPS only to the server whose certificate was checked for the token's host (ORIGIN is that
+        name); for a server on the host's loopback (plain http://localhost:PORT) only to the loopback port it was
+        given for, which the sandbox reaches only as the host's (pasta, the relay); always on the token's port, for
+        Git's smart HTTP requests, and never when the agent sends credentials of its own."""
+        tokens = self.config.get("git_tokens", [])
+        if not tokens or header(headers, "authorization"):
+            return None
+        destination = str(record.get("destination", ""))
+        port = destination.rsplit(":", 1)[-1]
+        address = destination.rsplit(":", 1)[0].strip("[]")
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(target).query)
+        git = path.endswith(("/git-upload-pack", "/git-receive-pack")) and method.upper() == "POST" or \
+            path.endswith("/info/refs") and method.upper() == "GET" and \
+            query.get("service", [""])[0] in ("git-upload-pack", "git-receive-pack")
+        if not git:
+            return None
+        for entry in tokens:
+            if str(entry["port"]) != port:
+                continue
+            if entry.get("loopback"):
+                try:
+                    # Only where the host's port is (HOST_LOOPBACK): at 127.0.0.5 the agent could listen itself.
+                    to_host = str(ipaddress.ip_address(address)) in HOST_LOOPBACK
+                except ValueError:
+                    to_host = False
+                if scheme == "http" and to_host:
+                    return base64.b64encode(f"{entry['user']}:{entry['token']}".encode())
+            elif scheme == "https" and not is_address_origin(origin) and entry["host"] == origin.lower():
+                return base64.b64encode(f"{entry['user']}:{entry['token']}".encode())
+        return None
+
     def has_http_rules(self, address):
-        """ADDRESS is pinned for a host with --allow-http rules: on any port, only HTTP it can check gets there."""
-        return any(address in rule.get("addresses", []) for rule in self.config.get("http_rules", []))
+        """ADDRESS is pinned for a host with HTTP rules: on any port, only HTTP the proxy can check gets there."""
+        return self.rules.pins(address)
 
     def http_refused(self, origin, method, path, host_header=None, address=None):
-        """Why --allow-http refuses METHOD PATH, or None. The rules that apply are those of every name the request
-        could reach: the verified server name (ORIGIN, else address:port), the Host header (servers such as
-        GitHub route by it, and one certificate covers many names) and the pinned addresses of ADDRESS, the
-        destination. A Host header other than the verified name is refused where rules apply."""
-        rules = self.config.get("http_rules", [])
-        if not rules:
-            return None
-        server = origin.rsplit(":", 1)[0].strip("[]").lower() if is_address_origin(origin) else origin.lower()
-        names = set() if is_address_origin(origin) else {server}
-        claimed = host_name(host_header)
-        if claimed:
-            names.add(claimed)
-        address = address or (server if is_address_origin(origin) else None)
+        """Why the rules refuse METHOD PATH without a body (or hold it for a question), or None; see Ruleset.http.
+        The rules that apply are those of every name the request could reach: the verified server name (ORIGIN,
+        else address:port), the Host header (servers such as GitHub route by it, and one certificate covers many
+        names) and the pinned addresses of ADDRESS, the destination."""
+        facts = Ruleset.request(origin, method, path, [["Host", host_header]] if host_header else [], address)
+        verdict = self.rules.http(facts)
+        return None if verdict["decision"] == "allow" else verdict["reason"]
 
-        def applies(rule):
-            pattern = rule["host"]
-            return address in rule.get("addresses", []) or any(
-                name == pattern or (pattern.startswith("*.") and name.endswith(pattern[1:])) for name in names)
-        applicable = [rule for rule in rules if applies(rule)]
-        if not applicable:
-            return None
-        if claimed and not is_address_origin(origin) and claimed != server:
-            return f"the Host header {claimed} differs from the server name {server} (--allow-http)"
-        for rule in applicable:
-            if ("*" in rule["methods"] or method.upper() in rule["methods"]) and path_matches(rule["path"], path):
-                return None
-        return f"{method} {path} is not among the requests allowed for {claimed or server} (--allow-http)"
+    def http_rule_body(self, parts, headers):
+        """(pieces read, body) for body conditions: up to RULE_BODY_LIMIT of PARTS is read before anything goes
+        to the server; a larger body is AMBIGUOUS. The pieces are passed on afterwards as they came."""
+        early, data = [], b""
+        for raw, payload in parts:
+            early.append((raw, payload))
+            data += payload
+            if len(data) > RULE_BODY_LIMIT:
+                return early, AMBIGUOUS
+        return early, Ruleset.body(data, headers)
+
+    def http_ask(self, verdict, method, url, host, path, body, asked_by=None):
+        """The human's answer to a request an ask rule holds (kind "http"); without approvals it is refused.
+        ASKED_BY: the process and sandbox of the connection, shown in the question."""
+        if self.asker is None:
+            return {"decision": "deny", "scope": "once", "reason": "asking is off (--ask off or no approvals)"}
+        details = {"rule": verdict["rule"], "ruleset": verdict["ruleset"], "method": printable_text(method, 20),
+                   "host": printable_text(host, 300), "path": printable_text(path, 2000),
+                   "url": printable_text(url, 2000), "reason": printable_text(verdict["reason"], 1000),
+                   **({"taint": verdict["taint"]} if verdict.get("taint") else {}), **(asked_by or {})}
+        if isinstance(body, (dict, list)):
+            details["body"] = printable_text(redact_text(json.dumps(shortened(body), default=repr)), 1000)
+        return self.asker("http", details)
 
     def exchange(self, stream, client, upstream, scheme, origin, record):
         """HTTP/1.1 requests and responses on one connection, until either side ends it. ORIGIN is the
@@ -1699,13 +2694,16 @@ class ProxyServer:
                 # target than the one the rules and the push check saw (/x#/../gists, or "/x /gists").
                 if not REQUEST_LINE.fullmatch(line) or "#" in rest.rpartition(" ")[0]:
                     send_all(client, b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                    self.log({**record, "event": "denied", "method": method[:20],
+                    self.log({**record, "event": "denied", "method": printable_text(method, 20),
+                              "request_line": printable_text(redact_text(line), 500),
+                              "request": {"headers": redact_headers(headers)},
                               "reason": "a malformed request line (one space each, no fragment)"})
                     return
                 if sum(1 for name, _ in headers if name.lower() == "host") > 1:
                     # Servers disagree on which one counts; rules and logs must see the one that is used.
                     send_all(client, b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                    self.log({**record, "event": "denied", "method": method, "reason": "more than one Host header"})
+                    self.log({**record, "event": "denied", "method": method, "reason": "more than one Host header",
+                              "request": {"headers": redact_headers(headers)}})
                     return
                 target = rest.rpartition(" ")[0] or rest
                 authority = header(headers, "host") or origin
@@ -1713,12 +2711,14 @@ class ProxyServer:
                 if "://" in target:
                     send_all(client, b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                     self.log({**record, "event": "denied", "method": method, "url": redact_text(target),
-                              "reason": "requests through another proxy (absolute URLs) would hide where they go"})
+                              "reason": "requests through another proxy (absolute URLs) would hide where they go",
+                              "request": {"headers": redact_headers(headers)}})
                     return
                 if method.upper() == "CONNECT":
                     send_all(client, b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                     self.log({**record, "event": "denied", "method": method, "url": redact_text(target),
-                              "reason": "tunnels through another proxy would hide what passes"})
+                              "reason": "tunnels through another proxy would hide what passes",
+                              "request": {"headers": redact_headers(headers)}})
                     return
                 # Where the request really goes: the server the proxy verified, with the path from the request
                 # line. Never the agent's Host header.
@@ -1727,26 +2727,51 @@ class ProxyServer:
                 entry = {**record, "event": "http", "method": method, "url": redact_text(url)}
                 current["entry"] = entry
                 destination = str(record.get("destination", "")).rsplit(":", 1)[0].strip("[]") or None
-                refusal = self.http_refused(origin, method, path or "/", header(headers, "host"), destination)
-                if refusal:
-                    message = f"sandbox-ai: {refusal}\n".encode()
-                    send_all(client, b"HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n"
-                             + f"Content-Length: {len(message)}\r\n\r\n".encode() + message)
-                    self.log({**entry, "event": "denied", "reason": refusal})
-                    current.pop("entry", None)
-                    return
-                framing = request_framing(headers)
-                if (header(headers, "expect") or "").lower() == "100-continue":
-                    # Answered here, so that a body to check arrives before anything reaches the server.
-                    send_all(client, b"HTTP/1.1 100 Continue\r\n\r\n")
-                    head = re.sub(rb"(?im)^expect:[^\r\n]*\r\n", b"", head)
+                parts, facts = None, None
+                if self.rules.http_active:
+                    facts = Ruleset.request(origin, method, target, headers, destination)
+                    facts["taint"] = self.taint()
+                    if facts["taint"]:
+                        entry["tainted"] = facts["taint"].get("since")
+                    if self.rules.needs_body(facts):
+                        # Read before the decision and before anything reaches the server; passed on as it came.
+                        framing = request_framing(headers)
+                        head = self.continued(client, head, headers)
+                        parts = stream.body(framing)
+                        early, facts["body"] = self.http_rule_body(parts, headers)
+                        parts = itertools.chain(early, parts)
+                    ruled = self.rules.http(facts)
+                    entry.update(decision=ruled["decision"], rule=ruled["rule"], ruleset=ruled["ruleset"])
+                    refusal = ruled["reason"] if ruled["decision"] == "deny" else None
+                    if ruled["decision"] == "ask":
+                        answer = self.http_ask(ruled, method, redact_text(url), facts["claimed"] or facts["server"],
+                                               facts["paths"][0] or "/", facts["body"], self.asked_by(record))
+                        entry["approval"] = {k: answer.get(k) for k in ("decision", "scope", "reason")}
+                        if answer.get("decision") != "allow":
+                            refusal = f"not approved ({answer.get('reason', 'refused')}): {ruled['reason']}"
+                    if refusal:
+                        message = f"sandbox-ai: {refusal}\n".encode()
+                        send_all(client, b"HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n"
+                                 + f"Content-Length: {len(message)}\r\n\r\n".encode() + message)
+                        request = {"headers": redact_headers(headers)}
+                        if self.debug:  # what it would have sent, read after the refusal went out
+                            request["body"] = self.refused_body(client, stream, parts, headers, limit)
+                        self.log({**entry, "event": "denied", "reason": refusal, "request": request})
+                        current.pop("entry", None)
+                        return
+                if parts is None:
+                    framing = request_framing(headers)
+                    head = self.continued(client, head, headers)
+                    parts = stream.body(framing)
+                parts = canary_request(self, head, parts, headers, entry, record, origin)
                 pending, captured = [], Capture(limit)
-                parts = stream.body(framing)
                 content_type = (header(headers, "content-type") or "").split(";")[0].strip().lower()
                 if (method.upper() == "POST" and path.endswith("git-receive-pack")) or \
                         content_type == "application/x-git-receive-pack-request":
-                    verdict, commands, capabilities = self.check_push(checked, headers, parts, pending, captured)
+                    verdict, commands, capabilities = self.check_push(checked, headers, parts, pending, captured,
+                                                                      record)
                     entry["push"] = verdict
+                    canary_push(self, verdict, entry, record)
                     if not verdict["ok"]:
                         with contextlib.suppress(ValueError, OSError):
                             for _, payload in parts:  # read the rest, so that Git reads our answer
@@ -1758,6 +2783,21 @@ class ProxyServer:
                         self.log(entry)
                         current.pop("entry", None)
                         return
+                token = self.git_token(scheme, origin, record, method, path, target, headers)
+                if token and head.endswith(b"\r\n\r\n"):
+                    # Added on the wire only: the log keeps the agent's headers, the token never appears there.
+                    head = head[:-2] + b"Authorization: Basic " + token + b"\r\n\r\n"
+                    entry["token_added"] = True
+                port = int(str(record.get("destination", "")).rsplit(":", 1)[-1] or 0)
+                head, llm = llm_head(self.config.get("llm"), scheme, origin, port, path, head)
+                if llm:
+                    entry["llm"] = llm  # its key went in on the wire; the log keeps the agent's headers
+                head, keys = api_key_head(self.config.get("api_keys"), scheme, origin, port, head)
+                if keys:
+                    entry["api_keys"] = keys  # the keys went in on the wire; the log keeps the placeholders
+                added = bool(entry.get("token_added") or llm or keys)
+                if added:
+                    head = identity_head(head)
                 send_all(upstream, head)
                 sent = len(head)
                 for raw in pending:
@@ -1781,6 +2821,10 @@ class ProxyServer:
                         status = int(status_line.split(" ")[1])
                     except (IndexError, ValueError):
                         raise ValueError("malformed HTTP status line") from None
+                    if facts is not None:
+                        self.observe(facts)  # before the agent sees a byte of the answer
+                    if added:  # a server that echoes what the proxy added gives the agent stars
+                        reply = Scrubber(s.encode("latin-1", "replace") for s in self.own_secrets()).mask(reply)
                     send_all(client, reply)
                     if 100 <= status < 200 and status != 101:
                         continue
@@ -1793,7 +2837,15 @@ class ProxyServer:
                 answer = Capture(ADVERT_LIMIT if advert else limit)
                 received = len(reply)
                 closing = response_framing(method, status, reply_headers)
-                for raw, payload in replies.body(closing):
+                pieces = replies.body(closing)
+                if added:
+                    encoding = (header(reply_headers, "content-encoding") or "identity").lower()
+                    if encoding != "identity":
+                        entry["unscrubbed"] = encoding  # asked for identity, got this: passed on as it came
+                    else:
+                        scrubber = Scrubber(s.encode("utf-8") for s in self.own_secrets())
+                        pieces = scrubbed_pieces(pieces, scrubber, bool(closing and closing[0] == "chunked"))
+                for raw, payload in pieces:
                     send_all(client, raw)
                     received += len(raw)
                     answer.add(payload)
@@ -1834,6 +2886,9 @@ class ProxyServer:
                 wants_close = any((header(h, "connection") or "").lower() == "close" for h in (headers, reply_headers))
                 if wants_close or (closing and closing[0] == "close") or line.endswith("HTTP/1.0"):
                     return
+            except CanaryRefused as refused:
+                canary_refusal(self, client, refused, current.get("entry") or record)
+                return
             except OSError as exc:
                 # The request went out: it is logged even if a side breaks the connection afterwards (a client
                 # that closes once it has what it wanted), never only as a bare error.
@@ -1844,14 +2899,36 @@ class ProxyServer:
                 raise
 
     @staticmethod
+    def refused_body(client, stream, parts, headers, limit):
+        """--log-debug: the logged form of a refused request's body (up to LIMIT), read within 2 seconds."""
+        captured = Capture(limit)
+        with contextlib.suppress(OSError, ValueError):
+            client.settimeout(2)
+            for _, payload in parts if parts is not None else stream.body(request_framing(headers)):
+                captured.add(payload)
+                if captured.total > limit:
+                    break
+        return body_record(captured.data, captured.total, headers, limit)
+
+    @staticmethod
+    def continued(client, head, headers):
+        """HEAD without its Expect line, with 100-continue answered here: a body to check arrives before anything
+        reaches the server."""
+        if (header(headers, "expect") or "").lower() == "100-continue":
+            send_all(client, b"HTTP/1.1 100 Continue\r\n\r\n")
+            head = re.sub(rb"(?im)^expect:[^\r\n]*\r\n", b"", head)
+        return head
+
+    @staticmethod
     def decoded(data, headers):
         if (header(headers, "content-encoding") or "").lower() in ("gzip", "x-gzip", "deflate"):
             with contextlib.suppress(zlib.error):
                 return zlib.decompressobj(47).decompress(data, ADVERT_LIMIT)
         return data
 
-    def check_push(self, url, headers, parts, pending, captured):
-        """(verdict, commands, capabilities) of a receive-pack request; reads the command lines into PENDING."""
+    def check_push(self, url, headers, parts, pending, captured, record=None):
+        """(verdict, commands, capabilities) of a receive-pack request; reads the command lines into PENDING.
+        RECORD: the connection's record, whose process a question names."""
         repository = url.rsplit("/git-receive-pack", 1)[0]
         gzip = (header(headers, "content-encoding") or "").lower() in ("gzip", "x-gzip")
         inflater, payload = zlib.decompressobj(47) if gzip else None, b""
@@ -1880,9 +2957,7 @@ class ProxyServer:
         request = {"url": repository, "commands": [list(c) for c in commands], "advertised": advertised}
         try:
             with self.check_lock:
-                self.checker.stdin.write((json.dumps(request) + "\n").encode())
-                self.checker.stdin.flush()
-                verdict = json.loads(self.checker.stdout.readline() or b"null")
+                verdict = self.ask_checker(request)
             if not isinstance(verdict, dict) or "ok" not in verdict:
                 raise ValueError("no answer from the privacy check")
         except (OSError, ValueError) as exc:
@@ -1890,13 +2965,48 @@ class ProxyServer:
         if verdict.get("ok") and verdict.get("warnings") and self.asker is not None:
             answer = self.asker("push", {"url": printable_text(repository, 2000),
                                          "refs": [printable_text(ref, 300) for _, _, ref in commands][:50],
-                                         "message": printable_text(verdict.get("message", ""))})
+                                         "message": printable_text(verdict.get("message", "")),
+                                         **(self.asked_by(record) if record is not None else {})})
             verdict["approval"] = {k: answer.get(k) for k in ("decision", "scope", "reason")}
             if answer.get("decision") != "allow":
                 verdict = {**verdict, "ok": False, "message": "the push has privacy warnings and was not approved:\n"
                            + str(verdict.get("message", ""))}
         verdict["refs"] = [ref for _, _, ref in commands]
         return verdict, commands, capabilities
+
+    def ask_checker(self, request):
+        """The checker's verdict on REQUEST (under check_lock); a refusal when it did not come within
+        PUSH_CHECK_SECONDS, or while the checker is still busy with an earlier request that took too long. The
+        checker runs as another user and cannot be stopped or restarted from here (the proxy has no privileges
+        left): its late answers are read and dropped once they arrive, and it is used again after that."""
+        while self.checker_owed:
+            line = self.checker_line(time.monotonic())  # what arrived meanwhile; no waiting
+            if line is None:
+                return {"ok": False, "message": "the privacy check is still busy with an earlier push that took too "
+                        "long; the push is refused, try again later"}
+            self.checker_owed -= 1
+        self.checker.stdin.write((json.dumps(request) + "\n").encode())
+        self.checker.stdin.flush()
+        line = self.checker_line(time.monotonic() + PUSH_CHECK_SECONDS)
+        if line is None:
+            self.checker_owed += 1
+            return {"ok": False, "message": f"the privacy check did not answer within {PUSH_CHECK_SECONDS} s; the "
+                    "push is refused, try again later"}
+        return json.loads(line or b"null")
+
+    def checker_line(self, deadline):
+        """The checker's next line (b"" once it ended), or None if none came by DEADLINE (monotonic)."""
+        fd = self.checker.stdout.fileno()
+        while b"\n" not in self.checker_buffer:
+            if not select.select([fd], [], [], max(0.0, deadline - time.monotonic()))[0]:
+                return None
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                line, self.checker_buffer = self.checker_buffer, b""
+                return line
+            self.checker_buffer += chunk
+        line, _, self.checker_buffer = self.checker_buffer.partition(b"\n")
+        return line + b"\n"
 
 
 def drop_to_proxy_user():
@@ -1945,9 +3055,10 @@ def exit_on_eof(stream, exit=os._exit):
     exit(0)
 
 
-def proxy_main(log_fd, ready_fd, ask_fd=None):
+def proxy_main(log_fd, ready_fd, ask_fd=None, asking=True):
     """The proxy process: CA, listeners and push checker as root, then the proxy user for the rest. ASK_FD is
-    the channel for questions to the supervisor (approvals), if there are any."""
+    the channel to the supervisor: questions (approvals, unless ASKING is False) and which process a
+    connection belongs to."""
     config = json.loads((PROXY_DIR / "proxy.json").read_text())
     create_ca(PROXY_RUN, CA_DIR)
     listeners = proxy_listeners(int(config.get("port", PROXY_PORT)))
@@ -1963,6 +3074,7 @@ def proxy_main(log_fd, ready_fd, ask_fd=None):
     allow.write_text(json.dumps(config.get("allow", {})))
     allow.chmod(0o644)
     config["allow_file"] = str(allow)
+    config["taint_file"] = str(PROXY_RUN / "taint.json")  # written by the supervisor (Taint)
     for root, dirs, files in os.walk(PROXY_RUN):
         for name in [*dirs, *files]:
             os.chown(os.path.join(root, name), PROXY_UID, PROXY_UID)
@@ -1970,23 +3082,24 @@ def proxy_main(log_fd, ready_fd, ask_fd=None):
     drop_to_proxy_user()
     if stdin_is_pipe():  # started by the supervisor (start_proxy), which stops it by closing the pipe
         threading.Thread(target=exit_on_eof, args=(sys.stdin.buffer,), daemon=True).start()
-    asker = AskChannel(socket.socket(fileno=ask_fd)) if ask_fd is not None else None
-    server = ProxyServer(config, log_fd, checker, asker=asker)
+    channel = AskChannel(socket.socket(fileno=ask_fd)) if ask_fd is not None else None
+    server = ProxyServer(config, log_fd, checker, run_dir=PROXY_RUN, asker=channel if asking else None, who=channel)
     server.serve(listeners)
     os.write(ready_fd, b"1")
     os.close(ready_fd)
     return server.wait()
 
 
-def start_proxy(cfg, broker=None):
+def start_proxy(cfg, broker=None, who=None, taint=None):
     """Start the proxy before the agent and make the agent's TLS libraries trust the session CA. With a
-    BROKER the proxy gets a channel to put questions to it (approvals)."""
+    BROKER the proxy gets a channel to put questions to it (approvals), with WHO (an Attribution) one to ask
+    which process a connection belongs to; the same channel."""
     flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_CLOEXEC", 0)
     log_fd = os.open(LOG_DIR / cfg["log"], flags, 0o600) if LOG_DIR.is_dir() else os.open(os.devnull, os.O_WRONLY)
     ready_r, ready_w = os.pipe()
-    mine, theirs = socket.socketpair() if broker is not None else (None, None)
+    mine, theirs = socket.socketpair() if broker is not None or who is not None or taint is not None else (None, None)
     try:
-        ask = [str(theirs.fileno())] if theirs else []
+        ask = [str(theirs.fileno()), *([] if broker is not None else ["--no-ask"])] if theirs else []
         # stdin is how the proxy is stopped: it runs as its own user, which the supervisor may not signal
         # (Podman gives it no CAP_KILL); it exits when the pipe closes.
         process = subprocess.Popen(["python3", "-I", "/sandbox/runtime.py", "--internal-proxy", str(log_fd),
@@ -2010,7 +3123,7 @@ def start_proxy(cfg, broker=None):
         if theirs is not None:
             theirs.close()
     if mine is not None:
-        threading.Thread(target=serve_asks, args=(mine, broker), daemon=True).start()
+        threading.Thread(target=serve_asks, args=(mine, broker, who, taint), daemon=True).start()
     trust_session_ca()
     return process
 
@@ -2031,6 +3144,1650 @@ def trust_session_ca(bundles=SYSTEM_BUNDLES, mount=None):
             mount(str(CA_DIR / "bundle.pem"), real)
             done.add(real)
     return sorted(done)
+
+# --- who opened a connection -----------------------------------------------------------------------
+#
+# Every connection the proxy sees, every lookup the DNS stub answers and every packet the firewall drops
+# belongs to a socket of some process in the sandbox. The supervisor (PID 1, outside Firejail, the same
+# user as the agent's processes) finds it: the socket's inode in /proc/net/{tcp,tcp6,udp,udp6}, then the
+# process holding it in /proc/*/fd. Nothing the agent sends is taken for this (no header, no variable);
+# what a process calls itself (comm, argv) is its own choice and is shown escaped, cut and redacted. A
+# lookup that fails or takes too long is "unknown": it never holds a connection.
+
+ATTRIBUTION_BUDGET = 0.2   # seconds one scan of /proc/*/fd may take; what it did not reach is unknown
+ATTRIBUTION_RATE = 50      # lookups per second; beyond that they are unknown ("too many lookups")
+ATTRIBUTION_WAIT = 0.25    # how long the proxy waits for the answer before it writes a record
+REFUSAL_WAIT = 0.05        # how long a refusal waits for it: a reset unhashes the client's socket
+TCP_STATES = {1: "ESTABLISHED", 2: "SYN_SENT", 3: "SYN_RECV", 4: "FIN_WAIT1", 5: "FIN_WAIT2", 6: "TIME_WAIT",
+              7: "CLOSE", 8: "CLOSE_WAIT", 9: "LAST_ACK", 10: "LISTEN", 11: "CLOSING"}
+
+
+class Attribution:
+    """The process behind a socket of this sandbox, read from PROC as the supervisor sees it. SANDBOX names
+    the sandbox ({"run", "agent", "backend", "role", "pod"}); DEBUG adds the ancestors' command lines and the
+    process's sockets; SECRET_VALUES are redacted from command lines by value (--env, --secret-env)."""
+
+    def __init__(self, proc=Path("/proc"), sandbox=None, debug=False, secret_values=(), budget=ATTRIBUTION_BUDGET,
+                 rate=ATTRIBUTION_RATE, clock=time.monotonic):
+        self.proc, self.debug, self.budget, self.rate, self.clock = Path(proc), debug, budget, rate, clock
+        self.sandbox = {key: value for key, value in (sandbox or {}).items() if value is not None}
+        self.values = sorted({v for v in secret_values if isinstance(v, str) and len(v) >= 6}, key=len, reverse=True)
+        self.lock = threading.Lock()
+        self.owners, self.scanned = {}, None  # socket inode: (pid, fd), from the last scan
+        self.cache, self.window, self.count = {}, 0.0, 0
+
+    # -- sockets --
+
+    @staticmethod
+    def endpoint(text):
+        """(address, port) of a /proc/net endpoint such as 0100007F:3A99; IPv4-mapped addresses as IPv4."""
+        raw, _, port = text.partition(":")
+        data = bytes.fromhex(raw)
+        # The kernel prints each 32-bit word in host byte order (little endian on every target here).
+        data = b"".join(data[i:i + 4][::-1] for i in range(0, len(data), 4))
+        address = ipaddress.ip_address(data)
+        if address.version == 6 and address.ipv4_mapped:
+            address = address.ipv4_mapped
+        return str(address), int(port, 16)
+
+    def sockets(self):
+        """[{"protocol", "local", "remote", "state", "uid", "inode"}] of the sandbox's TCP and UDP sockets."""
+        found = []
+        for name in ("tcp", "tcp6", "udp", "udp6"):
+            try:
+                lines = (self.proc / "net" / name).read_text().splitlines()[1:]
+            except OSError:
+                continue
+            for line in lines:
+                fields = line.split()
+                try:
+                    state = int(fields[3], 16)
+                    found.append({"protocol": name.rstrip("6"), "local": self.endpoint(fields[1]),
+                                  "remote": self.endpoint(fields[2]), "uid": int(fields[7]), "inode": int(fields[9]),
+                                  "state": TCP_STATES.get(state, str(state)) if name.startswith("tcp") else None})
+                except (IndexError, ValueError):
+                    continue
+        return found
+
+    def scan(self):
+        """{inode: (pid, fd)} of every socket a process holds, as far as BUDGET allows."""
+        owners, deadline = {}, self.clock() + self.budget
+        try:
+            pids = [entry.name for entry in os.scandir(self.proc) if entry.name.isdigit()]
+        except OSError:
+            return owners
+        for pid in pids:
+            if self.clock() > deadline:
+                break
+            try:
+                fds = [entry.name for entry in os.scandir(self.proc / pid / "fd")]
+            except OSError:
+                continue  # gone, or not ours to read
+            for fd in fds:
+                with contextlib.suppress(OSError):
+                    target = os.readlink(self.proc / pid / "fd" / fd)
+                    if target.startswith("socket:["):
+                        owners.setdefault(int(target[8:-1]), (int(pid), fd))
+        return owners
+
+    def owner(self, inode):
+        """The PID holding socket INODE now, or None. A cached owner is checked again (its fd may have closed
+        and its PID been reused); a socket not seen yet starts a new scan, at most every 50 ms."""
+        with self.lock:
+            for attempt in range(2):
+                found = self.owners.get(inode)
+                if found:
+                    pid, fd = found
+                    with contextlib.suppress(OSError):
+                        if os.readlink(self.proc / str(pid) / "fd" / fd) == f"socket:[{inode}]":
+                            return pid
+                if attempt or (self.scanned is not None and self.clock() - self.scanned < 0.05 and not found):
+                    return None
+                self.owners, self.scanned = self.scan(), self.clock()
+        return None
+
+    # -- processes --
+
+    def start(self, pid):
+        """Start time of PID (field 22 of stat, clock ticks after boot): with the PID, it names one process."""
+        return int((self.proc / str(pid) / "stat").read_text().rpartition(")")[2].split()[19])
+
+    def status(self, pid):
+        fields = {}
+        for line in (self.proc / str(pid) / "status").read_text().splitlines():
+            name, _, value = line.partition(":")
+            fields[name] = value.split()
+        return fields
+
+    def argv(self, pid, count=32, total=2000):
+        """PID's command line: at most COUNT arguments and TOTAL characters, secrets redacted, escaped."""
+        with open(self.proc / str(pid) / "cmdline", "rb") as stream:
+            raw = stream.read(64 << 10)
+        result, used = [], 0
+        for part in raw.split(b"\0")[:-1] if raw.endswith(b"\0") else raw.split(b"\0"):
+            if len(result) >= count or used >= total:
+                result.append("...")
+                break
+            text = part.decode("utf-8", "replace")
+            for value in self.values:
+                text = text.replace(value, "[redacted]")
+            text = printable_text(redact_text(text), min(300, total - used))
+            result.append(text)
+            used += len(text)
+        return result
+
+    def link(self, pid, name):
+        with contextlib.suppress(OSError):
+            return printable_text(os.readlink(self.proc / str(pid) / name), 500)
+        return None
+
+    def process(self, pid):
+        """What can be told of PID: PID and the PID inside Firejail (ns_pid), comm, argv, exe, cwd, uid, its
+        ancestors' names; None if it ended, or if its PID belonged to another process by the end of reading."""
+        try:
+            start = self.start(pid)
+            status = self.status(pid)
+            comm = (self.proc / str(pid) / "comm").read_text().rstrip("\n")
+            info = {"pid": pid, "ns_pid": int(status.get("NSpid", [pid])[-1]), "comm": printable_text(comm, 64),
+                    "argv": self.argv(pid), "exe": self.link(pid, "exe"), "cwd": self.link(pid, "cwd"),
+                    "uid": int(status["Uid"][0]), "ppid": int(status["PPid"][0]), "start": start}
+            if self.start(pid) != start:
+                return None
+        except (OSError, ValueError, IndexError, KeyError):
+            return None
+        info["parents"] = [entry["comm"] for entry in self.ancestors(info["ppid"], 4)]
+        if self.debug:
+            info["tree"] = self.ancestors(info["ppid"], 16, argv=True)
+            info["sockets"] = self.held(pid)
+        return info
+
+    def ancestors(self, pid, depth, argv=False):
+        """PID and its parents, up to DEPTH of them: {"pid", "comm"} (and "argv")."""
+        chain = []
+        while pid > 0 and len(chain) < depth:
+            try:
+                status = self.status(pid)
+                entry = {"pid": pid, "comm": printable_text((self.proc / str(pid) / "comm").read_text().rstrip("\n"), 64)}
+                if argv:
+                    entry["argv"] = self.argv(pid, count=12, total=600)
+                parent = int(status["PPid"][0])
+            except (OSError, ValueError, IndexError, KeyError):
+                break
+            chain.append(entry)
+            pid = parent
+        return chain
+
+    def held(self, pid, limit=32):
+        """The sockets PID holds: protocol, local and remote endpoint, state."""
+        inodes = set()
+        with contextlib.suppress(OSError):
+            for entry in os.scandir(self.proc / str(pid) / "fd"):
+                with contextlib.suppress(OSError):
+                    target = os.readlink(entry.path)
+                    if target.startswith("socket:["):
+                        inodes.add(int(target[8:-1]))
+        return [{"protocol": s["protocol"], "local": f"{s['local'][0]}:{s['local'][1]}",
+                 "remote": f"{s['remote'][0]}:{s['remote'][1]}", "state": s["state"]}
+                for s in self.sockets() if s["inode"] in inodes][:limit]
+
+    # -- lookups --
+
+    def allowed(self):
+        """Rate limit: ATTRIBUTION_RATE lookups per second; an agent opening sockets in a loop gets unknowns."""
+        with self.lock:
+            now = self.clock()
+            if now - self.window >= 1:
+                self.window, self.count = now, 0
+            self.count += 1
+            return self.count <= self.rate
+
+    def found(self, pid, why):
+        info = self.process(pid) if pid else None
+        result = {"process": info} if info else {"process": {"unknown": why}}
+        return {**result, **({"sandbox": self.sandbox} if self.sandbox else {})}
+
+    def lookup(self, protocol, address, port):
+        """{"process", "sandbox"} for the socket of PROTOCOL bound to ADDRESS:PORT: the client end of a
+        connection the proxy accepted, or of a DNS query."""
+        try:
+            key = (protocol, str(ipaddress.ip_address(str(address).split("%")[0])), int(port))
+        except ValueError:
+            return {"process": {"unknown": "not an address"}}
+        with self.lock:
+            cached = self.cache.get(key)
+            if cached and self.clock() - cached[0] < 2:
+                return cached[1]
+        if not self.allowed():
+            return {"process": {"unknown": "too many lookups"}, **({"sandbox": self.sandbox} if self.sandbox else {})}
+        sockets = [s for s in self.sockets() if s["protocol"] == protocol and s["local"] == key[1:] and s["inode"]]
+        if not sockets:
+            result = self.found(None, "no such socket (closed already)")
+        else:
+            pid = next((p for p in map(self.owner, (s["inode"] for s in sockets)) if p), None)
+            result = self.found(pid, "the process ended or closed the socket before it was found")
+        with self.lock:
+            self.cache[key] = (self.clock(), result)
+            if len(self.cache) > 4096:
+                self.cache.pop(next(iter(self.cache)))
+        return result
+
+    def by_remote(self, protocol, address, port):
+        """For a packet the firewall dropped: the process whose socket of PROTOCOL is connected to
+        ADDRESS:PORT (a TCP socket stays in SYN_SENT while it retries), with the socket's state."""
+        if not self.allowed():
+            return {"process": {"unknown": "too many lookups"}}
+        try:
+            target = (str(ipaddress.ip_address(str(address))), int(port))
+        except ValueError:
+            return {"process": {"unknown": "not an address"}}
+        for candidate in self.sockets():
+            if candidate["protocol"] == protocol and candidate["remote"] == target and candidate["inode"]:
+                pid = self.owner(candidate["inode"])
+                if pid:
+                    return {**self.found(pid, "the process ended"), "state": candidate["state"]}
+        return self.found(None, "no socket to that destination any more")
+
+    @staticmethod
+    def peer(connection):
+        """(pid, uid, gid) of the process at the other end of a Unix socket (SO_PEERCRED), as the kernel
+        reports it: pid 0 when that process is not in this PID namespace's view."""
+        data = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+        return struct.unpack("3i", data)
+
+
+# --- taint: untrusted content in the run ------------------------------------------------------------
+#
+# CaMeL's rule at sandbox-ai's layer: nothing here sees how data flows inside the model's context, so once
+# untrusted content has entered a run (a response of a host, or the result of an MCP tool, that a ruleset
+# marks untrusted), every later action may depend on it. Rules with "when": {"tainted": true} hold from then
+# on (writes to hosts other than the agent's own provider, pushes, chosen MCP tools: ask). The taint lasts for
+# the whole run, and only the human takes it back (sandbox-ai net untaint); a new run starts untainted.
+
+class Taint:
+    """The run's taint, held by the supervisor. MIRROR: a copy the proxy reads (in PROXY_RUN, which the agent
+    cannot see); LOG: the file taint events are appended to (the run's connection log)."""
+
+    def __init__(self, mirror=None, log=None, clock=time.time):
+        self.mirror, self.log, self.clock = mirror, log, clock
+        # The mirror is written on a change only: the proxy reads a missing one as untainted, and a file made at
+        # start-up would be handed to the proxy's user with the rest of its directory.
+        self.lock, self.state = threading.Lock(), {"tainted": False}
+
+    def shown(self):
+        with self.lock:
+            return dict(self.state)
+
+    def mark(self, source):
+        """Untrusted content entered the run: SOURCE {"layer", "rule", "ruleset", "what"}. The first source and
+        its time are kept, later ones counted. Returns the new state."""
+        source = {key: printable_text(str(value), 300) for key, value in (source or {}).items()
+                  if key in ("layer", "rule", "ruleset", "what") and value is not None}
+        with self.lock:
+            first = not self.state.get("tainted")
+            if first:
+                self.state = {"tainted": True, "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.clock())),
+                              "source": source, "sources": 1}
+            else:
+                self.state["sources"] = self.state.get("sources", 1) + 1
+            state = dict(self.state)
+        if first:
+            self.write()
+            self.append({"event": "taint", "taint": state})
+        return state
+
+    def reset(self, by="the human (sandbox-ai net untaint)"):
+        """Take the taint back; only the human does. Returns the state before."""
+        with self.lock:
+            before, self.state = self.state, {"tainted": False}
+        if before.get("tainted"):
+            self.write()
+            self.append({"event": "untaint", "by": by, "was": before})
+        return before
+
+    def write(self):
+        if self.mirror is not None:
+            with contextlib.suppress(OSError):
+                write_new(Path(self.mirror), json.dumps(self.shown()), 0o644)
+
+    def append(self, record):
+        if self.log is not None:
+            with contextlib.suppress(OSError):
+                with open(self.log, "a") as stream:
+                    stream.write(json.dumps({"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **record})
+                                 + "\n")
+
+    @staticmethod
+    def because(state):
+        """Why a rule for tainted runs held: "untrusted content from WHAT (rule ID of RULESET) entered this run
+        at TIME"."""
+        source = state.get("source") or {}
+        rule = f" (rule {source['rule']} of {source.get('ruleset', '?')})" if source.get("rule") else ""
+        return f"untrusted content from {source.get('what', 'a source marked untrusted')}{rule} entered this run " \
+               f"at {state.get('since', '?')}"
+
+
+# --- rulesets --------------------------------------------------------------------------------------
+#
+# Allow, ask or deny per HTTP request (host, method, path, query, headers, JSON body) in the connection proxy
+# and per MCP tool call (server, tool, arguments) in the MCP relay. Rulesets come from the administrator's
+# policy, your own files (~/.config/sandbox-ai/rules.json, --rules, --allow-http) and the trusted project
+# file. Each ruleset decides on its own and the strictest decision wins (deny over ask over allow), so no
+# ruleset can widen what another one narrows, and none opens the firewall. Within a ruleset the first rule
+# that matches decides, lowest priority number first, deny before ask before allow at equal priority.
+#
+# A condition is True, False or None: unknown, for what servers may read differently (a key given twice or
+# in another case, a body that cannot be parsed, a method override header, a path that matches only when case
+# is ignored). Allow rules need True; deny and ask rules take None as well, so that whatever cannot be judged
+# is never allowed by a rule. A value that is missing fails a condition unless it says "optional": true.
+
+RULE_DECISIONS = ("allow", "ask", "deny")  # in rising strictness
+DECIDED = {"allow": "allowed", "ask": "held for a question", "deny": "denied"}
+RULESET_KEYS = {"version", "description", "defaults", "http", "mcp", "devices", "canary", "tool", "untrusted"}
+RULE_SECTIONS = ("http", "mcp", "devices", "tool")
+# "canary": what a read of a canary file and a canary token leaving do (canary.py), in rising strictness
+CANARY_ON_READ = ("report", "ask", "pause", "stop")
+CANARY_ON_SEND = ("report", "block", "pause", "stop")
+HTTP_RULE_KEYS = {"id", "description", "host", "methods", "path", "query", "headers", "body", "decision",
+                  "priority", "reason", "when"}
+MCP_RULE_KEYS = {"id", "description", "server", "tool", "args", "decision", "priority", "reason", "when"}
+DEVICE_RULE_KEYS = {"id", "description", "usb", "serial", "class", "subsystem", "node", "decision", "priority",
+                    "reason"}
+DEVICE_MATCHERS = ("usb", "serial", "class", "subsystem", "node")
+RULE_USB = re.compile(r"[0-9a-f]{4}:(?:[0-9a-f]{4}|\*)")
+RULE_SUBSYSTEM = re.compile(r"[a-z0-9_-]{1,32}")
+RULE_SERIAL = re.compile(r"[!-~]{1,126}")
+RULE_NODE = re.compile(r"/dev/[!-~]{1,1000}|cdi:[!-~]{1,200}")
+# USB class codes (bDeviceClass, bInterfaceClass) by the names rules may use; two hex digits work as well.
+USB_CLASSES = {"audio": "01", "cdc": "02", "hid": "03", "physical": "05", "image": "06", "printer": "07",
+               "mass-storage": "08", "hub": "09", "cdc-data": "0a", "smart-card": "0b", "security": "0d",
+               "video": "0e", "healthcare": "0f", "audio-video": "10", "billboard": "11", "diagnostic": "dc",
+               "wireless": "e0", "misc": "ef", "application": "fe", "vendor": "ff"}
+UNTRUSTED_KEYS = {"id", "description", "host", "path", "server", "agent", "tool"}
+TOOL_RULE_KEYS = {"id", "description", "agent", "tool", "args", "decision", "priority", "reason", "when"}
+RULE_AGENT = re.compile(r"\*|claude|codex|opencode")
+CONDITION_KEYS = {"type", "const", "enum", "pattern", "glob", "path_glob", "minLength", "maxLength", "minimum",
+                  "maximum", "items", "properties", "required", "additionalProperties", "not", "anyOf", "allOf",
+                  "optional"}
+JSON_TYPES = ("string", "number", "integer", "boolean", "object", "array", "null")
+RULE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}")
+RULE_HOST = re.compile(r"\*|(?:\*\.)?(?:[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?\.)*[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?")
+RULE_SERVER = re.compile(r"\*|[A-Za-z0-9_-]{1,32}")
+RULE_TOOL = re.compile(r"[A-Za-z0-9_.:/*-]{1,128}")
+TOOL_NAME = re.compile(r"[A-Za-z0-9_.:/-]{1,128}")  # what MCP servers name tools (spec: A-Z a-z 0-9 _ - .)
+RULE_LIMIT = 2000             # rules in one ruleset
+PATTERN_INPUT_LIMIT = 100000  # characters a pattern is tried on: a longer value is unknown
+RULE_BODY_LIMIT = 1 << 20     # request body read for body conditions: a larger one is unknown
+# Headers that some frameworks run as the method or the path instead of the request line's.
+METHOD_OVERRIDES = ("x-http-method-override", "x-http-method", "x-method-override")
+PATH_OVERRIDES = ("x-original-url", "x-rewrite-url")
+
+
+class RuleError(ValueError):
+    """A ruleset that cannot be used; the message names the ruleset, the rule and the key."""
+
+
+class Unknown:
+    """MISSING (not there) and AMBIGUOUS (there, but not one value that every server reads alike)."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def __repr__(self):
+        return self.name
+
+
+MISSING, AMBIGUOUS = Unknown("MISSING"), Unknown("AMBIGUOUS")
+
+
+class Ruleset:
+    """The rulesets of a run, in order (the administrator's first), compiled for the proxy and the MCP relay."""
+
+    def __init__(self, sources=(), pinned=None, providers=()):
+        """SOURCES: [{"name", "version": 1, ...}], each checked again here (it comes from the launcher, but a
+        rule that does not compile must stop the proxy, not pass). PINNED: {host: [addresses]} of the run, so
+        that the rules of a host also hold for a request to its bare address."""
+        self.sources = []
+        for source in sources:
+            name = str(source.get("name") or "rules")
+            checked = self.validated({key: value for key, value in source.items() if key != "name"}, name)
+            for section in RULE_SECTIONS:
+                # sorted() is stable: file order decides among rules of equal priority and decision.
+                checked[section] = sorted(checked[section], key=lambda rule: (
+                    rule["priority"], -RULE_DECISIONS.index(rule["decision"])))
+            self.sources.append({"name": name, **checked})
+        # The agent's own provider (its model API): never a source of untrusted content, never held by a rule
+        # for tainted runs. Known by its verified name only, never by a Host header the agent sends.
+        self.providers = [self.name(host) for host in providers]
+        self.pinned = {}
+        for host, addresses in (pinned or {}).items():
+            with contextlib.suppress(ValueError, TypeError):
+                self.pinned[self.name(host)] = {str(ipaddress.ip_address(str(a))) for a in addresses}
+        for source in self.sources:
+            for rule in source["http"] + self.http_sources(source):
+                rule["addresses"] = set() if "*" in rule["host"] else {
+                    address for host, values in self.pinned.items() if self.host(rule["host"], [host])
+                    for address in values}
+
+    # -- checking a ruleset --
+
+    @classmethod
+    def validated(cls, document, name):
+        """DOCUMENT (a ruleset, version 1) checked and in its normal form; RuleError names NAME and the rule."""
+        def fail(message):
+            raise RuleError(f"{name}: {message}")
+        if not isinstance(document, dict):
+            fail('a ruleset is a JSON object with "version": 1')
+        unknown = sorted(set(document) - RULESET_KEYS)
+        if unknown:
+            fail(f"unknown key {unknown[0]!r} (a ruleset has {', '.join(sorted(RULESET_KEYS))})")
+        if document.get("version") != 1 or isinstance(document.get("version"), bool):
+            fail('"version": 1 is required')
+        if not isinstance(document.get("description", ""), str):
+            fail('"description" is text')
+        defaults = document.get("defaults", {})
+        if not isinstance(defaults, dict) or set(defaults) - set(RULE_SECTIONS) or \
+                any(value not in RULE_DECISIONS for value in defaults.values()):
+            fail('"defaults" takes "http", "mcp", "devices" and "tool", each "allow", "ask" or "deny"')
+        result = {"version": 1, "defaults": {key: defaults.get(key, "allow") for key in RULE_SECTIONS},
+                  "http": [], "mcp": [], "devices": [], "tool": [], "untrusted": []}
+        if "canary" in document:
+            canary = document["canary"]
+            if not isinstance(canary, dict) or not canary or set(canary) - {"on_read", "on_send"} or \
+                    canary.get("on_read", "report") not in CANARY_ON_READ or \
+                    canary.get("on_send", "block") not in CANARY_ON_SEND:
+                fail(f'"canary" takes "on_read" ({", ".join(CANARY_ON_READ)}) and "on_send" '
+                     f'({", ".join(CANARY_ON_SEND)})')
+            result["canary"] = dict(canary)
+        seen = set()
+        untrusted = document.get("untrusted", [])
+        if not isinstance(untrusted, list) or len(untrusted) > RULE_LIMIT:
+            fail(f'"untrusted" is a list of up to {RULE_LIMIT} sources')
+        for index, source in enumerate(untrusted, 1):
+            ident = source.get("id") if isinstance(source, dict) else None
+            where = f"untrusted source {index}" + (f" ({ident})" if isinstance(ident, str) and
+                                                   RULE_ID.fullmatch(ident) else "")
+            try:
+                checked = cls.untrusted_source(source)
+            except RuleError as exc:
+                fail(f"{where}: {exc}")
+            if checked["id"] in seen:
+                fail(f"{where}: the id {checked['id']} is used twice")
+            seen.add(checked["id"])
+            result["untrusted"].append(checked)
+        for section, check in (("http", cls.http_rule), ("mcp", cls.mcp_rule), ("devices", cls.device_rule),
+                               ("tool", cls.tool_rule)):
+            rules = document.get(section, [])
+            if not isinstance(rules, list):
+                fail(f'"{section}" is a list of rules')
+            if len(rules) > RULE_LIMIT:
+                fail(f'"{section}" has more than {RULE_LIMIT} rules')
+            for index, rule in enumerate(rules, 1):
+                ident = rule.get("id") if isinstance(rule, dict) else None
+                kind = "device" if section == "devices" else section
+                where = f"{kind} rule {index}" + (f" ({ident})" if isinstance(ident, str) and
+                                                  RULE_ID.fullmatch(ident) else "")
+                try:
+                    checked = check(rule)
+                except RuleError as exc:
+                    fail(f"{where}: {exc}")
+                if checked["id"] in seen:
+                    fail(f"{where}: the id {checked['id']} is used twice")
+                seen.add(checked["id"])
+                result[section].append(checked)
+        return result
+
+    @staticmethod
+    def rule(rule, keys):
+        """What every rule has: id, decision, priority, reason."""
+        if not isinstance(rule, dict):
+            raise RuleError("a rule is a JSON object")
+        unknown = sorted(set(rule) - keys)
+        if unknown:
+            raise RuleError(f"unknown key {unknown[0]!r} (a rule has {', '.join(sorted(keys))})")
+        ident = rule.get("id")
+        if not isinstance(ident, str) or not RULE_ID.fullmatch(ident):
+            raise RuleError('"id" is required: up to 64 letters, digits, ".", "_", ":" or "-", starting with a '
+                            'letter or digit')
+        if rule.get("decision") not in RULE_DECISIONS:
+            raise RuleError('"decision" is required: "allow", "ask" or "deny"')
+        priority = rule.get("priority", 100)
+        if isinstance(priority, bool) or not isinstance(priority, int) or not 0 <= priority <= 1000000:
+            raise RuleError('"priority" is a whole number from 0 to 1000000 (default 100; lower comes first)')
+        reason = rule.get("reason")
+        if reason is not None and (not isinstance(reason, str) or not reason or len(reason) > 500
+                                   or not reason.isprintable()):
+            raise RuleError('"reason" is one line of at most 500 characters')
+        if not isinstance(rule.get("description", ""), str):
+            raise RuleError('"description" is text')
+        when = rule.get("when")
+        if when is not None and when != {"tainted": True}:
+            raise RuleError('"when" takes only {"tainted": true}: the rule holds once untrusted content entered '
+                            'the run')
+        return {"id": ident, "decision": rule["decision"], "priority": priority, **({"reason": reason} if reason else {}),
+                **({"when": {"tainted": True}} if when else {})}
+
+    @classmethod
+    def untrusted_source(cls, source):
+        """A source of untrusted content: responses of hosts ("host", "path"), results of MCP tools ("server",
+        "tool") or of the agent's own tools ("agent", "tool": seen by its hooks). The agent's own provider is never
+        one."""
+        if not isinstance(source, dict):
+            raise RuleError("a source is a JSON object")
+        unknown = sorted(set(source) - UNTRUSTED_KEYS)
+        if unknown:
+            raise RuleError(f"unknown key {unknown[0]!r} (a source has {', '.join(sorted(UNTRUSTED_KEYS))})")
+        ident = source.get("id")
+        if not isinstance(ident, str) or not RULE_ID.fullmatch(ident):
+            raise RuleError('"id" is required: up to 64 letters, digits, ".", "_", ":" or "-", starting with a '
+                            'letter or digit')
+        if ("host" in source) == ("tool" in source):
+            raise RuleError('a source names either "host" (responses of hosts) or "tool" (results of MCP tools, '
+                            'or with "agent" of the agent\'s own tools)')
+        if "agent" in source:
+            if "server" in source or "path" in source:
+                raise RuleError('"agent" names the agent\'s own tools: not with "server" or "path"')
+            rule = cls.tool_rule({"id": ident, "agent": source["agent"], "tool": source["tool"], "decision": "deny"})
+            return {"id": ident, "agent": rule["agent"], "tool": rule["tool"]}
+        if "host" in source:
+            if "server" in source:
+                raise RuleError('"server" belongs to a source with "tool"')
+            rule = cls.http_rule({"id": ident, "host": source["host"], "path": source.get("path"), "decision": "deny"})
+            return {"id": ident, "host": rule["host"], "path": rule["path"]}
+        if "path" in source:
+            raise RuleError('"path" belongs to a source with "host"')
+        rule = cls.mcp_rule({"id": ident, "server": source.get("server"), "tool": source["tool"], "decision": "deny"})
+        return {"id": ident, "server": rule["server"], "tool": rule["tool"]}
+
+    @staticmethod
+    def strings(value, key, pattern, what, default=None):
+        """VALUE (a string or a list of up to 100) as a list, each matching PATTERN (WHAT says what that is)."""
+        if value is None and default is not None:
+            value = default
+        values = [value] if isinstance(value, str) else value
+        if not isinstance(values, list) or not values or len(values) > 100:
+            raise RuleError(f'"{key}" is {what}, or a list of up to 100')
+        for item in values:
+            if not isinstance(item, str) or not pattern.fullmatch(item):
+                raise RuleError(f'"{key}" {item!r}: not {what}')
+        return list(dict.fromkeys(values))
+
+    @classmethod
+    def http_rule(cls, rule):
+        checked = cls.rule(rule, HTTP_RULE_KEYS)
+        if "host" not in rule:
+            raise RuleError('"host" is required: a name, *.DOMAIN, an address, or * for every host')
+        hosts = []
+        what = "a host name, *.DOMAIN, an address, or * for every host"
+        for value in cls.strings(rule["host"], "host", re.compile(r"[!-~]{1,253}"), what):
+            host = cls.name(value)
+            if not RULE_HOST.fullmatch(host) and not cls.is_address(host):
+                raise RuleError(f'"host" {value!r}: not {what}')
+            hosts.append(host)
+        methods = [m.upper() for m in cls.strings(rule.get("methods"), "methods", re.compile(r"\*|[A-Za-z]{1,20}"),
+                                                  "a method such as GET, or *", "*")]
+        paths = []
+        for value in cls.strings(rule.get("path"), "path", re.compile(r"/[!-~]{0,1000}"),
+                                 "a path pattern starting with / (printable ASCII)", "/**"):
+            if "?" in value or "#" in value:
+                raise RuleError(f'"path" {value!r}: a path has no query (use "query") and no fragment')
+            # As the requests are compared: decoded, dot segments and repeated slashes resolved, no trailing /.
+            paths.append(normal_path(value) or "/")
+        checked.update(host=hosts, methods=["*"] if "*" in methods else list(dict.fromkeys(methods)),
+                       path=list(dict.fromkeys(paths)))
+        if "query" in rule:
+            checked["query"] = cls.conditions(rule["query"], "query")
+        if "headers" in rule:
+            checked["headers"] = cls.conditions(rule["headers"], "headers", lower=True)
+            if any(not re.fullmatch(r"[!#$%&'*+.^_`|~0-9a-z-]{1,100}", name) for name in checked["headers"]):
+                raise RuleError('"headers": header names are tokens such as content-type')
+        if "body" in rule:
+            checked["body"] = cls.condition(rule["body"], "body")
+        return checked
+
+    @classmethod
+    def mcp_rule(cls, rule):
+        checked = cls.rule(rule, MCP_RULE_KEYS)
+        if "tool" not in rule:
+            raise RuleError('"tool" is required: a tool name, a pattern with *, or a list of them')
+        checked.update(server=cls.strings(rule.get("server"), "server", RULE_SERVER, "an MCP server name, or *", "*"),
+                       tool=cls.strings(rule["tool"], "tool", RULE_TOOL,
+                                        "a tool name (A-Z a-z 0-9 _ - . : /, * as a wildcard)"))
+        if "args" in rule:
+            checked["args"] = cls.conditions(rule["args"], "args")
+        return checked
+
+    @classmethod
+    def device_rule(cls, rule):
+        """A device rule: what it matches (USB vendor:product, serial, USB class, kernel subsystem, node path), all
+        of the given ones at once; each a value or a list of up to 100, any of which may match."""
+        checked = cls.rule(rule, DEVICE_RULE_KEYS)
+        if not any(key in rule for key in DEVICE_MATCHERS):
+            raise RuleError('a device rule needs "usb", "serial", "class", "subsystem" or "node" (for every device: '
+                            '"defaults": {"devices": ...})')
+        if "usb" in rule:
+            value = rule["usb"]
+            lowered = value.lower() if isinstance(value, str) else \
+                [v.lower() if isinstance(v, str) else v for v in value] if isinstance(value, list) else value
+            checked["usb"] = cls.strings(lowered, "usb", RULE_USB, "VENDOR:PRODUCT in hex (2e8a:000a), or VENDOR:*")
+        if "serial" in rule:
+            checked["serial"] = cls.strings(rule["serial"], "serial", RULE_SERIAL,
+                                            "a serial number or a pattern with * (printable ASCII, no spaces)")
+        if "class" in rule:
+            names = cls.strings(rule["class"], "class", re.compile(r"[0-9A-Fa-f]{2}|[a-z-]{2,20}"),
+                                "a USB class (" + ", ".join(USB_CLASSES) + ") or two hex digits")
+            for name in names:
+                if not re.fullmatch(r"[0-9A-Fa-f]{2}", name) and name not in USB_CLASSES:
+                    raise RuleError(f'"class" {name!r}: not a USB class (' + ", ".join(USB_CLASSES) + ")")
+            checked["class"] = list(dict.fromkeys(USB_CLASSES.get(name, name.lower()) for name in names))
+        if "subsystem" in rule:
+            checked["subsystem"] = cls.strings(rule["subsystem"], "subsystem", RULE_SUBSYSTEM,
+                                               "a kernel subsystem such as tty, usb, video4linux, sound or drm")
+        if "node" in rule:
+            nodes = cls.strings(rule["node"], "node", RULE_NODE, "a device path pattern under /dev (* within a "
+                                "segment, ** across), or cdi:NAME")
+            for node in nodes:
+                if node.startswith("/dev/") and (posixpath.normpath(node) != node or "//" in node):
+                    raise RuleError(f'"node" {node!r}: a path without . or .. segments and repeated slashes')
+            checked["node"] = nodes
+        return checked
+
+    @classmethod
+    def tool_rule(cls, rule):
+        """A rule for the agent's own tools (through its hooks): agent, tool, args."""
+        checked = cls.rule(rule, TOOL_RULE_KEYS)
+        if "tool" not in rule:
+            raise RuleError('"tool" is required: a tool name such as Bash, Read or WebFetch, a pattern with *, or a '
+                            'list of them')
+        checked.update(agent=cls.strings(rule.get("agent"), "agent", RULE_AGENT, "claude, codex, opencode, or *", "*"),
+                       tool=cls.strings(rule["tool"], "tool", RULE_TOOL,
+                                        "a tool name (A-Z a-z 0-9 _ - . : /, * as a wildcard)"))
+        if "args" in rule:
+            checked["args"] = cls.conditions(rule["args"], "args")
+        return checked
+
+    @classmethod
+    def conditions(cls, spec, where, depth=0, lower=False):
+        """{NAME: condition} of arguments, query parameters, headers or properties."""
+        if not isinstance(spec, dict) or len(spec) > 200:
+            raise RuleError(f'"{where}" is an object of NAME: condition (at most 200)')
+        result = {}
+        for name, condition in spec.items():
+            if not name or len(name) > 200:
+                raise RuleError(f'"{where}": names have 1 to 200 characters')
+            result[name.lower() if lower else name] = cls.condition(condition, f"{where}.{name}", depth)
+        return result
+
+    @classmethod
+    def condition(cls, spec, where, depth=0):
+        """A condition (a subset of JSON Schema, see the README) checked and in its normal form."""
+        if not isinstance(spec, dict):
+            raise RuleError(f'"{where}": a condition is a JSON object such as {{"pattern": "..."}}')
+        if depth > 16:
+            raise RuleError(f'"{where}": conditions nest at most 16 deep')
+        unknown = sorted(set(spec) - CONDITION_KEYS)
+        if unknown:
+            raise RuleError(f'"{where}": unknown keyword {unknown[0]!r} (known: {", ".join(sorted(CONDITION_KEYS))})')
+        result = {}
+        for key, value in spec.items():
+            here = f'"{where}.{key}"'
+            number = isinstance(value, (int, float)) and not isinstance(value, bool)
+            if key == "type":
+                names = [value] if isinstance(value, str) else value
+                if not isinstance(names, list) or not names or any(n not in JSON_TYPES for n in names):
+                    raise RuleError(f"{here}: one of {', '.join(JSON_TYPES)} or a list of them")
+                result[key] = list(names)
+            elif key == "const":
+                result[key] = value
+            elif key == "enum":
+                if not isinstance(value, list) or not value or len(value) > 1000:
+                    raise RuleError(f"{here}: a list of 1 to 1000 values")
+                result[key] = value
+            elif key == "pattern":
+                if not isinstance(value, str) or len(value) > 1000:
+                    raise RuleError(f"{here}: a regular expression of at most 1000 characters")
+                try:
+                    re.compile(value)
+                except re.error as exc:
+                    raise RuleError(f"{here}: {exc}") from None
+                result[key] = value
+            elif key in ("glob", "path_glob"):
+                values = [value] if isinstance(value, str) else value
+                if not isinstance(values, list) or not values or len(values) > 100 or \
+                        not all(isinstance(v, str) and 0 < len(v) <= 1000 for v in values):
+                    raise RuleError(f"{here}: a pattern or a list of up to 100")
+                if key == "path_glob" and not all(v.startswith("/") for v in values):
+                    raise RuleError(f"{here}: absolute paths such as /work/src/**")
+                result[key] = list(values)
+            elif key in ("minLength", "maxLength"):
+                if not number or not isinstance(value, int) or value < 0:
+                    raise RuleError(f"{here}: a whole number of 0 or more")
+                result[key] = value
+            elif key in ("minimum", "maximum"):
+                if not number or value != value:
+                    raise RuleError(f"{here}: a number")
+                result[key] = value
+            elif key in ("items", "not"):
+                result[key] = cls.condition(value, f"{where}.{key}", depth + 1)
+            elif key in ("anyOf", "allOf"):
+                if not isinstance(value, list) or not value or len(value) > 100:
+                    raise RuleError(f"{here}: a list of 1 to 100 conditions")
+                result[key] = [cls.condition(v, f"{where}.{key}", depth + 1) for v in value]
+            elif key == "properties":
+                result[key] = cls.conditions(value, f"{where}.properties", depth + 1)
+            elif key == "required":
+                if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                    raise RuleError(f"{here}: a list of names")
+                result[key] = value
+            elif key == "additionalProperties":
+                if value is not False:
+                    raise RuleError(f"{here}: only false (no other names than under properties)")
+                result[key] = False
+            elif key == "optional":
+                if not isinstance(value, bool):
+                    raise RuleError(f"{here}: true or false")
+                result[key] = value
+        return result
+
+    # -- values --
+
+    @staticmethod
+    def parse_json(text):
+        """(value, duplicated) of the JSON text TEXT: a key given twice holds AMBIGUOUS. ValueError for anything
+        but exactly one JSON value, NaN and Infinity included (other parsers refuse them)."""
+        duplicated = []
+
+        def pairs(items):
+            result = {}
+            for key, value in items:
+                if key in result:
+                    duplicated.append(key)
+                    value = AMBIGUOUS
+                result[key] = value
+            return result
+
+        def constant(name):
+            raise ValueError(f"{name} is not JSON")
+        try:
+            return json.loads(text, object_pairs_hook=pairs, parse_constant=constant), bool(duplicated)
+        except RecursionError:
+            raise ValueError("JSON nested too deeply") from None
+
+    @staticmethod
+    def member(value, name):
+        """VALUE[NAME], MISSING, or AMBIGUOUS when NAME is given twice or also in another case (Go's
+        encoding/json and ASP.NET read names regardless of case) or VALUE is no object."""
+        if not isinstance(value, dict):
+            return AMBIGUOUS
+        folded = name.casefold()
+        if any(isinstance(key, str) and key != name and key.casefold() == folded for key in value):
+            return AMBIGUOUS
+        return value.get(name, MISSING)
+
+    @staticmethod
+    def json_type(value):
+        if value is None:
+            return "null"
+        if isinstance(value, bool):
+            return "boolean"
+        if isinstance(value, int):
+            return "integer"
+        if isinstance(value, float):
+            return "integer" if value.is_integer() else "number"
+        return {str: "string", list: "array", dict: "object"}.get(type(value))
+
+    @classmethod
+    def same(cls, value, expected):
+        """VALUE equals the rule's EXPECTED as JSON (true is not 1); None where VALUE holds AMBIGUOUS."""
+        if value is AMBIGUOUS:
+            return None
+        kind, wanted = cls.json_type(value), cls.json_type(expected)
+        if kind in ("integer", "number") and wanted in ("integer", "number"):
+            return value == expected
+        if kind != wanted:
+            return False
+        if kind == "array":
+            return len(value) == len(expected) and cls.all_of(cls.same(a, b) for a, b in zip(value, expected))
+        if kind == "object":
+            return set(value) == set(expected) and cls.all_of(cls.same(value[k], expected[k]) for k in value)
+        return value == expected
+
+    @staticmethod
+    def all_of(outcomes):
+        """Kleene AND: False if one is False, else None if one is None, else True."""
+        result = True
+        for outcome in outcomes:
+            if outcome is False:
+                return False
+            if outcome is None:
+                result = None
+        return result
+
+    @staticmethod
+    def any_of(outcomes):
+        """Kleene OR: True if one is True, else None if one is None, else False."""
+        result = False
+        for outcome in outcomes:
+            if outcome is True:
+                return True
+            if outcome is None:
+                result = None
+        return result
+
+    @staticmethod
+    def every(outcomes):
+        """For several readings of one request (methods, paths): True if all match, False if none, else None."""
+        outcomes = list(outcomes)
+        if all(outcome is True for outcome in outcomes):
+            return True
+        return False if all(outcome is False for outcome in outcomes) else None
+
+    @classmethod
+    def holds(cls, condition, value):
+        """True, False or None (unknown): whether VALUE (MISSING, AMBIGUOUS or a JSON value) meets CONDITION."""
+        if value is MISSING:
+            return bool(condition.get("optional"))  # never a skipped condition: missing fails unless optional
+        keys = [key for key in condition if key != "optional"]
+        if value is AMBIGUOUS:
+            return None if keys else True
+        return cls.all_of(cls.keyword(key, condition[key], value, condition) for key in keys)
+
+    @classmethod
+    def keyword(cls, key, expected, value, condition):
+        kind = cls.json_type(value)
+        if key in ("type", "glob", "path_glob") and isinstance(expected, str):
+            expected = [expected]  # the normal form has lists; a condition written by hand may not
+        if key == "type":
+            return kind in expected or (kind == "integer" and "number" in expected)
+        if key == "const":
+            return cls.same(value, expected)
+        if key == "enum":
+            return cls.any_of(cls.same(value, option) for option in expected)
+        if key == "not":
+            outcome = cls.holds(expected, value)
+            return None if outcome is None else not outcome
+        if key == "anyOf":
+            return cls.any_of(cls.holds(option, value) for option in expected)
+        if key == "allOf":
+            return cls.all_of(cls.holds(option, value) for option in expected)
+        # A keyword for another type than the value's is unknown, not passed: a list where a deny rule expects
+        # a string must not slip by it, and must not meet an allow rule either.
+        if key in ("pattern", "glob", "path_glob", "minLength", "maxLength"):
+            if kind != "string":
+                return None
+            if key == "minLength":
+                return len(value) >= expected
+            if key == "maxLength":
+                return len(value) <= expected
+            if key == "glob":
+                return any(cls.glob(pattern, value) for pattern in expected)
+            if key == "path_glob":
+                # Relative paths depend on the server's working directory, which no rule knows.
+                if not value.startswith("/") or "\x00" in value:
+                    return None
+                path = posixpath.normpath(re.sub(r"/+", "/", value))
+                return any(path_matches(pattern, path) for pattern in expected)
+            if len(value) > PATTERN_INPUT_LIMIT:
+                return None
+            plain = re.fullmatch(expected, value) is not None
+            if "\n" not in value:
+                return plain
+            # Whether "." takes a line break decides: unknown (fullmatch with and without re.S).
+            return plain if plain == (re.fullmatch(expected, value, re.S) is not None) else None
+        if key in ("minimum", "maximum"):
+            if kind not in ("integer", "number"):
+                return None
+            return value >= expected if key == "minimum" else value <= expected
+        if key == "items":
+            return cls.all_of(cls.holds(expected, item) for item in value) if kind == "array" else None
+        if kind != "object":
+            return None
+        if key == "properties":
+            return cls.all_of(cls.holds(sub, cls.member(value, name)) for name, sub in expected.items())
+        if key == "required":
+            return cls.all_of(False if cls.member(value, name) is MISSING else None
+                              if cls.member(value, name) is AMBIGUOUS else True for name in expected)
+        allowed = set(condition.get("properties", {}))  # additionalProperties: false
+        return all(name in allowed for name in value)
+
+    @staticmethod
+    def glob(pattern, value, ignore_case=False):
+        """VALUE matches PATTERN, where * stands for any characters (/ and line breaks included)."""
+        expression = "".join(".*" if part == "*" else re.escape(part) for part in re.split(r"(\*)", pattern))
+        return re.fullmatch(expression, value, re.S | (re.I if ignore_case else 0)) is not None
+
+    @classmethod
+    def tool(cls, patterns, name):
+        """Whether the tool NAME is one of PATTERNS; None where only the case differs."""
+        if any(cls.glob(pattern, name) for pattern in patterns):
+            return True
+        return None if any(cls.glob(pattern, name, ignore_case=True) for pattern in patterns) else False
+
+    @staticmethod
+    def is_address(value):
+        try:
+            ipaddress.ip_address(value)
+            return True
+        except ValueError:
+            return False
+
+    @classmethod
+    def name(cls, value):
+        """A host name or address as rules compare it: lower case, no trailing dots, addresses in one form."""
+        value = str(value).strip().lower().rstrip(".")
+        bare = value[1:-1] if value.startswith("[") and value.endswith("]") else value
+        return str(ipaddress.ip_address(bare)) if cls.is_address(bare) else value
+
+    @staticmethod
+    def host(patterns, names):
+        return any(pattern == "*" or name == pattern or (pattern.startswith("*.") and name.endswith(pattern[1:]))
+                   for pattern in patterns for name in names)
+
+    # -- HTTP --
+
+    @property
+    def http_active(self):
+        return any(source["http"] or source["defaults"]["http"] != "allow" or self.http_sources(source)
+                   for source in self.sources)
+
+    @staticmethod
+    def http_sources(source):
+        return [entry for entry in source.get("untrusted", []) if "host" in entry]
+
+    def provider(self, facts):
+        """The request FACTS go to the agent's own provider: the verified server name is one of its hosts and no
+        other name is claimed (a Host header naming the provider at another server proves nothing)."""
+        return not facts["literal"] and facts["claimed"] in (None, facts["server"]) and \
+            self.host(self.providers, [facts["server"]])
+
+    def untrusted_http(self, facts, any_path=False):
+        """{"layer", "rule", "ruleset", "what"} of the first source that marks the response to the request FACTS
+        untrusted, or None (never the agent's provider). ANY_PATH: what is not HTTP, or not opened, matches a
+        source by its host alone (its content is unseen, so unknown)."""
+        if self.provider(facts):
+            return None
+        for source in self.sources:
+            for entry in self.http_sources(source):
+                if (self.host(entry["host"], facts["names"]) or facts["address"] in entry["addresses"]) and (any_path or any(
+                        path_matches(pattern, path, ignore_case=True) for pattern in entry["path"]
+                        for path in facts["paths"])):
+                    return {"layer": "proxy", "rule": entry["id"], "ruleset": source["name"],
+                            "what": facts["claimed"] or facts["server"]}
+        return None
+
+    def untrusted_tool(self, server, tool):
+        """The source that marks the results of TOOL on SERVER untrusted, or None (case variants count)."""
+        for source in self.sources:
+            for entry in source.get("untrusted", []):
+                if "server" in entry and ("*" in entry["server"] or server in entry["server"]) and \
+                        self.tool(entry["tool"], tool) is not False:
+                    return {"layer": "mcp", "rule": entry["id"], "ruleset": source["name"],
+                            "what": f"the MCP tool {tool} of {server}"}
+        return None
+
+    def mcp_taint_active(self):
+        """Some rule holds only in tainted runs, or some MCP tool is a source: the per-run relay is needed."""
+        return any(any("server" in entry for entry in source.get("untrusted", [])) or
+                   any(rule.get("when") for rule in source["mcp"]) for source in self.sources)
+
+    def untrusted_agent_tool(self, agent, tool):
+        """The source that marks the results of the agent's own TOOL untrusted (seen by its hooks), or None."""
+        for source in self.sources:
+            for entry in source.get("untrusted", []):
+                if "agent" in entry and ("*" in entry["agent"] or agent in entry["agent"]) and \
+                        self.tool(entry["tool"], tool) is not False:
+                    return {"layer": "hook", "rule": entry["id"], "ruleset": source["name"],
+                            "what": f"the tool {tool} of {agent}"}
+        return None
+
+    def pins(self, address):
+        """ADDRESS is pinned for a host that has HTTP rules: only HTTP the proxy can check may reach it."""
+        address = self.name(address)
+        return any(address in rule["addresses"] for source in self.sources for rule in source["http"])
+
+    @classmethod
+    def request(cls, origin, method, target, headers, address=None):
+        """What HTTP rules judge of a request: every name it could reach (the verified server name ORIGIN and
+        the Host header), the destination ADDRESS, each method and path a server might run (override headers
+        and _method included), the query and the headers."""
+        literal = is_address_origin(origin)
+        server = cls.name(origin.rsplit(":", 1)[0] if literal else origin)
+        claimed = host_name(header(headers, "host"))
+        claimed = cls.name(claimed) if claimed else None
+        address = cls.name(address) if address else (server if literal else None)
+        names = {name for name in (None if literal else server, claimed, address) if name}
+        query = cls.query(target)
+        fields = {}
+        for name, value in headers:
+            fields[name.lower()] = AMBIGUOUS if name.lower() in fields else value
+        methods = [method.upper()] + [value.strip().upper() for name, value in headers
+                                      if name.lower() in METHOD_OVERRIDES]
+        override = cls.member(query, "_method")
+        if override is not MISSING:
+            methods.append(override.upper() if isinstance(override, str) else "\0")
+        paths = [normal_path(target)] + [normal_path(value.strip()) for name, value in headers
+                                         if name.lower() in PATH_OVERRIDES]
+        paths = list(dict.fromkeys(reading for path in paths for reading in cls.readings(path)))
+        return {"server": server, "claimed": claimed, "literal": literal, "names": names, "address": address,
+                "methods": methods, "paths": paths, "query": query, "headers": fields, "body": AMBIGUOUS}
+
+    @staticmethod
+    def readings(path):
+        """PATH (normalised) and how lenient servers may also read it: cut at a control character (C code ends
+        strings at NUL), and without dots and spaces at the end of a segment (IIS)."""
+        cut = re.split(r"[\x00-\x1f\x7f]", path, maxsplit=1)[0]
+        trimmed = normal_path("/".join(segment.rstrip(". ") for segment in path.split("/")))
+        return list(dict.fromkeys([path, cut, trimmed]))
+
+    @staticmethod
+    def query(target):
+        """The query of TARGET as {name: value}; AMBIGUOUS for a name given twice, and for the whole query when
+        servers could split it differently (on ;) or decode it differently (not UTF-8)."""
+        if "?" not in target:
+            return {}
+        raw = target.split("?", 1)[1]
+        if ";" in raw:
+            return AMBIGUOUS
+        try:
+            pairs = urllib.parse.parse_qsl(raw, keep_blank_values=True, errors="strict")
+        except (UnicodeDecodeError, ValueError):
+            return AMBIGUOUS
+        result = {}
+        for name, value in pairs:
+            result[name] = AMBIGUOUS if name in result else value
+        return result
+
+    @classmethod
+    def body(cls, data, headers):
+        """A request body as body conditions see it: JSON whatever the declared type (some servers parse JSON
+        regardless), else a form when declared as one; MISSING when empty, AMBIGUOUS when it cannot be read."""
+        if not data:
+            return MISSING
+        encodings = [value.strip().lower() for name, value in headers if name.lower() == "content-encoding"]
+        if encodings and encodings not in (["gzip"], ["x-gzip"], ["deflate"], ["identity"]):
+            return AMBIGUOUS  # br, zstd, several layers: not read here, so not judged
+        if encodings and encodings != ["identity"]:
+            try:
+                inflater = zlib.decompressobj(47)
+                data = inflater.decompress(data, RULE_BODY_LIMIT + 1)
+            except zlib.error:
+                return AMBIGUOUS
+            if len(data) > RULE_BODY_LIMIT or inflater.unconsumed_tail or not inflater.eof:
+                return AMBIGUOUS
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            return AMBIGUOUS
+        with contextlib.suppress(ValueError):
+            return cls.parse_json(text)[0]
+        types = [value.split(";")[0].strip().lower() for name, value in headers if name.lower() == "content-type"]
+        if types == ["application/x-www-form-urlencoded"]:
+            return cls.query("?" + text)
+        return AMBIGUOUS
+
+    def needs_body(self, facts):
+        """A rule with a body condition may decide the request FACTS: the proxy reads the body first."""
+        return any("body" in rule and self.applies(rule, facts) and self.route(rule, facts, facts["methods"])
+                   is not False for source in self.sources for rule in source["http"])
+
+    def applies(self, rule, facts):
+        return self.host(rule["host"], facts["names"]) or facts["address"] in rule["addresses"]
+
+    def route(self, rule, facts, methods):
+        """Method and path of the request FACTS against RULE (True, False or None)."""
+        return self.all_of([
+            self.every("*" in rule["methods"] or method in rule["methods"] for method in methods),
+            self.every(self.any_of(True if path_matches(pattern, path) else None
+                                   if path_matches(pattern, path, ignore_case=True) else False
+                                   for pattern in rule["path"]) for path in facts["paths"])])
+
+    def http_match(self, rule, facts, methods):
+        if rule.get("when") and (not facts.get("taint") or self.provider(facts)):
+            return False
+        if not self.applies(rule, facts):
+            return False
+        outcomes = [self.route(rule, facts, methods)]
+        for field in ("query", "headers"):
+            if field in rule:
+                outcomes.append(self.all_of(self.holds(condition, self.member(facts[field], name))
+                                            for name, condition in rule[field].items()))
+        if "body" in rule:
+            outcomes.append(self.holds(rule["body"], facts["body"]))
+        return self.all_of(outcomes)
+
+    def http(self, facts):
+        """{"decision", "rule", "ruleset", "reason"} for the request FACTS (see request); rule None when no
+        ruleset has a say, "(unlisted)" or "(default)" when a ruleset decided without a rule."""
+        methods = list(facts["methods"])
+        if isinstance(facts["body"], dict):
+            override = self.member(facts["body"], "_method")  # Rails, Laravel: a form field
+            if override is not MISSING:
+                methods.append(override.upper() if isinstance(override, str) else "\0")
+        method, path = facts["methods"][0], facts["paths"][0] or "/"
+        shown_host = facts["claimed"] or facts["server"]
+        applying = [source["name"] for source in self.sources if any(
+            "*" not in rule["host"] and self.applies(rule, facts) for rule in source["http"])]
+        if applying and facts["claimed"] and not facts["literal"] and facts["claimed"] != facts["server"]:
+            # Servers route by Host and one certificate covers many names: the rules of the name verified
+            # and of the name claimed could differ, so neither is trusted.
+            return {"decision": "deny", "rule": "(host)", "ruleset": applying[0],
+                    "reason": f"the Host header {facts['claimed']} differs from the server name {facts['server']} "
+                              f"({', '.join(applying)})"}
+        best = None
+        for source in self.sources:
+            verdict = None
+            for rule in source["http"]:
+                outcome = self.http_match(rule, facts, methods)
+                if outcome or (outcome is None and rule["decision"] != "allow"):
+                    verdict = {"decision": rule["decision"], "rule": rule["id"], "ruleset": source["name"],
+                               "reason": rule.get("reason") or f"{method} {path} on {shown_host} is "
+                               f"{DECIDED[rule['decision']]} "
+                               f"by rule {rule['id']} ({source['name']})"}
+                    if rule.get("when"):
+                        verdict["reason"] += f": {Taint.because(facts['taint'])}"
+                        verdict["taint"] = facts["taint"]
+                    break
+            else:
+                if any(rule["decision"] == "allow" and "*" not in rule["host"] and self.applies(rule, facts)
+                       for rule in source["http"]):
+                    verdict = {"decision": "deny", "rule": "(unlisted)", "ruleset": source["name"],
+                               "reason": f"{method} {path} is not among the requests allowed for {shown_host} "
+                                         f"({source['name']})"}
+                elif source["defaults"]["http"] != "allow":
+                    verdict = {"decision": source["defaults"]["http"], "rule": "(default)", "ruleset": source["name"],
+                               "reason": f"{method} {path} on {shown_host}: no rule of {source['name']} allows it "
+                                         f"(its default is {source['defaults']['http']})"}
+            if verdict and (best is None or RULE_DECISIONS.index(verdict["decision"]) >
+                            RULE_DECISIONS.index(best["decision"])):
+                best = verdict
+        return best or {"decision": "allow", "rule": None, "ruleset": None, "reason": None}
+
+    # -- MCP --
+
+    @property
+    def mcp_active(self):
+        return any(source["mcp"] or source["defaults"]["mcp"] != "allow" for source in self.sources)
+
+    def mcp_asks(self):
+        """Some rule or default of this ruleset may ask about a tool call."""
+        return any(source["defaults"]["mcp"] == "ask" or any(r["decision"] == "ask" for r in source["mcp"])
+                   for source in self.sources)
+
+    @staticmethod
+    def for_server(source, server, section="mcp"):
+        key = "agent" if section == "tool" else "server"
+        return [rule for rule in source[section] if "*" in rule[key] or server in rule[key]]
+
+    # -- the agent's own tools (its hooks) --
+
+    @property
+    def tool_active(self):
+        """Some rule or default holds for the agent's own tools, or one of them is a source of untrusted content."""
+        return any(source["tool"] or source["defaults"]["tool"] != "allow" or
+                   any("agent" in entry for entry in source.get("untrusted", [])) for source in self.sources)
+
+    def agent_tool(self, agent, tool, arguments, taint=None):
+        """{"decision", "rule", "ruleset", "reason"} for AGENT's call of its own TOOL with ARGUMENTS: as mcp()."""
+        return self.mcp(agent, tool, arguments, taint, section="tool")
+
+    def mcp(self, server, tool, arguments, taint=None, section="mcp"):
+        """{"decision", "rule", "ruleset", "reason"} for a call of TOOL with ARGUMENTS (an object) on SERVER; TAINT:
+        the run's taint state, for the rules that hold only in tainted runs. SECTION "tool": the agent's own
+        tools, SERVER the agent."""
+        best = None
+        tainted = bool(taint and taint.get("tainted"))
+        for source in self.sources:
+            verdict, rules = None, [rule for rule in self.for_server(source, server, section)
+                                    if not rule.get("when") or tainted]
+            for rule in rules:
+                outcome = self.all_of([self.tool(rule["tool"], tool), *(self.holds(c, self.member(arguments, n))
+                                                                        for n, c in rule.get("args", {}).items())])
+                if outcome or (outcome is None and rule["decision"] != "allow"):
+                    verdict = {"decision": rule["decision"], "rule": rule["id"], "ruleset": source["name"],
+                               "reason": rule.get("reason") or f"the tool {tool} of {server} is "
+                               f"{DECIDED[rule['decision']]} "
+                               f"by rule {rule['id']} ({source['name']})"}
+                    if rule.get("when"):
+                        verdict["reason"] += f": {Taint.because(taint)}"
+                        verdict["taint"] = taint
+                    break
+            else:
+                # A tool with allow rules is listed: calls of it they do not match are refused (a case variant of
+                # its name too), as a host with allow rules refuses the requests they do not match.
+                if any(rule["decision"] == "allow" and self.tool(rule["tool"], tool) is not False for rule in rules):
+                    verdict = {"decision": "deny", "rule": "(unlisted)", "ruleset": source["name"],
+                               "reason": f"this call of {tool} is not among the calls of it allowed for {server} "
+                                         f"({source['name']})"}
+                elif source["defaults"][section] != "allow":
+                    verdict = {"decision": source["defaults"][section], "rule": "(default)", "ruleset": source["name"],
+                               "reason": f"no rule of {source['name']} allows the tool {tool} of {server} (its "
+                                         f"default is {source['defaults'][section]})"}
+            if verdict and (best is None or RULE_DECISIONS.index(verdict["decision"]) >
+                            RULE_DECISIONS.index(best["decision"])):
+                best = verdict
+        return best or {"decision": "allow", "rule": None, "ruleset": None, "reason": None}
+
+    def hidden(self, server, tool):
+        """True if every call of TOOL on SERVER is denied, whatever its arguments: tools/list leaves it out."""
+        for source in self.sources:
+            rules, verdict = self.for_server(source, server), None
+            for rule in rules:
+                if self.tool(rule["tool"], tool) is not True:
+                    continue
+                conditional = rule.get("args") or rule.get("when")
+                if conditional and rule["decision"] == "deny":
+                    continue  # denies some calls only
+                verdict = "maybe" if conditional else rule["decision"]
+                break
+            if verdict is None:  # no allow rule names it either (that would have been "maybe")
+                verdict = source["defaults"]["mcp"]
+            if verdict == "deny":
+                return True
+        return False
+
+    # -- devices --
+    #
+    # FACTS of a device node (see devices.identity): "node" (its path), "names" (the path given, the node and the
+    # udev links to it), "subsystem", "usb" ("vvvv:pppp", or None when not on USB), "serial", "classes" (the USB
+    # device's and its interfaces' class codes) and "unknown" (the fields that could not be read: a rule on one
+    # of them is unknown, so allow rules do not match and deny and ask rules do). USB IDs, serials and the udev
+    # links made from them are what the device reports about itself: an identification aid, not authentication.
+
+    @property
+    def devices_active(self):
+        return any(source["devices"] or source["defaults"]["devices"] != "allow" for source in self.sources)
+
+    def device_asks(self):
+        return any(source["defaults"]["devices"] == "ask" or any(r["decision"] == "ask" for r in source["devices"])
+                   for source in self.sources)
+
+    @classmethod
+    def device_field(cls, rule, key, facts):
+        """True, False or None: the device FACTS against the rule's KEY."""
+        unknown = set(facts.get("unknown") or ())
+        if key == "node":
+            names = [n for n in facts.get("names") or [facts.get("node")] if isinstance(n, str)]
+            return any(path_matches(pattern, name) if pattern.startswith("/") else cls.glob(pattern, name)
+                       for pattern in rule["node"] for name in names)
+        if key in unknown or (key == "serial" and "usb" in unknown):
+            return None
+        if key == "usb":
+            return isinstance(facts.get("usb"), str) and any(cls.glob(p, facts["usb"]) for p in rule["usb"])
+        if key == "serial":
+            return isinstance(facts.get("serial"), str) and any(cls.glob(p, facts["serial"]) for p in rule["serial"])
+        if key == "class":
+            return bool(set(rule["class"]) & set(facts.get("classes") or ()))
+        return facts.get("subsystem") in rule["subsystem"]
+
+    def device_match(self, rule, facts):
+        return self.all_of(self.device_field(rule, key, facts) for key in DEVICE_MATCHERS if key in rule)
+
+    @staticmethod
+    def device_name(facts):
+        usb = facts.get("usb")
+        return f"{facts.get('node')}" + (f" (usb {usb})" if isinstance(usb, str) else "")
+
+    def device(self, facts):
+        """{"decision", "rule", "ruleset", "reason"} for the device FACTS; rule None when no ruleset has a say."""
+        best, shown = None, self.device_name(facts)
+        for source in self.sources:
+            verdict = None
+            for rule in source["devices"]:
+                outcome = self.device_match(rule, facts)
+                if outcome or (outcome is None and rule["decision"] != "allow"):
+                    verdict = {"decision": rule["decision"], "rule": rule["id"], "ruleset": source["name"],
+                               "reason": rule.get("reason") or f"the device {shown} is {DECIDED[rule['decision']]} "
+                                                               f"by rule {rule['id']} ({source['name']})"}
+                    break
+            else:
+                # A vendor:product with allow rules is listed: a device of it they do not match (another serial,
+                # another class) is refused, as a tool with allow rules refuses the calls they do not match.
+                if any(rule["decision"] == "allow" and "usb" in rule and self.device_field(rule, "usb", facts)
+                       is not False for rule in source["devices"]):
+                    verdict = {"decision": "deny", "rule": "(unlisted)", "ruleset": source["name"],
+                               "reason": f"the USB IDs of the device {shown} cannot be read, and {source['name']} "
+                                         "allows devices by their IDs" if "usb" in (facts.get("unknown") or ())
+                               else f"the device {shown} is not among the devices of its vendor and product "
+                                    f"allowed ({source['name']})"}
+                elif source["defaults"]["devices"] != "allow":
+                    verdict = {"decision": source["defaults"]["devices"], "rule": "(default)",
+                               "ruleset": source["name"],
+                               "reason": f"no rule of {source['name']} allows the device {shown} (its default is "
+                                         f"{source['defaults']['devices']})"}
+            if verdict and (best is None or RULE_DECISIONS.index(verdict["decision"]) >
+                            RULE_DECISIONS.index(best["decision"])):
+                best = verdict
+        return best or {"decision": "allow", "rule": None, "ruleset": None, "reason": None}
+
+
+# --- agent hooks: rules for the agents' own tools ----------------------------------------------------------
+#
+# Claude Code, Codex and OpenCode call a hook before and after each of their own tools (Bash, file edits,
+# WebFetch, their MCP tools). The launcher installs it as managed configuration on read-only paths, so the agent
+# cannot drop it: Claude Code's /etc/claude-code/managed-settings.json (allowManagedHooksOnly), Codex's
+# /etc/codex/requirements.toml (allow_managed_hooks_only, the hooks feature pinned on), an OpenCode plugin. The
+# hook (hook_client) asks the supervisor over HOOK_SOCKET; the supervisor (HookServer) applies the "tool" rules
+# of the rulesets, asks the human where a rule says ask, records untrusted tools in the run's taint and logs each
+# call to tools.jsonl.
+#
+# A guard rail, not a boundary: Bash runs whatever it is given (python -c, a script, base64), and the agent's
+# network goes through the proxy anyway. The hook fails closed: whatever goes wrong refuses the call.
+
+HOOK_DIR = Path("/run/sandbox-hooks")
+HOOK_SOCKET = HOOK_DIR / "decide.sock"
+HOOK_LIMIT = 4 << 20          # one hook message to the supervisor
+HOOK_VALUE_LIMIT = 256 << 10  # a longer string of a tool's input is unknown to the rules (never matched, never cut)
+HOOK_READ_LIMIT = 64 << 20    # what the client reads of the agent's message
+HOOK_TIMEOUT = 110            # seconds the client waits: below the agents' own hook timeout (120, see the launcher)
+HOOK_EVENTS = ("PreToolUse", "PostToolUse")
+HOOK_AGENTS = ("claude", "codex", "opencode")
+# The first Codex that reads hooks and allow_managed_hooks_only from requirements.toml (rust-v0.131.0); an older
+# one ignores both without a word, so its run is refused rather than started without the rules.
+CODEX_HOOKS_VERSION = (0, 131, 0)
+# OpenCode's tool names as Claude Code and Codex name the same tools, so that one rule holds for all three.
+OPENCODE_TOOLS = {"bash": "Bash", "read": "Read", "write": "Write", "edit": "Edit", "multiedit": "MultiEdit",
+                  "glob": "Glob", "grep": "Grep", "list": "LS", "webfetch": "WebFetch", "websearch": "WebSearch",
+                  "patch": "apply_patch", "task": "Task", "todowrite": "TodoWrite", "todoread": "TodoRead"}
+OPENCODE_ARGUMENTS = {"filePath": "file_path", "oldString": "old_string", "newString": "new_string",
+                      "replaceAll": "replace_all", "patchText": "command"}
+PATCH_FILE = re.compile(r"^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+?)\s*$", re.M)
+SEARCH_TOOLS = ("Glob", "Grep", "LS")  # without "path" they search the working directory
+
+
+def hook_value(value, depth=0):
+    """VALUE as the rules see it: a string longer than HOOK_VALUE_LIMIT, and anything nested deeper than 32, is
+    replaced by {"sandbox-ai": "too large"}: no condition on a string holds for it, so it is unknown, never cut
+    short into something a rule would allow."""
+    if isinstance(value, str):
+        return value if len(value) <= HOOK_VALUE_LIMIT else {"sandbox-ai": "too large", "length": len(value)}
+    if depth >= 32:
+        return {"sandbox-ai": "too large"}
+    if isinstance(value, dict):
+        return {str(key): hook_value(item, depth + 1) for key, item in value.items()}
+    if isinstance(value, list):
+        return [hook_value(item, depth + 1) for item in value]
+    return value
+
+
+def hooks_supported(agent, command, run=subprocess.run):
+    """None if AGENT's executable (COMMAND[0]) holds the hooks it is given, else why not: a Codex older than
+    CODEX_HOOKS_VERSION, or one whose version cannot be read."""
+    if agent != "codex":
+        return None
+    try:
+        out = run([command[0], "--version"], capture_output=True, text=True, timeout=60).stdout or ""
+    except (OSError, IndexError, subprocess.SubprocessError) as exc:
+        return f"the version of Codex could not be read ({exc})"
+    found = re.search(r"\b(\d+)\.(\d+)\.(\d+)", out)
+    if not found:
+        return f"the version of Codex could not be read ({printable_text(out.strip(), 80)!r})"
+    if tuple(map(int, found.groups())) < CODEX_HOOKS_VERSION:
+        return f"Codex {found.group(0)} is older than {'.'.join(map(str, CODEX_HOOKS_VERSION))}, the first that " \
+               "holds managed hooks"
+    return None
+
+
+def hook_problem(cfg, run=subprocess.run):
+    """None if the run's managed hooks hold, else why not. They are the rule hooks (cfg "hooks") and approved kit
+    hooks (cfg "hook_agent" names the agent then, with or without rules): a Codex older than CODEX_HOOKS_VERSION
+    ignores both, so the run is refused rather than started without them."""
+    agent = cfg.get("hook_agent") or (cfg.get("hooks") or {}).get("agent")
+    # A helper's command is its server: the agent it runs for each task is found by its name.
+    command = [cfg["hook_binary"]] if isinstance(cfg.get("hook_binary"), str) else cfg.get("command") or []
+    problem = hooks_supported(agent, command, run=run) if agent else None
+    if problem is None:
+        for companion in cfg.get("companion_hook_agents") or []:  # the agents --with, started from the shell
+            problem = hooks_supported(companion, [companion], run=run)
+            if problem:
+                return f"the rules for {companion}'s own tools (--with {companion}) cannot hold: {problem}; " \
+                       "update the image (sandbox-build-image team)"
+        return None
+    what = "the rules for the agent's own tools" if cfg.get("hooks") is not None else "the kits' approved hooks"
+    return f"{what} cannot hold: {problem}; update the agent (sandbox-build-image)"
+
+
+def hook_client(agent, event, stdin=None, stderr=None, socket_path=None, timeout=HOOK_TIMEOUT):
+    """The agents' hook (`runtime.py --internal-hook AGENT EVENT`): the agent's JSON on STDIN (Claude Code and Codex:
+    tool_name, tool_input, cwd; the OpenCode plugin: tool, args, cwd), the supervisor's decision back. Refused is
+    exit status 2 with the reason on STDERR, which Claude Code and Codex both take as blocked (the OpenCode plugin
+    throws); allowed is 0 without output, and the agent's own permissions go on. Fails closed: whatever goes wrong
+    before a PreToolUse is decided refuses the call. PostToolUse only records (the tool ran already): always 0."""
+    stdin, stderr = stdin or sys.stdin.buffer, stderr or sys.stderr
+    pre = event != "PostToolUse"  # an event of no known name is refused too
+    try:
+        data = stdin.read(HOOK_READ_LIMIT + 1)
+        if len(data) > HOOK_READ_LIMIT:
+            raise ValueError("the hook message is too large")
+        message = json.loads(data.decode("utf-8")) if data.strip() else None
+        if agent not in HOOK_AGENTS or event not in HOOK_EVENTS or not isinstance(message, dict):
+            raise ValueError("not a hook message")
+        tool = message.get("tool_name", message.get("tool"))
+        if not isinstance(tool, str) or not tool:
+            raise ValueError("the hook message names no tool")
+        arguments = message.get("tool_input", message.get("args"))
+        if agent == "opencode":
+            tool = OPENCODE_TOOLS.get(tool, tool)
+            if isinstance(arguments, dict):
+                arguments = {OPENCODE_ARGUMENTS.get(key, key): value for key, value in arguments.items()}
+        result = message.get("tool_response", message.get("result"))
+        size = message.get("result_bytes")
+        request = {"agent": agent, "event": event, "tool": tool[:200], "input": hook_value(arguments),
+                   "cwd": message.get("cwd") if isinstance(message.get("cwd"), str) else "",
+                   "session_id": str(message.get("session_id", message.get("sessionID", "")))[:100],
+                   "tool_use_id": str(message.get("tool_use_id", message.get("callID", "")))[:100]}
+        if not pre:
+            request["input"] = None  # recorded at PreToolUse already
+            request["result_bytes"] = size if isinstance(size, int) and not isinstance(size, bool) else \
+                len(json.dumps(result, default=repr)) if result is not None else None
+        line = (json.dumps(request, ensure_ascii=False, default=repr) + "\n").encode()
+        if len(line) > HOOK_LIMIT:
+            line = (json.dumps({**request, "input": {"sandbox-ai": "too large", "length": len(line)}}) + "\n").encode()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(timeout)
+            client.connect(str(socket_path or HOOK_SOCKET))
+            client.sendall(line)
+            answer = json.loads(client.makefile("rb").readline(65536) or b"null")
+        if not pre:
+            return 0
+        if isinstance(answer, dict) and answer.get("decision") == "allow":
+            return 0
+        reason = answer.get("reason") if isinstance(answer, dict) and isinstance(answer.get("reason"), str) else ""
+        stderr.write(f"sandbox-ai: {printable_text(reason, 2000) or 'the tool call is refused'}\n")
+        stderr.flush()
+        return 2
+    except Exception as exc:  # noqa: BLE001 - whatever breaks, the call is refused, never let through
+        if not pre:
+            return 0
+        stderr.write(f"sandbox-ai: the tool call is refused: its rules could not be checked ({type(exc).__name__}: "
+                     f"{printable_text(str(exc), 200)})\n")
+        stderr.flush()
+        return 2
+
+
+def kit_hook(agent, timeout, command, stdin=None, stdout=None, stderr=None, check=None):
+    """A kit's PreToolUse hook while rules hold (`runtime.py --internal-kit-hook AGENT TIMEOUT COMMAND`): runs
+    COMMAND (sh -c) with the agent's message, within TIMEOUT seconds, and hands back its output and exit status.
+    Claude Code runs a call's hooks in parallel, so the rule hook never sees the input a kit hook rewrites
+    (hookSpecificOutput.updatedInput): that input is asked of the rules here (CHECK, the hook client) before it
+    reaches the agent, and a refusal blocks the call (status 2). Output that cannot be read, or an updatedInput
+    that is no object, refuses too: never let through unchecked."""
+    stdin, stdout, stderr = stdin or sys.stdin.buffer, stdout or sys.stdout.buffer, stderr or sys.stderr
+    check = check or hook_client
+
+    def refuse(why):
+        stderr.write(f"sandbox-ai: the tool call is refused: {why}\n")
+        stderr.flush()
+        return 2
+    data = stdin.read(HOOK_READ_LIMIT + 1)
+    if len(data) > HOOK_READ_LIMIT:
+        return refuse("the hook message is too large")
+    try:
+        done = subprocess.run(["/bin/sh", "-c", command], input=data, stdout=subprocess.PIPE, timeout=float(timeout))
+    except subprocess.TimeoutExpired:  # what the agent does with a hook that runs too long: not an answer
+        stderr.write(f"sandbox-ai: the kit hook ran longer than {timeout} s and was stopped\n")
+        stderr.flush()
+        return 1
+    except (OSError, ValueError) as exc:
+        stderr.write(f"sandbox-ai: the kit hook did not start ({type(exc).__name__}: {printable_text(str(exc), 200)})\n")
+        stderr.flush()
+        return 1
+    out = done.stdout or b""
+    if done.returncode == 0 and b"updatedInput" in out:  # the agents read updatedInput only after status 0
+        if len(out) > HOOK_READ_LIMIT:
+            return refuse("the kit hook's answer is too large to be checked")
+        try:
+            answer = json.loads(out.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return refuse("the kit hook's answer names updatedInput but is no JSON the rules can check")
+        specific = answer.get("hookSpecificOutput") if isinstance(answer, dict) else None
+        found = [place["updatedInput"] for place in (answer, specific)
+                 if isinstance(place, dict) and "updatedInput" in place]
+        if any(not isinstance(value, dict) for value in found):
+            return refuse("the kit hook's updatedInput is no object")
+        try:
+            message = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            message = None
+        for value in found:
+            if not isinstance(message, dict):
+                return refuse("not a hook message")
+            status = check(agent, "PreToolUse", stdin=io.BytesIO(json.dumps({**message, "tool_input": value}).encode()),
+                           stderr=stderr)
+            if status != 0:
+                return 2
+    stdout.write(out)
+    stdout.flush()
+    return done.returncode
+
+
+class HookServer:
+    """The supervisor's side of the hooks: RULES (a Ruleset with the "tool" rules and the untrusted tools), BROKER
+    for "ask" (kind "tool"), TAINT, and LOG (tools.jsonl)."""
+
+    def __init__(self, rules, broker=None, taint=None, log=None, secret_values=()):
+        self.rules, self.broker, self.taint, self.log = rules, broker, taint, log
+        self.values = sorted({v for v in secret_values if isinstance(v, str) and len(v) >= 6}, key=len, reverse=True)
+        self.lock, self.ready = threading.Lock(), threading.Event()  # ready: listening, open to the agent
+
+    @staticmethod
+    def facts(tool, arguments, cwd):
+        """ARGUMENTS as the rules see them: with "paths", the files the call names, made absolute against CWD
+        (file_path, notebook_path or path; the files of a patch; the working directory a search runs in). The
+        agent's own "paths" never counts."""
+        facts = dict(arguments)
+        facts.pop("paths", None)
+        found = [arguments[key] for key in ("file_path", "notebook_path", "path") if isinstance(arguments.get(key), str)]
+        if tool == "apply_patch" and isinstance(arguments.get("command"), str):
+            found += PATCH_FILE.findall(arguments["command"])
+        if not found and tool in SEARCH_TOOLS and cwd:
+            found = [cwd]
+        if found:
+            base = cwd if isinstance(cwd, str) and cwd.startswith("/") else None
+            facts["paths"] = [posixpath.join(base, path) if base and not path.startswith("/") else path
+                              for path in found]
+        return facts
+
+    def decide(self, message):
+        """{"decision", "reason"} for one hook MESSAGE; logged."""
+        agent, event = str(message.get("agent", ""))[:20], str(message.get("event", ""))[:40]
+        tool, arguments = str(message.get("tool", ""))[:200], message.get("input")
+        arguments = arguments if isinstance(arguments, dict) else {} if arguments is None else {"input": arguments}
+        cwd = message.get("cwd") if isinstance(message.get("cwd"), str) else ""
+        record = {"agent": agent, "event": event, "tool": tool,
+                  **{key: str(message[key])[:100] for key in ("session_id", "tool_use_id") if message.get(key)}}
+        state = self.taint.shown() if self.taint is not None else None
+        if state and state.get("tainted"):
+            record["tainted"] = state.get("since")
+        if event != "PreToolUse":
+            if isinstance(message.get("result_bytes"), int):
+                record["result_bytes"] = message["result_bytes"]
+            self.write(record)
+            return {"decision": "allow"}
+        record["input"] = self.text(arguments)
+        if agent not in HOOK_AGENTS or not tool:
+            verdict = {"decision": "deny", "rule": None, "ruleset": None, "reason": "not a hook of a known agent"}
+        else:
+            verdict = self.rules.agent_tool(agent, tool, self.facts(tool, arguments, cwd), state)
+        record.update(decision=verdict["decision"], rule=verdict["rule"], ruleset=verdict["ruleset"])
+        answer = {"decision": verdict["decision"], "reason": verdict.get("reason") or ""}
+        if verdict["decision"] == "ask":
+            if self.broker is None:
+                answer = {"decision": "deny", "reason": f"{verdict['reason']}; asking is off"}
+            else:
+                approval = self.broker.ask("tool", {"agent": agent, "tool": tool, "arguments": record["input"],
+                                                   "rule": verdict["rule"], "ruleset": verdict["ruleset"],
+                                                   "reason": printable_text(verdict["reason"], 1000),
+                                                   **({"taint": verdict["taint"]} if verdict.get("taint") else {})})
+                record["approval"] = {key: approval.get(key) for key in ("decision", "scope", "reason")}
+                answer = {"decision": "allow" if approval.get("decision") == "allow" else "deny",
+                          "reason": f"not approved ({approval.get('reason', 'refused')}): {verdict['reason']}"}
+        if answer["decision"] == "allow":
+            # Marked before the tool runs: its result reaches the agent only once the run is tainted.
+            source = self.rules.untrusted_agent_tool(agent, tool)
+            if source and self.taint is not None:
+                self.taint.mark(source)
+                record["untrusted"] = source["rule"]
+        else:
+            record["reason"] = answer["reason"]
+        self.write(record)
+        return answer
+
+    def text(self, arguments):
+        text = McpGateway.arguments(arguments)
+        for value in self.values:
+            text = text.replace(value, "[redacted]")
+        return text
+
+    def write(self, record):
+        if self.log is None:
+            return
+        line = json.dumps({"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **record}, ensure_ascii=False,
+                          default=repr) + "\n"
+        with self.lock, contextlib.suppress(OSError):
+            with open(self.log, "a") as stream:
+                stream.write(line)
+
+    def serve(self, path=None, stop=None):
+        """Answer the agents' hooks on PATH (one message per connection) until STOP is set."""
+        path = Path(path or HOOK_SOCKET)
+        server = listen_unix(str(path))
+        os.chmod(path, 0o666)
+        self.ready.set()
+        server.settimeout(0.5)
+        while stop is None or not stop.is_set():
+            try:
+                connection, _ = server.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            try:
+                threading.Thread(target=self.answer, args=(connection,), daemon=True).start()
+            except RuntimeError:  # no thread to be had (the sandbox's process limit): this hook only
+                connection.close()
+                time.sleep(0.1)
+        server.close()
+
+    def answer(self, connection):
+        with connection:
+            try:
+                connection.settimeout(10)
+                data = b""
+                while not data.endswith(b"\n") and len(data) <= HOOK_LIMIT:
+                    chunk = connection.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                message = json.loads(data) if len(data) <= HOOK_LIMIT else None
+                answer = self.decide(message) if isinstance(message, dict) else \
+                    {"decision": "deny", "reason": "not a hook message"}
+            except (OSError, ValueError, RecursionError) as exc:
+                answer = {"decision": "deny", "reason": printable_text(f"the hook message could not be read ({exc})", 300)}
+            except Exception as exc:  # noqa: BLE001 - a refusal, never a dropped connection the client cannot read
+                answer = {"decision": "deny", "reason": printable_text(f"the rules could not be checked ({exc})", 300)}
+            connection.settimeout(None)
+            with contextlib.suppress(OSError):
+                connection.sendall((json.dumps(answer) + "\n").encode())
+
 
 # --- network changes during a run (sandbox-ai net) -------------------------------------------------
 #
@@ -2053,11 +4810,127 @@ def runtime_rules(state):
     for address, port in sorted(state["tcp"]):
         family = "ip" if ipaddress.ip_address(address).version == 4 else "ip6"
         lines.append(f"add rule inet agent_sandbox runtime {family} daddr {address} tcp dport {port} accept")
+    for address in sorted(state.get("dns", ())):  # DNS allowed during the run: port 53 of these nameservers
+        family = "ip" if ipaddress.ip_address(address).version == 4 else "ip6"
+        lines.append(f"add rule inet agent_sandbox runtime {family} daddr {address} udp dport 53 accept")
+        lines.append(f"add rule inet agent_sandbox runtime {family} daddr {address} tcp dport 53 accept")
     return "\n".join(lines) + "\n"
 
 
+RELAY_PORTS = 16          # host ports relayed at a time
+RELAY_CONNECTIONS = 64    # open connections per relayed port
+
+
+def relay_ports(request):
+    """The host ports of REQUEST ("host_ports": a list of at most RELAY_PORTS ports), validated."""
+    ports = request.get("host_ports", [])
+    if not isinstance(ports, list) or len(ports) > RELAY_PORTS:
+        raise ValueError(f"host_ports is a list of at most {RELAY_PORTS} ports")
+    for port in ports:
+        if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+            raise ValueError(f"bad port {port!r}")
+    return sorted(set(ports))
+
+
+def relay_rules(ports, proxy_port=PROXY_PORT):
+    """nft commands that send the agent's connections to the relayed host PORTS through the proxy (which checks
+    them as it checks the ports forwarded at the start, pushes included); the relay chain is jumped to from the
+    proxy chain, after the proxy's own connections returned."""
+    lines = ["flush chain inet agent_sandbox relay"]
+    for port in sorted(ports):
+        lines.append(f"add rule inet agent_sandbox relay ip daddr 127.0.0.1 tcp dport {int(port)} redirect to :{int(proxy_port)}")
+        lines.append(f"add rule inet agent_sandbox relay ip6 daddr ::1 tcp dport {int(port)} redirect to :{int(proxy_port)}")
+    return "\n".join(lines) + "\n"
+
+
+RELAY_GRACE = 30  # seconds a relayed connection waits for its other side once one side ended
+
+
+def join_streams(first, second):
+    """Copy both ways between the sockets FIRST and SECOND until both sides are done; closes them. As the proxy's
+    relay: once one side ended, the other gets RELAY_GRACE quiet seconds to finish (a service that never closes
+    does not keep the connection), and a connection quiet both ways for IDLE_TIMEOUT ends."""
+    try:
+        relay(first, second, [0, 0], idle=IDLE_TIMEOUT, grace=RELAY_GRACE)
+    finally:
+        for sock in (first, second):
+            with contextlib.suppress(OSError):
+                sock.close()
+
+
+class PortRelay:
+    """The sandbox's end of a host port relayed during the run (`sandbox-ai net allow --allow-host-port PORT`):
+    listens on 127.0.0.1:PORT (and [::1]:PORT) in the sandbox and joins each connection to the host relay's
+    Unix socket in the run's control directory (DIRECTORY/relay-PORT.sock), which the host side (net.py) serves
+    and which connects only to the host's 127.0.0.1:PORT. The agent cannot reach that directory."""
+
+    def __init__(self, port, directory, limit=RELAY_CONNECTIONS, listen_port=None):
+        # LISTEN_PORT differs from PORT only in tests, where the host's port and the sandbox's share one network.
+        self.port, self.path, self.limit = int(port), Path(directory) / f"relay-{int(port)}.sock", limit
+        self.listen_port = int(listen_port or port)
+        self.slots = threading.BoundedSemaphore(limit)
+        self.listeners = []
+        for family, address in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
+            listener = socket.socket(family, socket.SOCK_STREAM)
+            try:
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                if family == socket.AF_INET6:
+                    listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                listener.bind((address, self.listen_port))
+                listener.listen(32)
+            except OSError as exc:
+                listener.close()
+                if family == socket.AF_INET6 and self.listeners and exc.errno in (errno.EADDRNOTAVAIL, errno.EAFNOSUPPORT):
+                    continue  # no IPv6 loopback in this sandbox: IPv4 is enough (taken by the agent is refused below)
+                self.close()
+                raise ValueError(f"port {self.port} cannot be relayed: {exc.strerror or exc} (something in the "
+                                 "sandbox may listen on it already)") from None
+            self.listeners.append(listener)
+        for listener in self.listeners:
+            threading.Thread(target=self.serve, args=(listener,), daemon=True).start()
+
+    def serve(self, listener):
+        while True:
+            try:
+                connection, _ = listener.accept()
+            except OSError:
+                return  # closed: the relay was revoked or the run ends
+            if not self.slots.acquire(blocking=False):
+                connection.close()  # RELAY_CONNECTIONS open already
+                continue
+            try:
+                threading.Thread(target=self.handle, args=(connection,), daemon=True).start()
+            except RuntimeError:  # no thread to be had (the sandbox's process limit): this connection only
+                connection.close()
+                self.slots.release()
+                time.sleep(0.1)
+
+    def handle(self, connection):
+        try:
+            upstream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                upstream.settimeout(10)
+                upstream.connect(str(self.path))
+                upstream.settimeout(None)
+            except OSError:
+                upstream.close()
+                connection.close()  # the host relay ended (revoked, or its port is not served)
+                return
+            join_streams(connection, upstream)
+        finally:
+            self.slots.release()
+
+    def close(self):
+        for listener in self.listeners:
+            with contextlib.suppress(OSError):
+                listener.shutdown(socket.SHUT_RDWR)
+            with contextlib.suppress(OSError):
+                listener.close()
+        self.listeners = []
+
+
 def runtime_change(state, request):
-    """STATE after REQUEST ({"op": "allow"|"revoke", "nets", "https", "tcp"}); every value validated."""
+    """STATE after REQUEST ({"op": "allow"|"revoke", "nets", "https", "tcp", "dns"}); every value validated."""
     if request.get("op") not in ("allow", "revoke"):
         raise ValueError("op must be allow or revoke")
     nets = {str(ipaddress.ip_network(str(v), strict=False)) for v in request.get("nets", [])}
@@ -2067,9 +4940,14 @@ def runtime_change(state, request):
         if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
             raise ValueError(f"bad port {port!r}")
         tcp.add((str(ipaddress.ip_address(str(address))), port))
-    if any("%" in value for value in nets | https | {a for a, _ in tcp}):
+    dns = request.get("dns", [])
+    if not isinstance(dns, list) or len(dns) > 8:
+        raise ValueError("dns is a list of at most 8 nameserver addresses")
+    dns = {str(ipaddress.ip_address(str(v))) for v in dns}
+    if any("%" in value for value in nets | https | dns | {a for a, _ in tcp}):
         raise ValueError("scope IDs are not accepted")
-    change = {"nets": nets, "https": https, "tcp": tcp}
+    change = {"nets": nets, "https": https, "tcp": tcp, "dns": dns}
+    state = {"dns": set(), **state}
     if request["op"] == "allow":
         return {key: state[key] | change[key] for key in state}
     return {key: state[key] - change[key] for key in state}
@@ -2080,7 +4958,8 @@ def merged_allow(base, state, no_ssh=()):
     allow = dict(base)
     allow["nets"] = [*base.get("nets", []), *sorted(state["nets"])]
     allow["https"] = [*base.get("https", []), *sorted(state["https"])]
-    allow["tcp"] = [*base.get("tcp", []), *[[a, p] for a, p in sorted(state["tcp"])]]
+    allow["tcp"] = [*base.get("tcp", []), *[[a, p] for a, p in sorted(state["tcp"])],
+                    *[[a, 53] for a in sorted(state.get("dns", ()))]]  # DNS over TCP to the allowed nameservers
     # Explicit destinations may also take SSH, as at the start (--allow, --allow-tcp); approved ones
     # (NO_SSH) may not.
     allow["ssh"] = sorted(state["nets"])
@@ -2106,6 +4985,9 @@ def write_new(path, text, mode):
         raise
 
 
+NFT_SECONDS = 30  # one firewall change during the run, at most
+
+
 class RuntimeNetwork:
     """What was allowed during the run: the firewall's runtime chain and the proxy's allow-list, changed by
     `sandbox-ai net` and by approvals. A connection allowed "once" is open for ONCE_SECONDS, long enough
@@ -2114,28 +4996,72 @@ class RuntimeNetwork:
 
     def __init__(self, base_allow, allow_file=None, apply=None, within=None):
         def nft(script):
-            subprocess.run(["nft", "-f", "-"], input=script, text=True, check=True, capture_output=True)
+            # Under the lock: an nft that hangs must not hold every later change and approval. One stopped in
+            # time changed nothing (nft -f applies all or nothing): the change fails as a refused one does.
+            try:
+                subprocess.run(["nft", "-f", "-"], input=script, text=True, check=True, capture_output=True,
+                               timeout=NFT_SECONDS)
+            except subprocess.TimeoutExpired:
+                raise OSError(errno.ETIMEDOUT, f"nft did not finish within {NFT_SECONDS} s; nothing was changed") from None
         self.base, self.allow_file, self.apply_rules = base_allow, allow_file, apply or nft
-        self.state = {"nets": set(), "https": set(), "tcp": set()}
+        self.state = {"nets": set(), "https": set(), "tcp": set(), "dns": set()}
+        self.dns_stub = True  # the supervisor says whether the run has its DNS stub (inner_bootstrap)
         self.within = [ipaddress.ip_network(n, strict=False) for n in within] if within is not None else None
         self.once = set()
         self.once_count = {}
         self.no_ssh = set()  # approved destinations: no SSH to them
         self.lock = threading.Lock()
+        # Host ports relayed during the run ({port: PortRelay}); the supervisor sets RELAY_DIR (the control
+        # directory, where the host relays listen) and PROXIED (the agent's TCP goes through the proxy).
+        self.relays, self.relay_dir, self.proxied, self.relay_factory = {}, None, False, PortRelay
 
     def _commit(self, state, once):
         effective = dict(state, tcp=state["tcp"] | once)
-        self.apply_rules(runtime_rules(effective))
+        self.apply_rules(runtime_rules(effective) + (relay_rules(self.relays) if self.proxied else ""))
         self.state, self.once = state, once
         if self.allow_file is not None:
-            write_new(self.allow_file, json.dumps(merged_allow(self.base, effective, self.no_ssh | once)), 0o644)
+            allow = merged_allow(self.base, effective, self.no_ssh | once)
+            allow["loopback"] = sorted({*self.base.get("loopback", []), *self.relays})
+            write_new(self.allow_file, json.dumps(allow), 0o644)
+
+    def relay(self, op, ports):
+        """Start (allow) or stop (revoke) relaying host PORTS; called under the lock, before the commit."""
+        if op == "revoke":
+            for port in ports:
+                relay = self.relays.pop(port, None)
+                if relay is not None:
+                    relay.close()
+            return
+        if self.relay_dir is None:
+            raise ValueError("this run cannot relay host ports (no control directory)")
+        started = []
+        try:
+            for port in ports:
+                if port in self.relays:
+                    continue
+                if port in self.base.get("loopback", []):
+                    raise ValueError(f"host port {port} is forwarded since the start already")
+                if len(self.relays) >= RELAY_PORTS:
+                    raise ValueError(f"at most {RELAY_PORTS} host ports are relayed at a time")
+                self.relays[port] = self.relay_factory(port, self.relay_dir)
+                started.append(port)
+        except BaseException:
+            for port in started:
+                self.relays.pop(port).close()
+            raise
+
+    def close_relays(self):
+        with self.lock:
+            for relay in self.relays.values():
+                relay.close()
+            self.relays = {}
 
     def check_within(self, request):
         """Refuse an allow request that reaches outside the administrator's networks (policy allow_within)."""
         if self.within is None or request.get("op") != "allow":
             return
         added = runtime_change({"nets": set(), "https": set(), "tcp": set()}, request)
-        networks = [ipaddress.ip_network(n, strict=False) for n in [*added["nets"], *added["https"]]]
+        networks = [ipaddress.ip_network(n, strict=False) for n in [*added["nets"], *added["https"], *added["dns"]]]
         networks += [ipaddress.ip_network(address) for address, _ in added["tcp"]]
         for network in networks:
             if not any(network.version == limit.version and network.subnet_of(limit) for limit in self.within):
@@ -2145,8 +5071,15 @@ class RuntimeNetwork:
         """Apply an allow or revoke request ({"op", "nets", "https", "tcp"}); the new state. SSH=False: the
         destinations added may not take SSH (approvals)."""
         self.check_within(request)
+        if request.get("op") == "allow" and request.get("dns") and not self.dns_stub:
+            raise ValueError("this run has no DNS stub to forward with (it was started with --no-proxy and without "
+                             "--log-dir): start it again with --dns")
+        ports = relay_ports(request)
         with self.lock:
             state = runtime_change(self.state, request)
+            previous = dict(self.relays)
+            if ports:
+                self.relay(request.get("op"), ports)
             if request.get("op") == "allow":
                 requested = runtime_change({"nets": set(), "https": set(), "tcp": set()}, request)["tcp"]
                 if ssh:
@@ -2154,7 +5087,13 @@ class RuntimeNetwork:
                 else:
                     self.no_ssh |= requested - self.state["tcp"]  # newly approved; explicit ones keep SSH
             self.no_ssh &= state["tcp"]
-            self._commit(state, set(self.once))
+            try:
+                self._commit(state, set(self.once))
+            except BaseException:
+                if ports and request.get("op") == "allow":
+                    for port in set(self.relays) - set(previous):
+                        self.relays.pop(port).close()
+                raise
             return self.shown()
 
     def allow_once(self, address, port, timer=threading.Timer):
@@ -2175,17 +5114,42 @@ class RuntimeNetwork:
         closing.daemon = True
         closing.start()
 
+    def nameservers(self):
+        """The nameservers DNS was allowed to during the run, for the DNS stub (in the order they were given is
+        not kept: sorted)."""
+        with self.lock:
+            return sorted(self.state.get("dns", ()))
+
     def shown(self):
         return {"nets": sorted(self.state["nets"]), "https": sorted(self.state["https"]),
-                "tcp": [[a, p] for a, p in sorted(self.state["tcp"])]}
+                "tcp": [[a, p] for a, p in sorted(self.state["tcp"])], "dns": sorted(self.state.get("dns", ())),
+                "host_ports": sorted(self.relays)}
 
 
-NET_OPTIONS = (("nets", "--allow"), ("https", "--allow-host"), ("tcp", "--allow-tcp"))
+NET_OPTIONS = (("nets", "--allow"), ("https", "--allow-host"), ("tcp", "--allow-tcp"), ("dns", "--dns"),
+               ("host_ports", "--allow-host-port"))
 
 
-def control_server(path, network, stop=None, forbid=()):
-    """Serve `sandbox-ai net` requests (allow, revoke, show) on the Unix socket PATH until STOP is set. FORBID:
-    the options the administrator's policy forbids; a run-time change must not do what they would."""
+def mode_refusal(mode, request):
+    """Why the run's security MODE ({"name", "refuses": start options, ...} from config.json) refuses the allow
+    REQUEST, or None: a run-time change must not open what the mode refuses at the start (a preset is
+    --allow-host here: the request carries its addresses)."""
+    if not mode or request.get("op") != "allow":
+        return None
+    refuses = mode.get("refuses") or []
+    for field, option in NET_OPTIONS:
+        if request.get(field) and option in refuses:
+            return (f"{option} widens the security mode {mode.get('name')} of this run; answer its questions "
+                    "instead, or start it again with a laxer mode")
+    return None
+
+
+def control_server(path, network, stop=None, forbid=(), mode=None, taint=None):
+    """Serve `sandbox-ai net` requests (allow, revoke, show, untaint) on the Unix socket PATH until STOP is set.
+    FORBID: the options the administrator's policy forbids, MODE: the run's strict security mode (or None); a
+    run-time change must not do what they would. Checked here, not only by `sandbox-ai net`: a request written by
+    hand reaches this socket too. TAINT: the run's taint, shown and taken back (untaint) here: only the human
+    reaches this socket."""
     listener = listen_unix(path)
     listener.settimeout(0.5)
     while stop is None or not stop.is_set():
@@ -2207,11 +5171,21 @@ def control_server(path, network, stop=None, forbid=()):
                 request = json.loads(data)
                 if request.get("op") == "allow":
                     for field, option in NET_OPTIONS:
-                        if request.get(field) and (option in forbid or (field == "nets" and "--egress-all-allow" in forbid
+                        if request.get(field) and (option in forbid or field == "dns" and "--nameserver" in forbid
+                                                   or (field == "nets" and "--egress-all-allow" in forbid
                                                                         and any(ipaddress.ip_network(n, strict=False).prefixlen == 0
                                                                                 for n in request[field]))):
                             raise ValueError(f"{option} is not allowed by the administrator's policy")
-                answer = {"ok": True, **(network.shown() if request.get("op") == "show" else network.change(request))}
+                refused = mode_refusal(mode, request)
+                if refused:
+                    raise ValueError(refused)
+                if request.get("op") == "untaint":
+                    if taint is None:
+                        raise ValueError("this sandbox keeps no taint")
+                    answer = {"ok": True, "was": taint.reset(), "taint": taint.shown()}
+                else:
+                    answer = {"ok": True, **(network.shown() if request.get("op") == "show" else network.change(request)),
+                              **({"taint": taint.shown()} if taint is not None and request.get("op") == "show" else {})}
             except (ValueError, TypeError, KeyError, AttributeError, OSError,
                     subprocess.CalledProcessError) as exc:
                 answer = {"ok": False, "error": str(exc)[:500]}
@@ -2222,13 +5196,22 @@ def control_server(path, network, stop=None, forbid=()):
 
 # --- approvals -------------------------------------------------------------------------------------
 #
-# A connection to a destination the options do not allow, a lookup of a name they do not pin, and a
-# push the privacy check has warnings about are put to the human: the request appears as a file in the
-# run's control directory on the host (sandbox-ai approvals, the app, a desktop notification); the
-# answer comes back as a file next to it. Without an answer within APPROVAL_SECONDS it is refused.
+# A connection to a destination the options do not allow, a lookup of a name they do not pin, a push
+# the privacy check has warnings about, and a request an ask rule holds are put to the human: the
+# request appears as a file in the run's control directory on the host (sandbox-ai approvals, the app,
+# a desktop notification); the answer comes back as a file next to it. Without an answer within
+# APPROVAL_SECONDS it is refused.
 
 APPROVAL_SECONDS = 60
+VERIFY_SECONDS = 15      # how long "Allow always" for a name waits for the certificate that proves it
+# A name "Allow always" may remember (as the approvals store takes it): a dotted host name, never an address.
+REMEMBERED_NAME = re.compile(r"(?=.{1,253}$)(?:[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?\.)+[a-z0-9-]{1,63}")
 SCOPES = ("once", "run", "always")
+
+
+def narrowest_scope(*scopes):
+    """The narrowest of the approval SCOPES; an unknown one counts as once."""
+    return min((scope if scope in SCOPES else "once" for scope in scopes), key=SCOPES.index)
 OPEN_QUESTIONS = 20      # at a time; more are refused without asking
 RUN_QUESTIONS = 500      # per run; after that, nothing more is asked
 
@@ -2237,10 +5220,24 @@ class ApprovalBroker:
     """The supervisor's side: one request per question (repeats wait for the same answer), decisions
     remembered for the run, firewall changes for what is allowed."""
 
-    def __init__(self, directory, network, timeout=APPROVAL_SECONDS, poll=0.2, clock=time.monotonic, max_scope="always"):
+    def __init__(self, directory, network, timeout=APPROVAL_SECONDS, poll=0.2, clock=time.monotonic, max_scope="always",
+                 blocked=None, hosts_file=Path("/etc/hosts"), no_inspect=(), public=None, verify_seconds=VERIFY_SECONDS,
+                 name_ports=(443,)):
         self.directory, self.network, self.timeout, self.poll, self.clock = Path(directory), network, timeout, poll, clock
+        # What "Allow always" for a connection remembers (see remembers): the names sandbox-ai pinned (HOSTS_FILE,
+        # the sandbox's /etc/hosts), the hosts whose TLS is not opened (NO_INSPECT), which addresses count as
+        # public (PUBLIC), the ports a remembered name opens (NAME_PORTS: HTTPS, as --allow-host) and the certificates
+        # the proxy validated in this run (verified). PUBLIC and NAME_PORTS differ only in tests.
+        self.hosts_file, self.no_inspect, self.verify_seconds = Path(hosts_file), list(no_inspect), verify_seconds
+        self.name_ports = tuple(name_ports)
+        self.public = public or (lambda ip: ip.is_global)
+        self.verified, self.proved = {}, threading.Condition()
         # The administrator's policy may cap the scope: an answer wider than that counts as the widest allowed.
         self.max_scope = max_scope if max_scope in SCOPES else "once"
+        # Blocked always for this project (sandbox-ai approvals deny --scope always): refused without a question.
+        blocked = blocked if isinstance(blocked, dict) else {}
+        self.blocked_hosts = {h for h in blocked.get("hosts", []) if isinstance(h, str)}
+        self.blocked_tcp = {t for t in blocked.get("tcp", []) if isinstance(t, str)}
         self.lock, self.pending, self.decided, self.counter = threading.Lock(), {}, {}, 0
         self.run_token = secrets.randbelow(10 ** 9)  # IDs differ between sandboxes asking in the same second
         self.directory.mkdir(mode=0o700, exist_ok=True)
@@ -2250,10 +5247,26 @@ class ApprovalBroker:
         if kind == "push":  # an answer covers this repository with these warnings, not later other ones
             digest = hashlib.sha256(str(details.get("message", "")).encode("utf-8", "replace")).hexdigest()[:16]
             return kind, f"{details.get('url', '')} {digest}"
+        if kind == "http":  # "run" covers this endpoint under this rule, not the rule's other requests
+            return kind, " ".join(str(details.get(k, "")) for k in ("ruleset", "rule", "method", "host", "path"))
+        if kind == "mcp":  # "run" covers this tool under this rule
+            return kind, " ".join(str(details.get(k, "")) for k in ("ruleset", "rule", "server", "tool"))
+        if kind == "tool":  # the agent's own tool: "run" covers it under this rule
+            return kind, " ".join(str(details.get(k, "")) for k in ("ruleset", "rule", "agent", "tool"))
         return kind, str(details.get("destination") or details.get("name") or details.get("url") or "")
+
+    def blocked(self, kind, details):
+        if kind == "dns":
+            return str(details.get("name", "")).lower() in self.blocked_hosts
+        if kind == "connect":
+            address, port = str(details.get("address", "")), details.get("port")
+            return (f"[{address}]:{port}" if ":" in address else f"{address}:{port}") in self.blocked_tcp
+        return False
 
     def ask(self, kind, details, wait=True):
         """{"decision": "allow"|"deny", "scope", "reason"} for a question; WAIT=False only files it."""
+        if self.blocked(kind, details):
+            return {"decision": "deny", "scope": "run", "reason": "blocked always for this project"}
         key = self.key(kind, details)
         with self.lock:
             if key in self.decided:
@@ -2265,6 +5278,8 @@ class ApprovalBroker:
                 self.counter += 1
                 ident = f"{int(time.time())}-{self.run_token}-{self.counter}"
                 waiting = self.pending[key] = {"id": ident, "event": threading.Event(), "answer": None}
+                if kind == "connect":  # shown in the question: what "Allow always" will remember
+                    details = {**details, "remembers": self.remembers(details)}
                 try:
                     self._write(f"{ident}.json", {"id": ident, "kind": kind, "time": time.strftime(
                         "%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "timeout": self.timeout, **details})
@@ -2304,20 +5319,109 @@ class ApprovalBroker:
                 break
             time.sleep(self.poll)
         answer = answer or {"decision": "deny", "scope": "run", "reason": f"no answer within {self.timeout} s"}
-        if kind == "push" and answer["scope"] == "always":
-            answer = {**answer, "scope": "run"}  # pushes are never remembered beyond the run
+        if kind in ("push", "http", "mcp", "tool") and answer["scope"] == "always":
+            answer = {**answer, "scope": "run"}  # pushes, requests and tool calls are never remembered beyond the run
         if answer["decision"] == "allow":
             try:
                 self._apply(kind, details, answer)
             except (ValueError, OSError, subprocess.CalledProcessError) as exc:
                 answer = {"decision": "deny", "scope": "once", "reason": f"could not be applied: {exc}"}
+        remember = None
+        if kind == "connect" and answer["decision"] == "allow" and answer["scope"] == "always":
+            remember = details.get("remembers") or self.remembers(details)
         with self.lock:
             self.pending.pop(key, None)
             if answer["scope"] in ("run", "always") or answer["reason"].startswith("no answer"):
                 self.decided[key] = answer  # asked once per run (a deny counts for the run unless "once")
-        self._write(f"{waiting['id']}.done", {**answer, "id": waiting["id"]})
-        waiting["answer"] = answer
-        waiting["event"].set()
+        proof = bool(remember) and remember.get("verified") == "on connection"
+        if proof:  # the proxy goes on first: the approved connection is what proves (or not) the name it sent
+            waiting["answer"] = answer
+            waiting["event"].set()
+            remember = self.await_proof(details, remember)
+        self._write(f"{waiting['id']}.done", {**answer, "id": waiting["id"], **({"remember": remember} if remember else {})})
+        if not proof:
+            waiting["answer"] = answer
+            waiting["event"].set()
+
+    def pinned(self):
+        """{name: {addresses}} sandbox-ai pinned for this run (the sandbox's /etc/hosts, written by the launcher
+        and by approved lookups; the agent cannot change it)."""
+        names = {}
+        with contextlib.suppress(OSError):
+            for line in self.hosts_file.read_text().splitlines():
+                fields = line.split("#", 1)[0].split()
+                for name in fields[1:]:
+                    with contextlib.suppress(ValueError):
+                        names.setdefault(name.lower().rstrip("."), set()).add(str(ipaddress.ip_address(fields[0])))
+        return names
+
+    def remembers(self, details):
+        """What "Allow always" for the connection question DETAILS remembers for the project: the host name
+        ({"host", "verified", "tcp"}) when it can be proved, else the address ({"tcp", "why"}). The name is the
+        agent's claim; it counts when sandbox-ai pinned it to this address, or a certificate the proxy checked
+        against the system's CAs is valid for it (already in this run, else on the approved connection:
+        "verified": "on connection"). Never checked before the answer: the server name the agent chose would
+        then leave the sandbox unapproved. A name is opened like --allow-host (HTTPS on port 443)."""
+        address, port = str(details.get("address", "")), details.get("port")
+        tcp = f"[{address}]:{port}" if ":" in address else f"{address}:{port}"
+        claimed = details.get("host")
+        name = question_name(claimed)
+
+        def address_only(why):
+            return {"tcp": tcp, "why": why}
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError:
+            return address_only("no address")
+        if not claimed:
+            return address_only("no host name was sent")
+        if not name or not REMEMBERED_NAME.fullmatch(name) or Ruleset.is_address(name):
+            return address_only("the name sent is an address or not a dotted host name")
+        if port not in self.name_ports:
+            return address_only("a name is remembered for HTTPS (port 443) only")
+        if not self.public(ip):
+            return address_only("not a public address")
+        if any(host_matches(name, [pattern]) for pattern in self.no_inspect):
+            return address_only("its TLS passes unopened (--no-inspect), so no certificate is checked")
+        if address in self.pinned().get(name, ()):
+            return {"host": name, "verified": "pinned", "tcp": tcp}
+        with self.proved:
+            if name in self.verified.get((address, port), {}).get(True, ()):
+                return {"host": name, "verified": "certificate", "tcp": tcp}
+        if details.get("protocol") != "tls":
+            return address_only("not TLS: nothing proves the name the agent sent")
+        return {"host": name, "verified": "on connection", "tcp": tcp}
+
+    def prove(self, address, port, name, ok):
+        """The proxy checked the certificate of ADDRESS:PORT for NAME against the system's CAs: valid (OK) or
+        not. Kept for the run (at most 1024 destinations)."""
+        name = question_name(name)
+        try:
+            key = (str(ipaddress.ip_address(str(address))), int(port))
+        except (ValueError, TypeError):
+            return
+        if not name:
+            return
+        with self.proved:
+            if key not in self.verified and len(self.verified) >= 1024:
+                return
+            self.verified.setdefault(key, {True: set(), False: set()})[bool(ok)].add(name)
+            self.proved.notify_all()
+
+    def await_proof(self, details, remember):
+        """REMEMBER as the name once the approved connection proved it, else as the address (a certificate for
+        another name, none in time, no connection)."""
+        key, name = (str(details["address"]), int(details["port"])), remember["host"]
+        deadline = self.clock() + self.verify_seconds
+        with self.proved:
+            while True:
+                outcome = self.verified.get(key, {True: set(), False: set()})
+                if name in outcome[True]:
+                    return {"host": name, "verified": "certificate", "tcp": remember["tcp"]}
+                if name in outcome[False] or self.clock() >= deadline:
+                    return {"tcp": remember["tcp"], "why": "the server's certificate did not prove the name"
+                            if name in outcome[False] else "no certificate proved the name in time"}
+                self.proved.wait(self.poll)
 
     def _apply(self, kind, details, answer):
         if kind == "connect":
@@ -2335,15 +5439,32 @@ class ApprovalBroker:
                 self.network.change({"op": "allow", "https": addresses})
 
 
-def serve_asks(channel, broker):
-    """The supervisor's end of the proxy's question channel: JSON lines {"id", "kind", ...} in, answers out."""
+def serve_asks(channel, broker, who=None, taint=None):
+    """The supervisor's end of the proxy's channel: JSON lines {"id", "kind", ...} in, answers out. Kinds:
+    questions (connect, push, http; refused without a BROKER) and who (the process behind the client end
+    {"peer": [address, port]} of a connection; WHO is the Attribution)."""
     lock = threading.Lock()
     reader = channel.makefile("r", encoding="utf-8")
 
     def answer(message):
         kind = message.get("kind")
         details = {k: v for k, v in message.items() if k not in ("id", "kind")}
-        result = broker.ask(kind, details) if kind in ("connect", "push") else {"decision": "deny", "reason": "unknown"}
+        peer = details.get("peer") if isinstance(details.get("peer"), list) else []
+        if kind == "taint":  # the proxy saw untrusted content arrive; it waits for this answer before going on
+            result = {"taint": taint.mark(details.get("source")) if taint is not None else {"tainted": False}}
+        elif kind == "verified":
+            if broker is not None:
+                broker.prove(details.get("address"), details.get("port", 0), details.get("name"), details.get("ok"))
+            return  # nobody waits for an answer
+        elif kind == "who":
+            result = {"process": {"unknown": "no attribution here"}} if who is None else \
+                who.lookup("tcp", *peer[:2]) if len(peer) >= 2 else {"process": {"unknown": "no peer given"}}
+        elif kind in ("connect", "push", "http") and broker is not None:
+            result = broker.ask(kind, details)
+        elif kind == "canary":  # found by the proxy: for the launcher (canary.py)
+            result = {"ok": canary_event(details)}
+        else:
+            result = {"decision": "deny", "reason": "asking is off" if broker is None else "unknown"}
         with lock, contextlib.suppress(OSError):
             channel.sendall((json.dumps({"id": message.get("id"), **result}) + "\n").encode())
     for line in reader:
@@ -2352,7 +5473,30 @@ def serve_asks(channel, broker):
         except ValueError:
             continue
         if isinstance(message, dict):
-            threading.Thread(target=answer, args=(message,), daemon=True).start()
+            try:
+                threading.Thread(target=answer, args=(message,), daemon=True).start()
+            except RuntimeError:  # no thread to be had (the sandbox's process limit): refused at once
+                if message.get("kind") != "verified":  # nobody waits for that one
+                    with lock, contextlib.suppress(OSError):
+                        channel.sendall((json.dumps({"id": message.get("id"), "decision": "deny",
+                                                     "reason": "no thread to answer it (process limit)"}) + "\n").encode())
+                time.sleep(0.05)
+
+
+class Pending:
+    """An answer of the supervisor still to come (see AskChannel.request)."""
+
+    def __init__(self, channel, ident):
+        self.channel, self.ident, self.event, self.answer = channel, ident, threading.Event(), None
+
+    def result(self, timeout):
+        """The answer, or None if it did not come within TIMEOUT seconds (it is not waited for again)."""
+        self.event.wait(timeout)
+        self.channel.waiting.pop(self.ident, None)
+        return self.answer
+
+
+ASK_SEND_SECONDS = 10  # a message to the supervisor goes out within this time, else its request fails
 
 
 class AskChannel:
@@ -2360,6 +5504,9 @@ class AskChannel:
 
     def __init__(self, sock, timeout=APPROVAL_SECONDS + 10):
         self.sock, self.timeout, self.lock, self.waiting, self.counter = sock, timeout, threading.Lock(), {}, 0
+        # STALLED: the last send did not go out in time (the supervisor reads nothing); CUT: a line went out only
+        # in part, so the next message first ends it (the supervisor skips the broken line).
+        self.stalled, self.cut = False, False
         threading.Thread(target=self._read, daemon=True).start()
 
     def _read(self):
@@ -2368,18 +5515,48 @@ class AskChannel:
                 message = json.loads(line)
                 slot = self.waiting.get(message.get("id"))
                 if slot:
-                    slot["answer"] = message
-                    slot["event"].set()
+                    slot.answer = message
+                    slot.event.set()
 
-    def __call__(self, kind, details):
+    def _send(self, data):
+        """Send DATA (under the lock); False if it did not go out whole. The lock is held at most ASK_SEND_SECONDS
+        (not at all again while a send stalled and the supervisor still reads nothing): a supervisor that stops
+        reading fails the requests instead of holding every connection that asks. The socket itself stays
+        blocking for the reader: each send is non-blocking on its own (MSG_DONTWAIT)."""
+        view = memoryview(b"\n" + data if self.cut else data)
+        deadline = time.monotonic() + (0 if self.stalled else ASK_SEND_SECONDS)
+        try:
+            while view:
+                try:
+                    sent = self.sock.send(view, socket.MSG_DONTWAIT)
+                except (BlockingIOError, InterruptedError):
+                    if not select.select([], [self.sock], [], max(0.0, deadline - time.monotonic()))[1]:
+                        self.stalled = True
+                        return False
+                    continue
+                self.cut, view = True, view[sent:]
+        except OSError:
+            return False
+        self.stalled = self.cut = False
+        return True
+
+    def request(self, kind, details):
+        """Send a request; its Pending answer. A broken or stalled channel gives one that is already there: None."""
         with self.lock:
             self.counter += 1
-            ident = self.counter
-            slot = self.waiting[ident] = {"event": threading.Event(), "answer": None}
-            self.sock.sendall((json.dumps({"id": ident, "kind": kind, **details}) + "\n").encode())
-        slot["event"].wait(self.timeout)
-        self.waiting.pop(ident, None)
-        return slot["answer"] or {"decision": "deny", "reason": "no answer"}
+            slot = self.waiting[self.counter] = Pending(self, self.counter)
+            sent = self._send((json.dumps({"id": self.counter, "kind": kind, **details}) + "\n").encode())
+        if not sent:
+            slot.event.set()  # no answer will come: nobody waits for one
+        return slot
+
+    def __call__(self, kind, details):
+        return self.request(kind, details).result(self.timeout) or {"decision": "deny", "reason": "no answer"}
+
+    def send(self, kind, details):
+        """Tell the supervisor something; no answer is waited for."""
+        with self.lock:
+            self._send((json.dumps({"id": None, "kind": kind, **details}) + "\n").encode())
 
 
 BROWSER_SOCKET = "/sandbox/browser/open.sock"
@@ -2406,16 +5583,292 @@ def open_request(arguments, socket_path=BROWSER_SOCKET, out=None):
     return 0 if answer.get("ok") else 1
 
 
-def stop_process(process):
-    """Stop PROCESS: close its stdin (the proxy exits on that), then signal it. A process of another user
-    may not be signalled without CAP_KILL: it ends with the sandbox's PID namespace at the latest."""
+# --- canaries --------------------------------------------------------------------------------------
+#
+# Decoy files the launcher planted for the run (canary.py: fake credentials with tokens made for this run).
+# The supervisor watches the files (inotify: opened, read, changed, deleted, renamed) and the names its DNS
+# stub is asked for; the proxy searches every request (request line, headers, body, the name it connects
+# to) for the tokens, in the forms the launcher listed (plain, URL-encoded, base64, hex, JSON-escaped). The
+# lists reach them through directories the agent cannot see (CONTROL_DIR/canary.json, proxy.json); what they
+# find goes to CONTROL_DIR/canary-events.jsonl, which the launcher follows (notification, pause, stop).
+
+CANARY_CONFIG = "canary.json"
+CANARY_EVENTS = "canary-events.jsonl"
+# inotify bits on a canary file and on its directory (the name: deleted, renamed, replaced), as event names
+CANARY_FILE_EVENTS = {0x20: "read", 0x1: "read", 0x2: "modify", 0x4: "modify", 0x400: "delete", 0x800: "move"}
+CANARY_DIR_EVENTS = {0x200: "delete", 0x40: "move", 0x80: "replace", 0x100: "replace"}
+CANARY_REPEAT = 5.0          # seconds: one event of a kind per canary within that time
+CANARY_INFLATE = 4 << 20     # bytes of a compressed request body searched per piece
+
+
+def canary_event(record, path=None):
+    """Append RECORD (an event of a canary) to the launcher's CONTROL_DIR/canary-events.jsonl; True if written."""
+    path = Path(path) if path is not None else CONTROL_DIR / CANARY_EVENTS
+    line = json.dumps({"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **record}) + "\n"
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_CLOEXEC", 0), 0o600)
+    except OSError:
+        return False
+    try:
+        os.write(fd, line.encode())
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+    return True
+
+
+class CanaryRefused(Exception):
+    """A request that carries a canary token: refused before the rest of it reaches the server."""
+
+    def __init__(self, hit):
+        super().__init__(f"canary {hit.get('canary')}")
+        self.hit = hit
+
+
+class CanaryMatcher:
+    """Finds a canary token in data: FORMS [[text, canary id, encoding]] (the launcher's list); LOWER for host
+    names, where case means nothing."""
+
+    def __init__(self, forms=(), lower=False):
+        self.forms, self.lower = {}, lower
+        for entry in forms or []:
+            if not isinstance(entry, (list, tuple)) or len(entry) != 3 or not isinstance(entry[0], str):
+                continue
+            needle = (entry[0].lower() if lower else entry[0]).encode()
+            if len(needle) >= 8:  # never a short piece that ordinary traffic carries
+                self.forms.setdefault(needle, {"canary": str(entry[1]), "encoding": str(entry[2])})
+        self.longest = max(map(len, self.forms), default=0)
+        self.pattern = re.compile(b"|".join(re.escape(form) for form in sorted(self.forms, key=len, reverse=True))) \
+            if self.forms else None
+
+    def __bool__(self):
+        return self.pattern is not None
+
+    def find(self, data):
+        """{"canary", "encoding"} of the first token in DATA (bytes or text), or None."""
+        if self.pattern is None or not data:
+            return None
+        if isinstance(data, str):
+            data = data.encode("utf-8", "replace")
+        match = self.pattern.search(data.lower() if self.lower else data)
+        return dict(self.forms[match.group()]) if match else None
+
+    def name(self, name):
+        """A token in the host name NAME: as it is, or across labels (the dots taken out)."""
+        name = str(name or "").lower().rstrip(".")
+        return self.find(name) or self.find(name.replace(".", "")) if name else None
+
+    def scan(self, parts, headers, hit):
+        """PARTS ((raw, payload) of a body) passed on unchanged, each searched first together with the end of the
+        part before (a token across two parts is found too) and, for a gzip or deflate body, uncompressed. HIT
+        is called with what was found before that part is passed on; it raises to stop the request there."""
+        keep = max(self.longest - 1, 0)
+        encoding = (header(headers, "content-encoding") or "").lower() if headers is not None else ""
+        inflate = zlib.decompressobj(47) if encoding in ("gzip", "x-gzip", "deflate") else None
+        tail = plain_tail = b""
+        for raw, payload in parts:
+            window = tail + payload
+            found = self.find(window)
+            if inflate is not None:
+                try:
+                    plain = plain_tail + inflate.decompress(payload, CANARY_INFLATE)
+                except zlib.error:
+                    inflate, plain = None, b""
+                if found is None and plain:
+                    found = self.find(plain)
+                    if found is not None:
+                        found["encoding"] += f"+{encoding}"
+                plain_tail = plain[-keep:] if keep else b""
+            if found is not None:
+                hit(found)
+            tail = window[-keep:] if keep else b""
+            yield raw, payload
+
+
+class Canaries:
+    """The supervisor's side: the planted files watched, host names checked, events reported."""
+
+    FILE_MASK = 0x1 | 0x2 | 0x4 | 0x20 | 0x400 | 0x800 | 0x02000000            # ... | IN_DONT_FOLLOW
+    DIR_MASK = 0x40 | 0x80 | 0x100 | 0x200 | 0x02000000 | 0x01000000          # ... | IN_ONLYDIR
+
+    def __init__(self, config, directory=None):
+        self.files = [entry for entry in config.get("files", []) if isinstance(entry, dict)
+                      and isinstance(entry.get("path"), str) and isinstance(entry.get("id"), str)]
+        self.names = CanaryMatcher(config.get("names", []), lower=True)
+        self.events = Path(directory if directory is not None else CONTROL_DIR) / CANARY_EVENTS
+        self.stopping, self.thread = threading.Event(), None
+
+    @classmethod
+    def load(cls, directory=None):
+        """The canaries of this run (CONTROL_DIR/canary.json), or None without any."""
+        directory = Path(directory if directory is not None else CONTROL_DIR)
+        try:
+            config = json.loads((directory / CANARY_CONFIG).read_text())
+        except (OSError, ValueError):
+            return None
+        return cls(config, directory) if isinstance(config, dict) else None
+
+    def report(self, record):
+        return canary_event(record, self.events)
+
+    def lookup(self, name, found=None):
+        """A token in a name the DNS stub was asked for (the lookup failed, but the name left the agent)."""
+        hit = self.names.name(name)
+        if hit:
+            self.report({"event": "send", "source": "dns", "host": printable_text(name, 300), **hit, **(found or {})})
+        return hit
+
+    def start(self):
+        if self.files:
+            self.thread = threading.Thread(target=self.watch, args=(self.stopping,), daemon=True)
+            self.thread.start()
+        return self
+
+    def close(self):
+        self.stopping.set()
+        if self.thread is not None:
+            self.thread.join(3)
+
+    def watch(self, stop, libc=None):
+        """Report what happens to the files until STOP: read (opened or read), modify, delete, move, replace (a new
+        file under its name). Who did it inotify does not say; one event of a kind per file every few seconds."""
+        libc = libc or ctypes.CDLL(None, use_errno=True)
+        fd = libc.inotify_init1(0o2000000)
+        if fd < 0:
+            self.report({"event": "error", "source": "files", "error": "inotify unavailable: canary files unwatched"})
+            return
+        files, dirs = {}, {}
+        for entry in self.files:
+            wd = libc.inotify_add_watch(fd, os.fsencode(entry["path"]), self.FILE_MASK)
+            if wd < 0:
+                self.report({"event": "error", "source": "files", "canary": entry["id"], "path": entry["path"],
+                             "error": f"not watched: {os.strerror(ctypes.get_errno() or 2)}"})
+                continue
+            files[wd] = entry
+            parent, name = os.path.split(entry["path"])
+            wd = libc.inotify_add_watch(fd, os.fsencode(parent), self.DIR_MASK)
+            if wd >= 0:
+                dirs.setdefault(wd, {})[name] = entry
+        recent = {}
+        try:
+            while not stop.is_set():
+                if not select.select([fd], [], [], 0.2)[0]:
+                    continue
+                data, pos = os.read(fd, 65536), 0
+                while pos + 16 <= len(data):
+                    wd, mask, _cookie, size = struct.unpack_from("iIII", data, pos)
+                    name = data[pos + 16:pos + 16 + size].rstrip(b"\0").decode("utf-8", "replace")
+                    pos += 16 + size
+                    if mask & 0x4000:
+                        self.report({"event": "error", "source": "files", "error": "inotify queue overflow"})
+                        continue
+                    entry, table = (files.get(wd), CANARY_FILE_EVENTS) if wd in files else \
+                        (dirs.get(wd, {}).get(name), CANARY_DIR_EVENTS)
+                    action = next((label for bit, label in table.items() if mask & bit), None)
+                    if entry is None or action is None:
+                        continue
+                    now = time.monotonic()
+                    if now - recent.get((entry["id"], action), -CANARY_REPEAT) < CANARY_REPEAT:
+                        continue
+                    recent[(entry["id"], action)] = now
+                    self.report({"event": action, "source": "files", "canary": entry["id"], "path": entry["path"]})
+        finally:
+            os.close(fd)
+
+
+def canary_matchers(server):
+    """(request forms, host-name forms, block, model hosts) of SERVER's proxy.json "canary", built once."""
+    cached = getattr(server, "_canary", None)
+    if cached is None:
+        entry = server.config.get("canary") or {}
+        cached = server._canary = (CanaryMatcher(entry.get("forms")), CanaryMatcher(entry.get("names"), lower=True),
+                                   entry.get("block", True) is not False,
+                                   {str(h).lower() for h in entry.get("model_hosts", [])})
+    return cached
+
+
+def canary_found(server, hit, where, entry, record, origin=None):
+    """Report HIT (where the token was: url, header, body, sni, push); CanaryRefused when the run blocks. A token in
+    a request to the agent's model provider (ORIGIN, the server the proxy verified) entered the agent's
+    conversation: reported as context, never blocked here."""
+    _, _, block, models = canary_matchers(server)
+    context = where in ("url", "header", "body") and str(origin or "").lower() in models
+    event = {"event": "context" if context else "send", "source": "proxy", "where": where, **hit,
+             **{key: entry[key] for key in ("url", "method", "destination", "host") if key in entry}}
+    seen = server.__dict__.setdefault("_canary_seen", set())
+    if not context or (hit.get("canary"), "context") not in seen:
+        seen.add((hit.get("canary"), "context" if context else where))
+        if server.who is not None:
+            with contextlib.suppress(Exception):
+                server.who.request("canary", {**event, **server.asked_by(dict(record))})
+    entry["canary"] = {**hit, "where": where, **({"context": True} if context else {})}
+    if block and not context:
+        raise CanaryRefused({**hit, "where": where})
+
+
+def canary_request(server, head, parts, headers, entry, record, origin=None):
+    """PARTS of a request whose HEAD carried no token (else CanaryRefused), searched as they pass."""
+    forms, names, _, _ = canary_matchers(server)
+    if not forms and not names:
+        return parts
+    found, where = forms.find(head.split(b"\r\n", 1)[0]), "url"
+    if found is None:
+        found, where = forms.find(head) or names.name(header(headers, "host")), "header"
+    if found is not None:
+        canary_found(server, found, where, entry, record, origin)
+    return forms.scan(parts, headers, lambda hit: canary_found(server, hit, "body", entry, record, origin)) \
+        if forms else parts
+
+
+def canary_refusal(server, client, refused, entry):
+    """Answer a request CanaryRefused stopped and log it."""
+    message = b"sandbox-ai: refused: this request carries a credential that must not leave the sandbox\n"
+    with contextlib.suppress(OSError):
+        send_all(client, b"HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n"
+                 + f"Content-Length: {len(message)}\r\n\r\n".encode() + message)
+    server.log({**entry, "event": "denied", "reason": f"a canary token ({refused.hit.get('canary')}, "
+                f"{refused.hit.get('encoding')}) in the request's {refused.hit.get('where')}",
+                "canary": refused.hit})
+
+
+def canary_sni(server, client, name, record):
+    """True (refused, logged) if the name a TLS client asks for carries a token and the run blocks."""
+    _, names, _, _ = canary_matchers(server)
+    hit = names.name(name) if names and name else None
+    if hit is None:
+        return False
+    entry = {**record, "host": name}
+    try:
+        canary_found(server, hit, "sni", entry, record)
+    except CanaryRefused:
+        server.refuse(client, {**entry, "event": "denied", "reason": f"a canary token ({hit['canary']}) in the "
+                               "name the client asked for", "canary": {**hit, "where": "sni"}}, reset=True)
+        return True
+    return False
+
+
+def canary_push(server, verdict, entry, record):
+    """Report the canaries the push check found in a push (it refuses the push itself when the run blocks)."""
+    for ident in verdict.get("canary") or []:
+        if server.who is not None:
+            with contextlib.suppress(Exception):
+                server.who.request("canary", {"event": "send", "source": "push", "where": "push", "canary": str(ident),
+                                              "encoding": "git", "url": entry.get("url"),
+                                              **server.asked_by(dict(record))})
+        entry["canary"] = {"canary": str(ident), "where": "push"}
+
+
+def stop_process(process, grace=2):
+    """Stop PROCESS: close its stdin (the proxy exits on that), give it GRACE seconds, then signal it. A process
+    of another user may not be signalled without CAP_KILL: it ends with the sandbox's PID namespace at the latest."""
     if not process or process.poll() is not None:
         return
     if process.stdin is not None:
         with contextlib.suppress(OSError):
             process.stdin.close()
         try:
-            process.wait(timeout=2)
+            process.wait(timeout=grace)
             return
         except subprocess.TimeoutExpired:
             pass
@@ -2430,21 +5883,80 @@ def stop_process(process):
         pass
 
 
+GIT_TOKENS = Path("/sandbox/session/git-tokens.json")
+GIT_CREDENTIAL_LIMIT = 1 << 16
+
+
+def git_credential(operation, stream=None, out=None, path=None):
+    """Git's credential helper for logins added during the run (`sandbox-ai net allow --git-token-*`, which writes
+    PATH on the host; read-only here). Answers "get" for the origin (protocol://host[:port]) of a login, nothing
+    else; "store" and "erase" are ignored: the agent cannot change what the human gave. Always 0: no login known
+    means Git asks its next helper."""
+    if operation != "get":
+        return 0
+    stream, out = stream or sys.stdin, out or sys.stdout
+    asked = {}
+    for line in stream.read(GIT_CREDENTIAL_LIMIT).splitlines():
+        if not line:
+            break
+        key, sep, value = line.partition("=")
+        if sep:
+            asked[key] = value
+    protocol, host = asked.get("protocol", "").lower(), asked.get("host", "").lower()
+    if protocol not in ("http", "https") or not host:
+        return 0
+    default = {"http": ":80", "https": ":443"}[protocol]
+    origin = f"{protocol}://{host.removesuffix(default)}"
+    try:
+        with open(path or GIT_TOKENS, encoding="utf-8") as tokens:
+            logins = json.loads(tokens.read(GIT_CREDENTIAL_LIMIT)).get("logins", [])
+    except (OSError, ValueError, AttributeError):
+        return 0
+    for login in logins if isinstance(logins, list) else []:
+        if not isinstance(login, dict) or login.get("url") != origin:
+            continue
+        user, token = login.get("user"), login.get("token")
+        if not all(isinstance(v, str) and v and "\n" not in v and "\r" not in v and "\0" not in v for v in (user, token)):
+            return 0
+        if asked.get("username") and asked["username"] != user:
+            return 0  # the remote names another user: not this login
+        out.write(f"username={user}\npassword={token}\n")
+        return 0
+    return 0
+
+
 if __name__ == "__main__":
     try:
         if len(sys.argv) > 1 and sys.argv[1] == "--internal-bootstrap":
             result = inner_bootstrap()
         elif len(sys.argv) > 2 and sys.argv[1] == "--internal-guard":
             result = inner_guard(json.loads(sys.argv[2]))
-        elif len(sys.argv) > 4 and sys.argv[1] == "--internal-mcp-serve" and sys.argv[3] == "--":
+        elif len(sys.argv) > 4 and sys.argv[1] == "--internal-mcp-serve" and "--" in sys.argv[3:]:
+            # SOCKET [--gateway BASE64-JSON] -- COMMAND (the command may hold a -- of its own)
+            options, command = sys.argv[3:sys.argv.index("--", 3)], sys.argv[sys.argv.index("--", 3) + 1:]
+            if not command or options and (len(options) != 2 or options[0] != "--gateway"):
+                raise ValueError("usage: --internal-mcp-serve SOCKET [--gateway CONFIG] -- COMMAND")
+            gateway = json.loads(base64.urlsafe_b64decode(options[1].encode())) if options else None
+            # Not dumpable: the server it starts runs as the same user and must not reach the relay's stderr
+            # (the records and questions) or its memory through /proc.
+            with contextlib.suppress(OSError, AttributeError):
+                ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)  # PR_SET_DUMPABLE
             # In a server sandbox the work directory is /work; a catalog server's bridge runs on the host.
-            result = mcp_serve(sys.argv[2], sys.argv[4:], cwd="/work" if os.path.isdir("/work") else "/")
+            result = mcp_serve(sys.argv[2], command, cwd="/work" if os.path.isdir("/work") else "/", gateway=gateway)
         elif len(sys.argv) == 3 and sys.argv[1] == "--internal-mcp-bridge":
             result = mcp_bridge(sys.argv[2])
-        elif len(sys.argv) in (4, 5) and sys.argv[1] == "--internal-proxy":
-            result = proxy_main(int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]) if len(sys.argv) == 5 else None)
+        elif len(sys.argv) in (4, 5, 6) and sys.argv[1] == "--internal-proxy":
+            # LOG_FD READY_FD [CHANNEL_FD [--no-ask]]: --no-ask, the channel only says who connects
+            result = proxy_main(int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]) if len(sys.argv) >= 5 else None,
+                                asking=sys.argv[5:] != ["--no-ask"])
+        elif len(sys.argv) == 4 and sys.argv[1] == "--internal-hook":
+            result = hook_client(sys.argv[2], sys.argv[3])
+        elif len(sys.argv) == 5 and sys.argv[1] == "--internal-kit-hook":
+            result = kit_hook(sys.argv[2], sys.argv[3], sys.argv[4])
         elif len(sys.argv) >= 2 and sys.argv[1] == "--internal-open":
             result = open_request(sys.argv[2:])
+        elif len(sys.argv) == 3 and sys.argv[1] == "--internal-git-credential":
+            result = git_credential(sys.argv[2])
         elif len(sys.argv) == 3 and sys.argv[1] == "--internal-attach-relay":
             result = attach_relay(sys.argv[2], ["tmux", "attach", "-t", "sandbox"])
         else:

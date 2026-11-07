@@ -1,0 +1,31 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "network-analysis",
+  "title": "Network analysis",
+  "description": "Packet captures in a read-only folder, the agent reaches only its provider; TShark and mcpcap as MCP servers.",
+  "category": "analysis",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--mount",
+    "{captures}:/mnt/captures:ro"
+  ],
+  "mcp": [
+    "hub:tshark",
+    "hub:mcpcap"
+  ],
+  "values": {
+    "captures": {
+      "label": "Folder with the .pcap/.pcapng files",
+      "kind": "folder"
+    }
+  },
+  "prompt": "Analyse the captures in /mnt/captures: hosts and conversations, protocols, DNS names, anything unusual (beaconing, cleartext credentials, odd ports). Write /work/network-report.md with evidence (frame numbers).",
+  "notes": [
+    "Active scans (hub:nmap) only against targets you may scan: add it yourself, with the policy's allow_within."
+  ]
+}

@@ -3,7 +3,8 @@
 
 A kit is a directory with one subdirectory per agent (claude/, codex/, opencode/). Each holds
 any of: skills/, agents/, commands/, prompts/ (whatever the agent knows), a memory template
-(CLAUDE.md or AGENTS.md) and marketplaces.json. Every sandbox gets the default kit
+(CLAUDE.md or AGENTS.md), marketplaces.json and hooks/ (the agent's hooks, which run only once
+you approved them: see stage_hooks). Every sandbox gets the default kit
 (~/.local/share/sandbox-ai/home/AGENT, created from the templates on first use) plus the kits
 named with --kit NAME (~/.local/share/sandbox-ai/kits/NAME/AGENT) and --kit-dir DIR (DIR/AGENT).
 Entries of all kits are merged; one name from two kits is an error, never silently replaced.
@@ -24,9 +25,11 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shlex
 import shutil
 import stat
 import tempfile
+import time
 
 HERE = Path(__file__).resolve().parent
 AGENTS = ("claude", "codex", "opencode")
@@ -35,6 +38,9 @@ TEMPLATES = HERE / "templates"
 # a kit replaces it (unlike two kits, which may not share a name).
 BUILTIN = HERE / "builtin"
 BUILTIN_LABEL = "built-in"
+# Named kits shipped with sandbox-ai (--kit NAME), in BUILTIN_KITS/NAME/AGENT. A kit NAME of the user's
+# for the same agent replaces it. Their plugins are installed only on request (plugins claude --kit NAME).
+BUILTIN_KITS = BUILTIN / "kits"
 # sandbox-ai's own Claude plugin marketplace, mounted read-only at the same place in every Claude sandbox.
 MARKETPLACE = HERE / "marketplace"
 MARKETPLACE_TARGET = "/sandbox/marketplace"
@@ -95,19 +101,34 @@ def bad_name(name):
 
 
 def kit_path(name, agent):
+    """The kit NAME for AGENT: the user's in the kits directory, else the built-in one of that name."""
     if not re.fullmatch(KIT_NAME, name):
         raise ValueError(f"--kit NAME: 1-64 letters, digits, '_', '.', '-' (not starting with '.' or '-'): {name!r}")
-    return kits_dir() / name / agent
+    path = kits_dir() / name / agent
+    if not path.is_dir() and (BUILTIN_KITS / name / agent).is_dir():
+        return BUILTIN_KITS / name / agent
+    return path
 
 
-def available_kits(agent=None):
-    """Names of the kits in the kits directory (those with a directory for AGENT, if given)."""
+def kit_names(root, agent=None):
     try:
-        entries = sorted(os.scandir(kits_dir()), key=lambda e: e.name)
+        entries = sorted(os.scandir(root), key=lambda e: e.name)
     except OSError:
         return []
     return [e.name for e in entries if re.fullmatch(KIT_NAME, e.name) and e.is_dir()
             and (agent is None or (Path(e.path) / agent).is_dir())]
+
+
+def builtin_kits(agent):
+    """Names of the kits shipped with sandbox-ai for AGENT that no kit of the user's replaces."""
+    return [name for name in kit_names(BUILTIN_KITS, agent) if not (kits_dir() / name / agent).is_dir()]
+
+
+def available_kits(agent=None, builtin=True):
+    """Names of the kits in the kits directory (those with a directory for AGENT, if given), and of the
+    built-in kits unless BUILTIN is false."""
+    own = kit_names(kits_dir(), agent)
+    return sorted(set(own) | set(kit_names(BUILTIN_KITS, agent) if builtin else ()))
 
 
 def sources(a):
@@ -121,6 +142,10 @@ def sources(a):
         path = kit_path(name, agent)
         if not path.is_dir():
             known = ", ".join(available_kits(agent)) or "none"
+            if name in kit_names(BUILTIN_KITS):
+                usable = ", ".join(other for other in AGENTS if (BUILTIN_KITS / name / other).is_dir())
+                raise ValueError(f"--kit {name}: sandbox-ai's built-in kit {name} is not available for {agent} "
+                                 f"(only for {usable})")
             raise ValueError(f"--kit {name}: {path} does not exist (kits for {agent}: {known})")
         result.append((f"kit {name}", path))
     for value in dict.fromkeys(a.kit_dir):
@@ -172,8 +197,10 @@ def scan(agent, kit_sources):
                 memory = (label, path)
             elif name == PLUGINS_FILE:
                 plugins.append((label, path))
+            elif name == HOOKS_DIR:
+                continue  # the kit's hooks: stage_hooks, and only once approved
             else:
-                known = ", ".join([*(f"{k}/" for k in LAYOUT[agent]), memory_name, PLUGINS_FILE])
+                known = ", ".join([*(f"{k}/" for k in LAYOUT[agent]), memory_name, PLUGINS_FILE, f"{HOOKS_DIR}/"])
                 notes.append(f"{label}: {name} is not used for {agent} (known: {known})")
     return {"entries": entries, "memory": memory, "plugins": plugins, "notes": notes}
 
@@ -727,16 +754,35 @@ def declarations(agent, plugin_files):
     return marketplaces, plugins, notes
 
 
-def all_plugin_files(agent):
-    """marketplaces.json of the default kit and of every kit: what `sandbox-ai plugins` installs."""
+def all_plugin_files(agent, builtin=()):
+    """marketplaces.json of the default kit and of every kit: what `sandbox-ai plugins` installs. A
+    built-in kit only when named in BUILTIN (its plugins may come from far away, e.g. GitHub)."""
     files = []
     if (default_home(agent) / PLUGINS_FILE).is_file():
         files.append(("home", default_home(agent) / PLUGINS_FILE))
-    for name in available_kits(agent):
+    for name in available_kits(agent, builtin=False):
         path = kits_dir() / name / agent / PLUGINS_FILE
         if path.is_file():
             files.append((f"kit {name}", path))
+    for name in dict.fromkeys(builtin):
+        if name not in kit_names(BUILTIN_KITS, agent):
+            raise ValueError(f"--kit {name}: no built-in kit of that name for {agent} "
+                             f"(built-in: {', '.join(kit_names(BUILTIN_KITS, agent)) or 'none'})")
+        if name in builtin_kits(agent) and (BUILTIN_KITS / name / agent / PLUGINS_FILE).is_file():
+            files.append((f"built-in kit {name}", BUILTIN_KITS / name / agent / PLUGINS_FILE))
     return files
+
+
+def install_command(plugins, agent="claude"):
+    """The command that installs PLUGINS (missing ones): `sandbox-ai plugins claude`, with --kit NAME
+    for each built-in kit (not replaced by the user's) that declares one of them."""
+    words = ["sandbox-ai", "plugins", agent]
+    for name in builtin_kits(agent):
+        document = read_store_json(BUILTIN_KITS / name / agent / PLUGINS_FILE) or {}
+        listed = document.get("plugins") if isinstance(document.get("plugins"), list) else []
+        if set(listed) & set(plugins):
+            words += ["--kit", name]
+    return " ".join(words)
 
 
 def read_store_json(path):
@@ -778,3 +824,463 @@ def describe(agent, label, directory):
     parts += [MEMORY_FILE[agent][0]] if plan["memory"] else []
     parts += [PLUGINS_FILE] if plan["plugins"] else []
     return "; ".join(parts) or "empty"
+
+
+# --- hooks: kits may carry the agent's hooks; they run only once the user approved them ------------------------
+#
+# AGENT/hooks/ in a kit. For Claude Code and Codex: hooks.json, the "hooks" object of Claude Code's settings
+# ({"hooks": {EVENT: [{"matcher": ..., "hooks": [{"type": "command", "command": ..., "timeout": ...}]}]}}), and the
+# files its commands run, named ${HOOK_DIR}/FILE. For OpenCode: plugin modules (*.js, *.mjs, *.ts at the top) and
+# their helper files. A run copies the folder, hashes the copy and installs its hooks as the agent's managed
+# configuration (next to the rule hooks, after them) only if the user approved exactly that content with
+# `sandbox-ai kits trust-hooks`, recorded in trust_file(): outside every tree a sandbox can write. Any change, by
+# anyone, takes the approval away until it is given again. A symlink or a special file makes a folder's hooks
+# unusable: they would run something else than what was reviewed.
+
+HOOKS_DIR = "hooks"
+HOOKS_FILE = "hooks.json"
+HOOK_DIR_VARIABLE = "${HOOK_DIR}"
+HOOK_FILES, HOOK_BYTES, HOOK_DEPTH, HOOK_HANDLERS = 200, 8 << 20, 8, 100
+HOOK_EVENT = re.compile(r"[A-Z][A-Za-z]{2,39}")
+HOOK_TIMEOUT_LIMIT = 600
+# Events the agents are known to run hooks for; another name is kept, with a note (a newer agent may know it).
+HOOK_EVENTS = {
+    "claude": ("PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest", "UserPromptSubmit",
+               "Notification", "Stop", "SubagentStart", "SubagentStop", "PreCompact", "SessionStart", "SessionEnd"),
+    "codex": ("PreToolUse", "PostToolUse", "PermissionRequest", "UserPromptSubmit", "SessionStart", "SessionEnd",
+              "Stop", "SubagentStart", "SubagentStop", "PreCompact", "PostCompact"),
+}
+PLUGIN_SUFFIXES = (".js", ".mjs", ".ts")
+TRUST_VERSION = 1
+
+
+def trust_file():
+    """Where the approvals of kit hooks are kept: with your rules, outside every sandbox."""
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "sandbox-ai" / "trusted-hooks.json"
+
+
+def hook_tree(directory, limits=None, keep=(), links=False):
+    """{"files": [{"path", "size", "sha256", "executable"}], "sha256", "errors", "data", "kept"} of the hooks folder
+    DIRECTORY, read through directory descriptors (nothing followed). "sha256" covers every file's path, content and
+    executable bit, and is None once there is an error; "data": the bytes of the top-level hooks.json, if any;
+    "kept": {path: bytes} of the files KEEP names. LIMITS: (files, bytes, depth), by default a kit's. LINKS: a
+    symlink is no error but part of the content (its target, never followed; a plugin's node_modules/.bin)."""
+    max_files, max_bytes, max_depth = limits or (HOOK_FILES, HOOK_BYTES, HOOK_DEPTH)
+    files, errors, state = [], [], {"bytes": 0, "data": None, "kept": {}}
+    try:
+        top = os.open(directory, DIR_FLAGS)
+    except OSError as exc:
+        why = "a symlink" if exc.errno in (errno.ELOOP, errno.ENOTDIR) and os.path.islink(directory) else exc.strerror
+        return {"files": [], "sha256": None, "errors": [f"{directory}: {why}"], "data": None, "kept": {}}
+
+    def walk(fd, relative, depth):
+        with os.scandir(fd) as entries:
+            names = sorted(entry.name for entry in entries)
+        for name in names:
+            shown = relative + name
+            problem = bad_name(name)
+            if problem:
+                errors.append(f"{shown}: {problem}")
+                continue
+            try:
+                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            except OSError as exc:
+                errors.append(f"{shown}: {exc.strerror}")
+                continue
+            if stat.S_ISLNK(info.st_mode) and links:
+                target = os.readlink(name, dir_fd=fd)
+                files.append({"path": shown, "size": 0, "link": target, "executable": False,
+                              "sha256": hashlib.sha256(b"link:" + os.fsencode(target)).hexdigest()})
+                if len(files) > max_files:
+                    raise ValueError(f"more than {max_files} files")
+            elif stat.S_ISLNK(info.st_mode):
+                errors.append(f"{shown} is a symlink: hooks run only from files of their own, which were reviewed")
+            elif stat.S_ISDIR(info.st_mode):
+                if depth + 1 >= max_depth:
+                    errors.append(f"{shown}: nested deeper than {max_depth} folders")
+                    continue
+                child = os.open(name, DIR_FLAGS, dir_fd=fd)
+                try:
+                    walk(child, shown + "/", depth + 1)
+                finally:
+                    os.close(child)
+            elif stat.S_ISREG(info.st_mode):
+                data, why = read_at(fd, name, max_bytes)
+                if data is None:
+                    errors.append(f"{shown}: {why or 'gone while reading'}")
+                    continue
+                state["bytes"] += len(data)
+                files.append({"path": shown, "size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+                              "executable": bool(info.st_mode & 0o111)})
+                if shown == HOOKS_FILE:
+                    state["data"] = data
+                if shown in keep:
+                    state["kept"][shown] = data
+                if len(files) > max_files or state["bytes"] > max_bytes:
+                    raise ValueError(f"more than {max_files} files or {max_bytes >> 20} MiB")
+            else:
+                errors.append(f"{shown}: not a regular file or folder (FIFO, socket or device)")
+    try:
+        walk(top, "", 0)
+    except (OSError, ValueError) as exc:
+        errors.append(str(exc) if isinstance(exc, ValueError) else f"{directory}: {exc.strerror}")
+    finally:
+        os.close(top)
+    listing = json.dumps([[f["path"], f["executable"], f["sha256"]] for f in files]).encode()
+    return {"files": files, "sha256": None if errors else hashlib.sha256(listing).hexdigest(), "errors": errors,
+            "data": state["data"], "kept": state["kept"]}
+
+
+def hook_groups(agent, document):
+    """The hook definitions DOCUMENT (hooks.json: {"hooks": {EVENT: [group]}} or {EVENT: [group]}) checked and in
+    their normal form {EVENT: [{"matcher"?, "hooks": [{"type": "command", "command", "timeout"?}]}]}, and notes."""
+    if isinstance(document, dict) and set(document) <= {"hooks", "description", "$comment"} and "hooks" in document:
+        document = document["hooks"]
+    if not isinstance(document, dict):
+        raise ValueError(f"{HOOKS_FILE}: an object of EVENT: [groups], as under \"hooks\" in Claude Code's settings")
+    groups, notes, count = {}, [], 0
+    for event, entries in document.items():
+        if not isinstance(event, str) or not HOOK_EVENT.fullmatch(event):
+            raise ValueError(f"{HOOKS_FILE}: {str(event)[:60]!r} is not an event name (PreToolUse, Stop, ...)")
+        if event not in HOOK_EVENTS.get(agent, ()):
+            notes.append(f"{event} is not an event {agent} is known to run hooks for")
+        if not isinstance(entries, list):
+            raise ValueError(f"{HOOKS_FILE}: {event} is a list of groups {{\"matcher\", \"hooks\"}}")
+        for entry in entries:
+            if not isinstance(entry, dict) or set(entry) - {"matcher", "hooks"} or \
+                    not isinstance(entry.get("hooks"), list) or not entry["hooks"]:
+                raise ValueError(f"{HOOKS_FILE}: {event}: a group is {{\"matcher\": ..., \"hooks\": [...]}}")
+            matcher = entry.get("matcher")
+            if matcher is not None and (not isinstance(matcher, str) or len(matcher) > 200 or not matcher.isprintable()):
+                raise ValueError(f"{HOOKS_FILE}: {event}: \"matcher\" is one line of at most 200 characters")
+            handlers = []
+            for handler in entry["hooks"]:
+                count += 1
+                if count > HOOK_HANDLERS:
+                    raise ValueError(f"{HOOKS_FILE}: more than {HOOK_HANDLERS} hooks")
+                if not isinstance(handler, dict) or handler.get("type") != "command" or \
+                        set(handler) - {"type", "command", "timeout"}:
+                    raise ValueError(f"{HOOKS_FILE}: {event}: only {{\"type\": \"command\", \"command\", \"timeout\"}} "
+                                     "hooks run from a kit")
+                command, timeout = handler.get("command"), handler.get("timeout")
+                if not isinstance(command, str) or not command.strip() or len(command) > 4000 or \
+                        any(ord(c) < 32 and c != "\t" or 0xD800 <= ord(c) <= 0xDFFF for c in command):
+                    raise ValueError(f"{HOOKS_FILE}: {event}: \"command\" is one line of at most 4000 characters")
+                if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, int)
+                                            or not 1 <= timeout <= HOOK_TIMEOUT_LIMIT):
+                    raise ValueError(f"{HOOKS_FILE}: {event}: \"timeout\" is 1 to {HOOK_TIMEOUT_LIMIT} seconds")
+                handlers.append({"type": "command", "command": command,
+                                 **({"timeout": timeout} if timeout is not None else {})})
+            groups.setdefault(event, []).append({**({"matcher": matcher} if matcher is not None else {}),
+                                                 "hooks": handlers})
+    return groups, notes
+
+
+def read_hooks(agent, directory):
+    """What the hooks folder DIRECTORY holds for AGENT: {"path", "files", "sha256", "groups" (Claude Code, Codex),
+    "plugins" (OpenCode), "hooks" (one line per hook: event, matcher, command, the folder's files it runs), "notes",
+    "errors"}. Hooks with errors never run and cannot be approved."""
+    tree = hook_tree(directory)
+    result = {"path": str(directory), "files": tree["files"], "sha256": tree["sha256"], "groups": {},
+              "plugins": [], "hooks": [], "notes": [], "errors": list(tree["errors"])}
+    names = [f["path"] for f in tree["files"]]
+    if agent == "opencode":
+        result["plugins"] = [name for name in names if "/" not in name and name.endswith(PLUGIN_SUFFIXES)]
+        result["hooks"] = [{"plugin": name, "files": [name]} for name in result["plugins"]]
+        if names and not result["plugins"]:
+            result["errors"].append(f"no plugin module ({', '.join(PLUGIN_SUFFIXES)}) at the top of the folder")
+        return result
+    if tree["data"] is None:
+        if names or not tree["errors"]:
+            result["errors"].append(f"no {HOOKS_FILE} at the top of the folder: it says which hooks run")
+        return result
+    try:
+        document = json.loads(tree["data"].decode("utf-8"))
+        result["groups"], result["notes"] = hook_groups(agent, document)
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+        result["errors"].append(str(exc) if isinstance(exc, ValueError) and HOOKS_FILE in str(exc)
+                                else f"{HOOKS_FILE} is not valid JSON ({exc})")
+        result["sha256"] = None
+        return result
+    for event, entries in result["groups"].items():
+        for entry in entries:
+            for handler in entry["hooks"]:
+                runs = [name for name in names if name != HOOKS_FILE and f"{HOOK_DIR_VARIABLE}/{name}" in handler["command"]]
+                result["hooks"].append({"event": event, "matcher": entry.get("matcher"), "command": handler["command"],
+                                        "timeout": handler.get("timeout"), "files": runs})
+    if result["errors"]:
+        result["sha256"] = None
+    return result
+
+
+# --- the hooks of Claude plugins -----------------------------------------------------------------------------
+#
+# A plugin's hooks (hooks/hooks.json, or "hooks" in .claude-plugin/plugin.json) do not run while the agent's
+# managed hooks are on (allowManagedHooksOnly). Approved like a kit's hooks (`sandbox-ai plugins claude
+# trust-hooks PLUGIN`: the SHA-256 of the plugin's whole installed folder, which its commands may use), they
+# join the managed configuration after the rule and kit hooks, with ${CLAUDE_PLUGIN_ROOT} set as Claude Code
+# sets it for a plugin's own hooks. Without managed hooks they run as Claude Code runs them, as before.
+
+PLUGIN_ROOT_VARIABLE = "${CLAUDE_PLUGIN_ROOT}"
+PLUGIN_CACHE = PurePosixPath("/root/.claude/plugins/cache")  # where the plugin store's cache is in every sandbox
+PLUGIN_LIMITS = (20000, 256 << 20, 32)  # files, bytes, depth of a plugin's folder (node_modules included)
+PLUGIN_HOOKS_FILE = "hooks/hooks.json"
+PLUGIN_MANIFEST = ".claude-plugin/plugin.json"
+PLUGIN_KNOWN_VARIABLES = {PLUGIN_ROOT_VARIABLE, "${CLAUDE_PROJECT_DIR}", "$CLAUDE_PROJECT_DIR", "$CLAUDE_PLUGIN_ROOT"}
+
+
+def plugin_trust_key(plugin):
+    """What an approval records as the "kit" of PLUGIN's hooks."""
+    return f"plugin:{plugin}"
+
+
+def plugin_install(plugin, entries, store=None):
+    """(host folder, sandbox folder) of PLUGIN as installed_plugins.json lists it (ENTRIES), or None. The path
+    must lie in the cache (the store's sandbox could have written anything there)."""
+    store = store or plugin_dir("claude")
+    if store is None or not isinstance(entries, list):
+        return None
+    for entry in entries:
+        path = entry.get("installPath") if isinstance(entry, dict) else None
+        if not isinstance(path, str):
+            continue
+        sandbox = PurePosixPath(path)
+        try:
+            relative = sandbox.relative_to(PLUGIN_CACHE)
+        except ValueError:
+            continue
+        if not relative.parts or any(part in ("", ".", "..") or bad_name(part) for part in relative.parts) \
+                or path != os.path.normpath(path):
+            continue
+        return store / "cache" / Path(*relative.parts), str(sandbox)
+    return None
+
+
+def read_plugin_hooks(plugin, host_root, sandbox_root):
+    """PLUGIN's hooks in its installed folder HOST_ROOT (SANDBOX_ROOT in the sandbox): like read_hooks, with
+    "plugin" and the commands made to run as managed hooks (${CLAUDE_PLUGIN_ROOT} replaced and exported)."""
+    tree = hook_tree(host_root, PLUGIN_LIMITS, keep=(PLUGIN_HOOKS_FILE, PLUGIN_MANIFEST), links=True)
+    result = {"plugin": plugin, "path": str(host_root), "files": tree["files"], "sha256": tree["sha256"],
+              "groups": {}, "hooks": [], "notes": [], "errors": list(tree["errors"]),
+              "declared": os.path.lexists(Path(host_root) / PLUGIN_HOOKS_FILE)}
+    documents = []
+    try:
+        if PLUGIN_HOOKS_FILE in tree["kept"]:
+            documents.append((PLUGIN_HOOKS_FILE, json.loads(tree["kept"][PLUGIN_HOOKS_FILE].decode("utf-8"))))
+        manifest = json.loads(tree["kept"][PLUGIN_MANIFEST].decode("utf-8")) if PLUGIN_MANIFEST in tree["kept"] else {}
+        declared = manifest.get("hooks") if isinstance(manifest, dict) else None
+        result["declared"] = result["declared"] or declared is not None
+        for value in (declared if isinstance(declared, list) else [declared] if declared is not None else []):
+            if isinstance(value, dict):
+                documents.append((PLUGIN_MANIFEST, value))
+                continue
+            name = os.path.normpath(value[2:] if isinstance(value, str) and value.startswith("./") else str(value))
+            listed = {f["path"]: f for f in tree["files"]}
+            if name == PLUGIN_HOOKS_FILE and PLUGIN_HOOKS_FILE in tree["kept"]:
+                continue  # the default file, named once more
+            if name not in listed or "link" in listed[name] or name.startswith(".."):
+                raise ValueError(f"{PLUGIN_MANIFEST}: hooks {str(value)[:80]!r} is no file of the plugin")
+            data, why = read_at_path(host_root, name)
+            if data is None or hashlib.sha256(data).hexdigest() != listed[name]["sha256"]:
+                raise ValueError(f"{name}: {why or 'changed while it was read'}")
+            documents.append((name, json.loads(data.decode("utf-8"))))
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+        result["errors"].append(f"its hook definitions cannot be read: {exc}")
+    for name, document in documents:
+        try:
+            groups, notes = hook_groups("claude", document)
+        except ValueError as exc:
+            result["errors"].append(f"{name}: {str(exc).replace(HOOKS_FILE + ': ', '')}")
+            continue
+        result["notes"] += notes
+        for event, entries in groups.items():
+            for entry in entries:
+                handlers = []
+                for handler in entry["hooks"]:
+                    command = handler["command"]
+                    unknown = sorted(set(re.findall(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?", command))
+                                     - PLUGIN_KNOWN_VARIABLES - {"$" + v for v in ("HOME", "PATH", "PWD")})
+                    if unknown:
+                        result["notes"].append(f"{event}: its command uses {', '.join(unknown)}, which Claude Code "
+                                               "may set only for a plugin's own hooks")
+                    result["hooks"].append({"event": event, "matcher": entry.get("matcher"), "command": command,
+                                            "timeout": handler.get("timeout")})
+                    handlers.append({**handler, "command": f"export CLAUDE_PLUGIN_ROOT={shlex.quote(sandbox_root)}; "
+                                                           + command.replace(PLUGIN_ROOT_VARIABLE, sandbox_root)})
+                result["groups"].setdefault(event, []).append({**entry, "hooks": handlers})
+    if result["errors"]:
+        result["sha256"] = None
+    return result
+
+
+def read_at_path(root, relative):
+    """(bytes, None) of the file RELATIVE in ROOT, every folder on the way opened without following a link;
+    (None, why) when that cannot be."""
+    parts = PurePosixPath(relative).parts
+    try:
+        fd = os.open(root, DIR_FLAGS)
+    except OSError as exc:
+        return None, exc.strerror
+    try:
+        for part in parts[:-1]:
+            child = os.open(part, DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        return read_at(fd, parts[-1], HOOK_BYTES)
+    except OSError as exc:
+        return None, exc.strerror
+    finally:
+        os.close(fd)
+
+
+def stage_plugin_hooks(plugins, installed_plugins, store=None, records=None):
+    """The hooks of the run's PLUGINS (ids) as INSTALLED_PLUGINS lists them: [{"plugin", "label", "kit",
+    "trusted", "groups", "hooks", "notes", "errors", "sha256"}], only plugins with hooks."""
+    records = trust_records() if records is None else records
+    staged = []
+    for plugin in plugins:
+        where = plugin_install(plugin, installed_plugins.get(plugin), store)
+        if where is None:
+            continue
+        info = read_plugin_hooks(plugin, *where)
+        if not info["declared"]:
+            continue  # a plugin without hooks: nothing to approve
+        staged.append({**info, "label": f"plugin {plugin}", "kit": plugin_trust_key(plugin),
+                       "trusted": hooks_trusted("claude", info["sha256"], plugin_trust_key(plugin), records)})
+    return staged
+
+
+def trust_records(path=None):
+    """The approvals in PATH (trust_file()): [{"agent", "sha256", "kit", "path", "time", "hooks"}]."""
+    path = Path(path or trust_file())
+    try:
+        data = read_regular(path, 4 << 20)
+        document = json.loads(data) if data else {}
+    except (OSError, ValueError):
+        return []
+    records = document.get("hooks") if isinstance(document, dict) else None
+    return [r for r in records if isinstance(r, dict) and isinstance(r.get("agent"), str)
+            and isinstance(r.get("sha256"), str)] if isinstance(records, list) else []
+
+
+def hooks_trusted(agent, sha, kit, records=None):
+    """True if the user approved hooks of exactly this content (SHA, from read_hooks) for AGENT in exactly this KIT
+    (trust_argument: a kit's name, `default` or a --kit-dir folder). The same content in another kit, a project's
+    --kit-dir say, is not approved by it: each kit is reviewed and approved for itself."""
+    if not sha or not kit:
+        return False
+    return any(r["agent"] == agent and r["sha256"] == sha and r.get("kit") == kit
+               for r in (trust_records() if records is None else records))
+
+
+def change_trust(agent, info, kit, approve=True, path=None):
+    """Record (APPROVE) or take back the approval of the hooks INFO (read_hooks) of KIT for AGENT; returns the
+    records. Taking back drops every approval of that kit for AGENT, whatever its content."""
+    path = Path(path or trust_file())
+    if approve and not info.get("sha256"):
+        raise ValueError("these hooks cannot be approved: " + "; ".join(info.get("errors") or ["nothing to approve"]))
+    with locked(path.parent):
+        records = [r for r in trust_records(path) if not (r["agent"] == agent and r.get("kit") == kit)]
+        if approve:
+            records.append({"agent": agent, "sha256": info["sha256"], "kit": kit, "path": info["path"],
+                            "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            "hooks": [h.get("plugin") or f"{h['event']} {h.get('matcher') or '*'}: {h['command']}"
+                                      for h in info["hooks"]][:100]})
+        write_at(path.parent, path.name, (json.dumps({"version": TRUST_VERSION, "hooks": records}, indent=2)
+                                          + "\n").encode())
+    return records
+
+
+def copy_hooks(source, target):
+    """Copy the hooks folder SOURCE to TARGET (new) through directory descriptors: nothing followed, symlinks and
+    special files left out (read_hooks of the copy then reports them missing)."""
+    budget = {"files": 0, "bytes": 0}
+
+    def walk(source_fd, target_fd, depth):
+        with os.scandir(source_fd) as entries:
+            names = sorted(entry.name for entry in entries)
+        for name in names:
+            if bad_name(name):
+                continue
+            info = os.stat(name, dir_fd=source_fd, follow_symlinks=False)
+            if stat.S_ISDIR(info.st_mode) and depth + 1 < HOOK_DEPTH:
+                os.mkdir(name, 0o755, dir_fd=target_fd)
+                child, copy = os.open(name, DIR_FLAGS, dir_fd=source_fd), os.open(name, DIR_FLAGS, dir_fd=target_fd)
+                try:
+                    walk(child, copy, depth + 1)
+                finally:
+                    os.close(child)
+                    os.close(copy)
+            elif stat.S_ISREG(info.st_mode):
+                data, _ = read_at(source_fd, name, HOOK_BYTES)
+                if data is None:
+                    continue
+                budget["files"] += 1
+                budget["bytes"] += len(data)
+                if budget["files"] > HOOK_FILES or budget["bytes"] > HOOK_BYTES:
+                    raise ValueError(f"more than {HOOK_FILES} files or {HOOK_BYTES >> 20} MiB")
+                fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=target_fd)
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(data)
+                    os.fchmod(stream.fileno(), 0o755 if info.st_mode & 0o111 else 0o644)
+    Path(target).mkdir(mode=0o755, parents=True)
+    source_fd, target_fd = os.open(source, DIR_FLAGS), os.open(target, DIR_FLAGS)
+    try:
+        walk(source_fd, target_fd, 0)
+    finally:
+        os.close(source_fd)
+        os.close(target_fd)
+
+
+def kit_hook_sources(agent, kit_sources):
+    """[(label, hooks folder)] of the kits of a run that have hooks for AGENT."""
+    found = []
+    for label, root in kit_sources:
+        folder = Path(root) / HOOKS_DIR
+        if os.path.lexists(folder):
+            found.append((label, folder))
+    return found
+
+
+def trust_argument(label, folder):
+    """What `sandbox-ai kits trust-hooks` takes for the kit LABEL: its name, `default`, or its folder."""
+    if label.startswith("kit "):
+        return label[4:]
+    if label == "home":
+        return "default"
+    if label.startswith("built-in kit "):
+        return label[len("built-in kit "):]
+    return str(Path(folder).parent.parent)
+
+
+def stage_hooks(agent, kit_sources, staging, target_root, records=None):
+    """Copy the hooks folder of every kit of a run (AGENT/hooks) to STAGING/N, read the copy and check its approval:
+    [{"kit", "label", "source", "staged", "target" (TARGET_ROOT/N in the sandbox), "sha256", "trusted", "groups"
+    (with ${HOOK_DIR} replaced by TARGET), "plugins", "hooks", "errors"}]. Only the copy is judged and run, so a
+    change after the copy reaches no sandbox."""
+    records = trust_records() if records is None else records
+    staged = []
+    for number, (label, folder) in enumerate(kit_hook_sources(agent, kit_sources), 1):
+        copy, target = Path(staging) / str(number), f"{target_root}/{number}"
+        errors = []
+        try:
+            copy_hooks(folder, copy)
+        except (OSError, ValueError) as exc:
+            errors.append(f"not copied: {exc}")
+            copy.mkdir(mode=0o755, parents=True, exist_ok=True)
+        info = read_hooks(agent, copy)
+        source = read_hooks(agent, folder)  # what the copy left out (symlinks, special files) counts against it
+        info["errors"] = list(dict.fromkeys(errors + source["errors"] + info["errors"]))
+        if info["errors"]:
+            info["sha256"] = None
+        groups = {event: [{**entry, "hooks": [{**handler, "command": handler["command"].replace(HOOK_DIR_VARIABLE,
+                                                                                                    target)}
+                                               for handler in entry["hooks"]]}
+                          for entry in entries] for event, entries in info["groups"].items()}
+        kit = trust_argument(label, folder)
+        staged.append({"kit": kit, "label": label, "source": str(folder),
+                       "staged": str(copy), "target": target, "sha256": info["sha256"],
+                       "trusted": hooks_trusted(agent, info["sha256"], kit, records), "groups": groups,
+                       "plugins": info["plugins"], "hooks": info["hooks"], "notes": info["notes"],
+                       "errors": info["errors"]})
+    return staged

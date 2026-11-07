@@ -1,0 +1,21 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "mobile-android",
+  "title": "Mobile: Android",
+  "description": "An Android device through the adb server on the host (port 5037); APK analysis in the workspace.",
+  "category": "development",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--allow-host-port",
+    "5037"
+  ],
+  "notes": [
+    "Start the adb server on the host first: adb start-server. In the sandbox: adb -H 127.0.0.1 -P 5037 devices.",
+    "Podman only (pasta forwards the host's port)."
+  ]
+}

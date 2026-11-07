@@ -42,6 +42,17 @@ def load_runtime():
 
 
 RUNTIME = load_runtime()
+
+
+def load_modes():
+    """The security modes (modes.py): a table and small checks, loaded by path like the runtime."""
+    spec = importlib.util.spec_from_file_location("sandbox_ai_modes", HERE / "modes.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+MODES = load_modes()
 # Shared constants and helpers, and the runtime functions under their former names.
 LOG_DIR = RUNTIME.LOG_DIR
 VNC_DIR = RUNTIME.VNC_DIR
@@ -104,6 +115,7 @@ PRESETS = {
                    "lore.kernel.org"],
     "duckduckgo": ["duckduckgo.com", "html.duckduckgo.com", "lite.duckduckgo.com", "links.duckduckgo.com",
                    "api.duckduckgo.com"],
+    "npm": ["registry.npmjs.org"],
 }
 # Published, stable ingress ranges (TCP/443 only). They keep the API reachable
 # when DNS rotates after launch. OpenAI publishes none; it stays DNS-pinned.
@@ -111,8 +123,45 @@ HOST_NETWORKS = {"api.anthropic.com": ["160.79.104.0/23", "2607:6bc0::/48"]}
 # Per-agent switches for --dangerously-skip-permissions.
 DANGER_ARGS = {"codex": ["--dangerously-bypass-approvals-and-sandbox"],
                "claude": ["--dangerously-skip-permissions"], "opencode": []}
+# --model and --effort: the names each agent knows for sure (any other model name is passed on as it is) and the
+# effort levels it takes; OpenCode sets the effort per model in its own configuration.
+AGENT_MODELS = {"claude": ("fable", "opus", "sonnet", "haiku"), "codex": (), "opencode": ()}
+AGENT_EFFORTS = {"claude": ("low", "medium", "high", "xhigh", "max"),
+                 "codex": ("minimal", "low", "medium", "high", "xhigh"), "opencode": ()}
+MODEL_NAME = r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}"
 DANGER_ENV = {"codex": {}, "claude": {"IS_SANDBOX": "1"},
               "opencode": {"OPENCODE_PERMISSION": '{"*":"allow"}'}}
+# --telemetry: what the agents report to their makers. off (the default): no usage statistics, error reports,
+# feedback uploads, session sharing or update checks; strict: also every other call that is not the model's;
+# on: the agents' own settings. Names checked in the sources: Claude Code 2.1.317 (the binary), Codex rust-v0.166.0
+# (codex-rs/config: analytics, feedback, otel, check_for_update_on_startup, features), OpenCode v1.19.5
+# (packages/core/src/flag/flag.ts, effect/runtime-flags.ts; "share" and "autoupdate" in its config).
+TELEMETRY_LEVELS = ("off", "strict", "on")
+# Tools an agent runs that report usage unless told not to: the common DO_NOT_TRACK and the tools' own switches.
+TELEMETRY_TOOLS = {"DO_NOT_TRACK": "1", "OPENSPEC_TELEMETRY": "0", "HF_HUB_DISABLE_TELEMETRY": "1",
+                   "NEXT_TELEMETRY_DISABLED": "1", "DOTNET_CLI_TELEMETRY_OPTOUT": "1", "GATSBY_TELEMETRY_DISABLED": "1",
+                   "ASTRO_TELEMETRY_DISABLED": "1"}
+TELEMETRY_ENV = {
+    "claude": {"off": {**TELEMETRY_TOOLS, "DISABLE_TELEMETRY": "1", "DISABLE_ERROR_REPORTING": "1", "DISABLE_BUG_COMMAND": "1",
+                       "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY": "1", "DISABLE_AUTOUPDATER": "1"},
+               # Also plugin and marketplace downloads, release notes and the like.
+               "strict": {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}},
+    # OpenCode sends no usage statistics (OTLP only with an endpoint of yours); it checks for updates.
+    "opencode": {"off": {**TELEMETRY_TOOLS, "OPENCODE_DISABLE_AUTOUPDATE": "1"},
+                 "strict": {"OPENCODE_DISABLE_MODELS_FETCH": "1", "OPENCODE_DISABLE_LSP_DOWNLOAD": "1"}},
+    "codex": {"off": dict(TELEMETRY_TOOLS), "strict": {}},  # its own switches: codex_telemetry_defaults()
+}
+OPENCODE_TELEMETRY_CONFIG = {"share": "disabled", "autoupdate": False}  # in OPENCODE_CONFIG_CONTENT
+# Telemetry sent to hosts the agent needs anyway, refused by the proxy as well (the ruleset "telemetry"): Claude
+# Code's event log on its API host, Codex's analytics on ChatGPT's (codex-rs/analytics/src/client.rs).
+TELEMETRY_PATHS = {"claude": [("api.anthropic.com", "/api/event_logging/**")],
+                   "codex": [("chatgpt.com", "/backend-api/codex/analytics-events/**")]}
+# (table, key, value, TOML) set in the sandbox's ~/.codex/config.toml where the file does not set them itself.
+CODEX_TELEMETRY = {
+    "off": [(None, "check_for_update_on_startup", False, "false"), ("analytics", "enabled", False, "false"),
+            ("feedback", "enabled", False, "false"), ("otel", "metrics_exporter", "none", '"none"')],
+    "strict": [("features", "plugins", False, "false")],  # the plugin sync with chatgpt.com
+}
 # Written into a sandbox HOME's ~/.claude/settings.json where not already set.
 CLAUDE_DEFAULT_MODEL = "claude-opus-5-5"
 CLAUDE_DEFAULT_EFFORT = "high"
@@ -151,19 +200,116 @@ CDI_DIRS = (Path("/etc/cdi"), Path("/var/run/cdi"), Path("/run/cdi"))
 # pasta without gateway mapping or any port forwarding (-t/-u inbound, -T/-U to the host).
 PASTA_OPTIONS = ("--no-map-gw", "-t", "none", "-u", "none", "-T", "none", "-U", "none")
 POD_NETWORK = "pasta:" + ",".join(PASTA_OPTIONS)
+# A chosen --subnet/--subnet6 is laid out as slirp4netns lays out its own: the sandbox at the 100th address,
+# the gateway at the 2nd, slirp4netns's DNS forwarder at the 3rd. pasta gets the same addresses.
+# (For IPv6 the sandbox gets ::100, written like the others: the 0x100th address.)
+SUBNET_HOSTS = {"address": 100, "gateway": 2, "dns": 3}
+# What each backend uses without a --subnet: slirp4netns its built-in networks (IPv6 cannot be changed),
+# pasta the host's own addresses.
+SLIRP_SUBNETS = ("10.0.2.0/24", "fd00::/64")
+# slirp4netns accepts /1 to /25 (the 100th address must fit); below /8 a sandbox would hide large parts of
+# the private ranges. IPv6: pasta and slirp4netns configure the interface as a /64.
+SUBNET_PREFIXES = {4: (8, 25), 6: (64, 64)}
+SUBNET_RANGES = {4: [ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+                                                       "100.64.0.0/10")],
+                 6: [ipaddress.ip_network("fc00::/7")]}
+ROUTE_FILES = (Path("/proc/net/route"), Path("/proc/net/ipv6_route"))
+DEFAULTS_KEYS = {"version", "subnet", "subnet6", "mode", "canaries", "keep_days", "telemetry"}
 SESSION_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}"
-__version__ = "0.1.21"
+# The directory of a start: its first name, with a suffix when that directory is taken (sessions.new_key).
+START_ID = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}"
+__version__ = "0.1.58"
 CONFIG_NAME = ".sandbox-ai.json"
+RULES_NAME = "rules.json"  # ~/.config/sandbox-ai/rules.json: your own rules, for every start
 # Label on session pods: the session's tmux directory, so a stale pod can be told apart from someone else's.
 SESSION_LABEL = "sandbox-ai.session"
-CONFIG_KEYS = {"version", "agent", "options", "agent_args", "workspaces", "description", "mcp_servers"}
+CONFIG_KEYS = {"version", "agent", "options", "agent_args", "workspaces", "description", "mcp_servers", "rules",
+               "log_debug", "mode", "canaries", "name", "keep"}
 MCP_NAME = r"[A-Za-z0-9_-]{1,32}"
-MCP_AGENT_DIR = "/sandbox/mcp"        # agent side: one read-only socket directory per server
+VPN_PROFILE_NAME = r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}"  # sandbox-ai vpn (vpn.py)
+MCP_AGENT_DIR = "/run/sandbox-mcp"    # agent side: the supervisor's relay of each server, for this run
+MCP_UPSTREAM_DIR = "/sandbox/mcp-upstream"  # supervisor side: the servers' socket directories, read-only
 MCP_SERVE_DIR = "/sandbox/mcp-sock"   # server side: where the server sandbox listens
+MCP_APPROVALS_DIR = "/sandbox/mcp-approvals"  # server side, read-only: the answers to its questions
+# The agent's hooks (rules for its own tools): the command the agents run before and after each tool, how long
+# they wait for it (the hook client gives up earlier: runtime.HOOK_TIMEOUT), and where Claude Code and Codex read
+# their managed configuration (mounted read-only from the session directory) and OpenCode its plugin.
+HOOK_COMMAND = "/usr/bin/python3 -I /sandbox/runtime.py --internal-hook {agent} {event}"
+HOOK_AGENT_TIMEOUT = 120
+# A kit's PreToolUse hook while rules hold: the wrapper runs it (within its own timeout, in seconds) and has a
+# rewritten tool input (updatedInput) checked by the rules before it reaches the agent (runtime.kit_hook).
+KIT_HOOK_COMMAND = "/usr/bin/python3 -I /sandbox/runtime.py --internal-kit-hook {agent} {timeout} {command}"
+KIT_HOOK_TIMEOUT = 60  # what Claude Code and Codex give a hook that names no timeout
+MANAGED_DIRS = {"claude": "/etc/claude-code", "codex": "/etc/codex"}
+OPENCODE_HOOK_PLUGIN = "/sandbox/session/opencode-hooks.js"
+OPENCODE_HOOK_RECHECK = "/sandbox/session/opencode-hooks-recheck.js"  # after the kits' plugins: changed args
+KIT_HOOKS_TARGET = "/sandbox/session/kits/hooks"  # the approved kits' hook folders, copied for the run
+OPENCODE_HOOKS_JS = r'''// sandbox-ai: the rules for the agent's own tools (README, Rulesets: "The agent's own tools").
+// Installed by the launcher. Each tool call asks the sandbox's supervisor first; a refusal, or anything that
+// goes wrong on the way, stops the call (the hook client exits with status 2 for both).
+import { spawn } from "node:child_process";
+
+const HOOK = ["/usr/bin/python3", "-I", "/sandbox/runtime.py", "--internal-hook", "opencode"];
+
+function hook(event, message) {
+  return new Promise((resolve) => {
+    const refused = (why) => resolve({ code: 2, reason: `sandbox-ai: the tool call is refused: ${why}` });
+    let child;
+    try {
+      child = spawn(HOOK[0], [...HOOK.slice(1), event], { stdio: ["pipe", "ignore", "pipe"] });
+    } catch (error) {
+      refused(`the hook did not start (${error})`);
+      return;
+    }
+    let reason = "";
+    child.stderr.on("data", (chunk) => { if (reason.length < 4000) reason += chunk; });
+    child.on("error", (error) => refused(`the hook did not start (${error})`));
+    child.on("close", (code) => resolve({ code: code === null ? 2 : code, reason }));
+    child.stdin.on("error", () => {});
+    child.stdin.end(JSON.stringify(message));
+  });
+}
+
+// RECHECK: this copy comes after the approved kits' plugins (OpenCode runs plugins one after the other, in order)
+// and asks again only for a call whose arguments a plugin changed after the first copy's check.
+const RECHECK = false;
+const CHECKED = (globalThis[Symbol.for("sandbox-ai.checked")] ??= new Map());
+
+export const SandboxAiHooks = async ({ directory }) => ({
+  "tool.execute.before": async (input, output) => {
+    const args = JSON.stringify(output.args) ?? "null";
+    if (RECHECK) {
+      const checked = CHECKED.get(input.callID);
+      CHECKED.delete(input.callID);
+      if (checked === args) {
+        return;
+      }
+    }
+    const answer = await hook("PreToolUse", { tool: input.tool, args: output.args, sessionID: input.sessionID,
+                                              callID: input.callID, cwd: directory });
+    if (answer.code !== 0) {
+      throw new Error(answer.reason.trim() || "sandbox-ai: the tool call is refused");
+    }
+    if (!RECHECK && CHECKED.size < 10000) {
+      CHECKED.set(input.callID, args);
+    }
+  },
+  "tool.execute.after": async (input, output) => {
+    if (RECHECK) {
+      return;
+    }
+    const text = output && typeof output.output === "string" ? output.output : null;
+    await hook("PostToolUse", { tool: input.tool, sessionID: input.sessionID, callID: input.callID, cwd: directory,
+                                result_bytes: text === null ? null : Buffer.byteLength(text) });
+  },
+});
+'''
 # Options a project file may not set: internal ones, config selection itself,
 # workspace order (main workspace = where the file lives) and sessions.
-CONFIG_FORBIDDEN = ("--config", "--no-config", "--tmux-socket-dir", "--pod-name", "--mcp-socket-dir", "--workspace",
-                    "--session", "--dry-run", "--")
+CONFIG_FORBIDDEN = ("--config", "--no-config", "--tmux-socket-dir", "--pod-name", "--mcp-socket-dir", "--helper-of",
+                    "--workspace",
+                    "--session", "--dry-run", "--mcp-approvals-dir", "--rules", "--mode", "--name", "--project-name",
+                    "--start-id", "--")
 # Mutually exclusive auth choices: one given on the command line replaces the file's.
 AUTH_OPTIONS = {"--copy-auth": False, "--no-auth": False, "--auth-file": True, "--import-codex-auth": True}
 CONFIG_LIMIT = 1 << 20
@@ -187,28 +333,34 @@ PROFILES = {
 # two letters for the rest. A two-letter form is an option of its own: -gl is --allow-gitlab, not -g -l.
 SHORT_OPTIONS = {
     "--version": "-V", "--backend": "-b", "--workspace": "-w", "--workspace-ro": "-W", "--mount": "-m",
-    "--device": "-d", "--gpu": "-G", "--profile": "-p", "--allow": "-a", "--allow-host": "-A",
+    "--device": "-d", "--gpu": "-G", "--profile": "-p", "--mode-at-least": "-ml", "--preset": "-ps", "--preset-value": "-pv", "--allow": "-a", "--allow-host": "-A",
     "--allow-pypi": "-y", "--allow-github": "-g", "--allow-gitlab": "-gl", "--allow-kernel-org": "-ak",
-    "--allow-duckduckgo": "-dd", "--allow-tcp": "-t", "--allow-host-port": "-P", "--git-token-env": "-ge",
-    "--git-token-file": "-gf", "--git-credentials": "-gc", "--git-identity": "-I", "--privacy-check": "-pc",
+    "--allow-duckduckgo": "-dd", "--allow-npm": "-an", "--allow-tcp": "-t", "--allow-host-port": "-P", "--git-token-env": "-ge",
+    "--git-token-file": "-gf", "--git-credentials": "-gc", "--git-identity": "-I", "--identity": "-id", "--privacy-check": "-pc",
     "--privacy-rules": "-pr", "--no-proxy": "-X", "--no-inspect": "-x", "--allow-http": "-ah", "--no-provider-defaults": "-nd",
     "--frontier": "-f", "--dangerously-skip-permissions": "-D", "--local-config": "-L", "--offline": "-o",
-    "--egress-all-allow": "-E", "--dns": "-R", "--nameserver": "-ns", "--network": "-nw", "--ip": "-ip",
+    "--egress-all-allow": "-E", "--dns": "-R", "--nameserver": "-ns", "--subnet": "-sn", "--subnet6": "-s6",
+    "--network": "-nw", "--ip": "-ip",
     "--ip6": "-i6", "--image": "-i", "--podman-url": "-pu", "--binary": "-B", "--runtime": "-rt",
     "--copy-auth": "-ca", "--no-auth": "-na", "--auth-file": "-af", "--import-codex-auth": "-ic",
+    "--image-variant": "-iv",
     "--copy": "-cp", "--state-dir": "-S", "--kit": "-k", "--kit-dir": "-K", "--no-default-kit": "-nk",
     "--no-memory": "-nm", "--no-plugins": "-np", "--env": "-e", "--log-dir": "-l", "--gui": "-gu",
-    "--gui-screen": "-gs", "--gui-vnc": "-gv", "--gui-wayland": "-gw", "--tmux": "-T", "--no-tmux": "-nt",
-    "--mcp": "-M", "--session": "-s", "--config": "-c", "--no-config": "-nc", "--dry-run": "-n",
+    "--gui-screen": "-gs", "--audio": "-au", "--gui-vnc": "-gv", "--gui-wayland": "-gw", "--tmux": "-T", "--no-tmux": "-nt",
+    "--mcp": "-M", "--helper": "-hl", "--with": "-wa", "--session": "-s", "--name": "-N", "--project-name": "-pn", "--keep": "-kp",
+    "--no-keep": "-nkp", "--config": "-c", "--no-config": "-nc", "--dry-run": "-n",
     "--probe": "-pb", "--memory": "-me", "--cpus": "-cu", "--pids": "-pi", "--ask": "-Q",
-    "--secret-env": "-se", "--git-token-secret": "-gk",
+    "--secret-env": "-se", "--api-key": "-ky", "--model": "-mm", "--effort": "-ef", "--publish": "-pl", "--git-token-secret": "-gk", "--token-proxy": "-tp", "--git-logins": "-gn", "--rules": "-ru",
+    "--log-debug": "-ld", "--llm": "-lm", "--vpn": "-vp", "--vpn-check": "-vc", "--mode": "-mo",
+    "--canaries": "-cn", "--no-canaries": "-nn", "--telemetry": "-tm",
 }
 HELP_EPILOG = """\
 Agent arguments follow --. Examples (more in QUICKSTART.md):
-  claude-sandbox                                   the current directory as /work
-  claude-sandbox -w ~/src/app -p development -D    PyPI, GitHub, both APIs; no prompts
-  claude-sandbox -n                                show the plan, start nothing
-  claude-sandbox -s web                            a session: detach, attach later
+  sandbox-ai claude                                the current directory as /work; detach: Ctrl-b d
+  sandbox-ai claude -w ~/src/app -p development -D PyPI, GitHub, both APIs; no prompts
+  sandbox-ai claude -n                             show the plan, start nothing
+  sandbox-ai claude -N web                         named web: sandbox-ai attach|stop|resume web
+  sandbox-ai claude --no-keep -- -p "task"         a task whose HOME goes when it ends
 
 Every option has a short form (shown above). One-letter forms can be bundled
 (-Dn = --dangerously-skip-permissions --dry-run) and take a value directly
@@ -231,33 +383,106 @@ Hardware for the agent, safest first:
 """
 
 
+HELP_GROUPS = [  # --help: options by topic, in this order
+    ("Presets", ["--preset", "--preset-value"]),
+    ("Security mode", ["--mode", "--mode-at-least"]),
+    ("Workspace and files", ["--workspace", "--workspace-ro", "--mount", "--copy", "--state-dir", "--config",
+                             "--no-config"]),
+    ("Network", ["--profile", "--allow-host", "--allow-pypi", "--allow-github", "--allow-gitlab",
+                 "--allow-kernel-org", "--allow-duckduckgo", "--allow-npm", "--frontier", "--allow", "--allow-tcp",
+                 "--allow-host-port", "--no-provider-defaults", "--dns", "--nameserver", "--offline",
+                 "--egress-all-allow", "--subnet", "--subnet6", "--network", "--ip", "--ip6", "--vpn",
+                 "--vpn-check"]),
+    ("Connection proxy, approvals and privacy", ["--ask", "--rules", "--allow-http", "--privacy-check",
+                                                 "--privacy-rules", "--no-inspect", "--no-proxy", "--canaries",
+                                                 "--no-canaries", "--telemetry"]),
+    ("Git", ["--identity", "--git-identity", "--git-token-env", "--git-token-file", "--git-token-secret", "--git-logins", "--token-proxy",
+             "--git-credentials"]),
+    ("Agent, login and secrets", ["--model", "--effort", "--dangerously-skip-permissions", "--copy-auth", "--no-auth", "--auth-file",
+                                  "--import-codex-auth", "--env", "--secret-env", "--api-key", "--publish", "--llm", "--local-config",
+                                  "--mcp", "--helper", "--with"]),
+    ("Kits, memory and plugins", ["--kit", "--kit-dir", "--no-default-kit", "--no-memory", "--no-plugins"]),
+    ("Sessions, terminal and display", ["--audio", "--name", "--project-name", "--keep", "--no-keep", "--session", "--tmux",
+                                        "--no-tmux", "--gui", "--gui-screen", "--gui-vnc", "--gui-wayland"]),
+    ("Hardware and limits", ["--device", "--gpu", "--memory", "--cpus", "--pids"]),
+    ("Engine", ["--backend", "--image", "--image-variant", "--podman-url", "--binary", "--runtime"]),
+    ("Logs and checks", ["--log-dir", "--log-debug", "--dry-run", "--probe", "--version", "--help"]),
+]
+
+
+class HelpFormatter(argparse.RawDescriptionHelpFormatter):
+    """Each option on one line with its short form and its value once: "-w, --workspace DIR[,DIR...]"."""
+
+    def __init__(self, prog):
+        width = min(shutil.get_terminal_size((100, 24)).columns, 110)
+        super().__init__(prog, max_help_position=38, width=width)
+
+    def _format_action_invocation(self, action):
+        if not action.option_strings:
+            return super()._format_action_invocation(action)
+        names = ", ".join(action.option_strings)
+        if action.nargs == 0:
+            return names
+        return f"{names} {self._format_args(action, self._get_default_metavar_for_optional(action))}"
+
+
+def group_help(p):
+    """Sort the options into HELP_GROUPS for --help (parsing is unchanged); options not listed come last."""
+    listed = {name for _, names in HELP_GROUPS for name in names}
+    by_name = {action.option_strings[-1]: action for action in p._actions if action.option_strings}
+    general = p._optionals
+    for title, names in HELP_GROUPS:
+        group = p.add_argument_group(title)
+        for name in names:
+            action = by_name.get(name)
+            if action is not None and action in general._group_actions:
+                general._group_actions.remove(action)
+                group._group_actions.append(action)
+    general.title = "Other options" if any(a.option_strings and a.option_strings[-1] not in listed and
+                                           a.help != argparse.SUPPRESS for a in general._group_actions) else None
+    p._action_groups.remove(general)
+    p._action_groups.append(general)
+
+
 def build_parser():
     """The launcher's option parser (also used by the wizard to split option lists)."""
     # No prefix matching: abbreviations must not reach internal or forbidden options.
     p = argparse.ArgumentParser(prog="sandbox-ai", usage="sandbox-ai claude|codex|opencode [options] [-- agent arguments]\n"
-                                "       claude-sandbox|codex-sandbox|opencode-sandbox [options] [-- agent arguments]",
+                                "       claude-sandbox|codex-sandbox|opencode-sandbox (deprecated) [options] [-- agent arguments]",
                                 description="Agent in rootless Podman/Bubblewrap + verified Firejail.",
-                                epilog=HELP_EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter,
-                                allow_abbrev=False)
+                                epilog=HELP_EPILOG, formatter_class=HelpFormatter, allow_abbrev=False)
     add = p.add_argument
 
     def add_with_short_form(*names, **kwargs):
         return add(*[SHORT_OPTIONS[name] for name in names if name in SHORT_OPTIONS], *names, **kwargs)
     p.add_argument = add_with_short_form
-    p.add_argument("agent", choices=AUTH_TARGETS)
+    p.add_argument("agent", choices=AUTH_TARGETS, help=argparse.SUPPRESS)  # named in the usage line
     p.add_argument("--version", action="version", version=f"sandbox-ai {__version__}")
-    p.add_argument("--backend", choices=list(BACKENDS), default="podman")
+    p.add_argument("--mode-at-least", choices=MODES.NAMES, metavar="MODE",
+                   help="A floor for the security mode: MODE where the project file and your defaults choose a laxer "
+                        "one, never lower than they (a preset's --mode is one; the app passes it so)")
+    p.add_argument("--mode", choices=MODES.NAMES, metavar="MODE",
+                   help="Security mode, a preset of the options below; options may only narrow it, in high and "
+                        "paranoid one that widens it is refused (default: the project file's \"mode\", else "
+                        "\"mode\" in ~/.config/sandbox-ai/defaults.json, else medium; never below the "
+                        "administrator's min_mode). " + "; ".join(MODES.summaries()))
+    p.add_argument("--backend", choices=list(BACKENDS), default="podman",
+                   help="podman (default): a rootless pod from a prebuilt image; bwrap: Bubblewrap with the agent "
+                        "installed on the host")
     p.add_argument("--workspace", action="append", metavar="DIR[,DIR...]",
                    help="Host directory at /work (default: current directory); further entries, repeated or "
                         "comma-separated, appear at /workspaces/<name>")
     p.add_argument("--workspace-ro", action="store_true", help="Mount every workspace read-only")
     p.add_argument("--mount", action="append", default=[], metavar="SRC:DEST:ro|rw", help="Repeatable; DEST under /work, /mnt or /opt")
-    p.add_argument("--device", action="append", default=[], metavar="PATH",
+    p.add_argument("--device", action="append", default=[], metavar="PATH|usb:VID:PID[:SERIAL]",
                    help="Hand a host device to the agent: a character device under /dev (symlinks such as "
-                        "/dev/serial/by-id/... are resolved) or one of the directories "
+                        "/dev/serial/by-id/... are resolved), one of the directories "
                         + ", ".join("/dev/" + d for d in DEVICE_DIRS) + " (devices plugged in later appear "
-                        "there too). Its driver runs in your host's kernel, so this weakens isolation; a "
-                        "service on the host reached over the network is safer (see below). The agent can "
+                        "there too), or a USB device by its IDs, usb:VENDOR:PRODUCT[:SERIAL] (its nodes, found "
+                        "through sysfs; attached again when it is replugged under another node). Device rules of "
+                        "the rulesets (--rules) allow, ask about or deny each. Its driver runs in your host's "
+                        "kernel, so this weakens isolation; a service on the host reached over the network is "
+                        "safer (see below). The agent can "
                         "open it only if your user may without supplementary groups; repeatable")
     p.add_argument("--gpu", choices=GPU_KINDS,
                    help="Hand the GPU to the agent: nvidia (Podman: through CDI, after `sudo nvidia-ctk cdi "
@@ -270,6 +495,11 @@ def build_parser():
                    help="CPU limit, e.g. 2 or 1.5 (default: half of this host's CPUs; none: no limit)")
     p.add_argument("--pids", default="4096", metavar="N",
                    help="Limit on processes and threads (default: 4096; none: no limit)")
+    p.add_argument("--preset", metavar="NAME",
+                   help="Start from the preset NAME (sandbox-ai presets list): its options, MCP servers, ruleset and "
+                        "first task; the command line wins over it")
+    p.add_argument("--preset-value", action="append", default=[], metavar="KEY=VALUE",
+                   help="A value the preset asks for (sandbox-ai presets show NAME); repeatable")
     p.add_argument("--profile", action="append", default=[], choices=PROFILES, metavar="NAME",
                    help="Network profile: " + "; ".join(f"{name}: {value['help']}" for name, value in PROFILES.items())
                         + "; repeatable")
@@ -294,6 +524,17 @@ def build_parser():
     p.add_argument("--git-token-secret", action="append", default=[], metavar="URL=SECRET",
                    help="Like --git-token-env, but the token is the secret SECRET of sandbox-ai secrets (your "
                         "keyring); repeatable")
+    p.add_argument("--identity", metavar="NAME",
+                   help="Work as the identity NAME of sandbox-ai identities: its commit name and address, its Git "
+                        "logins instead of sandbox-ai git-logins' and, with --publish, its publish logins; the tokens "
+                        "stay in the connection proxy (default: the identity default, your git-logins and "
+                        "publish-logins)")
+    p.add_argument("--git-logins", choices=("on", "off"), default="on",
+                   help="sandbox-ai git-logins in the connection proxy (on, the default): your Git servers' logins are "
+                        "added on the wire to Git's requests to them, never handed to the agent; off: without them")
+    p.add_argument("--token-proxy", action="store_true",
+                   help="Keep the --git-token-* tokens out of the sandbox: the connection proxy adds them to Git "
+                        "requests to their HTTPS server; the agent can clone and push but never reads a token")
     p.add_argument("--git-credentials", type=Path, metavar="FILE",
                    help="Logins for Git over HTTP(S) from FILE in git's credential-store format, e.g. "
                         "~/.git-credentials (yours, mode 0600, outside every workspace); each server is reached "
@@ -326,6 +567,26 @@ def build_parser():
                         "pattern where * matches within one path segment and ** across them, e.g. "
                         "'api.github.com GET,HEAD /repos/**'; once a host has rules, every other request to it is "
                         "refused; repeatable")
+    p.add_argument("--rules", action="append", default=[], type=Path, metavar="FILE",
+                   help="Allow, ask or deny per HTTP request (host, method, path, query, headers, JSON body) and per "
+                        "MCP tool call (tool, arguments): a JSON ruleset outside every workspace, applied with "
+                        f"~/.config/sandbox-ai/{RULES_NAME} and the administrator's and the project's rules; each can "
+                        "only narrow what the others allow; repeatable")
+    p.add_argument("--canaries", metavar="CATEGORIES",
+                   help="Decoy files with tokens made for the run, which no service accepts: credentials (fake "
+                        "~/.aws/credentials, gcloud, SSH key, gh, ~/.netrc, ~/.git-credentials) and home "
+                        "(a password list, ~/.kube/config), the default; workspace (a .env in each workspace, kept out of Git and "
+                        "removed at the end); comma-separated, or all. A read is reported, a token leaving "
+                        "(proxy, DNS, push) is refused and stops the sandbox; rulesets' \"canary\" section decides "
+                        "(sandbox-ai canaries list RUN)")
+    p.add_argument("--no-canaries", action="store_const", const="none", dest="canaries",
+                   help="No canary files")
+    p.add_argument("--telemetry", choices=TELEMETRY_LEVELS,
+                   help="What Claude Code, Codex and OpenCode report to their makers: off (the default: no usage "
+                        "statistics, error reports, feedback uploads, session sharing or update checks), strict "
+                        "(also no other call that is not the model's: plugin downloads, model lists, language "
+                        "servers; the default of --mode paranoid), on (the agents' own settings); "
+                        "\"telemetry\" in ~/.config/sandbox-ai/defaults.json")
     p.add_argument("--no-inspect", action="append", default=[], metavar="HOST",
                    help="Pass TLS to HOST (or *.DOMAIN) through unopened, for programs that do not accept the "
                         "session CA; only the name is logged, and pushes there are not checked; repeatable")
@@ -334,6 +595,12 @@ def build_parser():
     p.add_argument("--frontier", action="store_true", help="Also allow OpenAI and Anthropic API/auth hosts (TCP/443); everything else stays denied")
     p.add_argument("--dangerously-skip-permissions", action="store_true",
                    help="Start the agent without approval prompts; the outer sandbox and egress firewall stay in force")
+    p.add_argument("--llm", metavar="NAME[:MODEL]",
+                   help="Use the LLM server NAME of sandbox-ai llm (Ollama, LM Studio, llama.cpp, vLLM or another "
+                        "OpenAI-compatible one, local or remote) with MODEL (default: the endpoint's model): opens "
+                        "exactly its address and port and configures the agent for it; its key is added by the "
+                        "connection proxy, the agent sees only a placeholder. With --no-provider-defaults the agent "
+                        "reaches nothing else")
     p.add_argument("--local-config", type=Path, help="OpenCode local-only config: copy privately and disable default cloud access")
     p.add_argument("--offline", action="store_true", help="No outside network, including provider defaults")
     p.add_argument("--egress-all-allow", action="store_true",
@@ -342,12 +609,28 @@ def build_parser():
                    help=f"Real DNS via {' and '.join(DEFAULT_NAMESERVERS)} (UDP/TCP 53 to them only)")
     p.add_argument("--nameserver", action="append", default=[], metavar="IP",
                    help="Use this resolver instead of the defaults; repeatable, implies --dns")
+    p.add_argument("--subnet", metavar="CIDR",
+                   help="IPv4 network of the default sandbox network (pasta, slirp4netns), a private /8 to /25 such "
+                        "as 10.20.0.0/24: the sandbox gets .100, the gateway .2 (default: ~/.config/sandbox-ai/"
+                        "defaults.json, the policy, else the host's address with Podman, 10.0.2.0/24 with bwrap)")
+    p.add_argument("--subnet6", metavar="CIDR",
+                   help="Podman: IPv6 /64 of the default network in fc00::/7, such as fd20::/64: the sandbox gets "
+                        "::100, the gateway ::2 (bwrap: slirp4netns always uses fd00::/64)")
     p.add_argument("--network", help="Existing Podman network (default: private rootless pasta)")
     p.add_argument("--ip", help="Static IPv4 address in --network")
     p.add_argument("--ip6", help="Static IPv6 address in --network")
+    p.add_argument("--vpn", metavar="PROFILE",
+                   help="Podman: put the VPN profile PROFILE in front (sandbox-ai vpn add ...): everything the sandbox "
+                        "sends leaves through the tunnel, a kill switch blocks the rest (IPv4 and IPv6), and the "
+                        "addresses and DNS seen from outside are checked before the agent starts")
+    p.add_argument("--vpn-check", choices=["stop", "warn"], default="stop",
+                   help="What a failed VPN check does: stop the start (default) or only warn")
     p.add_argument("--image", help="Prebuilt Podman image (default: localhost/<agent>-sandbox:latest); never pulled implicitly")
-    p.add_argument("--podman-url", help="Podman service URL, e.g. unix:///example/podman.sock")
-    p.add_argument("--binary", help="Agent executable (host path with bwrap; image path with podman)")
+    p.add_argument("--image-variant", metavar="NAME",
+                   help="Your image variant NAME of this agent (sandbox-ai images new NAME --from AGENT): "
+                        "localhost/<agent>-sandbox-NAME:latest")
+    p.add_argument("--podman-url", metavar="URL", help="Podman service URL, e.g. unix:///example/podman.sock")
+    p.add_argument("--binary", metavar="PATH", help="Agent executable (host path with bwrap; image path with podman)")
     p.add_argument("--runtime", action="append", default=[], metavar="DIR", help="bwrap: expose runtime directory read-only at same path")
     p.add_argument("--copy-auth", action="store_true",
                    help="Copy this agent's JSON credential files; they must exist on the host. A login already "
@@ -355,12 +638,13 @@ def build_parser():
                         "host's files are copied automatically when present and the sandbox has none yet")
     p.add_argument("--no-auth", action="store_true", help="Disable automatic copying of host credentials")
     p.add_argument("--auth-file", type=Path, help="Copy this JSON file to agent's standard auth path")
-    p.add_argument("--import-codex-auth", type=Path, help="OpenCode only: import a Codex ChatGPT auth.json as a private OAuth copy")
+    p.add_argument("--import-codex-auth", type=Path, metavar="FILE", help="OpenCode only: import a Codex ChatGPT auth.json as a private OAuth copy")
     p.add_argument("--copy", action="append", default=[], metavar="SRC:HOME_RELATIVE_DEST", help="Copy individual config/credential file; repeatable")
-    p.add_argument("--state-dir", type=Path, help="Private persistent sandbox home; default: deleted after exit")
+    p.add_argument("--state-dir", type=Path, metavar="DIR", help="Private persistent sandbox home; default: deleted after exit")
     p.add_argument("--kit", action="append", default=[], metavar="NAME",
                    help="Also use the kit ~/.local/share/sandbox-ai/kits/NAME/AGENT (skills, agents, commands, "
-                        "prompts, memory template, marketplaces.json); repeatable")
+                        "prompts, memory template, marketplaces.json), else sandbox-ai's built-in kit NAME "
+                        "(egm: Claude only); repeatable")
     p.add_argument("--kit-dir", action="append", default=[], metavar="DIR",
                    help="Also use the kit in DIR/AGENT; repeatable")
     p.add_argument("--no-default-kit", action="store_true",
@@ -375,14 +659,39 @@ def build_parser():
     p.add_argument("--secret-env", action="append", default=[], metavar="NAME[=SECRET]",
                    help="Give the agent the environment variable NAME with the value of the secret SECRET (default: "
                         "NAME) from sandbox-ai secrets; values never printed; repeatable")
+    p.add_argument("--model", metavar="MODEL",
+                   help="The agent's model: Claude Code's alias (fable, opus, sonnet, haiku) or full name, Codex's "
+                        "model name, OpenCode's provider/model (default: the agent's own; with --llm the model comes "
+                        "from --llm NAME:MODEL)")
+    p.add_argument("--effort", metavar="LEVEL",
+                   help="How hard the agent thinks: Claude Code low, medium, high, xhigh, max; Codex minimal, low, "
+                        "medium, high, xhigh (model_reasoning_effort); OpenCode sets it per model in its configuration")
+    p.add_argument("--api-key", action="append", default=[], metavar="HOST=NAME[=SECRET]",
+                   help="An API key that stays out of the sandbox: the agent gets the variable NAME with a "
+                        "placeholder, the connection proxy puts the secret SECRET (default: NAME) of sandbox-ai "
+                        "secrets in its place on the wire, only in a credential header (Authorization, X-API-Key, "
+                        "API-Key) of an HTTPS request to HOST. Opens HOST (TCP/443); repeatable")
+    p.add_argument("--publish", action="append", default=[], metavar="KIND[,KIND]",
+                   help="Publish with your logins of sandbox-ai publish-logins (npm, pypi, testpypi, crates, gitlab, "
+                        "github): opens that kind's upload and API hosts, gives the agent's tools their usual variables "
+                        "with a placeholder, the proxy adds the token on the wire, and every request that publishes is "
+                        "asked first; repeatable")
     p.add_argument("--log-dir", type=Path,
                    help="Write egress-denied.jsonl, files.jsonl and the proxy's connections-*.jsonl here (outside "
                         "workspaces; hidden from the agent). Without it the connection log goes to "
                         "~/.local/state/sandbox-ai/logs/PROJECT-HASH and file access is not logged")
+    p.add_argument("--log-debug", action="store_true",
+                   help="Log more of what is refused: the bodies of refused requests, the TLS ClientHello's "
+                        "versions, ciphers and extensions, and the whole process tree and open sockets of the "
+                        "process behind a connection (credentials stay redacted)")
     p.add_argument("--gui", action="store_true", help=f"Virtual X display {GUI_DISPLAY} (Xvfb) for GUI apps and headed browsers")
     p.add_argument("--gui-screen", default="1920x1080x24", metavar="WxHxDEPTH", help="Virtual screen size (default: 1920x1080x24)")
     p.add_argument("--gui-vnc", type=Path, metavar="DIR",
                    help="Implies --gui; serve the display over VNC on the Unix socket DIR/vnc.sock (outside workspaces)")
+    p.add_argument("--audio", choices=("virtual",),
+                   help="Sound inside the sandbox: virtual starts PulseAudio with a null sink (record what is played: "
+                        "text to speech, screen videos with sound); nothing reaches your sound card or microphones. "
+                        "Needs PulseAudio in the image (sandbox-ai images recipe media)")
     p.add_argument("--gui-wayland", action="store_true",
                    help="Expose the host's Wayland socket: windows appear on your desktop (weakens isolation)")
     p.add_argument("--tmux", action="store_const", const=True, default=None,
@@ -392,18 +701,43 @@ def build_parser():
     p.add_argument("--no-tmux", action="store_const", const=False, dest="tmux", help="Run the agent without tmux")
     p.add_argument("--mcp", action="append", default=[], metavar="NAME",
                    help="Connect a local MCP server running in its own sandbox; started if not running "
-                        "(see sandbox-mcp list; built in: demo)")
+                        "(see sandbox-ai mcp list; built in: demo)")
+    p.add_argument("--helper", action="append", default=[], choices=sorted(AUTH_TARGETS), metavar="AGENT",
+                   help="Another agent (claude, codex, opencode) as this agent's helper: it runs as an MCP server in "
+                        "a sandbox of its own (its login, its provider's hosts, kits, rules and hooks) on this run's "
+                        "main workspace, and this agent gives it tasks with its tool ask")
     p.add_argument("--session", metavar="NAME",
-                   help="Named, detachable session in tmux; manage with sandbox-session (list/attach/pause/resume/stop)")
+                   help="A kept, named session (the older form of --name NAME): a stopped one of that name comes back; manage "
+                        "with sandbox-ai list|attach|pause|resume|stop|delete")
+    p.add_argument("--name", metavar="NAME",
+                   help="Name of this start (default: AGENT-PROJECT-xxxx); sandbox-ai list shows it, rename changes "
+                        "it, and the other commands take it")
+    p.add_argument("--project-name", metavar="NAME",
+                   help="The PROJECT part of the automatic name (default: the main workspace's folder name; the "
+                        "project file's \"name\")")
+    p.add_argument("--keep", action="store_const", const=True, default=None,
+                   help="Keep the sandbox HOME, the options and logs when the start ends, so that sandbox-ai resume "
+                        "NAME can bring it back (the default)")
+    p.add_argument("--no-keep", action="store_const", const=False, dest="keep",
+                   help="Discard the HOME when the start ends: nothing carries over to a next start (suits scripts)")
     # Internal: set by the session supervisor, not meant for direct use.
+    p.add_argument("--start-id", help=argparse.SUPPRESS)
     p.add_argument("--tmux-socket-dir", type=Path, help=argparse.SUPPRESS)
     p.add_argument("--pod-name", help=argparse.SUPPRESS)
     p.add_argument("--mcp-socket-dir", type=Path, help=argparse.SUPPRESS)
+    p.add_argument("--helper-of", metavar="NAME", help=argparse.SUPPRESS)  # this MCP server sandbox is helper NAME
+    p.add_argument("--with", dest="companions", action="append", default=[], choices=sorted(AUTH_TARGETS),
+                   metavar="AGENT",
+                   help="Another agent (claude, codex, opencode) in the same sandbox, for this agent to call from "
+                        "the shell (claude -p, codex exec, opencode run): its login, its provider's hosts and its "
+                        "managed hooks join this run's; needs the team image (sandbox-build-image team)")
+    p.add_argument("--mcp-approvals-dir", type=Path, help=argparse.SUPPRESS)
     p.add_argument("--config", type=Path, metavar="FILE",
                    help=f"Project configuration (default: {CONFIG_NAME} in the main workspace, if trusted)")
     p.add_argument("--no-config", action="store_true", help=f"Ignore {CONFIG_NAME}")
     p.add_argument("--dry-run", action="store_true", help="Print plan; no DNS, auth reads, copies, pods or processes")
     p.add_argument("--probe", action="store_true", help="Verify both sandbox layers and firewall, then exit without agent")
+    group_help(p)
     return p
 
 
@@ -476,7 +810,8 @@ def logical_cwd():
 BACKENDS = ("podman", "bwrap")
 POLICY_FILE = Path("/etc/sandbox-ai/policy.json")
 POLICY_KEYS = {"version", "forbid", "backends", "max_approval_scope", "allow_within", "allow_hosts", "mcp_network",
-               "message"}
+               "subnet", "subnet6", "subnet_within", "require_vpn", "require_signed_updates", "message", "rules",
+               "min_mode", "require_canaries", "forbid_keep"}
 APPROVAL_SCOPES = ("once", "run", "always")
 
 
@@ -509,12 +844,23 @@ def load_policy(path=None):
         raise ValueError(f"Policy {path}: backends is a non-empty list of {list(BACKENDS)}")
     if policy.get("max_approval_scope", "always") not in APPROVAL_SCOPES:
         raise ValueError(f"Policy {path}: max_approval_scope is one of {list(APPROVAL_SCOPES)}")
+    if "min_mode" in policy:
+        MODES.check_name(policy["min_mode"], f"Policy {path}: min_mode")
     names = policy.get("allow_hosts", [])
     if not isinstance(names, list) or not all(isinstance(n, str) and re.fullmatch(r"(\*\.)?[a-z0-9.-]{1,253}", n)
                                               for n in names):
         raise ValueError(f"Policy {path}: allow_hosts is a list of host names or *.DOMAIN")
     if policy.get("mcp_network", "full") not in ("none", "full"):
         raise ValueError(f"Policy {path}: mcp_network is none or full")
+    if not load_vpn_module().policy_value_ok(policy.get("require_vpn", False)):
+        raise ValueError(f"Policy {path}: require_vpn is true, false or a list of VPN profile names")
+    if not load_canary_module().check_policy_value(policy.get("require_canaries", False)):
+        raise ValueError(f"Policy {path}: require_canaries is true, false or a list of canary categories "
+                         "(credentials, home, workspace)")
+    if not isinstance(policy.get("forbid_keep", False), bool):
+        raise ValueError(f"Policy {path}: forbid_keep is true or false (every start discards its HOME at the end)")
+    if not isinstance(policy.get("require_signed_updates", False), bool):
+        raise ValueError(f"Policy {path}: require_signed_updates is true or false (install.sh, sandbox-ai update)")
     within = policy.get("allow_within")
     if within is not None:
         try:
@@ -523,10 +869,37 @@ def load_policy(path=None):
             [ipaddress.ip_network(n, strict=False) for n in within]
         except (TypeError, ValueError):
             raise ValueError(f"Policy {path}: allow_within is a list of networks such as \"10.0.0.0/8\"") from None
+    for key, version in (("subnet", 4), ("subnet6", 6)):
+        if key in policy:
+            try:
+                parse_subnet(policy[key], version, key)
+            except ValueError as exc:
+                raise ValueError(f"Policy {path}: {exc}") from None
+    ceiling = policy.get("subnet_within")
+    if ceiling is not None:
+        try:
+            if not isinstance(ceiling, list) or not ceiling or not all(isinstance(n, str) for n in ceiling):
+                raise TypeError
+            ceiling = [ipaddress.ip_network(n, strict=False) for n in ceiling]
+        except (TypeError, ValueError):
+            raise ValueError(f"Policy {path}: subnet_within is a list of networks such as \"10.200.0.0/16\"") from None
+        for key, version in (("subnet", 4), ("subnet6", 6)):
+            limits = [n for n in ceiling if n.version == version]
+            # Without a default inside, Podman would take the host's address, which no ceiling holds.
+            if limits and key not in policy:
+                raise ValueError(f"Policy {path}: subnet_within with IPv{version} networks needs {key}, the "
+                                 "default inside them")
+            if limits and not any(ipaddress.ip_network(policy[key]).subnet_of(n) for n in limits):
+                raise ValueError(f"Policy {path}: {key} {policy[key]} lies outside subnet_within")
     known = build_parser()._option_string_actions
     for value in forbid:
         if value.split("=", 1)[0] not in known:
             raise ValueError(f"Policy {path}: unknown option {value}")
+    if "rules" in policy:
+        try:
+            RUNTIME.Ruleset.validated(policy["rules"], f"Policy {path}: rules")
+        except RUNTIME.RuleError as exc:
+            raise ValueError(str(exc)) from None
     return policy
 
 
@@ -535,10 +908,22 @@ def check_policy(a, policy, path=None):
     through a profile (--profile sets --egress-all-allow, for example) or a short form."""
     a.max_approval_scope = policy.get("max_approval_scope", "always")
     a.policy = {}
+    a.policy_rules = policy.get("rules")  # the first ruleset of every run (see load_rulesets)
+    a.require_canaries = policy.get("require_canaries")  # canary.categories() applies it
+    a.forbid_keep = policy.get("forbid_keep") is True
     if not policy:
         return
     note = f" ({policy['message']})" if isinstance(policy.get("message"), str) else ""
     where = path or POLICY_FILE
+    if a.forbid_keep and a.session is not None and not (a.tmux_socket_dir or a.mcp_socket_dir):
+        raise ValueError(f"--session keeps the sandbox HOME, which the administrator's policy forbids (forbid_keep in "
+                         f"{where}){note}; start without --session (--name NAME names the start): its HOME is "
+                         "discarded at the end")
+    # A HOME of your own outlives the run just as well (sandbox-ai's own sandboxes, a session's supervisor and
+    # an MCP server, get theirs from it: not chosen by anyone).
+    if a.forbid_keep and a.state_dir and not (a.tmux_socket_dir or a.mcp_socket_dir):
+        raise ValueError(f"--state-dir keeps the sandbox HOME beyond the run, which the administrator's policy forbids "
+                         f"(forbid_keep in {where}){note}; start without it: the HOME is discarded at the end")
     actions = build_parser()._option_string_actions
     for entry in policy.get("forbid", []):
         option, _, wanted = entry.partition("=")
@@ -546,16 +931,64 @@ def check_policy(a, policy, path=None):
         value = getattr(a, action.dest, None)
         if wanted:
             used = (wanted in [str(v) for v in value]) if isinstance(value, list) else str(value) == wanted
+        elif option == "--dns":
+            # --nameserver and --egress-all-allow imply it: DNS leaves either way.
+            used = bool(a.dns or a.nameserver or a.egress_all_allow)
+        elif option == "--image":
+            # parse_args fills in the default image (the team image with --with); only another one counts (a
+            # variant is another one).
+            used = value not in (f"localhost/{a.agent}-sandbox:latest", *([TEAM_IMAGE] if companions(a) else []))
+        elif option == "--mcp":
+            used = bool(a.mcp or a.helper)  # a helper is an MCP server with its agent's network
+        elif action.nargs == 0 and isinstance(value, list):
+            # --allow-pypi, --allow-github ...: one shared list, each option adds its own value.
+            used = action.const in value
         elif action.nargs == 0:
-            used = bool(value) and value != action.default
+            # store_true, and store_const such as --no-tmux (False, against the default None).
+            used = value == action.const and value != action.default
         else:
             used = value not in (None, [], action.default)
         if used:
-            raise ValueError(f"{entry} is not allowed by the administrator's policy ({where}){note}")
+            origin = getattr(a, "vpn_origin", None) if action.dest == "vpn" else None  # --llm's VPN (llm.py)
+            # Not chosen by the options, while the security mode added some: the mode's (modes.py).
+            by_mode = bool(getattr(a, "mode_options", [])) and action.dest not in getattr(a, "mode_given", [])
+            raise ValueError(f"{entry} is not allowed by the administrator's policy ({where}){note}"
+                             + (f"; {origin} is reached through it" if origin else "")
+                             + (f"; the security mode {a.mode} ({a.mode_origin}) sets it, choose a stricter one "
+                                "with --mode" if by_mode else ""))
     if a.backend not in policy.get("backends", list(BACKENDS)):
         raise ValueError(f"The backend {a.backend} is not allowed by the administrator's policy ({where}){note}")
+    if policy.get("require_vpn"):
+        load_vpn_module().check_policy(a, policy, f" ({where}){note}")
     a.policy = {key: policy[key] for key in ("forbid", "allow_within", "allow_hosts") if key in policy}
     check_ceiling(a, f" ({where}){note}")
+    # After the forbid check: the policy's own default is no choice of the user's.
+    apply_subnet_defaults(a, policy, f"the administrator's policy {where}")
+    check_subnet_ceiling(a, policy, f" ({where}){note}")
+
+
+def check_subnet_ceiling(a, policy, where=""):
+    """The sandbox's own network lies inside the policy's subnet_within, for each IP version it names: a chosen
+    --subnet/--subnet6, else what the backend uses (slirp4netns: 10.0.2.0/24 and always fd00::/64; pasta: the
+    host's address, which is refused). --network leaves it to the Podman network (forbid --network for that)."""
+    ceiling = policy.get("subnet_within")
+    if ceiling is None or a.offline or a.network:
+        return
+    limits = [ipaddress.ip_network(n, strict=False) for n in ceiling]
+    for key, version in (("subnet", 4), ("subnet6", 6)):
+        mine = [n for n in limits if n.version == version]
+        if not mine:
+            continue
+        bwrap = SLIRP_SUBNETS[version == 6] if a.backend == "bwrap" else None
+        value = bwrap if version == 6 and bwrap else getattr(a, key) or bwrap
+        if value is None:
+            raise ValueError(f"The administrator's policy keeps the sandbox's own IPv{version} network inside "
+                             f"{', '.join(map(str, mine))}; choose one with --{key}{where}")
+        label = subnet_label(a, key) if value == getattr(a, key) else f"slirp4netns's {value}"
+        net = parse_subnet(value, version, label)
+        if not any(net.subnet_of(n) for n in mine):
+            raise ValueError(f"{label} lies outside the networks the administrator's policy allows for the "
+                             f"sandbox's own network (subnet_within: {', '.join(map(str, mine))}){where}")
 
 
 def within_ceiling(a, network=None, host=None):
@@ -592,6 +1025,21 @@ def check_ceiling(a, where=""):
     for host in dict.fromkeys(names):
         if host not in own and not within_ceiling(a, host=host):
             raise ValueError(f"{host} is not among the hosts the administrator's policy allows (allow_hosts){where}")
+
+
+def check_image_variant(a):
+    """--image-variant names a variant of this agent from sandbox-ai images (it fixes the image's name only:
+    nothing is read from the variant at the start), for Podman, and replaces --image."""
+    if not a.image_variant:
+        return
+    spec = importlib.util.spec_from_file_location("images_for_launcher", Path(__file__).resolve().parent / "images.py")
+    images = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(images)
+    wanted = images.variant_image(a.agent, a.image_variant)
+    if a.image != wanted:
+        raise ValueError("--image and --image-variant exclude each other")
+    if a.backend != "podman":
+        raise ValueError("--image-variant applies only to the Podman backend")
 
 
 def exposed_registry():
@@ -724,25 +1172,29 @@ def tool_dirs_state(a):
     """{directory: {name: (size, mtime, inode)}} of the PATH directories inside the workspaces (a project's own
     .venv/bin or node_modules/.bin, which project_tool_dir lets through): what you run there next comes from the
     agent. Compared after the run by tool_dirs_changed."""
-    workspaces = [Path(w) for w in a.workspaces]
+    workspaces = [Path(os.path.normpath(Path(w).absolute())) for w in a.workspaces]
+    workspaces += [w.resolve() for w in workspaces]
     state = {}
     for entry in os.environ.get("PATH", "").split(os.pathsep):
         if not os.path.isabs(entry):
             continue
+        literal = Path(os.path.normpath(entry))
         try:
-            directory = Path(entry).resolve()
+            directory = literal.resolve()
         except OSError:
             continue
-        if not any(directory == w or w in directory.parents for w in workspaces):
+        # As written (a link in the workspace may lead out of it: the agent can swap that link) or where it leads.
+        if not any(path == w or w in path.parents for w in workspaces for path in (literal, directory)):
             continue
-        files = {}
+        # "" is no file name: it keeps where the entry led at the start, to see a link swapped meanwhile.
+        files = {"": ("target", str(directory))}
         with contextlib.suppress(OSError):
             for item in os.scandir(directory):
                 with contextlib.suppress(OSError):
                     info = item.stat(follow_symlinks=False)
                     # ctime too: an agent can write the same size in place and reset the mtime, not the ctime.
                     files[item.name] = (info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino)
-        state[str(directory)] = files
+        state[str(literal)] = files
     return state
 
 
@@ -750,8 +1202,20 @@ def tool_dirs_changed(before):
     """Notes on files added or changed during the run in the PATH directories recorded by tool_dirs_state."""
     notes = []
     for directory, files in before.items():
+        # Where the entry led at the start: leading elsewhere now (the directory or a link on the way swapped by
+        # the agent) would send the comparison to another folder, so it is named instead.
+        target = files.get("", (None, None))[1]
+        try:
+            moved = not os.path.isdir(directory) or (target is not None and str(Path(directory).resolve()) != target)
+        except OSError:
+            moved = True
+        if moved:
+            notes.append(f"the agent replaced {directory}, which is on your PATH, (by a link or something else); "
+                         "check it before running anything from this shell")
+            continue
         now = tool_dirs_state(argparse.Namespace(workspaces=[directory]))
-        current = now.get(directory, {})
+        current = {k: v for k, v in now.get(directory, {}).items() if k}
+        files = {k: v for k, v in files.items() if k}
         added = sorted(set(current) - set(files))
         changed = sorted(name for name in set(current) & set(files) if current[name] != files[name])
         if added or changed:
@@ -762,14 +1226,17 @@ def tool_dirs_changed(before):
 
 
 def private_locations():
-    """([fixed], [path]): host directories whose contents run on the host or hold its keys. A workspace may not
+    """([fixed], [path]): host directories whose contents run on the host or hold its keys (also the packages'
+    copies in ~/.cache/sandbox-ai). A workspace may not
     be, contain or lie in a fixed one, nor be or lie in a PATH directory (~/.cargo/bin, ~/go/bin ...; a project
     may contain its own activated .venv/bin)."""
     home = Path.home().resolve()
     fixed = {Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config"),
              Path(os.environ.get("XDG_DATA_HOME") or home / ".local/share"),
              Path(os.environ.get("XDG_STATE_HOME") or home / ".local/state"),
-             home / ".local", home / ".ssh", home / ".gnupg", home / ".bin", home / "bin", home / ".mozilla"}
+             home / ".local", home / ".ssh", home / ".gnupg", home / ".bin", home / "bin", home / ".mozilla",
+             # The copies sandbox-ai.pyz and the AppImage run from (scripts/dist_boot.py).
+             Path(os.environ.get("XDG_CACHE_HOME") or home / ".cache") / "sandbox-ai"}
     path = {Path(entry) for entry in os.environ.get("PATH", "").split(os.pathsep) if os.path.isabs(entry)}
 
     def resolved(paths):
@@ -784,14 +1251,18 @@ def private_locations():
 
 
 def own_home(path):
-    """PATH (resolved) is or lies in a HOME sandbox-ai itself keeps for a sandbox, inside ~/.local but private
-    to that sandbox: a session's or MCP server's home, a login's staging home, the plugin installer's store,
-    the wizard's persistent HOME of a project. Their siblings (session.json, logs, the registry) are not."""
+    """PATH (resolved) is or lies in a HOME or work folder sandbox-ai itself keeps for a sandbox, inside ~/.local
+    but private to that sandbox: a session's or MCP server's home, a login's staging home and work folder, an MCP
+    server's default work folder, a team's board, the plugin installer's store, the wizard's persistent HOME of a
+    project. Their siblings (session.json, logs, the registry) are not."""
     state = (Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "sandbox-ai").expanduser()
     data = (Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "sandbox-ai").expanduser()
+    # The work folders are the workspaces of sandbox-ai's own sandboxes: a login's (empty), an MCP server's
+    # without one of its own, a team board's (team.py). Refusing them refused every login and those servers.
     patterns = [(state.resolve() / "sessions", ("*", "home")), (state.resolve() / "mcp", ("*", "home")),
+                (state.resolve() / "mcp", ("*", "work")), (state.resolve() / "teams", ("*", "board")),
                 (state.resolve() / "home", ("*",)), (data.resolve() / "auth", ("*", "home")),
-                (data.resolve() / "plugins", ("*",))]
+                (data.resolve() / "auth", ("*", "work")), (data.resolve() / "plugins", ("*",))]
     for base, shape in patterns:
         try:
             parts = path.relative_to(base).parts
@@ -800,6 +1271,46 @@ def own_home(path):
         if len(parts) >= len(shape) and all(want == "*" or want == got for want, got in zip(shape, parts)):
             return True
     return False
+
+
+def package_paths(environ=None):
+    """[(path, label)]: the ready-made package this launcher runs from (sandbox-ai.pyz, the AppImage, sandbox-ai.app)
+    and the copy it runs in, from $SANDBOX_AI_PACKAGE_COPY and $SANDBOX_AI_PACKAGE (set by the package's start,
+    scripts/dist_boot.py). Each counts only for what it claims: the copy must be a folder of this user that holds this
+    launcher (an inherited variable names another one), the package an existing file or folder of this user or root;
+    anything else is ignored."""
+    environ = os.environ if environ is None else environ
+    found = []
+    for variable, label, kinds in (("SANDBOX_AI_PACKAGE_COPY", "the copy sandbox-ai runs in", (stat.S_ISDIR,)),
+                                   ("SANDBOX_AI_PACKAGE", "the package sandbox-ai runs from",
+                                    (stat.S_ISREG, stat.S_ISDIR))):
+        value = environ.get(variable, "")
+        if not os.path.isabs(value):
+            continue
+        try:
+            path = Path(value).resolve()
+            info = path.stat()
+        except (OSError, RuntimeError):
+            continue
+        if not any(kind(info.st_mode) for kind in kinds) or info.st_uid not in (os.getuid(), 0):
+            continue
+        if variable == "SANDBOX_AI_PACKAGE_COPY":
+            if info.st_uid != os.getuid() or not (path == HERE or path in HERE.resolve().parents):
+                return []  # not this launcher's copy: the package named beside it is not ours either
+        found.append((path, label))
+    return found if found and found[0][1].startswith("the copy") else []
+
+
+def check_package_location(path, option, packages=None):
+    """Refuse an agent-writable host tree PATH (resolved) that is, holds or lies in the package this launcher runs
+    from or its copy: the agent could rewrite it, and the next start would run that on the host."""
+    for package, label in package_paths() if packages is None else packages:
+        inside = path == package or package in path.parents
+        if inside or path in package.parents:
+            move = "" if label.startswith("the copy") else \
+                f" Move it out, e.g. mv {shlex.quote(str(package))} ~/.local/bin/, and start it from there."
+            raise ValueError(f"{option} {path} {'lies in' if inside and path != package else 'contains'} {package}, "
+                             f"{label}: the agent could rewrite it and run code on the host at the next start.{move}")
 
 
 def check_private_location(path, option):
@@ -824,6 +1335,7 @@ def parse_args(argv):
     a = build_parser().parse_args(argv)
     # Commas are invalid in workspace paths, so they can separate entries.
     a.workspaces = [part for value in (a.workspace or [logical_cwd()]) for part in value.split(",")]
+    a.subnet_origin = {}  # where a --subnet/--subnet6 came from when no option set it (defaults, policy)
     a.workspace = a.workspaces[0]
     a.gui = a.gui or bool(a.gui_vnc)
     for name in a.profile:
@@ -852,16 +1364,41 @@ def parse_args(argv):
                 a.presets.append("github")  # api.github.com and the download hosts too
         elif credential["host"] not in a.allow_host:  # pins the name; other ports need --allow-tcp
             a.allow_host.append(credential["host"])
+    for host, _, _ in api_key_values(a, check=False):
+        if host not in a.allow_host:
+            a.allow_host.append(host)  # validate() reports a wrong --api-key
+    for host in publish_hosts(a):
+        if host not in a.allow_host:
+            a.allow_host.append(host)
+    if a.llm:
+        llm = load_llm_module()
+        llm.network_options(a, loopback_reachable(a))
+        a.llm_vpn_note = llm.apply_vpn(a)
+    if a.image is None and companions(a) and not a.image_variant:
+        a.image = TEAM_IMAGE  # every agent of the run in one image
     if a.image is None:
-        a.image = f"localhost/{a.agent}-sandbox:latest"
+        a.image = f"localhost/{a.agent}-sandbox{'-' + a.image_variant if a.image_variant else ''}:latest"
     a.agent_args = tail
     return a
+
+
+def settle_network(a, hosts, resolve_names):
+    """Once the allowed HOSTS are resolved (RESOLVE_NAMES resolves further names the same way: by the host, the
+    Podman machine or, with --vpn, from what the tunnel resolved): --llm's name on a port other than 443 is pinned
+    and opened on that port alone, and no address lies inside the sandbox's own network."""
+    a.llm_pins = load_llm_module().resolved_network(a, hosts, resolve_names) if a.llm else {}
+    check_subnets(a, [addr for values in hosts.values() for addr in values])
+    for key, version in (("subnet", "ipv4"), ("subnet6", "ipv6")):
+        if getattr(a, key):
+            entry = sandbox_network(a)[version]
+            print(f"agent-sandbox: sandbox network {printable(subnet_label(a, key))}: the sandbox "
+                  f"{entry['address']}, gateway {entry['gateway']}", file=sys.stderr)
 
 
 def allowed_hosts(a):
     if a.offline:
         return []
-    defaults = PROVIDERS[a.agent]
+    defaults = [host for agent in team(a) for host in PROVIDERS[agent]]
     return list(dict.fromkeys(([] if a.no_provider_defaults or a.local_config else defaults)
                               + (FRONTIER if a.frontier else [])
                               + [host for preset in a.presets for host in PRESETS[preset]] + a.allow_host))
@@ -874,11 +1411,28 @@ def host_ports(a):
         if not re.fullmatch(r"[0-9]{1,5}", value) or not 1 <= int(value) <= 65535:
             raise ValueError(f"--allow-host-port expects a TCP port 1-65535: {value!r}")
         ports.add(int(value))
+    web = web_service_port()
+    if web in ports:
+        raise ValueError(f"--allow-host-port {web}: the web interface (sandbox-ai web) listens there; no sandbox may "
+                         "reach it")
     return sorted(ports)
 
 
+def web_service_port():
+    """The port a running `sandbox-ai web` listens on (its listen.json, while its PID lives), else None."""
+    path = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "sandbox-ai" / "web" / "listen.json"
+    try:
+        record = json.loads(path.read_text())
+        port, pid = int(record["port"]), int(record["pid"])
+        os.kill(pid, 0)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return port if 1 <= port <= 65535 else None
+
+
 def pod_network(a):
-    """Podman --network value; host ports are pasta's namespace-to-host forwards (-T)."""
+    """Podman --network value; host ports are pasta's namespace-to-host forwards (-T), a --subnet/--subnet6 its
+    address (-a), IPv4 prefix (-n; IPv6 is a /64) and gateway (-g), laid out as slirp4netns would."""
     if a.offline:
         return "none"
     if a.network:
@@ -888,7 +1442,220 @@ def pod_network(a):
     if ports:
         index = options.index("-T")
         options[index:index + 2] = [part for port in ports for part in ("-T", str(port))]
+    for key in ("subnet", "subnet6"):
+        if getattr(a, key, None):
+            net = ipaddress.ip_network(getattr(a, key))
+            hosts = subnet_hosts(net)
+            options += ["-a", hosts["address"], *(["-n", str(net.prefixlen)] if net.version == 4 else []),
+                        "-g", hosts["gateway"]]
+    if getattr(a, "subnet", None):
+        # DNS sent to .3 goes to the host's resolvers, as slirp4netns's forwarder does; the firewall lets it
+        # through only for --nameserver .3. Podman adds its own (169.254.1.1) only when none is given.
+        options += ["--dns-forward", subnet_hosts(ipaddress.ip_network(a.subnet))["dns"]]
     return "pasta:" + ",".join(options)
+
+
+def slirp_command(a, pid, ready_fd):
+    """slirp4netns for the bwrap sandbox PID: its own network or --subnet (--cidr; slirp4netns places the sandbox
+    at .100, its gateway at .2 and its DNS forwarder at .3), IPv6 always fd00::/64, the host's loopback hidden."""
+    return ["slirp4netns", "--configure", "--disable-host-loopback", "--enable-sandbox", "--enable-seccomp",
+            "--enable-ipv6", *([f"--cidr={a.subnet}"] if getattr(a, "subnet", None) else []),
+            "--ready-fd", str(ready_fd), str(pid), "tap0"]
+
+
+def subnet_hosts(net):
+    """{"address", "gateway", "dns"} of the sandbox's own network NET (see SUBNET_HOSTS)."""
+    return {name: str(net[offset if net.version == 4 else int(str(offset), 16)])
+            for name, offset in SUBNET_HOSTS.items()}
+
+
+def parse_subnet(value, version, option="--subnet"):
+    """VALUE as the network of a sandbox's own default network, IPv4 or IPv6 by VERSION; ValueError says why not."""
+    example = "10.20.0.0/24" if version == 4 else "fd20::/64"
+    if not isinstance(value, str) or "%" in value or "/" not in value:
+        raise ValueError(f"{option} expects a network with its prefix, such as {example}: {value!r}")
+    try:
+        net = ipaddress.ip_network(value)
+    except ValueError:
+        try:
+            loose = ipaddress.ip_network(value, strict=False)
+        except ValueError:
+            raise ValueError(f"{option} expects a network with its prefix, such as {example}: {value!r}") from None
+        # slirp4netns refuses 10.0.2.100/24 as well: the network is named, not an address in it.
+        raise ValueError(f"{option} {value}: give the network address, {loose}") from None
+    if net.version != version:
+        raise ValueError(f"{option} expects an IPv{version} network such as {example}: {value!r}")
+    for kind in ("loopback", "link_local", "multicast"):
+        if getattr(net, f"is_{kind}"):
+            raise ValueError(f"{option} {value} is a {kind.replace('_', '-')} network; choose a private range")
+    low, high = SUBNET_PREFIXES[version]
+    if not low <= net.prefixlen <= high:
+        raise ValueError(f"{option} {value}: the prefix must be " + (f"/{low}" if low == high else f"/{low} to /{high}")
+                         + (" (the sandbox takes the 100th address)" if version == 4 else
+                            " (pasta and slirp4netns configure the interface as a /64)"))
+    if not any(net.subnet_of(r) for r in SUBNET_RANGES[version]):
+        raise ValueError(f"{option} {value} is not a private range ({', '.join(map(str, SUBNET_RANGES[version]))}); "
+                         "the sandbox would no longer reach the real addresses in it")
+    return net
+
+
+def host_routes(files=None):
+    """Networks this host routes to (main table, default routes left out), from /proc/net/route and
+    /proc/net/ipv6_route. An unreadable file counts as no routes: the check spares clashes, it guards nothing."""
+    files = files or ROUTE_FILES
+    routes = []
+    for path, version in zip(files, (4, 6)):
+        try:
+            lines = Path(path).read_text().splitlines()
+        except (OSError, UnicodeDecodeError):
+            continue
+        for line in lines[1:] if version == 4 else lines:
+            fields = line.split()
+            try:
+                if len(fields[1 if version == 4 else 0]) != (8 if version == 4 else 32):
+                    continue
+                if version == 4:
+                    # Hexadecimal in the kernel's byte order.
+                    address, mask = (int(fields[i], 16).to_bytes(4, sys.byteorder) for i in (1, 7))
+                    net = ipaddress.IPv4Network((ipaddress.IPv4Address(address),
+                                                 bin(int.from_bytes(mask, "big")).count("1")), strict=False)
+                else:
+                    net = ipaddress.IPv6Network((int(fields[0], 16), int(fields[1], 16)), strict=False)
+            except (IndexError, ValueError, OverflowError):
+                continue
+            if net.prefixlen and not (net.is_loopback or net.is_link_local or net.is_multicast):
+                routes.append(net)
+    return routes
+
+
+def defaults_file():
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "sandbox-ai" / "defaults.json"
+
+
+def load_user_defaults(a):
+    """Your own defaults ({} without the file): {"version": 1, "subnet": CIDR, "subnet6": CIDR}. Options and
+    the project file win over them; the administrator's policy binds them like options."""
+    path = defaults_file()
+    # The agent must not be able to choose the network of its next start.
+    check_host_source(a, path, "The defaults file (XDG_CONFIG_HOME)")
+    try:
+        data = read_config_bytes(path, 1 << 16)
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise ValueError(f"{path}: {exc.strerror}") from None
+    try:
+        document = json.loads(data.decode())
+    except (ValueError, RecursionError):
+        raise ValueError(f"{path}: invalid JSON") from None
+    if not isinstance(document, dict) or document.get("version") != 1 or set(document) - DEFAULTS_KEYS:
+        raise ValueError(f"{path}: expected version 1 with keys {sorted(DEFAULTS_KEYS)}")
+    for key, version in (("subnet", 4), ("subnet6", 6)):
+        if key in document:
+            parse_subnet(document[key], version, f"{path}: {key}")
+    if "mode" in document:
+        MODES.check_name(document["mode"], f"{path}: mode")
+    if "canaries" in document and not (document["canaries"] is False or isinstance(document["canaries"], list)):
+        raise ValueError(f"{path}: canaries is false or a list of categories (credentials, home, workspace)")
+    if "canaries" in document:
+        load_canary_module().parse_categories(document["canaries"], f"{path}: canaries")
+    if "telemetry" in document and document["telemetry"] not in TELEMETRY_LEVELS:
+        raise ValueError(f"{path}: telemetry is one of {', '.join(TELEMETRY_LEVELS)}")
+    days = document.get("keep_days", 1)
+    if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 36500:
+        raise ValueError(f"{path}: keep_days is a number of days (1 or more): kept starts unused for longer expire")
+    return document
+
+
+def apply_subnet_defaults(a, values, origin):
+    """Fill --subnet/--subnet6 from VALUES (your defaults file, the policy) where no option chose them and the
+    run has a default network to give them to: not --offline, not --network, IPv6 only with Podman."""
+    if a.offline or a.network:
+        return
+    for key in ("subnet", "subnet6"):
+        if getattr(a, key) is None and values.get(key) and (key == "subnet" or a.backend == "podman"):
+            setattr(a, key, values[key])
+            a.subnet_origin[key] = origin
+
+
+def subnet_label(a, key):
+    origin = getattr(a, "subnet_origin", {}).get(key)
+    return f"--{key} {getattr(a, key)}" + (f" (from {origin})" if origin else "")
+
+
+def subnet_destinations(a, addresses=()):
+    """(label, network) of every destination the run allows by address, ADDRESSES (resolved hosts) included."""
+    found = [(f"--allow {v}", ipaddress.ip_network(v, strict=False)) for v in a.allow]
+    found += [(f"--allow-tcp {addr}:{port}", ipaddress.ip_network(addr)) for addr, port in tcp_targets(a)]
+    found += [(f"the nameserver {ns}", ipaddress.ip_network(ns)) for ns in nameservers(a)]
+    found += [(f"{net} (an allowed host's network)", ipaddress.ip_network(net))
+              for net in host_networks(allowed_hosts(a))]
+    found += [(f"{addr} (an allowed host's address)", ipaddress.ip_network(addr)) for addr in addresses]
+    return found
+
+
+def check_subnets(a, addresses=()):
+    """A chosen --subnet/--subnet6 fits this run's default network and stays clear of the host's routes and of
+    every destination the run allows: an allowed address inside the sandbox's own network would never be reached
+    (it is the sandbox's own link, gateway or DNS forwarder), and widening there must not reach those instead.
+    The one exception is --nameserver at .3, the backend's DNS forwarder to the host's resolvers."""
+    chosen = {key: getattr(a, key, None) for key in ("subnet", "subnet6") if getattr(a, key, None)}
+    if not chosen:
+        return
+    if a.network:
+        raise ValueError("--subnet/--subnet6 set the default network; with --network the Podman network decides "
+                         "(use --ip/--ip6)")
+    if "subnet6" in chosen and a.backend == "bwrap":
+        raise ValueError(f"{subnet_label(a, 'subnet6')}: slirp4netns (bwrap) has no IPv6 option and always uses "
+                         f"{SLIRP_SUBNETS[1]}; use the Podman backend")
+    routes = host_routes() if local_engine(a) else []  # a remote Podman's (or podman machine's) are not visible here
+    destinations = subnet_destinations(a, addresses)
+    for key, value in chosen.items():
+        net = parse_subnet(value, 4 if key == "subnet" else 6, subnet_label(a, key))
+        for route in routes:
+            if route.version == net.version and route.overlaps(net):
+                raise ValueError(f"{subnet_label(a, key)} overlaps {route}, a network this host routes to; the "
+                                 "sandbox could no longer reach it. Choose another range")
+        forwarder = ipaddress.ip_network(subnet_hosts(net)["dns"])
+        for label, dest in destinations:
+            if dest.version != net.version or not dest.overlaps(net):
+                continue
+            if label.startswith("the nameserver") and dest == forwarder:
+                continue
+            raise ValueError(f"{label} lies inside the sandbox's own network, {subnet_label(a, key)}: it would "
+                             "reach the sandbox's link, gateway or DNS forwarder, not that destination. Choose "
+                             "another range")
+
+
+def in_subnet(a, address):
+    """ADDRESS lies inside a chosen --subnet/--subnet6 (an invalid one is reported by check_subnets)."""
+    try:
+        address = ipaddress.ip_address(address)
+        return any(address in ipaddress.ip_network(v) for v in (a.subnet, a.subnet6) if v)
+    except ValueError:
+        return False
+
+
+def sandbox_network(a):
+    """The sandbox's own addresses on its default network (the plan, the start's log); None without one."""
+    if a.offline or a.network:
+        return None
+    result = {}
+    for key, version in (("subnet", 4), ("subnet6", 6)):
+        value = getattr(a, key, None)
+        origin = getattr(a, "subnet_origin", {}).get(key) or ("--" + key if value else None)
+        if value is None and a.backend == "bwrap":
+            value, origin = SLIRP_SUBNETS[version == 6], "slirp4netns"
+        if value is None:
+            result[f"ipv{version}"] = {"subnet": None, "from": "the host's addresses (pasta)"}
+            continue
+        hosts = subnet_hosts(ipaddress.ip_network(value))
+        if version == 6 and a.backend == "bwrap":
+            hosts["address"] = None  # slirp4netns: from its router advertisements
+        if version == 6 and a.backend == "podman":
+            hosts["dns"] = None  # pasta forwards DNS for IPv4 only (--dns-forward at .3)
+        result[f"ipv{version}"] = {"subnet": value, **hosts, "from": origin}
+    return result
 
 
 def read_private_file(path, option, limit):
@@ -972,6 +1739,11 @@ def git_server(url, option):
     if not match:
         raise ValueError(f"{option} expects http(s)://[USER@]HOST[:PORT], without a path: {url!r}")
     scheme, user, host, port = match[1], match[2], match[3].lower(), match[4]
+    if user is not None and ":" in user:
+        # A password in the URL would sit in the command line, a project file or the list: the token comes from
+        # its own place (a variable, a file, sandbox-ai secrets) instead.
+        raise ValueError(f"{option}: no password in the URL; the token comes from its variable, file or secret: "
+                         f"{scheme}://{user.split(':', 1)[0]}:***@{host}")
     if not port or not 1 <= int(port) <= 65535:
         if port:
             raise ValueError(f"{option}: port out of range: {url!r}")
@@ -1101,25 +1873,146 @@ def git_tokens(a):
         if credential["loopback"] and (a.backend != "podman" or a.network or a.offline):
             raise ValueError(f"--git-token-{kind}: {credential['url']} is on the host's loopback, which only the "
                              "Podman backend with its default network reaches (--allow-host-port)")
-        if kind == "file":
-            token = read_token_file(credential["file"], GIT_TOKEN, "--git-token-file")
-        elif kind == "secret":
-            token = load_secret_store_module().get(credential["secret"])
-            if token is None:
-                raise ValueError(f"--git-token-secret: no secret {credential['secret']}; keep one with: "
-                                 f"sandbox-ai secrets set {credential['secret']}")
-            if not re.fullmatch(GIT_TOKEN, token):
-                raise ValueError(f"the secret {credential['secret']} does not look like an access token")
-        else:
-            name = credential["env"]
-            if name not in os.environ:
-                raise ValueError(f"Host variable is not set: {name}")
-            if not re.fullmatch(GIT_TOKEN, os.environ[name]):
-                raise ValueError(f"{name} does not look like an access token "
-                                 "(one line of letters, digits and _.~+/=-)")
-            token = os.environ[name]
-        result.append((credential, token))
+        result.append((credential, git_token_value(credential, kind)))
     return result + git_credentials_file(a)[0]
+
+
+def git_token_value(credential, kind):
+    """The token of CREDENTIAL (git_token_credential) of --git-token-KIND: from the file, the secret store or
+    the host variable it names; checked to look like a token. Never printed."""
+    if kind == "file":
+        return read_token_file(credential["file"], GIT_TOKEN, "--git-token-file")
+    if kind == "secret":
+        token = load_secret_store_module().get(credential["secret"])
+        if token is None:
+            raise ValueError(f"--git-token-secret: no secret {credential['secret']}; keep one with: "
+                             f"sandbox-ai secrets set {credential['secret']}")
+        if not re.fullmatch(GIT_TOKEN, token):
+            raise ValueError(f"the secret {credential['secret']} does not look like an access token")
+        return token
+    name = credential["env"]
+    if name not in os.environ:
+        raise ValueError(f"Host variable is not set: {name}")
+    if not re.fullmatch(GIT_TOKEN, os.environ[name]):
+        raise ValueError(f"{name} does not look like an access token "
+                         "(one line of letters, digits and _.~+/=-)")
+    return os.environ[name]
+
+
+# Git logins added during the run (`sandbox-ai net allow --git-token-*`): the host writes them into the run's
+# session directory, which the sandbox sees read-only and which is removed when the run ends; this helper,
+# configured at every start, reads them when Git asks.
+RUNTIME_GIT_TOKENS = "git-tokens.json"
+RUNTIME_GIT_HELPER = "!python3 -I /sandbox/runtime.py --internal-git-credential"
+
+
+_git_logins_module = None
+
+
+class RunningLauncher:
+    """This launcher as its submodules see it: each name looked up here when it is used (what a caller replaced
+    included). Handing it over spares them loading agent_sandbox.py a second time (about 30 ms per start)."""
+
+    def __getattr__(self, name):
+        try:
+            return globals()[name]
+        except KeyError:
+            raise AttributeError(name) from None
+
+
+def load_git_logins_module():
+    global _git_logins_module
+    if _git_logins_module is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_git_logins", HERE / "git_logins.py")
+        _git_logins_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_git_logins_module)
+        _git_logins_module._launcher = RunningLauncher()
+    return _git_logins_module
+
+
+def registry_git_tokens(a):
+    """([(credential, token)], notes) of sandbox-ai git-logins for this run: with the connection proxy and
+    --git-logins on, for the servers no --git-token-* option of the start names. Read once per start."""
+    cached = getattr(a, "_registry_git_tokens", None)
+    if cached is not None:
+        return cached
+    result = ([], [])
+    # An MCP server's sandbox never gets them: a server must not push with your login.
+    if getattr(a, "git_logins", "on") == "on" and proxy_enabled(a) and not getattr(a, "mcp_socket_dir", None):
+        named = set()
+        for kind, value in git_token_values(a):
+            with contextlib.suppress(ValueError):
+                named.add(git_token_credential(value, kind)["url"])
+        _, identity = identity_of(a)
+        result = load_git_logins_module().credentials(
+            skip=named, entries=identity.get("git", []) if identity is not None else None,
+            origin=f"identity {a.identity}" if identity is not None else "git-logins")
+    a._registry_git_tokens = result
+    return result
+
+
+_identities_module = None
+
+
+def load_identities_module():
+    global _identities_module
+    if _identities_module is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_identities", HERE / "identities.py")
+        _identities_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_identities_module)
+        _identities_module._modules["agent_sandbox"] = RunningLauncher()
+        _identities_module._modules["git_logins"] = load_git_logins_module()
+        _identities_module._modules["publish_logins"] = load_publish_logins_module()
+    return _identities_module
+
+
+def identity_of(a):
+    """(NAME, identity) of --identity NAME, or (None, None) for the identity default; ValueError for an unknown or
+    wrong one. Read once per start."""
+    name = getattr(a, "identity", None)
+    if not name:
+        return None, None
+    cached = getattr(a, "_identity", None)
+    if cached is None:
+        module = load_identities_module()
+        if not module.NAME.fullmatch(name) or name == module.DEFAULT:
+            if name == module.DEFAULT:
+                return None, None  # the same as no --identity
+            raise ValueError(f"--identity {name!r}: lower-case letters, digits, - and _")
+        cached = a._identity = (name, module.get(name))
+    return cached
+
+
+def check_identity(a):
+    """--identity: a known identity, not with --git-identity (whose name would it be?), never for an MCP server."""
+    name, identity = identity_of(a)
+    if identity is None:
+        return
+    if a.git_identity:
+        raise ValueError(f"--identity {name} brings its own commit name and address; drop --git-identity")
+    if getattr(a, "mcp_socket_dir", None):
+        raise ValueError("--identity is for an agent's sandbox, not an MCP server's")
+
+
+def identity_plan(a):
+    """The dry run's view of --identity: names, address, servers and kinds, never a secret."""
+    name, identity = identity_of(a)
+    if identity is None:
+        return None
+    return {"name": name, "commit_name": identity.get("name"), "commit_email": identity.get("email"),
+            "git": [entry["url"] for entry in identity.get("git", [])],
+            "publish": [entry["kind"] for entry in identity.get("publish", [])]}
+
+
+def publish_logins_of(a):
+    """The publish logins --publish uses: the identity's, or None for sandbox-ai publish-logins' (default)."""
+    _, identity = identity_of(a)
+    return identity.get("publish", []) if identity is not None else None
+
+
+def proxied_git_tokens(a):
+    """[(credential, token)] the connection proxy adds on the wire: --token-proxy's, then sandbox-ai git-logins'."""
+    return (git_tokens(a) if a.token_proxy else []) + registry_git_tokens(a)[0]
 
 
 def git_credential_helper(user_variable, token_variable):
@@ -1153,7 +2046,14 @@ def git_environment(a):
     if a.git_identity:
         name, email = host_git_identity()
         entries += [("user.name", name), ("user.email", email)]
-    for index, (credential, token) in enumerate(git_tokens(a)):
+    _, identity = identity_of(a)
+    if identity is not None:
+        entries += [(key, identity[field]) for key, field in (("user.name", "name"), ("user.email", "email"))
+                    if identity.get(field)]
+    if not a.token_proxy:
+        # First, so that a server's own helpers below (the empty value resets the list) win over it.
+        entries.append(("credential.helper", RUNTIME_GIT_HELPER))
+    for index, (credential, token) in enumerate([] if a.token_proxy else git_tokens(a)):
         variable, user = f"SANDBOX_GIT_TOKEN_{index}", f"SANDBOX_GIT_USER_{index}"
         key = f"credential.{credential['url']}.helper"
         # The empty value drops helpers from config files (e.g. one the agent planted) for this URL first.
@@ -1163,6 +2063,15 @@ def git_environment(a):
             env["GH_TOKEN"] = token  # the gh CLI
     if privacy_hooks_apply(a):
         entries.append(("core.hooksPath", PRIVACY_HOOKS))
+    if getattr(a, "helper_of", None):
+        # A helper works in the lead's /work: what the lead writes into /work/.git must not run in the helper's
+        # sandbox when its agent runs git (Claude Code and Codex run git status at once). Command-line settings
+        # win over the repository's: no fsmonitor, no repository hooks, no .gitattributes filters (GIT_ATTR_SOURCE,
+        # Git 2.42 and newer). Not every Git setting can be switched off this way (README: helpers, limits).
+        entries.append(("core.fsmonitor", "false"))
+        if not privacy_hooks_apply(a):
+            entries.append(("core.hooksPath", "/dev/null"))
+        env["GIT_ATTR_SOURCE"] = EMPTY_TREE
     if entries:
         env["GIT_CONFIG_COUNT"] = str(len(entries))
         for index, (key, value) in enumerate(entries):
@@ -1270,7 +2179,7 @@ def load_project_config(a):
         if str(path) in trusted:
             # Deleting a restrictive file must not silently drop its restrictions.
             raise ValueError(f"The trusted project configuration {path} is missing; restore it, start with "
-                             f"--no-config, or run: sandbox-wizard forget {shlex.quote(str(path))}")
+                             f"--no-config, or run: sandbox-ai wizard forget {shlex.quote(str(path))}")
         return None, None
     # Hash and parse the very same bytes: no window to swap the file in between.
     data = read_config_bytes(path)
@@ -1278,7 +2187,7 @@ def load_project_config(a):
     if known != hashlib.sha256(data).hexdigest():
         state = "changed since it was trusted" if known else "not trusted"
         raise ValueError(f"Project configuration {path} is {state}. Review it, then run: "
-                         f"sandbox-wizard trust {shlex.quote(str(path))} (or start with --no-config)")
+                         f"sandbox-ai wizard trust {shlex.quote(str(path))} (or start with --no-config)")
     try:
         document = json.loads(data.decode())
     except (ValueError, RecursionError):
@@ -1295,7 +2204,15 @@ def load_project_config(a):
     document["options"] = canonical_options(document.get("options", []))
     for value in document.get("options", []):
         if any(value == flag or value.startswith(flag + "=") for flag in CONFIG_FORBIDDEN):
-            raise ValueError(f"{path}: option {value} is not allowed in a project configuration")
+            hint = ' (the key "mode" chooses the security mode)' if value.split("=", 1)[0] == "--mode" else ""
+            raise ValueError(f"{path}: option {value} is not allowed in a project configuration{hint}")
+    options = document.get("options", [])
+    for index, value in enumerate(options):
+        if value == "--telemetry=on" or value == "--telemetry" and options[index + 1:index + 2] == ["on"]:
+            raise ValueError(f"{path}: --telemetry on is not allowed in a project configuration: only your command "
+                             "line or ~/.config/sandbox-ai/defaults.json turns the agents' telemetry on")
+    if "mode" in document:
+        MODES.check_name(document["mode"], f"{path}: mode")
     # Relative paths would resolve against wherever the launcher is started, not the file.
     relative = relative_paths(document.get("options", [])) + [
         w for w in document.get("workspaces", []) if not os.path.isabs(os.path.expanduser(w))]
@@ -1303,6 +2220,22 @@ def load_project_config(a):
         raise ValueError(f"{path}: use absolute paths (or ~/...), not: {', '.join(relative)}")
     if any("," in value for value in document.get("workspaces", [])):
         raise ValueError(f"{path}: workspaces cannot contain commas")
+    if "rules" in document:
+        try:
+            RUNTIME.Ruleset.validated(document["rules"], f"{path}: rules")
+        except RUNTIME.RuleError as exc:
+            raise ValueError(str(exc)) from None
+    if not isinstance(document.get("log_debug", False), bool):
+        raise ValueError(f"{path}: log_debug is true or false")
+    if "canaries" in document:
+        if not (document["canaries"] is False or isinstance(document["canaries"], list)):
+            raise ValueError(f"{path}: canaries is false or a list of categories (credentials, home, workspace)")
+        load_canary_module().parse_categories(document["canaries"], f"{path}: canaries")
+    if not isinstance(document.get("keep", True), bool):
+        raise ValueError(f"{path}: keep is true or false")
+    if "name" in document and not (isinstance(document["name"], str) and re.fullmatch(SESSION_NAME, document["name"])):
+        raise ValueError(f"{path}: name (the PROJECT part of the automatic names) is 1-40 letters, digits, '_', '.' "
+                         "or '-', starting with a letter or digit")
     return path, document
 
 
@@ -1311,7 +2244,7 @@ PATH_OPTIONS = {"--mount": lambda v: v.rsplit(":", 2)[0], "--copy": lambda v: v.
                 "--git-token-file": lambda v: v.partition("=")[2], "--local-config": str, "--auth-file": str,
                 "--import-codex-auth": str, "--state-dir": str, "--log-dir": str, "--gui-vnc": str,
                 "--git-credentials": str, "--runtime": str, "--workspace": str, "--kit-dir": str,
-                "--privacy-rules": str}
+                "--privacy-rules": str, "--rules": str}
 
 
 def relative_paths(options):
@@ -1334,6 +2267,37 @@ def relative_paths(options):
     return result
 
 
+def copies_credential(value):
+    """Whether a --copy SRC:DEST value brings a login in: a credential target, or a credential file as source."""
+    if ":" not in value:
+        return False
+    source, dest = value.rsplit(":", 1)
+    if os.path.normpath(dest) in set(AUTH_TARGETS.values()) | {".claude.json"}:
+        return True
+    path = Path(os.path.normpath(Path(source).expanduser().absolute()))
+    if path.name in (".credentials.json", "auth.json"):
+        return True
+    # A symlink or another name for a login file is a login file too.
+    candidates = {candidate for agent in AUTH_TARGETS for candidate in auth_source_candidates(agent)}
+    return path in candidates or path.resolve() in candidates
+
+
+def auth_choices(options):
+    """Indices of the tokens in OPTIONS (canonical, as on the command line) that make an auth choice:
+    an AUTH_OPTIONS option or a --copy of a credential file, each with a value given as the next token."""
+    actions = build_parser()._option_string_actions
+    chosen, index = set(), 0
+    while index < len(options):
+        name, equals, value = options[index].partition("=")
+        takes = name in actions and actions[name].nargs != 0 and not equals
+        if takes:
+            value = options[index + 1] if index + 1 < len(options) else ""
+        if name in AUTH_OPTIONS or (name == "--copy" and copies_credential(value)):
+            chosen.update(range(index, index + (2 if takes else 1)))
+        index += 2 if takes else 1
+    return chosen
+
+
 def merge_config(argv, a, document):
     """Arguments with the project file applied; the command line wins."""
     options, agent_args = list(argv[1:]), None
@@ -1349,18 +2313,15 @@ def merge_config(argv, a, document):
         elif not value.startswith("--workspace="):
             kept.append(value)
     workspaces = a.workspaces + [w for w in document.get("workspaces", []) if w not in a.workspaces]
-    file_options = document.get("options", [])
-    if any(value.split("=", 1)[0] in AUTH_OPTIONS for value in kept):
-        filtered, skip = [], False
-        for value in file_options:
-            name = value.split("=", 1)[0]
-            if skip:
-                skip = False
-            elif name in AUTH_OPTIONS:
-                skip = AUTH_OPTIONS[name] and "=" not in value
-            else:
-                filtered.append(value)
-        file_options = filtered
+    file_options = document.get("options", []) + (["--log-debug"] if document.get("log_debug") is True else []) + \
+        (["--project-name", document["name"]] if isinstance(document.get("name"), str) else []) + \
+        ({True: ["--keep"], False: ["--no-keep"]}.get(document.get("keep")) if "keep" in document else [])
+    if "canaries" in document:  # before the command line's options: --canaries/--no-canaries there win
+        chosen = document["canaries"]
+        file_options = (["--canaries", ",".join(chosen)] if chosen else ["--no-canaries"]) + file_options
+    if auth_choices(kept):
+        chosen = auth_choices(file_options)
+        file_options = [value for index, value in enumerate(file_options) if index not in chosen]
     return [argv[0], *file_options, *kept, "--workspace", ",".join(workspaces),
             "--", *(document.get("agent_args", []) if agent_args is None else agent_args)]
 
@@ -1426,6 +2387,44 @@ def check_host_source(a, path, option, trees=None):
                                  "keep it outside workspaces, rw mounts and --state-dir")
 
 
+HELPER_PREFIX = "helper-"
+EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"  # Git's empty tree: no .gitattributes for a helper
+LONG_TOOL_TIMEOUT = 2000  # seconds Codex waits for a helper's or a team board's call (a helper's task: 1800 at most)
+
+
+def helper_name(agent, workspace):
+    """The MCP server name of AGENT as the helper on WORKSPACE: one per agent and main workspace, so another
+    project never gets this one's helper (and its files)."""
+    return f"{HELPER_PREFIX}{agent}-{hashlib.sha256(str(workspace).encode()).hexdigest()[:8]}"
+
+
+def add_helpers(a):
+    """--helper AGENT: each helper becomes an MCP server of this run (a.mcp), defined here (a.helper_definitions):
+    the agent in a sandbox of its own on the main workspace, with this run's --rules and project rules for its own
+    tools, and --dangerously-skip-permissions if this run has it."""
+    a.helper_definitions = {}
+    if not a.helper:
+        return
+    if a.mcp_socket_dir or a.probe:
+        raise ValueError("--helper is for an agent's start, not for MCP servers or probes")
+    if a.offline or getattr(a, "llm", None):
+        raise ValueError(f"--helper: a helper reaches its own provider, which {'--offline' if a.offline else '--llm'} "
+                         "keeps out of this run")
+    document = getattr(a, "project_document", None) or {}
+    for agent in dict.fromkeys(a.helper):
+        name = helper_name(agent, a.workspaces[0])
+        # What narrows the lead holds for its helper too: a read-only workspace, the security mode, no login.
+        a.helper_definitions[name] = {
+            "helper": agent, "workspace": a.workspaces[0], "workspace_ro": bool(a.workspace_ro),
+            "mode": getattr(a, "mode", None) or "medium", "no_auth": bool(a.no_auth),
+            "skip_permissions": bool(a.dangerously_skip_permissions), "telemetry": telemetry_level(a),
+            "rules": [str(Path(path).expanduser().absolute()) for path in a.rules],
+            "project_rules": document.get("rules") if isinstance(document, dict) else None,
+            "description": f"{agent} as a helper on {a.workspaces[0]}"}
+        if name not in a.mcp:
+            a.mcp.append(name)
+
+
 def mcp_socket_dir(name):
     """Host directory holding the Unix socket of MCP server NAME."""
     state = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
@@ -1443,8 +2442,11 @@ def mcp_agent_args(a):
         servers = {name: {"command": "python3", "args": mcp_bridge_args(name)} for name in names}
         return ["--mcp-config", json.dumps({"mcpServers": servers})]
     if a.agent == "codex":
+        # A helper's task and a team member's wait take longer than Codex's default of 60 s for an MCP call.
         return [value for name in names for value in
-                ("-c", f'mcp_servers.{name}.command="python3"', "-c", f"mcp_servers.{name}.args={json.dumps(mcp_bridge_args(name))}")]
+                ("-c", f'mcp_servers.{name}.command="python3"', "-c", f"mcp_servers.{name}.args={json.dumps(mcp_bridge_args(name))}",
+                 *(("-c", f"mcp_servers.{name}.tool_timeout_sec={LONG_TOOL_TIMEOUT}")
+                   if name.startswith((HELPER_PREFIX, "team-")) else ()))]
     return []
 
 
@@ -1529,6 +2531,8 @@ def nameservers(a):
         return []
     if a.nameserver:
         return list(dict.fromkeys(a.nameserver))
+    if getattr(a, "vpn_dns", None) and (a.dns or a.egress_all_allow):
+        return list(a.vpn_dns)  # the VPN's resolvers, reached through the tunnel (vpn.py)
     return list(DEFAULT_NAMESERVERS) if a.dns or a.egress_all_allow else []
 
 
@@ -1667,13 +2671,83 @@ def gpu_devices(a):
     return found
 
 
-def devices(a):
+def device_entries(a):
+    """[{"value", "path", "kind", "facts", "notes", "device"}] of every device asked for (--device, then --gpu):
+    paths checked by parse_device, usb:VENDOR:PRODUCT[:SERIAL] resolved to the device's nodes through sysfs
+    (devices.py), each with what the device rules judge (its FACTS)."""
+    module = load_devices_module()
+    entries = []
+    for value in a.device:
+        if value.startswith("usb:"):
+            nodes, notes, device = module.plan(value, launcher=launcher_view())
+            entries += [{"value": value, **node, "notes": notes if index == 0 else [], "device": device}
+                        for index, node in enumerate(nodes)]
+        else:
+            path, kind = parse_device(value)
+            facts = module.identity(path, value, dev_root=DEV) if kind == "node" else \
+                module.other_facts(path, kind, value, DEV)
+            entries.append({"value": value, "path": path, "kind": kind, "facts": facts, "notes": [], "device": None})
+    for path, kind in gpu_devices(a):
+        facts = module.other_facts(path, kind, dev_root=DEV) if kind != "node" else module.identity(path, dev_root=DEV)
+        entries.append({"value": f"--gpu {a.gpu}", "path": path, "kind": kind, "facts": facts, "notes": [],
+                        "device": None})
+    return entries
+
+
+def launcher_view():
+    """This launcher as devices.plan uses it (its device checks and /dev), with what a caller replaced in it."""
+    return argparse.Namespace(parse_device=parse_device, DEV=DEV)
+
+
+def devices(a, held=False):
     """[(path, kind)] of every device for the agent (--device, then --gpu), without repeats and
-    without single devices inside a directory that is passed whole."""
-    found = list(dict.fromkeys([parse_device(value) for value in a.device] + gpu_devices(a)))
+    without single devices inside a directory that is passed whole. Devices an "ask" rule holds are left out
+    (they are attached once allowed); HELD: only those."""
+    asked = {path for path, verdict in (getattr(a, "device_verdicts", None) or {}).items()
+             if verdict["decision"] == "ask"}
+    found = list(dict.fromkeys((entry["path"], entry["kind"]) for entry in device_entries(a)))
     directories = [Path(path) for path, kind in found if kind == "dir"]
     return [(path, kind) for path, kind in found
-            if not any(directory in Path(path).parents for directory in directories)]
+            if not any(directory in Path(path).parents for directory in directories) and (path in asked) == held]
+
+
+def check_device_rules(a):
+    """The device rules of the run's rulesets on every device: a deny stops the start, an ask holds the device
+    for a question once the sandbox runs (a.device_verdicts: {path: verdict})."""
+    a.device_verdicts = {}
+    rules = RUNTIME.Ruleset(load_rulesets(a))
+    if not rules.devices_active or not (a.device or a.gpu):
+        return
+    for entry in device_entries(a):
+        verdict = rules.device(entry["facts"])
+        what = entry["value"] if entry["value"] == entry["path"] else f"{entry['value']} ({entry['path']})"
+        if verdict["decision"] == "deny":
+            raise ValueError(f"--device {printable(what)}: {printable(verdict['reason'])}")
+        if verdict["decision"] == "ask" and a.ask != "on" and not a.dry_run:
+            raise ValueError(f"--device {printable(what)}: rule {verdict['rule']} ({verdict['ruleset']}) asks about "
+                             "it, and --ask is off")
+        a.device_verdicts[entry["path"]] = verdict
+
+
+def device_grants(a):
+    """The grants of the start for devices.json (see devices.py): one per --device value and per --gpu."""
+    module = load_devices_module()
+    verdicts = getattr(a, "device_verdicts", None) or {}
+    kept = {path for path, _ in devices(a)} | {path for path, _ in devices(a, held=True)}
+    grants = []
+    for value in dict.fromkeys(entry["value"] for entry in device_entries(a)):
+        entries = [entry for entry in device_entries(a) if entry["value"] == value and entry["path"] in kept]
+        if not entries:
+            continue
+        judged = [verdicts.get(entry["path"]) or {"decision": "allow", "rule": None, "ruleset": None}
+                  for entry in entries]
+        grant = module.grant_from(value, entries, judged, entries[0]["device"], "start")
+        if any(verdict["decision"] == "ask" for verdict in judged):
+            grant.update(state="held", pending=list(grant["nodes"]), pending_numbers=dict(grant["nodes"]), nodes={})
+        else:
+            grant["state"] = "attached"
+        grants.append(grant)
+    return grants
 
 
 def device_access(path):
@@ -1704,6 +2778,51 @@ def device_access(path):
     return any(tag == 0x20 and perm & 6 == 6 for tag, perm, _ in entries)
 
 
+def usb_device_dir(path, sys_root=Path("/sys")):
+    """The sysfs directory of the USB device behind the character device PATH (a /dev/bus/usb node, or a tty,
+    hidraw or video device on USB), or None."""
+    try:
+        rdev = os.stat(path).st_rdev
+        current = (sys_root / "dev" / "char" / f"{os.major(rdev)}:{os.minor(rdev)}").resolve()
+    except OSError:
+        return None
+    for candidate in (current, *current.parents):
+        if (candidate / "idVendor").is_file() and (candidate / "idProduct").is_file():
+            return candidate
+        if candidate == sys_root:
+            break
+    return None
+
+
+def usb_class_bluetooth(device_dir):
+    """The USB device in DEVICE_DIR is a Bluetooth adapter (class e0, protocol 01, on the device or an interface)."""
+    def read(path):
+        try:
+            return path.read_text().strip().lower()
+        except OSError:
+            return ""
+    if read(device_dir / "bDeviceClass") == "e0":
+        return True
+    return any(read(interface / "bInterfaceClass") == "e0" and read(interface / "bInterfaceProtocol") == "01"
+               for interface in device_dir.glob(f"{device_dir.name}:*"))
+
+
+def udev_hint(path, sys_root=Path("/sys")):
+    """A udev rule line that gives your user the device PATH, with its USB IDs where known."""
+    subsystem = "tty" if "/tty" in str(path) else "hidraw" if "hidraw" in str(path) else "usb"
+    device = usb_device_dir(path, sys_root)
+    if device is None:
+        return None
+    try:
+        vendor, product = ((device / name).read_text().strip() for name in ("idVendor", "idProduct"))
+    except OSError:
+        return None
+    if not (re.fullmatch(r"[0-9a-f]{4}", vendor) and re.fullmatch(r"[0-9a-f]{4}", product)):
+        return None
+    return (f'SUBSYSTEM=="{subsystem}", ATTRS{{idVendor}}=="{vendor}", ATTRS{{idProduct}}=="{product}", '
+            'TAG+="uaccess"')
+
+
 def group_name(gid):
     try:
         return grp.getgrgid(gid).gr_name
@@ -1714,9 +2833,15 @@ def group_name(gid):
 def device_notes(a):
     """Messages for the start: which devices the agent gets, what they expose, and which it cannot open."""
     found = devices(a)
+    held = devices(a, held=True)
+    notes = [f"{value}: {note}" for entry in device_entries(a) for value, note in
+             ((entry["value"], note) for note in entry["notes"])] if any(v.startswith("usb:") for v in a.device) else []
+    if held:
+        notes.append("held for a question (a device rule asks; attached once you allow it with sandbox-ai "
+                     "approvals): " + ", ".join(path for path, _ in held))
     if not found:
-        return []
-    notes = ["devices for the agent (their drivers run in your host's kernel): " + ", ".join(
+        return notes
+    notes += ["devices for the agent (their drivers run in your host's kernel): " + ", ".join(
         "NVIDIA GPUs (CDI)" if kind == "cdi" else f"{path} (directory: devices plugged in later appear too)"
         if kind == "dir" else path for path, kind in found)]
     for path, kind in found:
@@ -1732,12 +2857,22 @@ def device_notes(a):
             if nodes and not any(device_access(node) for node in nodes):
                 notes.append(f"warning: your user cannot open any device in {path} without supplementary "
                              "groups, so the agent cannot either; see the README (Hardware) for a udev rule")
-        elif not device_access(path):
-            group = os.stat(path).st_gid
-            via = f" (only through group {group_name(group)})" if os.stat(path).st_mode & 0o060 else ""
-            notes.append(f"warning: your user cannot open {path} directly{via}; the sandbox keeps no "
-                         "supplementary groups, so the agent cannot either; see the README (Hardware) for a "
-                         "udev rule")
+        else:
+            usb = usb_device_dir(path)
+            if usb is not None and usb_class_bluetooth(usb):
+                notes.append(f"warning: {path} is a Bluetooth adapter; the host's kernel driver (btusb) owns it, "
+                             "so the agent cannot use Bluetooth through this node. Bluetooth goes through BlueZ on "
+                             "the host: run the Bluetooth part there and let the agent reach it over the network "
+                             "(--allow-host-port PORT), see --help (Hardware)")
+            if not device_access(path):
+                group = os.stat(path).st_gid
+                via = f" (only through group {group_name(group)})" if os.stat(path).st_mode & 0o060 else ""
+                rule = udev_hint(path)
+                notes.append(f"warning: your user cannot open {path} directly{via}; the sandbox keeps no "
+                             "supplementary groups, so the agent cannot either. "
+                             + (f"Give your user the device with a udev rule in /etc/udev/rules.d/70-sandbox-ai.rules: "
+                                f"{rule} (then: sudo udevadm control --reload && sudo udevadm trigger, and replug)"
+                                if rule else "See the README (Hardware) for a udev rule"))
     return notes
 
 
@@ -1745,7 +2880,8 @@ def validate(a):
     if a.offline and (git_token_values(a) or a.git_credentials):
         raise ValueError("Git tokens need network access to their server; drop --offline (or --profile offline)")
     if a.offline and (a.allow or a.allow_host or a.allow_tcp or a.allow_host_port or a.presets or a.frontier
-                      or a.network or a.ip or a.ip6 or a.dns or a.nameserver or a.egress_all_allow):
+                      or a.network or a.ip or a.ip6 or a.dns or a.nameserver or a.egress_all_allow
+                      or a.subnet or a.subnet6):
         raise ValueError("--offline conflicts with network permissions/options")
     tcp_targets(a)
     git_tokens(a)
@@ -1779,6 +2915,7 @@ def validate(a):
             raise ValueError(f"Expected IPv{version} address without scope ID")
     if a.backend == "bwrap" and (a.network or a.ip or a.ip6 or a.podman_url):
         raise ValueError("--network/--ip/--ip6/--podman-url apply only to Podman")
+    check_subnets(a)
     if a.backend == "podman" and a.runtime:
         raise ValueError("--runtime applies only to bwrap; install runtimes in the image")
     if sum(bool(value) for value in (a.copy_auth, a.auth_file, a.import_codex_auth, a.no_auth)) > 1:
@@ -1791,6 +2928,10 @@ def validate(a):
     for value in a.secret_env:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}(?:=[A-Za-z_][A-Za-z0-9_]{0,63})?", value):
             raise ValueError(f"--secret-env expects NAME or NAME=SECRET (letters, digits, _): {value!r}")
+    check_api_keys(a)
+    check_model_effort(a)
+    check_identity(a)
+    check_publish(a)
     for name in a.env:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
             raise ValueError("--env expects a variable NAME, without a value")
@@ -1801,6 +2942,8 @@ def validate(a):
     for mount in a.mount:
         parse_mount(mount)
     resource_limits(a)
+    check_platform(a)
+    check_machine_shares(a)
     if a.podman_url and (a.device or a.gpu in ("dri", "rocm")):
         raise ValueError("--device and --gpu dri|rocm name devices of this host; with --podman-url only "
                          "--gpu nvidia (the remote's CDI) is possible")
@@ -1814,6 +2957,17 @@ def validate(a):
                 if dest == managed or managed in dest.parents:
                     raise ValueError(f"--copy {dest}: sandbox-ai fills {managed} from the kits or the project "
                                      "memory; put the file into a kit (or start with --no-default-kit/--no-memory)")
+    for value, option in ((a.name, "--name"), (a.project_name, "--project-name")):
+        if value is not None and not re.fullmatch(SESSION_NAME, value):
+            raise ValueError(f"{option} NAME: 1-40 characters from letters, digits, '_', '.', '-', starting with a "
+                             "letter or digit")
+    if a.name is not None:
+        if a.session is not None:
+            raise ValueError("--session NAME names the start already; drop --name")
+        if a.name.startswith("mcp-"):
+            raise ValueError("--name: names starting with mcp- belong to the MCP server sandboxes")
+    if a.start_id is not None and not (re.fullmatch(START_ID, a.start_id) and a.tmux_socket_dir):
+        raise ValueError("Invalid --start-id")
     if a.session is not None:
         if not re.fullmatch(SESSION_NAME, a.session):
             raise ValueError("--session NAME: 1-40 characters from letters, digits, '_', '.', '-'")
@@ -1836,13 +2990,30 @@ def validate(a):
         if public and a.privacy_check != "off":
             raise ValueError(f"--no-inspect {value} would let pushes to {', '.join(public)} pass unchecked; the "
                              "privacy check needs to see them (or start with --privacy-check off)")
+    if a.token_proxy:
+        if not proxy_enabled(a):
+            raise ValueError("--token-proxy needs the connection proxy (not with --no-proxy or --offline)")
+        if a.git_credentials:
+            raise ValueError("--token-proxy takes --git-token-env, --git-token-file or --git-token-secret, not "
+                             "--git-credentials")
+        for kind, value in git_token_values(a):
+            credential = git_token_credential(value, kind)
+            if not credential["url"].startswith("https://") and not credential["loopback"]:
+                raise ValueError(f"--token-proxy: {credential['url']} is plain http; the proxy adds tokens only to "
+                                 "HTTPS servers whose certificate it checked, or to a server on this host's loopback")
     if a.allow_http:
         if not proxy_enabled(a):
             raise ValueError("--allow-http needs the connection proxy (not with --no-proxy or --offline)")
         http_rules(a)
+    if a.llm:
+        llm = load_llm_module()
+        # The agent must not be able to change where the key goes.
+        check_host_source(a, llm.store_path(), "The LLM endpoints file (XDG_CONFIG_HOME)")
+        check_host_source(a, llm.ca_dir(), "The LLM endpoints' CAs (XDG_CONFIG_HOME)")
+        llm.validate(a, proxy_enabled(a), loopback_reachable(a), within_ceiling)
     # Inside an agent-visible tree the Firejail blacklist would not hide them.
     for path, option in [(a.log_dir, "--log-dir"), (a.gui_vnc, "--gui-vnc"), (a.tmux_socket_dir, "--tmux-socket-dir"),
-                         (a.mcp_socket_dir, "--mcp-socket-dir")]:
+                         (a.mcp_socket_dir, "--mcp-socket-dir"), (a.mcp_approvals_dir, "--mcp-approvals-dir")]:
         if path:
             check_private_dir(a, path, option)
     match = re.fullmatch(r"(\d{1,5})x(\d{1,5})x(8|16|24|32)", a.gui_screen)
@@ -1872,6 +3043,8 @@ def validate(a):
     a.workspaces = [str(path) for path in resolved]
     a.workspace = a.workspaces[0]
     workspace = resolved[0]
+    add_helpers(a)
+    check_companions(a)
     if any(parse_mount(m)[1] == "/work" for m in a.mount):
         raise ValueError("Use --workspace to mount /work")
     bindings = [(workspace, PurePosixPath("/work"))]
@@ -1890,6 +3063,10 @@ def validate(a):
                 break
         bindings.append((Path(src), dest))
     check_host_sources(a)
+    check_rulesets(a)
+    check_device_rules(a)
+    load_vpn_module().validate(a)  # --vpn, and no VPN key within the sandbox's reach
+    a.canary_categories = load_canary_module().categories(a)
     a.log_explicit = bool(a.log_dir)
     if a.log_dir is None and proxy_enabled(a):
         # The connection log is always kept; a workspace containing this directory needs --log-dir elsewhere.
@@ -1921,6 +3098,7 @@ def check_workspace_scope(workspace):
             raise ValueError(f"Workspace {workspace} is or contains {label}; the agent could change your shell "
                              "start files, credentials and sandbox-ai's trust store. Use a project directory.")
     check_private_location(workspace, "Workspace")
+    check_package_location(workspace, "Workspace")
 
 
 def check_host_sources(a):
@@ -1946,6 +3124,10 @@ def check_host_sources(a):
     if privacy_rules_dir(a):
         # The agent must neither read the rules (they name what is private) nor change them.
         check_host_source(a, privacy_rules_dir(a), "--privacy-rules")
+    # Rules the agent could rewrite would be no rules (and it should not learn them either).
+    check_host_source(a, user_rules_file(), "Your rules (XDG_CONFIG_HOME)")
+    for path in a.rules:
+        check_host_source(a, path, "--rules")
     for value in a.copy:
         if ":" in value:
             check_host_source(a, value.rsplit(":", 1)[0], "--copy")
@@ -1953,6 +3135,8 @@ def check_host_sources(a):
         kits = load_kits_module()
         for label, path in kits.sources(a):
             check_host_source(a, path, f"Kit ({label})")
+        # Approvals the agent could write would be no approvals.
+        check_host_source(a, kits.trust_file(), "Approved kit hooks (XDG_CONFIG_HOME)")
         if not a.no_default_kit:
             check_host_source(a, kits.default_home(a.agent), "Default kit")
         if not a.no_memory:
@@ -1994,9 +3178,11 @@ def check_host_sources(a):
         check_planted(value.rsplit(":", 2)[0], "--mount", before)
         if mode == "rw":
             check_private_location(Path(src), "--mount")
+            check_package_location(Path(src).resolve(), "--mount")
     if a.state_dir:
         check_planted(a.state_dir, "--state-dir", before)
         check_private_location(a.state_dir.expanduser().resolve(), "--state-dir")
+        check_package_location(a.state_dir.expanduser().resolve(), "--state-dir")
     if a.log_dir:
         check_planted(a.log_dir, "--log-dir", before)
     for value in a.kit_dir:
@@ -2045,6 +3231,56 @@ def podman_command(a, *args):
     return ["podman", *(["--remote", "--url", a.podman_url] if a.podman_url else []), *args]
 
 
+PODMAN_HINTS = (
+    # (a pattern in Podman's message, lower case; what helps), the first that matches. The message is read without
+    # Podman's WARN lines (without a user session four of them come first, whatever the error).
+    (r"image not known|no such image|image not found", "the image is not built on this host: sandbox-ai build {agent}"),
+    (r"insufficient uids|insufficient gids",
+     "the image uses higher IDs than /etc/subuid and /etc/subgid delegate (65536 cover every image); "
+     "sandbox-ai doctor says how to get more"),
+    (r"write to [ug]id_map failed",
+     "the delegated IDs cannot be mapped: in an unprivileged container (LXC, Proxmox pct) they must lie within its "
+     "own IDs, on a host newuidmap needs its setuid bit or file capabilities; sandbox-ai doctor says which"),
+    (r"cannot re-exec process to join the existing user namespace|pause process",
+     "a Podman process of an earlier session is in the way: podman system migrate"),
+    (r"/dev/net/tun",
+     "pasta needs /dev/net/tun, which this system lacks: in an LXC or Proxmox container its host passes it in "
+     "(lxc.cgroup2.devices.allow: c 10:200 rwm and lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file "
+     "in /etc/pve/lxc/ID.conf, restart it); on a host: sudo modprobe tun"),
+    (r"could not find pasta|pasta.{0,40}(not found|no such file)|executable file not found",
+     "the network needs pasta: install the package passt (Podman 4.4 or newer)"),
+    (r"\bpasta\b|\bpasst\b", "pasta could not set up the network (its message above says why); sandbox-ai doctor "
+                             "checks pasta and /dev/net/tun"),
+    (r"newuidmap|newgidmap|subuid|subgid|cannot set up namespace|user namespace",
+     "rootless Podman needs subordinate IDs: sandbox-ai doctor says which and how"),
+    (r"xdg_runtime_dir|runtime directory|/run/user",
+     "Podman has no runtime directory: log in by ssh or on the desktop (not with su or sudo), or run: loginctl "
+     "enable-linger"),
+    (r"cgroup", "Podman cannot use cgroups here: loginctl enable-linger (a systemd user session), or "
+                "cgroup_manager = \"cgroupfs\" in ~/.config/containers/containers.conf"),
+)
+PODMAN_WARNING = re.compile(r"^(WARN\[\d+\]|time=\"[^\"]*\" level=warning)")
+
+
+def podman_failure(a, exc):
+    """What the human reads when the first Podman command of a start failed: who failed (125: Podman itself;
+    126, 127: a program, pasta or the image's python3, could not be run or found; else the lookup inside the
+    image), the end of the message without Podman's warnings (printable), and what helps when it names a known
+    cause."""
+    lines = [line for line in (exc.stderr or exc.stdout or "").strip().splitlines()
+             if line.strip() and not PODMAN_WARNING.match(line.strip())]
+    message = printable("\n".join(lines[-6:]))
+    found = next((hint for pattern, hint in PODMAN_HINTS if re.search(pattern, message.lower())), None)
+    hint = found.format(agent=a.agent) if found else "check the host with: sandbox-ai doctor"
+    # 126 and 127: a program Podman needs did not start (pasta for the network, or the image's python3): missing,
+    # or failing at once (pasta without /dev/net/tun gives 127 too).
+    who = {125: "Podman failed", 126: "Podman could not start a program it needs (pasta, or the image's python3)",
+           127: "Podman could not start a program it needs (pasta, or the image's python3)"}.get(
+        exc.returncode, "the host lookup in the image failed")
+    return f"{who} (exit status {exc.returncode}) before the sandbox started" + (f": {message}" if message else "") \
+        + f"\n  -> {hint}"
+
+
 def resolve_pod_hosts(a, hosts):
     if not hosts:
         return {}
@@ -2055,7 +3291,14 @@ def resolve_pod_hosts(a, hosts):
                          "--security-opt=no-new-privileges", "--network",
                          a.network or POD_NETWORK,
                          "--entrypoint=/usr/bin/python3", a.image, "-I", "-c", script, json.dumps(hosts))
-    result = subprocess.run(cmd, check=True, text=True, capture_output=True, timeout=45)
+    try:
+        result = subprocess.run(cmd, check=True, text=True, capture_output=True, timeout=45)
+    except subprocess.TimeoutExpired:
+        raise ValueError("Podman did not resolve the allowed hosts within 45 s (the image's first start, or no "
+                         "DNS on the host?); check the host with: sandbox-ai doctor") from None
+    except subprocess.CalledProcessError as exc:
+        # Podman's own message says why (exit status 125: Podman failed, not the program in the container).
+        raise ValueError(podman_failure(a, exc)) from None
     answer = json.loads(result.stdout)
     if not isinstance(answer, dict) or set(answer) != set(hosts):
         raise ValueError("Podman DNS returned an incomplete host list")
@@ -2066,10 +3309,17 @@ def resolve_pod_hosts(a, hosts):
     return answer
 
 
-def firewall_rules(networks, addresses, log=False, dns=(), allow_all=False, tcp=(), proxy=None):
+def firewall_rules(networks, addresses, log=False, dns=(), allow_all=False, tcp=(), proxy=None, vpn_mark=None,
+                   vpn_rules=()):
     """The sandbox's nftables table. PROXY ({"port", "loopback"}) redirects every TCP connection of the agent
     to the connection proxy, except the proxy's own (PROXY_UID) and those to loopback ports other than
-    LOOPBACK (the host's forwarded ports). The chain "runtime" holds what `sandbox-ai net` allows later."""
+    LOOPBACK (the host's forwarded ports). The chain "runtime" holds what `sandbox-ai net` allows later.
+    VPN_MARK (an nft match, see vpn.py) lets the VPN's own packets pass, unredirected: only a process with
+    CAP_NET_ADMIN can mark one, and the VPN's kill switch limits where they go. VPN_RULES (vpn.py: Tor's
+    loopback ports) open the output chain, before loopback is accepted."""
+    for rule in vpn_rules:
+        if not re.fullmatch(r"[a-z0-9 .:/,=-]{1,200}", rule):
+            raise ValueError(f"not a firewall rule of a VPN: {rule!r}")
     lines = ["table inet agent_sandbox {"]
     if log:
         # Dropped destinations are collected here and polled by the bootstrap;
@@ -2083,6 +3333,7 @@ def firewall_rules(networks, addresses, log=False, dns=(), allow_all=False, tcp=
              " chain forward { type filter hook forward priority 0; policy drop; }",
              " chain runtime {", " }",
              " chain output { type filter hook output priority 0; policy drop;",
+             *[f"  {rule}" for rule in vpn_rules],
              '  oifname "lo" accept', "  ct state established,related accept",
              "  ip6 hoplimit 255 icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept"]
     if proxy:
@@ -2091,6 +3342,8 @@ def firewall_rules(networks, addresses, log=False, dns=(), allow_all=False, tcp=
         port = int(proxy["port"])
         lines += [f"  ct status dnat ip daddr 127.0.0.1 tcp dport {port} accept",
                   f"  ct status dnat ip6 daddr ::1 tcp dport {port} accept"]
+    if vpn_mark:
+        lines.append(f"  {vpn_mark} accept")
     lines += ["  jump runtime"]
     for raw in networks:
         net = ipaddress.ip_network(raw, strict=False)
@@ -2114,11 +3367,17 @@ def firewall_rules(networks, addresses, log=False, dns=(), allow_all=False, tcp=
     lines.append(" }")
     if proxy:
         ports = sorted({int(port) for port in proxy.get("loopback", [])})
-        lines += [" chain proxy { type nat hook output priority -100; policy accept;",
-                  f"  meta skuid {PROXY_UID} return",
+        # The relay chain first: the proxy chain jumps to it (a chain must exist before a rule names it).
+        lines += [" chain relay {", " }",
+                  " chain proxy { type nat hook output priority -100; policy accept;",
+                  f"  meta skuid {PROXY_UID} return", *([f"  {vpn_mark} return"] if vpn_mark else []),
+                  # Host ports relayed during the run (sandbox-ai net allow --allow-host-port) go through the proxy too.
+                  "  jump relay",
                   f"  ip daddr 127.0.0.0/8 tcp dport != {{ {', '.join(map(str, ports))} }} return" if ports
                   else "  ip daddr 127.0.0.0/8 return",
-                  "  ip6 daddr ::1 return",
+                  # The same for IPv6: pasta forwards [::1]:PORT too, and a push there must meet the proxy as well.
+                  f"  ip6 daddr ::1 tcp dport != {{ {', '.join(map(str, ports))} }} return" if ports
+                  else "  ip6 daddr ::1 return",
                   f"  meta l4proto tcp redirect to :{int(proxy['port'])}", " }"]
     return "\n".join(lines + ["}", ""])
 
@@ -2275,6 +3534,217 @@ def auth_source_candidates(agent):
     return store + [Path(os.environ.get("XDG_DATA_HOME") or (home / ".local/share")) / "opencode/auth.json"]
 
 
+TEAM_IMAGE = "localhost/team-sandbox:latest"  # Claude Code, Codex and OpenCode in one image (--with)
+
+
+def companions(a):
+    """The agents --with, without the lead itself, each once."""
+    return [agent for agent in dict.fromkeys(getattr(a, "companions", None) or []) if agent != a.agent]
+
+
+def team(a):
+    """Every agent of the run: the lead, then the agents --with."""
+    return [a.agent, *companions(a)]
+
+
+def check_companions(a):
+    """--with AGENT: other agents in this sandbox, for an agent's own start."""
+    if a.agent in (a.companions or []):
+        raise ValueError(f"--with {a.agent}: that is the agent of this start")
+    if a.companions and (a.mcp_socket_dir or a.probe):
+        raise ValueError("--with is for an agent's start, not for MCP servers or probes")
+    if companions(a) and (a.offline or getattr(a, "llm", None)):
+        raise ValueError(f"--with: each agent reaches its own provider, which {'--offline' if a.offline else '--llm'} "
+                         "keeps out of this run")
+
+
+def companion_auth(a, agent=None):
+    """How the agents --with (or AGENT among them) get their logins: "none" with --no-auth or --llm (the lead's
+    choice holds for them); "manual" for AGENT when a --copy writes its login file (that one is kept, never
+    replaced by the host's); else "auto": the login store's or the host's default files, when there are any."""
+    if a.no_auth or getattr(a, "llm", None):
+        return "none"
+    targets = {AUTH_TARGETS[agent], *([".claude.json"] if agent == "claude" else [])} if agent else set()
+    if any(":" in value and str(PurePosixPath(value.rsplit(":", 1)[1])) in targets for value in a.copy):
+        return "manual"
+    return "auto"
+
+
+def companion_logins(a, home):
+    """Copy each --with agent's login into HOME (auth_sources, like the lead's automatic mode); a login already in a
+    reused HOME is kept. Returns [(source, target)]."""
+    copied = []
+    if companion_auth(a) == "none":
+        return copied
+    for agent in companions(a):
+        if companion_auth(a, agent) != "auto":
+            continue
+        for source, dest in auth_sources(agent):
+            target = home / dest
+            if target.is_symlink():
+                raise ValueError(f"Auth destination is a symlink: {dest}")
+            if source.is_file() and not target.exists():
+                copy_auth_file(source, home, dest)
+                copied.append((source, dest))
+    return copied
+
+
+def telemetry_level(a):
+    """off, strict or on: --telemetry, else "telemetry" in your defaults file, else off; never below the security
+    mode's floor (strict for paranoid; modes.py refuses an option below it)."""
+    chosen = getattr(a, "telemetry", None) or getattr(a, "telemetry_default", None) or "off"
+    floor = MODES.MODES.get(getattr(a, "mode", None) or "medium", {}).get("telemetry")
+    order = ("on", "off", "strict")
+    return floor if floor and order.index(floor) > order.index(chosen) else chosen
+
+
+def telemetry_environment(a):
+    """The variables that keep the run's agents (the lead and the agents --with) from reporting to their makers."""
+    level, env = telemetry_level(a), {}
+    if level == "on" or not runs_agent(a):
+        return env
+    for agent in team(a):
+        env.update(TELEMETRY_ENV[agent]["off"])
+        if level == "strict":
+            env.update(TELEMETRY_ENV[agent]["strict"])
+    return env
+
+
+def telemetry_plan(a):
+    """The dry run's "telemetry": the level, where it came from and what it sets."""
+    level = telemetry_level(a)
+    origin = ("--telemetry" if getattr(a, "telemetry", None) else
+              str(defaults_file()) if getattr(a, "telemetry_default", None) else "default")
+    if level != (getattr(a, "telemetry", None) or getattr(a, "telemetry_default", None) or "off"):
+        origin = f"--mode {a.mode}"
+    agents = team(a) if runs_agent(a) else []
+    return {"level": level, "origin": origin, "environment": sorted(telemetry_environment(a)),
+            "opencode_config": OPENCODE_TELEMETRY_CONFIG if level != "on" and "opencode" in agents else None,
+            "codex_config": [".".join(filter(None, (table, key))) for table, key, _, _ in codex_telemetry_keys(level)]
+            if "codex" in agents else []}
+
+
+def telemetry_rules(a):
+    """The ruleset "telemetry" (--telemetry off or strict, with the proxy): the agents' telemetry to the hosts
+    they need anyway is refused even if an agent ignores its switches. Not for hosts passed unopened
+    (--no-inspect), whose paths the proxy cannot see."""
+    if telemetry_level(a) == "on" or not runs_agent(a) or not proxy_enabled(a) or a.offline:
+        return None
+    rules = [{"id": f"telemetry-{agent}-{number}", "host": host, "path": path, "decision": "deny",
+              "reason": f"--telemetry {telemetry_level(a)}: {agent}'s telemetry"}
+             for agent in team(a) for number, (host, path) in enumerate(TELEMETRY_PATHS.get(agent, []), 1)
+             if not any(host_matches_any(host, value) for value in a.no_inspect)]
+    return {"version": 1, "description": "the agents' telemetry (--telemetry)", "http": rules} if rules else None
+
+
+def codex_telemetry_keys(level):
+    return [] if level == "on" else CODEX_TELEMETRY["off"] + (CODEX_TELEMETRY["strict"] if level == "strict" else [])
+
+
+TOML_TABLE_HEADER = r"^[ \t]*\[[ \t]*{name}[ \t]*\][ \t]*(?:#[^\n]*)?$"
+
+
+def codex_config_with(text, keys, toml):
+    """TEXT (~/.codex/config.toml) with each (table, key, value, TOML) of KEYS the file does not set itself, and
+    [(name, value)] of those it sets otherwise (they stay: the file is yours). Top-level keys go first; a key of a
+    table the file has goes below its [table] header, a table it lacks at the end. The result must parse to the
+    same document plus exactly these keys, else ValueError: nothing is written that Codex could read otherwise."""
+    original, document = text, toml.loads(text)
+    top, tables, below, kept = [], {}, {}, []
+    for table, key, value, literal in keys:
+        holder = document if table is None else document.get(table)
+        if holder is not None and not isinstance(holder, dict):
+            raise ValueError(f"{table} is not a table")
+        if holder is not None and key in holder:
+            if holder[key] != value:
+                kept.append((".".join(filter(None, (table, key))), holder[key]))
+            continue
+        line = f"{key} = {literal}"
+        if table is None:
+            top.append(line)
+        elif holder is None:
+            tables.setdefault(table, []).append(line)
+        else:
+            below.setdefault(table, []).append(line)
+    for table, lines in below.items():
+        headers = list(re.finditer(TOML_TABLE_HEADER.format(name=re.escape(table)), text, re.M))
+        if len(headers) != 1:
+            raise ValueError(f"[{table}] is not written as one plain [{table}] header")
+        end = headers[0].end()
+        text = text[:end] + "\n" + "\n".join(lines) + text[end:]
+    if top:
+        # A key before every table is a top-level key, whatever the file holds below it.
+        text = "\n".join(top) + "\n" + text
+    for table, lines in tables.items():
+        text = text + ("" if not text or text.endswith("\n") else "\n") + f"\n[{table}]\n" + "\n".join(lines) + "\n"
+    expected = toml.loads(original)  # a copy of DOCUMENT, dates and all
+    for table, key, value, _ in keys:
+        holder = expected if table is None else expected.setdefault(table, {})
+        holder.setdefault(key, value)
+    if toml.loads(text) != expected:
+        raise ValueError("the changed file would read differently")
+    return text, kept
+
+
+def codex_telemetry_defaults(home, level):
+    """--telemetry off/strict for Codex: ~/.codex/config.toml in the sandbox HOME turns off its analytics, feedback
+    uploads, metrics (statsig) and update check (strict: the plugin sync too) where the file does not choose itself.
+    The file of a --state-dir or session stays yours: what it sets is kept, and said."""
+    path = check_home_path(home, home / ".codex/config.toml")
+    toml = load_privacy_module()._toml_module()
+    keys = codex_telemetry_keys(level)
+    try:
+        text = read_config_bytes(path).decode() if path.exists() else ""
+        if toml is None:
+            if text.strip():
+                raise ValueError("no TOML parser to read it with")
+            content, kept = "\n".join(f"[{t}]\n{k} = {v}" if t else f"{k} = {v}" for t, k, _, v in keys) + "\n", []
+        else:
+            content, kept = codex_config_with(text, keys, toml)
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        print(f"agent-sandbox: Codex's telemetry is left as its ~/.codex/config.toml says ({printable(str(exc))}); "
+              "set analytics.enabled = false, feedback.enabled = false, otel.metrics_exporter = \"none\" and "
+              "check_for_update_on_startup = false there", file=sys.stderr)
+        return
+    for name, value in kept:
+        print(f"agent-sandbox: Codex: {name} = {printable(json.dumps(value))} in ~/.codex/config.toml stays "
+              "(--telemetry does not override your own file)", file=sys.stderr)
+    if content != text:
+        replace_private(content.encode(), home, ".codex/config.toml")
+
+
+def codex_companion_defaults(home):
+    """Codex --with is started from the shell, without the launcher's --sandbox: its own sandbox cannot set up
+    inside sandbox-ai's, so ~/.codex/config.toml says sandbox_mode = "danger-full-access" unless it says
+    otherwise (sandbox-ai's sandbox is the boundary, as for the lead)."""
+    path = check_home_path(home, home / ".codex/config.toml")
+    try:
+        text = read_config_bytes(path).decode() if path.exists() else ""
+    except (OSError, ValueError) as exc:
+        print(f"agent-sandbox: left sandbox ~/.codex/config.toml unchanged ({exc}); run codex with "
+              "--sandbox danger-full-access", file=sys.stderr)
+        return
+    toml = load_privacy_module()._toml_module()
+    if toml is None:
+        if text.strip():  # without a parser only a file of its own is written
+            print("agent-sandbox: left sandbox ~/.codex/config.toml unchanged (no TOML parser); run codex with "
+                  "--sandbox danger-full-access", file=sys.stderr)
+            return
+    else:
+        try:
+            if "sandbox_mode" in toml.loads(text):
+                return  # the choice in the file stays
+        except ValueError:
+            print("agent-sandbox: left sandbox ~/.codex/config.toml unchanged (it is not valid TOML); run codex "
+                  "with --sandbox danger-full-access", file=sys.stderr)
+            return
+    # A key before every table is a top-level key, whatever the file holds below it.
+    content = 'sandbox_mode = "danger-full-access"\n' + text
+    if toml is not None:
+        toml.loads(content)  # never write a file Codex could not read
+    replace_private(content.encode(), home, ".codex/config.toml")
+
+
 def auth_sources(agent):
     """[(source, sandbox target)]: the login store's files if it holds a login for AGENT, else the host's."""
     if store_login(agent):
@@ -2313,7 +3783,8 @@ def auth_mode(a):
         targets.add(".claude.json")
     if any(":" in value and str(PurePosixPath(value.rsplit(":", 1)[1])) in targets for value in a.copy):
         return "manual"
-    return "auto"
+    # --llm: the endpoint is the provider; the cloud login is not needed, so it is not handed over.
+    return "none" if getattr(a, "llm", None) else "auto"
 
 
 def auth_plan(a):
@@ -2382,30 +3853,40 @@ def prepare_home(a, home):
     if pair:
         check_home_path(home, pair[1])
     if pair and pair[1].exists():
-        try:
-            if claude_recover_writeback(home, pair):
-                print("agent-sandbox: the Claude login refreshed in an earlier run of this HOME was never "
-                      "written back; wrote it back now", file=sys.stderr)
-        except (OSError, ValueError) as exc:
-            print(f"agent-sandbox: could not write back the Claude login of an earlier run: {exc}", file=sys.stderr)
-        # The source is the authority: its login replaces whatever a previous run left.
-        sync_claude_credentials(*pair, sandbox="target", newer_only=False)
+        with claude_login_lock():  # never between another run's compare and its swap
+            try:
+                if claude_recover_writeback(home, pair):
+                    print("agent-sandbox: the Claude login refreshed in an earlier run of this HOME was never "
+                          "written back; wrote it back now", file=sys.stderr)
+            except (OSError, ValueError) as exc:
+                print(f"agent-sandbox: could not write back the Claude login of an earlier run: {exc}",
+                      file=sys.stderr)
+            # The source is the authority: its login replaces whatever a previous run left.
+            sync_claude_credentials(*pair, sandbox="target", newer_only=False)
     if a.state_dir:
         # Recorded only while this HOME shares the source's login; any other run (--no-auth, another
         # account) forgets it, so a later start never takes that login for a missed write-back.
         remember_sync("claude", home, oauth_token_digest(claude_oauth(pair[0])) if pair else None)
-        sync_store_login(a, home)
-    if a.agent == "claude":
-        claude_default_settings(home)
+        for agent in team(a):  # the agents --with too: their logins may come from the store
+            sync_store_login(a, home, agent)
+    copied += companion_logins(a, home)
+    if "claude" in team(a):
+        claude_default_settings(home, skip_danger_prompt=a.dangerously_skip_permissions)
         claude_default_state(home)
         claude_trusted_workspaces(a, home)
-    if a.agent == "codex":
-        codex_trusted_workspaces(a, home)
-    if a.agent == "opencode":
+    if "codex" in team(a) and not getattr(a, "helper_of", None):
+        codex_trusted_workspaces(a, home)  # a helper's /work is the lead's too: never trusted for its settings
+    if "codex" in companions(a):
+        codex_companion_defaults(home)
+    if "codex" in team(a) and runs_agent(a) and telemetry_level(a) != "on":
+        codex_telemetry_defaults(home, telemetry_level(a))
+    if "opencode" in team(a):
         catalog = opencode_catalog()
         target = home / ".cache/opencode/models.json"
         if catalog.is_file() and not target.exists():
             copy_private(catalog, home, ".cache/opencode/models.json")
+    if a.llm:
+        load_llm_module().prepare_home(a, home, replace_private, update_json_defaults, CLAUDE_STATE_LIMIT)
     for name in [".codex", ".claude", ".config", ".local/share", ".cache"]:
         # A symlink planted in a persistent HOME must not make us create directories elsewhere.
         check_home_path(home, home / name).mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -2461,6 +3942,38 @@ def check_home_path(home, path):
     raise ValueError(f"Path outside the sandbox HOME: {path}")
 
 
+STATE_LOCK = ".sandbox-ai.lock"
+
+
+@contextlib.contextmanager
+def state_dir_lock(home):
+    """Exclusive lock on a --state-dir for the whole run: two runs on one HOME would overwrite each
+    other's logins and settings. The agent can write the HOME, so the file is never followed as a
+    symlink, never waited on as a FIFO, and the PID goes only into a private file of ours."""
+    try:
+        fd = os.open(home / STATE_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                     0o600)
+    except OSError as exc:
+        raise ValueError(f"--state-dir {home}: cannot open its lock file {STATE_LOCK}: {exc.strerror}") from None
+    try:
+        info = os.fstat(fd)
+        # A hard link would make us overwrite another file with the PID.
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+            raise ValueError(f"--state-dir {home}: {STATE_LOCK} is not a private regular file; remove it")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            holder = os.pread(fd, 16, 0).decode(errors="replace").strip()
+            holder = f" (PID {holder})" if holder.isdigit() else ""
+            raise ValueError(f"--state-dir {home} is in use by another run{holder}; wait for it to end or "
+                             "choose another directory") from None
+        os.ftruncate(fd, 0)
+        os.pwrite(fd, f"{os.getpid()}\n".encode(), 0)
+        yield fd
+    finally:
+        os.close(fd)
+
+
 def update_json_defaults(home, relative, apply, limit=CONFIG_LIMIT):
     """Let apply() add missing keys to a sandbox-HOME JSON object; existing values always win.
 
@@ -2490,10 +4003,14 @@ def update_json_defaults(home, relative, apply, limit=CONFIG_LIMIT):
     return None
 
 
-def claude_default_settings(home):
-    """Default Claude model and effort; existing settings always win."""
+def claude_default_settings(home, skip_danger_prompt=False):
+    """Default Claude model and effort; existing settings always win. SKIP_DANGER_PROMPT
+    (--dangerously-skip-permissions): Claude's "Bypass Permissions mode" confirmation is answered already;
+    the choice was made on the launcher's command line, and the sandbox stays in force."""
     def apply(document):
         changed = "model" not in document or "modelSettings" not in document
+        if skip_danger_prompt and document.get("skipDangerousModePermissionPrompt") is not True:
+            document["skipDangerousModePermissionPrompt"], changed = True, True
         document.setdefault("model", CLAUDE_DEFAULT_MODEL)
         models = document.setdefault("modelSettings", {})
         if isinstance(models, dict):
@@ -2596,8 +4113,16 @@ def claude_oauth(path, follow=True):
     size only, so a planted FIFO, device or huge file cannot hang or exhaust us."""
     try:
         data = Path(path).read_bytes() if follow else read_config_bytes(path)
+    except (OSError, ValueError):
+        return None
+    return claude_oauth_from(data)
+
+
+def claude_oauth_from(data):
+    """The validated claudeAiOauth block of a credentials file's contents (bytes), or None."""
+    try:
         oauth = json.loads(data)["claudeAiOauth"]
-    except (OSError, ValueError, KeyError, TypeError, RecursionError):
+    except (ValueError, KeyError, TypeError, RecursionError):
         return None
     if not (isinstance(oauth, dict) and timestamp_ms(oauth.get("expiresAt"))
             and all(isinstance(oauth.get(key), str) and oauth[key] for key in ("accessToken", "refreshToken"))):
@@ -2640,24 +4165,34 @@ def sync_claude_credentials(source, target, sandbox=None, newer_only=True):
     try:
         # The sandbox side is read without following links and bounded in size.
         data = read_config_bytes(target) if sandbox == "target" else Path(target).read_bytes()
-        document = json.loads(data)
-        document = document if isinstance(document, dict) else {}
-    except (OSError, ValueError, RecursionError):
-        document = {}
-    current = document.get("claudeAiOauth")
-    current = current if isinstance(current, dict) else {}
-    document["claudeAiOauth"] = {**oauth_fields(new, OAUTH_INFO_FIELDS), **oauth_fields(current, OAUTH_INFO_FIELDS),
-                                 **oauth_fields(new, OAUTH_TOKEN_FIELDS)}
+    except (OSError, ValueError):
+        data = None
     fd, temporary = tempfile.mkstemp(prefix=".credentials-", dir=Path(target).parent)
     try:
-        with os.fdopen(fd, "w") as stream:
+        with os.fdopen(fd, "wb") as stream:
             os.fchmod(stream.fileno(), 0o600)
-            json.dump(document, stream)
+            stream.write(merge_claude_login(data, new))
         os.replace(temporary, target)
     except BaseException:
         Path(temporary).unlink(missing_ok=True)
         raise
     return True
+
+
+def merge_claude_login(data, new):
+    """The credentials file DATA (bytes, or None) with the login NEW in its claudeAiOauth block, as bytes: NEW's
+    token fields, descriptive fields from DATA where it has them (else NEW's), everything else in DATA kept (the
+    OAuth tokens of MCP servers). Contents DATA cannot be read as a JSON object count as empty."""
+    try:
+        document = json.loads(data) if data is not None else {}
+    except (ValueError, RecursionError):
+        document = {}
+    document = document if isinstance(document, dict) else {}
+    current = document.get("claudeAiOauth")
+    current = current if isinstance(current, dict) else {}
+    document["claudeAiOauth"] = {**oauth_fields(new, OAUTH_INFO_FIELDS), **oauth_fields(current, OAUTH_INFO_FIELDS),
+                                 **oauth_fields(new, OAUTH_TOKEN_FIELDS)}
+    return json.dumps(document).encode()
 
 
 def claude_token_status(path):
@@ -2699,26 +4234,209 @@ def claude_writeback_state(pair):
 
 
 def claude_writeback(home, pair, before):
-    """Write tokens Claude refreshed in the sandbox back to the host; returns a status line or None.
+    """At the end of a run: the last claude_login_sync, after the agent has stopped; a status line or None.
 
-    Only a refresh of the login the host handed in counts: the host must have had
-    credentials, must be unchanged since start, and the sandbox tokens must differ
-    from what was copied in. A host-side login during the run always wins."""
+    Only a refresh of the login the source handed in counts: the source must have had credentials, must
+    still hold what it last shared with the sandbox, and the sandbox tokens must differ from that.
+    A login the source got meanwhile (the host's own, another sandbox's refresh) always wins."""
+    check_home_path(home, pair[1])
+    return claude_login_sync(home, pair, before)
+
+
+# Seconds between two looks at a running sandbox's Claude login and its source (lstat only, unless one changed).
+CLAUDE_SYNC_INTERVAL = 2.0
+CLAUDE_LOCK_TIMEOUT = 30
+
+
+@contextlib.contextmanager
+def claude_login_lock(timeout=CLAUDE_LOCK_TIMEOUT):
+    """Exclusive lock of every sandbox-ai process on this host around comparing and replacing a Claude login
+    (the source's and a sandbox's copy), so that one's compare-and-swap never interleaves with another's.
+    The lock file is launcher-private, next to the login-sync record, outside every sandbox. TimeoutError
+    after TIMEOUT seconds."""
+    path = login_sync_store().with_name("claude-login.lock")
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"another sandbox-ai process holds {path}") from None
+                time.sleep(0.05)
+        yield
+    finally:
+        os.close(fd)
+
+
+def open_home_dir(home, relative):
+    """A descriptor of the directory that holds RELATIVE in the sandbox HOME, reached without following a link:
+    the agent may swap a directory for a link while it runs. ValueError for a link or a non-directory on the
+    way, FileNotFoundError for a missing one."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    parts = PurePosixPath(relative).parts
+    if not parts or any(part in ("..", "/") for part in parts):
+        raise ValueError(f"Path outside the sandbox HOME: {relative}")
+    fd = os.open(home, flags)
+    try:
+        for part in parts[:-1]:
+            try:
+                following = os.open(part, flags, dir_fd=fd)
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise ValueError(f"Sandbox path is a symlink or no directory, refusing to use it: "
+                                     f"{Path(home) / relative}") from None
+                raise
+            os.close(fd)
+            fd = following
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def read_home_file(home, relative, limit=CONFIG_LIMIT):
+    """Contents of the regular file RELATIVE in the sandbox HOME, read once while the agent may be writing the
+    HOME: no link followed on the way or at the end, no FIFO or device, at most LIMIT bytes. FileNotFoundError
+    if it is not there, ValueError for anything else than a regular file."""
+    parent = open_home_dir(home, relative)
+    try:
+        fd = os.open(PurePosixPath(relative).name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                     dir_fd=parent)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ValueError(f"{Path(home) / relative} is a symlink; refusing to use it") from None
+        raise
+    finally:
+        os.close(parent)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError(f"{Path(home) / relative} is not a regular file")
+        chunks, size = [], 0
+        while chunk := os.read(fd, 65536):
+            size += len(chunk)
+            if size > limit:
+                raise ValueError(f"{Path(home) / relative} is larger than {limit} bytes")
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def replace_home_file(home, relative, content):
+    """Atomically replace the file RELATIVE in the sandbox HOME with CONTENT (mode 0600) while the agent may be
+    writing the HOME: written next to it and renamed over it through a directory descriptor, never through a
+    link (a link in its place is replaced, not followed)."""
+    parent = open_home_dir(home, relative)
+    name = PurePosixPath(relative).name
+    temporary = f".{name}.sandbox-ai-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    try:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
+                     dir_fd=parent)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                os.fchmod(stream.fileno(), 0o600)
+                stream.write(content)
+            os.replace(temporary, name, src_dir_fd=parent, dst_dir_fd=parent)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary, dir_fd=parent)
+            raise
+    finally:
+        os.close(parent)
+
+
+def claude_login_sync(home, pair, state):
+    """Compare a sandbox's Claude login with its source (host or login store) once, under claude_login_lock;
+    a status line or None. STATE (claude_writeback_state) holds what the two last shared and follows each sync.
+
+    Refresh tokens rotate, so whichever side refreshed last holds the only valid pair, and it must reach the
+    other side before that one refreshes with the used-up token:
+    - the sandbox refreshed and the source still holds what they shared: the new tokens go to the source now
+      (only a plausible pair newer than the source's; never a login into a source that had none);
+    - the source holds another login than the sandbox (another sandbox's refresh, the host's own Claude, a new
+      `sandbox-ai login`) and the sandbox did not refresh since: that login goes into the sandbox, where Claude
+      reads its file again before refreshing and takes the newer pair instead of sending the used one;
+    - both changed: the source wins.
+    The sandbox side is read and replaced without following links; tokens never appear in a status line."""
     host, sandbox = pair
-    check_home_path(home, sandbox)
-    if before["host"] is None or not before.get("host_login"):
-        return None  # Never create a host login from the sandbox, not even in an existing file.
+    if state.get("host") is None or not state.get("host_login"):
+        return None  # Never create a login in the source, not even in an existing file.
+    relative = str(Path(sandbox).relative_to(home))
     store = auth_store() in Path(host).parents
     where = "sandbox-ai's login store" if store else "the host"
-    if oauth_token_digest(claude_oauth(host)) != before["host"]:
-        return f"the Claude login {'in' if store else 'on'} {where} changed during the run; kept that one"
-    current = claude_oauth(sandbox, follow=False)
-    if current is None or oauth_fields(current, OAUTH_TOKEN_FIELDS) == before["tokens"]:
-        return None
-    if sync_claude_credentials(sandbox, host, sandbox="source"):
-        remember_sync("claude", home, oauth_token_digest(claude_oauth(host)))
-        return f"refreshed Claude credentials written back to {where}"
-    return None
+    with claude_login_lock():
+        try:
+            data = read_home_file(home, relative)
+        except (FileNotFoundError, ValueError):
+            data = None  # none, or nothing a login can be read from without following a link: none to sync
+        box, source = (claude_oauth_from(data) if data is not None else None), claude_oauth(host)
+        if source is None:
+            return None  # logged out, or being rewritten: nothing to give or take now
+        tokens = oauth_fields(box, OAUTH_TOKEN_FIELDS) if box is not None else None
+        changed = box is not None and tokens != state["tokens"]
+        if changed and oauth_token_digest(source) == state["host"]:
+            # The agent chooses the sandbox's expiresAt: only a plausible pair newer than the source's goes back.
+            if not source["expiresAt"] < box["expiresAt"] <= (time.time() + OAUTH_MAX_LIFETIME) * 1000:
+                state["tokens"], state["refused"] = tokens, oauth_token_digest(box)
+                return None
+            if Path(host).is_symlink():
+                raise ValueError(f"Credential target is a symlink: {host}")
+            write_private_file(host, merge_claude_login(Path(host).read_bytes(), box))
+            state["host"], state["tokens"] = oauth_token_digest(claude_oauth(host)), tokens
+            remember_sync("claude", home, state["host"])
+            return f"refreshed Claude credentials written back to {where}"
+        if box is None or oauth_token_digest(box) in (oauth_token_digest(source), state.get("refused")):
+            return None
+        replace_home_file(home, relative, merge_claude_login(data, source))
+        state["host"], state["tokens"] = oauth_token_digest(source), oauth_fields(source, OAUTH_TOKEN_FIELDS)
+        remember_sync("claude", home, state["host"])
+        if changed:
+            return f"the Claude login {'in' if store else 'on'} {where} changed during the run; kept that one"
+        return f"took over the newer Claude login from {where} (refreshed elsewhere)"
+
+
+def watch_claude_login(home, pair, state, stop, interval=None):
+    """For the whole run, until STOP is set: whenever the sandbox's Claude login or its source changed (an
+    lstat every INTERVAL seconds, by default CLAUDE_SYNC_INTERVAL), sync them (claude_login_sync), so that a
+    refresh on either side reaches the other at once and not only when the run ends. Status lines are collected
+    in STATE["notes"] and printed after the run, since the agent's terminal is busy meanwhile. Never raises."""
+    interval = CLAUDE_SYNC_INTERVAL if interval is None else interval
+    def signature():
+        def one(path, follow):
+            try:
+                info = os.stat(path, follow_symlinks=follow)
+            except OSError:
+                return None
+            return info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+        return one(pair[0], True), one(pair[1], False), one(Path(pair[1]).parent, False)
+
+    seen = None
+    notes = state.setdefault("notes", [])
+    while not stop.wait(interval):
+        current = signature()
+        if current == seen:
+            continue
+        # What was seen before the sync: a change that lands while it runs (the agent writing a refreshed token
+        # just then) is seen at the next look, not hidden in a signature taken afterwards. The sync's own writes
+        # cost one more look, which finds nothing to do.
+        seen = current
+        try:
+            message = claude_login_sync(home, pair, state)
+        except Exception as exc:  # noqa: BLE001 - the run goes on; said after it
+            message = f"could not sync the Claude login during the run: {exc}"
+        if message:
+            notes.append(message)
+
+
+def claude_sync_notes(state):
+    """The status lines watch_claude_login collected during a run, each once, with how often it happened."""
+    notes = (state or {}).get("notes") or []
+    return [note + (f" ({notes.count(note)} times during the run)" if notes.count(note) > 1 else " (during the run)")
+            for note in dict.fromkeys(notes)]
 
 
 def login_sync_store():
@@ -2776,12 +4494,16 @@ def claude_recover_writeback(home, pair):
     return sync_claude_credentials(sandbox, source, sandbox="source")
 
 
-def store_writeback_state(a, home):
-    """Codex and OpenCode logins from the login store: what to compare at the end, to keep a refresh."""
-    if a.agent == "claude" or a.probe or auth_mode(a) not in ("auto", "copy") or not store_login(a.agent):
+def store_writeback_state(a, home, agent=None):
+    """Codex and OpenCode logins from the login store: what to compare at the end, to keep a refresh. AGENT: an
+    agent --with (its login is copied the automatic way), by default the lead."""
+    agent = agent or a.agent
+    automatic = auth_mode(a) in ("auto", "copy") if agent == a.agent else companion_auth(a, agent) == "auto"
+    if agent == "claude" or a.probe or not automatic or not store_login(agent):
         return None
-    source = auth_store(a.agent) / AUTH_TARGETS[a.agent]
-    before = {"source": source, "store": credential_digest(source), "sandbox": sandbox_digest(home, AUTH_TARGETS[a.agent])}
+    source = auth_store(agent) / AUTH_TARGETS[agent]
+    before = {"source": source, "store": credential_digest(source), "sandbox": sandbox_digest(home, AUTH_TARGETS[agent]),
+              "agent": agent}
     # Only a login that came from the store goes back to it, never one a persistent HOME had of its own.
     return before if before["store"] is not None and before["store"] == before["sandbox"] else None
 
@@ -2797,11 +4519,12 @@ def store_writeback(home, a, before):
     """Write tokens the agent refreshed in the sandbox back to the login store; a status line or None.
     Only the refreshed tokens of the stored account are taken over (merge_refreshed). The store feeds
     only sandboxes, never the host's own login."""
-    relative, source = AUTH_TARGETS[a.agent], before["source"]
+    agent = before.get("agent") or a.agent
+    relative, source = AUTH_TARGETS[agent], before["source"]
     if credential_digest(source) != before["store"]:
         return "the stored login changed during the run; kept the stored one"
     path = check_home_path(home, home / relative)
-    stored = stored_document(a.agent, source)
+    stored = stored_document(agent, source)
     try:
         data = read_config_bytes(path)
         sandbox = json.loads(data)
@@ -2809,7 +4532,7 @@ def store_writeback(home, a, before):
         return None
     if stored is None or hashlib.sha256(data).hexdigest() == before["sandbox"]:
         return None
-    merged = merge_refreshed(a.agent, stored, sandbox)
+    merged = merge_refreshed(agent, stored, sandbox)
     if merged is None:
         return None
     content = json.dumps(merged, indent=2).encode()
@@ -2817,26 +4540,29 @@ def store_writeback(home, a, before):
     if a.state_dir:
         # A persistent HOME keeps exactly what the store holds, so it can follow later refreshes.
         replace_private(content, home, relative)
-        remember_sync(a.agent, home, hashlib.sha256(content).hexdigest())
-    return "refreshed login written back to sandbox-ai's login store"
+        remember_sync(agent, home, hashlib.sha256(content).hexdigest())
+    return f"refreshed {agent} login written back to sandbox-ai's login store"
 
 
-def sync_store_login(a, home):
+def sync_store_login(a, home, agent=None):
     """A persistent HOME with a Codex or OpenCode login copied from the store, unchanged since: take over
-    the store's newer tokens (another sandbox refreshed them, which used up the HOME's)."""
-    if a.agent == "claude" or a.probe or auth_mode(a) not in ("auto", "copy") or not store_login(a.agent):
-        if a.agent != "claude":
-            remember_sync(a.agent, home, None)
+    the store's newer tokens (another sandbox refreshed them, which used up the HOME's). AGENT: an agent --with,
+    by default the lead."""
+    agent = agent or a.agent
+    automatic = auth_mode(a) in ("auto", "copy") if agent == a.agent else companion_auth(a, agent) == "auto"
+    if agent == "claude" or a.probe or not automatic or not store_login(agent):
+        if agent != "claude":
+            remember_sync(agent, home, None)
         return
-    relative = AUTH_TARGETS[a.agent]
-    store = auth_store(a.agent) / relative
-    last, current, stored = (load_login_sync().get(sync_key(a.agent, home)), sandbox_digest(home, relative),
+    relative = AUTH_TARGETS[agent]
+    store = auth_store(agent) / relative
+    last, current, stored = (load_login_sync().get(sync_key(agent, home)), sandbox_digest(home, relative),
                              credential_digest(store))
     if last and current == last and stored != last:
         replace_private(read_config_bytes(store), home, relative)
         print("agent-sandbox: took over the newer stored login (refreshed by another sandbox)", file=sys.stderr)
         current = sandbox_digest(home, relative)
-    remember_sync(a.agent, home, stored if current == stored else None)
+    remember_sync(agent, home, stored if current == stored else None)
 
 
 def write_private_file(path, content):
@@ -2950,17 +4676,22 @@ def privacy_context(a):
     context = load_privacy_module().host_context()
     context["addresses"] = [address for address, _ in tcp_targets(a)]
     context["servers"], context["tokens"] = [], []
-    for credential, token in git_tokens(a):
+    for credential, token in git_tokens(a) + registry_git_tokens(a)[0]:
         context["servers"].append({key: credential.get(key) for key in ("host", "port", "user")})
         context["tokens"].append(token)
     return context
 
 
+def workspace_mode(a, index):
+    """ro or rw for the workspace at INDEX of workspace_targets(a): --workspace-ro makes every one read-only, the
+    security mode high (modes.py) all but the first."""
+    return "ro" if a.workspace_ro or (index and getattr(a, "mode_other_workspaces_ro", False)) else "rw"
+
+
 def privacy_workspaces(a):
     """[(host path, project name)] of the workspaces the privacy check looks at: the writable ones."""
-    if a.workspace_ro:
-        return []
-    paths = [Path(src).expanduser().resolve() for src, _ in workspace_targets(a)]
+    paths = [Path(src).expanduser().resolve() for index, (src, _) in enumerate(workspace_targets(a))
+             if workspace_mode(a, index) == "rw"]
     return [(path, path.name) for path in paths]
 
 
@@ -3005,14 +4736,14 @@ def resource_limits(a):
         if not re.fullmatch(r"[1-9][0-9]{0,6}[kmg]?", memory):
             raise ValueError(f"--memory expects a size such as 4g or 512m, or none: {a.memory!r}")
         limits["memory"] = memory
-    cpus = str(a.cpus).strip().lower() if a.cpus is not None else str(max(1, (os.cpu_count() or 2) // 2))
+    cpus = str(a.cpus).strip().lower() if a.cpus is not None else str(max(1, engine_cpus(a) // 2))
     if cpus != "none":
         try:
             value = float(cpus)
         except ValueError:
             value = 0
-        if not re.fullmatch(r"[0-9]+(?:\.[0-9]{1,2})?", cpus) or not 0 < value <= (os.cpu_count() or 1):
-            raise ValueError(f"--cpus expects a number from 0.01 to {os.cpu_count() or 1} (this host's CPUs), or none")
+        if not re.fullmatch(r"[0-9]+(?:\.[0-9]{1,2})?", cpus) or not 0 < value <= engine_cpus(a):
+            raise ValueError(f"--cpus expects a number from 0.01 to {engine_cpus(a)} (the engine's CPUs), or none")
         limits["cpus"] = cpus
     pids = str(a.pids).strip().lower()
     if pids != "none":
@@ -3032,15 +4763,92 @@ def delegated_controllers(path=None):
         return None
 
 
+def local_engine(a):
+    """True where the container engine runs on this host's own kernel: Linux without --podman-url. Its cgroups,
+    routes, /dev and systemd are this host's. On macOS Podman runs in a Linux VM (podman machine): as remote as
+    --podman-url, so the same checks are left to the VM (TODO.md: macOS support)."""
+    return not a.podman_url and sys.platform == "linux"
+
+
+_machine = None
+
+
+def podman_machine(runner=None):
+    """`podman machine inspect` of the default machine (macOS), read once: {} when there is none."""
+    global _machine
+    if _machine is None or runner is not None:
+        try:
+            out = (runner or subprocess.run)(["podman", "machine", "inspect"], capture_output=True, text=True,
+                                              timeout=30, check=False).stdout
+            data = json.loads(out)
+            found = data[0] if isinstance(data, list) and data and isinstance(data[0], dict) else {}
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            found = {}
+        if runner is not None:
+            return found
+        _machine = found
+    return _machine
+
+
+def machine_paths(a):
+    """[(what, host path)] a start mounts from this host into podman machine's VM."""
+    paths = [("the workspace", Path(w).expanduser()) for w in a.workspaces if w]
+    paths += [("--mount", Path(src)) for src, _, _ in map(parse_mount, a.mount)]
+    paths += [("--state-dir", a.state_dir.expanduser())] if a.state_dir else []
+    paths += [("sandbox-ai's files", HERE), ("$TMPDIR (the run's session)", Path(tempfile.gettempdir()))]
+    return paths
+
+
+def check_machine_shares(a, machine=None):
+    """macOS: every host path a start mounts must lie in a share of podman machine (by default /Users, /private and
+    /var/folders), or the VM mounts an empty directory in its place. Refused with the share to add."""
+    if sys.platform != "darwin" or a.backend != "podman" or a.podman_url:
+        return
+    machine = podman_machine() if machine is None else machine
+    shares = [str(m.get("Source", "")).rstrip("/") for m in machine.get("Mounts") or [] if isinstance(m, dict)]
+    shares = [s for s in shares if s]
+    if not shares:
+        return  # no machine to ask (doctor says so); podman itself refuses then
+    for what, path in machine_paths(a):
+        real = os.path.realpath(path)
+        if not any(real == share or real.startswith(share + "/") for share in shares):
+            raise ValueError(f"{what} {real} is not shared with podman machine (shares: {', '.join(shares)}); "
+                             f"keep it under one of them, or add one: podman machine stop; podman machine set -v "
+                             f"{real}:{real}")
+
+
+def engine_cpus(a):
+    """The CPUs the engine's machine has: this host's on Linux, podman machine's VM on macOS."""
+    if sys.platform == "darwin" and not a.podman_url:
+        cpus = (podman_machine().get("Resources") or {}).get("CPUs")
+        if isinstance(cpus, int) and cpus > 0:
+            return cpus
+    return os.cpu_count() or 1
+
+
+def check_platform(a):
+    """Refuse what needs Linux on this host when it is macOS: Bubblewrap, this host's devices and Wayland."""
+    if sys.platform != "darwin":
+        return
+    if a.backend == "bwrap":
+        raise ValueError("--backend bwrap needs Linux (Bubblewrap); on macOS sandbox-ai runs with Podman "
+                         "(podman machine)")
+    if a.device or a.gpu in ("dri", "rocm"):
+        raise ValueError("--device and --gpu dri|rocm hand devices of a Linux host to the sandbox; on macOS the "
+                         "sandbox runs in Podman's Linux VM, which has none of the Mac's")
+    if getattr(a, "gui_wayland", False):
+        raise ValueError("--gui-wayland needs a Wayland session (Linux); use --gui or --gui-vnc DIR")
+
+
 def enforced_limits(a):
     """(limits that can be enforced here, notes about those that cannot)."""
     limits, notes = resource_limits(a), []
-    if limits and not a.podman_url and not user_manager_running():
+    if limits and local_engine(a) and not user_manager_running():
         # Without a systemd user session rootless Podman falls back to cgroupfs, where it cannot set limits,
         # and Bubblewrap has no scope to run in.
         return {}, ["no systemd user session (podman: cgroupfs), so --memory, --cpus and --pids are not enforced; "
                     "`loginctl enable-linger` or a desktop login provides one"]
-    controllers = None if a.podman_url else delegated_controllers()
+    controllers = delegated_controllers() if local_engine(a) else None
     if controllers is not None:
         for key, controller in CGROUP_CONTROLLERS.items():
             if key in limits and controller not in controllers:
@@ -3078,6 +4886,13 @@ def limits_prefix(a):
     return ["systemd-run", "--user", "--scope", "--quiet", "--collect", *properties, "--"]
 
 
+def load_llm_module():
+    spec = importlib.util.spec_from_file_location("sandbox_llm", HERE / "llm.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def load_secret_store_module():
     spec = importlib.util.spec_from_file_location("sandbox_secret_store", HERE / "secret_store.py")
     module = importlib.util.module_from_spec(spec)
@@ -3101,6 +4916,154 @@ def secret_environment(a):
             raise ValueError(f"--secret-env {value}: no secret {secret}; keep one with: sandbox-ai secrets set {secret}")
         result[name] = token
     return result
+
+
+API_KEY_HOST = re.compile(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}")
+API_KEY_PLACEHOLDER = "sandbox-ai-api-key-placeholder-{name}"
+SANDBOX_OWNED = ("HOME", "PATH", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME")
+
+
+def api_key_values(a, check=True):
+    """[(host, NAME, SECRET)] of --api-key HOST=NAME[=SECRET]. CHECK: ValueError for a wrong one; otherwise wrong
+    ones are left out (validate() reports them)."""
+    found = []
+    for value in getattr(a, "api_key", []) or []:
+        host, _, rest = value.partition("=")
+        name, _, secret = rest.partition("=")
+        host, secret = host.lower().rstrip("."), secret or name
+        ok = bool(API_KEY_HOST.fullmatch(host)) and bool(
+            re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}(?:=[A-Za-z_][A-Za-z0-9_]{0,63})?", rest))
+        if not ok:
+            if check:
+                raise ValueError(f"--api-key expects HOST=NAME or HOST=NAME=SECRET (a host name, not an address; "
+                                 f"NAME and SECRET letters, digits, _): {value!r}")
+            continue
+        found.append((host, name, secret))
+    return found
+
+
+def check_api_keys(a, get=None):
+    """--api-key: well-formed, each variable once, not one of the sandbox's own, only where the proxy opens the
+    request (with the proxy, the host inspected), and each secret kept (GET reads the store; False skips that)."""
+    keys = api_key_values(a)
+    names = [name for _, name, _ in keys]
+    secret_names = {value.partition("=")[0] for value in a.secret_env} | set(a.env)
+    for host, name, _ in keys:
+        if names.count(name) > 1 or name in secret_names:
+            raise ValueError(f"--api-key: the variable {name} is given twice")
+        if name in SANDBOX_OWNED:
+            raise ValueError(f"Sandbox-owned variable cannot be overridden: {name}")
+        if host in (h.lower() for h in a.no_inspect):
+            raise ValueError(f"--api-key {host}: the proxy adds the key only to requests it opens; drop --no-inspect {host}")
+    if keys and a.no_proxy:
+        raise ValueError("--api-key needs the connection proxy (it adds the key on the wire); drop --no-proxy")
+    if keys and get is not False:
+        api_key_entries(a, get)  # a secret that is not kept stops a dry run too, before anything runs
+
+
+def api_key_environment(a):
+    """{NAME: placeholder} for --api-key: what the agent sees instead of the key."""
+    return {name: API_KEY_PLACEHOLDER.format(name=name) for _, name, _ in api_key_values(a)}
+
+
+def api_key_entries(a, get=None):
+    """proxy.json's "api_keys": host, placeholder and key, in the proxy's directory the agent cannot read; ValueError
+    when a secret is not kept."""
+    get = get or load_secret_store_module().get
+    entries = []
+    for host, name, secret in api_key_values(a):
+        key = get(secret)
+        if key is None:
+            raise ValueError(f"--api-key {host}={name}: no secret {secret}; keep one with: sandbox-ai secrets set {secret}")
+        if not key or any(ord(c) < 33 or ord(c) == 127 for c in key):
+            raise ValueError(f"--api-key {host}={name}: the secret {secret} is not usable in a header")
+        entries.append({"host": host, "port": 443, "name": name, "placeholder": API_KEY_PLACEHOLDER.format(name=name),
+                        "key": key})
+    return entries
+
+
+_publish_logins_module = None
+
+
+def load_publish_logins_module():
+    global _publish_logins_module
+    if _publish_logins_module is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_publish_logins", HERE / "publish_logins.py")
+        _publish_logins_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_publish_logins_module)
+        _publish_logins_module._launcher = RunningLauncher()
+    return _publish_logins_module
+
+
+def publish_kinds(a):
+    """The kinds of --publish, each once (ValueError for an unknown one)."""
+    return load_publish_logins_module().kinds_value(getattr(a, "publish", []))
+
+
+def publish_hosts(a):
+    """The hosts --publish opens ([] when a kind or its login is wrong: validate() reports that)."""
+    try:
+        return [host for entry in load_publish_logins_module().plan(publish_kinds(a), publish_logins_of(a))
+                for host in entry["hosts"]]
+    except ValueError:
+        return []
+
+
+NPMRC_TARGET = "/sandbox/session/npmrc"
+
+
+def publish_environment(a):
+    """The agent's variables for --publish: placeholders and user names, never a token; npm's configuration."""
+    kinds = publish_kinds(a)
+    if not kinds:
+        return {}
+    module = load_publish_logins_module()
+    env = module.environment(kinds, publish_logins_of(a))
+    if module.npmrc(kinds, publish_logins_of(a)):
+        env["NPM_CONFIG_GLOBALCONFIG"] = NPMRC_TARGET  # yours, ~/.npmrc, still applies
+    return env
+
+
+def check_publish(a, get=None):
+    """--publish: known kinds with a login each, the proxy to add the tokens, their hosts inspected, no variable
+    given twice, never in an MCP server's sandbox, and each token kept (GET reads the store; False skips that)."""
+    kinds = publish_kinds(a)
+    if not kinds:
+        return
+    module = load_publish_logins_module()
+    logins = publish_logins_of(a)
+    try:
+        found = module.plan(kinds, logins)
+    except ValueError as exc:
+        if logins is None:
+            raise
+        missing = next(kind for kind in kinds if kind not in {entry["kind"] for entry in logins})
+        raise ValueError(f"--publish {missing}: the identity {a.identity} has no login for it; add one with: "
+                         f"sandbox-ai identities publish {a.identity} {missing} --secret NAME") from exc
+    if a.no_proxy:
+        raise ValueError("--publish needs the connection proxy (it adds the tokens on the wire); drop --no-proxy")
+    if getattr(a, "mcp_socket_dir", None):
+        raise ValueError("--publish is for an agent's sandbox, not an MCP server's")
+    inspected_off = {h.lower() for h in a.no_inspect}
+    for entry in found:
+        for host in entry["hosts"]:
+            if host in inspected_off:
+                raise ValueError(f"--publish {entry['kind']}: the proxy adds the token only to requests it opens; "
+                                 f"drop --no-inspect {host}")
+    taken = {value.partition("=")[0] for value in a.secret_env} | set(a.env) | {n for _, n, _ in api_key_values(a)}
+    for name in module.environment(kinds, logins):
+        if name in taken:
+            raise ValueError(f"--publish: the variable {name} is given twice")
+    if "github" in kinds and not a.token_proxy:
+        urls = set()
+        for kind, value in git_token_values(a):
+            with contextlib.suppress(ValueError):  # a wrong one: validate() reports it
+                urls.add(git_token_credential(value, kind)["url"])
+        if "https://github.com" in urls:
+            raise ValueError("--publish github: a --git-token-* option for https://github.com gives the agent "
+                             "GH_TOKEN itself; add --token-proxy or drop one of them")
+    if get is not False:
+        module.proxy_entries(kinds, get or load_secret_store_module().get, logins)
 
 
 def write_browser_shims(directory):
@@ -3132,15 +5095,23 @@ def apply_remembered_approvals(a):
         check_host_source(a, approvals.approved_file(), "Remembered approvals (XDG_CONFIG_HOME)")
     except ValueError as exc:
         return [f"{exc}; not read"]
+    # Blocked always: the supervisor refuses these at once, without a question (config.json "ask_blocked").
+    a.blocked_approvals = approvals.blocked_for(Path(a.workspaces[0]).expanduser())
     remembered = approvals.approved_for(Path(a.workspaces[0]).expanduser())
-    hosts = [h for h in remembered["hosts"] if h not in a.allow_host]
+    already = set(allowed_hosts(a))
+    hosts = [h for h in remembered["hosts"] if h not in already]
     tcp = [t for t in remembered["tcp"] if t not in a.allow_tcp]
     # Under the administrator's ceiling, what lies outside it is not applied (it may predate the policy).
     outside = [h for h in hosts if not within_ceiling(a, host=h)]
     outside += [t for t in tcp if not within_ceiling(a, network=tcp_targets(argparse.Namespace(allow_tcp=[t]))[0][0])]
     hosts, tcp = [h for h in hosts if h not in outside], [t for t in tcp if t not in outside]
     ignored = [f"not applied, outside the administrator's policy: {', '.join(outside)}"] if outside else []
+    # One approved before a --subnet that now holds it would stop every start (see check_subnets).
+    own = [t for t in tcp if in_subnet(a, tcp_targets(argparse.Namespace(allow_tcp=[t]))[0][0])]
+    tcp = [t for t in tcp if t not in own]
+    ignored += [f"not applied, inside the sandbox's own network: {', '.join(own)}"] if own else []
     a.allow_host += hosts
+    a.remembered_hosts = hosts  # resolved apart from the rest (see remembered_pins)
     a.allow_tcp += tcp
     # Approved, not chosen as an option: such addresses never get SSH (see proxy_config).
     a.approved_tcp = list(getattr(a, "approved_tcp", [])) + tcp
@@ -3148,6 +5119,52 @@ def apply_remembered_approvals(a):
         return ignored
     return ignored + [f"allowed because you approved them always for this project: {', '.join(hosts + tcp)} "
             f"(remove in {load_approvals_module().approved_file()})"]
+
+
+def remembered_pins(a, names, resolve):
+    """({name: addresses}, notes) for NAMES remembered "always" (approved lookups, connections whose name a
+    certificate proved), resolved as RESOLVE resolves --allow-host but only to what an approval may open: public
+    addresses, or ones inside the administrator's allow_within. A name that does not resolve now, or only to
+    other addresses (a moved service, DNS rebinding to the LAN), is left out and the notes say so: it never
+    stops the start, and never opens the LAN or this host."""
+    resolved, notes = {}, []
+    try:
+        resolved = resolve(list(names)) if names else {}
+    except (ValueError, OSError, subprocess.SubprocessError):
+        for name in names:  # one at a time: one name that no longer resolves must not take the others along
+            try:
+                resolved.update(resolve([name]))
+            except (ValueError, OSError, subprocess.SubprocessError):
+                pass
+    ceiling = (getattr(a, "policy", {}) or {}).get("allow_within") is not None
+    pins = {}
+    for name in names:
+        found = resolved.get(name) or []
+        kept = [address for address in found if ipaddress.ip_address(address).is_global
+                or (ceiling and within_ceiling(a, network=address))]
+        if not found:
+            notes.append(f"{name} (approved always) is not opened: it does not resolve now")
+        elif not kept:
+            notes.append(f"{name} (approved always) is not opened: it resolves only to addresses that are not "
+                         f"public ({', '.join(found)})")
+        else:
+            pins[name] = kept
+            if len(kept) < len(found):
+                notes.append(f"{name} (approved always): not opened, not public: "
+                             + ", ".join(address for address in found if address not in kept))
+    return pins, notes
+
+
+def apply_remembered_pins(a, names, resolve):
+    """The pins of the remembered NAMES (remembered_pins), with what was left out dropped from --allow-host and
+    told on stderr."""
+    if not names:
+        return {}
+    pins, notes = remembered_pins(a, names, resolve)
+    a.allow_host = [name for name in a.allow_host if name not in names or name in pins]
+    for note in notes:
+        print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
+    return pins
 
 
 def proxy_enabled(a):
@@ -3183,6 +5200,118 @@ def http_rules(a):
     return rules
 
 
+def user_rules_file():
+    """Your own ruleset for every start (XDG_CONFIG_HOME/sandbox-ai/rules.json), used when it exists."""
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "sandbox-ai" / RULES_NAME
+
+
+def read_ruleset(path, name):
+    """The ruleset in the file PATH, checked; NAME stands for it in logs and in what the agent is told."""
+    try:
+        # Non-blocking: a FIFO in its place must not hang the start.
+        fd = os.open(Path(path).expanduser(), os.O_RDONLY | os.O_NONBLOCK)
+    except OSError as exc:
+        raise ValueError(f"Rules {path}: {exc.strerror}") from None
+    with open(fd, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError(f"Rules {path} is not a regular file")
+        data = stream.read(CONFIG_LIMIT + 1)
+    if len(data) > CONFIG_LIMIT:
+        raise ValueError(f"Rules {path}: larger than {CONFIG_LIMIT} bytes")
+    try:
+        document, duplicated = RUNTIME.Ruleset.parse_json(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ValueError(f"Rules {path} is not valid JSON: {exc}") from None
+    if duplicated:
+        raise ValueError(f"Rules {path}: a key is given twice")
+    try:
+        return RUNTIME.Ruleset.validated(document, f"Rules {path}")
+    except RUNTIME.RuleError as exc:
+        raise ValueError(str(exc)) from None
+
+
+def load_rulesets(a):
+    """The rulesets of this run, in order: the administrator's policy, your rules.json, each --rules file,
+    --allow-http, the trusted project file's "rules", the agents' telemetry (--telemetry). Each decides on its own and the strictest decision wins
+    (no ruleset can widen another); the order names who decided. Read once; a broken file stops the start."""
+    if getattr(a, "rulesets", None) is not None:
+        return a.rulesets
+    sources = []
+    policy_rules = a.policy_rules if hasattr(a, "policy_rules") else load_policy().get("rules")
+    if policy_rules is not None:
+        try:
+            sources.append({"name": "policy", **RUNTIME.Ruleset.validated(policy_rules, f"Policy {POLICY_FILE}: rules")})
+        except RUNTIME.RuleError as exc:
+            raise ValueError(str(exc)) from None
+    mode_rules = getattr(a, "mode_rules", None)  # the security mode's own (modes.py), right after the policy's
+    if mode_rules is not None:
+        sources.append({"name": f"mode {a.mode}", **RUNTIME.Ruleset.validated(mode_rules, f"mode {a.mode}")})
+    files = [(user_rules_file(), RULES_NAME)] if user_rules_file().exists() else []
+    files += [(path, f"--rules {Path(path).name}") for path in a.rules]
+    taken = {"policy", "--allow-http", "project", *(s["name"] for s in sources)}
+    for path, name in files:
+        unique, number = name, 2
+        while unique in taken:  # two files of one name: told apart in logs and answers
+            unique, number = f"{name} ({number})", number + 1
+        taken.add(unique)
+        sources.append({"name": unique, **read_ruleset(path, unique)})
+    if a.allow_http:
+        sources.append({"name": "--allow-http", **RUNTIME.Ruleset.validated({"version": 1, "http": [
+            {"id": f"allow-http-{index}", "decision": "allow", **rule} for index, rule in enumerate(http_rules(a), 1)]},
+            "--allow-http")})
+    document = getattr(a, "project_document", None) or {}
+    if "rules" in document:
+        try:
+            sources.append({"name": "project", **RUNTIME.Ruleset.validated(document["rules"], "project rules")})
+        except RUNTIME.RuleError as exc:
+            raise ValueError(str(exc)) from None
+    publish = load_publish_logins_module().rules(publish_kinds(a), publish_logins_of(a)) \
+        if getattr(a, "publish", None) else None
+    if publish:
+        sources.append({"name": "publish", **RUNTIME.Ruleset.validated(publish, "--publish")})
+    telemetry = telemetry_rules(a)  # last: it only refuses, and the others keep their places in logs and answers
+    if telemetry:
+        sources.append({"name": "telemetry", **RUNTIME.Ruleset.validated(telemetry, "telemetry")})
+    a.rulesets = sources
+    return sources
+
+
+def check_rulesets(a):
+    """Read the rulesets and refuse a start where they could not hold: HTTP rules without the proxy, or for a
+    host whose TLS passes unopened (--no-inspect)."""
+    http = [source for source in load_rulesets(a) if source["http"] or source["defaults"]["http"] != "allow"]
+    if http and not proxy_enabled(a) and not a.offline:
+        raise ValueError(f"The HTTP rules of {', '.join(source['name'] for source in http)} need the connection "
+                         "proxy (not with --no-proxy)")
+    for source in http:
+        hosts = [host for rule in source["http"] for host in rule["host"]]
+        hosts += ["*"] if source["defaults"]["http"] != "allow" else []
+        for value in a.no_inspect:
+            for host in hosts:
+                if host == "*" or host_matches_any(host, value):
+                    raise ValueError(f"--no-inspect {value}: the HTTP rules of {source['name']} ({host}) cannot hold "
+                                     "for requests the proxy does not open")
+
+
+def mcp_gateway(a, name, approvals=None):
+    """The gateway configuration of MCP server NAME ({"server", "rules", "approvals"}) from this run's rulesets,
+    or None when none has rules for it. APPROVALS: where the relay reads the answers to its questions."""
+    sources = []
+    for source in load_rulesets(a):
+        # The rules for tainted runs hold in the run's own relay (mcp_relay_config), which knows its taint.
+        rules = [rule for rule in source["mcp"]
+                 if not rule.get("when") and ("*" in rule["server"] or name in rule["server"])]
+        if rules or source["defaults"]["mcp"] != "allow":
+            sources.append({"name": source["name"], "version": 1, "defaults": {"mcp": source["defaults"]["mcp"]},
+                            "mcp": rules})
+    if not sources:
+        return None
+    config = {"server": name, "rules": sources}
+    if approvals and RUNTIME.Ruleset(sources).mcp_asks():
+        config["approvals"] = str(approvals)
+    return config
+
+
 def host_matches_any(host, pattern):
     """HOST (a name or *.DOMAIN) and PATTERN (the same) can name the same server."""
     host, pattern = host.lower(), pattern.lower()
@@ -3205,10 +5334,223 @@ def proxy_config(a, hosts, log_name):
             "ssh": {"block": a.privacy_check != "off", "allowed": explicit, "allowed_tcp": explicit_tcp,
                     "public_git": public_git},
             "push_check": a.privacy_check != "off",
+            "debug": a.log_debug,
+            # The agent's own provider: never a source of untrusted content, never held by a rule for tainted runs.
+            "providers": provider_hosts(a),
+            # --token-proxy: the tokens live here, in the proxy's directory, which the agent cannot read.
+            # sandbox-ai git-logins: the same, for every run with the proxy; the start's options win for their server.
+            "git_tokens": [{"host": credential["host"], "port": credential["port"], "user": credential["user"],
+                            "loopback": credential["loopback"], "token": token}
+                           for credential, token in proxied_git_tokens(a)],
+            # --llm: the endpoint's key and header secrets, added on the wire; its own CA.
+            "llm": load_llm_module().proxy_entry(a) if a.llm else [],
+            # --api-key: the keys, added on the wire in place of the agent's placeholder.
+            "api_keys": (api_key_entries(a) if a.api_key else [])
+            + (load_publish_logins_module().proxy_entries(publish_kinds(a), load_secret_store_module().get,
+                                                          publish_logins_of(a))
+               if getattr(a, "publish", None) else []),
             # Rules of a host also hold for its pinned addresses: a request to the bare IP is no way around them.
-            "http_rules": [{**rule, "addresses": sorted({addr for name, values in hosts.items() for addr in values
-                                                         if host_matches_any(name, rule["host"])})}
-                           for rule in http_rules(a)]}
+            "http_rules": [{**rule, "addresses": sorted({addr for name, values in {**hosts, **getattr(a, "llm_pins", {})}.items()
+                                                         for addr in values if host_matches_any(name, rule["host"])})}
+                           for rule in http_rules(a)],
+            # --canaries: the tokens of the run's decoy files in every form the proxy looks for (canary.py)
+            **({"canary": a.canary_plan.proxy_entry()} if getattr(a, "canary_plan", None) else {}),
+            **proxy_rules(a, hosts)}
+
+
+def sandbox_identity(a):
+    """Which sandbox this is, as its logs and questions name it: run, agent, backend, role (an agent or an
+    MCP server's sandbox), and the pod, session or MCP server where there is one."""
+    identity = {"run": getattr(a, "run_id", None), "agent": a.agent, "backend": a.backend,
+                "role": "mcp-server" if a.mcp_socket_dir else "agent", "pod": a.pod_name, "session": a.session,
+                "mcp": a.mcp_socket_dir.expanduser().parent.name if a.mcp_socket_dir else None,
+                "name": getattr(a, "start_name", None)}
+    return {key: value for key, value in identity.items() if value is not None}
+
+
+def provider_hosts(a):
+    """The agent's own provider: its model API and login hosts (--frontier adds the OpenAI and Anthropic ones,
+    --llm its server), and those of the agents --with: they are providers of this run as much."""
+    hosts = [host for agent in team(a) for host in PROVIDERS[agent]] + (FRONTIER if a.frontier else [])
+    hosts += load_llm_module().pinned_names(a) if getattr(a, "llm", None) else []
+    return list(dict.fromkeys(hosts))
+
+
+def hooks_active(a):
+    """The agent's own tools have rules in this run (a "tool" rule or default, or a tool whose results are
+    untrusted): its hooks are installed. Not in probes and MCP server sandboxes, where no agent runs."""
+    return kits_apply(a) and any(
+        source.get("tool") or source["defaults"].get("tool", "allow") != "allow"
+        or any("agent" in entry for entry in source.get("untrusted", [])) for source in load_rulesets(a))
+
+
+def hooks_config(a):
+    """config.json's "hooks" for the supervisor's answer to the hooks: the agent (its version is checked) and the
+    rulesets' rules for its own tools and its tools whose results are untrusted. None without hooks."""
+    if not hooks_active(a):
+        return None
+    return {"agent": a.agent, "rules": [
+        {"name": source["name"], "version": 1, "defaults": {"tool": source["defaults"]["tool"]},
+         "tool": source["tool"], "untrusted": [e for e in source.get("untrusted", []) if "agent" in e]}
+        for source in load_rulesets(a) if source.get("tool") or source["defaults"]["tool"] != "allow"
+        or any("agent" in e for e in source.get("untrusted", []))]}
+
+
+def trusted_kit_hooks(a):
+    """The kits' hooks of this run that the user approved (stage_hooks in prepare_kits), in kit order."""
+    return [staged for staged in getattr(a, "kit_hooks", []) if staged["trusted"] and not staged["errors"]]
+
+
+def trusted_plugin_hooks(a):
+    """The hooks of the run's Claude plugins that the user approved (stage_plugin_hooks in prepare_kits)."""
+    return [staged for staged in getattr(a, "plugin_hooks", []) if staged["trusted"] and not staged["errors"]]
+
+
+def plugin_hook_notes(a):
+    """What the start says about the plugins' hooks while managed hooks are on (without them, Claude Code runs a
+    plugin's hooks itself, as always): approved ones run, the others are named with the command that approves
+    them."""
+    if not managed_hooks(a):
+        return []
+    notes = []
+    for item in getattr(a, "plugin_hooks", []):
+        if item["errors"]:
+            notes.append(f"{item['label']}: its hooks do not run: {item['errors'][0]}")
+        elif not item["trusted"]:
+            notes.append(f"{item['label']}: {len(item['hooks'])} hook(s) not approved: they do not run while the "
+                         f"managed hooks are on; review and approve them with: sandbox-ai plugins claude trust-hooks "
+                         f"{item['plugin']}")
+        else:
+            notes.append(f"{item['label']}: {len(item['hooks'])} approved hook(s)")
+    return notes
+
+
+def managed_hooks(a):
+    """The agent gets managed hooks this run: the rule hooks (hooks_active), approved kit hooks, or both."""
+    return hooks_active(a) or bool(trusted_kit_hooks(a))
+
+
+def hook_groups(a):
+    """{EVENT: [group]} of the agent's managed hooks for Claude Code and Codex: the rule hooks first (every tool,
+    before and after it runs), then each approved kit's in kit order, then the approved hooks of the run's Claude
+    plugins."""
+    groups = {}
+    if hooks_active(a):
+        groups.update(rule_groups(a.agent))
+    for staged in [*trusted_kit_hooks(a), *trusted_plugin_hooks(a)]:  # the kits', then the plugins'
+        for event, entries in staged["groups"].items():
+            groups.setdefault(event, []).extend(
+                [{**entry, "hooks": [kit_handler(a, handler) for handler in entry["hooks"]]} for entry in entries]
+                if event == "PreToolUse" and hooks_active(a) else entries)
+    return groups
+
+
+def kit_handler(a, handler):
+    """HANDLER of a kit's PreToolUse hook while rules hold, run through the wrapper (KIT_HOOK_COMMAND): a tool
+    input it rewrites (updatedInput) is checked by the rules too, not only the agent's own. The wrapper keeps the
+    hook's timeout; the agent waits that long plus the rules' answer."""
+    timeout = handler.get("timeout", KIT_HOOK_TIMEOUT)
+    return {**handler, "timeout": timeout + HOOK_AGENT_TIMEOUT,
+            "command": KIT_HOOK_COMMAND.format(agent=a.agent, timeout=timeout, command=shlex.quote(handler["command"]))}
+
+
+def opencode_recheck(a):
+    """The rule plugin runs a second time, after the approved kits' plugins: rules hold and kit plugins run."""
+    return hooks_active(a) and any(staged["plugins"] for staged in trusted_kit_hooks(a))
+
+
+def rule_groups(agent):
+    """{EVENT: [group]} of AGENT's rule hooks alone: every tool, before and after it runs."""
+    return {event: [{"matcher": "*", "hooks": [{"type": "command", "timeout": HOOK_AGENT_TIMEOUT,
+                                                "command": HOOK_COMMAND.format(agent=agent, event=event)}]}]
+            for event in ("PreToolUse", "PostToolUse")}
+
+
+def hook_files(a):
+    """{path in the session directory: content} of the agent's hooks, as its managed configuration: Claude Code's
+    managed-settings.json (allowManagedHooksOnly), Codex's requirements.toml (allow_managed_hooks_only, the hooks
+    feature pinned on), both in a directory mounted read-only at MANAGED_DIRS; OpenCode's plugin, which
+    OPENCODE_CONFIG_CONTENT names (with the approved kits' plugins after it). The rule hooks come first, then the
+    approved kit hooks (hook_groups); nothing else runs hooks. The agents --with get the rule hooks the same way
+    (the kits are the lead's)."""
+    files = agent_hook_files(a, a.agent, hook_groups(a))
+    if hooks_active(a):
+        for agent in companions(a):
+            files.update(agent_hook_files(a, agent, rule_groups(agent), companion=True))
+    return files
+
+
+def toml_string(value):
+    """VALUE as a TOML basic string. JSON's form is one, but not with ensure_ascii: it writes a character beyond
+    the BMP (an emoji) as a surrogate pair, which TOML refuses, and Codex would then ignore its managed hooks."""
+    text = str(value)
+    if any(0xD800 <= ord(c) <= 0xDFFF for c in text):
+        raise ValueError(f"a hook holds an unpaired surrogate: {printable(text)[:80]}")
+    return json.dumps(text, ensure_ascii=False)
+
+
+def agent_hook_files(a, agent, groups, companion=False):
+    """hook_files for one AGENT of the run with the hook GROUPS (Claude Code, Codex) it gets."""
+    if agent == "claude":
+        settings = {"allowManagedHooksOnly": True, "hooks": groups}
+        return {"claude-code/managed-settings.json": json.dumps(settings, indent=2) + "\n"}
+    if agent == "codex":
+        lines = ["# sandbox-ai: the agent's hooks (README, Rulesets: \"The agent's own tools\"; Kits: hooks)",
+                 "allow_managed_hooks_only = true", "", "[features]", "hooks = true"]
+        for event, entries in groups.items():
+            for entry in entries:
+                lines += ["", f"[[hooks.{event}]]", f"matcher = {toml_string(entry.get('matcher', '*'))}"]
+                for handler in entry["hooks"]:
+                    lines += ["", f"[[hooks.{event}.hooks]]", 'type = "command"',
+                              f"command = {toml_string(handler['command'])}"]
+                    lines += [f"timeout = {handler['timeout']}"] if "timeout" in handler else []
+        return {"codex/requirements.toml": "\n".join(lines) + "\n"}
+    files = {PurePosixPath(OPENCODE_HOOK_PLUGIN).name: OPENCODE_HOOKS_JS} if hooks_active(a) else {}
+    if opencode_recheck(a) and not companion:
+        files[PurePosixPath(OPENCODE_HOOK_RECHECK).name] = OPENCODE_HOOKS_JS.replace(
+            "const RECHECK = false;", "const RECHECK = true;", 1)
+    return files
+
+
+def hook_mount(a, session):
+    """(directory in SESSION, target) of the agent's managed configuration with its hooks, mounted read-only;
+    None without hooks, and for OpenCode (its plugin lies in the session directory, mounted anyway)."""
+    if a.agent not in MANAGED_DIRS or not managed_hooks(a):
+        return None
+    return Path(session) / PurePosixPath(MANAGED_DIRS[a.agent]).name, MANAGED_DIRS[a.agent]
+
+
+def companion_hook_mounts(a, session):
+    """[(directory in SESSION, target)]: the managed configuration of each agent --with (Claude Code, Codex), with
+    its rule hooks, mounted read-only like the lead's (hook_mount)."""
+    if not hooks_active(a):
+        return []
+    return [(Path(session) / PurePosixPath(MANAGED_DIRS[agent]).name, MANAGED_DIRS[agent])
+            for agent in companions(a) if agent in MANAGED_DIRS]
+
+
+def mcp_relay_config(a, name):
+    """What the supervisor's relay of MCP server NAME checks for this run: the rules that hold only in tainted
+    runs and the tools whose results are untrusted (the server's own gateway has the rest)."""
+    sources = []
+    for source in load_rulesets(a):
+        rules = [rule for rule in source["mcp"] if rule.get("when") and ("*" in rule["server"] or name in rule["server"])]
+        untrusted = [entry for entry in source.get("untrusted", []) if "server" in entry
+                     and ("*" in entry["server"] or name in entry["server"])]
+        if rules or untrusted:
+            sources.append({"name": source["name"], "version": 1, "mcp": rules, "untrusted": untrusted})
+    return {"server": name, "rules": sources}
+
+
+def proxy_rules(a, hosts):
+    """proxy.json's "rules" (the rulesets with HTTP rules, --allow-http aside: it comes as http_rules) and
+    "pinned" (the run's host addresses, so that a host's rules hold for its bare address too)."""
+    rules = [{"name": source["name"], "version": 1, "defaults": {"http": source["defaults"]["http"]},
+              "http": source["http"], "untrusted": [entry for entry in source.get("untrusted", []) if "host" in entry]}
+             for source in load_rulesets(a)
+             if source["name"] != "--allow-http" and (source["http"] or source["defaults"]["http"] != "allow"
+                                                       or any("host" in entry for entry in source.get("untrusted", [])))]
+    return {"rules": rules, "pinned": {name: list(values) for name, values in hosts.items()}} if rules else {}
 
 
 def write_proxy_files(a, directory, hosts, log_name):
@@ -3229,8 +5571,12 @@ def write_proxy_files(a, directory, hosts, log_name):
                 workspaces.append({"path": dest, "rules": privacy.rules_document(rules)})
         except privacy.RulesUnavailable as exc:
             raise ValueError(f"--privacy-rules: {exc}") from None
+        canaries = getattr(a, "canary_plan", None)
         files["push.json"] = json.dumps({"mode": a.privacy_check, "own_hosts": privacy.private_hosts(context),
-                                         "workspaces": workspaces})
+                                         "workspaces": workspaces,
+                                         **({"canaries": canaries.push_entry(),
+                                             "canary_block": canaries.decisions["on_send"] != "report"}
+                                            if canaries else {})})
         files["privacy.py"] = (HERE / "privacy.py").read_text()
     for name, content in files.items():
         (directory / name).write_text(content)
@@ -3320,16 +5666,102 @@ def register_run(a, run, session):
             raise ValueError(f"A sandbox named {run} is already running (see sandbox-ai net list)") from None
         shutil.rmtree(directory)
         directory.mkdir(mode=0o700)
+    a.runtime_mode = MODES.runtime_record(launcher_namespace(), a)
     (directory / "run.json").write_text(json.dumps({
         "run": run, "agent": a.agent, "backend": a.backend, "workspace": a.workspaces[0], "pid": os.getpid(),
+        # The PID's start time: `sandbox-ai net stop` signals this process only, never a later one of that PID.
+        "pid_start": process_start(os.getpid()),
         "session": a.session or (a.pod_name if a.tmux_socket_dir else None), "session_dir": str(session),
-        "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "proxy": proxy_enabled(a)}))
+        # sandbox-ai list, rename and the other commands find a run by its name; "start" links it to its
+        # start directory (sessions.py), "pod" is what pause and resume freeze with Podman.
+        "name": run_name(a), "start": getattr(a, "start_key", None) or a.start_id,
+        "kind": "mcp" if a.mcp_socket_dir else "agent",
+        "pod": pod_name(a, run) if a.backend == "podman" else None, "podman_url": a.podman_url,
+        # A HOME of your own (--state-dir) stays when the run ends; sandbox-ai list says so.
+        "own_home": bool(a.state_dir) and not (getattr(a, "start_key", None) or a.tmux_socket_dir or a.mcp_socket_dir),
+        "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "proxy": proxy_enabled(a),
+        # sandbox-ai activity and session events find the run's timeline (activity.jsonl) here.
+        "log_dir": str(Path(a.log_dir).expanduser().resolve()) if a.log_dir else None,
+        # devices.jsonl keeps serial numbers in full only then.
+        "log_debug": bool(getattr(a, "log_debug", False)),
+        # `sandbox-ai net allow` refuses destinations inside a chosen network of the sandbox's own.
+        "subnets": [v for v in (getattr(a, "subnet", None), getattr(a, "subnet6", None)) if v],
+        # `sandbox-ai net allow --git-token-*` writes logins its Git helper reads (not with --token-proxy).
+        "runtime_git_tokens": not a.token_proxy,
+        # `sandbox-ai net allow --allow-host-port` relays host ports into this run (the supervisor's PortRelay).
+        "host_relay": True,
+        # The security mode: `sandbox-ai net allow` and `sandbox-ai approvals` keep to it (modes.py).
+        "mode": a.runtime_mode}))
     return directory
 
 
+def run_name(a):
+    """The name this run shows (sandbox-ai list): its start's current name for a session's supervisor (renamed
+    perhaps since it was started), else the name the start got (name_start); None for MCP servers."""
+    if a.start_id:
+        try:
+            data = load_sessions_module().load(a.start_id)
+        except (OSError, ValueError):
+            return a.start_id
+        return data.get("name") if isinstance(data.get("name"), str) else a.start_id
+    return getattr(a, "start_name", None)
+
+
+def pod_name(a, run=None):
+    """The Podman pod of this run (RUN, default a.run_id): the VPN's pod (vpn.py made it), the one a session or
+    MCP server chose, else agent-RUN."""
+    run = run or getattr(a, "run_id", None) or f"{a.agent}-{uuid.uuid4().hex[:12]}"
+    return getattr(a, "vpn_pod", None) or a.pod_name or f"agent-{run}"
+
+
+def load_starts_module():
+    spec = importlib.util.spec_from_file_location("sandbox_starts", HERE / "starts.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def project_label(a):
+    """The PROJECT part of the automatic names: --project-name (the project file's "name"), else the main
+    workspace's folder name, made fit for a name."""
+    return a.project_name or load_starts_module().sanitise(PurePosixPath(a.workspaces[0]).name)
+
+
+def name_start(a):
+    """The name of this start: --session or --name as given (a --name in use is refused), else
+    AGENT-PROJECT-xxxx. None for an MCP server and a session's supervisor (its start is named already)."""
+    if a.mcp_socket_dir or a.tmux_socket_dir:
+        return None
+    if a.session is not None:
+        return a.session  # sessions.py decides: a new session or the restart of a stopped one
+    starts = load_starts_module()
+    if a.name is not None:
+        if not a.dry_run:
+            starts.check_free(a.name)
+        return a.name
+    return starts.auto_name(a.agent, project_label(a))
+
+
+def history_event(a, event, status=None):
+    """Note EVENT (start, exit) of this run in its name's history (starts.py); True if written. Not for MCP
+    servers and probes; a session's start is noted by sessions.py, which knows whether it is a rebirth."""
+    if a.mcp_socket_dir or a.probe or (event == "start" and a.tmux_socket_dir) or not getattr(a, "control_dir", None):
+        return False
+    try:
+        return load_starts_module().run_event(a.control_dir, event, status)
+    except Exception:  # noqa: BLE001 - the history never stops a start or hides its exit status
+        return False
+
+
 def kits_apply(a):
-    """Kits, project memory and plugins are for agent sandboxes, not for probes or MCP servers."""
-    return not a.probe and not a.mcp_socket_dir
+    """Kits, project memory and plugins (and with them the agent's hooks) are for agent sandboxes, not for probes
+    or MCP servers; a helper (--helper) is an agent, though it serves MCP."""
+    return not a.probe and (not a.mcp_socket_dir or bool(getattr(a, "helper_of", None)))
+
+
+def runs_agent(a):
+    """The sandbox runs the agent itself: no --binary, or a helper, whose server runs the agent for each task."""
+    return a.binary is None or bool(getattr(a, "helper_of", None))
 
 
 def kit_managed_paths(a):
@@ -3354,8 +5786,13 @@ def kit_plan(a):
     kits = load_kits_module()
     plan = kits.scan(a.agent, kits.sources(a))
     marketplaces, plugins, notes = kits.declarations(a.agent, plan["plugins"]) if not a.no_plugins else ({}, [], [])
+    hooks = []
+    for label, folder in kits.kit_hook_sources(a.agent, kits.sources(a)):
+        info = kits.read_hooks(a.agent, folder)
+        hooks.append({"kit": label, "path": str(folder), "hooks": len(info["hooks"]), "errors": info["errors"],
+                      "trusted": kits.hooks_trusted(a.agent, info["sha256"], kits.trust_argument(label, folder))})
     result = {"sources": [{"kit": label, "path": str(path)} for label, path in kits.sources(a)],
-              "entries": kits.summary(plan),
+              "entries": kits.summary(plan), "hooks": hooks,
               "memory_template": plan["memory"][0] if plan["memory"] else None,
               "memory": None if a.no_memory else str(kits.memory_store(a.workspaces[0], a.agent)),
               "notes": plan["notes"] + notes}
@@ -3386,7 +5823,7 @@ def claude_plugins(home, marketplaces, plugins, notes):
     missing = [p for p in plugins if p not in installed]
     if missing:
         notes.append(f"plugins not in the plugin store yet: {', '.join(missing)}; install them with: "
-                     "sandbox-ai plugins claude")
+                     f"{kits.install_command(missing)}")
     mounts = []
     store = kits.plugin_dir("claude")
     if store and (known or installed):
@@ -3419,6 +5856,43 @@ def claude_plugins(home, marketplaces, plugins, notes):
     return mounts
 
 
+def claude_drop_plugins(home, notes):
+    """--no-plugins on a HOME of an earlier run: what claude_plugins() wrote there would still enable
+    plugins whose store is no longer mounted. Other settings stay; nothing is followed as a symlink."""
+    kits = load_kits_module()
+    try:
+        for name in ("known_marketplaces.json", "installed_plugins.json"):
+            kits.remove_at(home, f".claude/plugins/{name}", tree=False)
+    except (OSError, ValueError) as exc:
+        notes.append(f"plugin index of an earlier run left in place: {exc}")
+    if not check_home_path(home, home / ".claude/settings.json").exists():
+        return  # never create the file just to leave it without plugins
+
+    def apply(document):
+        return bool([document.pop(key) for key in ("enabledPlugins", "extraKnownMarketplaces") if key in document])
+    problem = update_json_defaults(home, ".claude/settings.json", apply)
+    if problem:
+        notes.append(f"plugins of an earlier run may stay enabled: .claude/settings.json: {problem}")
+
+
+def kit_hook_notes(agent, staged):
+    """What the start says about the kits' hooks: approved ones run, the others are named with the command that
+    approves them after a review."""
+    notes = []
+    for item in staged:
+        count = len(item["hooks"])
+        if item["errors"]:
+            more = f" (and {len(item['errors']) - 1} more)" if len(item["errors"]) > 1 else ""
+            notes.append(f"{item['label']}: its hooks for {agent} do not run: {item['errors'][0]}{more}")
+        elif not item["trusted"]:
+            notes.append(f"{item['label']}: {count} hook(s) for {agent} not approved (new, or changed since they "
+                         f"were approved): they do not run; review and approve them with: sandbox-ai kits "
+                         f"trust-hooks {shlex.quote(item['kit'])} --agent {agent}")
+        elif count:
+            notes.append(f"{item['label']}: {count} approved hook(s) for {agent}")
+    return notes
+
+
 def prepare_kits(a, home, staging):
     """Kits, project memory and plugins for this run: (read-only mounts, notes, memory state)."""
     mounts, notes, memory = [], [], None
@@ -3436,6 +5910,8 @@ def prepare_kits(a, home, staging):
     staged, more = kits.stage(a.agent, plan, staging,
                               lambda path, label: check_host_source(a, path, f"Kit file ({label})", trees))
     notes += more
+    a.kit_hooks = kits.stage_hooks(a.agent, kits.sources(a), staging / "hooks", KIT_HOOKS_TARGET)
+    notes += kit_hook_notes(a.agent, a.kit_hooks)
     for source, dest in staged:
         ensure_mount_point(home, str(PurePosixPath(dest).relative_to("/root")))
         mounts.append((source, dest, "ro"))
@@ -3455,10 +5931,14 @@ def prepare_kits(a, home, staging):
         notes += more
         if a.agent == "claude":
             mounts += claude_plugins(home, marketplaces, plugins, notes)
+            a.plugin_hooks = kits.stage_plugin_hooks(plugins, kits.installed("claude")[1])
+            notes += plugin_hook_notes(a)
         elif a.agent == "opencode" and plugins:
             a.opencode_plugins = plugins
             if not a.egress_all_allow and "registry.npmjs.org" not in allowed_hosts(a):
                 notes.append("OpenCode installs its plugins from npm: allow it with --allow-host registry.npmjs.org")
+    elif a.agent == "claude":
+        claude_drop_plugins(home, notes)
     return mounts, notes, memory
 
 
@@ -3475,7 +5955,9 @@ def save_memory(a, home, manifest):
 
 def claude_credential_pair(a, home):
     """(host, sandbox) credential paths when Claude auth is shared with the host."""
-    if a.agent != "claude" or auth_mode(a) not in ("auto", "copy"):
+    if "claude" not in team(a) or (a.agent == "claude" and auth_mode(a) not in ("auto", "copy")):
+        return None
+    if a.agent != "claude" and companion_auth(a, "claude") != "auto":
         return None
     return auth_sources("claude")[0][0], home / AUTH_TARGETS["claude"]
 
@@ -3497,23 +5979,43 @@ def opencode_auth_from_codex(source):
 
 
 def agent_environment(a):
-    env = {key: os.environ[key] for key in a.env}
+    env = telemetry_environment(a)  # first: what you pass yourself (--env, --secret-env, --llm) wins
+    env.update({key: os.environ[key] for key in a.env})
     env.update(secret_environment(a))
+    env.update(api_key_environment(a))
     env.update(git_environment(a))
+    env.update(publish_environment(a))
     if a.local_config:
         env.update({"OPENCODE_CONFIG": "/root/.config/opencode/opencode.jsonc",
                     "OPENCODE_DISABLE_PROJECT_CONFIG": "1", "OPENCODE_DISABLE_MODELS_FETCH": "1",
                     "OPENCODE_DISABLE_AUTOUPDATE": "1", "OPENCODE_DISABLE_SHARE": "1"})
+    if a.llm:
+        env.update(load_llm_module().agent_environment(a))
     if a.dangerously_skip_permissions:
-        env.update(DANGER_ENV[a.agent])
+        for agent in team(a):
+            env.update(DANGER_ENV[agent])
+    if companions(a):  # who else is here, for the agent (and the sandbox-ai skill)
+        env["SANDBOX_AI_COMPANIONS"] = " ".join(companions(a))
     if a.tmux_socket_dir:
         env["TMUX_TMPDIR"] = TMUX_DIR
+    if getattr(a, "helper_of", None) and a.agent == "opencode":
+        env["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"  # the lead shares /work: no plugins or settings from there
     content = {}
-    if a.agent == "opencode" and a.mcp and a.binary is None:
+    if a.agent == "opencode" and a.mcp and runs_agent(a):
         content["mcp"] = {name: {"type": "local", "command": ["python3", *mcp_bridge_args(name)], "enabled": True}
                           for name in dict.fromkeys(a.mcp)}
-    if a.agent == "opencode" and getattr(a, "opencode_plugins", None) and a.binary is None:
+    if a.agent == "opencode" and getattr(a, "opencode_plugins", None) and runs_agent(a):
         content["plugin"] = list(a.opencode_plugins)
+    if a.agent == "opencode" and runs_agent(a) and managed_hooks(a):
+        # The rule hooks' plugin first, then the approved kits' plugins (their copies in the session directory).
+        content["plugin"] = [*content.get("plugin", []), *(["file://" + OPENCODE_HOOK_PLUGIN] if hooks_active(a) else []),
+                             *(f"file://{staged['target']}/{name}" for staged in trusted_kit_hooks(a)
+                               for name in staged["plugins"]),
+                             *(["file://" + OPENCODE_HOOK_RECHECK] if opencode_recheck(a) else [])]
+    if "opencode" in companions(a) and hooks_active(a):
+        content["plugin"] = ["file://" + OPENCODE_HOOK_PLUGIN]  # the rules hold for it too
+    if "opencode" in team(a) and runs_agent(a) and telemetry_level(a) != "on":
+        content.update(OPENCODE_TELEMETRY_CONFIG)  # after the project's and your own configuration: this wins
     if content:
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(content)
     if proxy_enabled(a):
@@ -3527,6 +6029,8 @@ def agent_environment(a):
         env["BROWSER"] = "/sandbox/session/bin/xdg-open"
     if a.gui:
         env["DISPLAY"] = GUI_DISPLAY
+    if getattr(a, "audio", None) == "virtual":
+        env["PULSE_SERVER"] = f"unix:{RUNTIME.AUDIO_SOCKET}"
     if a.gui_wayland:
         env.update({"WAYLAND_DISPLAY": PurePosixPath(WAYLAND_TARGET).name,
                     "XDG_RUNTIME_DIR": str(PurePosixPath(WAYLAND_TARGET).parent),
@@ -3535,9 +6039,45 @@ def agent_environment(a):
     return env
 
 
+def check_model_effort(a):
+    """--model and --effort: a model name (no spaces or options), an effort level the agent knows, not together with
+    --llm's own model, and not given twice (as an option and in the agent's arguments)."""
+    model, effort = getattr(a, "model", None), getattr(a, "effort", None)
+    if model is not None:
+        if not re.fullmatch(MODEL_NAME, model):
+            raise ValueError(f"--model expects a model name (letters, digits, . _ : / @ + -): {model!r}")
+        if a.llm:
+            raise ValueError("--model and --llm: name the model in --llm NAME:MODEL instead")
+    if effort is not None:
+        levels = AGENT_EFFORTS.get(a.agent, ())
+        if not levels:
+            raise ValueError(f"--effort: {a.agent} sets its effort per model in its own configuration "
+                             "(opencode.json, a model's options); start without --effort")
+        if effort not in levels:
+            raise ValueError(f"--effort for {a.agent} is one of {', '.join(levels)}: {effort!r}")
+    given = a.agent_args[:a.agent_args.index("--")] if "--" in a.agent_args else a.agent_args
+    for option, value, flags in (("--model", model, ("--model", "-m")), ("--effort", effort, ("--effort",))):
+        if value is not None and any(arg in flags or arg.startswith(f"{flags[0]}=") for arg in given):
+            raise ValueError(f"{option} is given twice: as the launcher's option and in the agent's arguments")
+
+
+def model_effort_args(a):
+    """The agent's own arguments for --model and --effort."""
+    args, model, effort = [], getattr(a, "model", None), getattr(a, "effort", None)
+    if model:
+        args += ["--model", model]
+    if effort:
+        if a.agent == "claude":
+            args += ["--effort", effort]
+        elif a.agent == "codex":
+            args += ["-c", f"model_reasoning_effort={effort}"]
+    return args
+
+
 def agent_command(a, binary):
     args = list(a.agent_args)
-    if a.dangerously_skip_permissions and not a.probe:
+    # A helper's command is its server (python3): agent_mcp.py gives the agent its flags for each task.
+    if a.dangerously_skip_permissions and not a.probe and not getattr(a, "helper_of", None):
         args = [flag for flag in DANGER_ARGS[a.agent] if flag not in args] + args
     # Codex's native sandbox cannot create its UID map inside the verified
     # outer namespaces. Use the external boundary unless explicitly overridden.
@@ -3550,6 +6090,10 @@ def agent_command(a, binary):
             args = ["--sandbox", "danger-full-access", *args]
     if a.mcp and a.binary is None and not a.probe:
         args = [*mcp_agent_args(a), *args]
+    if a.llm and a.binary is None and not a.probe:
+        args = [*load_llm_module().agent_arguments(a), *args]
+    if a.binary is None and not a.probe and not getattr(a, "helper_of", None):
+        args = [*model_effort_args(a), *args]
     return [binary, *args]
 
 
@@ -3584,8 +6128,8 @@ def pod_commands(a, name, session, home):
     run = podman_command(a, "run", "--rm", "--pull=never", "--pod", name, "--user=0:0",
            "--read-only", "--cap-drop=ALL", "--security-opt=seccomp=unconfined",
            "--security-opt=apparmor=unconfined", "--security-opt=label=disable",
-           "--tmpfs=/run:rw,nosuid,nodev", "--tmpfs=/tmp:rw,nosuid,nodev",
-           "--tmpfs=/var/tmp:rw,nosuid,nodev", "--workdir=/work", "--interactive")
+           "--tmpfs=/run:rw,nosuid,nodev", f"--tmpfs=/tmp:rw,nosuid,nodev{tmpfs_size(enforced_limits(a)[0])}",
+           f"--tmpfs=/var/tmp:rw,nosuid,nodev{tmpfs_size(enforced_limits(a)[0])}", "--workdir=/work", "--interactive")
     limits = enforced_limits(a)[0]
     if "memory" in limits:
         run += ["--memory", limits["memory"]]
@@ -3603,8 +6147,8 @@ def pod_commands(a, name, session, home):
         run += ["--tty"]
     bindings = [(HERE / "runtime.py", "/sandbox/runtime.py", "ro"),
                 (session, "/sandbox/session", "ro"), (home, "/root", "rw"),
-                *((Path(src).expanduser().resolve(), dest, "ro" if a.workspace_ro else "rw")
-                  for src, dest in workspace_targets(a)),
+                *((Path(src).expanduser().resolve(), dest, workspace_mode(a, index))
+                  for index, (src, dest) in enumerate(workspace_targets(a))),
                 (session / "hosts", "/etc/hosts", "ro"),
                 (session / "resolv.conf", "/etc/resolv.conf", "ro"),
                 (session / "nsswitch.conf", "/etc/nsswitch.conf", "ro")]
@@ -3619,8 +6163,14 @@ def pod_commands(a, name, session, home):
         bindings.append((a.tmux_socket_dir.expanduser().resolve(), TMUX_DIR, "rw"))
     if a.mcp_socket_dir:
         bindings.append((a.mcp_socket_dir.expanduser().resolve(), MCP_SERVE_DIR, "rw"))
-    for name in dict.fromkeys(a.mcp):
-        bindings.append((mcp_socket_dir(name), f"{MCP_AGENT_DIR}/{name}", "ro"))
+    if a.mcp_approvals_dir:
+        bindings.append((a.mcp_approvals_dir.expanduser().resolve(), MCP_APPROVALS_DIR, "ro"))
+    for name in dict.fromkeys(a.mcp):  # reached through the supervisor's relay (MCP_AGENT_DIR), never directly
+        bindings.append((mcp_socket_dir(name), f"{MCP_UPSTREAM_DIR}/{name}", "ro"))
+    if hook_mount(a, session):  # the agent's managed configuration: its hooks, which it cannot change
+        bindings.append((*hook_mount(a, session), "ro"))
+    for source, target in companion_hook_mounts(a, session):
+        bindings.append((source, target, "ro"))
     if a.gui_wayland:
         bindings.append((wayland_socket(), WAYLAND_TARGET, "rw"))
     if getattr(a, "proxy_dir", None):
@@ -3638,6 +6188,32 @@ def pod_commands(a, name, session, home):
         run += ["--env", f"{key}={value}"]
     run += ["--entrypoint=/usr/bin/python3", a.image, "-I", "/sandbox/runtime.py", "--internal-bootstrap"]
     return create, run
+
+
+def process_start(pid, proc=Path("/proc")):
+    """Start time of PID in clock ticks after boot (field 22 of /proc/PID/stat), or None if it is gone.
+    Recorded with a supervisor's PID, so a later check can tell a reused PID apart."""
+    try:
+        # comm (field 2) may contain spaces and parentheses: the fields after it follow the last ')'.
+        return int((proc / str(pid) / "stat").read_text().rpartition(")")[2].split()[19])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def process_cmdline(pid, start, proc=Path("/proc")):
+    """Arguments of the process recorded as PID with start time START; [] when it is gone or the PID
+    now belongs to another process. The caller still matches the arguments: records of older
+    versions have no START (None) and rely on that check alone."""
+    if not pid:
+        return []
+    try:
+        cmdline = (proc / str(pid) / "cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return []
+    # Compared after reading the arguments: a match means they belonged to the recorded process.
+    if start is not None and process_start(pid, proc) != start:
+        return []
+    return cmdline
 
 
 def pod_owner(a):
@@ -3670,8 +6246,280 @@ def remove_stale_pod(a, pod, owner):
     return True
 
 
+# --- memory watch ----------------------------------------------------------------------------------------------
+#
+# The kernel enforces --memory: when the sandbox's cgroup is full, its OOM killer ends a process, and if that is the
+# supervisor (PID 1 of the sandbox) the whole run ends. The launcher watches the cgroup from the host (the sandbox
+# cannot see it): at MEMORY_WARN it tells the human and the agent (the session directory's memory.json, which the
+# agent reads), at MEMORY_ACT it ends the largest process that is neither sandbox-ai's nor the agent's (a test run,
+# a build), before the kernel picks one. Files in the sandbox's /tmp and HOME (tmpfs) count as memory too.
+
+MEMORY_WARN, MEMORY_ACT, MEMORY_INTERVAL, MEMORY_GRACE = 0.85, 0.95, 2.0, 3.0
+CGROUP_ROOT = Path("/sys/fs/cgroup")
+# Never ended by the watch: sandbox-ai's own processes (their command lines name an --internal- entry point too).
+MEMORY_PROTECTED = {"kthreadd", "firejail", "tmux: server", "tmux: client", "conmon", "catatonit", "pasta",
+                    "pasta.avx2", "slirp4netns", "bwrap", "Xvfb", "x11vnc"}
+AGENT_PROGRAMS = {"claude", "codex", "opencode"}
+
+
+def cgroup_dir(pid, proc=Path("/proc"), root=CGROUP_ROOT):
+    """The cgroup v2 directory of PID that carries a memory limit (its own, or its parent's when the process sits in
+    a leaf without one), or None (no cgroup v2, no limit, gone)."""
+    try:
+        text = (Path(proc) / str(int(pid)) / "cgroup").read_text()
+    except (OSError, ValueError):
+        return None
+    line = next((entry for entry in text.splitlines() if entry.startswith("0::")), None)
+    if line is None:
+        return None
+    path = Path(root) / line[3:].strip().lstrip("/")
+    for candidate in (path, path.parent):
+        try:
+            if (candidate / "memory.max").read_text().strip() not in ("max", ""):
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def memory_state(cgroup):
+    """{"current", "limit", "oom_kill", "anon", "shmem"} (bytes, kills) of CGROUP; shmem is what tmpfs files hold."""
+    cgroup = Path(cgroup)
+
+    def pairs(name):
+        found = {}
+        for line in (cgroup / name).read_text().splitlines():
+            key, _, value = line.partition(" ")
+            if value.strip().isdigit():
+                found[key] = int(value)
+        return found
+    stat, events = pairs("memory.stat"), pairs("memory.events")
+    return {"current": int((cgroup / "memory.current").read_text().strip()),
+            "limit": int((cgroup / "memory.max").read_text().strip()),
+            "oom_kill": events.get("oom_kill", 0), "anon": stat.get("anon", 0), "shmem": stat.get("shmem", 0)}
+
+
+def cgroup_processes(cgroup):
+    """The PIDs of CGROUP and every cgroup below it."""
+    pids = []
+    for directory, _, _ in os.walk(cgroup):
+        try:
+            pids += [int(line) for line in (Path(directory) / "cgroup.procs").read_text().split() if line.isdigit()]
+        except OSError:
+            continue
+    return pids
+
+
+def memory_victim(pids, proc=Path("/proc"), protected=()):
+    """(pid, name, rss bytes) of the process to end when the sandbox is about to run out of memory: the one with the
+    most resident memory among PIDS that is not sandbox-ai's own (PROTECTED pids, MEMORY_PROTECTED names, an
+    --internal- entry point) nor the agent itself; None if there is none."""
+    best = None
+    for pid in pids:
+        if pid in protected:
+            continue
+        try:
+            status = (Path(proc) / str(pid) / "status").read_text()
+            argv = (Path(proc) / str(pid) / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        fields = dict(line.split(":", 1) for line in status.splitlines() if ":" in line)
+        name = fields.get("Name", "").strip()
+        rss = int(fields.get("VmRSS", "0 kB").split()[0]) * 1024 if fields.get("VmRSS") else 0
+        programs = {os.path.basename(part.decode("utf-8", "replace")) for part in argv[:2] if part}
+        if name in MEMORY_PROTECTED or any(b"--internal-" in part for part in argv) or programs & AGENT_PROGRAMS:
+            continue
+        if rss and (best is None or rss > best[2]):
+            best = (pid, name, rss)
+    return best
+
+
+def gib(value):
+    return f"{value / (1 << 30):.1f} GiB"
+
+
+class MemoryWatch:
+    """Watches the sandbox's memory from the host while it runs (see above). LOCATE() gives (cgroup, protected pids)
+    once the sandbox's processes exist, or None; SESSION is the session directory (memory.json for the agent), LOG
+    a file for memory.jsonl records (or None), NOTIFY(title, text) tells the human."""
+
+    def __init__(self, locate, name, session=None, log=None, notify=None, warn=MEMORY_WARN, act=MEMORY_ACT,
+                 interval=MEMORY_INTERVAL, grace=MEMORY_GRACE, clock=time.monotonic, kill=os.kill, proc=Path("/proc")):
+        self.locate, self.name, self.session, self.log, self.notify = locate, name, session, log, notify
+        self.warn, self.act, self.interval, self.grace, self.clock, self.kill, self.proc = \
+            warn, act, interval, grace, clock, kill, Path(proc)
+        self.cgroup, self.protected, self.first_oom = None, set(), None
+        self.warned, self.peak, self.ended, self.ending, self.events = False, 0, [], {}, []
+        self.stopping, self.thread, self.written = threading.Event(), None, 0.0
+
+    def record(self, event, **fields):
+        entry = {"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "event": event, "run": self.name, **fields}
+        self.events.append(entry)
+        if self.log is not None:
+            with contextlib.suppress(OSError):
+                with open(self.log, "a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(entry) + "\n")
+
+    def share(self, state, warning):
+        """The session directory's memory.json: what the agent can read about its memory (no names, no PIDs)."""
+        if self.session is None:
+            return
+        data = {"used_bytes": state["current"], "limit_bytes": state["limit"],
+                "percent": round(100 * state["current"] / state["limit"], 1), "tmpfs_bytes": state["shmem"],
+                "warning": warning, "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "advice": ("memory is nearly full: run fewer things at once (tests, builds), remove large files from "
+                           "/tmp and HOME (they count as memory)") if warning else ""}
+        with contextlib.suppress(OSError):
+            target = Path(self.session) / "memory.json"
+            temporary = target.with_name(f".memory.json.{os.getpid()}")
+            temporary.write_text(json.dumps(data))
+            os.replace(temporary, target)
+
+    def tick(self):
+        """One look at the cgroup; returns its state (or None before the sandbox's processes exist)."""
+        if self.cgroup is None:
+            found = self.locate()
+            if not found:
+                return None
+            self.cgroup, self.protected = Path(found[0]), set(found[1])
+        try:
+            state = memory_state(self.cgroup)
+        except (OSError, ValueError):
+            return None  # the cgroup went: the sandbox ended
+        if self.first_oom is None:
+            self.first_oom = state["oom_kill"]
+        self.peak = max(self.peak, state["current"])
+        ratio = state["current"] / state["limit"] if state["limit"] else 0
+        if ratio >= self.warn and not self.warned:
+            self.warned = True
+            text = (f"{self.name} uses {ratio:.0%} of its memory ({gib(state['current'])} of {gib(state['limit'])}, "
+                    f"files in its /tmp and HOME: {gib(state['shmem'])})")
+            self.record("memory-warning", used=state["current"], limit=state["limit"], tmpfs=state["shmem"])
+            if self.notify is not None:
+                with contextlib.suppress(Exception):
+                    self.notify("sandbox-ai: memory nearly full", text)
+            self.share(state, True)
+        elif ratio < self.warn - 0.05 and self.warned:
+            self.warned = False
+            self.share(state, False)
+        elif self.clock() - self.written >= 10:
+            self.share(state, self.warned)
+            self.written = self.clock()
+        if ratio >= self.act:
+            self.relieve(state)
+        return state
+
+    def relieve(self, state):
+        now = self.clock()
+        for pid, (since, handle) in list(self.ending.items()):
+            if now - since >= self.grace:
+                # Through the pidfd opened at SIGTERM: a PID reused meanwhile (by any process of yours) is never hit.
+                with contextlib.suppress(OSError):
+                    if handle is not None:
+                        signal.pidfd_send_signal(handle, signal.SIGKILL)
+                    elif pid in cgroup_processes(self.cgroup):
+                        self.kill(pid, signal.SIGKILL)  # no pidfd here: only while it is still the sandbox's
+                if handle is not None:
+                    with contextlib.suppress(OSError):
+                        os.close(handle)
+                del self.ending[pid]
+        victim = memory_victim(cgroup_processes(self.cgroup), self.proc, self.protected | set(self.ending))
+        if victim is None:
+            return
+        pid, name, rss = victim
+        handle = None
+        if self.kill is os.kill and hasattr(os, "pidfd_open"):
+            with contextlib.suppress(OSError):
+                handle = os.pidfd_open(pid)
+        try:
+            if handle is not None:
+                signal.pidfd_send_signal(handle, signal.SIGTERM)
+            else:
+                self.kill(pid, signal.SIGTERM)
+        except OSError:
+            if handle is not None:
+                os.close(handle)
+            return
+        self.ending[pid] = (now, handle)
+        self.ended.append({"pid": pid, "name": name, "rss": rss})
+        self.record("memory-relief", pid=pid, process=name, rss=rss, used=state["current"], limit=state["limit"])
+
+    def watch_memory(self):
+        while not self.stopping.wait(self.interval):
+            with contextlib.suppress(Exception):  # a broken look never ends the launcher's watch of the run
+                self.tick()
+
+    def start(self):
+        self.thread = threading.Thread(target=self.watch_memory, daemon=True)
+        self.thread.start()
+        return self
+
+    def stop(self):
+        """Stop watching; the lines that tell the human what happened (none when nothing did)."""
+        self.stopping.set()
+        if self.thread is not None:
+            self.thread.join(self.interval + 1)
+        lines = []
+        oom = 0
+        if self.cgroup is not None:
+            with contextlib.suppress(OSError, ValueError):
+                oom = memory_state(self.cgroup)["oom_kill"] - (self.first_oom or 0)
+        for entry in self.ended:
+            lines.append(f"memory nearly full: ended {printable(entry['name'])} (PID {entry['pid']}, {gib(entry['rss'])}) "
+                         "so that the sandbox could go on")
+        if oom > 0:
+            lines.append(f"the sandbox ran out of memory: the kernel ended {oom} process{'es' if oom != 1 else ''} "
+                         f"(peak {gib(self.peak)}); start with --memory 16g, or run fewer things at once")
+        return lines
+
+
+def tmpfs_size(limits):
+    """",size=N" for the sandbox's /tmp and /var/tmp: half the memory limit (files there are memory, and without a
+    size a tmpfs may take half the host's RAM, more than the limit: the run would end by OOM instead of a full
+    disk); "" without a limit."""
+    memory = limits.get("memory")
+    if not memory:
+        return ""
+    units = {"k": 1 << 10, "m": 1 << 20, "g": 1 << 30}
+    size = int(memory[:-1]) * units[memory[-1]] if memory[-1] in units else int(memory)
+    return f",size={max(size // 2, 64 << 20)}"
+
+
+def podman_agent_pid(a, pod):
+    """The host PID of the agent container's first process (the supervisor) in POD, or None while it starts."""
+    try:
+        listed = subprocess.run(podman_command(a, "ps", "--filter", f"pod={pod}", "--format", "{{.ID}} {{.IsInfra}}"),
+                                capture_output=True, text=True, timeout=10, check=False).stdout.split("\n")
+        ids = [line.split()[0] for line in listed if line.strip() and line.split()[-1] == "false"]
+        if not ids:
+            return None
+        pid = subprocess.run(podman_command(a, "inspect", "--format", "{{.State.Pid}}", ids[0]),
+                             capture_output=True, text=True, timeout=10, check=False).stdout.strip()
+        return int(pid) if pid.isdigit() and int(pid) > 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+
+
+def start_memory_watch(a, session):
+    """The memory watch of this run, or None: only where the launcher sees the sandbox's cgroup (a local engine on
+    Linux) and the run has a memory limit."""
+    if not local_engine(a) or "memory" not in enforced_limits(a)[0]:
+        return None
+
+    def locate():
+        pid = podman_agent_pid(a, pod_name(a)) if a.backend == "podman" else getattr(a, "sandbox_pid", None)
+        cgroup = cgroup_dir(pid) if pid else None
+        return (cgroup, {pid}) if cgroup else None
+    log = Path(a.log_dir).expanduser() / "memory.jsonl" if a.log_dir else None
+
+    def notify(title, text):
+        load_approvals_module().desktop_notification(title, text)
+    return MemoryWatch(locate, getattr(a, "run_id", None) or pod_name(a), session=session, log=log,
+                       notify=notify).start()
+
+
 def run_pod(a, session, home):
-    name = a.pod_name or "agent-" + a.agent + "-" + uuid.uuid4().hex[:12]
+    name = pod_name(a)
     create, run = pod_commands(a, name, session, home)
     # Check local image first, before creating an owned pod. Never mutate a
     # pre-existing pod, use host networking, or implicitly fetch images.
@@ -3682,16 +6530,19 @@ def run_pod(a, session, home):
     owned = True
     try:
         try:
-            subprocess.run(create, check=True, stdout=subprocess.DEVNULL)
+            if not getattr(a, "vpn_pod", None):  # vpn.py created it, with the tunnel in it
+                subprocess.run(create, check=True, stdout=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
             owned = False
             raise
+        a.running_pod = name  # a canary's pause (canary.py) freezes the pod
         return wait_child(subprocess.Popen(run))
     finally:
         if owned:
             # --time 0: the infra container's sleep ignores SIGTERM; waiting for it only costs 10 seconds.
-            subprocess.run(podman_command(a, "pod", "rm", "--force", "--time", "0", name), check=False,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            with signals_deferred():
+                subprocess.run(podman_command(a, "pod", "rm", "--force", "--time", "0", name), check=False,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def bwrap_command(a, session, home):
@@ -3715,8 +6566,9 @@ def bwrap_command(a, session, home):
         cmd += ["--ro-bind", str(session / name), "/etc/" + name]
     cmd += ["--ro-bind", str(HERE / "runtime.py"), "/sandbox/runtime.py",
             "--ro-bind", str(session), "/sandbox/session", "--bind", str(home), "/root"]
-    for src, dest in workspace_targets(a):
-        cmd += ["--ro-bind" if a.workspace_ro else "--bind", str(Path(src).expanduser().resolve()), dest]
+    for index, (src, dest) in enumerate(workspace_targets(a)):
+        cmd += ["--ro-bind" if workspace_mode(a, index) == "ro" else "--bind", str(Path(src).expanduser().resolve()),
+                dest]
     for value in a.mount:
         src, dest, mode = parse_mount(value)
         cmd += ["--ro-bind" if mode == "ro" else "--bind", src, dest]
@@ -3730,8 +6582,15 @@ def bwrap_command(a, session, home):
         cmd += ["--bind", str(a.tmux_socket_dir.expanduser().resolve()), TMUX_DIR]
     if a.mcp_socket_dir:
         cmd += ["--bind", str(a.mcp_socket_dir.expanduser().resolve()), MCP_SERVE_DIR]
-    for name in dict.fromkeys(a.mcp):
-        cmd += ["--ro-bind", str(mcp_socket_dir(name)), f"{MCP_AGENT_DIR}/{name}"]
+    if a.mcp_approvals_dir:
+        cmd += ["--ro-bind", str(a.mcp_approvals_dir.expanduser().resolve()), MCP_APPROVALS_DIR]
+    for name in dict.fromkeys(a.mcp):  # reached through the supervisor's relay (MCP_AGENT_DIR), never directly
+        cmd += ["--ro-bind", str(mcp_socket_dir(name)), f"{MCP_UPSTREAM_DIR}/{name}"]
+    if hook_mount(a, session):  # the agent's managed configuration: its hooks, which it cannot change
+        source, target = hook_mount(a, session)
+        cmd += ["--ro-bind", str(source), target]
+    for source, target in companion_hook_mounts(a, session):
+        cmd += ["--ro-bind", str(source), target]
     if a.gui_wayland:
         runtime = str(PurePosixPath(WAYLAND_TARGET).parent)
         cmd += ["--perms", "0700", "--dir", runtime, "--bind", str(wayland_socket()), WAYLAND_TARGET]
@@ -3839,6 +6698,7 @@ def run_bwrap(a, session, home):
         child = subprocess.Popen(prefix + cmd + ["--info-fd", str(info_w), "--userns-block-fd", str(maps_r), "--block-fd", str(gate_r),
                                        "/usr/bin/python3", "-I", "/sandbox/runtime.py", "--internal-bootstrap"],
                                  pass_fds=(info_w, maps_r, gate_r), env=user_bus_environment() if prefix else None)
+        a.sandbox_pid = child.pid  # the memory watch finds the run's cgroup (systemd-run's scope) through it
         os.close(info_w)
         info_w = -1
         os.close(gate_r)
@@ -3846,14 +6706,13 @@ def run_bwrap(a, session, home):
         os.close(maps_r)
         maps_r = -1
         pid = int(read_ready(info_r, child)["child-pid"])
+        a.running_pid = child.pid  # a canary's pause (canary.py) freezes this process tree
         configure_user_maps(pid)
         os.write(maps_w, b"1")
         os.close(maps_w)
         maps_w = -1
         if not a.offline:
-            slirp = subprocess.Popen(["slirp4netns", "--configure", "--disable-host-loopback",
-                                      "--enable-sandbox", "--enable-seccomp", "--enable-ipv6",
-                                      "--ready-fd", str(ready_w), str(pid), "tap0"], pass_fds=(ready_w,),
+            slirp = subprocess.Popen(slirp_command(a, pid, ready_w), pass_fds=(ready_w,),
                                      stdout=subprocess.DEVNULL)
             os.close(ready_w)
             ready_w = -1
@@ -3863,11 +6722,12 @@ def run_bwrap(a, session, home):
         gate_w = -1
         return wait_child(child)
     finally:
-        stop_process(child)
-        stop_process(slirp)
-        for fd in (info_r, info_w, maps_r, maps_w, gate_r, gate_w, ready_r, ready_w):
-            if fd >= 0:
-                os.close(fd)
+        with signals_deferred():
+            stop_process(child)
+            stop_process(slirp)
+            for fd in (info_r, info_w, maps_r, maps_w, gate_r, gate_w, ready_r, ready_w):
+                if fd >= 0:
+                    os.close(fd)
 
 
 def load_sessions_module():
@@ -3878,6 +6738,81 @@ def load_sessions_module():
     return module
 
 
+def load_canary_module():
+    spec = importlib.util.spec_from_file_location("sandbox_canary", HERE / "canary.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def plant_canaries(a, home, cleanup):
+    """The run's canary files (canary.py), planted in HOME and the workspaces; removed (or kept with a kept HOME)
+    when CLEANUP ends. None when the run has none."""
+    plan = load_canary_module().plant(a, home, argparse.Namespace(**globals()))
+    if plan is None:
+        return None
+    def finish():
+        for note in plan.finish():
+            print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
+    cleanup.callback(finish)
+    for note in plan.notes:
+        print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
+    return plan if plan.entries else None
+
+
+def load_activity_module():
+    spec = importlib.util.spec_from_file_location("sandbox_activity", HERE / "activity.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def start_activity(a, home, log_name, cfg):
+    """The timeline of this run (activity.py) while the agent works, or None: for agent sandboxes with a log
+    directory. Never fails the launch."""
+    if not a.log_dir or not kits_apply(a):
+        return None
+    try:
+        return load_activity_module().start(a, home, log_name, cfg["env"], cfg["secret_names"],
+                                            [{"host": str(src), "sandbox": str(dest)}
+                                             for src, dest in workspace_targets(a)])
+    except Exception as exc:  # noqa: BLE001 - the sandbox runs without a timeline
+        print(f"agent-sandbox: activity: not recorded: {printable(exc)}", file=sys.stderr)
+        return None
+
+
+_devices_module = None
+
+
+def load_devices_module():
+    """devices.py (sysfs identity of devices, the run's device grants and their watcher), loaded once."""
+    global _devices_module
+    if _devices_module is None:
+        spec = importlib.util.spec_from_file_location("sandbox_devices", HERE / "devices.py")
+        _devices_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_devices_module)
+    return _devices_module
+
+
+def start_devices(a):
+    """The run's device grants in devices.json and its device rules in device-rules.json (both in the run's
+    directory, for `sandbox-ai devices` and the watcher); the run record when a watcher is needed (a device on
+    USB to follow through unplug and replug, or one held for a question), else None."""
+    module = load_devices_module()
+    rules = [{"name": source["name"], "version": 1, "defaults": {"devices": source["defaults"]["devices"]},
+              "devices": source["devices"]} for source in load_rulesets(a)
+             if source["devices"] or source["defaults"]["devices"] != "allow"]
+    path = a.control_dir / "device-rules.json"
+    path.write_text(json.dumps(rules))
+    path.chmod(0o600)
+    grants = device_grants(a) if (a.device or a.gpu) and kits_apply(a) else []
+    record = {**json.loads((a.control_dir / "run.json").read_text()), "directory": str(a.control_dir)}
+    if not grants:
+        return None
+    module.start_grants(record, grants)
+    return record if any(g.get("track") or g["state"] == "held" for g in grants) else None
+
+
 def load_mcp_module():
     spec = importlib.util.spec_from_file_location("sandbox_mcp", HERE / "mcp.py")
     module = importlib.util.module_from_spec(spec)
@@ -3885,10 +6820,56 @@ def load_mcp_module():
     return module
 
 
+def launcher_namespace():
+    """This launcher as other modules see it (what a caller replaced in it included)."""
+    return argparse.Namespace(**globals())
+
+
+def load_vpn_module():
+    """vpn.py, which sees this launcher as loaded (what a caller replaced in it included)."""
+    spec = importlib.util.spec_from_file_location("sandbox_vpn", HERE / "vpn.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.launcher = lambda: argparse.Namespace(**globals())
+    return module
+
+
 def terminate(signum, _frame):
     # SIGTERM/SIGHUP become a normal exit, so every cleanup in a finally block
     # runs (pod removal, temporary state, Claude write-back), even during startup.
     raise SystemExit(128 + signum)
+
+
+CLEANUP_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+
+
+@contextlib.contextmanager
+def signals_deferred():
+    """Hold SIGTERM, SIGHUP and SIGINT while cleanup runs and deliver them afterwards: an interrupted
+    `podman pod rm` or slirp4netns stop leaves the pod or the process behind.
+
+    Commands run inside (podman pod rm) inherit the blocked mask (exec keeps it). That is intended:
+    Ctrl-C and a terminal hangup reach the whole foreground process group, podman included, and podman
+    must finish its job too; it exits when done, so nothing long-lived keeps the mask."""
+    if threading.current_thread() is not threading.main_thread():
+        # Python runs signal handlers in the main thread only; a mask set here would not hold them.
+        yield
+        return
+    caught, previous = [], {}
+    mask = signal.pthread_sigmask(signal.SIG_BLOCK, CLEANUP_SIGNALS)
+    try:
+        for sig in CLEANUP_SIGNALS:
+            if signal.getsignal(sig) not in (signal.SIG_IGN, None):
+                # The mask covers this thread only: a signal sent to the process can still land on a
+                # helper thread (approval notifications), and CPython then runs the handler here.
+                previous[sig] = signal.signal(sig, lambda signum, _frame: caught.append(signum))
+        yield
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+        signal.pthread_sigmask(signal.SIG_SETMASK, mask)  # signals held by the mask arrive here
+        for sig in dict.fromkeys(caught):
+            signal.raise_signal(sig)
 
 
 # Arguments that print something and exit instead of starting the agent's interface.
@@ -3909,6 +6890,101 @@ def interactive_args(agent, args):
     return True
 
 
+def resolve_keep(a):
+    """Whether this start keeps its HOME (a.keep_home), and a note when an option is ignored: --session always
+    does; else --keep/--no-keep or the project file's "keep" as chosen, by default yes. Never for a session's
+    own supervisor or an MCP server (their HOME is chosen for them), probes or a HOME of your own (--state-dir,
+    which stays anyway); the administrator's policy forbid_keep and the security mode paranoid discard every
+    HOME (paranoid refuses --keep and --session, and a rebirth of a kept HOME)."""
+    if a.tmux_socket_dir or a.mcp_socket_dir or a.probe:
+        a.keep_home = False
+        if getattr(a, "mode", None) == "paranoid" and kept_start_dir(a) is not None:
+            # A rebirth of a kept start whose mode is paranoid now (its options, project file or defaults).
+            raise ValueError("the security mode paranoid keeps no HOME beyond a run, so this start's kept HOME "
+                             "cannot be used again; start anew (its HOME is discarded at the end), or choose a laxer "
+                             "mode (--mode high keeps HOMEs)")
+        return None
+    if getattr(a, "mode", None) == "paranoid":
+        a.keep_home = False  # every start discards its HOME (an explicit --keep was refused by modes.check)
+        return None
+    if a.state_dir:
+        a.keep_home = False
+        return "--keep has no effect with --state-dir: that HOME is yours and stays anyway" if a.keep else None
+    if getattr(a, "forbid_keep", False):
+        a.keep_home = False
+        return ("the administrator's policy discards the HOME when the start ends (forbid_keep); --keep is ignored"
+                if a.keep else None)
+    if a.session is not None:
+        a.keep_home = True
+        return "--session keeps its HOME; --no-keep is ignored" if a.keep is False else None
+    a.keep_home = a.keep is not False
+    return None
+
+
+def plan_kept_home(a):
+    """A kept start in the foreground (a task, no terminal, --no-tmux) gets its start directory's home/ as
+    --state-dir, chosen before the checks so that they cover it like any --state-dir (sessions.begin makes it)."""
+    if not a.keep_home or detachable(a) or a.dry_run or a.state_dir:
+        return False
+    if not re.fullmatch(SESSION_NAME, a.start_name or ""):
+        return False  # validate() refuses the name
+    sessions = load_sessions_module()
+    a.start_key = sessions.new_key(a.start_name)
+    a.state_dir = sessions.session_dir(a.start_key) / "home"
+    a.foreground_start = True
+    return True
+
+
+def expire_kept(a, defaults):
+    """With "keep_days" in your defaults file: remove the stopped kept starts unused for longer (starts.gc);
+    the names of those removed. Not for plans, probes and the starts of sessions and MCP servers."""
+    days = defaults.get("keep_days")
+    if not days or a.dry_run or a.probe or a.tmux_socket_dir or a.mcp_socket_dir:
+        return []
+    try:
+        return [entry["name"] for entry in load_starts_module().gc(days, expired_only=True)["removed"]]
+    except Exception as exc:  # noqa: BLE001 - an expiry that fails must not stop a start
+        print(f"agent-sandbox: kept starts not expired: {printable(exc)}", file=sys.stderr)
+        return []
+
+
+def kept_start_dir(a):
+    """The directory of the start whose kept HOME this run uses (a session's or a task's), or None."""
+    key = getattr(a, "start_key", None) or a.start_id
+    if not key or not a.state_dir:
+        return None
+    directory = load_sessions_module().session_dir(key)
+    try:
+        same = Path(a.state_dir).expanduser().resolve() == (directory / "home").resolve()
+    except OSError:
+        return None
+    return directory if same else None
+
+
+def record_home_manifest(a, home):
+    """Right before the sandbox starts: record what the start files of a kept HOME are now (home_review.py), in
+    the start's directory, where the agent cannot reach it; the next rebirth names what changed since. True if
+    recorded; a failure is reported, never fatal."""
+    directory = kept_start_dir(a)
+    if directory is None:
+        return False
+    try:
+        spec = importlib.util.spec_from_file_location("sandbox_home_review", HERE / "home_review.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.record(home, directory, run=a.run_id)
+        return True
+    except Exception as exc:  # noqa: BLE001 - the start goes on; the next rebirth has no manifest to compare
+        print(f"agent-sandbox: the start files of the HOME were not recorded: {printable(exc)}", file=sys.stderr)
+        return False
+
+
+def detachable(a):
+    """This start runs as a detachable session: interactive in tmux (resolve_tmux), not a probe, MCP server or
+    a session's own supervisor. Closing the terminal then detaches instead of ending the agent."""
+    return a.session is not None or (bool(a.tmux) and not (a.probe or a.tmux_socket_dir or a.mcp_socket_dir))
+
+
 def resolve_tmux(a):
     """--tmux/--no-tmux as given; by default tmux for every interactive start from a terminal, but not
     for probes, sessions (tmux already), MCP servers, other binaries, commands that print and exit, or
@@ -3916,7 +6992,9 @@ def resolve_tmux(a):
     if a.tmux is None:
         a.tmux = bool(not (a.probe or a.session is not None or a.tmux_socket_dir or a.mcp_socket_dir
                            or a.binary) and sys.stdin.isatty() and sys.stdout.isatty()
-                      and interactive_args(a.agent, a.agent_args) and (a.backend == "podman" or shutil.which("tmux")))
+                      and interactive_args(a.agent, a.agent_args) and (a.backend == "podman" or shutil.which("tmux"))
+                      # macOS: attaching reaches the VM's socket only in stage 2 (TODO.md); --tmux still asks for it
+                      and sys.platform != "darwin")
     return a.tmux
 
 
@@ -3929,27 +7007,76 @@ def main(argv):
             signal.signal(sig, handler)
 
 
+_presets_module = None
+
+
+def load_presets_module():
+    global _presets_module
+    if _presets_module is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_presets", HERE / "presets.py")
+        _presets_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_presets_module)
+    return _presets_module
+
+
 def launch(argv):
-    argv = canonical_options(list(argv))
+    # --preset NAME: its options right after the agent (the command line wins), its first task as the agent's
+    # arguments; then everything is checked as if typed.
+    argv, preset_mode = load_presets_module().apply(canonical_options(list(argv)), canonical=canonical_options,
+                                                    with_mode=True)
+    argv = canonical_options(argv)
+    if preset_mode:
+        MODES.check_name(preset_mode, "the preset's --mode")
     a = parse_args(argv)
     config_path, document = load_project_config(a)
+    merged = merge_config(argv, a, document) if document else argv
     if document:
-        a = parse_args(merge_config(argv, a, document))
+        a = parse_args(merged)
+    user_defaults, policy = load_user_defaults(a), load_policy()
+    # The security mode's defaults join the options (modes.py); medium, the default, adds none.
+    a = MODES.apply(launcher_namespace(), merged, a, document, config_path, user_defaults, policy)
+    floors = [m for m in (preset_mode, getattr(a, "mode_at_least", None)) if m]
+    floor = max(floors, key=MODES.rank) if floors else None
+    if floor and a.mode_origin != "--mode" and MODES.rank(floor) > MODES.rank(a.mode):
+        # A floor (the preset's mode, --mode-at-least): stricter than the project's or your defaults', so it is
+        # taken (as if typed). Never lower: a stricter mode they chose stays.
+        rest, skip = [], False
+        for token in argv[1:]:  # the floor is applied: --mode-at-least goes (it would only say the same again)
+            if skip:
+                skip = False
+            elif token == "--mode-at-least":
+                skip = True
+            elif not token.startswith("--mode-at-least="):
+                rest.append(token)
+        return launch([argv[0], "--mode", floor, *rest])
     # The checked document is passed on; nothing re-reads the file later.
     a.project_config, a.project_document = (str(config_path) if config_path else None), document
-    # The administrator's policy binds every way of choosing an option, the project file's included.
-    check_policy(a, load_policy())
+    apply_subnet_defaults(a, user_defaults, str(defaults_file()))
+    a.canary_default = user_defaults.get("canaries")  # canary.categories(): after the options and the project file
+    a.telemetry_default = user_defaults.get("telemetry")  # telemetry_level(): after the option
+    # The administrator's policy binds every way of choosing an option, the project file's and the mode's included.
+    check_policy(a, policy)
+    # Options may narrow the mode, never widen it; then what it enforces beyond options (approval scope ...).
+    MODES.check(launcher_namespace(), a, policy)
     # What you approved "always" for this project joins the options before they are checked.
     remembered = apply_remembered_approvals(a) if not a.offline and a.max_approval_scope == "always" else []
+    for name in expire_kept(a, user_defaults):
+        print(f"agent-sandbox: removed the kept start {printable(name)}: unused for more than "
+              f"{user_defaults['keep_days']} days (keep_days in {defaults_file()})", file=sys.stderr)
+    resolve_tmux(a)
+    a.start_name = name_start(a)
+    notes = [note for note in [resolve_keep(a)] if note]
+    plan_kept_home(a)
     validate(a)
+    check_image_variant(a)
     if not a.dry_run:
         remember_exposed(a)
-    for note in remembered:
+    for note in remembered + notes:
         print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
     a.run_id = (a.pod_name[len("agent-"):] if a.pod_name else f"{a.agent}-{uuid.uuid4().hex[:8]}")
-    resolve_tmux(a)
     check_login(a)
-    for note in git_credentials_file(a)[1]:
+    for note in git_credentials_file(a)[1] + ([a.llm_vpn_note] if getattr(a, "llm_vpn_note", None) else []) + \
+            registry_git_tokens(a)[1]:
         print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
     for note in device_notes(a):
         print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
@@ -3958,20 +7085,34 @@ def launch(argv):
     if a.backend == "bwrap" and resource_limits(a) and not limits_prefix(a):
         print("agent-sandbox: the resource limits are not enforced with bwrap here (no systemd user manager)",
               file=sys.stderr)
-    if a.session is not None and not a.dry_run:
+    if (a.tmux and a.session is None and not (a.probe or a.tmux_socket_dir or a.mcp_socket_dir or a.dry_run)
+            and not sys.stdin.isatty()):
+        raise ValueError("--tmux needs an interactive terminal")  # a session may start detached, without one
+    if detachable(a) and not a.dry_run:
+        if a.backend == "bwrap" and not shutil.which("tmux"):
+            raise ValueError("Required tool missing: tmux")
+        # A background supervisor runs the sandbox; this terminal attaches (and may detach).
         return load_sessions_module().start(a, argv)
     if a.dry_run:
-        print(json.dumps({"agent": a.agent, "backend": a.backend, "workspace": str(Path(a.workspace).resolve()),
+        print(json.dumps({"agent": a.agent, "backend": a.backend, "mode": MODES.plan(a),
+                          "workspace": str(Path(a.workspace).resolve()),
                           "workspaces": [{"host": src, "sandbox": dest} for src, dest in workspace_targets(a)],
                           "workspace_mode": "ro" if a.workspace_ro else "rw", "mounts": a.mount,
                           "devices": [{"path": path, "kind": kind} for path, kind in devices(a)], "gpu": a.gpu,
+                          "device_grants": [{**{key: grant[key] for key in ("value", "by", "state", "decision",
+                                                                            "rule", "ruleset", "track")},
+                                             "nodes": list(grant["nodes"] or grant.get("pending") or [])}
+                                            for grant in device_grants(a)],
                           "limits": enforced_limits(a)[0],
                           "allow": a.allow, "https_hosts": allowed_hosts(a),
                           "https_networks": host_networks(allowed_hosts(a)), "offline": a.offline,
                           "dangerously_skip_permissions": a.dangerously_skip_permissions,
                           "egress_all_allow": a.egress_all_allow, "nameservers": nameservers(a),
                           "log_dir": str(a.log_dir.expanduser().resolve()) if a.log_dir else None,
-                          "gui": gui_config(a), "gui_wayland": a.gui_wayland, "tmux": a.tmux, "session": a.session,
+                          "gui": gui_config(a), "audio": getattr(a, "audio", None), "gui_wayland": a.gui_wayland,
+                          "tmux": a.tmux, "session": a.session,
+                          "name": a.start_name, "project_name": project_label(a), "detachable": detachable(a),
+                          "keep": a.keep_home,
                           "allow_tcp": [f"{addr}:{port}" for addr, port in tcp_targets(a)],
                           "host_ports": host_ports(a),
                           "network_profiles": a.profile,
@@ -3980,28 +7121,46 @@ def launch(argv):
                           "proxy": {"enabled": proxy_enabled(a), "no_inspect": a.no_inspect,
                                     "log_dir": str(Path(a.log_dir).expanduser()) if proxy_enabled(a) else None},
                           "privacy_rules": str(privacy_rules_dir(a)) if privacy_rules_dir(a) else None,
-                          "git_credentials": [{key: c[key] for key in ("url", "user", "env", "file", "credentials",
-                                                                       "line") if key in c}
+                          "log_debug": a.log_debug,
+                          "canaries": load_canary_module().Plan(a, "/root", argparse.Namespace(**globals())).plan(),
+                          "telemetry": telemetry_plan(a),
+                          "rulesets": [{"name": source["name"], "defaults": source["defaults"],
+                                        "http": [rule["id"] for rule in source["http"]],
+                                        "mcp": [rule["id"] for rule in source["mcp"]],
+                                        "devices": [rule["id"] for rule in source["devices"]],
+                                        "tool": [rule["id"] for rule in source["tool"]]}
+                                       for source in load_rulesets(a)],
+                          "git_credentials": [{key: c[key] for key in ("url", "user", "env", "file", "secret",
+                                                                       "credentials", "line") if key in c}
                                               for c, _ in git_tokens(a)],
+                          # sandbox-ai git-logins the proxy adds (servers and users; the tokens never)
+                          "git_logins": [{"url": c["url"], "user": c["user"]} for c, _ in registry_git_tokens(a)[0]],
                           "mcp": [{"name": name, "socket": str(mcp_socket_dir(name) / "server.sock")}
                                   for name in dict.fromkeys(a.mcp)],
                           "project_config": a.project_config,
                           "kits": kit_plan(a),
                           "network": a.network, "ip": a.ip, "ip6": a.ip6, "image": a.image,
+                          "sandbox_network": sandbox_network(a),
+                          "vpn": load_vpn_module().plan(a) if a.vpn else None,
                           "podman_url": a.podman_url,
                           "local_config": str(a.local_config) if a.local_config else None,
+                          "llm": load_llm_module().plan(a) if a.llm else None,
                           "copy_auth": a.copy_auth, "auth_file": str(a.auth_file) if a.auth_file else None,
                           "auth_mode": auth_mode(a), "auth_copies": auth_plan(a),
+                          "companions": companions(a),
                           "import_codex_auth": str(a.import_codex_auth) if a.import_codex_auth else None,
-                          "copies": a.copy, "env_names": a.env, "secret_env": a.secret_env, "agent_args": a.agent_args,
+                          "copies": a.copy, "env_names": a.env, "secret_env": a.secret_env,
+                          "api_keys": [{"host": host, "variable": name, "secret": secret}
+                                       for host, name, secret in api_key_values(a)],
+                          "publish": load_publish_logins_module().plan(publish_kinds(a), publish_logins_of(a)),
+                          "identity": identity_plan(a),
+                          "model": getattr(a, "model", None), "effort": getattr(a, "effort", None),
+                          "agent_args": a.agent_args,
                           "firejail_required": True}, indent=2))
         return 0
     if os.geteuid() == 0:
         raise ValueError("Run as an ordinary host user; both backends use a rootless user namespace")
     required = ["podman"] if a.backend == "podman" else ["bwrap", "firejail", "nft", "setpriv", "newuidmap", "newgidmap"] + ([] if a.offline else ["slirp4netns"])
-    if a.tmux and not a.probe and not a.tmux_socket_dir:
-        if not sys.stdin.isatty():
-            raise ValueError("--tmux needs an interactive terminal")
     if (a.tmux or a.tmux_socket_dir) and not a.probe and a.backend == "bwrap":
         required.append("tmux")
     for tool in required:
@@ -4018,9 +7177,18 @@ def launch(argv):
         binary = str(Path(found).resolve(strict=True))
         if not binary.startswith("/usr/"):
             a.runtime.append(str(Path(binary).parent))
+        # The agents --with, and the agent a helper's server runs for each task: the host's, like the lead's.
+        for agent in [*companions(a), *([a.agent] if getattr(a, "helper_of", None) else [])]:
+            found = shutil.which(agent)
+            if not found:
+                raise ValueError(f"Agent executable missing: {agent} "
+                                 f"({'the helper' if agent == a.agent else '--with ' + agent})")
+            where = str(Path(found).resolve(strict=True).parent)
+            if not where.startswith("/usr/") and where not in a.runtime:
+                a.runtime.append(where)
     for workspace in a.workspaces:
         prepare_workspace(workspace)
-    for private in (a.log_dir, a.gui_vnc, a.tmux_socket_dir, a.mcp_socket_dir):
+    for private in (a.log_dir, a.gui_vnc, a.tmux_socket_dir, a.mcp_socket_dir, a.mcp_approvals_dir):
         if private:
             private.expanduser().mkdir(mode=0o700, parents=True, exist_ok=True)
             private.expanduser().chmod(0o700)
@@ -4032,23 +7200,43 @@ def launch(argv):
         mcp = load_mcp_module()
         for name in dict.fromkeys(a.mcp):
             mcp.ensure_running(name, a)
-    hosts = resolve_pod_hosts(a, allowed_hosts(a)) if a.backend == "podman" else resolve_hosts(allowed_hosts(a))
+    hosts = None
+    remembered = [name for name in getattr(a, "remembered_hosts", []) if name in allowed_hosts(a)]
+    if not a.vpn:  # with --vpn the names are resolved through the tunnel, once it is up (below)
+        resolve = (lambda names: resolve_pod_hosts(a, names)) if a.backend == "podman" else resolve_hosts
+        hosts = resolve([name for name in allowed_hosts(a) if name not in remembered])
+        hosts.update(apply_remembered_pins(a, remembered, resolve))
+        settle_network(a, hosts, resolve)
     with tempfile.TemporaryDirectory(prefix="agent-sandbox-") as tmp, contextlib.ExitStack() as cleanup:
         session = Path(tmp)
+        if getattr(a, "foreground_start", False):
+            # The kept start's directory now: everything before could still refuse the start.
+            load_sessions_module().begin(a, argv)
+            cleanup.callback(load_sessions_module().discard_unstarted, a)
         home = a.state_dir.expanduser().absolute() if a.state_dir else session / "home"
         if home.is_symlink():
             raise ValueError("--state-dir must not be a symlink")
         home.mkdir(mode=0o700, parents=True, exist_ok=True)
         if home.stat().st_uid != os.getuid() or stat.S_IMODE(home.stat().st_mode) != 0o700:
             raise ValueError("--state-dir must be owned by you and have mode 0700")
+        if a.state_dir:
+            cleanup.enter_context(state_dir_lock(home))  # closed (O_CLOEXEC) in every child
+        if a.vpn:  # the pod with the tunnel first; the agent's names are resolved through it
+            names = allowed_hosts(a)
+            extra = [name for name in (load_llm_module().pinned_names(a) if a.llm else []) if name not in names]
+            found = load_vpn_module().agent_up(a, session, home, names + extra, cleanup)
+            hosts = {name: found[name] for name in names if name not in remembered}
+            hosts.update(apply_remembered_pins(a, remembered, lambda wanted: {n: found[n] for n in wanted if n in found}))
+            settle_network(a, hosts, lambda wanted: {name: found[name] for name in wanted})
         for source, dest in prepare_home(a, home):
             print(f"agent-sandbox: auth copied: {Path(source).expanduser()} -> /root/{dest}", file=sys.stderr)
         a.kit_mounts, notes, memory = prepare_kits(a, home, session / "kits")
         for note in notes:
             print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
+        a.canary_plan = plant_canaries(a, home, cleanup)  # after the auth copies and kits: never over them
         pair = claude_credential_pair(a, home)
         writeback = claude_writeback_state(pair) if pair and not a.probe else None
-        stored = store_writeback_state(a, home)
+        stored = [state for state in (store_writeback_state(a, home, agent) for agent in team(a)) if state]
         if a.agent == "claude" and auth_mode(a) != "none" and (home / AUTH_TARGETS["claude"]).exists():
             print(f"agent-sandbox: {claude_token_status(home / AUTH_TARGETS['claude'])}", file=sys.stderr)
         for port in host_ports(a):
@@ -4066,23 +7254,43 @@ def launch(argv):
             write_proxy_files(a, a.proxy_dir, hosts, log_name)
         a.control_dir = register_run(a, a.run_id, session)
         cleanup.callback(shutil.rmtree, a.control_dir, True)
+        if a.canary_plan:
+            a.canary_plan.arm(a.control_dir, a.log_dir)
+            cleanup.callback(a.canary_plan.drain)  # before the control directory goes: what is left is read
+        device_watch = start_devices(a)
+        history_event(a, "start")
         if asking(a):
             a.browser_dir = a.control_dir.with_name(a.control_dir.name + ".browser")
             a.browser_dir.mkdir(mode=0o700, exist_ok=True)
             cleanup.callback(shutil.rmtree, a.browser_dir, True)
             write_browser_shims(session / "bin")
+        mode = a.runtime_mode
         cfg = {"command": agent_command(a, binary), "env": agent_environment(a), "probe": a.probe,
+               # Who this sandbox is, for the process attribution in its logs and questions.
+               "sandbox": sandbox_identity(a), "log_debug": a.log_debug,
+               # The supervisor relays each MCP server for this run: the rules for tainted runs, untrusted tools.
+               "mcp_relay": {name: mcp_relay_config(a, name) for name in dict.fromkeys(a.mcp)},
+               # The rules for the agent's own tools, answered to its hooks (None: no hooks this run).
+               "hooks": hooks_config(a),
+               # The agent whose managed hooks (rule hooks, approved kit hooks) must hold: its version is checked.
+               "hook_agent": a.agent if managed_hooks(a) else None,
+               # A helper's command is its server (python3): the agent it runs is checked by its name.
+               "hook_binary": a.agent if getattr(a, "helper_of", None) else None,
+               "companion_hook_agents": list(companions(a)) if hooks_active(a) else [],
                # Values the supervisor's process log redacts by value (--env and --secret-env).
                "secret_names": sorted(set(a.env) | {v.partition("=")[0] for v in a.secret_env}),
                "tmux": "detached" if a.tmux_socket_dir else a.tmux,
                "proxy": {"log": log_name} if log_name else None,
                "ask": asking(a), "ask_quiet": list(ASK_QUIET),
                "ask_max_scope": getattr(a, "max_approval_scope", "always"),
+               # A strict security mode, which the supervisor holds run-time changes to (modes.py).
+               **({"mode": mode} if mode["refuses"] or mode["approval_scope"] != "always" else {}),
+               "ask_blocked": getattr(a, "blocked_approvals", {"hosts": [], "tcp": []}),
                "policy": getattr(a, "policy", {}),  # the supervisor holds run-time changes to it too
-               "pinned": list(hosts), "watch": [*(dest for _, dest in workspace_targets(a)), "/root", "/tmp",
+               "pinned": [*hosts, *a.llm_pins], "watch": [*(dest for _, dest in workspace_targets(a)), "/root", "/tmp",
                          *(parse_mount(m)[1] for m in a.mount)] if a.log_explicit else []}
         resolv, nsswitch = resolver_files(a)
-        files = {"config.json": json.dumps(cfg), "hosts": hosts_file(hosts),
+        files = {"config.json": json.dumps(cfg), "hosts": hosts_file({**hosts, **a.llm_pins}),
                  "resolv.conf": resolv, "nsswitch.conf": nsswitch,
                  "passwd": "root:x:0:0:Sandbox:/root:/bin/bash\n", "group": "root:x:0:\n",
                  "firewall.nft": firewall_rules(a.allow, [addr for values in hosts.values() for addr in values]
@@ -4090,40 +7298,79 @@ def launch(argv):
                                                 dns=nameservers(a), allow_all=a.egress_all_allow,
                                                 tcp=tcp_targets(a),
                                                 proxy={"port": PROXY_PORT, "loopback": host_ports(a)}
-                                                if log_name else None)}
+                                                if log_name else None, vpn_mark=getattr(a, "vpn_mark", None),
+                                                vpn_rules=getattr(a, "vpn_firewall", ()))}
         if gui_config(a):
             files["gui.json"] = json.dumps(gui_config(a))
+        if getattr(a, "audio", None) == "virtual":
+            files["audio.json"] = json.dumps({"kind": "virtual"})
+        npmrc = load_publish_logins_module().npmrc(publish_kinds(a), publish_logins_of(a)) \
+            if getattr(a, "publish", None) else None
+        if npmrc:
+            files["npmrc"] = npmrc
+        if managed_hooks(a):
+            files.update(hook_files(a))
         for name, content in files.items():
             path = session / name
+            path.parent.mkdir(mode=0o755, exist_ok=True)
             path.write_text(content)
             path.chmod(0o600 if name == "config.json" else 0o644)
         privacy_after_run = prepare_privacy(a, session)
         watching = threading.Event()
-        if asking(a):
+        if device_watch:
+            threading.Thread(target=load_devices_module().watch_devices, args=(device_watch, watching),
+                             daemon=True).start()
+        if asking(a) or (device_watch and devices(a, held=True)):
             # The agent's terminal is busy with the agent: questions are announced on the desktop.
             approvals = load_approvals_module()
+            (a.control_dir / "approvals").mkdir(mode=0o700, exist_ok=True)
             threading.Thread(target=approvals.watch, args=(a.control_dir / "approvals", watching),
                              daemon=True).start()
+        if asking(a):
             threading.Thread(target=approvals.serve_browser, args=(a.browser_dir / "open.sock",
                                                                    a.control_dir / "approvals", watching),
                              daemon=True).start()
+        if writeback and writeback["host_login"]:
+            # Refreshes reach the source (and other sandboxes' refreshes this one) during the run, not at its end.
+            login_watch = threading.Thread(target=watch_claude_login, args=(home, pair, writeback, watching),
+                                           daemon=True)
+            login_watch.start()
+        else:
+            login_watch = None
+        record_home_manifest(a, home)
         tools = tool_dirs_state(a)
+        activity, status = start_activity(a, home, log_name, cfg), None
+        # Not "memory": that name holds the project memory (save_memory below).
+        memory_watch = start_memory_watch(a, session)
         try:
-            return run_pod(a, session, home) if a.backend == "podman" else run_bwrap(a, session, home)
+            status = run_pod(a, session, home) if a.backend == "podman" else run_bwrap(a, session, home)
+            return status
         finally:
             watching.set()
+            for line in memory_watch.stop() if memory_watch is not None else []:
+                print(f"agent-sandbox: {printable(line)}", file=sys.stderr)
             for note in tool_dirs_changed(tools):
                 print(f"agent-sandbox: warning: {printable(note)}", file=sys.stderr)
+            # Each login on its own: one that fails never keeps another's refresh from the store, and the
+            # agent's own exit status survives any of them.
             try:
+                if login_watch is not None:
+                    login_watch.join(CLAUDE_LOCK_TIMEOUT + 5)
+                for note in claude_sync_notes(writeback):
+                    print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
                 message = claude_writeback(home, pair, writeback) if writeback else None
                 if message:
                     print(f"agent-sandbox: {message}", file=sys.stderr)
-                message = store_writeback(home, a, stored) if stored else None
-                if message:
-                    print(f"agent-sandbox: {message}", file=sys.stderr)
             except Exception as exc:  # noqa: BLE001 - whatever the agent left, keep its exit status
-                # The agent's own exit status must survive a failed write-back.
-                print(f"agent-sandbox: could not write back Claude credentials: {exc}", file=sys.stderr)
+                print(f"agent-sandbox: could not write back the Claude login: {exc}", file=sys.stderr)
+            for state in stored:  # the lead's and the --with agents' logins from the store
+                try:
+                    message = store_writeback(home, a, state)
+                    if message:
+                        print(f"agent-sandbox: {message}", file=sys.stderr)
+                except Exception as exc:  # noqa: BLE001 - as above
+                    print(f"agent-sandbox: could not write back the {state.get('agent') or a.agent} login to the "
+                          f"login store: {exc}", file=sys.stderr)
             if memory is not None:
                 try:
                     save_memory(a, home, memory)
@@ -4139,6 +7386,15 @@ def launch(argv):
             if log_name:
                 for line in connection_summary(a.log_dir.expanduser() / log_name):
                     print(f"agent-sandbox: {printable(line)}", file=sys.stderr)
+            if activity is not None:  # last (a signal here skips no other cleanup); before the HOME goes
+                activity.finish(status)
+            ended = sys.exc_info()[1]
+            history_event(a, "exit", status if status is not None else
+                          ended.code if isinstance(ended, SystemExit) and isinstance(ended.code, int) else None)
+            if getattr(a, "foreground_start", False):
+                print(f"agent-sandbox: {printable(a.start_name)} keeps its HOME; continue it with: sandbox-ai resume "
+                      f"{printable(a.start_name)} (or remove it: sandbox-ai delete {printable(a.start_name)} --yes)",
+                      file=sys.stderr)
 
 
 if __name__ == "__main__":

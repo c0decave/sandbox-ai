@@ -1,0 +1,26 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "pixel-art-factory",
+  "title": "Pixel art factory",
+  "description": "A logo for the project, drawn with code (Pillow, SVG, shaders) on a virtual screen, only the provider; the GPU if given.",
+  "category": "fun",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--gui",
+    "--gpu",
+    "{gpu}"
+  ],
+  "values": {
+    "gpu": {
+      "label": "GPU (dri or nvidia), for shaders",
+      "kind": "text",
+      "optional": true
+    }
+  },
+  "prompt": "Design a logo for this project, drawn only with code (Pillow, SVG or a shader): three variants in /work/logo/, each with the code that makes it, and a screenshot of them side by side."
+}

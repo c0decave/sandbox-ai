@@ -99,6 +99,41 @@ def suggestion(record):
     return f"--allow {ip}", f"--allow {ip}", f"{protocol or 'traffic'} to that address (all ports and protocols)"
 
 
+def by(record, pid=False):
+    """" by NAME" (with PID: " by NAME (pid N)") for a record that names the process behind it, else ""."""
+    process = record.get("process")
+    if not isinstance(process, dict):
+        return ""
+    if "unknown" in process:
+        return " by a process not identified"
+    number = process.get("ns_pid") or process.get("pid")
+    return f" by {process.get('comm', '?')}" + (f" (pid {number})" if pid and number else "")
+
+
+def refusals(directory, limit=20):
+    """The newest LIMIT refusals of the logs in DIRECTORY with what is known of them: when, what, why, the
+    process (name, PID, program, command line, working directory, its parents) and the sandbox, and what the
+    client sent (server name, ALPN, request line, Host, DNS name)."""
+    found = []
+    for path in [*sorted(Path(directory).glob("connections-*.jsonl")), Path(directory) / "egress-denied.jsonl"]:
+        records, _ = read_records(path, limit=20_000)
+        for record in records:
+            if path.name.startswith("connections-") and record.get("event") != "denied":
+                continue
+            process = record.get("process") if isinstance(record.get("process"), dict) else {}
+            sandbox = record.get("sandbox") if isinstance(record.get("sandbox"), dict) else {}
+            target = record.get("url") or (f"DNS {record['host']}" if path.name.startswith("egress") and
+                                           record.get("host") else None) or \
+                " ".join(str(record[k]) for k in ("protocol", "address", "port", "destination") if record.get(k))
+            found.append({
+                "time": record.get("time", ""), "what": f"{record.get('method', '')} {target}".strip(),
+                "reason": record.get("reason") or ("dropped by the firewall" if path.name.startswith("egress") else ""),
+                "rule": record.get("rule"), "process": process, "sandbox": sandbox,
+                "client": {key: record[key] for key in ("sni", "alpn", "http_host", "request_line", "state")
+                           if record.get(key)}})
+    return sorted(found, key=lambda entry: str(entry["time"]))[-limit:]
+
+
 def summarize(directory):
     denied, denied_skipped = read_records(Path(directory) / "egress-denied.jsonl")
     files, files_skipped = read_records(Path(directory) / "files.jsonl")
@@ -106,9 +141,9 @@ def summarize(directory):
     suggestions = {}
     for record in denied:
         if "host" in record:
-            targets[f"DNS {record['host']}"] += 1
+            targets[f"DNS {record['host']}{by(record)}"] += 1
         else:
-            targets[f"{record.get('protocol', '?')} {record.get('address', '?')}:{record.get('port', '-')}"] += 1
+            targets[f"{record.get('protocol', '?')} {record.get('address', '?')}:{record.get('port', '-')}{by(record)}"] += 1
         found = suggestion(record)
         if found:
             key, option, why = found
@@ -155,7 +190,8 @@ def telemetry(directory):
         if isinstance(push, dict):
             pushes["ok" if push.get("ok") else "refused"] += 1
         if event in ("denied", "tls-refused", "tls-upstream-failed"):
-            refusals[f"{event} {record.get('destination') or host}"] += 1
+            refusals[f"{event} {record.get('destination') or host}"
+                     + (f" rule {record['rule']}" if record.get("rule") else "") + by(record)] += 1
     commands = Counter((str(r.get("command", "")).split() or ["?"])[0].rsplit("/", 1)[-1] for r in processes)
     return {"requests": sum(hosts.values()), "hosts": hosts.most_common(20), "model_calls": dict(models),
             "tokens": dict(tokens), "pushes": pushes, "credentials": credentials.most_common(20),
@@ -164,7 +200,8 @@ def telemetry(directory):
 
 
 def tool_calls(state_root=None):
-    """{server: [(time, tool)]} of the MCP servers' supervisor logs."""
+    """{server: [(time, tool, decision)]} of the MCP servers' tool calls: mcp-calls.jsonl, and the
+    `sandbox-ai-mcp-call` lines older versions wrote into supervisor.log."""
     root = Path(state_root or os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "sandbox-ai" / "mcp"
     calls = {}
     try:
@@ -172,22 +209,25 @@ def tool_calls(state_root=None):
     except OSError:
         return calls
     for server in servers:
-        try:
-            with open(server / "supervisor.log", "rb") as stream:  # the newest 4 MiB: the log is not rotated
-                stream.seek(max(0, stream.seek(0, os.SEEK_END) - (4 << 20)))
-                lines = stream.read().decode("utf-8", "replace").splitlines()[-5000:]
-        except OSError:
-            continue
-        for line in lines:
-            if line.startswith("sandbox-ai-mcp-call "):
+        for name, prefix in (("supervisor.log", "sandbox-ai-mcp-call "), ("mcp-calls.jsonl", "")):
+            try:
+                with open(server / name, "rb") as stream:  # the newest 4 MiB: the logs are not rotated
+                    stream.seek(max(0, stream.seek(0, os.SEEK_END) - (4 << 20)))
+                    lines = stream.read().decode("utf-8", "replace").splitlines()[-5000:]
+            except OSError:
+                continue
+            for line in lines:
+                if not line.startswith(prefix):
+                    continue
                 try:
-                    record = json.loads(line.split(" ", 1)[1])
+                    record = json.loads(line[len(prefix):])
                 except (ValueError, RecursionError):
                     continue
-                if not isinstance(record, dict):  # the server's own stderr shares this log
-                    continue
+                if not isinstance(record, dict) or record.get("event", "call") != "call":
+                    continue  # the server's own stderr shares supervisor.log; results and refusals are not calls
                 calls.setdefault(server.name, []).append((str(record.get("time", ""))[:40],
-                                                          str(record.get("tool", ""))[:200]))
+                                                          str(record.get("tool", ""))[:200],
+                                                          str(record.get("decision", "allow"))[:10]))
     return calls
 
 
@@ -235,8 +275,32 @@ def report(summary, out=print):
             out(f"  refused {p(entry)} ({count}x)")
         out(f"Processes started: {seen['processes']}" + (": " + ", ".join(
             f"{p(name)} {count}" for name, count in seen["programs"][:10]) if seen["programs"] else ""))
+    shown_refusals = summary.get("refusals") or []
+    if shown_refusals:
+        out("")
+        out(f"Refused, newest last ({len(shown_refusals)}):")
+    for entry in shown_refusals:
+        process, sandbox, client = entry["process"], entry["sandbox"], entry["client"]
+        out(f"  {p(entry['time'])}  {p(entry['what'])[:200]}" + (f"  [rule {p(entry['rule'])}]" if entry["rule"] else ""))
+        if entry["reason"]:
+            out(f"      why:     {p(entry['reason'])[:300]}")
+        if "unknown" in process:
+            out(f"      process: not identified ({p(process['unknown'])})")
+        elif process:
+            out(f"      process: {p(process.get('comm', '?'))} (pid {p(process.get('ns_pid') or process.get('pid'))}, "
+                f"uid {p(process.get('uid', '?'))}) {p(process.get('exe') or '')}")
+            out(f"      command: {p(' '.join(str(a) for a in process.get('argv') or []))[:300]}")
+            if process.get("cwd") or process.get("parents"):
+                out(f"      in:      {p(process.get('cwd') or '?')}, started by "
+                    f"{p(' < '.join(str(c) for c in process.get('parents') or []) or '?')}")
+        if sandbox:
+            out(f"      sandbox: " + ", ".join(f"{key} {p(value)}" for key, value in sandbox.items()))
+        if client:
+            out(f"      sent:    " + ", ".join(f"{key} {p(value)}" for key, value in client.items())[:300])
     for server, calls in (summary.get("tool_calls") or {}).items():
-        out(f"MCP {p(server)}: {len(calls)} tool call(s): " + ", ".join(sorted({p(str(t)) for _, t in calls})[:10]))
+        refused = sum(1 for call in calls if call[2:] and call[2] != "allow")
+        out(f"MCP {p(server)}: {len(calls)} tool call(s)" + (f", {refused} not allowed outright" if refused else "")
+            + ": " + ", ".join(sorted({p(str(call[1])) for call in calls})[:10]))
     return 0
 
 
@@ -254,6 +318,7 @@ def cli(argv):
     summary = summarize(directory)
     summary["telemetry"] = telemetry(directory)
     summary["tool_calls"] = tool_calls()
+    summary["refusals"] = refusals(directory)
     if a.json:
         print(json.dumps(summary, indent=2))
         return 0

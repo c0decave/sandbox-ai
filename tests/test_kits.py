@@ -99,17 +99,18 @@ def test_demo_marketplace_and_plugin():
 
 
 def test_packaging_ships_templates_and_marketplace():
-    """Installed from PyPI, the package data must hold every template and marketplace file."""
+    """Installed from PyPI, the package data must hold every file of sandbox/ that is not Python: templates, the
+    marketplace, the web interface, the presets, the signers' keys (each new kind of file is caught here)."""
     import fnmatch
     tomllib = pytest.importorskip("tomllib")  # Python 3.11+
     patterns = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["setuptools"]["package-data"]["sandbox_ai"]
-    for base in (k.TEMPLATES, k.MARKETPLACE):
-        for path in base.rglob("*"):
-            if path.is_file():
-                relative = str(path.relative_to(ROOT / "sandbox"))
-                assert any(fnmatch.fnmatch(relative, pattern) and relative.count("/") == pattern.count("/")
-                           for pattern in patterns), relative
-    assert "graft sandbox/templates" in (ROOT / "MANIFEST.in").read_text()
+    for path in (ROOT / "sandbox").rglob("*"):
+        if path.is_file() and path.suffix not in (".py", ".pyc") and "__pycache__" not in path.parts:
+            relative = str(path.relative_to(ROOT / "sandbox"))
+            assert any(fnmatch.fnmatch(relative, pattern) and relative.count("/") == pattern.count("/")
+                       for pattern in patterns), relative
+    manifest = (ROOT / "MANIFEST.in").read_text()
+    assert all(f"graft sandbox/{name}" in manifest for name in ("templates", "web", "presets"))
 
 
 # --- default kit -----------------------------------------------------------------------------------
@@ -466,6 +467,97 @@ def test_plugins_sync_installs_what_kits_declare_in_a_narrow_sandbox(tmp_path):
     assert plugins.sync(out=lines.append, runner=again) == 0 and again.commands == []
 
 
+def test_egm_is_offered_pinned_but_not_enabled_by_default():
+    manifest = json.loads((k.MARKETPLACE / ".claude-plugin/marketplace.json").read_text())
+    entry = next(e for e in manifest["plugins"] if e["name"] == "egm")
+    # A full commit: what is installed only changes when sandbox-ai moves the pin.
+    assert entry["source"]["source"] == "github" and entry["source"]["repo"] == "google/elephant-goldfish-model"
+    assert len(entry["source"]["sha"]) == 40 and set(entry["source"]["sha"]) <= set("0123456789abcdef")
+    template = json.loads((k.TEMPLATES / "claude/marketplaces.json").read_text())
+    assert "egm@sandbox-ai" not in template["plugins"]
+
+
+def test_plugins_sync_reaches_github_only_for_a_github_plugin_of_the_own_marketplace(tmp_path):
+    make(data() / "kits/egm/claude", {"marketplaces.json": json.dumps({
+        "marketplaces": {"sandbox-ai": {"source": {"source": "directory", "path": "/sandbox/marketplace"}}},
+        "plugins": ["egm@sandbox-ai"]})})
+    fake = FakeClaude()
+    assert plugins.sync(out=lambda line: None, runner=fake) == 0
+    installs = {c[-1]: c for c in fake.commands if "install" in c}
+    assert "--allow-github" in installs["egm@sandbox-ai"] and "--allow-host" not in installs["egm@sandbox-ai"]
+    assert "--allow-github" not in installs["sandcastle@sandbox-ai"]
+    assert "--allow-github" not in next(c for c in fake.commands if "/sandbox/marketplace" in c)
+
+
+# --- the built-in kit egm ----------------------------------------------------------------------------
+
+def test_builtin_kit_egm_is_claude_only_and_a_kit_of_the_users_replaces_it(tmp_path):
+    assert k.kit_names(k.BUILTIN_KITS) == ["egm", "superpowers"] and k.builtin_kits("claude") == ["egm", "superpowers"]
+    assert k.builtin_kits("codex") == k.builtin_kits("opencode") == []
+    document = json.loads((k.BUILTIN_KITS / "egm/claude/marketplaces.json").read_text())
+    assert document["plugins"] == ["egm@sandbox-ai"]
+    # Only marketplaces.json: a CLAUDE.md here would clash with the default kit's memory template.
+    assert sorted(p.name for p in (k.BUILTIN_KITS / "egm/claude").iterdir()) == ["marketplaces.json"]
+    assert k.kit_path("egm", "claude") == k.BUILTIN_KITS / "egm/claude"
+    assert k.available_kits("claude") == ["egm", "superpowers"] and k.available_kits("claude", builtin=False) == []
+    assert k.sources(args(tmp_path, "claude", "--kit", "egm"))[-1] == ("kit egm", k.BUILTIN_KITS / "egm/claude")
+    for agent in ("codex", "opencode"):
+        with pytest.raises(ValueError, match=f"built-in kit egm is not available for {agent} \\(only for claude\\)"):
+            k.sources(s.parse_args([agent, "--kit", "egm"]))
+    # The user's own kit egm (for that agent) wins.
+    make(data() / "kits/egm/claude", {"skills/mine/SKILL.md": "x"})
+    assert k.kit_path("egm", "claude") == data() / "kits/egm/claude" and k.builtin_kits("claude") == ["superpowers"]
+    assert k.available_kits("claude") == ["egm", "superpowers"]
+
+
+def test_builtin_kit_egm_plan_and_install_hint(tmp_path):
+    k.ensure_default_home("claude")
+    plan = s.kit_plan(args(tmp_path, "claude", "--kit", "egm"))
+    assert plan["sources"][-1] == {"kit": "kit egm", "path": str(k.BUILTIN_KITS / "egm/claude")}
+    assert plan["plugins"]["missing"] == ["sandcastle@sandbox-ai", "egm@sandbox-ai"]
+    assert "sandbox-ai" in plan["plugins"]["marketplaces"]
+    assert k.install_command(["egm@sandbox-ai"]) == "sandbox-ai plugins claude --kit egm"
+    assert k.install_command(["sandcastle@sandbox-ai"]) == "sandbox-ai plugins claude"
+    home, notes = tmp_path / "home", []
+    home.mkdir()
+    s.claude_plugins(home, {}, ["egm@sandbox-ai"], notes)
+    assert notes[0].endswith("install them with: sandbox-ai plugins claude --kit egm")
+    # Without --kit egm nothing enables it.
+    assert "egm@sandbox-ai" not in s.kit_plan(args(tmp_path, "claude"))["plugins"]["missing"]
+
+
+def test_plugins_sync_installs_the_builtin_kit_only_on_request(tmp_path, monkeypatch):
+    fake = FakeClaude()
+    assert plugins.sync(out=lambda line: None, runner=fake) == 0
+    assert "egm@sandbox-ai" not in [c[-1] for c in fake.commands]
+    fake = FakeClaude()
+    assert plugins.sync(out=lambda line: None, runner=fake, builtin=["egm"]) == 0
+    install = next(c for c in fake.commands if c[-1] == "egm@sandbox-ai")
+    assert "--allow-github" in install and "--kit" not in install
+    with pytest.raises(ValueError, match="no built-in kit of that name for claude \\(built-in: egm, superpowers\\)"):
+        plugins.sync(out=lambda line: None, runner=FakeClaude(), builtin=["nope"])
+    lines = []
+    plugins.status(lines.append)
+    assert any("built-in kit egm (--kit egm): egm@sandbox-ai" in line and "->" not in line for line in lines)
+    # The command line: --kit is sandbox-ai plugins' own, not handed to the store sandbox.
+    seen = []
+    monkeypatch.setattr(plugins, "sync", lambda options, update, builtin=(): seen.append((options, builtin)) or 0)
+    assert plugins.cli(["claude", "--kit", "egm", "--backend", "bwrap"]) == 0
+    assert seen == [(["--backend", "bwrap"], ["egm"])]
+    ran = []
+    monkeypatch.setattr(plugins.subprocess, "run", lambda command: ran.append(command)
+                        or subprocess.CompletedProcess(command, 0))
+    assert plugins.cli(["claude", "--kit", "egm", "--", "update", "egm@sandbox-ai"]) == 0
+    assert "--allow-github" in ran[0] and "--kit" not in ran[0]
+
+
+def test_plugins_status_names_an_uninstalled_builtin_kit():
+    lines = []
+    plugins.status(lines.append)
+    assert any("built-in kit egm (--kit egm): egm@sandbox-ai (not installed) -> sandbox-ai plugins claude --kit egm"
+               in line for line in lines)
+
+
 def test_plugins_sync_reports_failures_and_renamed_marketplaces(tmp_path):
     k.ensure_default_home("claude")
     make(data() / "kits/x/claude", {"marketplaces.json": json.dumps({
@@ -558,13 +650,18 @@ class Prompter:
 
 def test_wizard_new_configuration_offers_kits_only_when_there_are_some():
     p = Prompter([])
-    assert wizard.ask_new_kits(p, "claude") == [] and p.questions == []
+    assert wizard.ask_new_kits(p, "codex") == [] and p.questions == []
     assert "project memory on" in p.lines[0]
+    # Claude has the built-in kit egm: named, not asked for, while the user has no kits of their own.
+    p = Prompter([])
+    assert wizard.ask_new_kits(p, "claude") == [] and p.questions == []
+    assert "Built-in kits for claude: egm, superpowers; choose them later with: sandbox-ai wizard edit, part k" in p.lines[1]
     make(data() / "kits/review/claude", {"skills/a/SKILL.md": "x"})
     make(data() / "kits/python/codex", {"skills/a/SKILL.md": "x"})
-    p = Prompter(["nope, review", "review"])
-    assert wizard.ask_new_kits(p, "claude") == ["--kit", "review"]
-    assert "available for claude: review)" in p.questions[0] and any("No kit 'nope'" in l for l in p.lines)
+    p = Prompter(["nope, review", "review, egm"])
+    assert wizard.ask_new_kits(p, "claude") == ["--kit", "review", "--kit", "egm"]
+    assert "available for claude: egm (built-in), review, superpowers (built-in))" in p.questions[0]
+    assert any("No kit 'nope'" in l for l in p.lines)
 
 
 def test_wizard_edit_kits_round_trip(tmp_path):
@@ -888,3 +985,15 @@ def test_builtin_skill_ships_for_every_agent_and_a_kit_can_replace_it(tmp_path):
     label, path = plan["entries"]["skills"]["sandbox-ai"]
     assert label.startswith("kit-dir") and (path / "SKILL.md").read_text().endswith("mine")
     assert any("replaces the built-in one" in note for note in plan["notes"])
+
+
+def test_superpowers_is_offered_pinned_with_a_built_in_kit_but_not_by_default():
+    manifest = json.loads((k.MARKETPLACE / ".claude-plugin/marketplace.json").read_text())
+    entry = next(e for e in manifest["plugins"] if e["name"] == "superpowers")
+    assert entry["source"] == {"source": "github", "repo": "obra/superpowers",
+                               "sha": "22f0b463e7a5e579904dd6211a520321035526f7"}  # the commit of tag v7.0.2
+    assert entry["license"] == "MIT" and entry["version"] == "7.0.2"
+    kit = json.loads((k.BUILTIN_KITS / "superpowers/claude/marketplaces.json").read_text())
+    assert kit["plugins"] == ["superpowers@sandbox-ai"] and set(kit["marketplaces"]) == {"sandbox-ai"}
+    assert "superpowers@sandbox-ai" not in json.loads((k.TEMPLATES / "claude/marketplaces.json").read_text())["plugins"]
+    assert "superpowers" in k.builtin_kits("claude") and "superpowers" not in k.builtin_kits("codex")

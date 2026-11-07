@@ -1,0 +1,20 @@
+# Written by sandbox-ai for --llm team at every start (codex --profile sandbox-ai-llm).
+model_provider = "llm-team"
+model = "qwen3-coder-30b"
+check_for_update_on_startup = false
+web_search = "disabled"
+
+[model_providers.llm-team]
+name = "team (vLLM)"
+base_url = "https://llm.example.org:8443/gw/v1"
+env_key = "SANDBOX_AI_LLM_KEY"
+wire_api = "responses"
+
+[analytics]
+enabled = false
+
+[otel]
+metrics_exporter = "none"
+
+[features]
+plugins = false

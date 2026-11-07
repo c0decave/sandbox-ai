@@ -49,3 +49,24 @@ def private_runtime_state(request, tmp_path_factory, monkeypatch):
     if request.node.get_closest_marker("agent_live") is None:
         monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path_factory.mktemp("xdg-runtime")))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("xdg-state")))
+
+
+@pytest.fixture(autouse=True)
+def writable_tmp_path(request):
+    """After each test, every directory under its tmp_path is writable again (a test may leave a read-only tree,
+    as an installed MCP rootfs is). Otherwise pytest cannot remove old base directories, keeps each run's whole
+    basetemp as garbage-*, and /tmp - a tmpfs in a sandbox, so memory - fills up run by run."""
+    if "tmp_path" not in request.fixturenames:
+        yield
+        return
+    import os
+    root = request.getfixturevalue("tmp_path")  # the test uses it anyway; taken now, while it exists
+    yield
+    for directory, dirs, _ in os.walk(root):
+        for name in dirs:
+            child = os.path.join(directory, name)
+            if not os.path.islink(child):
+                try:
+                    os.chmod(child, os.lstat(child).st_mode | 0o700)
+                except OSError:
+                    pass

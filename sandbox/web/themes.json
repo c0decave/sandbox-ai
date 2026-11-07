@@ -1,0 +1,532 @@
+{
+ "comment": "The desktop app's themes (sandbox_ai_app/theme.py THEMES_DATA), for the web interface; the app's tests/test_theme.py checks that both agree.",
+ "themes": {
+  "light": {
+   "label": "light",
+   "dark": false,
+   "colors": {
+    "window": "#f5f6f8",
+    "base": "#ffffff",
+    "alternate": "#f7f8fa",
+    "text": "#1d1f23",
+    "secondary": "#575c66",
+    "placeholder": "#6b707a",
+    "button": "#ffffff",
+    "border": "#828893",
+    "highlight": "#2563eb",
+    "highlight_text": "#ffffff",
+    "accent": "#2563eb",
+    "accent_text": "#ffffff",
+    "danger": "#b42318",
+    "tooltip": "#ffffff",
+    "disabled": "#8a8f98",
+    "nav": "#eceef2",
+    "nav_text": "#2b2f36",
+    "nav_selected": "#dbe6ff",
+    "nav_selected_text": "#1d3f99",
+    "title": "#111318",
+    "canvas": "#f0f2f5",
+    "grid": "#818791",
+    "node": "#ffffff",
+    "node_header": "#e8eefc"
+   },
+   "status": {
+    "ok": "#16692b",
+    "warn": "#8a5300",
+    "bad": "#b42318",
+    "muted": "#575c66"
+   },
+   "font": {
+    "families": [
+     "Inter",
+     "Cantarell",
+     "Noto Sans",
+     "Segoe UI",
+     "Ubuntu",
+     "DejaVu Sans",
+     "sans-serif"
+    ],
+    "size": 10
+   },
+   "radius": 8,
+   "bevel": false,
+   "terminal": {
+    "background": "#ffffff",
+    "foreground": "#1d1f23",
+    "cursor": "#2563eb",
+    "selectionBackground": "#c7d7fe"
+   }
+  },
+  "dark": {
+   "label": "dark",
+   "dark": true,
+   "colors": {
+    "window": "#17191d",
+    "base": "#1f2228",
+    "alternate": "#23272e",
+    "text": "#e6e8eb",
+    "secondary": "#a9afb9",
+    "placeholder": "#959ba6",
+    "button": "#262a31",
+    "border": "#6b727e",
+    "highlight": "#3a63c8",
+    "highlight_text": "#ffffff",
+    "accent": "#7aa2ff",
+    "accent_text": "#0b1020",
+    "danger": "#ff8a80",
+    "tooltip": "#262a31",
+    "disabled": "#80868f",
+    "nav": "#121418",
+    "nav_text": "#c9cdd4",
+    "nav_selected": "#26324d",
+    "nav_selected_text": "#dbe5ff",
+    "title": "#f3f4f6",
+    "canvas": "#14161a",
+    "grid": "#626975",
+    "node": "#1f2228",
+    "node_header": "#28334a"
+   },
+   "status": {
+    "ok": "#7ddc8f",
+    "warn": "#ffc46b",
+    "bad": "#ff8a80",
+    "muted": "#a9afb9"
+   },
+   "font": {
+    "families": [
+     "Inter",
+     "Cantarell",
+     "Noto Sans",
+     "Segoe UI",
+     "Ubuntu",
+     "DejaVu Sans",
+     "sans-serif"
+    ],
+    "size": 10
+   },
+   "radius": 8,
+   "bevel": false,
+   "terminal": {
+    "background": "#14161a",
+    "foreground": "#e6e8eb",
+    "cursor": "#7aa2ff",
+    "selectionBackground": "#2c4a8a"
+   }
+  },
+  "hacker": {
+   "label": "hacker",
+   "dark": true,
+   "colors": {
+    "window": "#000000",
+    "base": "#050a05",
+    "alternate": "#081108",
+    "text": "#33ff66",
+    "secondary": "#22c24d",
+    "placeholder": "#1fae45",
+    "button": "#031003",
+    "border": "#1f9e40",
+    "highlight": "#33ff66",
+    "highlight_text": "#000000",
+    "accent": "#33ff66",
+    "accent_text": "#000000",
+    "danger": "#ff5555",
+    "tooltip": "#031003",
+    "disabled": "#1b7a33",
+    "nav": "#000000",
+    "nav_text": "#33ff66",
+    "nav_selected": "#0b3d18",
+    "nav_selected_text": "#9dffb5",
+    "title": "#66ff8c",
+    "canvas": "#000000",
+    "grid": "#178a35",
+    "node": "#030c03",
+    "node_header": "#0b3d18"
+   },
+   "status": {
+    "ok": "#33ff66",
+    "warn": "#e6ff33",
+    "bad": "#ff5555",
+    "muted": "#22c24d"
+   },
+   "font": {
+    "families": [
+     "JetBrains Mono",
+     "Fira Code",
+     "Cascadia Mono",
+     "DejaVu Sans Mono",
+     "Liberation Mono",
+     "monospace"
+    ],
+    "size": 10
+   },
+   "radius": 0,
+   "bevel": false,
+   "extra": "hacker",
+   "terminal": {
+    "background": "#000000",
+    "foreground": "#33ff66",
+    "cursor": "#33ff66",
+    "selectionBackground": "#0b5a22"
+   }
+  },
+  "cyberpunk": {
+   "label": "cyberpunk",
+   "dark": true,
+   "colors": {
+    "window": "#0d0221",
+    "base": "#150533",
+    "alternate": "#1b0840",
+    "text": "#f2e9ff",
+    "secondary": "#05d9e8",
+    "placeholder": "#9a86c9",
+    "button": "#1e0a4a",
+    "border": "#c03fd0",
+    "highlight": "#ff2a6d",
+    "highlight_text": "#0d0221",
+    "accent": "#ff2a6d",
+    "accent_text": "#0d0221",
+    "danger": "#ff6b8b",
+    "tooltip": "#1e0a4a",
+    "disabled": "#7e6aa8",
+    "nav": "#08011a",
+    "nav_text": "#05d9e8",
+    "nav_selected": "#ff2a6d",
+    "nav_selected_text": "#0d0221",
+    "title": "#f9f002",
+    "canvas": "#0a011c",
+    "grid": "#8d36b9",
+    "node": "#170639",
+    "node_header": "#3a0f66"
+   },
+   "status": {
+    "ok": "#3dffb0",
+    "warn": "#f9f002",
+    "bad": "#ff6b8b",
+    "muted": "#b8a6e6"
+   },
+   "font": {
+    "families": [
+     "Rajdhani",
+     "Orbitron",
+     "Exo 2",
+     "Inter",
+     "Cantarell",
+     "Noto Sans",
+     "Segoe UI",
+     "Ubuntu",
+     "DejaVu Sans",
+     "sans-serif"
+    ],
+    "size": 10
+   },
+   "radius": 2,
+   "bevel": false,
+   "extra": "cyberpunk",
+   "terminal": {
+    "background": "#0a011c",
+    "foreground": "#f2e9ff",
+    "cursor": "#ff2a6d",
+    "selectionBackground": "#5b1a7a"
+   }
+  },
+  "amber": {
+   "label": "amber",
+   "dark": true,
+   "colors": {
+    "window": "#0f0900",
+    "base": "#160d00",
+    "alternate": "#1d1200",
+    "text": "#ffb000",
+    "secondary": "#d99400",
+    "placeholder": "#c48600",
+    "button": "#1d1200",
+    "border": "#a86f00",
+    "highlight": "#ffb000",
+    "highlight_text": "#120a00",
+    "accent": "#ffb000",
+    "accent_text": "#120a00",
+    "danger": "#ff7043",
+    "tooltip": "#1d1200",
+    "disabled": "#8a5c00",
+    "nav": "#0a0600",
+    "nav_text": "#ffb000",
+    "nav_selected": "#4a3000",
+    "nav_selected_text": "#ffd27a",
+    "title": "#ffc94d",
+    "canvas": "#0a0600",
+    "grid": "#8f5f00",
+    "node": "#140c00",
+    "node_header": "#3d2700"
+   },
+   "status": {
+    "ok": "#ffd27a",
+    "warn": "#ff9e2c",
+    "bad": "#ff7043",
+    "muted": "#d99400"
+   },
+   "font": {
+    "families": [
+     "JetBrains Mono",
+     "Fira Code",
+     "Cascadia Mono",
+     "DejaVu Sans Mono",
+     "Liberation Mono",
+     "monospace"
+    ],
+    "size": 10
+   },
+   "radius": 0,
+   "bevel": false,
+   "extra": "amber",
+   "terminal": {
+    "background": "#0a0600",
+    "foreground": "#ffb000",
+    "cursor": "#ffb000",
+    "selectionBackground": "#5c3b00"
+   }
+  },
+  "unicorn": {
+   "label": "unicorn",
+   "dark": false,
+   "colors": {
+    "window": "#fff4fb",
+    "base": "#ffffff",
+    "alternate": "#fdf2ff",
+    "text": "#3b1f4a",
+    "secondary": "#6e4c84",
+    "placeholder": "#7d5d92",
+    "button": "#ffffff",
+    "border": "#a878bd",
+    "highlight": "#a020c8",
+    "highlight_text": "#ffffff",
+    "accent": "#a020c8",
+    "accent_text": "#ffffff",
+    "danger": "#c2185b",
+    "tooltip": "#fffaff",
+    "disabled": "#a58fb3",
+    "nav": "#fbe3f6",
+    "nav_text": "#4a2160",
+    "nav_selected": "#e7d1ff",
+    "nav_selected_text": "#5b118a",
+    "title": "#7a1fa2",
+    "canvas": "#fff7fd",
+    "grid": "#aa77bb",
+    "node": "#ffffff",
+    "node_header": "#f6defb"
+   },
+   "status": {
+    "ok": "#1d7a4d",
+    "warn": "#9a4d00",
+    "bad": "#c2185b",
+    "muted": "#6e4c84"
+   },
+   "font": {
+    "families": [
+     "Nunito",
+     "Quicksand",
+     "Comfortaa",
+     "Inter",
+     "Cantarell",
+     "Noto Sans",
+     "Segoe UI",
+     "Ubuntu",
+     "DejaVu Sans",
+     "sans-serif"
+    ],
+    "size": 10
+   },
+   "radius": 14,
+   "bevel": false,
+   "extra": "unicorn",
+   "gradient": [
+    "#ffd6f0",
+    "#e7d1ff",
+    "#d3f5ff",
+    "#d6ffe8"
+   ],
+   "terminal": {
+    "background": "#fff7fd",
+    "foreground": "#3b1f4a",
+    "cursor": "#a020c8",
+    "selectionBackground": "#ead2ff"
+   }
+  },
+  "win311": {
+   "label": "Windows 3.11",
+   "dark": false,
+   "colors": {
+    "window": "#c0c0c0",
+    "base": "#ffffff",
+    "alternate": "#f0f0f0",
+    "text": "#000000",
+    "secondary": "#303030",
+    "placeholder": "#4a4a4a",
+    "button": "#c0c0c0",
+    "border": "#000000",
+    "highlight": "#000080",
+    "highlight_text": "#ffffff",
+    "accent": "#000080",
+    "accent_text": "#ffffff",
+    "danger": "#800000",
+    "tooltip": "#ffffe1",
+    "disabled": "#5e5e5e",
+    "nav": "#ffffff",
+    "nav_text": "#000000",
+    "nav_selected": "#000080",
+    "nav_selected_text": "#ffffff",
+    "title": "#000080",
+    "canvas": "#008080",
+    "grid": "#00eded",
+    "node": "#c0c0c0",
+    "node_header": "#000080",
+    "node_title": "#ffffff",
+    "light_edge": "#ffffff",
+    "dark_edge": "#808080"
+   },
+   "status": {
+    "ok": "#005900",
+    "warn": "#654600",
+    "bad": "#800000",
+    "muted": "#303030"
+   },
+   "font": {
+    "families": [
+     "MS Sans Serif",
+     "Microsoft Sans Serif",
+     "Arial",
+     "Liberation Sans",
+     "sans-serif"
+    ],
+    "size": 9
+   },
+   "radius": 0,
+   "bevel": true,
+   "extra": "win311",
+   "terminal": {
+    "background": "#000000",
+    "foreground": "#c0c0c0",
+    "cursor": "#ffffff",
+    "selectionBackground": "#000080"
+   }
+  },
+  "mac": {
+   "label": "Mac",
+   "dark": false,
+   "colors": {
+    "window": "#ececec",
+    "base": "#ffffff",
+    "alternate": "#f5f5f7",
+    "text": "#1d1d1f",
+    "secondary": "#55555a",
+    "placeholder": "#6e6e73",
+    "button": "#ffffff",
+    "border": "#828287",
+    "highlight": "#0064d1",
+    "highlight_text": "#ffffff",
+    "accent": "#0064d1",
+    "accent_text": "#ffffff",
+    "danger": "#c4251b",
+    "tooltip": "#f5f5f7",
+    "disabled": "#8e8e93",
+    "nav": "#e8e8ed",
+    "nav_text": "#1d1d1f",
+    "nav_selected": "#d4d4da",
+    "nav_selected_text": "#1d1d1f",
+    "title": "#1d1d1f",
+    "canvas": "#f5f5f7",
+    "grid": "#8a8a8f",
+    "node": "#ffffff",
+    "node_header": "#e8f0fc"
+   },
+   "status": {
+    "ok": "#197834",
+    "warn": "#8a5300",
+    "bad": "#c4251b",
+    "muted": "#55555a"
+   },
+   "font": {
+    "families": [
+     "SF Pro Text",
+     "Helvetica Neue",
+     "Inter",
+     "Helvetica",
+     "Inter",
+     "Cantarell",
+     "Noto Sans",
+     "Segoe UI",
+     "Ubuntu",
+     "DejaVu Sans",
+     "sans-serif"
+    ],
+    "size": 10
+   },
+   "radius": 7,
+   "bevel": false,
+   "extra": "mac",
+   "terminal": {
+    "background": "#ffffff",
+    "foreground": "#1d1d1f",
+    "cursor": "#0064d1",
+    "selectionBackground": "#b3d7ff"
+   }
+  },
+  "fallout": {
+   "label": "Fallout",
+   "dark": true,
+   "colors": {
+    "window": "#0b1a0b",
+    "base": "#0f220f",
+    "alternate": "#122812",
+    "text": "#4dff88",
+    "secondary": "#3ccf6d",
+    "placeholder": "#36b862",
+    "button": "#102610",
+    "border": "#2fa65a",
+    "highlight": "#4dff88",
+    "highlight_text": "#0b1a0b",
+    "accent": "#4dff88",
+    "accent_text": "#0b1a0b",
+    "danger": "#ffb347",
+    "tooltip": "#102610",
+    "disabled": "#258a48",
+    "nav": "#081408",
+    "nav_text": "#4dff88",
+    "nav_selected": "#4dff88",
+    "nav_selected_text": "#081408",
+    "title": "#8dffb2",
+    "canvas": "#081408",
+    "grid": "#26874a",
+    "node": "#0f220f",
+    "node_header": "#1c4a2a"
+   },
+   "status": {
+    "ok": "#4dff88",
+    "warn": "#f2e35c",
+    "bad": "#ffb347",
+    "muted": "#3ccf6d"
+   },
+   "font": {
+    "families": [
+     "Share Tech Mono",
+     "VT323",
+     "JetBrains Mono",
+     "Fira Code",
+     "Cascadia Mono",
+     "DejaVu Sans Mono",
+     "Liberation Mono",
+     "monospace"
+    ],
+    "size": 11
+   },
+   "radius": 4,
+   "bevel": false,
+   "extra": "fallout",
+   "terminal": {
+    "background": "#081408",
+    "foreground": "#4dff88",
+    "cursor": "#4dff88",
+    "selectionBackground": "#1c5a32"
+   }
+  }
+ }
+}

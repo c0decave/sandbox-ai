@@ -149,7 +149,7 @@ def scripted(answers):
 def test_run_writes_trusted_local_llm_project(tmp_path):
     project = tmp_path / "proj"
     out = []
-    path = w.run(prompt=scripted([str(project), "", "opencode", "podman", "y", "ollama", "192.168.1.20", "", "size", "2",
+    path = w.run(prompt=scripted([str(project), "", "", "opencode", "podman", "y", "ollama", "192.168.1.20", "", "size", "2", "",
                                   "n", "n", "", "n", "n", "n", "n", "y"]),
                  out=out.append, fetch=fake_fetch(OLLAMA))
     assert path == project / ".sandbox-ai.json"
@@ -175,8 +175,8 @@ def test_run_handles_loopback_unreachable_and_overwrite(scenario, tmp_path):
         assert (project / ".sandbox-ai.json").read_text() == "{}"
     elif scenario == "edge":
         # Loopback is unreachable from the sandbox: warned, then replaced by a LAN address.
-        path = w.run(prompt=scripted([str(project), "", "opencode", "podman", "y", "vllm", "127.0.0.1", "n",
-                                      "10.1.1.1", "", "name", "1", "n", "n", "", "n", "n", "n", "n", "y"]),
+        path = w.run(prompt=scripted([str(project), "", "", "opencode", "podman", "y", "vllm", "127.0.0.1", "n",
+                                      "10.1.1.1", "", "name", "1", "", "n", "n", "", "n", "n", "n", "n", "y"]),
                      out=out.append, fetch=fake_fetch(VLLM))
         assert any("loopback" in line for line in out)
         assert "10.1.1.1:8000" in json.loads(path.read_text())["options"]
@@ -188,8 +188,8 @@ def test_run_handles_loopback_unreachable_and_overwrite(scenario, tmp_path):
             if "10.9.9.9" in url:
                 raise OSError("timed out")
             return fake_fetch(VLLM)(url)
-        path = w.run(prompt=scripted([str(project), "", "opencode", "podman", "y", "vllm", "10.9.9.9", "", "10.1.1.1", "",
-                                      "loaded", "1", "n", "n", "", "n", "n", "n", "n", "y"]), out=out.append, fetch=fetch)
+        path = w.run(prompt=scripted([str(project), "", "", "opencode", "podman", "y", "vllm", "10.9.9.9", "", "10.1.1.1", "",
+                                      "loaded", "1", "", "n", "n", "", "n", "n", "n", "n", "y"]), out=out.append, fetch=fetch)
         assert any("Cannot reach vllm" in line for line in out)
         assert path.is_file()
         # The local OpenCode configuration is written after the check: no false warning about it.
@@ -198,7 +198,7 @@ def test_run_handles_loopback_unreachable_and_overwrite(scenario, tmp_path):
 
 def test_run_cloud_agent_without_local_llm(tmp_path):
     project = tmp_path / "p"
-    path = w.run(prompt=scripted([str(project), f"{tmp_path}/lib", "claude", "bwrap", "frontier", "y", "y", "y", "y", "n", "n", "n", "y"]),
+    path = w.run(prompt=scripted([str(project), "", f"{tmp_path}/lib", "claude", "bwrap", "frontier", "", "y", "y", "y", "y", "n", "n", "n", "y"]),
                  out=lambda line: None, fetch=fake_fetch({}))
     document = json.loads(path.read_text())
     assert document["agent"] == "claude" and document["workspaces"] == [f"{tmp_path}/lib"]
@@ -292,7 +292,7 @@ def test_ask_git(scenario, tmp_path, monkeypatch):
         # Bad names, plain http to a remote host, loopback with bwrap and malformed tokens are refused;
         # the malformed token is never echoed.
         prompts = Prompts(["n", "variable", "GH=x", "CONTRACT_GH", "http://git.example.org", "http://localhost:3000",
-                           "https://git.example.org", "enter", ""], secrets=["bad token\nx", ""])
+                           "https://git.example.org", "enter", "", "n"], secrets=["bad token\nx", ""])
         assert w.ask_git(prompts.p, {"backend": "bwrap", "network": "default"}, project) == [
             "--git-token-env", "https://github.com=CONTRACT_GH"]
         shown = "\n".join(prompts.lines)
@@ -309,9 +309,30 @@ def test_ask_git(scenario, tmp_path, monkeypatch):
         # GH_TOKEN of the gh CLI is suggested when it is set.
         monkeypatch.delenv("SANDBOX_GH_TOKEN", raising=False)
         monkeypatch.setenv("GH_TOKEN", GH)
-        prompts = Prompts(["n", "variable", "", ""])
+        prompts = Prompts(["n", "variable", "", "", ""])  # Enter at the last question: --token-proxy (default yes)
         assert w.ask_git(prompts.p, {"backend": "podman", "network": "default"}, tmp_path / "none") == [
-            "--git-token-env", "https://github.com=GH_TOKEN"]
+            "--git-token-env", "https://github.com=GH_TOKEN", "--token-proxy"]
+
+
+def test_ask_git_more_ways(tmp_path, monkeypatch):
+    """Tokens from sandbox-ai secrets, a credentials file named at the server prompt, and --token-proxy."""
+    store = tmp_path / "creds"
+    store.write_text("https://u:t@git.example.org\n")
+    prompts = Prompts(["n", "secret", "GH_PUSH", "https://git.example.org", "secret", "", str(tmp_path / "missing"),
+                       str(store), "", "y"])
+    options = w.ask_git(prompts.p, {"backend": "podman", "network": "default"}, tmp_path / "none")
+    assert options == ["--git-token-secret", "https://github.com=GH_PUSH",
+                       "--git-token-secret", "https://git.example.org=GIT_PUSH", "--git-credentials", str(store)]
+    assert any("is not a regular file" in line for line in prompts.lines)
+    # Without a credentials file and with HTTPS tokens only, --token-proxy is offered (default yes).
+    prompts = Prompts(["n", "secret", "", "", ""])
+    assert w.ask_git(prompts.p, {"backend": "podman", "network": "default"}, tmp_path / "none") == [
+        "--git-token-secret", "https://github.com=GH_PUSH", "--token-proxy"]
+    # Editing keeps a secret and the proxy choice.
+    current = ["--git-token-secret", "https://github.com=GH_PUSH", "--token-proxy"]
+    prompts = Prompts(["n", "", "", ""])
+    assert w.ask_git(prompts.p, {"backend": "podman", "network": "default"}, tmp_path / "none", current=current) == [
+        "--git-token-secret", "https://github.com=GH_PUSH", "--token-proxy"]
 
 
 def test_ask_git_credentials(scenario, tmp_path, monkeypatch):
@@ -418,7 +439,7 @@ def test_run_with_optional_blocks_then_launcher_plan(tmp_path, monkeypatch, caps
     project = tmp_path / "proj"
     git_config(project, '[remote "origin"]\n\turl = http://localhost:3000/alice/sandbox-ai.git\n')
     out = []
-    path = w.run(prompt=scripted([str(project), "", "claude", "podman", "default", "n", "n", "", "n",
+    path = w.run(prompt=scripted([str(project), "", "", "claude", "podman", "default", "", "n", "n", "", "n",
                                   "y", "pypi", "", "", "", "",
                                   "y", "n", "", "y", "variable", "SANDBOX_GITEA_TOKEN", "",
                                   "n", "y"]), out=out.append, fetch=fake_fetch({}))
@@ -471,8 +492,8 @@ def test_end_to_end_wizard_script_then_launcher_plan(tmp_path):
     try:
         port = server.server_address[1]
         project = tmp_path / "proj"
-        answers = "\n".join([str(project), "", "opencode", "podman", "y", "ollama", "127.0.0.1", "y", str(port),
-                             "name", "1", "n", "n", "n", "n", "n", "n", "n", "y"]) + "\n"
+        answers = "\n".join([str(project), "", "", "opencode", "podman", "y", "ollama", "127.0.0.1", "y", str(port),
+                             "name", "1", "n", "n", "n", "n", "n", "n", "n", "n", "y"]) + "\n"
         env = {**os.environ, "XDG_CONFIG_HOME": str(tmp_path / "cfg")}
         result = subprocess.run([str(ROOT / "sandbox-wizard")], input=answers, capture_output=True, text=True, env=env,
                                 timeout=60)
@@ -513,7 +534,7 @@ def test_review_wizard_never_writes_through_symlinks(scenario, tmp_path):
     link = w.local_config_path(project) if scenario != "sad" else project / ".sandbox-ai.json"
     link.parent.mkdir(parents=True, exist_ok=True)
     link.symlink_to(outside)
-    answers = [str(project), "", "opencode", "podman", "y", "ollama", "192.168.1.20", "", "size", "1", "n", "n", "", "n", "n", "n", "n", "y"]
+    answers = [str(project), "", "", "opencode", "podman", "y", "ollama", "192.168.1.20", "", "size", "1", "", "n", "n", "", "n", "n", "n", "n", "y"]
     with pytest.raises(ValueError, match="symlink"):
         w.run(prompt=scripted(answers), out=lambda line: None, fetch=fake_fetch(OLLAMA))
     assert outside.read_text() == "keep"
@@ -645,7 +666,7 @@ def test_run_writes_typed_token_privately_then_launcher_plan(tmp_path, capsys):
     project = tmp_path / "proj"
     git_config(project, '[remote "origin"]\n\turl = http://localhost:3000/alice/sandbox-ai.git\n')
     out = []
-    path = w.run(prompt=scripted([str(project), "", "claude", "podman", "development", "n", "n", "", "n",
+    path = w.run(prompt=scripted([str(project), "", "", "claude", "podman", "development", "", "n", "n", "", "n",
                                   "n", "y", "n", "none", "y", "enter", "", "n", "y"]),
                  out=out.append, fetch=fake_fetch({}), secret=scripted([GITEA]))
     text = path.read_text()
@@ -666,8 +687,8 @@ def test_run_writes_typed_token_privately_then_launcher_plan(tmp_path, capsys):
 
 def test_run_cancel_writes_no_token(tmp_path):
     project = tmp_path / "proj"
-    path = w.run(prompt=scripted([str(project), "", "claude", "podman", "default", "n", "n", "", "n",
-                                  "n", "y", "n", "enter", "", "n", "n"]),
+    path = w.run(prompt=scripted([str(project), "", "", "claude", "podman", "default", "", "n", "n", "", "n",
+                                  "n", "y", "n", "enter", "", "n", "n", "n"]),
                  out=lambda line: None, fetch=fake_fetch({}), secret=scripted([GH]))
     assert path is None and not w.token_store().exists()
 
@@ -676,7 +697,7 @@ def test_review_github_origin_after_github_token(tmp_path, monkeypatch):
     """Review finding: a github.com token and the github.com origin gave two tokens for one URL."""
     project = tmp_path / "proj"
     git_config(project, '[remote "origin"]\n\turl = https://github.com/owner/repo.git\n')
-    prompts = Prompts(["", "enter", "https://github.com", ""], secrets=[GH])
+    prompts = Prompts(["", "enter", "https://github.com", "", "n"], secrets=[GH])
     options = w.ask_git(prompts.p, {"backend": "podman", "network": "default"}, project, [])
     assert options.count("--git-token-file") == 1
     assert any("has a token already" in line for line in prompts.lines)
@@ -755,10 +776,10 @@ def test_edit_changes_parts_and_shows_the_difference(tmp_path, monkeypatch):
                                                "--git-token-env", "https://github.com=SANDBOX_GH", "--copy", "/a:.b"],
                                    "workspaces": []})
     out = []
-    answers = ["4", "development",                       # network
+    answers = ["4", "development", "",                   # network, no own addresses
                "5", "y", "n", "n", "y",                  # behaviour: no prompts, no display, no tmux, logging
                "6", "-", "", "", "", "",                 # network extras: drop pypi, keep the rest empty
-               "7", "", "y", "",                         # git: identity, keep the GitHub token, no own server
+               "7", "", "y", "", "n",                    # git: identity, keep the GitHub token, no own server, no proxy
                "s", "y"]
     assert w.run(prompt=scripted(answers), out=out.append, project=project, mode="edit") == path
     document = json.loads(path.read_text())
@@ -866,3 +887,176 @@ def test_prompter_edit(scenario):
     else:
         p = w.Prompter(scripted(["", ""]), print)
         assert p.edit("Options", "--dns") == "--dns" and p.edit("Options", "") == ""
+
+
+@pytest.fixture
+def no_routes(monkeypatch):
+    """The host's routes as the launcher sees them for --subnet: one LAN (the test machine's own stay out)."""
+    l = w.launcher()
+    monkeypatch.setattr(l, "host_routes", lambda files=None: [l.ipaddress.ip_network("192.168.1.0/24")])
+
+
+def test_ask_subnet(scenario, no_routes):
+    """Advanced, default no: the sandbox's own addresses; IPv6 only with Podman; the launcher's checks."""
+    if scenario == "happy":
+        answers = {"agent": "claude", "backend": "podman"}
+        prompts = Prompts(["y", "10.20.0.0/24", "fd20::/64"])
+        w.ask_subnet(prompts.p, answers)
+        assert answers["subnet"] == ["--subnet", "10.20.0.0/24", "--subnet6", "fd20::/64"]
+        answers = {"agent": "claude", "backend": "podman"}
+        w.ask_subnet(Prompts([""]).p, answers)  # Enter: the backend's own addresses, nothing written
+        assert answers["subnet"] == []
+    elif scenario == "sad":  # each refusal is explained and asked again; Enter leaves it out
+        answers = {"agent": "claude", "backend": "podman"}
+        prompts = Prompts(["y", "192.168.0.0/16", "10.0.0.0/26", "8.8.8.0/24", "10.20.0.100/24", "", "fd20::/48", ""])
+        w.ask_subnet(prompts.p, answers)
+        assert answers["subnet"] == []
+        shown = "\n".join(prompts.lines)
+        for message in ("overlaps 192.168.1.0/24", "/8 to /25", "not a private range", "give the network address",
+                        "must be /64"):
+            assert message in shown, message
+    else:  # bwrap: no IPv6 question; an edited file's --subnet6 is dropped with a note, its --subnet kept
+        answers = {"agent": "claude", "backend": "bwrap", "subnet": ["--subnet", "10.20.0.0/24", "--subnet6", "fd20::/64"]}
+        prompts = Prompts(["", ""])
+        w.ask_subnet(prompts.p, answers, editing=True)
+        assert answers["subnet"] == ["--subnet", "10.20.0.0/24"]
+        assert any("Dropped --subnet6" in line for line in prompts.lines)
+
+
+def test_subnet_in_new_and_edited_configurations(tmp_path, no_routes):
+    project = tmp_path / "proj"
+    path = w.run(prompt=scripted([str(project), "", "", "claude", "podman", "default", "y", "10.20.0.0/24", "",
+                                  "n", "n", "", "n", "n", "n", "n", "y"]), out=lambda line: None, fetch=fake_fetch({}))
+    document = json.loads(path.read_text())
+    assert document["options"][:2] == ["--subnet", "10.20.0.0/24"]
+    answers, notes = w.answers_from_document(document)
+    assert answers["subnet"] == ["--subnet", "10.20.0.0/24"] and notes == [] and "--subnet" not in answers["extra"]
+    assert "--subnet 10.20.0.0/24" in dict((key, text) for key, _, text in w.summary(answers))["4"]
+    # Offline: the addresses go with the network.
+    out = []
+    assert w.run(prompt=scripted(["4", "offline", "s", "y"]), out=out.append, project=project, mode="edit") == path
+    assert "--subnet" not in json.loads(path.read_text())["options"]
+    assert any("Dropped --subnet/--subnet6" in line for line in out)
+    # Switching to bwrap drops only --subnet6.
+    answers = {"agent": "claude", "backend": "podman", "local": None, "network_extra": [],
+               "subnet": ["--subnet", "10.20.0.0/24", "--subnet6", "fd20::/64"]}
+    w.edit_part(Prompts(["bwrap"]).p, "2", answers, project, fake_fetch({}), [])
+    assert answers["subnet"] == ["--subnet", "10.20.0.0/24"]
+
+
+def registered(monkeypatch, models):
+    """Endpoints in sandbox-ai llm's store; listing their models answers MODELS without a server."""
+    module = w.llm()
+    module.save_store({"version": 1, "endpoints": {
+        "gpu": {"kind": "vllm", "url": "http://10.0.0.5:8000", "models": ["listed-earlier"]},
+        "gw": {"kind": "openai-compatible", "url": "https://gw.example.org", "model": "gpt-oss-20b"}}})
+    monkeypatch.setattr(module, "endpoint_models", lambda endpoint: models(endpoint))
+    return module
+
+
+def test_run_with_a_registered_llm_server(tmp_path, monkeypatch):
+    registered(monkeypatch, lambda endpoint: [{"name": "a-model", "size": None, "loaded": True, "details": ""},
+                                              {"name": "b-model", "size": None, "loaded": False, "details": ""}])
+    project, out = tmp_path / "p", []
+    # Claude: only the server with the Anthropic API (vLLM) is offered; model 2, nothing but this server.
+    path = w.run(prompt=scripted([str(project), "", "", "claude", "podman", "y", "", "2", "", "n", "n", "n", "", "n", "n",
+                                  "n", "n", "y"]), out=out.append, fetch=fake_fetch({}))
+    document = json.loads(path.read_text())
+    assert document["options"] == ["--llm", "gpu:b-model", "--no-provider-defaults"]
+    listed = [line.split() for line in out if line.startswith("  1  ") or line.startswith("  2  ")]
+    assert ["1", "gpu", "vllm", "http://10.0.0.5:8000"] in listed and not any("gw" in row for row in listed)
+    assert not any("would refuse" in line for line in out)
+    answers, notes = w.answers_from_document(document)
+    assert answers["llm"] == "gpu:b-model" and answers["llm_only"] and notes == []
+    assert w.build_document(answers)["options"] == document["options"]
+    assert dict((key, text) for key, _, text in w.summary(answers))["4"] == "LLM server gpu:b-model, nothing else"
+
+
+def test_registered_llm_server_offline_listing_and_agent_change(tmp_path, monkeypatch):
+    def unreachable(endpoint):
+        raise ValueError("http://10.0.0.5:8000/v1/models: timed out")
+    registered(monkeypatch, unreachable)
+    prompts = Prompts(["y", "1", "my-own:7b", "n", "n"])  # the last: no own sandbox addresses (--subnet)
+    answers = {"agent": "codex", "network": "default", "local": None, "backend": "podman"}
+    w.ask_network(prompts.p, answers, tmp_path, fake_fetch({}))
+    # The server does not answer: the models it listed last time are offered, a name can be typed.
+    assert any("timed out" in line for line in prompts.lines) and any("listed-earlier" in l for l in prompts.lines)
+    assert answers["llm"] == "gpu:my-own:7b" and answers["llm_only"] is False
+    answers = {"agent": "codex", "network": "default", "local": None, "llm": "gw:gpt-oss-20b", "llm_only": True}
+    w.edit_part(Prompts(["claude"]).p, "1", answers, tmp_path, None, [])
+    assert answers["llm"] is None and answers["agent"] == "claude"  # gw has no Anthropic API
+    document = {"agent": "codex", "options": ["--no-provider-defaults", "--allow-pypi"]}
+    answers, _ = w.answers_from_document(document)
+    assert answers["llm"] is None and answers["extra"][:1] == ["--no-provider-defaults"]
+
+
+def test_cli_models_of_a_registered_server(monkeypatch, capsys):
+    registered(monkeypatch, lambda endpoint: [{"name": f"{endpoint['name']}-m", "size": 2 ** 30, "loaded": True,
+                                               "details": ""}])
+    assert w.cli(["models", "--llm", "gpu"]) == 0
+    assert capsys.readouterr().out.splitlines()[1].split()[:2] == ["1", "gpu-m"]
+    with pytest.raises(SystemExit):
+        w.cli(["models", "--kind", "ollama"])
+
+
+def recorded(answers, asked):
+    """scripted(), keeping every question in ASKED."""
+    prompt = scripted(answers)
+
+    def ask(text):
+        asked.append(text)
+        return prompt(text)
+    return ask
+
+
+def test_mode_first_and_the_questions_respect_it(tmp_path):
+    """The security mode is the first question; high offers only the networks it allows and no further hosts,
+    paranoid also skips the permission and display questions and refuses a writable mount."""
+    project, asked, out = tmp_path / "high", [], []
+    path = w.run(prompt=recorded([str(project), "high", "", "claude", "podman", "frontier", "default", "", "n", "",
+                                  "", "n", "n", "n", "y"], asked), out=out.append, fetch=fake_fetch({}))
+    document = json.loads(path.read_text())
+    assert document["mode"] == "high" and document["options"] == []
+    assert asked[1].startswith("Security mode (lax/low/medium/high/paranoid) [medium]")
+    assert any(q.startswith("Network (default/offline)") for q in asked)
+    assert any("Please choose one of: default, offline" in line for line in out)
+    assert any("opens nothing beyond the agent's provider" in line for line in out)
+    assert not any("Allow further network destinations" in q for q in asked)
+    assert any("without permission prompts" in q for q in asked)  # high keeps -D
+    project, asked, out = tmp_path / "paranoid", [], []
+    path = w.run(prompt=recorded([str(project), "paranoid", "", "claude", "podman", "default", "", "", "n", "n", "y",
+                                  "n", f"{tmp_path}:/mnt/x:rw", "", "", "", "", "y"], asked),
+                 out=out.append, fetch=fake_fetch({}))
+    document = json.loads(path.read_text())
+    assert document["mode"] == "paranoid" and "--workspace-ro" not in document["options"]
+    assert not any("permission prompts" in q or "Virtual display" in q or "--workspace-ro" in q for q in asked)
+    assert any("keeps the agent's permission prompts" in line for line in out)
+    assert any("mounts the workspaces read-only" in line for line in out)
+    assert any("widens the security mode paranoid" in line for line in out)
+
+
+def test_mode_enter_inherits_and_the_floor(tmp_path, monkeypatch):
+    project = tmp_path / "p"
+    path = w.run(prompt=scripted([str(project), "", "", "claude", "podman", "", "", "n", "n", "", "n", "n", "n",
+                                  "n", "y"]), out=lambda line: None, fetch=fake_fetch({}))
+    assert "mode" not in json.loads(path.read_text())  # Enter: the inherited mode, nothing written
+    monkeypatch.setattr(w.launcher(), "load_policy", lambda path=None: {"version": 1, "min_mode": "high"})
+    asked = []
+    path.unlink()
+    w.run(prompt=recorded([str(project), "", "", "claude", "podman", "", "", "n", "", "", "n", "n", "n", "y"], asked),
+          out=lambda line: None, fetch=fake_fetch({}))
+    assert asked[1].startswith("Security mode (high/paranoid) [high]")
+    assert "mode" not in json.loads(path.read_text())
+
+
+def test_edit_the_mode(tmp_path):
+    project = tmp_path / "p"
+    path = write_trusted(project, {"version": 1, "agent": "claude", "options": ["--allow-pypi"], "workspaces": []})
+    out = []
+    assert w.run(prompt=scripted(["m", "high", "s", "y"]), out=out.append, project=project, mode="edit") == path
+    assert json.loads(path.read_text())["mode"] == "high"
+    assert any("would refuse" in line and "--allow-pypi widens the security mode high" in line for line in out)
+    assert any("Security mode" in line and "medium (inherited)" in line for line in out)
+    # The expert line keeps the mode.
+    assert w.run(prompt=scripted(["0", "--offline", "s", "y"]), out=out.append, project=project, mode="edit") == path
+    assert json.loads(path.read_text())["mode"] == "high"

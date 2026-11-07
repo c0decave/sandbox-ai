@@ -1,0 +1,15 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "docs-lie-detector",
+  "title": "Docs lie detector",
+  "description": "Every claim of the README checked against the code and a real run; only the provider.",
+  "category": "testing",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [],
+  "prompt": "Read README* and docs/. For every concrete claim (an option, a default, a command's output, a file path), check it against the code and, where you can, by running it. Do not change the code. Write /work/DOCS-AUDIT.md: claim, where, true/false/unclear, evidence."
+}

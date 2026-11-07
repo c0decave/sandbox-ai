@@ -104,7 +104,12 @@ def test_missing_agent_fails_before_workspace_or_auth_preparation(tmp_path, monk
     assert not workspace.exists()
 
 
-@pytest.mark.parametrize("mode", ("dry-run", "bad-bootstrap-pid", "bad-guard-namespace", "terminated-bootstrap"))
+IN_SANDBOX = Path("/sandbox/session/config.json").exists()
+
+
+@pytest.mark.parametrize("mode", ("dry-run", "bad-bootstrap-pid", "bad-guard-namespace", pytest.param(
+    "terminated-bootstrap", marks=pytest.mark.skipif(
+        IN_SANDBOX, reason="runs a fresh runtime.py, which would read this sandbox's own session config"))))
 def test_cli_entrypoint_exit_contract(mode, tmp_path, monkeypatch, capsys):
     if mode == "dry-run":
         source = SOURCE

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>CFBundleDisplayName</key><string>sandbox-ai</string>
+  <key>CFBundleExecutable</key><string>sandbox-ai-app</string>
+  <key>CFBundleIconFile</key><string>sandbox-ai</string>
+  <key>CFBundleIdentifier</key><string>io.github.c0decave.sandbox-ai</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleName</key><string>sandbox-ai</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>@VERSION@</string>
+  <key>CFBundleVersion</key><string>@VERSION@</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
+  <key>LSMinimumSystemVersion</key><string>14.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSHumanReadableCopyright</key><string>MIT licence; PySide6 (Qt) LGPL-3.0; Python PSF licence</string>
+</dict>
+</plist>

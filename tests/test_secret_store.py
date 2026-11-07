@@ -63,7 +63,7 @@ def test_cli(capsys):
     assert ss.main(["set", "OPENAI_KEY"], stdin=io.StringIO("sk-test-value\n")) == 0
     assert ss.main(["list"]) == 0
     out = capsys.readouterr().out
-    assert "OPENAI_KEY  (file)" in out and "sk-test-value" not in out
+    assert "NAME        STORE\nOPENAI_KEY  file\n" in out and "sk-test-value" not in out
     assert ss.main(["set", "BAD"], stdin=io.StringIO("\n")) == 1
     assert ss.main(["delete", "OPENAI_KEY"]) == 0 and ss.get("OPENAI_KEY") is None
     assert ss.main(["backend"]) == 0 and capsys.readouterr().out.strip().endswith("file")
@@ -83,3 +83,37 @@ def test_launcher_secret_env_and_git_token_secret(tmp_path):
         s.validate(s.parse_args(["codex", "--workspace", str(tmp_path / "w"), "--secret-env", "A=b c"]))
     with pytest.raises(ValueError, match="Sandbox-owned"):
         s.secret_environment(s.parse_args(["codex", "--secret-env", "PATH=BRAVE_API_KEY"]))
+
+
+@pytest.mark.parametrize("returncode, stderr, usable", [
+    (0, "", True),                       # found something
+    (1, "", True),                       # found nothing: a working keyring
+    (1, "secret-tool: The name is not activatable\n", False),   # regression: no Secret Service on the bus
+    (1, "secret-tool: The name org.freedesktop.secrets was not provided by any .service files\n", False),
+    (1, "secret-tool: Cannot autolaunch D-Bus without X11 $DISPLAY\n", False),
+    (1, "secret-tool: Cannot create an item in a locked collection\n", False),
+    (2, "", False),
+])
+def test_the_keyring_counts_as_usable_only_when_secret_tool_says_nothing_wrong(returncode, stderr, usable, monkeypatch):
+    """Regression: "The name is not activatable" passed the probe, so sandbox-ai secrets set failed instead of
+    keeping the secret in the private files."""
+    monkeypatch.setattr(ss.shutil, "which", lambda name: "/usr/bin/secret-tool")
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus")
+    run = lambda *args, **kwargs: subprocess.CompletedProcess(args, returncode, "", stderr)  # noqa: E731
+    assert ss.keyring_usable(run) is usable
+
+
+def test_without_a_usable_keyring_set_keeps_the_secret_in_the_files(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.delenv("SANDBOX_AI_SECRETS", raising=False)
+    monkeypatch.setattr(ss, "keyring_usable", lambda run=None: False)
+    lines = []
+    assert ss.main(["set", "GH_PUSH"], stdin=io.StringIO("ghp_value\n"), out=lines.append) == 0
+    assert lines == ["GH_PUSH kept (file)"] and ss.get("GH_PUSH") == "ghp_value"
+
+
+def test_a_keyring_that_refuses_says_how_to_keep_it_in_the_files(monkeypatch, capsys):
+    refusing = ss.KeyringStore(run=lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "secret-tool: locked\n"))
+    monkeypatch.setattr(ss, "store", lambda: refusing)
+    assert ss.main(["set", "GH_PUSH"], stdin=io.StringIO("ghp_value\n")) == 1
+    assert "SANDBOX_AI_SECRETS=file sandbox-ai secrets set GH_PUSH" in capsys.readouterr().err

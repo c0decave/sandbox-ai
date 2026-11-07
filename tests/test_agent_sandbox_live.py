@@ -778,7 +778,7 @@ def test_real_opencode_uses_local_llm_only(request, backend, tmp_path, monkeypat
 MCP_CLIENT = '''
 import json, os, subprocess
 bridge = subprocess.Popen(["python3", "-I", "/sandbox/runtime.py", "--internal-mcp-bridge",
-                           "/sandbox/mcp/demo/server.sock"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+                           "/run/sandbox-mcp/demo/server.sock"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 def call(message):
     bridge.stdin.write(json.dumps(message) + "\\n"); bridge.stdin.flush()
     return json.loads(bridge.stdout.readline()) if "id" in message else None

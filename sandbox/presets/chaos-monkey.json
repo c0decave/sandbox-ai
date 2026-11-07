@@ -1,0 +1,22 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "chaos-monkey",
+  "title": "Chaos monkey",
+  "description": "Build and test the project with 1 GiB, half a CPU and 64 processes: finds what eats resources.",
+  "category": "testing",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--memory",
+    "1g",
+    "--cpus",
+    "0.5",
+    "--pids",
+    "64"
+  ],
+  "prompt": "Build the project and run its tests with these tight limits (1 GiB memory, half a CPU, 64 processes). Watch /sandbox/session/memory.json. Report what fails, why, and what in the project uses the most."
+}

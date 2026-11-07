@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# sandbox-ai-app: the graphical front end (projects/sandbox-ai-app), started for this sandbox-ai.
+set -euo pipefail
+script_path=$(readlink -f -- "${BASH_SOURCE[0]}")
+script_dir=$(dirname -- "$script_path")
+app_dir="$script_dir/projects/sandbox-ai-app"
+if [[ ! -f "$app_dir/sandbox_ai_app/__main__.py" ]]; then
+  echo "sandbox-ai-app: the app is not part of this sandbox-ai ($app_dir is missing)." >&2
+  echo "sandbox-ai-app: install from a release or a checkout that contains projects/sandbox-ai-app." >&2
+  exit 1
+fi
+
+installed=0
+[[ $(basename -- "$(dirname -- "$script_dir")") == versions ]] && installed=1
+
+# Python: $SANDBOX_AI_APP_PYTHON, else the app's own environment (install.sh puts PySide6 there), else python3.
+python=${SANDBOX_AI_APP_PYTHON:-}
+if [[ -z "$python" ]]; then
+  python=python3
+  if [[ $installed == 1 && -x "$(dirname -- "$(dirname -- "$script_dir")")/app-env/bin/python3" ]]; then
+    python="$(dirname -- "$(dirname -- "$script_dir")")/app-env/bin/python3"
+  fi
+fi
+
+if ! "$python" -I -c "import PySide6.QtWidgets" 2>/dev/null; then
+  echo "sandbox-ai-app: PySide6 (Qt for Python) is missing for $python." >&2
+  if "$python" -I -c "import PySide6" 2>/dev/null; then
+    echo "sandbox-ai-app: PySide6 is there but Qt does not load: install the system's OpenGL/EGL, xkbcommon and" >&2
+    echo "sandbox-ai-app: fontconfig libraries (Debian/Ubuntu: libegl1 libgl1 libxkbcommon0 libfontconfig1)." >&2
+  elif [[ $installed == 1 ]]; then
+    echo "sandbox-ai-app: get it with: sandbox-ai-update --force --app-deps   (or: pip install --user PySide6-Essentials)" >&2
+  else
+    echo "sandbox-ai-app: get it with: pip install --user PySide6-Essentials   (or your distribution's python3-pyside6)" >&2
+  fi
+  exit 1
+fi
+
+# Terminal tabs need xterm.js next to the app; it is not in the repository (no Node.js build here), so it is
+# fetched once (pinned, checked) when QtWebEngine is there and the files are missing - visibly, never fatal.
+vendor="$app_dir/sandbox_ai_app/web/vendor"
+if [[ -z "${SANDBOX_AI_APP_NO_WEBENGINE:-}" && ! -f "$vendor/xterm.js" && -f "$app_dir/scripts/vendor_xterm.py" ]] \
+   && "$python" -I -c "import PySide6.QtWebEngineWidgets" 2>/dev/null; then
+  echo "sandbox-ai-app: fetching xterm.js for the terminal tabs (once)..." >&2
+  if ! python3 -I "$app_dir/scripts/vendor_xterm.py" --into "$vendor"; then
+    echo "sandbox-ai-app: xterm.js could not be fetched (see above); the Terminals page can retry" >&2
+  fi
+fi
+
+# A checkout runs against itself; an installation finds its sandbox-ai command (and the Settings dialog may
+# choose another checkout).
+if [[ $installed == 0 && -z "${SANDBOX_AI_HOME:-}" ]]; then
+  export SANDBOX_AI_HOME="$script_dir"
+fi
+# The stable path of this command in an installation: a start at login runs it, not this version's folder,
+# which a later update removes.
+if [[ $installed == 1 ]]; then
+  export SANDBOX_AI_APP_LAUNCHER="$(dirname -- "$(dirname -- "$script_dir")")/current/sandbox-ai-app"
+else
+  unset SANDBOX_AI_APP_LAUNCHER
+fi
+
+# Started from a terminal, the app goes into the background and gives the terminal back, its output in a
+# log; --foreground keeps it attached, --debug too (with Qt's and the app's debug output on the terminal).
+foreground=0 args=()
+for arg in "$@"; do
+  case "$arg" in
+    --foreground|--fg) foreground=1 ;;
+    --debug) foreground=1; export SANDBOX_AI_APP_DEBUG=1 QT_LOGGING_RULES="${QT_LOGGING_RULES:-*.debug=true}" ;;
+    *) args+=("$arg") ;;
+  esac
+done
+[[ -t 0 && -t 1 ]] || foreground=1   # from a desktop entry, autostart or a script: nothing to give back
+[[ -n "${SANDBOX_AI_APP_FOREGROUND:-}" ]] && foreground=1
+
+# -I: neither the current directory (often a workspace an agent writes) nor PYTHON* variables reach the
+# import path; the app's folder is added by absolute path.
+run_app=("$python" -I -c 'import runpy, sys
+sys.path.insert(0, sys.argv[1])
+sys.argv = ["sandbox-ai-app", *sys.argv[2:]]
+runpy.run_module("sandbox_ai_app", run_name="__main__", alter_sys=True)' "$app_dir" "${args[@]}")
+
+if [[ $foreground == 1 ]]; then
+  exec "${run_app[@]}"
+fi
+state="${XDG_STATE_HOME:-$HOME/.local/state}/sandbox-ai"
+mkdir -p -m 0700 "$state"
+log="$state/app.log"
+if [[ -L "$log" ]]; then rm -f -- "$log"; fi
+# One log per start, the previous one kept as app.log.1.
+[[ -f "$log" ]] && mv -f -- "$log" "$log.1"
+( umask 077; : > "$log" )
+if command -v setsid >/dev/null; then
+  setsid -f "${run_app[@]}" </dev/null >>"$log" 2>&1
+else
+  nohup "${run_app[@]}" </dev/null >>"$log" 2>&1 &
+fi
+echo "sandbox-ai-app runs in the background (output: $log; --foreground keeps it in this terminal)" >&2

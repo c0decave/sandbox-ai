@@ -1,0 +1,17 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "sand-chess",
+  "title": "Chess in the sand",
+  "description": "The agent plays chess against Codex in the same sandbox, on a board in a file; no engines, only the provider.",
+  "category": "fun",
+  "agents": [
+    "claude",
+    "opencode"
+  ],
+  "options": [
+    "--with",
+    "codex"
+  ],
+  "prompt": "Play a game of chess against Codex (your companion in this sandbox). Keep the board in /work/chess/board.txt (FEN and an ASCII board) and the moves in /work/chess/moves.pgn. No chess engine, no chess library: think. Check every move for legality yourself. Play to the end."
+}

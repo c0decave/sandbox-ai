@@ -1,0 +1,24 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "agent-race",
+  "title": "Agent race",
+  "description": "The same task for Claude, Codex and OpenCode, each in its own sandbox; compare time, steps and what was blocked.",
+  "category": "fun",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [],
+  "values": {
+    "task": {
+      "label": "The task",
+      "kind": "text"
+    }
+  },
+  "prompt": "Race task: {task}. Work as fast and as cleanly as you can; when done, write /work/race/RESULT.md with what you did and how long it took.",
+  "notes": [
+    "Start it once per agent in copies of the workspace; compare with sandbox-ai activity --json."
+  ]
+}

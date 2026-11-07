@@ -1,0 +1,22 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "radio-sandbox-ai",
+  "title": "Radio sandbox-ai",
+  "description": "A short radio show about what the agent did today, spoken by a local voice, recorded inside the sandbox; only the provider.",
+  "category": "fun",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--audio",
+    "virtual"
+  ],
+  "prompt": "Read what happened in this workspace today (git log, recent files) and write a two-minute radio show about it: a host, a guest, one jingle. Then make it audible with whatever speech synthesis is installed (espeak-ng, piper) into /work/radio/show.wav, and the script into /work/radio/show.md.",
+  "notes": [
+    "Sound and voices: the media variant (sandbox-ai images recipe media --from AGENT; sandbox-ai build media), then add --image-variant media.",
+    "The sound stays inside the sandbox (a null sink): the show is the file /work/radio/show.wav."
+  ]
+}

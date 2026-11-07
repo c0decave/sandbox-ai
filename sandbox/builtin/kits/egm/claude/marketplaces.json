@@ -1,0 +1,14 @@
+{
+  "$comment": "Built-in kit 'egm': enables the Elephant-Goldfish Model plugin (google/elephant-goldfish-model, pinned in sandbox-ai's marketplace). Install with: sandbox-ai plugins claude --kit egm; use with: sandbox-ai claude --kit egm. Claude only: Codex and OpenCode are not supported yet.",
+  "marketplaces": {
+    "sandbox-ai": {
+      "source": {
+        "source": "directory",
+        "path": "/sandbox/marketplace"
+      }
+    }
+  },
+  "plugins": [
+    "egm@sandbox-ai"
+  ]
+}

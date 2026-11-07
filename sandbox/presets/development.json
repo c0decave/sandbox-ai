@@ -1,0 +1,22 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "development",
+  "title": "Development",
+  "description": "Python and JavaScript projects with GitHub: PyPI, npm, GitHub and DuckDuckGo open, everything else closed.",
+  "category": "development",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--allow-pypi",
+    "--allow-npm",
+    "--allow-github",
+    "--allow-duckduckgo"
+  ],
+  "notes": [
+    "Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy."
+  ]
+}

@@ -2,9 +2,12 @@
 import importlib.util
 import ipaddress
 import json
+import os
 import shutil
+import stat
 from pathlib import Path
 import subprocess
+import sys
 
 import pytest
 
@@ -64,6 +67,18 @@ def test_explicit_host_extension_is_local_to_invocation(agent):
     assert s.allowed_hosts(s.parse_args([agent, "--no-provider-defaults", "--allow-host", "extra.example.org"])) == ["extra.example.org"]
 
 
+def user_bus():
+    try:
+        return stat.S_ISSOCK(os.stat(f"/run/user/{os.getuid()}/bus").st_mode)
+    except OSError:
+        return False
+
+
+# Without a systemd user session every local build runs with cgroupfs (sandbox-build-image): its global option
+# comes first. On a desktop login there is none.
+CGROUPS = [] if user_bus() else ["--cgroup-manager=cgroupfs"]
+
+
 @pytest.fixture
 def fake_podman(tmp_path, monkeypatch):
     executable = tmp_path / "podman"
@@ -72,6 +87,7 @@ def fake_podman(tmp_path, monkeypatch):
     executable.chmod(0o700)
     monkeypatch.setenv("PATH", str(tmp_path) + ":/usr/bin:/bin")
     monkeypatch.setenv("BUILD_LOG", str(log))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))  # no image extensions of whoever runs this
     return log
 
 
@@ -83,8 +99,8 @@ def test_builder_selects_one_recipe_and_image(agent, remote, fake_podman):
     result = subprocess.run([str(ROOT / "sandbox-build-image"), *options, agent, "--build-arg", version], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert json.loads(fake_podman.read_text()) == [
-        *(["--remote", "--url", "unix:///tmp/test-engine.sock"] if remote else []),
-        "build", "--tag", f"localhost/{agent}-sandbox:latest", "--file",
+        *(["--remote", "--url", "unix:///tmp/test-engine.sock"] if remote else CGROUPS),
+        "build", "--tag", f"localhost/{agent}-sandbox:latest", "--tag", f"localhost/{agent}-sandbox:base", "--file",
         str(ROOT / "sandbox" / f"Containerfile.{agent}"), "--pull=newer", "--label", "sandbox-ai.agent-version=1.2.3",
         "--build-arg", version, str(ROOT / "sandbox")]
     recipe = (ROOT / "sandbox" / f"Containerfile.{agent}").read_text()
@@ -138,8 +154,8 @@ def test_builder_pins_latest_release_and_refreshes_base(agent, fake_podman, fake
     assert result.returncode == 0, result.stderr
     version = {"codex": "9.1.0", "claude": "9.2.0", "opencode": "9.3.0"}[agent]
     assert json.loads(fake_podman.read_text()) == [
-        "build", "--tag", f"localhost/{agent}-sandbox:latest", "--file",
-        str(ROOT / "sandbox" / f"Containerfile.{agent}"), "--pull=newer",
+        *CGROUPS, "build", "--tag", f"localhost/{agent}-sandbox:latest", "--tag", f"localhost/{agent}-sandbox:base",
+        "--file", str(ROOT / "sandbox" / f"Containerfile.{agent}"), "--pull=newer",
         "--build-arg", f"{agent.upper()}_VERSION={version}", "--label", f"sandbox-ai.agent-version={version}",
         str(ROOT / "sandbox")]
 
@@ -149,10 +165,13 @@ def test_builder_all_builds_every_image(tmp_path, fake_npm, monkeypatch):
     (tmp_path / "podman").write_text(f"#!/bin/sh\necho \"$*\" >> {log}\n")
     (tmp_path / "podman").chmod(0o700)
     monkeypatch.setenv("PATH", str(tmp_path) + ":/usr/bin:/bin")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     result = subprocess.run([str(ROOT / "sandbox-build-image"), "all"], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     lines = log.read_text().splitlines()
-    assert [line.split()[2] for line in lines] == [f"localhost/{a}-sandbox:latest" for a in ("codex", "claude", "opencode")]
+    assert [line.split()[2 + len(CGROUPS)] for line in lines] == [
+        f"localhost/{a}-sandbox:latest" for a in ("codex", "claude", "opencode")]
+    assert all(line.split()[:len(CGROUPS)] == CGROUPS for line in lines)
     assert "CLAUDE_VERSION=9.2.0" in lines[1]
 
 
@@ -171,6 +190,8 @@ def test_builder_without_npm_queries_registry_with_python(tmp_path, monkeypatch)
         (tmp_path / tool).symlink_to(found)
     monkeypatch.setenv("PATH", str(tmp_path))
     monkeypatch.setenv("BUILD_LOG", str(log))
+    monkeypatch.setenv("SANDBOX_AI_PYTHON", sys.executable)  # images.py checks the extensions, not the stand-in
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     result = subprocess.run(["/bin/bash", str(ROOT / "sandbox-build-image"), "claude"], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert "CLAUDE_VERSION=7.7.7" in json.loads(log.read_text())

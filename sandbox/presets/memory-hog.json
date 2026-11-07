@@ -1,0 +1,18 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "memory-hog",
+  "title": "Memory hog",
+  "description": "A sandbox with 2 GiB and a task that eats memory: the memory watch must warn, then end the hog, and the sandbox must survive.",
+  "category": "testing",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--memory",
+    "2g"
+  ],
+  "prompt": "Write and run /tmp/hog.py: it allocates 100 MB more every second and prints its size. While it runs, read /sandbox/session/memory.json every few seconds and print it. Report what happened to the hog and whether you (the agent) kept running."
+}

@@ -1,0 +1,19 @@
+#!/bin/sh
+# sandbox-ai.app/Contents/MacOS/sandbox-ai: the command line of the macOS app, e.g. linked as
+#   ln -s /Applications/sandbox-ai.app/Contents/MacOS/sandbox-ai /usr/local/bin/sandbox-ai
+set -eu
+self=$0
+while [ -L "$self" ]; do  # through links to this file (macOS 12.3+ has readlink -f, older ones do not)
+  target=$(readlink -- "$self")
+  case $target in /*) self=$target ;; *) self=$(dirname -- "$self")/$target ;; esac
+done
+contents=$(cd -- "$(dirname -- "$self")/.." && pwd -P)
+# -B: nothing is written into the app (it is compiled when built; a write would break its signature).
+# Started from Finder or a login item, PATH is launchd's: Podman (Homebrew, the podman.io installer) and
+# Homebrew's bash (sandbox-ai needs bash 4+) are added after it.
+PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:/opt/podman/bin"
+export PATH
+# The package and the copy sandbox-ai runs in: no workspace, rw mount or --state-dir may hold them.
+SANDBOX_AI_PACKAGE=$(dirname -- "$contents") SANDBOX_AI_PACKAGE_COPY="$contents/Resources/sandbox-ai"
+export SANDBOX_AI_PACKAGE SANDBOX_AI_PACKAGE_COPY
+exec "$contents/Resources/python/bin/python3" -I -B "$contents/Resources/sandbox-ai/sandbox/main.py" "$@"

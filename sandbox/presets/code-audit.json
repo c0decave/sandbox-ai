@@ -1,0 +1,22 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "code-audit",
+  "title": "Code audit",
+  "description": "Read-only review of the workspace in the security mode high; gitleaks finds committed secrets.",
+  "category": "development",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--workspace-ro",
+    "--mode",
+    "high"
+  ],
+  "mcp": [
+    "hub:gitleaks"
+  ],
+  "prompt": "Audit this repository for security problems: injection, unsafe deserialisation, path traversal, secrets (gitleaks), unsafe defaults. The workspace is read-only: report in your answer, with file:line and a fix."
+}

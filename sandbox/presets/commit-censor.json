@@ -1,0 +1,18 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "commit-censor",
+  "title": "Commit censor",
+  "description": "Every push is checked for private data (always, not only to public remotes): practise what passes.",
+  "category": "testing",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--privacy-check",
+    "always"
+  ],
+  "prompt": "Prepare a commit of your current work and try to push it. When the privacy check refuses something, explain what it found and why it would be private, fix the commits, and try again."
+}

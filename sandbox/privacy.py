@@ -978,19 +978,51 @@ def check_push(git, rules, args, data, config, err):
 # core.hooksPath). It sends the push's ref updates here; this process finds the pushed commits in the
 # workspaces and checks what the remote does not have yet. Whatever cannot be checked is refused.
 
+CANARY_PREFIX = "canary-"
+
+
+def canary_rules(config):
+    """Rules for the canary tokens of the run (push.json "canaries": [{"id", "tokens"}], the launcher's canary.py),
+    matched literally and never shown."""
+    rules = Rules(sources=["canaries"])
+    for entry in config.get("canaries") or []:
+        for token in entry.get("tokens", []) if isinstance(entry, dict) else []:
+            if isinstance(token, str) and len(token) >= 8:
+                rules.patterns.append(Pattern(f"{CANARY_PREFIX}{entry.get('id')}", re.compile(re.escape(token)), BLOCK,
+                                              "a canary token: a decoy credential sandbox-ai planted for this run",
+                                              secret=True))
+    return rules
+
+
 def push_verdict(config, request):
     """{"ok": bool, "message": str} for one push: REQUEST holds the remote's "url", the "commands"
-    [[old, new, ref]] and the commit ids the remote "advertised" (it has those already)."""
+    [[old, new, ref]] and the commit ids the remote "advertised" (it has those already). The run's canary
+    tokens are looked for in pushes to every remote: "canary" lists the canaries found, and such a push is
+    refused unless push.json says "canary_block": false."""
     url = str(request.get("url", ""))
-    if config.get("mode") != "always" and not remote_is_public(url, config.get("own_hosts", [])):
+    public = config.get("mode") == "always" or remote_is_public(url, config.get("own_hosts", []))
+    if not public and not canary_rules(config).patterns:
         return {"ok": True, "message": "not a public remote"}
+    verdict = push_findings(config, request, url, public)
+    canaries = verdict.pop("canaries", [])
+    if not canaries:
+        return verdict
+    if config.get("canary_block", True) is not False:
+        return {"ok": False, "canary": canaries, "message": f"this push to {remote_host(url)} carries canary tokens "
+                "(decoy credentials planted in this sandbox: " + ", ".join(canaries) + "); it is refused"}
+    return {**verdict, "canary": canaries}
+
+
+def push_findings(config, request, url, public):
+    """push_verdict's check of the commits: with the privacy rules for a PUBLIC remote, else the canary rules
+    alone (a private remote is no publication; then only what was checked counts)."""
     updates = [(str(new), str(ref)) for old, new, ref in request.get("commands", []) if not ZERO.fullmatch(str(new))]
     if not updates:
         return {"ok": True, "message": "nothing but deletions"}
     if any(not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", new) for new, _ in updates):
         return {"ok": False, "message": "the push names commits in an unknown format"}
     advertised = [str(oid) for oid in request.get("advertised", []) if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", str(oid))]
-    remaining, lines, blocking, incomplete = dict(updates), [], False, []
+    remaining, lines, blocking, incomplete, canaries = dict(updates), [], False, [], set()
     for workspace in config.get("workspaces", []):
         if not remaining:
             break
@@ -1000,7 +1032,8 @@ def push_verdict(config, request):
         found = present(git, list(remaining))
         if not found:
             continue
-        rules = builtin_rules().add(parse_rules(workspace["rules"], "derived"))
+        rules = (builtin_rules().add(parse_rules(workspace["rules"], "derived")) if public else Rules()).add(
+            canary_rules(config))
         report = Report(workspace["path"])
         known = sorted(set(present(git, advertised).values()))
         scan_commits(git, rules, [*sorted(set(found.values())), "--not", *known], report, [TOTAL_LIMIT],
@@ -1015,26 +1048,35 @@ def push_verdict(config, request):
                     break
                 tag, depth = target[1], depth + 1
             remaining.pop(oid, None)
+        found = [f for f in report.findings if f.pattern.id.startswith(CANARY_PREFIX)]
+        canaries |= {f.pattern.id[len(CANARY_PREFIX):] for f in found}
+        report.findings = [f for f in report.findings if f not in found]
+        if not public:
+            continue
         if report.notes:
             # What was not read cannot be called clean.
             incomplete += [f"{workspace['path']}: {note}" for note in report.notes]
         if report.findings:
             blocking |= bool(report.blocking)
             lines += [f"{workspace['path']}: {line}" for line in format_report(report, rules)]
+    if not public:
+        return {"ok": True, "message": "not a public remote", "canaries": sorted(canaries)}
     if remaining:
         refs = ", ".join(sorted(set(remaining.values())))
         return {"ok": False, "message": f"the commits for {refs} are in no workspace, so they cannot be checked; "
-                                        "push from /work or /workspaces/NAME"}
+                                        "push from /work or /workspaces/NAME", "canaries": sorted(canaries)}
     if incomplete and not blocking:
         return {"ok": False, "message": "\n".join(["this push cannot be checked completely, so it is refused:",
                                                    *incomplete, "Push it from the host after checking it with "
-                                                   "`sandbox-ai privacy-check`, or ask the user."])}
+                                                   "`sandbox-ai privacy-check`, or ask the user."]),
+                "canaries": sorted(canaries)}
     if blocking:
         return {"ok": False, "message": "\n".join([f"this push to {remote_host(url)} would publish what must stay "
                                                    "private:", *lines, "Remove these from the commits (rewrite "
                                                    "them), or ask the user whether they are meant to be "
-                                                   "published."])}
-    return {"ok": True, "message": "\n".join(lines) if lines else "clean", "warnings": bool(lines)}
+                                                   "published."]), "canaries": sorted(canaries)}
+    return {"ok": True, "message": "\n".join(lines) if lines else "clean", "warnings": bool(lines),
+            "canaries": sorted(canaries)}
 
 
 def present(git, oids):

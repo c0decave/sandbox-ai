@@ -84,7 +84,10 @@ def test_questions_name_the_sandbox_that_asks(run, tmp_path, monkeypatch):
     questions, lines = ap.questions, []
     monkeypatch.setattr(ap, "questions", lambda: questions(run))
     assert ap.main(["list"], out=lines.append) == 0
-    assert lines == ["1-1-1  claude-1 (~/app)  look up pypi.org"]
+    assert lines[0].split() == ["ID", "SANDBOX", "QUESTION"]
+    assert [cell.strip() for cell in lines[1].split("  ") if cell.strip()] == ["1-1-1", "claude-1 (~/app)", "look up pypi.org"]
+    assert lines[1].index("claude-1") == lines[0].index("SANDBOX"), "columns line up"
+    assert lines[2].startswith("answer: sandbox-ai approvals allow|deny ID")
 
 
 def test_answers(run, tmp_path):
@@ -282,8 +285,11 @@ def test_always_remembers_the_address_not_the_claimed_name(run, tmp_path):
 def test_push_always_is_only_for_the_run_and_deny_is_remembered(run):
     ask(run, "1-1-1", kind="push", url="https://github.com/a/b", refs=["refs/heads/main"], message="warn")
     assert ap.answer("1-1-1", "allow", "always", runs=run, out=lambda line: None)["scope"] == "run"
-    with pytest.raises(ValueError, match="at most for the run"):
-        ap.answer("1-1-1", "deny", "always", runs=run)
+    # A push cannot be blocked always (only names and addresses are): it is denied for the run.
+    ask(run, "1-1-2", kind="push", url="https://github.com/a/b", refs=["refs/heads/main"], message="warn")
+    lines = []
+    assert ap.answer("1-1-2", "deny", "always", runs=run, out=lines.append)["scope"] == "run"
+    assert "only names and addresses are blocked always" in lines[0]
     parsed = []
     original = ap.answer
     try:
@@ -368,12 +374,86 @@ def test_remembered_and_forget(run, tmp_path):
     ap.remember(tmp_path / "app", host="pypi.org")
     ap.remember(tmp_path / "app", tcp="192.0.2.9:5432")
     project = str((tmp_path / "app").resolve())
-    assert ap.remembered() == {project: {"hosts": ["pypi.org"], "tcp": ["192.0.2.9:5432"]}}
+    known = ap.remembered()[project]
+    assert {k: v for k, v in known.items() if k != "details"} == {
+        "hosts": ["pypi.org"], "tcp": ["192.0.2.9:5432"], "blocked_hosts": [], "blocked_tcp": []}
+    assert set(known["details"]) == {"hosts:pypi.org", "tcp:192.0.2.9:5432"}  # each with the time it was added
     lines = []
-    assert ap.main(["remembered"], out=lines.append) == 0 and lines == [project, "  pypi.org", "  192.0.2.9:5432"]
+    assert ap.main(["remembered"], out=lines.append) == 0 and lines[0] == project
+    assert [line.split("  ")[1] for line in lines[1:]] == ["allow pypi.org", "allow 192.0.2.9:5432"]
+    assert lines[1].split("  ")[2].startswith("name; added 20") and lines[2].split("  ")[2].startswith("address; added")
     assert ap.main(["forget", project, "pypi.org"], out=lines.append) == 0
     assert ap.approved_for(tmp_path / "app") == {"hosts": [], "tcp": ["192.0.2.9:5432"]}
     assert ap.main(["forget", project, "pypi.org"], out=lines.append) == 1  # not there any more
     assert ap.forget(project, "192.0.2.9:5432") and ap.remembered() == {}
     lines.clear()
     assert ap.main(["remembered", "--json"], out=lines.append) == 0 and json.loads(lines[0]) == {}
+
+
+def test_block_always_is_remembered_and_refused_without_a_question(run, tmp_path):
+    """deny --scope always: denied for the run now, refused at once at every later start of the project."""
+    supervisor(run)
+    ask(run, "1-1-1", kind="connect", destination="192.0.2.9:5432", address="192.0.2.9", port=5432)
+    reply = ap.answer("1-1-1", "deny", "always", runs=run, out=lambda line: None)
+    assert reply == {"decision": "deny", "scope": "run"}
+    assert ap.blocked_for(tmp_path / "app") == {"hosts": [], "tcp": ["192.0.2.9:5432"]}
+    ask(run, "1-1-2", kind="dns", name="tracker.example")
+    ap.answer("1-1-2", "deny", "always", runs=run, out=lambda line: None)
+    assert ap.blocked_for(tmp_path / "app")["hosts"] == ["tracker.example"]
+    # Allowing it always later moves it from blocked to allowed (one excludes the other).
+    ap.remember(tmp_path / "app", host="tracker.example")
+    assert ap.blocked_for(tmp_path / "app")["hosts"] == [] and ap.approved_for(tmp_path / "app")["hosts"] == ["tracker.example"]
+    project = str((tmp_path / "app").resolve())
+    assert ap.remembered()[project]["blocked_tcp"] == ["192.0.2.9:5432"]
+    lines = []
+    ap.main(["remembered"], out=lines.append)
+    assert any(line.startswith("  block 192.0.2.9:5432  address; added ") and "from question 1-1-1" in line
+               for line in lines)
+    assert any(line.startswith("  allow tracker.example  name; added ") for line in lines)
+    assert ap.forget(project, "192.0.2.9:5432") and ap.blocked_for(tmp_path / "app")["tcp"] == []
+
+
+def test_buttons_in_the_notification_answer_the_question(monkeypatch):
+    """Allow / Allow always / Block / Block always in the notification; the click answers as the CLI would."""
+    monkeypatch.setattr(ap, "policy_scope", lambda: "always")
+    answered, commands = [], []
+
+    def runner(command, **kwargs):
+        commands.append(command)
+        return type("Done", (), {"stdout": "never\n"})()
+    chosen = ap.desktop_question("sandbox-ai asks: claude-1", "connect to 192.0.2.9:5432", "1-1-1", runner=runner,
+                                 answer_with=lambda ident, decision, scope, out: answered.append((ident, decision, scope)))
+    assert chosen == "never" and answered == [("1-1-1", "deny", "always")]
+    assert "--action=always=Allow always" in commands[0] and "--wait" in commands[0]
+    # A policy capping the scope: no "Allow always" button.
+    monkeypatch.setattr(ap, "policy_scope", lambda: "run")
+    ap.desktop_question("t", "x", "1-1-2", runner=runner, answer_with=lambda *a, **k: None)
+    assert "--action=always=Allow always" not in commands[1] and "--action=never=Block always" in commands[1]
+
+
+@pytest.mark.parametrize("mode, cap", [("high", "run"), ("paranoid", "once")])
+def test_answers_keep_to_the_mode_of_the_run(run, tmp_path, mode, cap):
+    """A run in a strict security mode (run.json "mode"): an answer wider than its scope counts as the widest it
+    allows, and nothing is remembered for the project."""
+    run["claude-1"]["mode"] = {"name": mode, "origin": "--mode", "refuses": ["--allow-host"], "approval_scope": cap}
+    supervisor(run)
+    ask(run, "1-1-1", kind="connect", destination="192.0.2.9:5432", address="192.0.2.9", port=5432)
+    lines = []
+    reply = ap.answer("1-1-1", "allow", "always", runs=run, out=lines.append)
+    assert reply["scope"] == cap and ap.approved_for(tmp_path / "app")["tcp"] == []
+    assert any(f"security mode {mode} of this run approves at most" in line for line in lines)
+    ask(run, "1-1-2", kind="connect", destination="192.0.2.10:5432", address="192.0.2.10", port=5432)
+    assert ap.answer("1-1-2", "deny", "always", runs=run, out=lambda line: None)["decision"] == "deny"
+
+
+def test_list_as_json_for_the_web_interface(run, monkeypatch):
+    """approvals list --json: the same questions as the table, escaped the same way."""
+    ask(run, "1-1-1", kind="dns", name="pypi.org\x1b[2J")
+    real = ap.questions
+    monkeypatch.setattr(ap, "questions", lambda runs=None, answered=False: real(run, answered))
+    lines = []
+    assert ap.main(["list", "--json"], out=lines.append) == 0
+    (entry,) = json.loads(lines[0])
+    assert entry["id"] == "1-1-1" and entry["run"] == "claude-1" and entry["kind"] == "dns"
+    assert "\x1b" not in entry["question"] and "pypi.org" in entry["question"] and "\\x1b" in entry["question"]
+    assert entry["sandbox"].startswith("claude-1")

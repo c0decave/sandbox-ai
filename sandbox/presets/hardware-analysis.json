@@ -1,0 +1,42 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "hardware-analysis",
+  "title": "Hardware analysis",
+  "description": "A device's serial console, by default sandbox-ai's emulated SB-42 sensor node: identify it, read its boot, note bootloader, firmware and flash layout; the agent reaches only its provider and the device.",
+  "category": "analysis",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--allow-host-port",
+    "{port}",
+    "--device",
+    "{device}"
+  ],
+  "mcp": [
+    "hub:binwalk"
+  ],
+  "values": {
+    "port": {
+      "label": "Port of the serial console on this host",
+      "kind": "port",
+      "default": "4000",
+      "hint": "sandbox-ai demo-device start (the emulated one), or ser2net in front of a real device"
+    },
+    "device": {
+      "label": "A real device to hand over as well",
+      "kind": "device",
+      "optional": true,
+      "hint": "/dev/ttyUSB0, /dev/ttyACM0"
+    }
+  },
+  "prompt": "A device's serial console is reachable at socket://127.0.0.1:{port} (pyserial: serial.serial_for_url, or nc 127.0.0.1 {port}); a device under /dev may have been handed to you as well. Find out what it is without changing it: read its boot messages, log in to its console, note bootloader, kernel, firmware version, hardware revision and flash layout (read-only: md), and write your findings to /work/hardware-report.md. Never write to its flash or run commands that could.",
+  "notes": [
+    "Start the emulated device first: sandbox-ai demo-device start (port 4000); a real one: ser2net on the host.",
+    "Podman only (pasta forwards the host's port).",
+    "Only the agent's provider is reachable: datasheets come from you (copy them into the workspace)."
+  ]
+}

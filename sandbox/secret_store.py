@@ -107,7 +107,8 @@ class KeyringStore:
         result = self.tool("store", f"--label=sandbox-ai {check_name(name)}", "service", "sandbox-ai", "name", name,
                            data=value)
         if result.returncode != 0:
-            raise ValueError(f"the keyring refused the secret: {result.stderr.strip()[:200]}")
+            raise ValueError(f"the keyring refused the secret: {result.stderr.strip()[:200]} (keep it in sandbox-ai's "
+                             f"private files instead: SANDBOX_AI_SECRETS=file sandbox-ai secrets set {name})")
 
     def delete(self, name):
         return self.tool("clear", "service", "sandbox-ai", "name", check_name(name)).returncode == 0
@@ -123,7 +124,10 @@ def keyring_usable(run=subprocess.run):
                      timeout=10, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired):
         return False
-    return result.returncode in (0, 1) and "not provided by any .service" not in result.stderr
+    # A search that finds nothing ends with 1 and says nothing; any message on standard error is the Secret
+    # Service failing ("not provided by any .service files", "The name is not activatable", "Cannot autolaunch
+    # D-Bus", a locked or missing collection): then the private files are used.
+    return result.returncode == 0 or (result.returncode == 1 and not result.stderr.strip())
 
 
 def store():
@@ -161,9 +165,13 @@ def main(argv, stdin=sys.stdin, out=print):
             out(backend.name)
         elif args.command == "list":
             names = sorted(set(backend.names()) | (set(FileStore().names()) if backend.name != "file" else set()))
-            for name in names:
-                out(f"{name}  ({backend.name if name in backend.names() else 'file'})")
-            if not names:
+            in_backend = set(backend.names())
+            rows = [[name, backend.name if name in in_backend else "file"] for name in names]
+            if rows:  # values are never shown, only where each is kept
+                widths = [max(len(r[i]) for r in rows + [["NAME", "STORE"]]) for i in range(2)]
+                for row in [["NAME", "STORE"]] + rows:
+                    out(f"{row[0].ljust(widths[0])}  {row[1]}")
+            else:
                 out("no secrets")
         elif args.command == "set":
             value = os.environ.get(args.from_env, "") if args.from_env else stdin.readline().rstrip("\n")

@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 """Create (or update) a release on Gitea/Forgejo or GitHub and upload the dist/ files.
 
-Usage: scripts/publish_release.py --source URL [--tag vX.Y.Z] [--token-env NAME] [--notes TEXT] FILE...
+Usage: scripts/publish_release.py --source URL [--tag vX.Y.Z] [--token-env NAME] [--notes TEXT]
+                                 [--sign KEY | --allow-unsigned] FILE...
 
-  --source     repository URL, e.g. http://localhost:3000/OWNER/sandbox-ai or https://github.com/OWNER/REPO
-  --tag        default: v<version of sandbox/agent_sandbox.py>; the tag must already be pushed
-  --token-env  host variable with an access token that may write releases (default: SANDBOX_AI_TOKEN)
+  --source          repository URL, e.g. https://git.example.org/OWNER/sandbox-ai or https://github.com/OWNER/REPO
+  --tag             default: v<version of sandbox/agent_sandbox.py>; the tag must already be pushed
+  --token-env       host variable with an access token that may write releases (default: SANDBOX_AI_TOKEN)
+  --sign KEY        sign the SHA256SUMS among the files first (SHA256SUMS.sig, uploaded along)
+  --allow-unsigned  publish an unsigned SHA256SUMS although sandbox/release-signers lists keys
 
+Before anything is uploaded, every file SHA256SUMS lists must match it, and when sandbox/release-signers lists
+keys, SHA256SUMS.sig must be a good signature by one of them: installations would refuse the release otherwise.
 Files with the same name in an existing release are replaced. The token is sent only to the
 repository's API host (and GitHub's upload host), never printed, never over plain http except to localhost.
 """
 import argparse
+import hashlib
+import importlib.util
 import ipaddress
 import json
 import mimetypes
@@ -28,6 +35,54 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def fail(message):
     sys.exit(f"publish_release: {message}")
+
+
+def release_keys():
+    spec = importlib.util.spec_from_file_location("sandbox_release_keys", ROOT / "sandbox" / "release_keys.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def check_files(files, key, allow_unsigned):
+    """The files to upload, with SHA256SUMS.sig made (--sign) or checked: what install.sh will check, before the
+    release changes."""
+    rk = release_keys()
+    try:
+        keys = rk.load()
+    except ValueError as exc:
+        fail(str(exc))
+    names = {path.name: path for path in files}
+    sums = names.get("SHA256SUMS")
+    if sums is None:
+        if key:
+            fail("--sign: no SHA256SUMS among the files")
+        return files
+    listed = {parts[1].lstrip("*"): parts[0] for parts in (line.split() for line in sums.read_text().splitlines())
+              if len(parts) == 2}
+    for name, path in names.items():
+        if name in listed and hashlib.sha256(path.read_bytes()).hexdigest() != listed[name]:
+            fail(f"{path} does not match SHA256SUMS (rebuild dist/ with scripts/make_dist.py)")
+    sig = names.get("SHA256SUMS.sig")
+    if key:
+        try:
+            signature = rk.sign(sums.read_bytes(), key)
+        except RuntimeError as exc:
+            fail(str(exc))
+        sig = sums.with_name("SHA256SUMS.sig")
+        sig.write_bytes(signature)
+        files = [path for path in files if path.name != "SHA256SUMS.sig"] + [sig]
+    if sig is None:
+        if keys and not allow_unsigned:
+            fail("SHA256SUMS is not signed, but sandbox/release-signers lists keys: installations would refuse this "
+                 "release. Pass --sign KEY (or SHA256SUMS.sig from make_dist.py --sign)")
+        return files
+    verdict, detail = rk.verify(sums.read_bytes(), sig.read_bytes(), keys)
+    if verdict != "good" and not (allow_unsigned and not key):
+        fail(f"SHA256SUMS.sig: {detail}" + ("" if keys else " (sandbox/release-signers lists no key)"))
+    if verdict == "good":
+        print(f"publish_release: SHA256SUMS signed by {detail}", file=sys.stderr)
+    return files
 
 
 def version():
@@ -95,6 +150,9 @@ def main(argv=None):
     parser.add_argument("--tag")
     parser.add_argument("--token-env", default="SANDBOX_AI_TOKEN")
     parser.add_argument("--notes", default="")
+    parser.add_argument("--sign", metavar="KEY", type=Path, help="Sign SHA256SUMS with this SSH key first")
+    parser.add_argument("--allow-unsigned", action="store_true",
+                        help="Publish without a good signature although sandbox/release-signers lists keys")
     parser.add_argument("files", nargs="+", type=Path)
     a = parser.parse_args(argv)
     token = os.environ.get(a.token_env)
@@ -104,6 +162,7 @@ def main(argv=None):
     for path in a.files:
         if not path.is_file():
             fail(f"not a file: {path}")
+    files = check_files(a.files, a.sign, a.allow_unsigned)
     kind, api, uploads = endpoints(a.source)
     client = Client(token)
     release = client.request("GET", f"{api}/releases/tags/{urllib.parse.quote(tag)}")
@@ -115,11 +174,18 @@ def main(argv=None):
             fail(f"cannot create release {tag}: push the tag first (git push origin {tag})")
         print(f"publish_release: created release {tag}", file=sys.stderr)
     existing = {asset["name"]: asset["id"] for asset in release.get("assets", [])}
-    for path in a.files:
+
+    def delete(name):
+        client.request("DELETE", f"{api}/releases/assets/{existing[name]}" if kind == "github"
+                       else f"{api}/releases/{release['id']}/assets/{existing[name]}")
+
+    names = {path.name for path in files}
+    if "SHA256SUMS" in names and "SHA256SUMS.sig" not in names and "SHA256SUMS.sig" in existing:
+        delete("SHA256SUMS.sig")  # it signed the SHA256SUMS that is replaced now
+        print("publish_release: removed the old SHA256SUMS.sig", file=sys.stderr)
+    for path in files:
         if path.name in existing:
-            delete = (f"{api}/releases/assets/{existing[path.name]}" if kind == "github"
-                      else f"{api}/releases/{release['id']}/assets/{existing[path.name]}")
-            client.request("DELETE", delete)
+            delete(path.name)
         if kind == "github":
             client.request("POST", f"{uploads}/releases/{release['id']}/assets?name={urllib.parse.quote(path.name)}",
                            path.read_bytes(), "application/octet-stream")

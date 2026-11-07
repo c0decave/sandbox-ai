@@ -1,0 +1,34 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "software-analysis",
+  "title": "Software analysis",
+  "description": "Binaries in a read-only folder, the agent reaches only its provider; capa, FLOSS, radare2, YARA and binwalk as MCP servers in containers of their own.",
+  "category": "analysis",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--mount",
+    "{samples}:/mnt/samples:ro"
+  ],
+  "mcp": [
+    "hub:capa",
+    "hub:floss",
+    "hub:radare2",
+    "hub:yara",
+    "hub:binwalk"
+  ],
+  "values": {
+    "samples": {
+      "label": "Folder with the samples",
+      "kind": "folder"
+    }
+  },
+  "prompt": "Analyse the samples in /mnt/samples: what each one is, what it can do (capa), its strings (FLOSS), its structure (radare2), YARA matches. Never run a sample. Write one report per sample to /work/reports/.",
+  "notes": [
+    "Samples stay read-only and the agent reaches only its provider: nothing it finds can call home."
+  ]
+}

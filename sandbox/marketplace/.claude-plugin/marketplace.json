@@ -12,6 +12,41 @@
       "source": "./plugins/sandcastle",
       "version": "1.0.0",
       "description": "Demo: /sandcastle shows a robot building sandcastles in its sandbox"
+    },
+    {
+      "name": "egm",
+      "source": {
+        "source": "github",
+        "repo": "google/elephant-goldfish-model",
+        "sha": "113a3afc44e8f4f54722d7150d5701f65cc8ef7f"
+      },
+      "description": "Elephant-Goldfish Model (Google, Apache-2.0): draft design specs, review them with fresh-context reviewer subagents, check implementation drift. /egm:egm-brainstorm, /egm:egm-draft, /egm:egm-review",
+      "homepage": "https://egm.dev",
+      "license": "Apache-2.0",
+      "keywords": [
+        "design-documents",
+        "design-review",
+        "spec-driven-development"
+      ]
+    },
+    {
+      "name": "superpowers",
+      "source": {
+        "source": "github",
+        "repo": "obra/superpowers",
+        "sha": "22f0b463e7a5e579904dd6211a520321035526f7"
+      },
+      "version": "7.0.2",
+      "description": "Superpowers (Jesse Vincent, MIT): a skills library for disciplined work: brainstorming, writing and executing plans, test-driven development, systematic debugging, code review, git worktrees, subagent-driven development. Its SessionStart hook adds the using-superpowers skill to every session.",
+      "homepage": "https://github.com/obra/superpowers",
+      "license": "MIT",
+      "keywords": [
+        "skills",
+        "tdd",
+        "debugging",
+        "planning",
+        "code-review"
+      ]
     }
   ]
 }

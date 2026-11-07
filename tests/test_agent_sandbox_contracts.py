@@ -8,12 +8,16 @@ import argparse
 import ast
 import base64
 import contextlib
+import fcntl
 import hashlib
+import io
 import gzip
 import importlib.util
 import json
+from types import SimpleNamespace
 import os
 from pathlib import Path
+import re
 import signal
 import shutil
 import socket
@@ -25,6 +29,7 @@ import ssl
 import threading
 import time
 import tempfile
+import tomllib
 from unittest.mock import Mock
 
 import pytest
@@ -220,14 +225,71 @@ def test_resolve_pod_hosts(scenario, monkeypatch):
     args = s.parse_args(["codex"])
     if scenario == "sad":
         run.side_effect = subprocess.TimeoutExpired("podman", 45)
-        with pytest.raises(subprocess.TimeoutExpired):
+        with pytest.raises(ValueError, match="within 45 s"):
             s.resolve_pod_hosts(args, ["example.org"])
+        # Podman itself failed (125): its own message and what helps, never only the command line.
+        run.side_effect = subprocess.CalledProcessError(
+            125, ["podman", "run"], output="", stderr="Error: localhost/codex-sandbox:latest: image not known\n")
+        with pytest.raises(ValueError) as failed:
+            s.resolve_pod_hosts(args, ["example.org"])
+        text = str(failed.value)
+        assert "exit status 125" in text and "image not known" in text and "sandbox-ai build codex" in text
     elif scenario == "edge":
         assert s.resolve_pod_hosts(args, []) == {}
         run.assert_not_called()
     else:
         assert s.resolve_pod_hosts(args, ["example.org"]) == {"example.org": ["203.0.113.1"]}
         assert run.call_args.kwargs["timeout"] == 45
+
+
+def test_podman_failure(scenario):
+    a = s.parse_args(["claude"])
+
+    def failed(stderr):
+        return s.podman_failure(a, subprocess.CalledProcessError(125, ["podman"], output="", stderr=stderr))
+    if scenario == "happy":  # a known cause: what helps
+        assert failed("Error: could not find pasta, the network namespace can't be configured: exec: \"pasta\"") \
+            .endswith("-> the network needs pasta: install the package passt (Podman 4.4 or newer)")
+        assert "subordinate IDs" in failed("cannot find UID/GID for user u: no subuid ranges found for user")
+        # Without a user session four WARN lines come first, whatever the error: they decide nothing.
+        warned = failed("WARN[0000] The cgroupv2 manager is set to systemd but there is no systemd user session\n"
+                        "WARN[0000] Falling back to --cgroup-manager=cgroupfs\nError: something nobody has seen")
+        assert "WARN" not in warned and "cgroups" not in warned and warned.endswith("sandbox-ai doctor")
+        assert "pasta" not in failed("Error: invalid log driver: passthrough is only supported with a tty")
+        assert "podman system migrate" in failed("Error: cannot re-exec process to join the existing user namespace")
+        lookup = s.podman_failure(a, subprocess.CalledProcessError(1, ["podman"], output="",
+                                                                   stderr="socket.gaierror: [Errno -2] Name unknown"))
+        assert lookup.startswith("the host lookup in the image failed (exit status 1)")
+        # 127 on the user's Proxmox container: pasta was missing ("executable file not found"), not python3.
+        missing = s.podman_failure(a, subprocess.CalledProcessError(
+            127, ["podman"], output="", stderr='Error: could not find pasta, the network namespace cannot be '
+                                               'configured: exec: "pasta": executable file not found in $PATH'))
+        assert missing.startswith("Podman could not start a program it needs (pasta, or the image's python3) "
+                                  "(exit status 127)")
+        assert missing.endswith("install the package passt (Podman 4.4 or newer)")
+        # The same 127 when pasta is there but the container has no /dev/net/tun (the user's Proxmox container).
+        tun = s.podman_failure(a, subprocess.CalledProcessError(
+            127, ["podman"], output="", stderr="Error: pasta failed with exit code 1:\nFailed to open() /dev/net/tun: "
+                                               "No such file or directory\nFailed to set up tap device in namespace"))
+        assert "install the package passt" not in tun, "pasta is installed: no advice to install it"
+        assert "lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file" in tun and "modprobe tun" in tun
+        assert "pasta could not set up the network" in failed("Error: pasta failed with exit code 1: something else")
+        assert s.podman_failure(a, subprocess.CalledProcessError(127, ["podman"], output="", stderr="")) \
+            .endswith("-> check the host with: sandbox-ai doctor")
+        lxc = failed('newuidmap: write to uid_map failed: Operation not permitted\nError: cannot set up namespace '
+                     'using "/usr/bin/newuidmap": exit status 1')
+        assert "unprivileged container" in lxc and "sandbox-ai doctor" in lxc
+        few = failed("Error: potentially insufficient UIDs or GIDs available in user namespace (requested 0:65534 "
+                     "for /nonexistent): Check /etc/subuid and /etc/subgid")
+        assert "higher IDs" in few and "65536" in few
+        assert "sandbox-ai build claude" in failed("Error: localhost/claude-sandbox:latest: image not known")
+    elif scenario == "sad":  # an unknown one: Podman's message, and the doctor
+        text = failed("Error: something new")
+        assert "something new" in text and text.endswith("-> check the host with: sandbox-ai doctor")
+    else:  # no message at all, or one with control characters: still readable, never a terminal sequence
+        assert s.podman_failure(a, subprocess.CalledProcessError(125, ["podman"], output="", stderr="")) \
+            == "Podman failed (exit status 125) before the sandbox started\n  -> check the host with: sandbox-ai doctor"
+        assert "\x1b" not in failed("\x1b]0;evil\x07 image not known")
 
 
 def test_firewall_rules(scenario):
@@ -240,6 +302,14 @@ def test_firewall_rules(scenario):
         assert rules.count("policy drop") == 3
         assert rules.count("ip6 daddr 2001:db8::1 tcp dport 443 accept") == (1 if scenario == "happy" else 0)
         assert "udp dport 53 accept" not in rules
+    if scenario == "edge":
+        # A VPN's own rules (vpn.py: Tor's ports) come first in the output chain, before loopback is accepted.
+        rules = s.firewall_rules([], [], vpn_rules=["ip daddr 127.0.53.1 drop"])
+        output = rules.split(" chain output")[1]
+        assert output.index("ip daddr 127.0.53.1 drop") < output.index('oifname "lo" accept')
+    if scenario == "sad":
+        with pytest.raises(ValueError, match="firewall rule"):
+            s.firewall_rules([], [], vpn_rules=["accept }\n chain x {"])
 
 
 def test_copy_private(scenario, tmp_path):
@@ -370,7 +440,9 @@ def test_wait_child(scenario, monkeypatch):
         assert [call.args[0] for call in child.send_signal.call_args_list] == [signal.SIGTERM, signal.SIGINT, signal.SIGHUP]
 
 
-def test_inner_bootstrap(scenario, monkeypatch):
+def test_inner_bootstrap(scenario, monkeypatch, tmp_path):
+    monkeypatch.setattr(s.RUNTIME, "SESSION_CONFIG", tmp_path / "absent.json")  # not the session of a sandbox running the tests
+    monkeypatch.setattr(s.RUNTIME, "LOG_DIR", tmp_path / "absent-log")
     monkeypatch.setattr(s.os, "getpid", lambda: 1)
     libc = Mock()
     libc.prctl.return_value = 0
@@ -381,6 +453,8 @@ def test_inner_bootstrap(scenario, monkeypatch):
     monkeypatch.setattr(sr, "namespace_state", lambda: states()[0])
     monkeypatch.setattr(sr, "firejail_command", lambda state: ["firejail-fixture"])
     monkeypatch.setattr(sr, "wait_child", lambda child: 0)
+    oom = []
+    monkeypatch.setattr(s.RUNTIME, "oom_first", oom.append)  # never the real /proc of the machine running the tests
     if scenario == "sad":
         run.side_effect = subprocess.CalledProcessError(1, "nft")
         with pytest.raises(subprocess.CalledProcessError):
@@ -397,6 +471,27 @@ def test_inner_bootstrap(scenario, monkeypatch):
         assert run.call_args_list[0].args[0] == ["nft", "-f", "/sandbox/session/firewall.nft"]
         assert run.call_args_list[1].args[0][:3] == ["nft", "list", "table"]
         assert popen.call_args.kwargs["close_fds"] is True
+        assert oom == [popen.return_value.pid]  # the agent goes first when memory runs out
+
+
+def test_oom_first(scenario, tmp_path):
+    """The agent's oom_score_adj goes OOM_MARGIN above the supervisor's, within the kernel's range."""
+    proc = tmp_path / "proc"
+    (proc / "self").mkdir(parents=True)
+    (proc / "42").mkdir()
+    (proc / "self" / "oom_score_adj").write_text({"happy": "0\n", "edge": "900\n"}.get(scenario, "nonsense\n"))
+    (proc / "42" / "oom_score_adj").write_text("0\n")
+    if scenario == "happy":
+        assert rt.oom_first(42, proc=proc) == rt.OOM_MARGIN
+        assert (proc / "42" / "oom_score_adj").read_text() == f"{rt.OOM_MARGIN}\n"
+    elif scenario == "sad":
+        assert rt.oom_first(42, proc=proc) is None  # unreadable value: nothing written
+        assert (proc / "42" / "oom_score_adj").read_text() == "0\n"
+        (proc / "self" / "oom_score_adj").write_text("0\n")
+        assert rt.oom_first(7, proc=proc) is None  # the process ended already
+    else:
+        assert rt.oom_first(42, proc=proc) == 1000  # capped at the kernel's maximum
+        assert rt.oom_first(42, proc=proc, margin=-5000) == -1000
 
 
 def test_firejail_command(scenario, monkeypatch):
@@ -531,7 +626,9 @@ def test_pod_commands(scenario, tmp_path, monkeypatch):
 
 def test_run_pod(scenario, tmp_path, monkeypatch):
     args = s.parse_args(["codex", "--offline"])
-    run, popen, wait = Mock(), Mock(), Mock(return_value=9 if scenario == "edge" else 0)
+    masks = []
+    run = Mock(side_effect=lambda *a, **k: masks.append(signal.pthread_sigmask(signal.SIG_BLOCK, [])))
+    popen, wait = Mock(), Mock(return_value=9 if scenario == "edge" else 0)
     monkeypatch.setattr(s.subprocess, "run", run)
     monkeypatch.setattr(s.subprocess, "Popen", popen)
     monkeypatch.setattr(sr, "wait_child", wait)
@@ -544,6 +641,8 @@ def test_run_pod(scenario, tmp_path, monkeypatch):
     cleanup = run.call_args_list[-1].args[0]
     assert cleanup[:4] == ["podman", "pod", "rm", "--force"]
     assert cleanup[-1].startswith("agent-codex-")
+    # A SIGTERM or Ctrl-C cannot cut the pod removal short; the commands before it stay interruptible.
+    assert set(s.CLEANUP_SIGNALS) <= masks[-1] and not set(s.CLEANUP_SIGNALS) & masks[0]
 
 
 def test_bwrap_command(scenario, tmp_path, monkeypatch):
@@ -665,7 +764,8 @@ def test_run_bwrap(scenario, tmp_path, monkeypatch):
     maps = Mock(side_effect=RuntimeError("mapping failed") if scenario == "sad" else None)
     monkeypatch.setattr(s, "configure_user_maps", maps)
     monkeypatch.setattr(sr, "wait_child", lambda child: 0)
-    stop = Mock()
+    stop = Mock(side_effect=lambda process: masks.append(signal.pthread_sigmask(signal.SIG_BLOCK, [])))
+    masks = []
     monkeypatch.setattr(sr, "stop_process", stop)
     write = Mock()
     monkeypatch.setattr(s.os, "write", write)
@@ -685,6 +785,7 @@ def test_run_bwrap(scenario, tmp_path, monkeypatch):
         assert popen.call_count == (1 if scenario == "edge" else 2)
         assert write.call_count == 2
     assert stop.call_count == 2
+    assert all(set(s.CLEANUP_SIGNALS) <= mask for mask in masks)
     for fd in descriptors:
         with pytest.raises(OSError):
             os.fstat(fd)
@@ -711,6 +812,8 @@ def test_main(scenario, tmp_path, monkeypatch):
         runner.side_effect = inspect
         if scenario == "edge":
             options += ["--state-dir", str(tmp_path / "persistent")]
+        else:
+            options += ["--no-keep"]  # the HOME goes with the run (kept by default: see the feature matrix)
         assert s.main(options) == 0
         assert seen["config"]["command"][:3] == ["codex", "--sandbox", "danger-full-access"]
         assert not seen["session"].exists()
@@ -798,10 +901,11 @@ def test_start_loggers(scenario, tmp_path, monkeypatch):
     config.write_text(json.dumps({"pinned": ["api.openai.com"] if scenario == "happy" else [], "watch": ["/work"],
                                   "env": {"API_KEY": "value-of-the-key", "PATH": "/usr/bin"},
                                   "secret_names": ["API_KEY", "MISSING"] if scenario == "happy" else []}))
-    stop = s.start_loggers()
+    who = object()  # the supervisor's Attribution, handed to the loggers that name a process
+    stop = s.start_loggers(None, (), who)
     assert not stop.is_set() and stop.seen == set() and len(stop.threads) == 4
     targets = {target.__name__: args for target, args in started}
-    assert targets["dns_logger"] == ({"api.openai.com"} if scenario == "happy" else set(), 53, stop, None, ())
+    assert targets["dns_logger"] == ({"api.openai.com"} if scenario == "happy" else set(), 53, stop, None, (), who, None, None)
     assert targets["file_logger"] == (["/work"], stop)
     # The process log redacts the values of --env and --secret-env variables by value.
     assert "denied_loop" in targets and targets["process_logger"] == (
@@ -837,6 +941,38 @@ def test_dns_reply(scenario):
     assert reply[:2] == b"\xbe\xef" and reply[12:] == question
     flags = int.from_bytes(reply[2:4], "big")
     assert flags & 0xF == 3 and flags & 0x8000 and bool(flags & 0x0100) == (scenario == "happy")
+
+
+def test_forward_dns(scenario):
+    """The DNS stub's forwarder: the first nameserver whose answer carries the query's id."""
+    import socket as _socket
+    import threading
+    query = b"\xbe\xef\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03org\x00\x00\x01\x00\x01"
+    server = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+    server.bind(("127.0.0.1", 0))
+    port = server.getsockname()[1]
+
+    def answer():
+        data, peer = server.recvfrom(4096)
+        ident = data[:2] if scenario != "sad" else b"\x00\x00"  # sad: an answer to another query
+        server.sendto(ident + b"\x81\x80" + data[4:], peer)
+    thread = threading.Thread(target=answer, daemon=True)
+    thread.start()
+    try:
+        if scenario == "happy":
+            found = rt.forward_dns(query, ["127.0.0.1"], timeout=2.0, port=port)
+            assert found is not None and found[1] == "127.0.0.1" and found[0][:2] == b"\xbe\xef"
+        elif scenario == "sad":
+            assert rt.forward_dns(query, ["127.0.0.1"], timeout=1.0, port=port) is None
+            assert rt.forward_dns(query, [], port=port) is None
+        else:
+            # A nameserver that cannot be reached is skipped; the next one answers.
+            found = rt.forward_dns(query, ["::1" if _socket.has_ipv6 else "127.0.0.2", "127.0.0.1"],
+                                   timeout=0.5, port=port)
+            assert found is not None and found[1] == "127.0.0.1"
+    finally:
+        thread.join(timeout=3)
+        server.close()
 
 
 def struct_error():
@@ -875,7 +1011,9 @@ def test_file_logger(scenario, tmp_path, monkeypatch):
         raw = name.encode() + b"\0" * (16 - len(name))
         return struct.pack("iIII", wd, mask, 0, len(raw)) + raw
     reads = {"happy": [event(1, 0x8, "a.txt") + event(1, 0x10, "a.txt") + event(1, 0x8, "a.txt")],
-             "edge": [event(1, 0x40000100, "newdir") + event(1, 0x40000010, "sub") + event(1, 0x4000, "")]}
+             "edge": [event(1, 0x40000100, "newdir") + event(1, 0x40000010, "sub") + event(1, 0x4000, "")
+                      # The watch of sub ends (IN_IGNORED): its path is forgotten, later events carry "?".
+                      + event(2, 0x8000, "") + event(2, 0x8, "late.txt")]}
     monkeypatch.setattr(s.os, "read", Mock(side_effect=[*reads.get(scenario, []), StopLoop()]))
     if scenario == "edge":
         (root / "newdir").mkdir()
@@ -890,10 +1028,34 @@ def test_file_logger(scenario, tmp_path, monkeypatch):
         assert [(r["action"], r["path"]) for r in records] == [("write", str(root / "a.txt")), ("read", str(root / "a.txt"))]
     elif scenario == "edge":
         assert str(root / "newdir") in watched
-        assert [r.get("action") for r in records] == ["create", None]
+        assert [r.get("action") for r in records] == ["create", None, "write"]
         assert "overflow" in records[1]["error"]
+        assert records[2]["path"] == os.path.join("?", "late.txt")
     else:
         assert records == [{"time": records[0]["time"], "error": "inotify unavailable"}]
+
+
+def test_file_logger_forgets_old_paths(tmp_path, monkeypatch):
+    """The 2-second de-duplication keeps at most FILE_RECENT_LIMIT paths: a long run touches millions."""
+    import struct
+    monkeypatch.setattr(sr, "LOG_DIR", tmp_path / "log")
+    (tmp_path / "log").mkdir()
+    (tmp_path / "work").mkdir()
+    monkeypatch.setattr(s.RUNTIME, "FILE_RECENT_LIMIT", 8)
+    libc = Mock()
+    libc.inotify_init1.return_value = 7
+    libc.inotify_add_watch.return_value = 1
+    monkeypatch.setattr(s.RUNTIME.ctypes, "CDLL", lambda *a, **kw: libc)
+    def event(name):
+        raw = name.encode() + b"\0" * (16 - len(name))
+        return struct.pack("iIII", 1, 0x8, 0, len(raw)) + raw
+    batch = b"".join(event(f"f{i}.txt") for i in range(50)) + event("f0.txt")
+    monkeypatch.setattr(s.os, "read", Mock(side_effect=[batch, StopLoop()]))
+    with pytest.raises(StopLoop):
+        s.file_logger([str(tmp_path / "work")])
+    records = [json.loads(line) for line in (tmp_path / "log/files.jsonl").read_text().splitlines()]
+    # Every distinct path is logged; f0.txt again within 2 s was forgotten under the limit and logged again.
+    assert len(records) == 51 and records[-1]["path"].endswith("f0.txt")
 
 
 def test_oauth_fields(scenario):
@@ -1237,6 +1399,35 @@ def test_git_token_credential(scenario):
         assert credential["loopback"] and credential["port"] == 8443 and credential["user"] == "x-access-token"
 
 
+def test_git_token_value(scenario, monkeypatch, tmp_path):
+    """The token of one --git-token-* login: from the host variable, the file or the secret store, checked."""
+    if scenario == "happy":
+        monkeypatch.setenv("CONTRACT_GIT", GIT_TOKEN)
+        credential = s.git_token_credential("https://git.example.org=CONTRACT_GIT", "env")
+        assert s.git_token_value(credential, "env") == GIT_TOKEN
+        store = Mock()
+        store.get.return_value = GIT_TOKEN
+        monkeypatch.setattr(s, "load_secret_store_module", lambda: store)
+        assert s.git_token_value(s.git_token_credential("https://git.example.org=GIT_PUSH", "secret"), "secret") == GIT_TOKEN
+    elif scenario == "sad":
+        monkeypatch.delenv("CONTRACT_UNSET", raising=False)
+        with pytest.raises(ValueError, match="Host variable is not set: CONTRACT_UNSET"):
+            s.git_token_value(s.git_token_credential("https://git.example.org=CONTRACT_UNSET", "env"), "env")
+        monkeypatch.setenv("CONTRACT_BAD", "two words")
+        with pytest.raises(ValueError, match="does not look like an access token"):
+            s.git_token_value(s.git_token_credential("https://git.example.org=CONTRACT_BAD", "env"), "env")
+        store = Mock()
+        store.get.return_value = None
+        monkeypatch.setattr(s, "load_secret_store_module", lambda: store)
+        with pytest.raises(ValueError, match="sandbox-ai secrets set GIT_PUSH"):
+            s.git_token_value(s.git_token_credential("https://git.example.org=GIT_PUSH", "secret"), "secret")
+    else:
+        token = tmp_path / "token"
+        token.write_text(GIT_TOKEN + "\n")
+        token.chmod(0o600)
+        assert s.git_token_value(s.git_token_credential(f"https://git.example.org={token}", "file"), "file") == GIT_TOKEN
+
+
 def test_git_tokens(scenario, monkeypatch):
     monkeypatch.setenv("CONTRACT_GIT", GIT_TOKEN)
     if scenario == "happy":
@@ -1389,6 +1580,11 @@ def test_git_server(scenario):
         for bad in ["http://git.example.org", "https://git.example.org/owner", "ftp://localhost", "https://a_b.org"]:
             with pytest.raises(ValueError, match="--x"):
                 s.git_server(bad, "--x")
+        # A password in the URL is refused, and the message does not repeat it.
+        secret_url = "https://alice" + ":" + "hunter2" + "@" + "github.com"  # put together: no such URL in the source
+        with pytest.raises(ValueError, match="no password in the URL") as refused:
+            s.git_server(secret_url, "--x")
+        assert "hunter2" not in str(refused.value) and "alice:" + "***" in str(refused.value)
     else:
         server = s.git_server("https://[::1]:8443", "--x")
         assert server["loopback"] and server["port"] == 8443 and server["url"] == "https://[::1]:8443"
@@ -1650,10 +1846,13 @@ def test_git_environment(scenario, monkeypatch, tmp_path):
                         "--git-token-env", "http://alice@localhost:3000=CONTRACT_GIT"]}[scenario]
     env = s.git_environment(s.parse_args(["claude", *options]))
     if scenario == "sad":
-        # Only the privacy hooks, unless they are switched off.
-        assert env == {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath",
-                       "GIT_CONFIG_VALUE_0": s.PRIVACY_HOOKS}
-        assert s.git_environment(s.parse_args(["claude", "--privacy-check", "off"])) == {}
+        # The helper for logins added during the run, and the privacy hooks unless they are switched off.
+        helper = {"GIT_CONFIG_KEY_0": "credential.helper", "GIT_CONFIG_VALUE_0": s.RUNTIME_GIT_HELPER}
+        assert env == {"GIT_CONFIG_COUNT": "2", **helper, "GIT_CONFIG_KEY_1": "core.hooksPath",
+                       "GIT_CONFIG_VALUE_1": s.PRIVACY_HOOKS}
+        assert s.git_environment(s.parse_args(["claude", "--privacy-check", "off"])) == {"GIT_CONFIG_COUNT": "1", **helper}
+        # With --token-proxy the tokens stay outside the sandbox: no helper (net allow refuses logins then).
+        assert s.git_environment(s.parse_args(["claude", "--privacy-check", "off", "--token-proxy"])) == {}
         return
     count = int(env["GIT_CONFIG_COUNT"])
     assert (env[f"GIT_CONFIG_KEY_{count - 1}"], env[f"GIT_CONFIG_VALUE_{count - 1}"]) == \
@@ -1757,6 +1956,50 @@ def test_merge_config(scenario):
     assert final.workspaces[0] == ("/main" if scenario != "happy" else os.getcwd())
 
 
+def test_merge_config_credential_copy(scenario, tmp_path):
+    """A --copy of a login file is an auth choice: the command line's replaces the project file's."""
+    notes = tmp_path / "notes.txt"
+    credential = f"{Path.home()}/.claude/.credentials.json:.claude/.credentials.json"
+    document = {"options": ["--copy", f"{notes}:notes.txt", "--copy", credential, "--dns"]}
+    cli = {"happy": ["--no-auth"], "sad": ["--copy", f"{notes}:other.txt"],
+           "edge": ["--copy=/secrets/auth.json:.codex/auth.json"]}[scenario]
+    (tmp_path / "project").mkdir()
+    argv = ["claude", "--workspace", str(tmp_path / "project"), *cli]
+    final = s.parse_args(s.merge_config(argv, s.parse_args(argv), document))
+    assert final.dns is True
+    if scenario == "sad":  # a plain file on the command line leaves the file's login alone
+        assert final.copy == [f"{notes}:notes.txt", credential, f"{notes}:other.txt"]
+    else:
+        assert credential not in final.copy and f"{notes}:notes.txt" in final.copy
+        if scenario == "happy":
+            s.validate(final)  # no "--no-auth conflicts with --copy of a credential file"
+
+
+def test_copies_credential(scenario, tmp_path):
+    if scenario == "happy":
+        assert s.copies_credential("/anywhere/creds:.claude/.credentials.json")
+        assert s.copies_credential("/backup/auth.json:x.json")
+        assert s.copies_credential(f"{Path.home()}/.claude.json:state.json")
+    elif scenario == "sad":
+        assert not s.copies_credential("/etc/gitconfig:.gitconfig")
+        assert not s.copies_credential("no-separator")
+    else:  # another name or a symlink for a login file counts as well
+        (Path.home() / ".codex").mkdir()
+        (Path.home() / ".codex/auth.json").write_text("{}")
+        (tmp_path / "link").symlink_to(Path.home() / ".codex/auth.json")
+        assert s.copies_credential(f"{tmp_path}/link:token")
+        assert s.copies_credential("/x:./.codex/../.codex/auth.json")
+
+
+def test_auth_choices(scenario):
+    if scenario == "happy":
+        assert s.auth_choices(["--dns", "--auth-file", "/a", "--copy-auth"]) == {1, 2, 3}
+    elif scenario == "sad":
+        assert s.auth_choices(["--copy", "/etc/hosts:hosts", "--log-dir", "--copy-auth"]) == set()
+    else:
+        assert s.auth_choices(["--copy=/b/auth.json:a", "--copy", "/c:.codex/auth.json", "--copy"]) == {0, 1, 2}
+
+
 def test_claude_default_settings(scenario, tmp_path):
     home = tmp_path / "home"
     settings = home / ".claude/settings.json"
@@ -1779,6 +2022,44 @@ def test_claude_default_settings(scenario, tmp_path):
         # Existing choices win; only missing keys are added.
         assert document["model"] == "sonnet" and document["theme"] == "dark"
         assert document["modelSettings"]["claude-opus-5-5"]["effortLevel"] == "max"
+
+
+def test_state_dir_lock(scenario, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    lock = home / s.STATE_LOCK
+    if scenario == "happy":
+        with s.state_dir_lock(home) as fd:
+            assert lock.read_text() == f"{os.getpid()}\n" and stat.S_IMODE(lock.stat().st_mode) == 0o600
+            # A second run on the same directory stops at once, naming the directory and the holder.
+            with pytest.raises(ValueError, match=f"--state-dir {home} is in use by another run \\(PID {os.getpid()}\\)"):
+                with s.state_dir_lock(home):
+                    pass
+            # Not inherited: no child (the sandbox, the agent) holds the lock.
+            assert fcntl.fcntl(fd, fcntl.F_GETFD) & fcntl.FD_CLOEXEC
+            children = subprocess.run(["ls", "/proc/self/fd"], close_fds=False, capture_output=True, text=True)
+            assert str(fd) not in children.stdout.split()
+        with s.state_dir_lock(home):  # released with the run; the stale PID is overwritten
+            assert lock.read_text() == f"{os.getpid()}\n"
+    elif scenario == "sad":
+        # The agent can write the HOME: a planted symlink or hard link never makes us write elsewhere.
+        target = tmp_path / "target"
+        target.write_text("keep")
+        lock.symlink_to(target)
+        with pytest.raises(ValueError, match="cannot open its lock file"):
+            with s.state_dir_lock(home):
+                pass
+        lock.unlink()
+        os.link(target, lock)
+        with pytest.raises(ValueError, match="not a private regular file"):
+            with s.state_dir_lock(home):
+                pass
+        assert target.read_text() == "keep"
+    else:
+        os.mkfifo(lock)  # never blocks on a FIFO
+        with pytest.raises(ValueError, match="not a private regular file"):
+            with s.state_dir_lock(home):
+                pass
 
 
 def test_update_json_defaults(scenario, tmp_path):
@@ -2111,6 +2392,56 @@ def test_load_mcp_module(scenario, monkeypatch, tmp_path):
             assert s.load_mcp_module() is not module
 
 
+def test_load_vpn_module(scenario, monkeypatch, tmp_path):
+    if scenario == "sad":
+        monkeypatch.setattr(s, "HERE", tmp_path)
+        with pytest.raises(FileNotFoundError):
+            s.load_vpn_module()
+    else:
+        module = s.load_vpn_module()
+        assert callable(module.agent_up) and module.PROFILE_NAME == s.VPN_PROFILE_NAME
+        # The module sees this launcher as loaded, what a caller replaced in it included.
+        monkeypatch.setattr(s, "podman_command", lambda a, *args: ["fake-podman", *args])
+        assert module.launcher().podman_command(None, "ps") == ["fake-podman", "ps"]
+        if scenario == "edge":
+            assert s.load_vpn_module() is not module
+
+
+def test_load_activity_module(scenario, monkeypatch, tmp_path):
+    if scenario == "sad":
+        monkeypatch.setattr(s, "HERE", tmp_path)
+        with pytest.raises(FileNotFoundError):
+            s.load_activity_module()
+    else:
+        module = s.load_activity_module()
+        assert callable(module.start) and "prompt" in module.KINDS
+        if scenario == "edge":
+            assert s.load_activity_module() is not module
+
+
+def test_start_activity(scenario, monkeypatch, tmp_path, capsys):
+    a = SimpleNamespace(log_dir=tmp_path / "logs", probe=False, mcp_socket_dir=None, run_id="claude-1", agent="claude",
+                        backend="bwrap", pod_name=None, tmux_socket_dir=None, session=None, state_dir=None,
+                        control_dir=None, workspaces=[str(tmp_path / "w")])
+    cfg = {"env": {"API_TOKEN": "tok-123456"}, "secret_names": []}
+    if scenario == "happy":  # a timeline in the log directory, also before the agent wrote anything
+        (tmp_path / "logs").mkdir()
+        collector = s.start_activity(a, tmp_path / "home", None, cfg)
+        collector.finish(0)
+        records = [json.loads(line) for line in (tmp_path / "logs" / "activity.jsonl").read_text().splitlines()]
+        assert [r["details"]["event"] for r in records] == ["start", "stop"]
+        assert records[0]["details"]["workspaces"] == [{"host": str(tmp_path / "w"), "sandbox": "/work"}]
+    elif scenario == "sad":  # probes, MCP servers and runs without a log directory keep no timeline
+        for change in ({"probe": True}, {"mcp_socket_dir": tmp_path}, {"log_dir": None}):
+            assert s.start_activity(SimpleNamespace(**{**vars(a), **change}), tmp_path, None, cfg) is None
+    else:  # a broken activity module never fails the launch
+        def broken():
+            raise RuntimeError("broken")
+        monkeypatch.setattr(s, "load_activity_module", broken)
+        assert s.start_activity(a, tmp_path, None, cfg) is None
+        assert "activity: not recorded" in capsys.readouterr().err
+
+
 def test_mcp_socket_dir(scenario, tmp_path, monkeypatch):
     if scenario == "sad":
         monkeypatch.delenv("XDG_STATE_HOME", raising=False)
@@ -2124,7 +2455,7 @@ def test_mcp_socket_dir(scenario, tmp_path, monkeypatch):
 def test_mcp_bridge_args(scenario):
     name = {"happy": "demo", "sad": "x", "edge": "a_b-1"}[scenario]
     assert s.mcp_bridge_args(name) == ["-I", "/sandbox/runtime.py", "--internal-mcp-bridge",
-                                       f"/sandbox/mcp/{name}/server.sock"]
+                                       f"/run/sandbox-mcp/{name}/server.sock"]
 
 
 def test_mcp_agent_args(scenario):
@@ -2154,11 +2485,13 @@ def test_mcp_serve(scenario, tmp_path):
         if sock.exists() and sock.is_socket():
             break
         clock.sleep(0.05)
-    def exchange():
+    ping = b'{"jsonrpc": "2.0", "method": "ping", "id": 1}\n'
+
+    def exchange(data=ping):
         client = socket.socket(socket.AF_UNIX)
         client.settimeout(10)
         client.connect(str(sock))
-        client.sendall(b"echo\n")
+        client.sendall(data)
         client.shutdown(socket.SHUT_WR)
         received = b""
         try:
@@ -2167,9 +2500,13 @@ def test_mcp_serve(scenario, tmp_path):
         except ConnectionResetError:
             pass  # a failed server closes with unread input
         return received
-    assert exchange() == (b"echo\n" if scenario == "happy" else b"")
+    assert exchange() == (ping if scenario == "happy" else b"")
     # One failing or finished instance never takes the listener down.
-    assert exchange() == (b"echo\n" if scenario == "happy" else b"")
+    assert exchange() == (ping if scenario == "happy" else b"")
+    if scenario == "happy":
+        # What is not one JSON message never reaches the server: the relay answers it.
+        answer = json.loads(exchange(b"echo\n"))
+        assert answer["error"]["code"] == -32700 and answer["id"] is None
 
 
 def test_mcp_bridge(scenario, tmp_path, monkeypatch):
@@ -2437,6 +2774,56 @@ def test_terminate(scenario):
     assert raised.value.code == 128 + signum
 
 
+def blocked():
+    return signal.pthread_sigmask(signal.SIG_BLOCK, [])
+
+
+def test_signals_deferred(scenario):
+    received = []
+    def handler(signum, _frame):
+        received.append(signum)
+    previous = signal.signal(signal.SIGTERM, handler)
+    try:
+        before = blocked()
+        if scenario == "happy":
+            with s.signals_deferred():
+                assert set(s.CLEANUP_SIGNALS) <= blocked()
+                os.kill(os.getpid(), signal.SIGTERM)
+                time.sleep(0.01)
+                assert received == []
+            # Held, not lost: delivered once cleanup is over.
+            assert received == [signal.SIGTERM] and blocked() == before
+        elif scenario == "sad":
+            # Off the main thread: no mask, no handler change (Python runs handlers in the main thread).
+            inside = []
+            def worker():
+                with s.signals_deferred():
+                    inside.append(blocked())
+            thread = threading.Thread(target=worker)
+            thread.start()
+            thread.join()
+            assert not set(s.CLEANUP_SIGNALS) & inside[0]
+        else:
+            # A helper thread with an open mask takes the signal; the handler still waits for cleanup,
+            # and an exception in the cleanup restores mask and handler.
+            with pytest.raises(RuntimeError, match="cleanup failed"):
+                with s.signals_deferred():
+                    def helper_takes_signal():
+                        # A new thread inherits the blocked mask; helpers started before cleanup have it open.
+                        signal.pthread_sigmask(signal.SIG_UNBLOCK, [signal.SIGTERM])
+                        signal.pthread_kill(threading.get_ident(), signal.SIGTERM)
+                    helper = threading.Thread(target=helper_takes_signal)
+                    helper.start()
+                    helper.join()
+                    time.sleep(0.01)
+                    assert received == []
+                    raise RuntimeError("cleanup failed")
+            assert received == [signal.SIGTERM] and blocked() == before
+            assert signal.getsignal(signal.SIGTERM) is handler
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
 def test_launch(scenario, tmp_path, monkeypatch, capsys):
     if scenario == "sad":
         with pytest.raises(ValueError):
@@ -2525,6 +2912,42 @@ def test_has_controlling_terminal(scenario, monkeypatch):
         monkeypatch.setattr(s.os, "isatty", lambda fd: False)
         with pytest.raises(ValueError, match="TIOCSTI"):
             s.main(["codex", "--backend", "bwrap", "--offline", "--binary", "/usr/bin/true"])
+
+
+def fake_proc(proc, pid, cmdline, start, comm="python3"):
+    (proc / str(pid)).mkdir(parents=True, exist_ok=True)
+    (proc / str(pid) / "cmdline").write_bytes(cmdline)
+    # Fields 3..21 before the start time (field 22); comm may contain spaces and parentheses.
+    (proc / str(pid) / "stat").write_text(f"{pid} ({comm}) S 1 " + "0 " * 17 + f"{start} 4096 12\n")
+
+
+def test_process_start(scenario, tmp_path):
+    proc = tmp_path / "proc"
+    if scenario == "happy":
+        fake_proc(proc, 7, b"x\0", 123456)
+        assert s.process_start(7, proc) == 123456
+        assert s.process_start(os.getpid()) == s.process_start(os.getpid())  # the real /proc
+    elif scenario == "sad":
+        assert s.process_start(8, proc) is None  # gone
+    else:
+        fake_proc(proc, 9, b"x\0", 42, comm="a) S 1 2 (b")
+        assert s.process_start(9, proc) == 42
+        (proc / "9" / "stat").write_text("9 (short) S 1\n")
+        assert s.process_start(9, proc) is None
+
+
+def test_process_cmdline(scenario, tmp_path):
+    proc = tmp_path / "proc"
+    fake_proc(proc, 7, b"python3\0--tmux-socket-dir\0/s\0", 500)
+    if scenario == "happy":
+        assert s.process_cmdline(7, 500, proc) == [b"python3", b"--tmux-socket-dir", b"/s", b""]
+    elif scenario == "sad":
+        # The PID was reused by a process with the same command line, started later.
+        assert s.process_cmdline(7, 499, proc) == []
+        assert s.process_cmdline(8, 500, proc) == [] and s.process_cmdline(None, None, proc) == []
+    else:
+        # A record of an older version has no start time: the command line alone decides, as before.
+        assert s.process_cmdline(7, None, proc)[1] == b"--tmux-socket-dir"
 
 
 def test_pod_owner(scenario, tmp_path):
@@ -2629,6 +3052,29 @@ def test_contract_manifest_covers_every_launcher_function():
         contract = globals().get("test_" + function)
         assert callable(contract), "Missing happy/sad/edge contract for " + function
         assert "scenario" in contract.__code__.co_varnames[:contract.__code__.co_argcount]
+
+
+def test_check_image_variant(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    variant = tmp_path / "sandbox-ai" / "images" / "web"
+    variant.mkdir(parents=True)
+    (variant / "image.json").write_text(json.dumps({"version": 1, "agent": "claude", "apt": [], "npm": [], "pip": [],
+                                                    "files": []}))
+    if scenario == "happy":
+        a = s.parse_args(["claude", "--image-variant", "web"])
+        s.check_image_variant(a)
+        assert a.image == "localhost/claude-sandbox-web:latest"
+        s.check_image_variant(s.parse_args(["claude"]))  # nothing to check
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="variant of claude"):
+            s.check_image_variant(s.parse_args(["codex", "--image-variant", "web"]))
+        with pytest.raises(ValueError, match="no such variant"):
+            s.check_image_variant(s.parse_args(["claude", "--image-variant", "gone"]))
+    else:
+        with pytest.raises(ValueError, match="exclude each other"):
+            s.check_image_variant(s.parse_args(["claude", "--image-variant", "web", "--image", "localhost/x"]))
+        with pytest.raises(ValueError, match="not a variant name"):
+            s.check_image_variant(s.parse_args(["claude", "--image-variant", "../x"]))
 
 
 # --- tmux by default, login store, write-back by token digest -------------------------------------
@@ -2750,6 +3196,272 @@ def test_claude_recover_writeback(scenario, tmp_path):
         assert s.claude_recover_writeback(home, (source, sandbox)) is False
         assert json.loads(source.read_text())["claudeAiOauth"]["refreshToken"] == "refresh-fixture"
 
+
+# --- the Claude login kept alive during a run: live sync with its source -------------------------------------
+
+
+def test_claude_oauth_from(scenario):
+    good = {"accessToken": "a", "refreshToken": "r", "expiresAt": 2000}
+    if scenario == "happy":
+        assert s.claude_oauth_from(json.dumps({"claudeAiOauth": good}).encode()) == good
+    elif scenario == "sad":
+        for data in (b"", b"[", b"\xff", b"[]", b'{"claudeAiOauth": []}', b'{"other": {}}',
+                     json.dumps({"claudeAiOauth": {**good, "refreshToken": ""}}).encode(),
+                     json.dumps({"claudeAiOauth": {**good, "expiresAt": True}}).encode(), b"[" * 100000):
+            assert s.claude_oauth_from(data) is None
+    else:
+        # refreshTokenExpiresAt is optional, but must be a timestamp when present.
+        assert s.claude_oauth_from(json.dumps({"claudeAiOauth": {**good, "refreshTokenExpiresAt": 9e12}}).encode())
+        assert s.claude_oauth_from(json.dumps({"claudeAiOauth": {**good, "refreshTokenExpiresAt": "x"}}).encode()) is None
+
+
+def test_merge_claude_login(scenario):
+    new = {"accessToken": "a2", "refreshToken": "r2", "expiresAt": 3000, "scopes": ["user:inference"],
+           "subscriptionType": "max", "unknown": "dropped"}
+    if scenario == "happy":
+        data = json.dumps({"claudeAiOauth": {"accessToken": "a1", "refreshToken": "r1", "expiresAt": 1000,
+                                             "subscriptionType": "pro"}, "mcpOAuth": {"srv": {"x": 1}}}).encode()
+        merged = json.loads(s.merge_claude_login(data, new))
+        assert merged["mcpOAuth"] == {"srv": {"x": 1}}  # the rest of the file stays
+        assert merged["claudeAiOauth"] == {"accessToken": "a2", "refreshToken": "r2", "expiresAt": 3000,
+                                           "scopes": ["user:inference"], "subscriptionType": "pro"}
+    elif scenario == "sad":
+        for data in (None, b"", b"[1]", b"\xff", b"[" * 100000):
+            assert json.loads(s.merge_claude_login(data, new)) == {"claudeAiOauth": {
+                "accessToken": "a2", "refreshToken": "r2", "expiresAt": 3000, "scopes": ["user:inference"],
+                "subscriptionType": "max"}}
+    else:
+        # A claudeAiOauth that is no object counts as none; mistyped token fields of NEW never cross.
+        merged = json.loads(s.merge_claude_login(b'{"claudeAiOauth": "x"}', {**new, "expiresAt": "soon"}))
+        assert "expiresAt" not in merged["claudeAiOauth"] and merged["claudeAiOauth"]["subscriptionType"] == "max"
+
+
+def test_claude_login_lock(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    path = tmp_path / "state/sandbox-ai/claude-login.lock"
+    if scenario == "happy":
+        with s.claude_login_lock():
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600
+            assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+        with s.claude_login_lock():  # released again
+            pass
+    elif scenario == "sad":
+        fd = os.open(path.parent.mkdir(parents=True) or path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)  # another process holds it
+            started = time.monotonic()
+            with pytest.raises(TimeoutError, match="holds"):
+                with s.claude_login_lock(timeout=0.2):
+                    pytest.fail("got a lock that is held")
+            assert time.monotonic() - started < 5
+        finally:
+            os.close(fd)
+    else:
+        # A symlink in its place is never followed (O_NOFOLLOW).
+        path.parent.mkdir(parents=True)
+        (tmp_path / "target").write_text("keep")
+        path.symlink_to(tmp_path / "target")
+        with pytest.raises(OSError):
+            with s.claude_login_lock():
+                pass
+        assert (tmp_path / "target").read_text() == "keep"
+
+
+def test_open_home_dir(scenario, tmp_path):
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    if scenario == "happy":
+        fd = s.open_home_dir(home, ".claude/.credentials.json")
+        try:
+            assert os.path.samestat(os.fstat(fd), (home / ".claude").stat())
+        finally:
+            os.close(fd)
+    elif scenario == "sad":
+        shutil.rmtree(home / ".claude")
+        (tmp_path / "elsewhere").mkdir()
+        (home / ".claude").symlink_to(tmp_path / "elsewhere")
+        with pytest.raises(ValueError, match="symlink"):
+            s.open_home_dir(home, ".claude/.credentials.json")
+        with pytest.raises(FileNotFoundError):
+            s.open_home_dir(home, "missing/file")
+    else:
+        for relative in ("../outside", "", "a/../../b"):
+            with pytest.raises(ValueError, match="outside"):
+                s.open_home_dir(home, relative)
+        fd = s.open_home_dir(home, "top-level-file")  # a file in HOME itself: HOME's descriptor
+        os.close(fd)
+
+
+def test_read_home_file(scenario, tmp_path):
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    path = home / ".claude/.credentials.json"
+    if scenario == "happy":
+        path.write_text("{}")
+        assert s.read_home_file(home, ".claude/.credentials.json") == b"{}"
+    elif scenario == "sad":
+        with pytest.raises(FileNotFoundError):
+            s.read_home_file(home, ".claude/.credentials.json")
+        (tmp_path / "secret").write_text("host file")
+        path.symlink_to(tmp_path / "secret")
+        with pytest.raises(ValueError, match="symlink"):
+            s.read_home_file(home, ".claude/.credentials.json")
+        path.unlink()
+        os.mkfifo(path)  # never waited on
+        with pytest.raises(ValueError, match="regular"):
+            s.read_home_file(home, ".claude/.credentials.json")
+    else:
+        path.write_bytes(b"x" * 11)
+        with pytest.raises(ValueError, match="larger"):
+            s.read_home_file(home, ".claude/.credentials.json", limit=10)
+        assert s.read_home_file(home, ".claude/.credentials.json", limit=11) == b"x" * 11
+
+
+def test_replace_home_file(scenario, tmp_path):
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    path = home / ".claude/.credentials.json"
+    if scenario == "happy":
+        path.write_text("old")
+        path.chmod(0o644)
+        s.replace_home_file(home, ".claude/.credentials.json", b"new")
+        assert path.read_bytes() == b"new" and stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert sorted(p.name for p in path.parent.iterdir()) == [".credentials.json"]
+    elif scenario == "sad":
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        shutil.rmtree(home / ".claude")
+        (home / ".claude").symlink_to(outside)  # swapped while the agent runs
+        with pytest.raises(ValueError, match="symlink"):
+            s.replace_home_file(home, ".claude/.credentials.json", b"tokens")
+        assert list(outside.iterdir()) == []
+    else:
+        # A link in the file's place is replaced, its target never written.
+        (tmp_path / "target").write_text("keep")
+        path.symlink_to(tmp_path / "target")
+        s.replace_home_file(home, ".claude/.credentials.json", b"new")
+        assert not path.is_symlink() and path.read_bytes() == b"new"
+        assert (tmp_path / "target").read_text() == "keep"
+
+
+def sync_fixture(tmp_path, monkeypatch, store=False):
+    """A source (host file or login store) and a sandbox HOME that share one login, with the state of a start."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    home = tmp_path / "home"
+    host = (s.auth_store("claude") / s.AUTH_TARGETS["claude"]) if store else tmp_path / "host/.claude/.credentials.json"
+    sandbox = home / ".claude/.credentials.json"
+    soon = (time.time() + 3600) * 1000
+    claude_credentials(host, soon)
+    claude_credentials(sandbox, soon)
+    return home, (host, sandbox), s.claude_writeback_state((host, sandbox)), soon
+
+
+def test_claude_login_sync(scenario, tmp_path, monkeypatch):
+    home, pair, state, soon = sync_fixture(tmp_path, monkeypatch, store=scenario == "happy")
+    host, sandbox = pair
+    later = soon + 3600 * 1000
+    assert s.claude_login_sync(home, pair, state) is None  # nothing changed
+    if scenario == "happy":
+        # The sandbox refreshed: the store gets the new pair at once, and the record of the HOME follows.
+        claude_credentials(sandbox, later, refresh="rotated-1")
+        assert s.claude_login_sync(home, pair, state) == "refreshed Claude credentials written back to " \
+                                                         "sandbox-ai's login store"
+        assert s.claude_oauth(host)["refreshToken"] == "rotated-1"
+        assert s.load_login_sync()[s.sync_key("claude", home)] == s.oauth_token_digest(s.claude_oauth(host))
+        # Then another sandbox refreshed and wrote back: this one takes it over before it refreshes itself.
+        claude_credentials(host, later + 1000, refresh="rotated-2")
+        document = json.loads(sandbox.read_text())
+        sandbox.write_text(json.dumps({**document, "mcpOAuth": {"srv": {"x": 1}}}))
+        assert "took over the newer Claude login" in s.claude_login_sync(home, pair, state)
+        written = json.loads(sandbox.read_text())
+        assert written["claudeAiOauth"]["refreshToken"] == "rotated-2" and written["mcpOAuth"] == {"srv": {"x": 1}}
+        assert stat.S_IMODE(sandbox.stat().st_mode) == 0o600
+        assert s.claude_login_sync(home, pair, state) is None  # in step again
+    elif scenario == "sad":
+        # Implausible (a year ahead) or not newer than the source: never written back, and not pushed over either.
+        claude_credentials(sandbox, (time.time() + 365 * 86400) * 1000, refresh="forged")
+        assert s.claude_login_sync(home, pair, state) is None
+        assert s.claude_login_sync(home, pair, state) is None
+        assert s.claude_oauth(host)["refreshToken"] == "refresh-fixture"
+        claude_credentials(sandbox, soon - 1000, refresh="older")
+        assert s.claude_login_sync(home, pair, state) is None
+        assert s.claude_oauth(host)["refreshToken"] == "refresh-fixture"
+        # A source without a login never gets one; a source that lost its login is left alone.
+        empty = {"host": None, "host_login": False, "tokens": None}
+        claude_credentials(sandbox, later, refresh="rotated")
+        assert s.claude_login_sync(home, pair, empty) is None
+        host.write_text("{}")
+        assert s.claude_login_sync(home, pair, state) is None and host.read_text() == "{}"
+    else:
+        # Both refreshed (a new login on the host during the run): the source wins and goes into the sandbox.
+        claude_credentials(sandbox, later, refresh="rotated")
+        claude_credentials(host, soon, refresh="host-relogin")
+        assert "changed during the run; kept that one" in s.claude_login_sync(home, pair, state)
+        assert s.claude_oauth(host)["refreshToken"] == "host-relogin"
+        assert s.claude_oauth(sandbox)["refreshToken"] == "host-relogin"
+        # The agent swapped ~/.claude for a link to a host directory: nothing is read or written through it.
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        claude_credentials(outside / ".credentials.json", later + 5000, refresh="host-secret")
+        shutil.rmtree(home / ".claude")
+        (home / ".claude").symlink_to(outside)
+        claude_credentials(host, soon, refresh="host-again")
+        assert s.claude_login_sync(home, pair, state) is None
+        assert s.claude_oauth(host)["refreshToken"] == "host-again"
+        assert s.claude_oauth(outside / ".credentials.json")["refreshToken"] == "host-secret"
+
+
+def test_watch_claude_login(scenario, tmp_path, monkeypatch):
+    home, pair, state, soon = sync_fixture(tmp_path, monkeypatch)
+    host, sandbox = pair
+    stop = threading.Event()
+    calls = []
+    real = s.claude_login_sync
+
+    def counting(*args):
+        calls.append(1)
+        if scenario == "sad":
+            raise OSError("disk full")
+        return real(*args)
+    monkeypatch.setattr(s, "claude_login_sync", counting)
+    watcher = threading.Thread(target=s.watch_claude_login, args=(home, pair, state, stop, 0.01))
+    watcher.start()
+    try:
+        deadline = time.monotonic() + 10
+        while not calls and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if scenario == "happy":
+            claude_credentials(sandbox, soon + 1000, refresh="rotated")
+            deadline = time.monotonic() + 10  # its own: a loaded machine may have used up the first one
+            while s.claude_oauth(host)["refreshToken"] != "rotated" and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert s.claude_oauth(host)["refreshToken"] == "rotated"
+        elif scenario == "edge":
+            # Nothing changes: one look at the files, then lstat only.
+            time.sleep(0.2)
+            assert len(calls) == 1
+    finally:
+        stop.set()
+        watcher.join(10)
+    assert not watcher.is_alive()
+    if scenario == "happy":
+        assert state["notes"] == ["refreshed Claude credentials written back to the host"]
+    elif scenario == "sad":
+        # Errors never end the watcher or the run; each is said once the run is over.
+        assert set(state["notes"]) == {"could not sync the Claude login during the run: disk full"}
+        assert len(calls) == 1
+    else:
+        assert state["notes"] == []
+
+
+def test_claude_sync_notes(scenario):
+    if scenario == "happy":
+        assert s.claude_sync_notes({"notes": ["a", "b", "a"]}) == ["a (2 times during the run)", "b (during the run)"]
+    elif scenario == "sad":
+        assert s.claude_sync_notes(None) == [] and s.claude_sync_notes({}) == []
+    else:
+        assert s.claude_sync_notes({"notes": []}) == []
 
 def test_sandbox_digest(scenario, tmp_path):
     home = tmp_path / "home"
@@ -3275,7 +3987,7 @@ def test_kit_plan(scenario, tmp_path):
         assert any("created with examples on the first start" in note for note in plan["notes"])
         assert not (data_home() / "home").exists()  # planning changes nothing
     elif scenario == "sad":
-        with pytest.raises(ValueError, match="--kit missing: .* does not exist .*kits for claude: review"):
+        with pytest.raises(ValueError, match="--kit missing: .* does not exist .*kits for claude: egm, review"):
             s.kit_plan(kit_args(tmp_path, "claude", "--kit", "missing"))
         assert s.kit_plan(kit_args(tmp_path, "claude", "--probe")) is None
     else:
@@ -3351,6 +4063,46 @@ def test_claude_plugins(scenario, tmp_path):
         assert any(note.startswith("plugins not enabled") for note in notes)
 
 
+def test_claude_drop_plugins(scenario, tmp_path):
+    """--no-plugins after a run with plugins on the same HOME: nothing of that run enables a plugin."""
+    home = tmp_path / "home"
+    home.mkdir()
+    marketplace = {"sandbox-ai": {"source": "directory", "path": "/sandbox/marketplace"}}
+    notes = []
+    if scenario == "happy":
+        plugin_store_fixture()
+        settings = home / ".claude/settings.json"
+        settings.parent.mkdir()
+        settings.write_text(json.dumps({"model": "opus", "permissions": {"allow": ["Bash"]}}))
+        s.claude_plugins(home, marketplace, ["sandcastle@sandbox-ai"], notes)
+        a = kit_args(tmp_path, "claude", "--no-plugins", "--no-memory", "--state-dir", str(tmp_path / "state"))
+        mounts, notes, _ = s.prepare_kits(a, home, tmp_path / "staging")
+        assert not any("/root/.claude/plugins" in dest for _, dest, _ in mounts)
+        assert json.loads(settings.read_text()) == {"model": "opus", "permissions": {"allow": ["Bash"]}}
+        assert sorted(os.listdir(home / ".claude/plugins")) == ["cache", "marketplaces"]  # empty mount points
+    elif scenario == "sad":
+        # A fresh HOME gets no settings file; an unreadable one is left as it is, with a note.
+        s.claude_drop_plugins(home, notes)
+        assert not (home / ".claude").exists() and notes == []
+        (home / ".claude").mkdir()
+        (home / ".claude/settings.json").write_text("{broken")
+        s.claude_drop_plugins(home, notes)
+        assert (home / ".claude/settings.json").read_text() == "{broken" and "may stay enabled" in notes[0]
+    else:
+        # Planted symlinks are not followed: neither the settings nor the index outside the HOME change.
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "settings.json").write_text(json.dumps({"enabledPlugins": {"x@y": True}}))
+        (outside / "installed_plugins.json").write_text("{}")
+        (home / ".claude").mkdir()
+        (home / ".claude/plugins").symlink_to(outside)
+        (home / ".claude/settings.json").symlink_to(outside / "settings.json")
+        with pytest.raises(ValueError, match="symlink"):
+            s.claude_drop_plugins(home, notes)
+        assert (outside / "installed_plugins.json").exists() and "left in place" in notes[0]
+        assert json.loads((outside / "settings.json").read_text()) == {"enabledPlugins": {"x@y": True}}
+
+
 def test_prepare_kits(scenario, tmp_path):
     home = tmp_path / "home"
     home.mkdir()
@@ -3381,7 +4133,8 @@ def test_prepare_kits(scenario, tmp_path):
         a = kit_args(tmp_path, "opencode", "--no-memory")
         mounts, notes, memory = s.prepare_kits(a, home, tmp_path / "staging")
         assert [dest for _, dest, _ in mounts] == ["/root/.config/opencode/skills"] and memory is None
-        assert json.loads(s.agent_environment(a)["OPENCODE_CONFIG_CONTENT"]) == {"plugin": ["opencode-foo@1.2.3"]}
+        assert json.loads(s.agent_environment(a)["OPENCODE_CONFIG_CONTENT"]) == {"plugin": ["opencode-foo@1.2.3"],
+                                                                                 **s.OPENCODE_TELEMETRY_CONFIG}
         assert any("registry.npmjs.org" in note for note in notes)
 
 
@@ -3534,6 +4287,129 @@ def test_devices(scenario, fake_dev):
         a = s.parse_args(["codex", "--device", str(fake_dev / "serial/by-id/usb-Board"), "--device",
                           str(fake_dev / "ttyACM0"), "--device", str(fake_dev / "dri/renderD128"), "--gpu", "dri"])
         assert s.devices(a) == [(str(fake_dev / "ttyACM0"), "node"), (str(fake_dev / "dri"), "dir")]
+
+
+def device_ruleset(*rules, defaults=None):
+    """a.rulesets with one ruleset of device RULES."""
+    document = {"version": 1, "devices": list(rules), **({"defaults": {"devices": defaults}} if defaults else {})}
+    return [{"name": "mine", **s.RUNTIME.Ruleset.validated(document, "mine")}]
+
+
+def plugged_pico(tmp_path, monkeypatch, dev):
+    """A Raspberry Pi Pico in a fake sysfs, its nodes in DEV (tests/test_devices.py)."""
+    from test_devices import FakeUsb
+    usb = FakeUsb(tmp_path, monkeypatch, devices=s.load_devices_module(), launcher=None, dev=dev)
+    usb.plug()
+    return usb
+
+
+def test_device_entries(scenario, fake_dev, tmp_path, monkeypatch):
+    if scenario == "happy":
+        entries = s.device_entries(s.parse_args(["codex", "--device", str(fake_dev / "serial/by-id/usb-Board")]))
+        assert [(e["value"], e["path"], e["kind"]) for e in entries] == [
+            (str(fake_dev / "serial/by-id/usb-Board"), str(fake_dev / "ttyACM0"), "node")]
+        assert entries[0]["facts"]["names"] == ["/dev/ttyACM0", "/dev/serial/by-id/usb-Board"]
+    elif scenario == "sad":
+        plugged_pico(tmp_path, monkeypatch, fake_dev)
+        with pytest.raises(ValueError, match="no such USB device"):
+            s.device_entries(s.parse_args(["codex", "--device", "usb:0403:6001"]))
+    else:
+        plugged_pico(tmp_path, monkeypatch, fake_dev)
+        entries = s.device_entries(s.parse_args(["codex", "--device", "usb:2e8a:000a", "--gpu", "dri"]))
+        assert [e["path"] for e in entries] == [str(fake_dev / "bus/usb/001/005"), str(fake_dev / "ttyACM0"),
+                                                str(fake_dev / "dri")]
+        assert entries[0]["device"]["serial"] == "E6609CB2" and entries[-1]["value"] == "--gpu dri"
+
+
+def test_launcher_view(scenario, fake_dev):
+    view = s.launcher_view()
+    if scenario == "happy":
+        assert view.parse_device(str(fake_dev / "kvm")) == (str(fake_dev / "kvm"), "node")
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="consoles"):
+            view.parse_device(str(fake_dev / "console"))
+    else:
+        assert view.DEV == fake_dev  # what a caller replaced is seen
+
+
+def test_check_device_rules(scenario, fake_dev):
+    a = s.parse_args(["codex", "--device", str(fake_dev / "kvm"), "--device", str(fake_dev / "ttyACM0")])
+    if scenario == "happy":
+        a.rulesets = device_ruleset({"id": "kvm", "decision": "allow", "node": "/dev/kvm"})
+        s.check_device_rules(a)
+        assert a.device_verdicts[str(fake_dev / "kvm")]["rule"] == "kvm"
+        assert a.device_verdicts[str(fake_dev / "ttyACM0")]["rule"] is None
+        a.rulesets = []
+        s.check_device_rules(a)
+        assert a.device_verdicts == {}  # no device rules: nothing judged
+    elif scenario == "sad":
+        a.rulesets = device_ruleset({"id": "no-tty", "decision": "deny", "node": "/dev/ttyACM*", "reason": "no"})
+        with pytest.raises(ValueError, match=r"ttyACM0: no$"):
+            s.check_device_rules(a)
+    else:
+        a.rulesets = device_ruleset({"id": "ask-kvm", "decision": "ask", "node": "/dev/kvm"})
+        s.check_device_rules(a)
+        assert s.devices(a) == [(str(fake_dev / "ttyACM0"), "node")]
+        assert s.devices(a, held=True) == [(str(fake_dev / "kvm"), "node")]
+        a.ask = "off"
+        with pytest.raises(ValueError, match="--ask is off"):
+            s.check_device_rules(a)
+
+
+def test_device_grants(scenario, fake_dev, tmp_path, monkeypatch):
+    if scenario == "happy":
+        a = s.parse_args(["codex", "--device", str(fake_dev / "kvm")])
+        grant, = s.device_grants(a)
+        assert grant["value"] == str(fake_dev / "kvm") and grant["state"] == "attached" and grant["by"] == "path"
+        assert grant["source"] == "start" and not grant["track"] and grant["decision"] == "allow"
+    elif scenario == "sad":
+        assert s.device_grants(s.parse_args(["codex"])) == []
+    else:
+        plugged_pico(tmp_path, monkeypatch, fake_dev)
+        a = s.parse_args(["codex", "--device", "usb:2e8a:000a"])
+        a.rulesets = device_ruleset({"id": "ask-raw", "decision": "ask", "subsystem": "usb"})
+        s.check_device_rules(a)
+        grant, = s.device_grants(a)
+        assert grant["state"] == "held" and grant["nodes"] == {} and grant["track"] and grant["rule"] == "ask-raw"
+        assert grant["pending"] == [str(fake_dev / "bus/usb/001/005"), str(fake_dev / "ttyACM0")]
+
+
+def test_load_devices_module(scenario, monkeypatch, tmp_path):
+    if scenario == "sad":
+        monkeypatch.setattr(s, "_devices_module", None)
+        monkeypatch.setattr(s, "HERE", tmp_path)
+        with pytest.raises(FileNotFoundError):
+            s.load_devices_module()
+    else:
+        module = s.load_devices_module()
+        assert callable(module.plan) and callable(module.watch_devices)
+        if scenario == "edge":
+            assert s.load_devices_module() is module  # loaded once: what tests replace in it holds
+
+
+def test_start_devices(scenario, fake_dev, tmp_path, monkeypatch):
+    a = s.parse_args(["codex"] + (["--device", str(fake_dev / "kvm")] if scenario == "happy" else
+                                  ["--device", "usb:2e8a:000a"] if scenario == "edge" else []))
+    a.control_dir = tmp_path / "run-dir"
+    a.control_dir.mkdir()
+    (a.control_dir / "run.json").write_text(json.dumps({"run": "codex-1", "pid": os.getpid(), "log_dir": None}))
+    a.rulesets = device_ruleset({"id": "kvm", "decision": "allow", "node": "/dev/kvm"})
+    if scenario == "happy":
+        assert s.start_devices(a) is None  # nothing on USB to follow
+        grants = json.loads((a.control_dir / "devices.json").read_text())["grants"]
+        assert grants[0]["id"] == "1" and grants[0]["state"] == "attached"
+        rules = json.loads((a.control_dir / "device-rules.json").read_text())
+        assert rules[0]["devices"][0]["id"] == "kvm" and stat.S_IMODE(
+            (a.control_dir / "device-rules.json").stat().st_mode) == 0o600
+    elif scenario == "sad":
+        a.rulesets = []
+        assert s.start_devices(a) is None and not (a.control_dir / "devices.json").exists()
+        assert json.loads((a.control_dir / "device-rules.json").read_text()) == []
+    else:
+        plugged_pico(tmp_path, monkeypatch, fake_dev)
+        record = s.start_devices(a)
+        assert record["directory"] == str(a.control_dir) and record["run"] == "codex-1"
+        assert json.loads((a.control_dir / "devices.json").read_text())["grants"][0]["track"] is True
 
 
 def acl(*entries):
@@ -4157,6 +5033,70 @@ def test_trust_session_ca(scenario, tmp_path):
         assert mounts == []
 
 
+def test_relay_ports(scenario):
+    """The host ports of a relay request: a short list of real ports."""
+    if scenario == "happy":
+        assert rt.relay_ports({"host_ports": [3000, 11434, 3000]}) == [3000, 11434]
+    elif scenario == "sad":
+        for ports in ([0], [65536], ["3000"], [True], "3000", list(range(1, rt.RELAY_PORTS + 2))):
+            with pytest.raises(ValueError):
+                rt.relay_ports({"host_ports": ports})
+    else:
+        assert rt.relay_ports({}) == [] and rt.relay_ports({"host_ports": []}) == []
+
+
+def test_relay_rules(scenario):
+    """Relayed ports go through the proxy (IPv4 and IPv6 loopback); the chain is replaced each time."""
+    rules = rt.relay_rules({3000: None, 22: None} if scenario != "edge" else {}).splitlines()
+    assert rules[0] == "flush chain inet agent_sandbox relay"
+    if scenario == "edge":
+        assert rules == ["flush chain inet agent_sandbox relay"]
+        return
+    assert rules[1:] == [f"add rule inet agent_sandbox relay ip daddr 127.0.0.1 tcp dport 22 redirect to :{rt.PROXY_PORT}",
+                         f"add rule inet agent_sandbox relay ip6 daddr ::1 tcp dport 22 redirect to :{rt.PROXY_PORT}",
+                         f"add rule inet agent_sandbox relay ip daddr 127.0.0.1 tcp dport 3000 redirect to :{rt.PROXY_PORT}",
+                         f"add rule inet agent_sandbox relay ip6 daddr ::1 tcp dport 3000 redirect to :{rt.PROXY_PORT}"]
+    if scenario == "sad":
+        # The firewall jumps to the chain after the proxy's own connections returned: no loop through the proxy.
+        rules = s.firewall_rules([], [], proxy={"port": s.PROXY_PORT, "loopback": [3000]})
+        assert rules.index(" chain relay {") < rules.index(" chain proxy")  # declared before the jump to it
+        nat = rules.split(" chain proxy")[1]
+        lines = nat.splitlines()
+        assert lines.index(f"  meta skuid {s.PROXY_UID} return") < lines.index("  jump relay") < \
+            next(i for i, line in enumerate(lines) if "127.0.0.0/8" in line)
+        assert "jump relay" not in s.firewall_rules([], [])
+
+
+def test_join_streams(scenario):
+    """Both directions are copied until each side is done; a side that fails ends the join, not the process."""
+    import socket as _socket
+    left_a, left_b = _socket.socketpair()
+    right_a, right_b = _socket.socketpair()
+    worker = threading.Thread(target=rt.join_streams, args=(left_b, right_a), daemon=True)
+    worker.start()
+    if scenario == "happy":
+        left_a.sendall(b"to the host")
+        assert right_b.recv(100) == b"to the host"
+        right_b.sendall(b"to the sandbox")
+        assert left_a.recv(100) == b"to the sandbox"
+        left_a.shutdown(_socket.SHUT_WR)
+        assert right_b.recv(100) == b""  # the end of one direction reaches the other side
+        right_b.sendall(b"late answer")  # the other direction still works (half-close)
+        assert left_a.recv(100) == b"late answer"
+        right_b.close()
+    elif scenario == "sad":
+        right_b.close()  # the host side is gone
+        left_a.sendall(b"x" * 10)
+        left_a.close()
+    else:
+        left_a.close()
+        right_b.close()
+    worker.join(5)
+    assert not worker.is_alive()
+    for sock in (left_a, right_b):
+        sock.close()
+
+
 def test_runtime_rules(scenario):
     if scenario == "happy":
         script = rt.runtime_rules({"nets": {"192.0.2.0/24"}, "https": {"198.51.100.4/32"},
@@ -4178,17 +5118,24 @@ def test_runtime_change(scenario):
     empty = {"nets": set(), "https": set(), "tcp": set()}
     if scenario == "happy":
         state = rt.runtime_change(empty, {"op": "allow", "https": ["192.0.2.7"], "tcp": [["192.0.2.8", 22]]})
-        assert state == {"nets": set(), "https": {"192.0.2.7/32"}, "tcp": {("192.0.2.8", 22)}}
+        assert state == {"nets": set(), "https": {"192.0.2.7/32"}, "tcp": {("192.0.2.8", 22)}, "dns": set()}
         assert rt.runtime_change(state, {"op": "revoke", "https": ["192.0.2.7/32"]})["https"] == set()
+        # DNS during the run (`net allow --dns`): nameserver addresses, normalised.
+        state = rt.runtime_change(state, {"op": "allow", "dns": ["192.0.2.53", "2001:DB8::53"]})
+        assert state["dns"] == {"192.0.2.53", "2001:db8::53"}
+        assert rt.runtime_change(state, {"op": "revoke", "dns": ["192.0.2.53"]})["dns"] == {"2001:db8::53"}
     elif scenario == "sad":
         for request in ({"op": "drop"}, {"op": "allow", "nets": ["192.0.2.1; flush ruleset"]},
                         {"op": "allow", "tcp": [["192.0.2.1", 0]]}, {"op": "allow", "tcp": [["192.0.2.1", True]]},
-                        {"op": "allow", "tcp": [["192.0.2.1", "22"]]}, {"op": "allow", "nets": ["fe80::1%eth0"]}):
+                        {"op": "allow", "tcp": [["192.0.2.1", "22"]]}, {"op": "allow", "nets": ["fe80::1%eth0"]},
+                        {"op": "allow", "dns": "192.0.2.53"}, {"op": "allow", "dns": ["192.0.2.0/24"]},
+                        {"op": "allow", "dns": ["192.0.2.%d" % i for i in range(9)]},
+                        {"op": "allow", "dns": ["fe80::1%eth0"]}):
             with pytest.raises(ValueError):
                 rt.runtime_change(empty, request)
     else:
         # Revoking what was never allowed changes nothing; networks are normalised.
-        assert rt.runtime_change(empty, {"op": "revoke", "nets": ["10.0.0.0/8"]}) == empty
+        assert rt.runtime_change(empty, {"op": "revoke", "nets": ["10.0.0.0/8"]}) == {**empty, "dns": set()}
         assert rt.runtime_change(empty, {"op": "allow", "nets": ["10.1.2.3/8"]})["nets"] == {"10.0.0.0/8"}
 
 
@@ -4230,7 +5177,7 @@ def test_control_server(scenario, tmp_path):
     try:
         if scenario == "happy":
             answer = ask({"op": "allow", "https": ["192.0.2.7"]})
-            assert answer == {"ok": True, "nets": [], "https": ["192.0.2.7/32"], "tcp": []}
+            assert answer == {"ok": True, "nets": [], "https": ["192.0.2.7/32"], "tcp": [], "dns": [], "host_ports": []}
             assert "tcp dport 443 accept" in applied[-1]
             assert json.loads(allow.read_text())["https"] == ["192.0.2.7/32"]
             assert ask({"op": "show"})["https"] == ["192.0.2.7/32"]
@@ -4741,6 +5688,38 @@ def test_asking(scenario):
         assert not s.asking(s.parse_args(["codex", "--probe"])) and not s.asking(s.parse_args(["codex", "--offline"]))
 
 
+def test_remembered_pins(scenario):
+    a = s.parse_args(["codex"])
+    a.policy = {}
+    if scenario == "happy":
+        assert s.remembered_pins(a, ["api.github.com"], lambda names: {"api.github.com": ["140.82.121.4"]}) == (
+            {"api.github.com": ["140.82.121.4"]}, [])
+    elif scenario == "sad":  # rebound into the LAN or this host: an approval never opens those
+        pins, notes = s.remembered_pins(a, ["x.example"], lambda names: {"x.example": ["10.0.0.1", "127.0.0.1"]})
+        assert pins == {} and "not public" in notes[0]
+    else:  # one name that no longer resolves takes no other with it, and never stops the start
+        def resolve(names):
+            if "gone.example" in names:
+                raise ValueError("Cannot resolve allowed host gone.example")
+            return {name: ["140.82.121.4"] for name in names}
+        pins, notes = s.remembered_pins(a, ["gone.example", "api.github.com"], resolve)
+        assert pins == {"api.github.com": ["140.82.121.4"]} and "does not resolve now" in notes[0]
+
+
+def test_apply_remembered_pins(scenario, capsys):
+    a = s.parse_args(["codex", "--allow-host", "kept.example", "--allow-host", "dropped.example"])
+    a.policy = {}
+    if scenario == "happy":
+        assert s.apply_remembered_pins(a, ["kept.example"], lambda names: {"kept.example": ["140.82.121.4"]}) == \
+            {"kept.example": ["140.82.121.4"]}
+        assert "kept.example" in a.allow_host and capsys.readouterr().err == ""
+    elif scenario == "sad":
+        assert s.apply_remembered_pins(a, ["dropped.example"], lambda names: {"dropped.example": ["192.168.0.2"]}) == {}
+        assert a.allow_host == ["kept.example"] and "dropped.example (approved always)" in capsys.readouterr().err
+    else:
+        assert s.apply_remembered_pins(a, [], lambda names: 1 / 0) == {}  # nothing remembered: nothing resolved
+
+
 def test_apply_remembered_approvals(scenario, tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     work = tmp_path / "work"
@@ -4875,6 +5854,253 @@ def test_secret_environment(scenario, tmp_path, monkeypatch):
             s.secret_environment(s.parse_args(["codex", "--secret-env", "NOPE"]))
     else:
         assert s.secret_environment(s.parse_args(["codex"])) == {}
+
+
+def test_api_key_values(scenario):
+    if scenario == "happy":
+        a = s.parse_args(["codex", "--api-key", "Dev.To=DEVTO_API_KEY", "--api-key", "gql.hashnode.com=HN=HASHNODE"])
+        assert s.api_key_values(a) == [("dev.to", "DEVTO_API_KEY", "DEVTO_API_KEY"), ("gql.hashnode.com", "HN", "HASHNODE")]
+    elif scenario == "sad":
+        for value in ("dev.to", "192.0.2.1=KEY", "localhost=KEY", "dev.to=1KEY", "dev.to=KEY=", "*.dev.to=KEY",
+                      "dev.to:8443=KEY", "dev.to=KEY=SEC=RET", "[::1]=KEY"):
+            with pytest.raises(ValueError, match="--api-key expects"):
+                s.api_key_values(argparse.Namespace(api_key=[value]))
+            assert s.api_key_values(argparse.Namespace(api_key=[value]), check=False) == []
+    else:
+        assert s.api_key_values(argparse.Namespace()) == [] and s.api_key_values(s.parse_args(["codex"])) == []
+
+
+def test_check_api_keys(scenario):
+    if scenario == "happy":
+        s.check_api_keys(s.parse_args(["codex", "--api-key", "dev.to=A", "--api-key", "api.medium.com=B"]),
+                         {"A": "a-key", "B": "b-key"}.get)
+    elif scenario == "sad":
+        for argv, text in ((["--api-key", "dev.to=A", "--api-key", "api.medium.com=A"], "given twice"),
+                           (["--api-key", "dev.to=A", "--secret-env", "A"], "given twice"),
+                           (["--api-key", "dev.to=HOME"], "Sandbox-owned"),
+                           (["--api-key", "dev.to=A", "--no-inspect", "DEV.TO"], "drop --no-inspect"),
+                           (["--api-key", "dev.to=A", "--no-proxy"], "needs the connection proxy")):
+            with pytest.raises(ValueError, match=text):
+                s.check_api_keys(s.parse_args(["codex", *argv]), False)
+        with pytest.raises(ValueError, match="no secret B"):  # not kept: refused before anything runs
+            s.check_api_keys(s.parse_args(["codex", "--api-key", "dev.to=A", "--api-key", "api.medium.com=B"]),
+                             {"A": "a-key"}.get)
+    else:
+        s.check_api_keys(s.parse_args(["codex", "--no-proxy"]))  # nothing to add: no proxy needed
+
+
+def test_api_key_environment(scenario):
+    if scenario == "happy":
+        env = s.api_key_environment(s.parse_args(["codex", "--api-key", "dev.to=DEVTO_API_KEY=STORED"]))
+        assert env == {"DEVTO_API_KEY": "sandbox-ai-api-key-placeholder-DEVTO_API_KEY"}
+    elif scenario == "sad":
+        with pytest.raises(ValueError):
+            s.api_key_environment(argparse.Namespace(api_key=["not a host=KEY"]))
+    else:
+        assert s.api_key_environment(s.parse_args(["codex"])) == {}
+
+
+def test_api_key_entries(scenario):
+    a = s.parse_args(["codex", "--api-key", "dev.to=DEVTO_API_KEY", "--api-key", "api.medium.com=MEDIUM=STORED"])
+    store = {"DEVTO_API_KEY": "devto-SECRET-1", "STORED": "medium-SECRET-2"}
+    if scenario == "happy":
+        assert s.api_key_entries(a, store.get) == [
+            {"host": "dev.to", "port": 443, "name": "DEVTO_API_KEY",
+             "placeholder": "sandbox-ai-api-key-placeholder-DEVTO_API_KEY", "key": "devto-SECRET-1"},
+            {"host": "api.medium.com", "port": 443, "name": "MEDIUM",
+             "placeholder": "sandbox-ai-api-key-placeholder-MEDIUM", "key": "medium-SECRET-2"}]
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="no secret STORED; keep one with: sandbox-ai secrets set STORED"):
+            s.api_key_entries(a, {"DEVTO_API_KEY": "x"}.get)
+        for bad in ("two words", "line\r\nX-Injected: 1", ""):
+            with pytest.raises(ValueError, match="not usable in a header"):
+                s.api_key_entries(a, {"DEVTO_API_KEY": bad, "STORED": "ok"}.get)
+    else:
+        assert s.api_key_entries(s.parse_args(["codex"]), store.get) == []
+
+
+@pytest.fixture
+def publish_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setattr(s, "_publish_logins_module", None)
+    module = s.load_publish_logins_module()
+    module.save([{"kind": "pypi", "host": "upload.pypi.org", "secret": "PYPI_TOKEN"},
+                 {"kind": "npm", "host": "registry.npmjs.org", "secret": "NPM_SECRET"},
+                 {"kind": "github", "host": "api.github.com", "secret": "GH_PUB"}])
+    return module
+
+
+def test_load_publish_logins_module(scenario, publish_home):
+    if scenario == "happy":
+        assert s.load_publish_logins_module() is publish_home and callable(publish_home.proxy_entries)
+    elif scenario == "sad":
+        assert "nosuch" not in publish_home.KINDS
+    else:
+        assert publish_home.path().name == "publish-logins.json"
+
+
+def test_publish_kinds(scenario, publish_home):
+    if scenario == "happy":
+        assert s.publish_kinds(s.parse_args(["codex", "--publish", "pypi,npm", "--publish", "PyPI"])) == ["pypi", "npm"]
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="no kind 'docker'"):
+            s.publish_kinds(s.parse_args(["codex", "--publish", "docker"]))
+    else:
+        assert s.publish_kinds(s.parse_args(["codex"])) == [] and s.publish_kinds(argparse.Namespace()) == []
+
+
+def test_publish_hosts(scenario, publish_home):
+    if scenario == "happy":
+        assert s.publish_hosts(s.parse_args(["codex", "--publish", "pypi,github"])) == [
+            "upload.pypi.org", "api.github.com", "uploads.github.com"]
+    elif scenario == "sad":
+        assert s.publish_hosts(argparse.Namespace(publish=["crates"])) == []  # no login: validate() says so
+    else:
+        assert s.publish_hosts(s.parse_args(["codex"])) == []
+
+
+def test_publish_environment(scenario, publish_home):
+    if scenario == "happy":
+        env = s.publish_environment(s.parse_args(["codex", "--publish", "pypi,npm"]))
+        assert env["TWINE_USERNAME"] == "__token__" and env["TWINE_PASSWORD"] == env["UV_PUBLISH_TOKEN"] == \
+            "sandbox-ai-publish-placeholder-pypi"
+        assert env["NPM_TOKEN"] == "sandbox-ai-publish-placeholder-npm" and env["NPM_CONFIG_GLOBALCONFIG"] == s.NPMRC_TARGET
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="--publish crates: no login"):
+            s.publish_environment(argparse.Namespace(publish=["crates"]))
+    else:
+        assert s.publish_environment(s.parse_args(["codex"])) == {}
+        assert "NPM_CONFIG_GLOBALCONFIG" not in s.publish_environment(s.parse_args(["codex", "--publish", "pypi"]))
+
+
+def test_check_publish(scenario, publish_home):
+    store = {"PYPI_TOKEN": "pypi-REAL", "NPM_SECRET": "npm_REAL", "GH_PUB": "ghp_REAL"}
+    if scenario == "happy":
+        s.check_publish(s.parse_args(["codex", "--publish", "pypi,npm,github"]), store.get)
+    elif scenario == "sad":
+        for argv, text in ((["--publish", "pypi", "--no-proxy"], "needs the connection proxy"),
+                           (["--publish", "pypi", "--no-inspect", "upload.pypi.org"], "drop --no-inspect upload.pypi.org"),
+                           (["--publish", "pypi", "--secret-env", "TWINE_PASSWORD"], "TWINE_PASSWORD is given twice"),
+                           (["--publish", "crates"], "--publish crates: no login"),
+                           (["--publish", "github", "--git-token-env", "https://github.com=GH"], "add --token-proxy")):
+            with pytest.raises(ValueError, match=text):
+                s.check_publish(s.parse_args(["codex", *argv]), False)
+        with pytest.raises(ValueError, match="no secret NPM_SECRET"):
+            s.check_publish(s.parse_args(["codex", "--publish", "npm"]), {}.get)
+    else:
+        s.check_publish(s.parse_args(["codex", "--no-proxy"]), {}.get)  # nothing to publish: nothing to check
+        s.check_publish(s.parse_args(["codex", "--publish", "github", "--git-token-env", "https://github.com=GH",
+                                      "--token-proxy"]), store.get)
+
+
+@pytest.fixture
+def identities_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setattr(s, "_identities_module", None)
+    module = s.load_identities_module()
+    module.save({"c0decave": {"name": "dash", "email": "c0decave@users.noreply.github.com",
+                              "git": [{"url": "https://github.com", "user": "c0decave", "secret": "GH_C0DECAVE"}],
+                              "publish": [{"kind": "pypi", "host": "upload.pypi.org", "secret": "PYPI_C0DECAVE"}]},
+                 "investigation": {"description": "OSINT", "git": [], "publish": []}})
+    return module
+
+
+def test_load_identities_module(scenario, identities_home):
+    if scenario == "happy":
+        assert s.load_identities_module() is identities_home and identities_home.path().name == "identities.json"
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="no such identity"):
+            identities_home.get("nobody")
+    else:
+        assert identities_home.DEFAULT == "default"
+
+
+def test_identity_of(scenario, identities_home):
+    if scenario == "happy":
+        name, identity = s.identity_of(s.parse_args(["codex", "--identity", "c0decave"]))
+        assert name == "c0decave" and identity["email"] == "c0decave@users.noreply.github.com"
+    elif scenario == "sad":
+        for value, text in (("nobody", "no such identity .yours: c0decave, investigation"), ("Bad Name", "lower-case")):
+            with pytest.raises(ValueError, match=text):
+                s.identity_of(s.parse_args(["codex", "--identity", value]))
+    else:
+        assert s.identity_of(s.parse_args(["codex"])) == (None, None)
+        assert s.identity_of(s.parse_args(["codex", "--identity", "default"])) == (None, None)
+
+
+def test_check_identity(scenario, identities_home):
+    if scenario == "happy":
+        s.check_identity(s.parse_args(["codex", "--identity", "c0decave"]))
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="drop --git-identity"):
+            s.check_identity(s.parse_args(["codex", "--identity", "c0decave", "--git-identity"]))
+        a = s.parse_args(["codex", "--identity", "c0decave"])
+        a.mcp_socket_dir = "/x"
+        with pytest.raises(ValueError, match="not an MCP server's"):
+            s.check_identity(a)
+    else:
+        s.check_identity(s.parse_args(["codex", "--git-identity"]))  # default: the host's identity as before
+
+
+def test_identity_plan(scenario, identities_home):
+    if scenario == "happy":
+        assert s.identity_plan(s.parse_args(["codex", "--identity", "c0decave"])) == {
+            "name": "c0decave", "commit_name": "dash", "commit_email": "c0decave@users.noreply.github.com",
+            "git": ["https://github.com"], "publish": ["pypi"]}
+    elif scenario == "sad":
+        plan = s.identity_plan(s.parse_args(["codex", "--identity", "investigation"]))
+        assert plan["git"] == [] and plan["commit_name"] is None  # an identity with no logins has none of default's
+    else:
+        assert s.identity_plan(s.parse_args(["codex"])) is None
+
+
+def test_publish_logins_of(scenario, identities_home):
+    if scenario == "happy":
+        assert s.publish_logins_of(s.parse_args(["codex", "--identity", "c0decave"])) == [
+            {"kind": "pypi", "host": "upload.pypi.org", "secret": "PYPI_C0DECAVE"}]
+    elif scenario == "sad":
+        assert s.publish_logins_of(s.parse_args(["codex", "--identity", "investigation"])) == []
+    else:
+        assert s.publish_logins_of(s.parse_args(["codex"])) is None  # default: sandbox-ai publish-logins
+
+
+def test_git_credential(scenario, tmp_path):
+    """The sandbox's Git helper for logins added during the run: "get" for a login's origin, nothing else."""
+    import io
+    tokens = tmp_path / "git-tokens.json"
+    tokens.write_text(json.dumps({"version": 1, "logins": [
+        {"url": "http://localhost:3000", "user": "alice", "token": "gitea_token_1"},
+        {"url": "https://git.example.org", "user": "x-access-token", "token": "glpat_token_2"}]}))
+
+    def ask(text, operation="get", path=tokens):
+        out = io.StringIO()
+        assert rt.git_credential(operation, io.StringIO(text), out, path=path) == 0  # never fails Git
+        return out.getvalue()
+    if scenario == "happy":
+        assert ask("protocol=http\nhost=localhost:3000\npath=alice/repo.git\n\n") == \
+            "username=alice\npassword=gitea_token_1\n"
+        # The default port is the origin without it; the host name is not case-sensitive.
+        assert ask("protocol=https\nhost=Git.Example.org:443\n") == "username=x-access-token\npassword=glpat_token_2\n"
+        assert ask("protocol=http\nhost=localhost:3000\nusername=alice\n").startswith("username=alice")
+    elif scenario == "sad":
+        for text in ("protocol=http\nhost=localhost:3001\n", "protocol=https\nhost=localhost:3000\n",
+                     "protocol=http\nhost=localhost:3000\nusername=mallory\n", "protocol=ftp\nhost=localhost:3000\n",
+                     "host=localhost:3000\n", "", "protocol=https\nhost=git.example.org.evil.example\n"):
+            assert ask(text) == "", text
+        # store and erase change nothing: the agent cannot replace what the human gave.
+        before = tokens.read_text()
+        assert ask("protocol=http\nhost=localhost:3000\nusername=x\npassword=y\n", "store") == ""
+        assert ask("protocol=http\nhost=localhost:3000\n", "erase") == "" and tokens.read_text() == before
+    else:
+        # No file (no login added), a damaged one, or a login with a line break: no answer, no error.
+        assert ask("protocol=http\nhost=localhost:3000\n", path=tmp_path / "absent.json") == ""
+        (tmp_path / "bad.json").write_text("{not json")
+        assert ask("protocol=http\nhost=localhost:3000\n", path=tmp_path / "bad.json") == ""
+        (tmp_path / "list.json").write_text("[]")
+        assert ask("protocol=http\nhost=localhost:3000\n", path=tmp_path / "list.json") == ""
+        (tmp_path / "evil.json").write_text(json.dumps({"logins": [
+            {"url": "http://localhost:3000", "user": "a", "token": "t\nusername=evil"}]}))
+        assert ask("protocol=http\nhost=localhost:3000\n", path=tmp_path / "evil.json") == ""
 
 
 def test_open_request(scenario, tmp_path):
@@ -5186,7 +6412,9 @@ def test_private_locations(scenario, tmp_path, monkeypatch):
         assert s.private_locations()[1] == []
     else:  # XDG directories wherever they are set
         monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
         assert tmp_path / "cfg" in s.private_locations()[0]
+        assert tmp_path / "cache" / "sandbox-ai" in s.private_locations()[0]
 
 
 def test_check_private_location(scenario, tmp_path, monkeypatch):
@@ -5203,6 +6431,12 @@ def test_check_private_location(scenario, tmp_path, monkeypatch):
     else:
         with pytest.raises(ValueError, match="contains .*home/\\."):
             s.check_private_location(home, "--state-dir")
+        # Review finding: the packages' copies in the cache run on the host (an rw mount of them is refused).
+        monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+        for path in (home / ".cache" / "sandbox-ai", home / ".cache" / "sandbox-ai" / "pyz" / "1.0-abc", home / ".cache"):
+            with pytest.raises(ValueError, match=r"\.cache/sandbox-ai"):
+                s.check_private_location(path, "--mount")
+        s.check_private_location(home / ".cache" / "pip", "--mount")
 
 
 def test_relay_server_stderr(scenario):
@@ -5235,6 +6469,30 @@ def test_own_home(scenario, tmp_path, monkeypatch):
             s.check_private_location(state / "logs", "--state-dir")
     else:  # the installed launcher's versions are not among them
         assert not s.own_home(tmp_path / "data" / "sandbox-ai" / "versions" / "0.1.21")
+
+
+def test_sandbox_ais_own_work_folders_are_workspaces_under_dot_local(tmp_path, monkeypatch):
+    """The default layout (no XDG_* set): everything below ~/.local. The work folders of sandbox-ai's own
+    sandboxes are their workspaces: a login's (sandbox-ai login refused every login on a new host), an MCP
+    server's without one of its own (the demo server), a team's board. Their siblings stay refused."""
+    for name in ("XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(s.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    local = tmp_path / ".local"
+    allowed = [local / "share/sandbox-ai/auth/.login-claude-abc/work", local / "share/sandbox-ai/auth/.login-claude-abc/home",
+               local / "state/sandbox-ai/mcp/demo/work", local / "state/sandbox-ai/mcp/demo/home",
+               local / "state/sandbox-ai/teams/app/board"]
+    refused = [local / "share/sandbox-ai/auth", local / "share/sandbox-ai/auth/claude",
+               local / "state/sandbox-ai/mcp/demo", local / "state/sandbox-ai/mcp/demo/sock",
+               local / "state/sandbox-ai/teams/app", local / "state/sandbox-ai/teams", local / "share/sandbox-ai"]
+    for path in allowed + refused:
+        path.mkdir(parents=True, exist_ok=True)
+    for path in allowed:
+        s.check_workspace_scope(path.resolve())
+    for path in refused:
+        with pytest.raises(ValueError, match="lies in"):
+            s.check_workspace_scope(path.resolve())
 
 
 def test_project_tool_dir(scenario, tmp_path, monkeypatch):
@@ -5392,6 +6650,30 @@ def test_tool_dirs_changed(scenario, tmp_path, monkeypatch):
         (tools / "eslint").write_text("y")
         os.utime(tools / "eslint", ns=(stat_before.st_atime_ns, stat_before.st_mtime_ns))
         assert "eslint" in s.tool_dirs_changed(before)[0]
+        # The directory, or a parent of it, swapped for a link to one the agent filled: named, not compared away.
+        evil = work / "evil"
+        evil.mkdir()
+        (evil / "git").write_text("#!/bin/sh\n")
+        os.rename(tools, work / "node_modules" / "old")
+        os.symlink(evil, tools)
+        assert "replaced" in s.tool_dirs_changed(before)[0]
+        os.unlink(tools)
+        os.rename(work / "node_modules", work / "nm-old")
+        os.symlink(work / "nm-old", work / "node_modules")  # a parent is a link now
+        assert "replaced" in s.tool_dirs_changed(before)[0]
+        # A PATH entry that leads out of the workspace through a link in it is recorded as written, and a swap of
+        # that link for a folder of the agent's is named (the venv kept outside a synced folder).
+        outside = tmp_path / "virtualenvs" / "proj"
+        (outside / "bin").mkdir(parents=True)
+        (outside / "bin" / "python").write_text("real")
+        os.symlink(outside, work / ".venv")
+        monkeypatch.setenv("PATH", str(work / ".venv" / "bin"))
+        kept = s.tool_dirs_state(argparse.Namespace(workspaces=[str(work)]))
+        assert list(kept) == [str(work / ".venv" / "bin")]
+        os.unlink(work / ".venv")
+        (work / ".venv" / "bin").mkdir(parents=True)
+        (work / ".venv" / "bin" / "python").write_text("the agent's")
+        assert "replaced" in s.tool_dirs_changed(kept)[0]
 
 
 # --- the administrator's policy -------------------------------------------------------------------
@@ -5436,6 +6718,15 @@ def test_load_policy(scenario, tmp_path, monkeypatch):
             s.load_policy(path)
 
 
+def test_policy_require_signed_updates(tmp_path, monkeypatch):
+    """install.sh reads require_signed_updates itself; the launcher must accept the key, but only as a boolean."""
+    path = policy_file(tmp_path, {"version": 1, "require_signed_updates": True}, monkeypatch)
+    assert s.load_policy(path)["require_signed_updates"] is True
+    path.write_text(json.dumps({"version": 1, "require_signed_updates": "yes"}))
+    with pytest.raises(ValueError, match="require_signed_updates is true or false"):
+        s.load_policy(path)
+
+
 def test_check_policy(scenario):
     policy = {"version": 1, "forbid": ["--egress-all-allow", "--privacy-check=off", "--no-proxy"],
               "backends": ["podman"], "max_approval_scope": "once", "message": "ask IT"}
@@ -5475,6 +6766,141 @@ def test_http_rules(scenario):
     else:  # rules for a host whose TLS passes unopened could never hold
         with pytest.raises(ValueError, match="--no-inspect"):
             s.http_rules(s.parse_args(["codex", "--allow-http", "api.github.com GET /", "--no-inspect", "*.github.com"]))
+
+
+GH_RULES = {"version": 1, "http": [{"id": "no-gists", "host": "api.github.com", "path": "/gists/**", "decision": "deny"}],
+            "mcp": [{"id": "fs-write", "server": "files", "tool": "write_file", "decision": "ask"}]}
+
+
+def test_user_rules_file(scenario, monkeypatch, tmp_path):
+    if scenario == "happy":
+        assert s.user_rules_file() == Path.home() / ".config/sandbox-ai/rules.json"
+    elif scenario == "sad":
+        assert not s.user_rules_file().exists()  # optional: none by default
+    else:
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+        assert s.user_rules_file() == tmp_path / "cfg/sandbox-ai/rules.json"
+
+
+def test_read_ruleset(scenario, tmp_path):
+    path = tmp_path / "rules.json"
+    if scenario == "happy":
+        path.write_text(json.dumps(GH_RULES))
+        checked = s.read_ruleset(path, "--rules rules.json")
+        assert checked["http"][0]["host"] == ["api.github.com"] and checked["http"][0]["methods"] == ["*"]
+        assert checked["mcp"][0]["server"] == ["files"] and checked["defaults"] == {"http": "allow", "mcp": "allow",
+                                                                                  "devices": "allow",
+                                                                                  "tool": "allow"}
+    elif scenario == "sad":
+        for text, message in (('{"version": 1, "http": [{"host": "x"}]}', '"id" is required'),
+                              ('{"version": 1, "version": 1}', "given twice"), ("{", "not valid JSON"),
+                              ('{"version": 2}', '"version": 1'), ('{"version": 1, "http": NaN}', "not valid JSON")):
+            path.write_text(text)
+            with pytest.raises(ValueError, match=message):
+                s.read_ruleset(path, "x")
+        with pytest.raises(ValueError, match="No such file"):
+            s.read_ruleset(tmp_path / "absent.json", "x")
+    else:
+        path.write_bytes(b" " * (s.CONFIG_LIMIT + 1))
+        with pytest.raises(ValueError, match="larger than"):
+            s.read_ruleset(path, "x")
+        os.mkfifo(tmp_path / "fifo")
+        with pytest.raises(ValueError, match="regular file"):
+            s.read_ruleset(tmp_path / "fifo", "x")  # refused, never waited on
+
+
+def test_load_rulesets(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    mine = tmp_path / "mine.json"
+    mine.write_text(json.dumps(GH_RULES))
+    if scenario == "happy":
+        (tmp_path / "cfg/sandbox-ai").mkdir(parents=True)
+        s.user_rules_file().write_text(json.dumps({"version": 1, "defaults": {"mcp": "ask"}}))
+        a = s.parse_args(["codex", "--rules", str(mine), "-ru", str(mine), "--allow-http", "api.github.com GET /**"])
+        s.check_policy(a, {"version": 1, "rules": {"version": 1, "http": [
+            {"id": "admin", "host": "*", "methods": "DELETE", "decision": "ask"}]}})
+        a.project_document = {"rules": {"version": 1, "mcp": [{"id": "p", "tool": "*", "decision": "deny"}]}}
+        names = [source["name"] for source in s.load_rulesets(a)]
+        # In order; two files of one name are told apart.
+        assert names == ["policy", "rules.json", "--rules mine.json", "--rules mine.json (2)", "--allow-http", "project",
+                         "telemetry"]  # --telemetry off: the agent's telemetry refused by the proxy too
+        assert s.load_rulesets(a) is a.rulesets  # read once
+        assert s.load_rulesets(a)[4]["http"][0]["id"] == "allow-http-1"
+    elif scenario == "sad":
+        mine.write_text('{"version": 1, "http": [{"id": "x", "host": "api.github.com", "decision": "maybe"}]}')
+        with pytest.raises(ValueError, match="decision"):
+            s.load_rulesets(s.parse_args(["codex", "--rules", str(mine)]))
+    else:
+        # Nothing configured: only the proxy's part of --telemetry off; with it on, nothing decided by rules.
+        assert [r["name"] for r in s.load_rulesets(s.parse_args(["codex"]))] == ["telemetry"]
+        assert s.load_rulesets(s.parse_args(["codex", "--telemetry", "on"])) == []
+
+
+def test_check_rulesets(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    mine = tmp_path / "mine.json"
+    mine.write_text(json.dumps(GH_RULES))
+    if scenario == "happy":
+        s.check_rulesets(s.parse_args(["codex", "--rules", str(mine), "--no-inspect", "pypi.org"]))
+        s.check_rulesets(s.parse_args(["codex", "--rules", str(mine), "--offline"]))  # nothing to reach
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="need the connection proxy"):
+            s.check_rulesets(s.parse_args(["codex", "--rules", str(mine), "--no-proxy"]))
+    else:  # TLS passed through unopened: rules for that host could never hold
+        for host in ("*.github.com", "api.github.com"):
+            with pytest.raises(ValueError, match="cannot hold"):
+                s.check_rulesets(s.parse_args(["codex", "--rules", str(mine), "--no-inspect", host]))
+        mine.write_text('{"version": 1, "defaults": {"http": "ask"}}')
+        with pytest.raises(ValueError, match="cannot hold"):
+            s.check_rulesets(s.parse_args(["codex", "--rules", str(mine), "--no-inspect", "pypi.org"]))
+
+
+def test_mcp_gateway(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    mine = tmp_path / "mine.json"
+    mine.write_text(json.dumps(GH_RULES))
+    a = s.parse_args(["codex", "--rules", str(mine)])
+    if scenario == "happy":
+        config = s.mcp_gateway(a, "files", "/sandbox/mcp-approvals")
+        assert config["server"] == "files" and config["approvals"] == "/sandbox/mcp-approvals"
+        assert [rule["id"] for rule in config["rules"][0]["mcp"]] == ["fs-write"] and "http" not in config["rules"][0]
+    elif scenario == "sad":
+        assert s.mcp_gateway(a, "other", "/x") is None  # no rule for that server: no gateway rules
+    else:
+        mine.write_text(json.dumps({"version": 1, "mcp": [{"id": "d", "tool": "rm*", "decision": "deny"}]}))
+        config = s.mcp_gateway(s.parse_args(["codex", "--rules", str(mine)]), "any", "/x")
+        assert "approvals" not in config  # nothing can ask: no answers to read
+
+
+def test_sandbox_identity(scenario, tmp_path):
+    if scenario == "happy":
+        a = s.parse_args(["claude", "--backend", "bwrap"])
+        a.run_id = "claude-1a2b3c4d"
+        assert s.sandbox_identity(a) == {"run": "claude-1a2b3c4d", "agent": "claude", "backend": "bwrap", "role": "agent"}
+    elif scenario == "sad":  # before the run has an ID: named by what is known
+        assert s.sandbox_identity(s.parse_args(["codex"])) == {"agent": "codex", "backend": "podman", "role": "agent"}
+    else:  # an MCP server's sandbox: named by its server
+        a = s.parse_args(["codex", "--mcp-socket-dir", str(tmp_path / "files/sock"), "--pod-name", "agent-mcp-files"])
+        assert s.sandbox_identity(a) == {"agent": "codex", "backend": "podman", "role": "mcp-server",
+                                         "pod": "agent-mcp-files", "mcp": "files"}
+
+
+def test_proxy_rules(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    mine = tmp_path / "mine.json"
+    mine.write_text(json.dumps(GH_RULES))
+    hosts = {"api.github.com": ["192.0.2.21"]}
+    if scenario == "happy":
+        config = s.proxy_rules(s.parse_args(["codex", "--rules", str(mine)]), hosts)
+        assert [source["name"] for source in config["rules"]] == ["--rules mine.json", "telemetry"]
+        assert config["rules"][0]["http"][0]["id"] == "no-gists" and "mcp" not in config["rules"][0]
+        assert config["pinned"] == hosts
+    elif scenario == "sad":
+        assert s.proxy_rules(s.parse_args(["codex", "--telemetry", "on"]), hosts) == {}
+    else:  # --allow-http travels as http_rules, not twice
+        assert s.proxy_rules(s.parse_args(["codex", "--telemetry", "on", "--allow-http", "api.github.com GET /**"]),
+                             hosts) == {}
+        assert s.proxy_config(s.parse_args(["codex", "--rules", str(mine)]), hosts, "l")["rules"][0]["http"]
 
 
 def test_host_matches_any(scenario):
@@ -5543,6 +6969,123 @@ def test_host_name(scenario):
         assert rt.host_name("[2001:db8::1]:8443") == "2001:db8::1" and rt.host_name("[broken") is None
 
 
+LLM_ENTRY = {"name": "gpu", "scheme": "https", "host": "llm.example.org", "port": 8443, "addresses": ["192.0.2.9"],
+             "prefix": "/ollama", "placeholder": "sandbox-ai-llm-key-placeholder", "key": "sk-live-0123456789",
+             "headers": [["CF-Access-Client-Secret", "cf-value"]], "ca": None}
+
+
+def test_api_key_head(scenario):
+    entries = [{"host": "dev.to", "port": 443, "name": "DEVTO", "placeholder": "sandbox-ai-api-key-placeholder-DEVTO",
+                "key": "devto-SECRET-1"}]
+    head = (b"POST /api/articles HTTP/1.1\r\nHost: dev.to\r\napi-key: sandbox-ai-api-key-placeholder-DEVTO\r\n"
+            b"X-Echo: sandbox-ai-api-key-placeholder-DEVTO\r\n\r\n")
+    if scenario == "happy":
+        changed, added = rt.api_key_head(entries, "https", "DEV.TO", 443, head)
+        assert added == ["DEVTO"] and b"api-key: devto-SECRET-1\r\n" in changed
+        # Only credential headers: one the server might echo back keeps the placeholder.
+        assert b"X-Echo: sandbox-ai-api-key-placeholder-DEVTO" in changed
+    elif scenario == "sad":
+        for scheme, origin, port in (("http", "dev.to", 443), ("https", "evil.example", 443), ("https", "dev.to", 8443),
+                                     ("https", "dev.to.evil.example", 443)):
+            assert rt.api_key_head(entries, scheme, origin, port, head) == (head, []), (scheme, origin, port)
+        assert rt.api_key_head(entries, "https", "dev.to", 443, head[:-2]) == (head[:-2], [])  # not a whole head
+    else:
+        assert rt.api_key_head([], "https", "dev.to", 443, head) == (head, [])
+        assert rt.api_key_head(None, "https", "dev.to", 443, head) == (head, [])
+        plain = b"GET / HTTP/1.1\r\nHost: dev.to\r\n\r\n"
+        assert rt.api_key_head(entries, "https", "dev.to", 443, plain) == (plain, [])
+
+
+def test_basic_with_key(scenario):
+    import base64
+    entry = {"placeholder": "sandbox-ai-publish-placeholder-pypi", "key": "pypi-REAL-token", "name": "publish:pypi"}
+    sent = b" Basic " + base64.b64encode(b"__token__:sandbox-ai-publish-placeholder-pypi")
+    if scenario == "happy":
+        value, added = rt.basic_with_key(sent, [entry])
+        assert added == ["publish:pypi"] and base64.b64decode(value.split()[1]) == b"__token__:pypi-REAL-token"
+    elif scenario == "sad":
+        for value in (b" Bearer sandbox-ai-publish-placeholder-pypi", b" Basic !!!not-base64!!!",
+                      b" Basic " + base64.b64encode(b"__token__:agents-own")):
+            assert rt.basic_with_key(value, [entry]) == (value, [])
+    else:
+        assert rt.basic_with_key(sent, []) == (sent, []) and rt.basic_with_key(b"", [entry]) == (b"", [])
+
+
+def test_scrubbed_pieces(scenario):
+    key = b"sk-SECRET-0123456789"
+    if scenario == "happy":
+        # Chunked, the key split over two chunks: masked, and the new framing is valid.
+        pieces = [(b"6\r\n", b""), (b"ab" + key[:4], b"ab" + key[:4]), (b"\r\n", b""),
+                  (b"%x\r\n" % (len(key) - 4 + 1), b""), (key[4:] + b"z", key[4:] + b"z"), (b"\r\n", b""),
+                  (b"0\r\n\r\n", b"")]
+        out = b"".join(raw for raw, _ in rt.scrubbed_pieces(iter(pieces), rt.Scrubber([key]), True))
+        body, rest = b"", out
+        while True:
+            size, _, rest = rest.partition(b"\r\n")
+            if int(size, 16) == 0:
+                break
+            body, rest = body + rest[:int(size, 16)], rest[int(size, 16) + 2:]
+        assert body == b"ab" + b"*" * len(key) + b"z" and key not in out
+    elif scenario == "sad":
+        # A length-framed body: the same bytes in the same places, only the key's are stars.
+        pieces = [(b"x" + key[:7], b"x" + key[:7]), (key[7:] + b"y", key[7:] + b"y")]
+        out = b"".join(raw for raw, _ in rt.scrubbed_pieces(iter(pieces), rt.Scrubber([key]), False))
+        assert out == b"x" + b"*" * len(key) + b"y"
+    else:
+        # A chunk size with a leading zero is not the last chunk; nothing to mask leaves the body as it was.
+        pieces = [(b"0a\r\n", b""), (b"0123456789", b"0123456789"), (b"\r\n", b""), (b"0\r\n\r\n", b"")]
+        out = b"".join(raw for raw, _ in rt.scrubbed_pieces(iter(pieces), rt.Scrubber([key]), True))
+        assert out.endswith(b"0\r\n\r\n") and b"0123456789" in out
+        assert b"".join(r for r, _ in rt.scrubbed_pieces(iter([]), rt.Scrubber([]), False)) == b""
+
+
+def test_identity_head(scenario):
+    if scenario == "happy":
+        head = b"GET / HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip, br\r\n\r\n"
+        assert rt.identity_head(head) == b"GET / HTTP/1.1\r\nHost: x\r\nAccept-Encoding: identity\r\n\r\n"
+    elif scenario == "sad":
+        head = b"GET / HTTP/1.1\r\naccept-encoding: gzip\r\nACCEPT-ENCODING: br\r\n\r\n"
+        assert rt.identity_head(head).count(b"ncoding") == 1 and b"gzip" not in rt.identity_head(head)
+    else:
+        assert rt.identity_head(b"GET / HTTP/1.1\r\n\r\n") == b"GET / HTTP/1.1\r\nAccept-Encoding: identity\r\n\r\n"
+
+
+def test_llm_head(scenario):
+    head = (b"POST /ollama/v1/chat/completions HTTP/1.1\r\nHost: llm.example.org:8443\r\n"
+            b"Authorization: Bearer sandbox-ai-llm-key-placeholder\r\nCF-Access-Client-Secret: agent\r\n\r\n")
+    if scenario == "happy":
+        changed, name = rt.llm_head([LLM_ENTRY], "https", "llm.example.org", 8443, "/ollama/v1/chat/completions", head)
+        assert name == "gpu" and b"Authorization: Bearer sk-live-0123456789\r\n" in changed
+        assert b"placeholder" not in changed and b"agent" not in changed
+        assert changed.endswith(b"CF-Access-Client-Secret: cf-value\r\n\r\n")
+    elif scenario == "sad":
+        # Another name, plain http, another port, outside the prefix: unchanged.
+        for args in (("https", "evil.example", 8443, "/ollama/v1/x"), ("http", "192.0.2.9:8443", 8443, "/ollama/x"),
+                     ("https", "llm.example.org", 443, "/ollama/x"), ("https", "llm.example.org", 8443, "/ollamax/v1")):
+            assert rt.llm_head([LLM_ENTRY], *args, head) == (head, None)
+        assert rt.llm_head(None, "https", "llm.example.org", 8443, "/ollama", head) == (head, None)
+    else:
+        # No key: the placeholder is dropped, not sent; no credentials at all: the key goes in as a Bearer token.
+        keyless = dict(LLM_ENTRY, key=None, headers=[])
+        changed, _ = rt.llm_head([keyless], "https", "llm.example.org", 8443, "/ollama", head)
+        assert b"Authorization" not in changed and b"CF-Access-Client-Secret: agent" in changed
+        bare = b"GET /ollama/v1/models HTTP/1.1\r\nHost: x\r\n\r\n"
+        changed, _ = rt.llm_head([dict(LLM_ENTRY, headers=[])], "https", "llm.example.org", 8443, "/ollama/v1/models",
+                                 bare)
+        assert changed == b"GET /ollama/v1/models HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer sk-live-0123456789\r\n\r\n"
+
+
+def test_load_llm_module(scenario):
+    module = s.load_llm_module()
+    if scenario == "happy":
+        assert module.parse_choice("gpu:qwen2.5-coder:7b") == ("gpu", "qwen2.5-coder:7b")
+    elif scenario == "sad":
+        with pytest.raises(ValueError):
+            module.parse_choice("../x")
+    else:
+        assert module.parse_choice("gpu") == ("gpu", None) and module.PLACEHOLDER not in os.environ.values()
+
+
 def test_is_address_origin(scenario):
     if scenario == "happy":
         assert rt.is_address_origin("192.0.2.7:80") and rt.is_address_origin("[2001:db8::1]:443")
@@ -5593,3 +7136,2064 @@ def test_check_ceiling(scenario):
                 s.check_policy(s.parse_args(["codex", *options]), policy)
     else:  # a resolver inside the ceiling is fine
         s.check_policy(s.parse_args(["codex", "--nameserver", "10.0.0.53"]), policy)
+
+
+def test_token_proxy_keeps_tokens_out_of_the_agent(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))  # no git-logins of the machine running the tests
+    monkeypatch.setattr(s, "_git_logins_module", None)
+    monkeypatch.setenv("GIT_TOKEN_FOR_TEST", "ghp_" + "a" * 36)
+    a = s.parse_args(["codex", "--git-token-env", "https://github.com=GIT_TOKEN_FOR_TEST", "--token-proxy"])
+    env = s.git_environment(a)
+    assert "ghp_" + "a" * 36 not in json.dumps(env) and "GH_TOKEN" not in env
+    config = s.proxy_config(a, {}, "l")
+    assert config["git_tokens"] == [{"host": "github.com", "port": 443, "user": "x-access-token", "loopback": False,
+                                     "token": "ghp_" + "a" * 36}]
+    with pytest.raises(ValueError, match="plain http"):
+        s.validate(s.parse_args(["codex", "--git-token-env", "http://git.example.org=GIT_TOKEN_FOR_TEST",
+                                 "--token-proxy", "--no-config"]))
+    with pytest.raises(ValueError, match="needs the connection proxy"):
+        s.validate(s.parse_args(["codex", "--git-token-env", "https://github.com=GIT_TOKEN_FOR_TEST",
+                                 "--token-proxy", "--no-proxy", "--no-config"]))
+
+
+def test_group_help(scenario):
+    """--help: options by topic, short and long form on one line, the value named once."""
+    text = s.build_parser().format_help()
+    if scenario == "happy":
+        assert text.index("Workspace and files:") < text.index("Network:") < text.index("Git:")
+        assert "-w, --workspace DIR[,DIR...]" in text and "-A, --allow-host HOST" in text
+    elif scenario == "sad":  # internal options and the agent positional stay hidden, nothing is lost
+        assert "--pod-name" not in text and "positional arguments" not in text
+        listed = {name for _, names in s.HELP_GROUPS for name in names}
+        visible = {a.option_strings[-1] for a in s.build_parser()._actions
+                   if a.option_strings and a.help != argparse.SUPPRESS}
+        assert visible <= listed, visible - listed  # every option has a topic
+    else:  # parsing is unchanged by the grouping
+        assert s.parse_args(["codex", "-w", "/tmp/x", "-tp"]).token_proxy is True
+
+
+def fake_usb(tmp_path, monkeypatch, cls="ff", interface=("ff", "00")):
+    """A sysfs tree with one USB device (1-2) behind /dev/bus/usb/001/002 (char 189:1)."""
+    sys_root = tmp_path / "sys"
+    device = sys_root / "devices" / "pci0000:00" / "usb1" / "1-2"
+    (device / "1-2:1.0").mkdir(parents=True)
+    for name, value in (("idVendor", "0a12"), ("idProduct", "0001"), ("bDeviceClass", cls)):
+        (device / name).write_text(value + "\n")
+    (device / "1-2:1.0" / "bInterfaceClass").write_text(interface[0])
+    (device / "1-2:1.0" / "bInterfaceProtocol").write_text(interface[1])
+    (sys_root / "dev" / "char").mkdir(parents=True)
+    (sys_root / "dev" / "char" / "189:1").symlink_to(device)
+    node = tmp_path / "002"
+    node.write_text("")
+    real = os.stat
+    monkeypatch.setattr(s.os, "stat", lambda p, *a, **k: os.stat_result((0o20660, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+                        if str(p) == str(node) else real(p, *a, **k))
+    monkeypatch.setattr(s.os, "major", lambda rdev: 189)
+    monkeypatch.setattr(s.os, "minor", lambda rdev: 1)
+    return sys_root, node
+
+
+def test_usb_device_dir(scenario, tmp_path, monkeypatch):
+    sys_root, node = fake_usb(tmp_path, monkeypatch)
+    if scenario == "happy":
+        assert s.usb_device_dir(node, sys_root).name == "1-2"
+    elif scenario == "sad":
+        assert s.usb_device_dir(tmp_path / "missing", sys_root) is None
+    else:
+        (sys_root / "dev" / "char" / "189:1").unlink()
+        assert s.usb_device_dir(node, sys_root) is None
+
+
+def test_usb_class_bluetooth(scenario, tmp_path, monkeypatch):
+    if scenario == "happy":  # a typical dongle: class on the interface (e0/01)
+        sys_root, node = fake_usb(tmp_path, monkeypatch, interface=("e0", "01"))
+        assert s.usb_class_bluetooth(s.usb_device_dir(node, sys_root))
+    elif scenario == "sad":
+        sys_root, node = fake_usb(tmp_path, monkeypatch)
+        assert not s.usb_class_bluetooth(s.usb_device_dir(node, sys_root))
+    else:  # class on the device
+        sys_root, node = fake_usb(tmp_path, monkeypatch, cls="e0")
+        assert s.usb_class_bluetooth(s.usb_device_dir(node, sys_root))
+
+
+def test_udev_hint(scenario, tmp_path, monkeypatch):
+    sys_root, node = fake_usb(tmp_path, monkeypatch)
+    if scenario == "happy":
+        assert s.udev_hint(node, sys_root) == \
+            'SUBSYSTEM=="usb", ATTRS{idVendor}=="0a12", ATTRS{idProduct}=="0001", TAG+="uaccess"'
+    elif scenario == "sad":
+        assert s.udev_hint(tmp_path / "missing", sys_root) is None
+    else:  # IDs that are not four hex digits never reach the rule text
+        (s.usb_device_dir(node, sys_root) / "idVendor").write_text('0a12", RUN+="x')
+        assert s.udev_hint(node, sys_root) is None
+
+
+def test_blocked_always_is_refused_without_a_question(tmp_path):
+    broker = rt.ApprovalBroker(tmp_path / "a", rt.RuntimeNetwork({}, None, lambda r: None),
+                               blocked={"hosts": ["tracker.example"], "tcp": ["192.0.2.9:5432"]})
+    assert broker.ask("dns", {"name": "tracker.example"})["reason"] == "blocked always for this project"
+    assert broker.ask("connect", {"destination": "192.0.2.9:5432", "address": "192.0.2.9", "port": 5432})[
+        "decision"] == "deny"
+    assert list((tmp_path / "a").glob("*.json")) == []  # nobody was asked
+
+
+def test_dangerously_skip_permissions_answers_claudes_bypass_prompt(tmp_path):
+    """-D: Claude's "Bypass Permissions mode" confirmation is answered in the sandbox HOME (it reappeared at every
+    start of a throwaway HOME); without -D nothing is set."""
+    home = tmp_path / "home"
+    s.claude_default_settings(home)
+    assert "skipDangerousModePermissionPrompt" not in json.loads((home / ".claude/settings.json").read_text())
+    s.claude_default_settings(home, skip_danger_prompt=True)
+    assert json.loads((home / ".claude/settings.json").read_text())["skipDangerousModePermissionPrompt"] is True
+
+
+# --- the sandbox's own network: --subnet, --subnet6, defaults and the policy's subnet_within -------------
+
+
+def route_hex(address):
+    """/proc/net/route's hexadecimal for an IPv4 address (the kernel's byte order)."""
+    import ipaddress
+    return f"{int.from_bytes(ipaddress.IPv4Address(address).packed, sys.byteorder):08X}"
+
+
+def route_files(tmp_path, ipv4=(), ipv6=()):
+    """Fake /proc/net/route and /proc/net/ipv6_route with (destination, mask) and (hex destination, prefix)."""
+    header = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"
+    (tmp_path / "route").write_text(header + "".join(
+        f"eth0\t{route_hex(dest)}\t00000000\t0001\t0\t0\t100\t{route_hex(mask)}\t0\t0\t0\n" for dest, mask in ipv4))
+    (tmp_path / "ipv6_route").write_text("".join(
+        f"{dest} {prefix:02x} 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 "
+        "00000001 00000000 00000001 eth0\n" for dest, prefix in ipv6))
+    return (tmp_path / "route", tmp_path / "ipv6_route")
+
+
+@pytest.fixture
+def routes(monkeypatch):
+    """The host's routes, as host_routes() reports them (the test machine's own stay out)."""
+    import ipaddress
+    found = [ipaddress.ip_network("192.168.1.0/24"), ipaddress.ip_network("fd17:625c:f037:2::/64")]
+    monkeypatch.setattr(s, "host_routes", lambda files=None: list(found))
+    return found
+
+
+def test_slirp_command(scenario):
+    plain = ["slirp4netns", "--configure", "--disable-host-loopback", "--enable-sandbox", "--enable-seccomp",
+             "--enable-ipv6", "--ready-fd", "7", "42", "tap0"]
+    if scenario == "happy":
+        command = s.slirp_command(s.parse_args(["codex", "--backend", "bwrap", "--subnet", "10.20.0.0/24"]), 42, 7)
+        assert command == plain[:6] + ["--cidr=10.20.0.0/24"] + plain[6:]
+    elif scenario == "sad":  # nothing chosen: slirp4netns's own 10.0.2.0/24, as before
+        assert s.slirp_command(s.parse_args(["codex", "--backend", "bwrap"]), 42, 7) == plain
+    else:  # a defaults value applied later counts like the option; IPv6 has no option at all
+        a = s.parse_args(["codex", "--backend", "bwrap"])
+        a.subnet = "172.20.0.0/16"
+        command = s.slirp_command(a, 42, 7)
+        assert command.count("--cidr=172.20.0.0/16") == 1 and "fd00" not in " ".join(command)
+
+
+def test_subnet_hosts(scenario):
+    import ipaddress
+    if scenario == "happy":
+        assert s.subnet_hosts(ipaddress.ip_network("10.20.0.0/24")) == {
+            "address": "10.20.0.100", "gateway": "10.20.0.2", "dns": "10.20.0.3"}
+    elif scenario == "sad":  # a /26 has no 100th address: parse_subnet refuses it before
+        with pytest.raises(IndexError):
+            s.subnet_hosts(ipaddress.ip_network("10.20.0.0/26"))
+    else:  # IPv6 is written like the others: ::100, not the 100th (::64)
+        assert s.subnet_hosts(ipaddress.ip_network("fd20::/64")) == {
+            "address": "fd20::100", "gateway": "fd20::2", "dns": "fd20::3"}
+        assert s.subnet_hosts(ipaddress.ip_network("192.168.7.128/25"))["address"] == "192.168.7.228"
+
+
+def test_parse_subnet(scenario):
+    if scenario == "happy":
+        assert str(s.parse_subnet("10.20.0.0/24", 4)) == "10.20.0.0/24"
+        assert str(s.parse_subnet("fd20:1:2:3::/64", 6, "--subnet6")) == "fd20:1:2:3::/64"
+        assert str(s.parse_subnet("100.64.8.0/22", 4)) == "100.64.8.0/22"  # shared address space
+    elif scenario == "sad":
+        for value, message in (("10.20.0.5", "with its prefix"), ("x/24", "with its prefix"),
+                               ("127.0.0.0/8", "loopback"), ("169.254.0.0/16", "link-local"),
+                               ("224.0.0.0/8", "multicast"), ("8.8.8.0/24", "not a private range"),
+                               ("10.0.0.0/26", "/8 to /25"), ("10.0.0.0/7", "/8 to /25"),
+                               ("fd20::/64", "an IPv4 network"), (["10.0.0.0/8"], "with its prefix")):
+            with pytest.raises(ValueError, match=message):
+                s.parse_subnet(value, 4)
+        for value, message in (("fd20::/48", "must be /64"), ("2001:db8::/64", "not a private range"),
+                               ("fe80::/64", "link-local"), ("fd20::%eth0/64", "with its prefix")):
+            with pytest.raises(ValueError, match=message):
+                s.parse_subnet(value, 6, "--subnet6")
+    else:  # an address in the network names the network to use instead, as slirp4netns would refuse it
+        with pytest.raises(ValueError, match=r"--subnet 10.20.0.100/24: give the network address, 10.20.0.0/24"):
+            s.parse_subnet("10.20.0.100/24", 4)
+        assert str(s.parse_subnet("192.168.7.128/25", 4)) == "192.168.7.128/25"  # the smallest one
+        with pytest.raises(ValueError, match="^policy subnet "):
+            s.parse_subnet("8.8.8.0/24", 4, "policy subnet")
+
+
+def test_host_routes(scenario, tmp_path):
+    if scenario == "happy":
+        files = route_files(tmp_path, [("0.0.0.0", "0.0.0.0"), ("192.168.1.0", "255.255.255.0"),
+                                       ("10.8.0.0", "255.255.0.0")],
+                            [("00000000000000000000000000000000", 0), ("fd17625cf0370002" + "0" * 16, 64),
+                             ("fe80" + "0" * 28, 64), ("ff00" + "0" * 28, 8), ("0" * 31 + "1", 128)])
+        assert [str(n) for n in s.host_routes(files)] == ["192.168.1.0/24", "10.8.0.0/16", "fd17:625c:f037:2::/64"]
+    elif scenario == "sad":  # unreadable: no routes (the check spares clashes; it is no boundary)
+        assert s.host_routes((tmp_path / "missing", tmp_path / "missing6")) == []
+    else:  # malformed lines are skipped, the rest is kept
+        files = route_files(tmp_path, [("172.17.0.0", "255.255.0.0")])
+        with files[0].open("a") as handle:
+            handle.write("eth0\tZZZZ\n\n")
+        files[1].write_text("garbage\nfd00000000000000000000000000000 40\n")
+        assert [str(n) for n in s.host_routes(files)] == ["172.17.0.0/16"]
+
+
+def test_defaults_file(scenario, tmp_path, monkeypatch):
+    if scenario == "happy":
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+        assert s.defaults_file() == tmp_path / "cfg/sandbox-ai/defaults.json"
+    else:
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path / ("home" if scenario == "sad" else "other")))
+        assert s.defaults_file() == tmp_path / ("home" if scenario == "sad" else "other") / ".config/sandbox-ai/defaults.json"
+
+
+def test_load_user_defaults(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    path = tmp_path / "cfg/sandbox-ai/defaults.json"
+    path.parent.mkdir(parents=True)
+    a = s.parse_args(["codex", "--workspace", str(tmp_path / "work")])
+    if scenario == "happy":
+        assert s.load_user_defaults(a) == {}  # no file: nothing changes
+        path.write_text(json.dumps({"version": 1, "subnet": "10.20.0.0/24", "subnet6": "fd20::/64"}))
+        assert s.load_user_defaults(a)["subnet"] == "10.20.0.0/24"
+    elif scenario == "sad":
+        for document, message in (({"version": 2}, "expected version 1"), ({"version": 1, "allow": ["x"]}, "keys"),
+                                  ({"version": 1, "subnet": "8.8.8.0/24"}, "subnet 8.8.8.0/24 is not a private"),
+                                  ({"version": 1, "subnet6": "10.0.0.0/8"}, "IPv6 network")):
+            path.write_text(json.dumps(document))
+            with pytest.raises(ValueError, match=message):
+                s.load_user_defaults(a)
+        path.write_text("{")
+        with pytest.raises(ValueError, match="invalid JSON"):
+            s.load_user_defaults(a)
+    else:  # a link is not followed, and a file the agent could write is not read at all
+        (tmp_path / "real.json").write_text(json.dumps({"version": 1, "subnet": "10.20.0.0/24"}))
+        path.symlink_to(tmp_path / "real.json")
+        with pytest.raises(ValueError, match="symlink"):
+            s.load_user_defaults(a)
+        exposed = s.parse_args(["codex", "--workspace", str(tmp_path / "cfg")])
+        with pytest.raises(ValueError, match="lies inside"):
+            s.load_user_defaults(exposed)
+
+
+def test_apply_subnet_defaults(scenario):
+    values = {"version": 1, "subnet": "10.20.0.0/24", "subnet6": "fd20::/64"}
+    if scenario == "happy":
+        a = s.parse_args(["codex"])
+        s.apply_subnet_defaults(a, values, "defaults.json")
+        assert (a.subnet, a.subnet6) == ("10.20.0.0/24", "fd20::/64")
+        assert a.subnet_origin == {"subnet": "defaults.json", "subnet6": "defaults.json"}
+    elif scenario == "sad":  # no default network to give them to: offline, or a Podman network decides
+        for options in (["--offline"], ["--network", "lab"]):
+            a = s.parse_args(["codex", *options])
+            s.apply_subnet_defaults(a, values, "defaults.json")
+            assert (a.subnet, a.subnet6, a.subnet_origin) == (None, None, {})
+    else:  # an option wins; bwrap takes no IPv6 default (slirp4netns cannot), which is no error
+        a = s.parse_args(["codex", "--backend", "bwrap", "--subnet", "172.20.0.0/16"])
+        s.apply_subnet_defaults(a, values, "defaults.json")
+        assert (a.subnet, a.subnet6, a.subnet_origin) == ("172.20.0.0/16", None, {})
+
+
+def test_subnet_label(scenario):
+    a = s.parse_args(["codex", "--subnet", "10.20.0.0/24"])
+    if scenario == "happy":
+        assert s.subnet_label(a, "subnet") == "--subnet 10.20.0.0/24"
+    elif scenario == "sad":
+        assert s.subnet_label(a, "subnet6") == "--subnet6 None"
+    else:
+        a.subnet_origin["subnet"] = "/home/u/.config/sandbox-ai/defaults.json"
+        assert s.subnet_label(a, "subnet") == "--subnet 10.20.0.0/24 (from /home/u/.config/sandbox-ai/defaults.json)"
+
+
+def test_subnet_destinations(scenario):
+    if scenario == "happy":
+        a = s.parse_args(["claude", "--allow", "10.1.0.0/16", "--allow-tcp", "[fd30::7]:22", "--nameserver", "9.9.9.9"])
+        labels = [label for label, _ in s.subnet_destinations(a, ["203.0.113.5"])]
+        assert labels[:3] == ["--allow 10.1.0.0/16", "--allow-tcp fd30::7:22", "the nameserver 9.9.9.9"]
+        assert "160.79.104.0/23 (an allowed host's network)" in labels  # api.anthropic.com's ranges
+        assert labels[-1] == "203.0.113.5 (an allowed host's address)"
+    elif scenario == "sad":
+        assert s.subnet_destinations(s.parse_args(["codex", "--offline"])) == []
+    else:  # --dns brings the default resolvers in
+        a = s.parse_args(["codex", "--dns", "--no-provider-defaults"])
+        assert [str(net) for _, net in s.subnet_destinations(a)] == ["1.1.1.1/32", "8.8.8.8/32"]
+
+
+def test_check_subnets(scenario, routes):
+    if scenario == "happy":
+        s.check_subnets(s.parse_args(["claude", "--subnet", "10.20.0.0/24", "--subnet6", "fd20::/64",
+                                      "--allow", "10.21.0.0/16", "--allow-tcp", "192.168.2.5:22"]))
+        s.check_subnets(s.parse_args(["claude"]))  # nothing chosen: nothing to check
+    elif scenario == "sad":
+        for options, message in (
+                (["--subnet", "192.168.0.0/16"], "overlaps 192.168.1.0/24, a network this host routes to"),
+                (["--subnet6", "fd17:625c:f037:2::/64"], "overlaps fd17:625c:f037:2::/64"),
+                (["--subnet", "10.20.0.0/24", "--allow", "10.0.0.0/8"], "--allow 10.0.0.0/8 lies inside the sandbox"),
+                (["--subnet", "10.20.0.0/24", "--allow-tcp", "10.20.0.2:22"], "--allow-tcp 10.20.0.2:22 lies inside"),
+                (["--subnet", "10.20.0.0/24", "--nameserver", "10.20.0.2"], "the nameserver 10.20.0.2 lies inside"),
+                (["--subnet", "10.20.0.0/24", "--network", "lab"], "with --network the Podman network decides"),
+                (["--subnet6", "fd20::/64", "--backend", "bwrap"], "slirp4netns .*fd00::/64"),
+                (["--subnet", "nope"], "expects a network")):
+            with pytest.raises(ValueError, match=message):
+                s.check_subnets(s.parse_args(["claude", *options]))
+        # Resolved hosts: the address an allowed name had at the start.
+        with pytest.raises(ValueError, match=r"10.20.0.3 \(an allowed host's address\) lies inside"):
+            s.check_subnets(s.parse_args(["claude", "--subnet", "10.20.0.0/24"]), ["10.20.0.3"])
+    else:
+        # .3 is the backend's DNS forwarder to the host's resolvers: the one address inside that may be used.
+        s.check_subnets(s.parse_args(["claude", "--subnet", "10.20.0.0/24", "--nameserver", "10.20.0.3"]))
+        # A remote Podman's routes are not this host's.
+        s.check_subnets(s.parse_args(["claude", "--subnet", "192.168.1.0/24", "--podman-url", "unix:///x.sock"]))
+        a = s.parse_args(["claude", "--subnet", "10.20.0.0/24", "--allow-tcp", "10.20.0.9:22"])
+        a.subnet_origin["subnet"] = "defaults.json"
+        with pytest.raises(ValueError, match=r"inside the sandbox's own network, --subnet 10.20.0.0/24 \(from defaults.json\)"):
+            s.check_subnets(a)
+
+
+def test_settle_network(scenario, routes, capsys):
+    """After the hosts are resolved (by the host, the Podman machine or through the VPN): --llm's name pinned
+    with RESOLVE_NAMES, every address checked against the sandbox's own network."""
+    asked = []
+
+    def resolve(names):
+        asked.append(list(names))
+        return {name: ["10.20.0.7"] for name in names}
+    if scenario == "happy":
+        a = s.parse_args(["claude", "--subnet", "10.20.0.0/24"])
+        s.settle_network(a, {"api.anthropic.com": ["203.0.113.5"]}, resolve)
+        assert a.llm_pins == {} and asked == []
+        assert "sandbox network --subnet 10.20.0.0/24: the sandbox 10.20.0.100, gateway 10.20.0.2" in \
+            capsys.readouterr().err
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match=r"10.20.0.3 \(an allowed host's address\) lies inside"):
+            s.settle_network(s.parse_args(["claude", "--subnet", "10.20.0.0/24"]), {"x.example": ["10.20.0.3"]},
+                             resolve)
+    else:  # an --llm name on its own port: resolved the caller's way, pinned, opened on that port only
+        llm = s.load_llm_module()
+        store = llm.load_store()
+        store["endpoints"]["gpu"] = {"kind": "vllm", "url": "https://llm.example:8443", "model": "m"}
+        llm.save_store(store)
+        a = s.parse_args(["codex", "--llm", "gpu"])
+        s.settle_network(a, {}, resolve)
+        assert asked == [["llm.example"]] and a.llm_pins == {"llm.example": ["10.20.0.7"]}
+        assert "10.20.0.7:8443" in a.allow_tcp
+        with pytest.raises(ValueError, match="--allow-tcp 10.20.0.7:8443 lies inside"):
+            s.settle_network(s.parse_args(["codex", "--llm", "gpu", "--subnet", "10.20.0.0/24"]), {}, resolve)
+
+
+def test_in_subnet(scenario):
+    a = s.parse_args(["claude", "--subnet", "10.20.0.0/24", "--subnet6", "fd20::/64"])
+    if scenario == "happy":
+        assert s.in_subnet(a, "10.20.0.9") and s.in_subnet(a, "fd20::9")
+    elif scenario == "sad":
+        assert not s.in_subnet(a, "10.21.0.9") and not s.in_subnet(s.parse_args(["claude"]), "10.0.2.3")
+    else:  # an invalid value is check_subnets' to report
+        a.subnet = "nope"
+        assert not s.in_subnet(a, "10.20.0.9") and not s.in_subnet(a, "not an address")
+
+
+def test_sandbox_network(scenario):
+    if scenario == "happy":
+        a = s.parse_args(["claude", "--subnet", "10.20.0.0/24", "--subnet6", "fd20::/64"])
+        assert s.sandbox_network(a) == {
+            "ipv4": {"subnet": "10.20.0.0/24", "address": "10.20.0.100", "gateway": "10.20.0.2", "dns": "10.20.0.3",
+                     "from": "--subnet"},
+            "ipv6": {"subnet": "fd20::/64", "address": "fd20::100", "gateway": "fd20::2", "dns": None,
+                     "from": "--subnet6"}}
+    elif scenario == "sad":
+        assert s.sandbox_network(s.parse_args(["claude", "--offline"])) is None
+        assert s.sandbox_network(s.parse_args(["claude", "--network", "lab"])) is None
+    else:  # the backends' own: slirp4netns's networks, pasta the host's addresses
+        bwrap = s.sandbox_network(s.parse_args(["claude", "--backend", "bwrap"]))
+        assert bwrap["ipv4"] == {"subnet": "10.0.2.0/24", "address": "10.0.2.100", "gateway": "10.0.2.2",
+                                 "dns": "10.0.2.3", "from": "slirp4netns"}
+        assert bwrap["ipv6"]["subnet"] == "fd00::/64" and bwrap["ipv6"]["address"] is None
+        assert s.sandbox_network(s.parse_args(["claude"]))["ipv4"] == {"subnet": None,
+                                                                         "from": "the host's addresses (pasta)"}
+
+
+def test_check_subnet_ceiling(scenario):
+    policy = {"version": 1, "subnet": "10.200.0.0/24", "subnet_within": ["10.200.0.0/16"]}
+    if scenario == "happy":
+        s.check_subnet_ceiling(s.parse_args(["claude", "--subnet", "10.200.5.0/24"]), policy)
+        s.check_subnet_ceiling(s.parse_args(["claude", "--subnet", "10.0.0.0/8"]), {"version": 1})  # no ceiling
+        s.check_subnet_ceiling(s.parse_args(["claude", "--offline"]), policy)
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match=r"--subnet 10.20.0.0/24 lies outside .*subnet_within: 10.200.0.0/16\) x"):
+            s.check_subnet_ceiling(s.parse_args(["claude", "--subnet", "10.20.0.0/24"]), policy, " x")
+        # Podman without a subnet would take the host's address.
+        with pytest.raises(ValueError, match="choose one with --subnet"):
+            s.check_subnet_ceiling(s.parse_args(["claude"]), policy)
+    else:  # bwrap: slirp4netns's own networks are what is checked; its IPv6 network cannot be moved
+        s.check_subnet_ceiling(s.parse_args(["claude", "--backend", "bwrap"]), {"subnet_within": ["10.0.0.0/8"]})
+        with pytest.raises(ValueError, match="slirp4netns's 10.0.2.0/24 lies outside"):
+            s.check_subnet_ceiling(s.parse_args(["claude", "--backend", "bwrap"]), policy)
+        with pytest.raises(ValueError, match="slirp4netns's fd00::/64 lies outside"):
+            s.check_subnet_ceiling(s.parse_args(["claude", "--backend", "bwrap", "--subnet6", "fd20::/64"]),
+                                   {"subnet_within": ["fd20::/48"]})
+
+
+def test_policy_subnet_keys(tmp_path, monkeypatch):
+    """The policy's subnet, subnet6 and subnet_within are checked when it is read: a broken one stops every start."""
+    good = {"version": 1, "subnet": "10.200.0.0/24", "subnet6": "fd20::/64", "subnet_within": ["10.200.0.0/16",
+                                                                                              "fd20::/48"]}
+    assert s.load_policy(policy_file(tmp_path, good, monkeypatch))["subnet"] == "10.200.0.0/24"
+    for document, message in (({"subnet": "8.8.8.0/24"}, "not a private range"),
+                              ({"subnet_within": "10.0.0.0/8", "subnet": "10.1.0.0/24"}, "subnet_within is a list"),
+                              ({"subnet_within": ["10.0.0.0/8"]}, "needs subnet, the default inside them"),
+                              ({"subnet_within": ["fd00::/8"], "subnet": "10.1.0.0/24"}, "needs subnet6"),
+                              ({"subnet_within": ["10.0.0.0/16"], "subnet": "10.1.0.0/24"}, "lies outside subnet_within")):
+        path = policy_file(tmp_path, {"version": 1, **document}, monkeypatch)
+        with pytest.raises(ValueError, match=message):
+            s.load_policy(path)
+
+
+def test_policy_subnet_default_and_forbid(routes):
+    """The policy's default applies only where nothing chose one, after the forbid check (it is no choice of
+    yours); a defaults-file value counts as yours."""
+    policy = {"version": 1, "subnet": "10.200.0.0/24", "subnet_within": ["10.200.0.0/16"], "forbid": ["--subnet"]}
+    a = s.parse_args(["claude"])
+    s.check_policy(a, policy)
+    assert a.subnet == "10.200.0.0/24" and a.subnet_origin["subnet"].startswith("the administrator's policy")
+    with pytest.raises(ValueError, match="--subnet is not allowed"):
+        s.check_policy(s.parse_args(["claude", "--subnet", "10.200.1.0/24"]), policy)
+    mine = s.parse_args(["claude"])
+    s.apply_subnet_defaults(mine, {"subnet": "10.200.1.0/24"}, "defaults.json")
+    with pytest.raises(ValueError, match="--subnet is not allowed"):
+        s.check_policy(mine, policy)
+
+
+def test_load_modes(scenario):
+    modes = s.load_modes()
+    if scenario == "happy":
+        assert modes.NAMES == s.MODES.NAMES and modes.DEFAULT == "medium"
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="security mode is one of"):
+            modes.check_name("none", "x")
+    else:  # loaded afresh: a module of its own, not the launcher's
+        assert modes is not s.MODES
+
+
+def test_workspace_mode(scenario):
+    a = s.parse_args(["codex", "--workspace", "/tmp/a,/tmp/b", "--no-config"])
+    if scenario == "happy":
+        assert [s.workspace_mode(a, i) for i in (0, 1)] == ["rw", "rw"]
+    elif scenario == "sad":
+        a.workspace_ro = True
+        assert [s.workspace_mode(a, i) for i in (0, 1)] == ["ro", "ro"]
+    else:  # the security mode high: every workspace but the first
+        a.mode_other_workspaces_ro = True
+        assert [s.workspace_mode(a, i) for i in (0, 1)] == ["rw", "ro"]
+
+
+def test_launcher_namespace(scenario, monkeypatch):
+    if scenario == "happy":
+        assert s.launcher_namespace().PROVIDERS is s.PROVIDERS
+    elif scenario == "sad":  # what a caller replaced is what other modules see
+        monkeypatch.setattr(s, "load_policy", lambda path=None: {"version": 1, "min_mode": "high"})
+        assert s.launcher_namespace().load_policy()["min_mode"] == "high"
+    else:
+        assert s.launcher_namespace() is not s.launcher_namespace()
+
+
+# --- canary files (canary.py; the supervisor's and the proxy's side in runtime.py) -------------------
+
+CANARY_TOKEN = "AKIA" + "ABCDEFGHJ" + "EXAMPLE"
+
+
+def canary_server(block=True, models=(), who=True):
+    """A stand-in for ProxyServer with the canary entry of proxy.json; WHO records what it reports."""
+    reported = []
+    forms = [[CANARY_TOKEN, "aws", "plain"], [base64.b64encode(CANARY_TOKEN.encode()).decode(), "aws", "base64"]]
+    server = SimpleNamespace(config={"canary": {"forms": forms, "names": [[CANARY_TOKEN.lower(), "aws", "plain"]],
+                                                "block": block, "model_hosts": list(models)}},
+                             who=SimpleNamespace(request=lambda kind, details: reported.append((kind, details)))
+                             if who else None, asked_by=lambda record: {"process": {"comm": "curl"}}, logged=[])
+    server.log = server.logged.append
+    server.refuse = lambda client, entry, reset=False: server.logged.append(entry)
+    return server, reported
+
+
+def test_canary_event(scenario, tmp_path):
+    path = tmp_path / ("missing/events.jsonl" if scenario == "sad" else "events.jsonl")
+    for _ in range(2 if scenario == "edge" else 1):
+        written = s.RUNTIME.canary_event({"event": "read", "canary": "aws"}, path)
+    if scenario == "sad":
+        assert written is False and not path.exists()
+        return
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    assert len(lines) == (2 if scenario == "edge" else 1) and lines[0]["event"] == "read" and lines[0]["time"]
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_canary_matchers(scenario):
+    server, _ = canary_server(block=scenario != "edge")
+    if scenario == "sad":
+        server.config = {}
+    forms, names, block, models = s.RUNTIME.canary_matchers(server)
+    assert s.RUNTIME.canary_matchers(server)[0] is forms  # built once
+    if scenario == "sad":
+        assert not forms and not names and block is True and models == set()
+    else:
+        assert forms.find(b"x" + CANARY_TOKEN.encode()) == {"canary": "aws", "encoding": "plain"}
+        assert block is (scenario == "happy")
+
+
+def test_canary_found(scenario):
+    server, reported = canary_server(block=scenario != "edge", models=["api.openai.com"])
+    entry = {"url": "https://evil.example/x"}
+    hit = {"canary": "aws", "encoding": "plain"}
+    if scenario == "happy":  # blocked
+        with pytest.raises(s.RUNTIME.CanaryRefused):
+            s.RUNTIME.canary_found(server, hit, "body", entry, {}, "evil.example")
+        assert reported[0][1]["event"] == "send" and reported[0][1]["process"] == {"comm": "curl"}
+    elif scenario == "sad":  # to the model provider: the conversation, not a leak; reported once
+        for _ in range(2):
+            s.RUNTIME.canary_found(server, hit, "body", entry, {}, "api.openai.com")
+        assert [d["event"] for _, d in reported] == ["context"] and entry["canary"]["context"] is True
+    else:  # report only
+        s.RUNTIME.canary_found(server, hit, "url", entry, {}, "evil.example")
+        assert entry["canary"] == {**hit, "where": "url"} and reported[0][1]["where"] == "url"
+
+
+def test_canary_request(scenario):
+    server, reported = canary_server()
+    head = b"GET /?k=" + (CANARY_TOKEN.encode() if scenario == "sad" else b"x") + b" HTTP/1.1\r\nHost: h\r\n\r\n"
+    body = [(b"raw", b"aaa" + CANARY_TOKEN.encode()[:5]), (b"raw2", CANARY_TOKEN.encode()[5:] + b"zz")] \
+        if scenario == "edge" else [(b"raw", b"clean")]
+    if scenario == "sad":
+        with pytest.raises(s.RUNTIME.CanaryRefused) as refused:
+            s.RUNTIME.canary_request(server, head, iter(body), [], {}, {}, "h")
+        assert refused.value.hit["where"] == "url"
+        return
+    parts = s.RUNTIME.canary_request(server, head, iter(body), [], {}, {}, "h")
+    if scenario == "happy":
+        assert list(parts) == body and reported == []
+    else:  # a token across two pieces of a body: the second never passes
+        passed = []
+        with pytest.raises(s.RUNTIME.CanaryRefused):
+            for part in parts:
+                passed.append(part)
+        assert passed == body[:1]
+
+
+def test_canary_refusal(scenario):
+    server, _ = canary_server()
+    client, agent = socket.socketpair()
+    if scenario == "sad":
+        client.close()  # the agent went away: the refusal is still logged
+    refused = s.RUNTIME.CanaryRefused({"canary": "aws", "encoding": "base64", "where": "body"})
+    s.RUNTIME.canary_refusal(server, client, refused, {"url": "https://x/" if scenario != "edge" else None})
+    record = server.logged[-1]
+    assert record["event"] == "denied" and "canary token (aws, base64) in the request's body" in record["reason"]
+    if scenario != "sad":
+        assert agent.recv(4096).startswith(b"HTTP/1.1 403 Forbidden")
+    client.close()
+    agent.close()
+
+
+def test_canary_sni(scenario):
+    server, reported = canary_server(block=scenario != "edge")
+    name = {"happy": f"{CANARY_TOKEN.lower()}.evil.example", "sad": "api.github.com",
+            "edge": f"{CANARY_TOKEN}.evil.example"}[scenario]
+    refused = s.RUNTIME.canary_sni(server, Mock(), name, {"connection": 1})
+    assert refused is (scenario == "happy")
+    assert len(reported) == (0 if scenario == "sad" else 1)
+    if scenario == "happy":
+        assert server.logged[-1]["canary"]["where"] == "sni"
+
+
+def test_canary_push(scenario):
+    server, reported = canary_server(who=scenario != "edge")
+    entry = {"url": "https://git.example/x"}
+    s.RUNTIME.canary_push(server, {"ok": False, "canary": [] if scenario == "sad" else ["aws"]}, entry, {})
+    if scenario == "sad":
+        assert reported == [] and "canary" not in entry
+    else:
+        assert entry["canary"] == {"canary": "aws", "where": "push"}
+        assert [d["source"] for _, d in reported] == ([] if scenario == "edge" else ["push"])
+
+
+def test_load_canary_module(scenario):
+    module = s.load_canary_module()
+    if scenario == "happy":
+        assert module.CATEGORIES == ("credentials", "home", "workspace")
+    elif scenario == "sad":
+        with pytest.raises(ValueError):
+            module.parse_categories("nope")
+    else:
+        assert module is not s.load_canary_module()  # loaded fresh each time, like the other modules
+
+
+def test_plant_canaries(scenario, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    a = s.parse_args(["codex", "--no-config", "-w", str(tmp_path / "w")] +
+                     {"happy": [], "sad": ["--no-canaries"], "edge": ["--canaries", "home"]}[scenario])
+    a.canary_categories, a.run_id, a.kit_mounts = s.load_canary_module().categories(a), "codex-contract", []
+    with contextlib.ExitStack() as cleanup:
+        plan = s.plant_canaries(a, home, cleanup)
+        if scenario == "sad":
+            assert plan is None and not any(home.iterdir())
+            return
+        assert (home / (".aws/credentials" if scenario == "happy" else ".kube/config")).exists()
+    assert not any(home.iterdir())  # removed with the cleanup (a throwaway HOME)
+
+
+def test_mode_refusal(scenario):
+    high = {"name": "high", "refuses": ["--allow", "--allow-host", "--allow-tcp"], "approval_scope": "run"}
+    if scenario == "happy":
+        assert s.RUNTIME.mode_refusal(high, {"op": "revoke", "https": ["192.0.2.1/32"]}) is None
+        assert s.RUNTIME.mode_refusal(None, {"op": "allow", "https": ["192.0.2.1/32"]}) is None
+    elif scenario == "sad":
+        assert "--allow-tcp widens the security mode high" in s.RUNTIME.mode_refusal(
+            high, {"op": "allow", "tcp": [["192.0.2.1", 22]]})
+    else:  # empty fields open nothing
+        assert s.RUNTIME.mode_refusal(high, {"op": "allow", "nets": [], "https": [], "tcp": []}) is None
+
+
+def test_narrowest_scope(scenario):
+    if scenario == "happy":
+        assert s.RUNTIME.narrowest_scope("always", "run") == "run"
+    elif scenario == "sad":
+        assert s.RUNTIME.narrowest_scope("always", None) == "once"
+    else:
+        assert s.RUNTIME.narrowest_scope("always") == "always"
+TAINT_RULES = {"version": 1, "untrusted": [{"id": "web", "server": "web", "tool": "fetch"},
+                                           {"id": "news", "host": "news.example"}],
+               "mcp": [{"id": "write-tainted", "server": "files", "tool": "write_file", "decision": "ask",
+                        "when": {"tainted": True}},
+                       {"id": "fs-write", "server": "files", "tool": "write_file", "decision": "ask"}]}
+
+
+def test_provider_hosts(scenario):
+    if scenario == "happy":
+        assert s.provider_hosts(s.parse_args(["codex"])) == ["api.openai.com", "chatgpt.com", "auth.openai.com"]
+    elif scenario == "sad":  # another agent's provider is no provider of this run
+        assert "api.openai.com" not in s.provider_hosts(s.parse_args(["opencode"]))
+    else:  # --frontier adds both, once each
+        hosts = s.provider_hosts(s.parse_args(["claude", "--frontier"]))
+        assert "api.openai.com" in hosts and len(hosts) == len(set(hosts))
+
+
+def test_mcp_relay_config(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    mine = tmp_path / "mine.json"
+    mine.write_text(json.dumps(TAINT_RULES))
+    a = s.parse_args(["codex", "--rules", str(mine)])
+    if scenario == "happy":  # only the rules for tainted runs: the server's own gateway has the others
+        config = s.mcp_relay_config(a, "files")
+        assert config["server"] == "files" and [r["id"] for r in config["rules"][0]["mcp"]] == ["write-tainted"]
+        assert config["rules"][0]["untrusted"] == []
+    elif scenario == "sad":  # nothing for a server no rule names
+        assert s.mcp_relay_config(a, "other") == {"server": "other", "rules": []}
+    else:  # a tool source of the server travels, a host source does not
+        assert [e["id"] for e in s.mcp_relay_config(a, "web")["rules"][0]["untrusted"]] == ["web"]
+
+
+def test_start_mcp_relays(scenario, tmp_path, capsys):
+    directory = Path(tempfile.mkdtemp(prefix="relays-", dir="/tmp"))
+    try:
+        if scenario == "sad":  # no server: no relay, no directory
+            assert rt.start_mcp_relays({}, run_dir=directory / "run", upstream_dir=directory / "up") == []
+            assert not (directory / "run").exists()
+            return
+        relays = {"web": {"server": "web", "rules": []}}
+        threads = rt.start_mcp_relays(relays, run_dir=directory / "run", upstream_dir=directory / "up",
+                                      log=directory / "calls.jsonl")
+        assert len(threads) == 1 and (directory / "run/web/server.sock").exists()
+        assert stat.S_IMODE((directory / "run/web").stat().st_mode) == 0o755
+        if scenario == "edge":  # the server's own socket is gone: the agent's connection ends, the relay stays
+            with socket.socket(socket.AF_UNIX) as client:
+                client.settimeout(10)
+                client.connect(str(directory / "run/web/server.sock"))
+                # The relay may close the connection before all of it is sent: that is what this case expects.
+                with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                    client.sendall(b'{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}\n')
+                    client.shutdown(socket.SHUT_WR)
+                    while client.recv(65536):
+                        pass
+            assert threads[0].is_alive() and "MCP server failed" in capsys.readouterr().err
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+HOOK_RULES = {"version": 1, "untrusted": [{"id": "search", "agent": "claude", "tool": "WebSearch"}],
+              "tool": [{"id": "no-curl", "tool": "Bash", "args": {"command": {"pattern": "(?s).*curl.*"}},
+                        "decision": "deny"}]}
+
+
+def test_hook_value(scenario):
+    if scenario == "happy":
+        assert rt.hook_value({"command": "ls", "n": [1, None]}) == {"command": "ls", "n": [1, None]}
+    elif scenario == "sad":  # too large to check: unknown to the rules, never cut short
+        assert rt.hook_value("x" * (rt.HOOK_VALUE_LIMIT + 1)) == {"sandbox-ai": "too large",
+                                                                  "length": rt.HOOK_VALUE_LIMIT + 1}
+    else:
+        deep = []
+        for _ in range(40):
+            deep = [deep]
+        assert "too large" in json.dumps(rt.hook_value(deep))
+
+
+def test_hook_client(scenario, tmp_path):
+    message = json.dumps({"tool_name": "Bash", "tool_input": {"command": "curl x" if scenario == "sad" else "ls"},
+                          "cwd": "/work"}).encode()
+    path, stop = Path(tempfile.mkdtemp(prefix="hookc-", dir="/tmp")) / "s.sock", threading.Event()
+    try:
+        if scenario != "edge":
+            rt.start_hook_server({"rules": [{"name": "r", **HOOK_RULES}]}, path=path, stop=stop)
+        stderr = io.StringIO()
+        status = rt.hook_client("claude", "PreToolUse", stdin=io.BytesIO(message), stderr=stderr, socket_path=path,
+                                timeout=20)
+        if scenario == "happy":
+            assert status == 0 and stderr.getvalue() == ""
+        elif scenario == "sad":
+            assert status == 2 and "no-curl" in stderr.getvalue()
+        else:  # no supervisor: refused, never let through
+            assert status == 2 and "could not be checked" in stderr.getvalue()
+    finally:
+        stop.set()
+        shutil.rmtree(path.parent, ignore_errors=True)
+
+
+def test_start_hook_server(scenario, tmp_path):
+    path = Path(tempfile.mkdtemp(prefix="hooks-", dir="/tmp")) / "hooks" / "decide.sock"
+    taint, stop = rt.Taint(), threading.Event()
+    try:
+        rules = HOOK_RULES if scenario != "sad" else {"version": 1}
+        thread = rt.start_hook_server({"rules": [{"name": "r", **rules}]}, taint=taint, path=path,
+                                      log=tmp_path / "tools.jsonl", stop=stop)
+        assert thread.is_alive() and path.exists() and stat.S_IMODE(path.stat().st_mode) == 0o666
+        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o755
+        tool = "WebSearch" if scenario == "edge" else "Bash"
+        with socket.socket(socket.AF_UNIX) as client:
+            client.settimeout(20)
+            client.connect(str(path))
+            client.sendall(json.dumps({"agent": "claude", "event": "PreToolUse", "tool": tool,
+                                       "input": {"command": "curl x"}}).encode() + b"\n")
+            answer = json.loads(client.makefile("rb").readline())
+        record = json.loads((tmp_path / "tools.jsonl").read_text().splitlines()[-1])
+        if scenario == "happy":
+            assert answer["decision"] == "deny" and record["rule"] == "no-curl"
+        elif scenario == "sad":  # no tool rules: allowed, still logged
+            assert answer["decision"] == "allow" and record["decision"] == "allow"
+        else:  # an untrusted tool: the run is tainted before the tool runs
+            assert answer["decision"] == "allow" and taint.shown()["source"]["rule"] == "search"
+    finally:
+        stop.set()
+        thread.join(5)
+        assert not thread.is_alive()  # STOP ends it
+        shutil.rmtree(path.parent.parent, ignore_errors=True)
+
+
+def test_hooks_active(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    mine = tmp_path / "mine.json"
+    mine.write_text(json.dumps(HOOK_RULES if scenario != "edge" else {"version": 1, "defaults": {"tool": "ask"}}))
+    if scenario == "happy":
+        assert s.hooks_active(s.parse_args(["claude", "--rules", str(mine)]))
+    elif scenario == "sad":  # rules for HTTP and MCP only, or no agent at all (a probe)
+        github = tmp_path / "github.json"
+        github.write_text(json.dumps(GH_RULES))
+        assert not s.hooks_active(s.parse_args(["claude", "--rules", str(github)]))
+        assert not s.hooks_active(s.parse_args(["claude", "--rules", str(mine), "--probe"]))
+    else:  # a default other than allow is enough
+        assert s.hooks_active(s.parse_args(["codex", "--rules", str(mine)]))
+
+
+def test_hooks_config(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    mine = tmp_path / "mine.json"
+    mine.write_text(json.dumps(HOOK_RULES))
+    if scenario == "happy":
+        config = s.hooks_config(s.parse_args(["claude", "--rules", str(mine)]))
+        assert [r["id"] for r in config["rules"][0]["tool"]] == ["no-curl"]
+        assert config["rules"][0]["untrusted"][0]["id"] == "search" and config["rules"][0]["defaults"] == {"tool": "allow"}
+    elif scenario == "sad":
+        assert s.hooks_config(s.parse_args(["claude"])) is None
+    else:  # only the rulesets with something for the agent's tools, and only their tool part
+        github = tmp_path / "github.json"
+        github.write_text(json.dumps(GH_RULES))
+        config = s.hooks_config(s.parse_args(["claude", "--rules", str(github), "--rules", str(mine)]))
+        assert [r["name"] for r in config["rules"]] == ["--rules mine.json"] and "http" not in config["rules"][0]
+
+
+def test_hook_files(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    mine = tmp_path / "mine.json"
+    mine.write_text(json.dumps(HOOK_RULES))
+    a = s.parse_args([{"happy": "claude", "sad": "opencode", "edge": "codex"}[scenario], "--rules", str(mine)])
+    files = s.hook_files(a)
+    if scenario == "happy":
+        settings = json.loads(files["claude-code/managed-settings.json"])
+        assert settings["allowManagedHooksOnly"] is True and set(settings["hooks"]) == {"PreToolUse", "PostToolUse"}
+    elif scenario == "sad":
+        assert list(files) == ["opencode-hooks.js"] and "--internal-hook" in files["opencode-hooks.js"]
+    else:
+        requirements = tomllib.loads(files["codex/requirements.toml"])
+        assert requirements["allow_managed_hooks_only"] is True and requirements["features"]["hooks"] is True
+
+
+def test_hook_mount(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    mine = tmp_path / "mine.json"
+    mine.write_text(json.dumps(HOOK_RULES))
+    if scenario == "happy":
+        assert s.hook_mount(s.parse_args(["codex", "--rules", str(mine)]), tmp_path) == (tmp_path / "codex",
+                                                                                          "/etc/codex")
+    elif scenario == "sad":
+        assert s.hook_mount(s.parse_args(["claude"]), tmp_path) is None
+    else:  # OpenCode's plugin lies in the session directory, mounted anyway
+        assert s.hook_mount(s.parse_args(["opencode", "--rules", str(mine)]), tmp_path) is None
+
+
+def test_hook_problem(scenario):
+    def version(text):
+        return lambda command, **kwargs: SimpleNamespace(stdout=text)
+    old = version("codex-cli 0.130.9")
+    if scenario == "happy":  # no managed hooks, or an agent that holds them: nothing to say
+        assert rt.hook_problem({"command": ["codex"], "hooks": None, "hook_agent": None}, run=old) is None
+        assert rt.hook_problem({"command": ["codex"], "hook_agent": "codex"}, run=version("codex-cli 0.131.0")) is None
+    elif scenario == "sad":  # approved kit hooks alone, an old Codex: refused like the rule hooks
+        assert "the kits' approved hooks cannot hold" in rt.hook_problem(
+            {"command": ["codex"], "hooks": None, "hook_agent": "codex"}, run=old)
+        assert "the rules for the agent's own tools" in rt.hook_problem(
+            {"command": ["codex"], "hooks": {"agent": "codex"}}, run=old)
+    else:  # a config.json of before (no hook_agent) still has its rule hooks checked
+        assert rt.hook_problem({"command": ["codex"], "hooks": {"agent": "codex", "rules": []}}, run=old)
+
+
+def test_kit_hook(scenario):
+    message = json.dumps({"tool_name": "Bash", "tool_input": {"command": "ls"}}).encode()
+    asked = []
+
+    def check(agent, event, stdin=None, stderr=None):
+        asked.append(json.loads(stdin.read()))
+        return 2 if "curl" in json.dumps(asked[-1]) else 0
+    out, err = io.BytesIO(), io.StringIO()
+    if scenario == "happy":  # no rewrite: passed through, nothing asked
+        status = rt.kit_hook("claude", 10, "cat >/dev/null; echo '{}'", stdin=io.BytesIO(message), stdout=out,
+                             stderr=err, check=check)
+        assert status == 0 and out.getvalue() == b"{}\n" and asked == []
+    elif scenario == "sad":  # a rewrite the rules refuse never reaches the agent
+        rewrite = json.dumps({"hookSpecificOutput": {"updatedInput": {"command": "curl x"}}})
+        status = rt.kit_hook("claude", 10, f"cat >/dev/null; printf '%s' '{rewrite}'", stdin=io.BytesIO(message),
+                             stdout=out, stderr=err, check=check)
+        assert status == 2 and out.getvalue() == b"" and asked[0]["tool_input"] == {"command": "curl x"}
+    else:  # an answer naming updatedInput that cannot be read is refused
+        status = rt.kit_hook("claude", 10, "cat >/dev/null; echo 'updatedInput {'", stdin=io.BytesIO(message),
+                             stdout=out, stderr=err, check=check)
+        assert status == 2 and "no JSON" in err.getvalue() and asked == []
+
+
+def test_kit_handler(scenario):
+    a = SimpleNamespace(agent="claude")
+    if scenario == "happy":
+        handler = s.kit_handler(a, {"type": "command", "command": "/k/check.sh", "timeout": 5})
+        assert handler["command"] == "/usr/bin/python3 -I /sandbox/runtime.py --internal-kit-hook claude 5 /k/check.sh"
+        assert handler["timeout"] == 5 + s.HOOK_AGENT_TIMEOUT
+    elif scenario == "sad":  # a command with spaces and quotes stays one argument
+        handler = s.kit_handler(a, {"type": "command", "command": "/k/a b.sh 'x'"})
+        assert shlex_split(handler["command"])[6:] == ["/k/a b.sh 'x'"]
+    else:  # no timeout of its own: the agents' default
+        assert s.kit_handler(a, {"type": "command", "command": "x"})["timeout"] == s.KIT_HOOK_TIMEOUT + \
+            s.HOOK_AGENT_TIMEOUT
+
+
+def shlex_split(text):
+    import shlex
+    return shlex.split(text)
+
+
+def test_opencode_recheck(scenario, monkeypatch):
+    staged = {"trusted": True, "errors": [], "plugins": ["guard.js"] if scenario != "edge" else []}
+    a = SimpleNamespace(kit_hooks=[staged])
+    monkeypatch.setattr(s, "hooks_active", lambda a: scenario != "sad")
+    # happy: rules and a kit plugin; sad: no rules; edge: kit hooks without plugins
+    assert s.opencode_recheck(a) is (scenario == "happy")
+
+
+def test_helper_name(scenario, tmp_path):
+    name = s.helper_name("opencode", tmp_path / "w")
+    if scenario == "happy":  # an MCP server name of its agent
+        assert re.fullmatch(s.MCP_NAME, name) and name.startswith("helper-opencode-")
+    elif scenario == "sad":  # another workspace: another helper
+        assert name != s.helper_name("opencode", tmp_path / "other")
+    else:  # the same: the same helper, reused
+        assert name == s.helper_name("opencode", str(tmp_path / "w"))
+
+
+def test_add_helpers(scenario, tmp_path):
+    if scenario == "happy":
+        a = s.parse_args(["claude", "--helper", "codex"])
+        a.workspaces = [str(tmp_path)]
+        s.add_helpers(a)
+        assert a.mcp == [s.helper_name("codex", str(tmp_path))]
+        assert a.helper_definitions[a.mcp[0]]["helper"] == "codex"
+    elif scenario == "sad":  # an MCP server sandbox has no helpers
+        a = s.parse_args(["claude", "--helper", "codex", "--mcp-socket-dir", str(tmp_path / "s")])
+        a.workspaces = [str(tmp_path)]
+        with pytest.raises(ValueError, match="agent's start"):
+            s.add_helpers(a)
+    else:  # none asked for: nothing added
+        a = s.parse_args(["claude", "--mcp", "demo"])
+        a.workspaces = [str(tmp_path)]
+        s.add_helpers(a)
+        assert a.mcp == ["demo"] and a.helper_definitions == {}
+
+
+def test_runs_agent(scenario, tmp_path):
+    if scenario == "happy":
+        assert s.runs_agent(s.parse_args(["opencode"]))
+    elif scenario == "sad":  # another program in the sandbox
+        assert not s.runs_agent(s.parse_args(["opencode", "--binary", "python3"]))
+    else:  # a helper's server runs the agent for each task
+        assert s.runs_agent(s.parse_args(["opencode", "--binary", "python3", "--helper-of", "helper-x",
+                                          "--mcp-socket-dir", str(tmp_path)]))
+
+
+def test_companions(scenario):
+    if scenario == "happy":
+        assert s.companions(s.parse_args(["claude", "--with", "codex", "--with", "opencode"])) == ["codex", "opencode"]
+    elif scenario == "sad":  # the lead itself is never its own companion
+        assert s.companions(s.parse_args(["claude", "--with", "claude"])) == []
+    else:  # named twice: once
+        assert s.companions(s.parse_args(["claude", "--with", "codex", "--with", "codex"])) == ["codex"]
+
+
+def test_team(scenario):
+    if scenario == "happy":
+        assert s.team(s.parse_args(["codex", "--with", "claude"])) == ["codex", "claude"]
+    elif scenario == "sad":
+        assert s.team(s.parse_args(["codex"])) == ["codex"]
+    else:  # the lead first, whatever the order of --with
+        assert s.team(s.parse_args(["opencode", "--with", "codex", "--with", "opencode"]))[0] == "opencode"
+
+
+def test_check_companions(scenario, tmp_path):
+    if scenario == "happy":
+        s.check_companions(s.parse_args(["claude", "--with", "codex"]))
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="that is the agent"):
+            s.check_companions(s.parse_args(["claude", "--with", "claude"]))
+    else:
+        with pytest.raises(ValueError, match="agent's start"):
+            s.check_companions(s.parse_args(["claude", "--with", "codex", "--mcp-socket-dir", str(tmp_path)]))
+
+
+def test_companion_auth(scenario):
+    if scenario == "happy":
+        assert s.companion_auth(s.parse_args(["claude", "--with", "codex"])) == "auto"
+    elif scenario == "sad":
+        assert s.companion_auth(s.parse_args(["claude", "--with", "codex", "--no-auth"])) == "none"
+    else:  # --llm: the endpoint is the provider, for them too
+        a = s.parse_args(["claude", "--with", "codex"])
+        a.llm = "local"
+        assert s.companion_auth(a) == "none"
+
+
+def test_companion_logins(scenario, tmp_path, monkeypatch):
+    home, source = tmp_path / "home", tmp_path / "auth.json"
+    home.mkdir()
+    source.write_text("{}")
+    source.chmod(0o600)
+    monkeypatch.setattr(s, "auth_sources", lambda agent: [(source, s.AUTH_TARGETS[agent])])
+    a = s.parse_args(["claude", "--with", "codex"] + (["--no-auth"] if scenario == "sad" else []))
+    if scenario == "edge":  # a login already in a reused HOME is kept
+        (home / ".codex").mkdir()
+        (home / ".codex/auth.json").write_text('{"kept": 1}')
+    copied = s.companion_logins(a, home)
+    if scenario == "happy":
+        assert copied == [(source, ".codex/auth.json")] and (home / ".codex/auth.json").read_text() == "{}"
+    elif scenario == "sad":
+        assert copied == [] and not (home / ".codex/auth.json").exists()
+    else:
+        assert copied == [] and json.loads((home / ".codex/auth.json").read_text()) == {"kept": 1}
+
+
+def test_codex_companion_defaults(scenario, tmp_path):
+    home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True)
+    config = home / ".codex/config.toml"
+    if scenario == "happy":
+        config.write_text('[projects."/work"]\ntrust_level = "trusted"\n')
+        s.codex_companion_defaults(home)
+        document = tomllib.loads(config.read_text())
+        assert document["sandbox_mode"] == "danger-full-access" and document["projects"]["/work"]
+    elif scenario == "sad":  # the human's own choice stays, however the key is written; a broken file stays as it is
+        for text in ('sandbox_mode = "workspace-write"\n', '"sandbox_mode" = "workspace-write"\n'):
+            config.write_text(text)
+            s.codex_companion_defaults(home)
+            assert config.read_text() == text
+        # A sandbox_mode inside a table (behind an indented header and a string holding "[t]") is no choice for
+        # the top level: added there, the rest untouched and still valid.
+        config.write_text('  [projects."/a"]\n  x = """\n[t]\n"""\nsandbox_mode = "read-only"\n')
+        s.codex_companion_defaults(home)
+        document = tomllib.loads(config.read_text())
+        assert document["sandbox_mode"] == "danger-full-access"
+        assert document["projects"]["/a"] == {"x": "[t]\n", "sandbox_mode": "read-only"}
+        config.write_text("not = = toml")
+        s.codex_companion_defaults(home)
+        assert config.read_text() == "not = = toml"
+    else:  # no file yet
+        s.codex_companion_defaults(home)
+        assert tomllib.loads(config.read_text()) == {"sandbox_mode": "danger-full-access"}
+
+
+def test_rule_groups(scenario):
+    groups = s.rule_groups({"happy": "claude", "sad": "codex", "edge": "opencode"}[scenario])
+    assert set(groups) == {"PreToolUse", "PostToolUse"}
+    command = groups["PreToolUse"][0]["hooks"][0]["command"]
+    assert command.endswith(f"--internal-hook {({'happy': 'claude', 'sad': 'codex', 'edge': 'opencode'})[scenario]} "
+                            "PreToolUse") and groups["PreToolUse"][0]["matcher"] == "*"
+
+
+def test_agent_hook_files(scenario):
+    a = s.parse_args(["claude"])
+    if scenario == "happy":
+        files = s.agent_hook_files(a, "claude", s.rule_groups("claude"))
+        assert json.loads(files["claude-code/managed-settings.json"])["allowManagedHooksOnly"] is True
+    elif scenario == "sad":
+        files = s.agent_hook_files(a, "codex", s.rule_groups("codex"))
+        assert tomllib.loads(files["codex/requirements.toml"])["allow_managed_hooks_only"] is True
+    else:  # OpenCode without rules: no plugin
+        assert s.agent_hook_files(a, "opencode", {}, companion=True) == {}
+
+
+def test_companion_hook_mounts(scenario, tmp_path, monkeypatch):
+    monkeypatch.setattr(s, "hooks_active", lambda a: scenario != "sad")
+    agents = ["claude", "--with", "codex", "--with", "opencode"]
+    mounts = s.companion_hook_mounts(s.parse_args(agents), tmp_path)
+    if scenario == "happy":  # Codex's directory; OpenCode's plugin lies in the session directory anyway
+        assert mounts == [(tmp_path / "codex", "/etc/codex")]
+    elif scenario == "sad":  # no rules: nothing to mount
+        assert mounts == []
+    else:
+        assert s.companion_hook_mounts(s.parse_args(["codex", "--with", "claude"]), tmp_path) == [
+            (tmp_path / "claude-code", "/etc/claude-code")]
+def test_trusted_plugin_hooks(scenario):
+    staged = {"happy": {"trusted": True, "errors": []}, "sad": {"trusted": False, "errors": []},
+              "edge": {"trusted": True, "errors": ["broken"]}}[scenario]
+    a = SimpleNamespace(plugin_hooks=[staged])
+    assert s.trusted_plugin_hooks(a) == ([staged] if scenario == "happy" else [])
+
+
+def test_plugin_hook_notes(scenario, monkeypatch):
+    item = {"label": "plugin p@m", "plugin": "p@m", "hooks": [{}], "trusted": scenario == "happy",
+            "errors": ["no file"] if scenario == "edge" else []}
+    a = SimpleNamespace(plugin_hooks=[item])
+    monkeypatch.setattr(s, "managed_hooks", lambda a: True)
+    (note,) = s.plugin_hook_notes(a)
+    if scenario == "happy":
+        assert note == "plugin p@m: 1 approved hook(s)"
+    elif scenario == "sad":  # named with the command that approves it
+        assert note.endswith("sandbox-ai plugins claude trust-hooks p@m")
+    else:
+        assert "do not run: no file" in note
+    monkeypatch.setattr(s, "managed_hooks", lambda a: False)
+    assert s.plugin_hook_notes(a) == [], "without managed hooks Claude Code runs them itself"
+
+
+def test_toml_string(scenario):
+    if scenario == "happy":  # what TOML reads back: quotes and backslashes included
+        value = 'echo "a" \\ b'
+        assert tomllib.loads("x = " + s.toml_string(value))["x"] == value
+    elif scenario == "sad":  # an unpaired surrogate is no character
+        with pytest.raises(ValueError, match="unpaired surrogate"):
+            s.toml_string("\udcff")
+    else:  # beyond the BMP: the character itself, not a surrogate pair TOML refuses
+        assert s.toml_string("🚫") == '"🚫"' and tomllib.loads("x = " + s.toml_string("🚫"))["x"] == "🚫"
+
+
+def test_hooks_supported(scenario):
+    def version(text):
+        return lambda command, **kwargs: SimpleNamespace(stdout=text)
+    if scenario == "happy":
+        assert rt.hooks_supported("claude", ["claude"], run=lambda *a, **kw: 1 / 0) is None  # only Codex is asked
+        assert rt.hooks_supported("codex", ["codex"], run=version("codex-cli 0.131.0\n")) is None
+        assert rt.hooks_supported("codex", ["codex"], run=version("codex-cli 1.2.3")) is None
+    elif scenario == "sad":  # an older Codex would ignore the hooks without a word: refused
+        assert "older than 0.131.0" in rt.hooks_supported("codex", ["codex"], run=version("codex-cli 0.130.9"))
+    else:  # a version that cannot be read is no version that holds them
+        assert "could not be read" in rt.hooks_supported("codex", ["codex"], run=version("codex-cli dev"))
+
+        def missing(command, **kwargs):
+            raise FileNotFoundError(command[0])
+        assert "could not be read" in rt.hooks_supported("codex", ["/nowhere/codex"], run=missing)
+        assert "could not be read" in rt.hooks_supported("codex", [], run=version("0.200.0"))
+
+
+# --- every start: names and history (starts.py) ----------------------------------------------------------
+
+
+def state_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    return tmp_path / "state" / "sandbox-ai"
+
+
+def test_load_starts_module(scenario, monkeypatch, tmp_path):
+    if scenario == "sad":
+        monkeypatch.setattr(s, "HERE", tmp_path)
+        with pytest.raises(FileNotFoundError):
+            s.load_starts_module()
+        return
+    module = s.load_starts_module()
+    if scenario == "happy":
+        assert callable(module.record) and callable(module.auto_name)
+    else:
+        assert module is not s.load_starts_module()  # loaded afresh, like the other helpers
+
+
+def test_pod_name(scenario):
+    a = s.parse_args(["codex"])
+    a.run_id = "codex-1a2b3c4d"
+    if scenario == "happy":
+        assert s.pod_name(a) == "agent-codex-1a2b3c4d" and s.pod_name(a, "x-1") == "agent-x-1"
+    elif scenario == "sad":
+        a.pod_name = "agent-mcp-demo"  # a session or MCP server chose it
+        assert s.pod_name(a) == "agent-mcp-demo"
+    else:
+        a.vpn_pod = "agent-vpn-pod"  # vpn.py made the pod with the tunnel
+        assert s.pod_name(a) == "agent-vpn-pod"
+
+
+def test_run_name(scenario, tmp_path, monkeypatch):
+    state_home(tmp_path, monkeypatch)
+    if scenario == "happy":
+        a = s.parse_args(["codex"])
+        a.start_name = "codex-app-1a2b"
+        assert s.run_name(a) == "codex-app-1a2b"
+        assert s.run_name(s.parse_args(["codex"])) is None  # an MCP server, a probe: no name of its own
+        return
+    a = s.parse_args(["codex", "--tmux-socket-dir", str(tmp_path / "t"), "--start-id", "web"])
+    if scenario == "sad":
+        assert s.run_name(a) == "web"  # its session.json is gone: the id
+    else:
+        sessions = s.load_sessions_module()
+        sessions.root().joinpath("web").mkdir(parents=True)
+        sessions.save("web", {"agent": "codex", "options": [], "name": "renamed"})
+        assert s.run_name(a) == "renamed"  # renamed since the start
+
+
+def test_project_label(scenario, tmp_path):
+    if scenario == "happy":
+        assert s.project_label(s.parse_args(["codex", "--workspace", str(tmp_path / "my-app")])) == "my-app"
+    elif scenario == "sad":
+        a = s.parse_args(["codex", "--workspace", str(tmp_path / "my-app"), "--project-name", "shop"])
+        assert s.project_label(a) == "shop"
+    else:
+        assert s.project_label(s.parse_args(["codex", "--workspace", str(tmp_path / "Mein Projekt (alt)")])) == \
+            "Mein-Projekt-alt"
+        assert s.project_label(s.parse_args(["codex", "--workspace", "/"])) == "work"
+
+
+def test_name_start(scenario, tmp_path, monkeypatch):
+    state_home(tmp_path, monkeypatch)
+    workspace = str(tmp_path / "shop")
+    if scenario == "happy":
+        name = s.name_start(s.parse_args(["claude", "--workspace", workspace]))
+        assert re.fullmatch(r"claude-shop-[0-9a-f]{4}", name)
+        assert s.name_start(s.parse_args(["claude", "--workspace", workspace, "--name", "review"])) == "review"
+        assert s.name_start(s.parse_args(["claude", "--session", "web"])) == "web"
+    elif scenario == "sad":
+        run = s.runs_dir() / "claude-1"
+        run.mkdir(parents=True)
+        (run / "run.json").write_text(json.dumps({"run": "claude-1", "name": "review", "pid": os.getpid()}))
+        with pytest.raises(ValueError, match="The name review is in use"):
+            s.name_start(s.parse_args(["claude", "--name", "review"]))
+        # A plan starts nothing: the name is shown, not checked.
+        assert s.name_start(s.parse_args(["claude", "--name", "review", "--dry-run"])) == "review"
+    else:
+        # MCP servers and the supervisor of a session are named elsewhere.
+        assert s.name_start(s.parse_args(["codex", "--mcp-socket-dir", str(tmp_path / "m")])) is None
+        assert s.name_start(s.parse_args(["codex", "--tmux-socket-dir", str(tmp_path / "t")])) is None
+        long = s.name_start(s.parse_args(["opencode", "--workspace", str(tmp_path / ("x" * 60))]))
+        assert len(long) == 40 and long.startswith("opencode-xxx")
+
+
+def test_history_event(scenario, tmp_path, monkeypatch):
+    root = state_home(tmp_path, monkeypatch)
+    control = tmp_path / "control"
+    control.mkdir()
+    (control / "run.json").write_text(json.dumps({"run": "claude-1a2b3c4d", "name": "review", "agent": "claude",
+                                                  "workspace": "/w", "start": None}))
+    a = s.parse_args(["claude"])
+    a.control_dir = control
+    history = lambda: [json.loads(l) for l in (root / "history" / "review.jsonl").read_text().splitlines()]
+    if scenario == "happy":
+        assert s.history_event(a, "start") and s.history_event(a, "exit", 0)
+        assert [(e["event"], e["run"], e.get("status")) for e in history()] == \
+            [("start", "claude-1a2b3c4d", None), ("exit", "claude-1a2b3c4d", 0)]
+        assert not s.history_event(a, "exit", 1)  # one exit per run
+    elif scenario == "sad":
+        for options in (["--probe"], ["--mcp-socket-dir", str(tmp_path / "m")]):
+            b = s.parse_args(["claude", *options])
+            b.control_dir = control
+            assert s.history_event(b, "start") is False
+        assert not (root / "history").exists()
+        (control / "run.json").write_text("{broken")
+        assert s.history_event(a, "start") is False  # never raises
+    else:
+        # A session's supervisor: sessions.py notes the start (or rebirth); the exit is the launcher's.
+        b = s.parse_args(["claude", "--tmux-socket-dir", str(tmp_path / "t")])
+        b.control_dir = control
+        assert s.history_event(b, "start") is False and s.history_event(b, "exit", 143)
+        assert history()[-1]["status"] == 143
+
+
+def test_names_in_project_files_and_validation(tmp_path, monkeypatch):
+    """The project file's "name" is the PROJECT part of the automatic names; --name is not for project files."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    path = project / ".sandbox-ai.json"
+    for document, message in (({"name": "../x"}, "name \\(the PROJECT part"), ({"name": 5}, "name \\(the PROJECT part"),
+                              ({"options": ["--name", "x"]}, "option --name is not allowed"),
+                              ({"options": ["-pn", "x"]}, "option --project-name is not allowed")):
+        path.write_text(json.dumps({"version": 1, "agent": "codex", **document}))
+        s.trust_config(path)
+        with pytest.raises(ValueError, match=message):
+            s.load_project_config(s.parse_args(["codex", "--workspace", str(project)]))
+    path.write_text(json.dumps({"version": 1, "agent": "codex", "name": "shop"}))
+    s.trust_config(path)
+    argv = ["codex", "--workspace", str(project)]
+    _, document = s.load_project_config(s.parse_args(argv))
+    assert s.parse_args(s.merge_config(argv, s.parse_args(argv), document)).project_name == "shop"
+    # The command line wins.
+    argv = ["codex", "--workspace", str(project), "-pn", "mine"]
+    assert s.parse_args(s.merge_config(argv, s.parse_args(argv), document)).project_name == "mine"
+    for options, message in ((["--name", "a b"], "--name NAME: 1-40"), (["--project-name=-x"], "--project-name"),
+                             (["--name", "x", "--session", "y"], "names the start already"),
+                             (["--name", "mcp-x"], "belong to the MCP server"),
+                             (["--start-id", "x"], "Invalid --start-id")):
+        with pytest.raises(ValueError, match=message):
+            s.validate(s.parse_args(["codex", *options]))
+
+
+def test_detachable(scenario, tmp_path):
+    if scenario == "happy":
+        a = s.parse_args(["claude", "--tmux"])
+        assert s.detachable(a) is True and s.detachable(s.parse_args(["claude", "--session", "web"])) is True
+    elif scenario == "sad":
+        assert s.detachable(s.parse_args(["claude", "--no-tmux"])) is False
+        assert s.detachable(s.parse_args(["claude", "--tmux", "--probe"])) is False
+    else:
+        # A session's own supervisor and an MCP server run in the background already.
+        for options in (["--tmux-socket-dir", str(tmp_path)], ["--mcp-socket-dir", str(tmp_path)]):
+            assert s.detachable(s.parse_args(["claude", "--tmux", *options])) is False
+
+
+# --- kept HOMEs ---------------------------------------------------------------------------------------------
+
+
+def test_resolve_keep(scenario, tmp_path):
+    if scenario == "happy":
+        for argv, keep in ((["claude"], True), (["claude", "--keep"], True), (["claude", "--no-keep"], False),
+                           (["claude", "--session", "web"], True)):
+            a = s.parse_args(argv)
+            assert s.resolve_keep(a) is None and a.keep_home is keep, argv
+    elif scenario == "sad":
+        a = s.parse_args(["claude", "--keep"])
+        a.forbid_keep = True  # the administrator's policy
+        assert "forbid_keep); --keep is ignored" in s.resolve_keep(a) and a.keep_home is False
+        a = s.parse_args(["claude", "--keep", "--state-dir", str(tmp_path)])
+        assert "no effect with --state-dir" in s.resolve_keep(a) and a.keep_home is False
+        a = s.parse_args(["claude", "--session", "web", "--no-keep"])
+        assert "--no-keep is ignored" in s.resolve_keep(a) and a.keep_home is True
+    else:
+        # A session's supervisor, an MCP server and a probe keep nothing of their own.
+        for options in (["--tmux-socket-dir", str(tmp_path)], ["--mcp-socket-dir", str(tmp_path)], ["--probe"]):
+            a = s.parse_args(["claude", "--keep", *options])
+            assert s.resolve_keep(a) is None and a.keep_home is False
+
+
+def test_plan_kept_home(scenario, tmp_path, monkeypatch):
+    state_home(tmp_path, monkeypatch)
+    a = s.parse_args(["codex", "--no-tmux"])
+    a.start_name = "codex-app-1a2b"
+    s.resolve_keep(a)
+    if scenario == "happy":
+        assert s.plan_kept_home(a) is True and a.start_key == "codex-app-1a2b" and a.foreground_start
+        assert a.state_dir == s.load_sessions_module().root() / "codex-app-1a2b" / "home"
+        assert not a.state_dir.exists()  # made by sessions.begin once every check passed
+    elif scenario == "sad":
+        for argv in (["codex", "--no-keep"], ["codex", "--dry-run"], ["codex", "--tmux"]):
+            b = s.parse_args(argv)
+            b.start_name = "x"
+            s.resolve_keep(b)
+            assert s.plan_kept_home(b) is False and b.state_dir is None, argv
+    else:
+        a.start_name = "bad name"  # validate() refuses it
+        assert s.plan_kept_home(a) is False and a.state_dir is None
+
+
+def test_expire_kept(scenario, tmp_path, monkeypatch):
+    state_home(tmp_path, monkeypatch)
+    gc = Mock(return_value={"removed": [{"name": "old"}]})
+    monkeypatch.setattr(s, "load_starts_module", lambda: SimpleNamespace(gc=gc))
+    a = s.parse_args(["claude"])
+    if scenario == "happy":
+        assert s.expire_kept(a, {"keep_days": 30}) == ["old"]
+        assert gc.call_args.args == (30,) and gc.call_args.kwargs == {"expired_only": True}
+    elif scenario == "sad":
+        assert s.expire_kept(a, {}) == [] and not gc.called  # never on its own
+        assert s.expire_kept(s.parse_args(["claude", "--dry-run"]), {"keep_days": 1}) == []
+    else:
+        gc.side_effect = OSError("busy")
+        assert s.expire_kept(a, {"keep_days": 30}) == []  # a failed expiry never stops a start
+
+
+def test_keep_in_project_files_policy_and_defaults(tmp_path, monkeypatch):
+    """"keep" in a project file, forbid_keep in the policy and keep_days in your defaults are checked when read."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    path = project / ".sandbox-ai.json"
+    path.write_text(json.dumps({"version": 1, "agent": "codex", "keep": False}))
+    s.trust_config(path)
+    argv = ["codex", "--workspace", str(project)]
+    _, document = s.load_project_config(s.parse_args(argv))
+    assert s.parse_args(s.merge_config(argv, s.parse_args(argv), document)).keep is False
+    assert s.parse_args(s.merge_config(argv + ["-kp"], s.parse_args(argv + ["-kp"]), document)).keep is True
+    path.write_text(json.dumps({"version": 1, "agent": "codex", "keep": 1}))
+    s.trust_config(path)
+    with pytest.raises(ValueError, match="keep is true or false"):
+        s.load_project_config(s.parse_args(argv))
+    with pytest.raises(ValueError, match="forbid_keep is true or false"):
+        s.load_policy(policy_file(tmp_path, {"version": 1, "forbid_keep": "yes"}, monkeypatch))
+    assert s.load_policy(policy_file(tmp_path, {"version": 1, "forbid_keep": True}, monkeypatch))["forbid_keep"]
+    a = s.parse_args(["codex", "--session", "web"])
+    with pytest.raises(ValueError, match="administrator's policy forbids"):
+        s.check_policy(a, {"version": 1, "forbid_keep": True})
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    s.defaults_file().parent.mkdir(parents=True)
+    for days, ok in ((30, True), (0, False), ("30", False), (True, False)):
+        s.defaults_file().write_text(json.dumps({"version": 1, "keep_days": days}))
+        if ok:
+            assert s.load_user_defaults(s.parse_args(["codex"]))["keep_days"] == days
+        else:
+            with pytest.raises(ValueError, match="keep_days is a number of days"):
+                s.load_user_defaults(s.parse_args(["codex"]))
+
+
+def test_kept_start_dir(scenario, tmp_path, monkeypatch):
+    state_home(tmp_path, monkeypatch)
+    root = s.load_sessions_module().root()
+    if scenario == "happy":
+        a = s.parse_args(["codex", "--tmux-socket-dir", str(root / "web/tmux"), "--start-id", "web",
+                          "--state-dir", str(root / "web/home")])
+        assert s.kept_start_dir(a) == root / "web"
+        b = s.parse_args(["codex"])
+        b.start_key, b.state_dir = "task", root / "task/home"  # a kept task (plan_kept_home)
+        assert s.kept_start_dir(b) == root / "task"
+    elif scenario == "sad":
+        assert s.kept_start_dir(s.parse_args(["codex"])) is None
+        # A session that does not keep its HOME: the launcher's HOME is temporary.
+        a = s.parse_args(["codex", "--tmux-socket-dir", str(root / "web/tmux"), "--start-id", "web"])
+        assert s.kept_start_dir(a) is None
+    else:
+        # A HOME of your own given to a session's supervisor is not the start's.
+        a = s.parse_args(["codex", "--tmux-socket-dir", str(root / "web/tmux"), "--start-id", "web",
+                          "--state-dir", str(tmp_path / "mine")])
+        assert s.kept_start_dir(a) is None
+
+
+def test_record_home_manifest(scenario, tmp_path, monkeypatch, capsys):
+    state_home(tmp_path, monkeypatch)
+    directory = s.load_sessions_module().root() / "task"
+    home = directory / "home"
+    home.mkdir(parents=True)
+    (home / ".bashrc").write_text("x\n")
+    a = s.parse_args(["codex"])
+    a.start_key, a.state_dir, a.run_id = "task", home, "codex-1a2b3c4d"
+    if scenario == "happy":
+        assert s.record_home_manifest(a, home) is True
+        manifest = json.loads((directory / "home-manifest.json").read_text())
+        assert manifest["run"] == "codex-1a2b3c4d" and ".bashrc" in manifest["files"]
+    elif scenario == "sad":
+        assert s.record_home_manifest(s.parse_args(["codex"]), home) is False
+        assert not (directory / "home-manifest.json").exists()
+    else:
+        (directory / "home-manifest.json").mkdir()  # in the way: reported, the start goes on
+        assert s.record_home_manifest(a, home) is False
+        assert "were not recorded" in capsys.readouterr().err
+
+
+def staged_hooks(trusted=True, errors=(), plugins=()):
+    return {"kit": "mine", "label": "kit mine", "trusted": trusted, "errors": list(errors), "plugins": list(plugins),
+            "hooks": [{"event": "PreToolUse"}], "target": "/sandbox/session/kits/hooks/1",
+            "groups": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+                {"type": "command", "command": "/sandbox/session/kits/hooks/1/check.sh"}]}]}}
+
+
+def test_trusted_kit_hooks(scenario):
+    a = s.parse_args(["claude"])
+    if scenario == "happy":
+        a.kit_hooks = [staged_hooks()]
+        assert s.trusted_kit_hooks(a) == a.kit_hooks
+    elif scenario == "sad":  # not approved, or broken: never
+        a.kit_hooks = [staged_hooks(trusted=False), staged_hooks(errors=["x is a symlink"])]
+        assert s.trusted_kit_hooks(a) == []
+    else:  # a run that staged no hooks
+        assert s.trusted_kit_hooks(a) == []
+
+
+def test_managed_hooks(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    a = s.parse_args(["codex"])
+    if scenario == "happy":
+        a.kit_hooks = [staged_hooks()]
+        assert s.managed_hooks(a) and not s.hooks_active(a)
+    elif scenario == "sad":
+        a.kit_hooks = [staged_hooks(trusted=False)]
+        assert not s.managed_hooks(a)
+    else:  # rules for the agent's tools alone
+        mine = tmp_path / "mine.json"
+        mine.write_text(json.dumps(HOOK_RULES))
+        assert s.managed_hooks(s.parse_args(["codex", "--rules", str(mine)]))
+
+
+def test_hook_groups(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    mine = tmp_path / "mine.json"
+    mine.write_text(json.dumps(HOOK_RULES))
+    if scenario == "happy":  # the rule hook first, then the kit's
+        a = s.parse_args(["claude", "--rules", str(mine)])
+        a.kit_hooks = [staged_hooks()]
+        commands = [h["command"] for g in s.hook_groups(a)["PreToolUse"] for h in g["hooks"]]
+        assert commands[0].endswith("--internal-hook claude PreToolUse") and commands[1].endswith("/1/check.sh")
+    elif scenario == "sad":
+        assert s.hook_groups(s.parse_args(["claude"])) == {}
+    else:  # kit hooks alone: no rule hook
+        a = s.parse_args(["codex"])
+        a.kit_hooks = [staged_hooks()]
+        assert list(s.hook_groups(a)) == ["PreToolUse"] and len(s.hook_groups(a)["PreToolUse"]) == 1
+
+
+def test_kit_hook_notes(scenario):
+    if scenario == "happy":
+        assert s.kit_hook_notes("claude", [staged_hooks()]) == ["kit mine: 1 approved hook(s) for claude"]
+    elif scenario == "sad":
+        note, = s.kit_hook_notes("claude", [staged_hooks(trusted=False)])
+        assert "not approved" in note and "sandbox-ai kits trust-hooks mine --agent claude" in note
+    else:
+        note, = s.kit_hook_notes("codex", [staged_hooks(errors=["a.sh is a symlink", "b"])])
+        assert note == "kit mine: its hooks for codex do not run: a.sh is a symlink (and 1 more)"
+
+
+# --- --telemetry (test_telemetry.py has the runs) ---------------------------------------------------------
+
+def test_telemetry_level(scenario):
+    a = s.parse_args(["claude"])
+    if scenario == "happy":
+        assert s.telemetry_level(a) == "off"
+        a.telemetry_default = "strict"
+        assert s.telemetry_level(a) == "strict"
+        a.telemetry = "on"
+        assert s.telemetry_level(a) == "on", "the option wins over the defaults file"
+    elif scenario == "sad":  # below the security mode's floor: raised to it
+        a.mode, a.telemetry_default = "paranoid", "on"
+        assert s.telemetry_level(a) == "strict"
+    else:
+        a.mode = "high"
+        assert s.telemetry_level(a) == "off" and s.MODES.MODES["high"].get("telemetry") is None
+
+
+def test_telemetry_environment(scenario):
+    if scenario == "happy":
+        env = s.telemetry_environment(s.parse_args(["claude", "--with", "opencode"]))
+        assert env == {**s.TELEMETRY_ENV["claude"]["off"], **s.TELEMETRY_ENV["opencode"]["off"]}
+    elif scenario == "sad":
+        assert s.telemetry_environment(s.parse_args(["claude", "--telemetry", "on"])) == {}
+        assert s.telemetry_environment(s.parse_args(["claude", "--binary", "/bin/sh"])) == {}, "no agent runs"
+    else:
+        env = s.telemetry_environment(s.parse_args(["opencode", "--telemetry", "strict"]))
+        assert env["OPENCODE_DISABLE_MODELS_FETCH"] == "1" and env["OPENCODE_DISABLE_AUTOUPDATE"] == "1"
+
+
+def test_telemetry_plan(scenario):
+    if scenario == "happy":
+        plan = s.telemetry_plan(s.parse_args(["codex"]))
+        assert plan["level"] == "off" and plan["origin"] == "default" and "analytics.enabled" in plan["codex_config"]
+    elif scenario == "sad":
+        a = s.parse_args(["claude"])
+        a.mode = "paranoid"
+        assert s.telemetry_plan(a)["origin"] == "--mode paranoid"
+    else:
+        plan = s.telemetry_plan(s.parse_args(["claude", "--telemetry", "on"]))
+        assert plan == {"level": "on", "origin": "--telemetry", "environment": [], "opencode_config": None,
+                        "codex_config": []}
+
+
+def test_telemetry_rules(scenario):
+    if scenario == "happy":
+        rules = s.telemetry_rules(s.parse_args(["claude", "--with", "codex"]))
+        assert [r["host"] for r in rules["http"]] == ["api.anthropic.com", "chatgpt.com"]
+    elif scenario == "sad":
+        assert s.telemetry_rules(s.parse_args(["claude", "--no-proxy"])) is None
+        assert s.telemetry_rules(s.parse_args(["claude", "--telemetry", "on"])) is None
+    else:  # a host passed unopened gets no rule; OpenCode has none at all
+        assert s.telemetry_rules(s.parse_args(["claude", "--no-inspect", "api.anthropic.com"])) is None
+        assert s.telemetry_rules(s.parse_args(["opencode"])) is None
+
+
+def test_codex_telemetry_keys(scenario):
+    if scenario == "happy":
+        assert [k for _, k, _, _ in s.codex_telemetry_keys("off")] == [
+            "check_for_update_on_startup", "enabled", "enabled", "metrics_exporter"]
+    elif scenario == "sad":
+        assert s.codex_telemetry_keys("on") == []
+    else:
+        assert s.codex_telemetry_keys("strict")[-1] == ("features", "plugins", False, "false")
+
+
+def test_codex_config_with(scenario):
+    import tomllib
+    keys = s.codex_telemetry_keys("off")
+    if scenario == "happy":
+        text, kept = s.codex_config_with('model = "x"\n', keys, tomllib)
+        assert tomllib.loads(text)["analytics"] == {"enabled": False} and kept == []
+    elif scenario == "sad":
+        with pytest.raises(ValueError):
+            s.codex_config_with("analytics = { a = 1 }\n", keys, tomllib)
+        with pytest.raises(ValueError):
+            s.codex_config_with("not = [toml\n", keys, tomllib)
+    else:
+        text, kept = s.codex_config_with("[feedback]\nenabled = true\n", keys, tomllib)
+        assert ("feedback.enabled", True) in kept and tomllib.loads(text)["feedback"] == {"enabled": True}
+
+
+def test_codex_telemetry_defaults(scenario, tmp_path, capsys):
+    import tomllib
+    home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True)
+    config = home / ".codex/config.toml"
+    if scenario == "happy":
+        s.codex_telemetry_defaults(home, "off")
+        assert tomllib.loads(config.read_text())["otel"] == {"metrics_exporter": "none"}
+        assert oct(config.stat().st_mode & 0o777) == "0o600"
+    elif scenario == "sad":
+        config.write_text("analytics = { a = 1 }\n")
+        s.codex_telemetry_defaults(home, "off")
+        assert config.read_text() == "analytics = { a = 1 }\n" and "left as its" in capsys.readouterr().err
+    else:
+        s.codex_telemetry_defaults(home, "strict")
+        first = config.read_text()
+        s.codex_telemetry_defaults(home, "strict")
+        assert config.read_text() == first and tomllib.loads(first)["features"] == {"plugins": False}
+
+
+
+def test_web_service_port(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    listen = tmp_path / "sandbox-ai/web/listen.json"
+    if scenario == "happy":  # a running service: its port is no host port a sandbox gets
+        listen.parent.mkdir(parents=True)
+        listen.write_text(json.dumps({"address": "127.0.0.1", "port": 8443, "pid": os.getpid()}))
+        assert s.web_service_port() == 8443
+        with pytest.raises(ValueError, match="the web interface .* listens there"):
+            s.host_ports(s.parse_args(["claude", "--allow-host-port", "8443"]))
+        assert s.host_ports(s.parse_args(["claude", "--allow-host-port", "8080"])) == [8080]
+    elif scenario == "sad":  # a service that ended: its port is free again
+        listen.parent.mkdir(parents=True)
+        listen.write_text(json.dumps({"port": 8443, "pid": 2 ** 22 + 7}))
+        assert s.web_service_port() is None
+    else:  # none, or a damaged record
+        assert s.web_service_port() is None
+        listen.parent.mkdir(parents=True)
+        listen.write_text("{")
+        assert s.web_service_port() is None
+
+
+# --- memory watch (MemoryWatch: tests/test_memory_watch.py runs it against real processes) -------------------------
+
+def fake_cgroup(root, relative, limit="8589934592", current="4294967296"):
+    group = root / relative
+    group.mkdir(parents=True)
+    if limit is not None:
+        (group / "memory.max").write_text(limit + "\n")
+    (group / "memory.current").write_text(current + "\n")
+    (group / "memory.stat").write_text("anon 3000\nfile 10\nshmem 500\nweird line\n")
+    (group / "memory.events").write_text("low 0\noom 1\noom_kill 2\n")
+    return group
+
+
+def test_cgroup_dir(scenario, tmp_path):
+    proc, root = tmp_path / "proc", tmp_path / "cg"
+    (proc / "42").mkdir(parents=True)
+    group = fake_cgroup(root, "user.slice/libpod-abc.scope")
+    if scenario == "happy":
+        (proc / "42" / "cgroup").write_text("0::/user.slice/libpod-abc.scope\n")
+        assert s.cgroup_dir(42, proc, root) == group
+    elif scenario == "sad":
+        (proc / "42" / "cgroup").write_text("0::/user.slice/other\n")  # no limit there nor above
+        fake_cgroup(root, "user.slice/other", limit="max")
+        assert s.cgroup_dir(42, proc, root) is None
+        assert s.cgroup_dir(43, proc, root) is None  # gone
+        (proc / "42" / "cgroup").write_text("1:name=systemd:/x\n")  # cgroup v1 only
+        assert s.cgroup_dir(42, proc, root) is None
+    else:
+        # The process sits in a leaf without a limit: its parent carries it (podman's split cgroups).
+        fake_cgroup(root, "user.slice/libpod-abc.scope/container", limit=None)
+        (proc / "42" / "cgroup").write_text("0::/user.slice/libpod-abc.scope/container\n")
+        assert s.cgroup_dir(42, proc, root) == group
+
+
+def test_memory_state(scenario, tmp_path):
+    group = fake_cgroup(tmp_path, "g")
+    if scenario == "happy":
+        assert s.memory_state(group) == {"current": 4294967296, "limit": 8589934592, "oom_kill": 2, "anon": 3000,
+                                         "shmem": 500}
+    elif scenario == "sad":
+        (group / "memory.max").write_text("max\n")  # no limit: not a cgroup the watch takes
+        with pytest.raises(ValueError):
+            s.memory_state(group)
+    else:
+        (group / "memory.events").write_text("")
+        (group / "memory.stat").write_text("")
+        assert s.memory_state(group)["oom_kill"] == 0 and s.memory_state(group)["shmem"] == 0
+
+
+def test_cgroup_processes(scenario, tmp_path):
+    group = tmp_path / "g"
+    (group / "leaf").mkdir(parents=True)
+    if scenario == "happy":
+        (group / "cgroup.procs").write_text("1\n2\n")
+        (group / "leaf" / "cgroup.procs").write_text("3\n")
+        assert sorted(s.cgroup_processes(group)) == [1, 2, 3]
+    elif scenario == "sad":
+        assert s.cgroup_processes(tmp_path / "absent") == []
+    else:
+        (group / "cgroup.procs").write_text("1\nnot-a-pid\n\n")
+        assert s.cgroup_processes(group) == [1]
+
+
+def test_memory_victim(scenario, tmp_path):
+    proc = tmp_path / "proc"
+
+    def process(pid, name, rss_kib, *argv):
+        (proc / str(pid)).mkdir(parents=True)
+        (proc / str(pid) / "status").write_text(f"Name:\t{name}\nVmRSS:\t{rss_kib} kB\n")
+        (proc / str(pid) / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
+    process(1, "kthreadd", 900000, "python3", "-I", "/sandbox/runtime.py", "--internal-bootstrap")
+    process(2, "claude", 800000, "claude", "--continue")
+    process(3, "node", 700000, "/usr/bin/node", "/usr/local/bin/codex")
+    process(4, "python3", 600000, "python3", "-I", "/sandbox/runtime.py", "--internal-proxy", "3", "4")
+    process(5, "pytest", 500000, "python3", "-m", "pytest")
+    process(6, "cc1", 100000, "cc1", "x.c")
+    process(7, "firejail", 990000, "firejail", "--noprofile")
+    if scenario == "happy":
+        assert s.memory_victim([1, 2, 3, 4, 5, 6, 7], proc) == (5, "pytest", 500000 * 1024)
+    elif scenario == "sad":
+        assert s.memory_victim([1, 2, 3, 4, 7], proc) is None  # only sandbox-ai's own and the agents
+        assert s.memory_victim([99], proc) is None  # gone
+    else:
+        assert s.memory_victim([5, 6], proc, protected={5}) == (6, "cc1", 100000 * 1024)
+
+
+def test_gib(scenario):
+    assert s.gib({"happy": 1 << 30, "sad": 0, "edge": 3 << 29}[scenario]) == {"happy": "1.0 GiB", "sad": "0.0 GiB",
+                                                                             "edge": "1.5 GiB"}[scenario]
+
+
+def test_podman_agent_pid(scenario, monkeypatch):
+    a = s.parse_args(["claude"])
+    answers = {"happy": ["abc false\ninfra1 true\n", "4242\n"], "sad": ["infra1 true\n"], "edge": ["abc false\n", "0\n"]}
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        return Mock(stdout=answers[scenario][len(calls) - 1])
+    monkeypatch.setattr(s.subprocess, "run", run)
+    assert s.podman_agent_pid(a, "agent-pod") == {"happy": 4242, "sad": None, "edge": None}[scenario]
+    assert calls[0][-4:] == ["--filter", "pod=agent-pod", "--format", "{{.ID}} {{.IsInfra}}"]
+    if scenario == "happy":
+        assert calls[1][-3:] == ["{{.State.Pid}}", "abc"] or calls[1][-2:] == ["{{.State.Pid}}", "abc"]
+
+
+def test_start_memory_watch(scenario, monkeypatch, tmp_path):
+    a = s.parse_args(["claude", *(["--memory", "none"] if scenario == "sad" else [])])
+    monkeypatch.setattr(s, "enforced_limits", lambda a: (s.resource_limits(a), []))
+    started = []
+    monkeypatch.setattr(s.MemoryWatch, "start", lambda self: started.append(self) or self)
+    if scenario == "edge":
+        a.podman_url = "unix:///run/podman.sock"  # a remote engine: its cgroups are not this host's
+    watch = s.start_memory_watch(a, tmp_path)
+    if scenario == "happy":
+        assert watch is started[0] and watch.session == tmp_path and watch.log is None
+    else:
+        assert watch is None and started == []
+
+
+def test_tmpfs_size(scenario, monkeypatch):
+    """/tmp holds at most half the memory limit: a full /tmp is an error the agent sees, not an OOM of the run."""
+    if scenario == "happy":
+        assert s.tmpfs_size({"memory": "8g"}) == f",size={4 << 30}"
+        a = s.parse_args(["claude", "--memory", "16g"])
+        monkeypatch.setattr(s, "enforced_limits", lambda a: (s.resource_limits(a), []))
+        run = s.pod_commands(a, "agent-x", Path("/tmp/s"), Path("/tmp/h"))[1]
+        assert f"--tmpfs=/tmp:rw,nosuid,nodev,size={8 << 30}" in run and "--memory" in run
+        assert f"--tmpfs=/var/tmp:rw,nosuid,nodev,size={8 << 30}" in run and "--tmpfs=/run:rw,nosuid,nodev" in run
+    elif scenario == "sad":
+        assert s.tmpfs_size({}) == ""  # --memory none: no limit to keep to
+    else:
+        assert s.tmpfs_size({"memory": "100m"}) == f",size={64 << 20}"  # never below 64 MiB
+        assert s.tmpfs_size({"memory": "1073741824"}) == f",size={1 << 29}"  # plain bytes
+
+
+def test_load_presets_module(scenario, monkeypatch, tmp_path):
+    """presets.py, loaded once; a launch with --preset is expanded by it (test_presets.py, test_feature_matrix.py)."""
+    monkeypatch.setattr(s, "_presets_module", None)
+    if scenario == "sad":
+        monkeypatch.setattr(s, "HERE", tmp_path)
+        with pytest.raises(FileNotFoundError):
+            s.load_presets_module()
+        return
+    module = s.load_presets_module()
+    assert module.FORMAT == "sandbox-ai preset" and module.apply(["claude", "--gui"]) == ["claude", "--gui"]
+    if scenario == "edge":
+        assert s.load_presets_module() is module  # once per process
+
+
+def test_load_git_logins_module(scenario, monkeypatch, tmp_path):
+    monkeypatch.setattr(s, "_git_logins_module", None)
+    if scenario == "sad":
+        monkeypatch.setattr(s, "HERE", tmp_path)
+        with pytest.raises(FileNotFoundError):
+            s.load_git_logins_module()
+        return
+    module = s.load_git_logins_module()
+    assert callable(module.credentials) and module.path().name == "git-logins.json"
+    if scenario == "edge":
+        assert s.load_git_logins_module() is module
+
+
+def git_logins_home(monkeypatch, tmp_path, logins):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setattr(s, "_git_logins_module", None)
+    store = {"GITEA": GIT_TOKEN}
+    fake = Mock()
+    fake.get.side_effect = store.get
+    monkeypatch.setattr(s, "load_secret_store_module", lambda: fake)
+    module = s.load_git_logins_module()
+    monkeypatch.setattr(module, "launcher", lambda: s)
+    if logins:
+        module.save(logins)
+
+
+def test_registry_git_tokens(scenario, monkeypatch, tmp_path):
+    """The run's logins from sandbox-ai git-logins: only with the proxy, --git-logins on, and not for a server a
+    start option names; read once per start."""
+    git_logins_home(monkeypatch, tmp_path, [{"url": "http://localhost:3000", "user": "ch", "secret": "GITEA"},
+                                            {"url": "https://git.example.org", "user": "u", "secret": "MISSING"}])
+    if scenario == "happy":
+        a = s.parse_args(["claude"])
+        pairs, notes = s.registry_git_tokens(a)
+        assert [(c["url"], c["user"], c["loopback"], t) for c, t in pairs] == [("http://localhost:3000", "ch", True, GIT_TOKEN)]
+        assert len(notes) == 1 and "no usable secret MISSING" in notes[0]
+        assert s.registry_git_tokens(a) is s.registry_git_tokens(a)  # cached for the start
+    elif scenario == "sad":
+        for argv in (["claude", "--git-logins", "off"], ["claude", "--no-proxy"]):
+            assert s.registry_git_tokens(s.parse_args(argv)) == ([], [])
+        a = s.parse_args(["claude"])
+        a.mcp_socket_dir = tmp_path  # an MCP server's sandbox: never your logins
+        assert s.registry_git_tokens(a) == ([], [])
+    else:
+        monkeypatch.setenv("OWN", GIT_TOKEN)
+        a = s.parse_args(["claude", "--git-token-env", "http://localhost:3000=OWN"])
+        assert s.registry_git_tokens(a)[0] == []  # the start's option wins for its server
+
+
+def test_proxied_git_tokens(scenario, monkeypatch, tmp_path):
+    git_logins_home(monkeypatch, tmp_path, [{"url": "http://localhost:3000", "user": "ch", "secret": "GITEA"}]
+                    if scenario != "sad" else [])
+    monkeypatch.setenv("CONTRACT_GIT", GIT_TOKEN)
+    argv = {"happy": ["claude", "--token-proxy", "--git-token-env", "https://git.example.org=CONTRACT_GIT"],
+            "sad": ["claude"], "edge": ["claude", "--git-token-env", "https://git.example.org=CONTRACT_GIT"]}[scenario]
+    found = [c["url"] for c, _ in s.proxied_git_tokens(s.parse_args(argv))]
+    assert found == {"happy": ["https://git.example.org", "http://localhost:3000"], "sad": [],
+                     # without --token-proxy the start's token is the agent's (git_environment), the login the proxy's
+                     "edge": ["http://localhost:3000"]}[scenario]
+
+
+def test_local_engine(scenario, monkeypatch):
+    """The engine's cgroups, routes and devices are this host's only on Linux without --podman-url."""
+    monkeypatch.setattr(s.sys, "platform", {"happy": "linux", "sad": "darwin", "edge": "linux"}[scenario])
+    a = s.parse_args(["claude", *(["--podman-url", "ssh://core@vm/run/podman.sock"] if scenario == "edge" else [])])
+    assert s.local_engine(a) is (scenario == "happy")
+
+
+def test_check_platform(scenario, monkeypatch):
+    """macOS: Podman (podman machine) only; this host's devices and Wayland are refused with what works instead."""
+    monkeypatch.setattr(s.sys, "platform", "linux" if scenario == "edge" else "darwin")
+    if scenario == "happy":
+        s.check_platform(s.parse_args(["claude", "--backend", "podman", "--gui", "--gpu", "nvidia"]))
+    elif scenario == "sad":
+        for argv, text in ((["--backend", "bwrap"], "needs Linux"), (["--device", "/dev/ttyUSB0"], "Linux VM"),
+                           (["--gpu", "dri"], "Linux VM"), (["--gui-wayland"], "Wayland session")):
+            with pytest.raises(ValueError, match=text):
+                s.check_platform(s.parse_args(["claude", *argv]))
+    else:  # Linux: nothing of it is refused here (the other checks decide)
+        s.check_platform(s.parse_args(["claude", "--backend", "bwrap", "--device", "/dev/ttyUSB0", "--gui-wayland"]))
+
+
+def test_limits_on_macos_are_left_to_podman_machine(monkeypatch):
+    """On macOS the systemd and cgroup checks of this host do not apply: Podman's VM enforces the limits."""
+    monkeypatch.setattr(s.sys, "platform", "darwin")
+    monkeypatch.setattr(s, "user_manager_running", lambda: (_ for _ in ()).throw(AssertionError("not on macOS")))
+    monkeypatch.setattr(s, "delegated_controllers", lambda path=None: (_ for _ in ()).throw(AssertionError("no")))
+    limits, notes = s.enforced_limits(s.parse_args(["claude", "--memory", "4g", "--pids", "512"]))
+    assert limits["memory"] == "4g" and limits["pids"] == 512 and notes == []
+    assert s.start_memory_watch(s.parse_args(["claude"]), None) is None  # the VM's cgroups are not visible here
+
+
+MACHINE = {"Name": "podman-machine-default", "State": "running",
+           "Mounts": [{"Source": "/Users"}, {"Source": "/private"}, {"Source": "/var/folders"}],
+           "Resources": {"CPUs": 6, "Memory": 12288}}
+
+
+def test_podman_machine(scenario):
+    answers = {"happy": json.dumps([MACHINE]), "sad": "not json", "edge": "[]"}
+    found = s.podman_machine(lambda *a, **k: Mock(stdout=answers[scenario]))
+    assert found == (MACHINE if scenario == "happy" else {})
+
+
+def test_machine_paths(scenario, tmp_path):
+    (tmp_path / "m").mkdir()
+    a = s.parse_args(["claude", "--workspace", str(tmp_path / "w"), *(["--mount", f"{tmp_path}/m:/mnt/m:ro"]
+                                                                       if scenario != "sad" else [])])
+    if scenario == "edge":
+        a.state_dir = tmp_path / "state"
+    whats = [what for what, _ in s.machine_paths(a)]
+    assert whats[0] == "the workspace" and "sandbox-ai's files" in whats and "$TMPDIR (the run's session)" in whats
+    assert ("--mount" in whats) is (scenario != "sad") and ("--state-dir" in whats) is (scenario == "edge")
+
+
+def test_check_machine_shares(scenario, monkeypatch, tmp_path):
+    monkeypatch.setattr(s.sys, "platform", "darwin" if scenario != "edge" else "linux")
+    monkeypatch.setattr(s, "machine_paths", lambda a: [("the workspace", Path("/Users/ada/src/app")),
+                                                       ("sandbox-ai's files", Path("/Users/ada/.local/share/x")),
+                                                       ("$TMPDIR (the run's session)", Path("/var/folders/ab/T"))]
+                        + ([("--mount", Path("/Volumes/Data/samples"))] if scenario == "sad" else []))
+    a = s.parse_args(["claude", "--backend", "podman"])
+    if scenario == "sad":
+        with pytest.raises(ValueError, match=r"--mount /Volumes/Data/samples is not shared with podman machine .*"
+                                             r"podman machine set -v /Volumes/Data/samples:/Volumes/Data/samples"):
+            s.check_machine_shares(a, MACHINE)
+    else:
+        s.check_machine_shares(a, MACHINE)  # inside /Users and /var/folders; on Linux nothing to check
+        s.check_machine_shares(a, {})  # no machine: doctor and podman say so
+
+
+def test_engine_cpus(scenario, monkeypatch):
+    monkeypatch.setattr(s.os, "cpu_count", lambda: 16)
+    monkeypatch.setattr(s, "podman_machine", lambda runner=None: {"Resources": {"CPUs": 6}} if scenario != "sad" else {})
+    monkeypatch.setattr(s.sys, "platform", "linux" if scenario == "edge" else "darwin")
+    assert s.engine_cpus(s.parse_args(["claude"])) == {"happy": 6, "sad": 16, "edge": 16}[scenario]
+    if scenario == "happy":
+        assert s.resource_limits(s.parse_args(["claude"]))["cpus"] == "3"  # half the VM's, not the Mac's
+        with pytest.raises(ValueError, match="from 0.01 to 6 \\(the engine's CPUs\\)"):
+            s.resource_limits(s.parse_args(["claude", "--cpus", "8"]))
+
+
+def test_tmux_is_off_by_default_on_macos_until_attaching_reaches_the_vm(monkeypatch):
+    monkeypatch.setattr(s.sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(s.sys.stdout, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(s.sys, "platform", "darwin")
+    assert s.resolve_tmux(s.parse_args(["claude"])) is False
+    assert s.resolve_tmux(s.parse_args(["claude", "--tmux"])) is True  # asked for: still possible
+    monkeypatch.setattr(s.sys, "platform", "linux")
+    assert s.resolve_tmux(s.parse_args(["claude"])) is True
+
+
+def test_audio_command(scenario):
+    """PulseAudio as a user of its own, without capabilities, loading nothing a client asks for."""
+    command = rt.audio_command(Path({"happy": "/tmp/sandbox-audio/native", "sad": "/x", "edge": "/a b/native"}[scenario]))
+    program = command[command.index("--") + 1:]
+    assert command[0] == "setpriv" and f"--reuid={rt.AUDIO_UID}" in command and "--no-new-privs" in command
+    assert program[0] == "pulseaudio" and "--disallow-module-loading" in program and "--use-pid-file=no" in program
+    assert any(arg.startswith("--load=module-native-protocol-unix socket=") for arg in program)
+
+
+def test_start_audio(scenario, tmp_path, capsys):
+    """No PulseAudio in the image: said, nothing started (test_audio.py starts a stand-in for real)."""
+    if scenario == "happy":
+        assert rt.start_audio({}, which=lambda name: None, directory=tmp_path) == []
+        assert "images recipe media" in capsys.readouterr().err
+    elif scenario == "sad":
+        def popen(command, **kwargs):
+            return subprocess.Popen([sys.executable, "-c", "pass"], stderr=kwargs["stderr"])
+        assert rt.start_audio({}, which=lambda name: "x", popen=popen, directory=tmp_path, uid=os.getuid()) == []
+        assert "pulseaudio exited" in capsys.readouterr().err
+    else:
+        assert rt.AUDIO_SOCKET.parent == rt.AUDIO_DIR and rt.AUDIO_UID not in (0, rt.PROXY_UID)
+
+
+def test_host_ports_go_through_the_proxy_over_ipv6_too():
+    """pasta forwards [::1]:PORT as well as 127.0.0.1:PORT: a push to http://[::1]:3000 meets the proxy (and its
+    privacy check) as one to 127.0.0.1:3000 does; other ::1 ports stay the sandbox's own."""
+    rules = s.firewall_rules([], [], proxy={"port": s.PROXY_PORT, "loopback": [3000]})
+    assert "  ip daddr 127.0.0.0/8 tcp dport != { 3000 } return" in rules
+    assert "  ip6 daddr ::1 tcp dport != { 3000 } return" in rules
+    assert "  ip6 daddr ::1 return" not in rules
+    assert "  ip6 daddr ::1 return" in s.firewall_rules([], [], proxy={"port": s.PROXY_PORT, "loopback": []})
+
+
+def test_hold_unserved_loopback(scenario):
+    """[::1]:PORT is taken where pasta does not serve it, so the agent cannot listen there and get a login."""
+    import socket as _socket
+    try:
+        probe = _socket.socket(_socket.AF_INET6, _socket.SOCK_STREAM)
+        probe.bind(("::1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+    except OSError:
+        pytest.skip("no IPv6 loopback here")
+    if scenario == "happy":  # nobody serves it: held, and the agent's bind fails
+        held = rt.hold_unserved_loopback([port])
+        try:
+            assert len(held) == 1
+            agent = _socket.socket(_socket.AF_INET6, _socket.SOCK_STREAM)
+            agent.setsockopt(_socket.IPPROTO_IPV6, _socket.IPV6_V6ONLY, 1)
+            with pytest.raises(OSError):
+                agent.bind(("::1", port))
+            agent.close()
+            with pytest.raises(OSError):
+                _socket.create_connection(("::1", port), timeout=2)  # refused: nothing listens
+        finally:
+            for sock in held:
+                sock.close()
+    elif scenario == "sad":  # served (pasta's listener): left alone
+        server = _socket.socket(_socket.AF_INET6, _socket.SOCK_STREAM)
+        server.setsockopt(_socket.IPPROTO_IPV6, _socket.IPV6_V6ONLY, 1)
+        server.bind(("::1", port))
+        server.listen()
+        try:
+            assert rt.hold_unserved_loopback([port]) == []
+        finally:
+            server.close()
+    else:
+        assert rt.hold_unserved_loopback([]) == []
+
+
+def test_check_model_effort(scenario):
+    if scenario == "happy":
+        for argv in (["claude", "--model", "opus", "--effort", "max"], ["codex", "--model", "gpt-5-codex", "--effort",
+                     "minimal"], ["opencode", "--model", "anthropic/claude-sonnet-5-5"], ["claude"]):
+            s.check_model_effort(s.parse_args(argv))
+    elif scenario == "sad":
+        for argv, text in ((["claude", "--effort", "minimal"], "one of low, medium, high, xhigh, max"),
+                           (["codex", "--effort", "max"], "one of minimal, low, medium, high, xhigh"),
+                           (["opencode", "--effort", "high"], "sets its effort per model"),
+                           (["claude", "--model", "opus --dangerously-skip-permissions"], "expects a model name"),
+                           (["claude", "--model", "opus", "--", "--model", "sonnet"], "given twice"),
+                           (["claude", "--effort", "high", "--", "--effort=low"], "given twice")):
+            with pytest.raises(ValueError, match=text):
+                s.check_model_effort(s.parse_args(argv))
+    else:
+        a = s.parse_args(["claude", "--model", "opus"])
+        a.llm = "gpu"
+        with pytest.raises(ValueError, match="--llm NAME:MODEL"):
+            s.check_model_effort(a)
+        s.check_model_effort(s.parse_args(["claude", "--", "--model", "sonnet"]))  # the agent's own, alone: fine
+
+
+def test_model_effort_args(scenario):
+    if scenario == "happy":
+        assert s.model_effort_args(s.parse_args(["claude", "--model", "fable", "--effort", "xhigh"])) == [
+            "--model", "fable", "--effort", "xhigh"]
+        assert s.model_effort_args(s.parse_args(["codex", "--model", "gpt-5-codex", "--effort", "high"])) == [
+            "--model", "gpt-5-codex", "-c", "model_reasoning_effort=high"]
+    elif scenario == "sad":
+        assert s.model_effort_args(s.parse_args(["opencode", "--model", "ollama/qwen3"])) == ["--model", "ollama/qwen3"]
+    else:
+        assert s.model_effort_args(s.parse_args(["claude"])) == []
+
+
+def test_a_refresh_written_while_the_login_is_synced_is_not_missed(tmp_path, monkeypatch):
+    """Regression (seen as a flaky test under load): the watcher took the files' signature after a sync, so a
+    refresh the agent wrote while that sync ran was counted as seen and never written back; with refresh-token
+    reuse detection the next start then used a dead token."""
+    home, pair, state, soon = sync_fixture(tmp_path, monkeypatch)
+    host, sandbox = pair
+    real, raced = s.claude_login_sync, []
+
+    def racing(*args):
+        result = real(*args)
+        if not raced:  # the agent refreshes just as this first sync finishes
+            raced.append(1)
+            claude_credentials(sandbox, soon + 1000, refresh="rotated-during-sync")
+        return result
+    monkeypatch.setattr(s, "claude_login_sync", racing)
+    stop = threading.Event()
+    watcher = threading.Thread(target=s.watch_claude_login, args=(home, pair, state, stop, 0.01))
+    watcher.start()
+    try:
+        deadline = time.monotonic() + 10
+        while s.claude_oauth(host)["refreshToken"] != "rotated-during-sync" and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        stop.set()
+        watcher.join(10)
+    assert raced and s.claude_oauth(host)["refreshToken"] == "rotated-during-sync"
+
+
+def package_fixture(tmp_path, monkeypatch):
+    """A ready-made package (a .pyz) and the copy it was unpacked to, with this launcher inside the copy."""
+    package = tmp_path / "dl" / "sandbox-ai.pyz"
+    package.parent.mkdir()
+    package.write_bytes(b"#!/bin/sh\n")
+    copy = tmp_path / "cache" / "sandbox-ai" / "pyz" / "1.0-abc"
+    (copy / "sandbox").mkdir(parents=True)
+    monkeypatch.setattr(s, "HERE", copy / "sandbox")
+    monkeypatch.setenv("SANDBOX_AI_PACKAGE", str(package))
+    monkeypatch.setenv("SANDBOX_AI_PACKAGE_COPY", str(copy))
+    return package, copy
+
+
+def test_package_paths(scenario, tmp_path, monkeypatch):
+    """Review finding: the .pyz or AppImage a launcher runs from (and its copy) come from the boot's variables,
+    each only for what it claims."""
+    package, copy = package_fixture(tmp_path, monkeypatch)
+    if scenario == "happy":
+        assert [path for path, _ in s.package_paths()] == [copy, package]
+    elif scenario == "sad":  # a copy that does not hold this launcher (an inherited variable): nothing counts
+        monkeypatch.setattr(s, "HERE", tmp_path / "installed" / "sandbox")
+        assert s.package_paths() == []
+        monkeypatch.delenv("SANDBOX_AI_PACKAGE_COPY")
+        assert s.package_paths() == []
+    else:  # relative, missing or not a file/folder: ignored, the copy still counts
+        for value in ("sandbox-ai.pyz", str(tmp_path / "missing.pyz"), "/dev/null"):
+            monkeypatch.setenv("SANDBOX_AI_PACKAGE", value)
+            assert [path for path, _ in s.package_paths()] == [copy]
+
+
+def test_check_package_location(scenario, tmp_path, monkeypatch):
+    """Review finding (HIGH): a workspace, rw mount or --state-dir holding the package lets the agent rewrite it."""
+    package, copy = package_fixture(tmp_path, monkeypatch)
+    if scenario == "happy":
+        s.check_package_location(tmp_path / "project", "Workspace")
+        s.check_package_location(copy.parent.parent / "other", "--mount")
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match=r"Workspace .* contains .*sandbox-ai.pyz.*~/.local/bin"):
+            s.check_package_location(package.parent, "Workspace")
+        with pytest.raises(ValueError, match="--mount"):
+            s.check_package_location(package, "--mount")
+        with pytest.raises(ValueError, match="--state-dir .* contains"):
+            s.check_package_location(copy.parent, "--state-dir")
+    else:  # inside the copy, too; nothing set: nothing refused
+        with pytest.raises(ValueError, match="lies in"):
+            s.check_package_location(copy / "sandbox", "Workspace")
+        monkeypatch.delenv("SANDBOX_AI_PACKAGE")
+        monkeypatch.delenv("SANDBOX_AI_PACKAGE_COPY")
+        s.check_package_location(package.parent, "Workspace")
