@@ -323,8 +323,7 @@ def test_sandboxes_lists_and_manages_the_other_hosts_starts(window, wait, monkey
     assert page.stop_button.isEnabled() and page.session_buttons["pause"].isEnabled()
     assert not page.session_buttons["resume"].isEnabled()
     # While it runs, what it may reach, its workspaces, devices and limits are changed there; its log is there.
-    assert all(b.isEnabled() for key, b in page.run_named.items() if key != "log")
-    assert not page.run_named["log"].isEnabled() and "ct1" in page.run_named["log"].toolTip()
+    assert all(b.isEnabled() for b in page.run_named.values()), "its log too: the Connections page reads it there"
     # The Host filter: all, this machine, each host.
     assert page.host_filter.isVisibleTo(page)
     assert [page.host_filter.itemData(i) for i in range(page.host_filter.count())] == [None, "local", "ct1", "ct2"]
@@ -1050,8 +1049,9 @@ def test_slow_commands_do_not_block_the_window(window, env, monkeypatch, wait):
     window.sandboxes.table.selectRow(0)
     window.sandboxes.show_allowed()
     assert time.monotonic() - began < 3, "the commands run in the background"
+    live_mcp = [window.sandboxes.run_named[key] for key in ("add-mcp", "remove-mcp")]  # for kept starts only
     buttons = [window.system.privacy_button, window.system.check_button, window.launch.dry_button,
-               window.mcp.load_button, *window.sandboxes.run_buttons]
+               window.mcp.load_button, *[b for b in window.sandboxes.run_buttons if b not in live_mcp]]
     assert not any(button.isEnabled() for button in buttons), "the buttons that started them wait"
     # Questions are still read and shown while the commands run.
     ask(run, "1700000000-1-7", kind="dns", name="pypi.org")
@@ -1747,6 +1747,9 @@ def test_workspaces_of_a_running_sandbox(window, env, monkeypatch, wait):
 
         def directory(self):
             return "/home/me/more"
+
+        def name(self):
+            return ""
     monkeypatch.setattr(ui, "WorkspaceDialog", FakeWorkspace)
     shown = len(widgets.SHOWN)
     page.add_workspace()
@@ -2125,6 +2128,9 @@ def test_a_running_start_on_another_host_is_changed_there(window, monkeypatch, w
         def directory(self):
             return "/srv/data"
 
+        def name(self):
+            return ""
+
     class FakeDevices:
         def __init__(self, parent, candidates, title=None):
             seen.append(("device", candidates, title))
@@ -2197,11 +2203,12 @@ def test_the_limits_and_workspace_dialogs_of_another_host(qapp):
     assert ui.size_text(512 << 20) == "512m" and ui.size_text(1000) == "1000"
     dialog = ui.WorkspaceDialog(None, "web", host="ct1")
     assert dialog.windowTitle() == "Add workspace to web on ct1"
-    assert not [b for b in dialog.findChildren(QtWidgets.QPushButton) if b.text() == "Choose…"], \
-        "this computer's folders are not offered for another host"
+    assert not [b for b in dialog.findChildren(QtWidgets.QPushButton) if b.text() in ("Folder…", "File…")], \
+        "this computer's folders and files are not offered for another host"
     dialog.deleteLater()
     dialog = ui.WorkspaceDialog(None, "claude-abc")
-    assert [b for b in dialog.findChildren(QtWidgets.QPushButton) if b.text() == "Choose…"]
+    browse = [b.text() for b in dialog.findChildren(QtWidgets.QPushButton) if b.text() in ("Folder…", "File…")]
+    assert sorted(browse) == ["File…", "Folder…"]
     dialog.deleteLater()
 
 

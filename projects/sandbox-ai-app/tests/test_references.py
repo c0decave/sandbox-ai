@@ -106,7 +106,10 @@ BLOCKING_SAI = {"call", "answer", "dry_run", "doctor", "mcp_catalog", "statistic
                 "canary_log", "preset_dirs", "preset_dir_command", "identities", "save_identity", "git_logins",
                 "publish_logins", "vpn_check", "vpn_remove", "vpn_add",
                 # `sandbox-ai llm list` and `vpn list` (the wizard's Model page, the preset form, the VPN page)
-                "llm_endpoints", "vpn_profiles", "listing"}
+                "llm_endpoints", "vpn_profiles", "listing",
+                # MCP servers into a running start and out (--live), a host's model servers and connection logs
+                "host_mcp_attach_live", "host_mcp_detach_live", "mcp_live", "host_llm_endpoints", "host_llm_models",
+                "host_llm_servers", "host_connections", "host_log_summary"}
 # (host_statuses(cached=True) reads what `sandbox-ai hosts list` kept, without SSH: the Hosts page lists it at once.)
 # (stop_commands runs on the GUI thread on purpose: only when quitting, bounded by one grace period.)
 BLOCKING_MODULES = {"subprocess"}
@@ -258,7 +261,8 @@ MUTATIONS = {
     "canary-resume": ["canary_resume"],
     "project-forget": ["forget_trusted", ("wizard", "forget")],
     "start-delete": ["team_delete"],
-    "mcp-attach": ["mcp_attach"],
+    "mcp-attach": ["mcp_attach", "host_mcp_attach_live"],
+    "mcp-detach": ["host_mcp_detach_live"],
     "net-keep": ["net_keep"],
 }
 

@@ -308,7 +308,10 @@ def test_buttons_follow_the_kind_and_say_why_not(window, env, sleepers):
     loose = sleepers("/x/agent_sandbox.py", "claude", "--workspace", folder)
     page.refresh()
     page.table.selectRow(widgets.find_row(page.table, "run:claude-abc"))
-    assert all(b.isEnabled() for b in page.run_buttons)
+    live_mcp = [page.run_named[key] for key in ("add-mcp", "remove-mcp")]
+    assert all(b.isEnabled() for b in page.run_buttons if b not in live_mcp)
+    assert not any(b.isEnabled() for b in live_mcp) and "Only for kept starts" in live_mcp[0].toolTip(), \
+        "a run without a kept start takes no MCP server while it runs"
     assert not page.session_buttons["attach"].isEnabled() and "Only for sessions" in page.session_buttons["attach"].toolTip()
     assert page.stop_button.isEnabled() == page.stoppable
     page.table.selectRow(widgets.find_row(page.table, "session:work"))

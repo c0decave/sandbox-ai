@@ -1759,17 +1759,24 @@ class BoardPage(QWidget):
 
     # -- the agent's model server: its own provider or one of yours (sandbox-ai llm) --
 
-    def set_llm_servers(self, servers):
-        self.llm_servers, self.llm_loading = servers if isinstance(servers, list) else [], False
+    def set_llm_servers(self, servers, host=LOCAL):
+        self.llm_loading = False
+        if host != self.host():  # another host was chosen meanwhile: its servers, never these
+            self.load_llm_servers()
+            return
+        self.llm_servers = servers if isinstance(servers, list) else []
         if self.inspected in self.items and self.board.node(self.inspected).kind == "agent":
             self.inspect_timer.start()
 
     def load_llm_servers(self):
+        """The model servers of the host it starts on (sandbox-ai llm list there, and llm models NAME for a host's
+        servers), in the background."""
         if self.llm_loading:
             return
+        host = self.host()
         self.llm_loading = True
-        background(self.sai.llm_endpoints, timeout=90,
-                   done=lambda result, error: self.set_llm_servers(result if error is None else []))
+        background(lambda: self.sai.host_llm_servers(host), timeout=180,
+                   done=lambda result, error: self.set_llm_servers(result if error is None else [], host))
 
     def llm_server_row(self, node):
         """Beside the agent: the model server it works with, its own provider (cloud) or a registered one as NAME or
@@ -2129,6 +2136,7 @@ class BoardPage(QWidget):
                                      tr("Write .sandbox-ai.json into the first workspace and trust it, after showing "
                                         "it and what changes"))
         self.host_note.setVisible(remote)
+        self.llm_servers = None  # the agent's Model server: that host's servers, read again (load_llm_servers)
         if remote:
             self.host_note.setText(tr("Starts on {host}: folders and files are {host}'s (typed in; nothing of this "
                                       "computer is chosen), and its sandbox-ai checks the board.",

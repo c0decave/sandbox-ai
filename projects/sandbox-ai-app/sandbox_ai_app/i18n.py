@@ -47,6 +47,176 @@ def tr(key, **values):
 
 
 TEXTS = {
+    # == MCP servers, workspaces (files, names), connection logs and model servers of a running start on every
+    # host (sandbox-ai mcp attach|detach --live, workspace add --name, activity/logs, llm on that host): one block ==
+    'The connections the proxy on {host} logged: refusals, pushes and the first request to each host, repeats counted (sandbox-ai activity there); Summary… reads its logs in short (sandbox-ai logs).': {
+        'en': 'The connections the proxy on {host} logged: refusals, pushes and the first request to each host, repeats counted (sandbox-ai activity there); Summary… reads its logs in short (sandbox-ai logs).',
+        'de': 'Die Verbindungen, die der Proxy auf {host} protokolliert hat: Ablehnungen, Pushes und die erste Anfrage an jeden Host, Wiederholungen gezählt (sandbox-ai activity dort); Übersicht… liest seine Protokolle in Kurzform (sandbox-ai logs).'},
+    'Logs in {path}': {
+        'en': 'Logs in {path}',
+        'de': 'Protokolle in {path}'},
+    '/path/to/a/folder or /path/to/a/file': {
+        'en': '/path/to/a/folder or /path/to/a/file',
+        'de': '/pfad/zu/einem/ordner oder /pfad/zu/einer/datei'},
+    'Folder or file': {
+        'en': 'Folder or file',
+        'de': 'Ordner oder Datei'},
+    'Folder or file on {host}': {
+        'en': 'Folder or file on {host}',
+        'de': 'Ordner oder Datei auf {host}'},
+    'its own name': {
+        'en': 'its own name',
+        'de': 'sein eigener Name'},
+    "At /workspaces/NAME: 1-64 letters, digits, _ . -, starting with a letter or digit (sandbox-ai workspace add --name); empty: the folder's or file's name": {
+        'en': "At /workspaces/NAME: 1-64 letters, digits, _ . -, starting with a letter or digit (sandbox-ai workspace add --name); empty: the folder's or file's name",
+        'de': 'Unter /workspaces/NAME: 1-64 Buchstaben, Ziffern, _ . -, beginnend mit einem Buchstaben oder einer Ziffer (sandbox-ai workspace add --name); leer: der Name des Ordners oder der Datei'},
+    'Name under /workspaces': {
+        'en': 'Name under /workspaces',
+        'de': 'Name unter /workspaces'},
+    'File for the sandbox': {
+        'en': 'File for the sandbox',
+        'de': 'Datei für die Sandbox'},
+    'A server of sandbox-ai mcp list there, or another agent as a helper (an MCP server in a sandbox of its own on the same main workspace)': {
+        'en': 'A server of sandbox-ai mcp list there, or another agent as a helper (an MCP server in a sandbox of its own on the same main workspace)',
+        'de': 'Ein Server von sandbox-ai mcp list dort oder ein anderer Agent als Helfer (ein MCP-Server in einer eigenen Sandbox auf demselben Haupt-Arbeitsbereich)'},
+    'Claude Code finds it in /mcp; if it is not listed there, restart the agent.': {
+        'en': 'Claude Code finds it in /mcp; if it is not listed there, restart the agent.',
+        'de': 'Claude Code findet ihn unter /mcp; steht er dort nicht, starten Sie den Agenten neu.'},
+    'Codex reads its MCP servers when it starts: restart the agent to use it.': {
+        'en': 'Codex reads its MCP servers when it starts: restart the agent to use it.',
+        'de': 'Codex liest seine MCP-Server beim Start: Starten Sie den Agenten neu, um ihn zu nutzen.'},
+    'OpenCode reads its MCP servers when it starts: restart the agent to use it.': {
+        'en': 'OpenCode reads its MCP servers when it starts: restart the agent to use it.',
+        'de': 'OpenCode liest seine MCP-Server beim Start: Starten Sie den Agenten neu, um ihn zu nutzen.'},
+    'named': {
+        'en': 'named',
+        'de': 'benannt'},
+    'the MCP server {name}': {
+        'en': 'the MCP server {name}',
+        'de': 'den MCP-Server {name}'},
+    '{agent} as a helper': {
+        'en': '{agent} as a helper',
+        'de': '{agent} als Helfer'},
+    '{agent} as a helper ({name})': {
+        'en': '{agent} as a helper ({name})',
+        'de': '{agent} als Helfer ({name})'},
+    'Add MCP server on {host}': {
+        'en': 'Add MCP server on {host}',
+        'de': 'MCP-Server hinzufügen auf {host}'},
+    'Add MCP server': {
+        'en': 'Add MCP server',
+        'de': 'MCP-Server hinzufügen'},
+    'Add MCP server to {start} on {host}': {
+        'en': 'Add MCP server to {start} on {host}',
+        'de': 'MCP-Server zu {start} auf {host} hinzufügen'},
+    'Add MCP server to {start}': {
+        'en': 'Add MCP server to {start}',
+        'de': 'MCP-Server zu {start} hinzufügen'},
+    'Remove MCP server from {start} on {host}': {
+        'en': 'Remove MCP server from {start} on {host}',
+        'de': 'MCP-Server von {start} auf {host} entfernen'},
+    'Remove MCP server from {start}': {
+        'en': 'Remove MCP server from {start}',
+        'de': 'MCP-Server von {start} entfernen'},
+    "The connection logs of this machine, or of a host's sandboxes (over SSH)": {
+        'en': "The connection logs of this machine, or of a host's sandboxes (over SSH)",
+        'de': 'Die Verbindungsprotokolle dieses Rechners oder der Sandboxen eines Hosts (über SSH)'},
+    'Summary…': {
+        'en': 'Summary…',
+        'de': 'Übersicht…'},
+    'What the logs of the chosen folder say in short: refusals, their targets, requests per host (sandbox-ai logs --json)': {
+        'en': 'What the logs of the chosen folder say in short: refusals, their targets, requests per host (sandbox-ai logs --json)',
+        'de': 'Was die Protokolle des gewählten Ordners in Kurzform sagen: Ablehnungen, ihre Ziele, Anfragen je Host (sandbox-ai logs --json)'},
+    'Logs on {host}': {
+        'en': 'Logs on {host}',
+        'de': 'Protokolle auf {host}'},
+    'Dropped by the firewall: {count}': {
+        'en': 'Dropped by the firewall: {count}',
+        'de': 'Von der Firewall verworfen: {count}'},
+    'Requests: {count}': {
+        'en': 'Requests: {count}',
+        'de': 'Anfragen: {count}'},
+    'Pushes: {ok} checked, {refused} refused': {
+        'en': 'Pushes: {ok} checked, {refused} refused',
+        'de': 'Pushes: {ok} geprüft, {refused} abgelehnt'},
+    'The newest refusals:': {
+        'en': 'The newest refusals:',
+        'de': 'Die neuesten Ablehnungen:'},
+    'Refused by the proxy:': {
+        'en': 'Refused by the proxy:',
+        'de': 'Vom Proxy abgelehnt:'},
+    'It appears at /workspaces/NAME until the sandbox ends; a session keeps a folder for a restart (with its name) unless it is read-only, a file only for this run. sandbox-ai checks it as at a start: private places, package stores and the policy are refused.': {
+        'en': 'It appears at /workspaces/NAME until the sandbox ends; a session keeps a folder for a restart (with its name) unless it is read-only, a file only for this run. sandbox-ai checks it as at a start: private places, package stores and the policy are refused.',
+        'de': 'Es erscheint unter /workspaces/NAME, bis die Sandbox endet; eine Sitzung behält einen Ordner für einen Neustart (mit seinem Namen), außer er ist schreibgeschützt, eine Datei nur für diesen Lauf. sandbox-ai prüft es wie bei einem Start: private Orte, Paketspeicher und die Richtlinie werden abgelehnt.'},
+    'A name is 1-64 letters, digits, _ . -, starting with a letter or digit.': {
+        'en': 'A name is 1-64 letters, digits, _ . -, starting with a letter or digit.',
+        'de': 'Ein Name besteht aus 1-64 Buchstaben, Ziffern, _ . -, beginnend mit einem Buchstaben oder einer Ziffer.'},
+    'Mount a folder or a file of its host into the selected sandbox until it ends (sandbox-ai workspace add)': {
+        'en': 'Mount a folder or a file of its host into the selected sandbox until it ends (sandbox-ai workspace add)',
+        'de': 'Einen Ordner oder eine Datei seines Hosts in die gewählte Sandbox einhängen, bis sie endet (sandbox-ai workspace add)'},
+    'Add MCP server…': {
+        'en': 'Add MCP server…',
+        'de': 'MCP-Server hinzufügen…'},
+    'Give the selected kept start an MCP server or a helper agent now, without a restart, and at its later starts (sandbox-ai mcp attach --live)': {
+        'en': 'Give the selected kept start an MCP server or a helper agent now, without a restart, and at its later starts (sandbox-ai mcp attach --live)',
+        'de': 'Dem gewählten aufbewahrten Start jetzt einen MCP-Server oder einen Helfer-Agenten geben, ohne Neustart, und bei seinen späteren Starts (sandbox-ai mcp attach --live)'},
+    'Remove MCP server…': {
+        'en': 'Remove MCP server…',
+        'de': 'MCP-Server entfernen…'},
+    'Take an MCP server from the selected start now and from its later starts (sandbox-ai mcp detach --live)': {
+        'en': 'Take an MCP server from the selected start now and from its later starts (sandbox-ai mcp detach --live)',
+        'de': 'Einen MCP-Server jetzt und bei späteren Starts vom gewählten Start nehmen (sandbox-ai mcp detach --live)'},
+    "An MCP server's sandbox: a server is attached to an agent's start.": {
+        'en': "An MCP server's sandbox: a server is attached to an agent's start.",
+        'de': 'Die Sandbox eines MCP-Servers: Ein Server wird an den Start eines Agenten gehängt.'},
+    'Only for kept starts (sessions): a run without one keeps nothing to check the server against.': {
+        'en': 'Only for kept starts (sessions): a run without one keeps nothing to check the server against.',
+        'de': 'Nur für aufbewahrte Starts (Sitzungen): Ein Lauf ohne einen bewahrt nichts, gegen das der Server geprüft werden kann.'},
+    'It is paused: resume it first.': {
+        'en': 'It is paused: resume it first.',
+        'de': 'Er ist pausiert: Setzen Sie ihn zuerst fort.'},
+    'Not while it is {state}.': {
+        'en': 'Not while it is {state}.',
+        'de': 'Nicht, solange er {state} ist.'},
+    'Give the folder or file as an absolute path.': {
+        'en': 'Give the folder or file as an absolute path.',
+        'de': 'Geben Sie den Ordner oder die Datei als absoluten Pfad an.'},
+    'Select a running kept start (a session) first.': {
+        'en': 'Select a running kept start (a session) first.',
+        'de': 'Wählen Sie zuerst einen laufenden aufbewahrten Start (eine Sitzung).'},
+    'Not attached: {reason}': {
+        'en': 'Not attached: {reason}',
+        'de': 'Nicht angehängt: {reason}'},
+    'Not removed: {reason}': {
+        'en': 'Not removed: {reason}',
+        'de': 'Nicht entfernt: {reason}'},
+    'Restart the agent now (the conversation goes on)': {
+        'en': 'Restart the agent now (the conversation goes on)',
+        'de': 'Den Agenten jetzt neu starten (das Gespräch geht weiter)'},
+    'Codex and OpenCode see a new server only after a restart.': {
+        'en': 'Codex and OpenCode see a new server only after a restart.',
+        'de': 'Codex und OpenCode sehen einen neuen Server erst nach einem Neustart.'},
+    'If /mcp does not list it, restart the agent.': {
+        'en': 'If /mcp does not list it, restart the agent.',
+        'de': 'Steht er nicht unter /mcp, starten Sie den Agenten neu.'},
+    'Choose a log folder first (a start whose project is not known has none here).': {
+        'en': 'Choose a log folder first (a start whose project is not known has none here).',
+        'de': 'Wählen Sie zuerst einen Protokollordner (ein Start, dessen Projekt nicht bekannt ist, hat hier keinen).'},
+    'The servers there could not be read: {error}': {
+        'en': 'The servers there could not be read: {error}',
+        'de': 'Die Server dort konnten nicht gelesen werden: {error}'},
+    'It is opened in the running sandbox now, without a restart, and kept for its later starts.': {
+        'en': 'It is opened in the running sandbox now, without a restart, and kept for its later starts.',
+        'de': 'Er wird jetzt in der laufenden Sandbox geöffnet, ohne Neustart, und für ihre späteren Starts aufbewahrt.'},
+    'Give {start} the tools of {what} now, while it runs, and at its later starts?': {
+        'en': 'Give {start} the tools of {what} now, while it runs, and at its later starts?',
+        'de': '{start} die Werkzeuge von {what} jetzt geben, während er läuft, und bei seinen späteren Starts?'},
+    '{start} reaches no MCP server now.': {
+        'en': '{start} reaches no MCP server now.',
+        'de': '{start} erreicht jetzt keinen MCP-Server.'},
+    "Take {name} from {start} now? Its relay closes at once: the agent's connections to it end and its calls fail; its later starts go without it.": {
+        'en': "Take {name} from {start} now? Its relay closes at once: the agent's connections to it end and its calls fail; its later starts go without it.",
+        'de': '{name} jetzt von {start} nehmen? Sein Relay schließt sofort: Die Verbindungen des Agenten zu ihm enden und seine Aufrufe schlagen fehl; seine späteren Starts gehen ohne ihn.'},
     # == the command-line parity on every host (the Manage pages, Activity, Statistics, Teams, VPN, LLM,
     # canaries, trusted projects): one block ===
     'Tor (every connection through Tor, .onion names work)': {
@@ -6794,18 +6964,9 @@ TEXTS = {
     'Add workspace to {run}': {
         'en': 'Add workspace to {run}',
         'de': 'Workspace zu {run} hinzufügen'},
-    '/path/to/a/folder': {
-        'en': '/path/to/a/folder',
-        'de': '/pfad/zu/einem/ordner'},
-    'Choose…': {
-        'en': 'Choose…',
-        'de': 'Wählen…'},
     'Read-only (the agent cannot change it)': {
         'en': 'Read-only (the agent cannot change it)',
         'de': 'Nur lesen (der Agent kann ihn nicht ändern)'},
-    'It appears at /workspaces/NAME until the sandbox ends; a session keeps it for a restart unless it is read-only. sandbox-ai checks it as at a start: private places, package stores and the policy are refused.': {
-        'en': 'It appears at /workspaces/NAME until the sandbox ends; a session keeps it for a restart unless it is read-only. sandbox-ai checks it as at a start: private places, package stores and the policy are refused.',
-        'de': 'Er erscheint unter /workspaces/NAME, bis die Sandbox endet; eine Sitzung behält ihn für einen Neustart, außer er ist nur lesbar. sandbox-ai prüft ihn wie bei einem Start: private Orte, Paketspeicher und die Richtlinie werden abgelehnt.'},
     'Folder for the sandbox': {
         'en': 'Folder for the sandbox',
         'de': 'Ordner für die Sandbox'},
@@ -6827,9 +6988,6 @@ TEXTS = {
     'No workspace added during the run.': {
         'en': 'No workspace added during the run.',
         'de': 'Kein Workspace während des Laufs hinzugefügt.'},
-    'Give the folder as an absolute path.': {
-        'en': 'Give the folder as an absolute path.',
-        'de': 'Gib den Ordner als absoluten Pfad an.'},
     'Add workspace': {
         'en': 'Add workspace',
         'de': 'Workspace hinzufügen'},
@@ -6875,9 +7033,6 @@ TEXTS = {
     'Delete session {name} and its HOME on this machine? This cannot be undone.': {
         'en': 'Delete session {name} and its HOME on this machine? This cannot be undone.',
         'de': 'Die Sitzung {name} und ihr HOME auf diesem Rechner löschen? Das lässt sich nicht rückgängig machen.'},
-    'Folder on {host}': {
-        'en': 'Folder on {host}',
-        'de': 'Ordner auf {host}'},
     'Give the folder as an absolute path, or its name under /workspaces.': {
         'en': 'Give the folder as an absolute path, or its name under /workspaces.',
         'de': 'Gib den Ordner als absoluten Pfad an oder seinen Namen unter /workspaces.'},
@@ -6890,9 +7045,6 @@ TEXTS = {
     'Its HOME has more files than were checked: not every change is named.': {
         'en': 'Its HOME has more files than were checked: not every change is named.',
         'de': 'Ihr HOME hat mehr Dateien, als geprüft wurden: Nicht jede Änderung ist genannt.'},
-    'Its connection log is on {host} (sandbox-ai there).': {
-        'en': 'Its connection log is on {host} (sandbox-ai there).',
-        'de': 'Ihr Verbindungsprotokoll liegt auf {host} (sandbox-ai dort).'},
     'Let {run} change {path} on {host} until it ends? The agent can write, delete and run there.': {
         'en': 'Let {run} change {path} on {host} until it ends? The agent can write, delete and run there.',
         'de': '{run} {path} auf {host} ändern lassen, bis sie endet? Der Agent kann dort schreiben, löschen und ausführen.'},
@@ -6902,9 +7054,6 @@ TEXTS = {
     'Memory pressure from {size} on (memory.high): set at the start.': {
         'en': 'Memory pressure from {size} on (memory.high): set at the start.',
         'de': 'Speicherdruck ab {size} (memory.high): beim Start festgelegt.'},
-    'Mount a folder of its host into the selected sandbox until it ends (sandbox-ai workspace add)': {
-        'en': 'Mount a folder of its host into the selected sandbox until it ends (sandbox-ai workspace add)',
-        'de': 'Einen Ordner ihres Hosts in die gewählte Sandbox einhängen, bis sie endet (sandbox-ai workspace add)'},
     'Only http and https pages are opened here.': {
         'en': 'Only http and https pages are opened here.',
         'de': 'Hier werden nur http- und https-Seiten geöffnet.'},

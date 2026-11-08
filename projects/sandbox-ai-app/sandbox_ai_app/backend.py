@@ -784,8 +784,11 @@ class SandboxAI:
         data = self.host_json(host, "workspace", "list", run, "--json", timeout=60)
         if not isinstance(data, list):
             raise ValueError("not a list of workspaces")
-        return [{key: printable(entry[key])[:1000] for key in ("host", "sandbox", "mode", "source", "note")
-                 if isinstance(entry.get(key), str)} for entry in data if isinstance(entry, dict)]
+        return [{**{key: printable(entry[key])[:1000] for key in ("host", "sandbox", "mode", "source", "note")
+                    if isinstance(entry.get(key), str)},
+                 **({"kind": entry["kind"]} if entry.get("kind") in ("dir", "file") else {}),
+                 **({"named": entry["named"]} if isinstance(entry.get("named"), bool) else {})}
+                for entry in data if isinstance(entry, dict)]
 
     # -- workspaces of a running sandbox (sandbox-ai workspace) --
 
@@ -795,13 +798,16 @@ class SandboxAI:
         record = self.runs().get(run)
         return list(self.module("workspaces").listing(record)) if record else []
 
-    def add_workspace(self, run, directory, read_only=False, host="local"):
-        """`sandbox-ai workspace add RUN DIR [--ro]`: DIR at /workspaces/NAME until the sandbox ends (kept for a
-        restart of a session). The launcher does every check of a start (scope, private places, the policy)."""
+    def add_workspace(self, run, directory, read_only=False, name=None, host="local"):
+        """`sandbox-ai workspace add RUN DIR|FILE [--ro] [--name NAME]`: a folder (or one regular file) at
+        /workspaces/NAME until the sandbox ends (a folder is kept for a restart of a session; NAME with it). The
+        launcher does every check of a start (scope, private places, the policy)."""
         if not valid_run(run) or not valid_directory(directory):
             return 2, "", "invalid run or directory"
+        if name and not valid_workspace_name(name):
+            return 2, "", "invalid workspace name"
         return self.host_run(host, "workspace", "add", run, str(directory), *(["--ro"] if read_only else []),
-                             timeout=120)
+                             *([f"--name={name}"] if name else []), timeout=120)
 
     def remove_workspace(self, run, value, force=False, host="local"):
         """`sandbox-ai workspace remove RUN DIR|NAME [--force]`: refused while a process in the sandbox uses it,
@@ -2315,6 +2321,103 @@ class SandboxAI:
             raise ValueError("not what sandbox-ai mcp attach says")
         return data
 
+    def host_mcp_attach_live(self, host, start, server=None, helper=None):
+        """`sandbox-ai mcp attach NAME START --live --json` (or --helper AGENT START) on HOST (mcp_live)."""
+        return self.mcp_live(host, start, server, helper)
+
+    def host_mcp_detach_live(self, host, start, server=None, helper=None):
+        """`sandbox-ai mcp detach NAME START --live --json` (or --helper AGENT START) on HOST (mcp_live)."""
+        return self.mcp_live(host, start, server, helper, detach=True)
+
+    def mcp_live(self, host, start, server=None, helper=None, detach=False):
+        """`sandbox-ai mcp attach NAME START --live --json` (HELPER: --helper AGENT in place of NAME; DETACH: `mcp
+        detach ... --live --json`) on HOST: the server into (or out of) the running sandbox of START now, without a
+        restart. Its answer ({"server", "start", "attached" or "detached", "agent_restart", "message", ...}) with
+        "notes": what it said besides on its error output. ValueError: refused, with sandbox-ai's reason."""
+        args = mcp_live_args(start, server, helper, detach)
+        status, out, err = self.host_run(host, *args, timeout=600)
+        data = None
+        if status == 0:
+            try:
+                data = json.loads(out)
+            except ValueError:
+                data = None
+        if not isinstance(data, dict):
+            text = (err or out).strip()
+            lines = [line[len("sandbox-mcp: "):] if line.startswith("sandbox-mcp: ") else line
+                     for line in text.splitlines() if line.strip()]
+            raise ValueError(printable("\n".join(lines[-5:]))[-800:] or f"exit status {status}")
+        message = data.get("message") if isinstance(data.get("message"), str) else ""
+        data["message"] = printable(message)[:2000]
+        data["notes"] = [printable(line.strip())[:500] for line in (err or "").splitlines()
+                         if line.strip() and line.strip() != message.strip()][:10]
+        return data
+
+    def host_llm_endpoints(self, host):
+        """The model servers registered on HOST (`sandbox-ai llm list --json` there; this machine: llm_endpoints),
+        each checked as the wizard checks this machine's (wizard_llm.parse_endpoints)."""
+        if host == "local":
+            return self.llm_endpoints()
+        from .wizard_llm import parse_endpoints
+        status, out, err = self.host_run(host, "llm", "list", "--json", timeout=90)
+        if status != 0:
+            raise ValueError(printable((err or out).strip())[-500:] or f"exit status {status}")
+        return parse_endpoints(out)[0]
+
+    def host_llm_models(self, host, name):
+        """[model name] the server NAME of HOST offers now (`sandbox-ai llm models NAME --json` there). ValueError:
+        not answered (the server is down, say)."""
+        from .wizard_llm import models_argv, parse_models
+        status, out, err = self.host_run(host, *models_argv(name), timeout=60)
+        if status != 0:
+            raise ValueError(printable((err or out).strip())[-500:] or f"exit status {status}")
+        return [model["name"] for model in parse_models(out)]
+
+    def host_llm_servers(self, host, ask_models=6):
+        """The model servers of HOST for the Model choice beside the agent: `llm list --json` there, and for each one
+        (the first ASK_MODELS) that lists no models since its last check, `llm models NAME --json` - so NAME:MODEL is
+        offered for that host's servers, not this machine's. A server that does not answer keeps what the list said."""
+        endpoints = [dict(e) for e in self.host_llm_endpoints(host)]
+        if host == "local":
+            return endpoints
+        for endpoint in [e for e in endpoints if not e.get("models")][:ask_models]:
+            try:
+                endpoint["models"] = self.host_llm_models(host, endpoint["name"])[:30]
+            except (ValueError, OSError):
+                continue
+        return endpoints
+
+    def host_connections(self, host, source, tail=5000, since=None):
+        """What the connection proxy of HOST logged for SOURCE (the arguments of `sandbox-ai activity`: a run, --session
+        NAME, --log-dir DIR or --project DIR): `activity SOURCE --kind=network --json --tail N` there, each record as
+        a connection log's ({"time", "event", "method", "status", "url", "destination", "bytes_in", ...}: what
+        summary() shows) with its "summary" and "verdict"."""
+        found = []
+        for record in self.host_activity(host, source, tail=tail, since=since, kinds=("network",)):
+            details = record.get("details") if isinstance(record.get("details"), dict) else {}
+            entry = {key: value for key, value in details.items() if isinstance(key, str)}
+            if not isinstance(entry.get("event"), str):
+                entry["event"] = str(entry.get("verdict") or "")
+            entry["time"] = record.get("time") or ""
+            entry["summary"] = record.get("summary") or ""
+            if not entry.get("url") and not entry.get("destination") and isinstance(entry.get("target"), str):
+                entry["host"] = entry["target"]
+            found.append(entry)
+        return found
+
+    def host_log_summary(self, host, source):
+        """`sandbox-ai logs DIR --json` (or `logs --project DIR --json`) on HOST: what its connection logs say in
+        short - refusals, their targets, the requests per host (a dict). ValueError: not answered."""
+        if len(source) == 2 and source[0] in ("--log-dir", "--project") and valid_directory(source[1]):
+            args = ["logs", source[1], "--json"] if source[0] == "--log-dir" else \
+                ["logs", f"--project={source[1]}", "--json"]
+        else:
+            raise ValueError("a log folder or a project folder")
+        data = self.host_json(host, *args, timeout=120)
+        if not isinstance(data, dict):
+            raise ValueError("not what sandbox-ai logs says")
+        return data
+
     def net_keep(self, name, run, every=False):
         """`sandbox-ai net show RUN --keep` (EVERY: --keep-all) on host NAME: what the run was given, kept for its
         project's later starts (into its trusted .sandbox-ai.json). (status, out, err)."""
@@ -2418,6 +2521,15 @@ def valid_directory(path):
     return path.startswith("/") and len(path) <= 4096 and path.isprintable() and "\0" not in path
 
 
+WORKSPACE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")  # workspaces.NAME: workspace add --name NAME
+
+
+def valid_workspace_name(name):
+    """NAME for /workspaces/NAME as `sandbox-ai workspace add --name` takes it: 1-64 letters, digits, '_', '.' or
+    '-', starting with a letter or digit (never "." or "..")."""
+    return isinstance(name, str) and bool(WORKSPACE_NAME.fullmatch(name)) and name not in (".", "..")
+
+
 def valid_device(path):
     """A device path of one line under /dev (never read as an option)."""
     path = str(path or "")
@@ -2479,6 +2591,7 @@ NEEDS_CONFIRM = {
     'vpn-socks': 'a SOCKS port in the sandbox lets what goes through it pass the connection proxy by',
     'login-logout': 'logging out forgets the stored login of that agent: its sandboxes need a new login',
     'kit-hooks-trust': 'trusted hooks of a kit run in every later start with that kit',
+    'mcp-detach': 'detaching an MCP server from a running start closes its relay there now: the agent\'s connections to it end and its calls fail (its later starts go without it)',
 }
 APP_NEEDS_CONFIRM = {}
 MODE_ORDER = ("lax", "low", "medium", "high", "paranoid")  # the order of protection, weakest first (webui.MODE_ORDER)
@@ -3725,6 +3838,33 @@ def resume_args(name, restart=False, workspaces=(), mounts=(), mcp=()):
     if len(args) > 1 + 48:
         raise ValueError("too many workspaces, mounts and servers at once")
     return args + (["--restart"] if restart else []) + [name]
+
+
+LIVE_HELPERS = ("claude", "codex", "opencode")  # mcp attach --helper AGENT: the agents a helper can be
+HELPER_SERVER = re.compile(r"helper-(claude|codex|opencode)-[0-9a-f]{8}")  # agent_sandbox.helper_name
+
+
+def helper_of(server):
+    """The agent of a helper's server name (helper-AGENT-HASH), or None for any other server."""
+    match = HELPER_SERVER.fullmatch(str(server or ""))
+    return match[1] if match else None
+
+
+def mcp_live_args(start, server=None, helper=None, detach=False):
+    """The words after `sandbox-ai` of `mcp attach NAME START --live --json` (HELPER: `--helper AGENT START`), or
+    with DETACH `mcp detach ... --live --json`: a server into (out of) a running start now. ValueError says what is
+    wrong."""
+    if not valid_run(start):
+        raise ValueError("not a start's name")
+    if helper:
+        if helper not in LIVE_HELPERS or server:
+            raise ValueError("a helper is claude, codex or opencode (and no server's name with it)")
+        named = ["--helper", helper]
+    elif re.fullmatch(MCP_NAME, str(server or "")):
+        named = [server]
+    else:
+        raise ValueError("an MCP server's name is 1-32 letters, digits, '_' or '-'")
+    return ["mcp", "detach" if detach else "attach", *named, start, "--live", "--json"]
 
 
 def stop_args(name, wait=None):

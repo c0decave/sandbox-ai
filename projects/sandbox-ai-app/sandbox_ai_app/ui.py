@@ -42,6 +42,7 @@ from .widgets import (
 )
 
 CONNECTIONS_LIMIT = 5000  # records the Connections page keeps (backend.read_connections reads as many)
+REMOTE_LOG_SECONDS = 5  # between two reads of another host's connections while the Connections page follows
 STATE_WAIT = 30  # seconds a look at a project folder (its state, whether it exists) may take
 QUIT_WAIT = 10  # seconds the window waits, when it is closed, for the work still running
 SESSION_GRACE = 60  # seconds after a logout request after which the logout counts as cancelled
@@ -376,6 +377,7 @@ class LaunchPage(QWidget):
         self.model_only = QCheckBox(tr("only this server"))
         self.model_only.setToolTip(tr("--no-provider-defaults: the agent reaches the model server and nothing else"))
         self.llm_servers, self.llm_loading, self.llm_read_at, self.model_seen = [], False, 0.0, None
+        self.llm_again, self.llm_host = False, LOCAL  # the host whose servers llm_servers are
         # Where it starts: this machine, or a host of sandbox-ai hosts (its launcher there checks and starts it).
         self.host_choice = HostCombo(sai)
         self.host_known = {}  # {(host, agent): that host's launcher options, or None: could not be read}
@@ -444,17 +446,26 @@ class LaunchPage(QWidget):
     # -- the model: the agent's provider or a server of yours (sandbox-ai llm) --
 
     def read_llm_servers(self):
-        """The registered model servers (sandbox-ai llm list), read in the background; again when the page is shown
-        after a while (a server added on the Model servers page meanwhile)."""
-        if self.llm_loading or "--llm" not in self.form.widgets:
+        """The model servers registered on the host it starts on (sandbox-ai llm list there, and for a host's servers
+        their models: llm models NAME), read in the background; again when the page is shown after a while (a server
+        added on the Model servers page meanwhile) and when another host is chosen."""
+        if "--llm" not in self.form.widgets:
             return
-        self.llm_loading = True
+        host = self.host()
+        if self.llm_loading:
+            self.llm_again = self.llm_loading != host  # the host it is read for is no longer the one chosen
+            return
+        self.llm_loading, self.llm_again = host, False
         # A read, not work: no owner, so it neither greys out the page's buttons (busy()) nor holds up quitting.
-        background(self.sai.llm_endpoints, timeout=90,
-                   done=lambda result, error: alive(self) and self.llm_servers_read(result, error))
+        background(lambda: self.sai.host_llm_servers(host), timeout=180,
+                   done=lambda result, error: alive(self) and self.llm_servers_read(host, result, error))
 
-    def llm_servers_read(self, result, error):
-        self.llm_loading, self.llm_read_at = False, time.monotonic()
+    def llm_servers_read(self, host, result, error):
+        self.llm_loading = False
+        if host != self.host() or self.llm_again:
+            self.read_llm_servers()  # another host was chosen meanwhile: its servers, never these
+            return
+        self.llm_read_at, self.llm_host = time.monotonic(), host
         self.llm_servers = result if error is None and isinstance(result, list) else []
         self.show_model(force=True)
 
@@ -493,6 +504,10 @@ class LaunchPage(QWidget):
                                                       host=printable(host)))
         self.host_note.setVisible(remote)
         self.show_host_note()
+        if self.llm_host != host:  # the Model choice: that host's model servers, not this machine's
+            self.llm_servers = []
+            self.show_model(force=True)
+            self.read_llm_servers()
         self.read_host_options()
         self.apply_host_options()
         self.show_project_note()
@@ -1017,8 +1032,9 @@ class DeviceDialog(QDialog):
 
 
 class WorkspaceDialog(QDialog):
-    """A host directory for a running sandbox (sandbox-ai workspace add): the folder, read-only or not. For a sandbox
-    on another HOST the folder is that host's: typed in, never chosen from this computer's."""
+    """A host folder or a single file for a running sandbox (sandbox-ai workspace add): the path, a name under
+    /workspaces (optional; checked as sandbox-ai checks --name), read-only or not. For a sandbox on another HOST the
+    path is that host's: typed in, never chosen from this computer's."""
 
     def __init__(self, parent, run, host="local"):
         super().__init__(parent)
@@ -1027,23 +1043,38 @@ class WorkspaceDialog(QDialog):
                             else tr("Add workspace to {run}", run=printable(run)))
         form = QFormLayout(self)
         self.edit = QLineEdit()
-        self.edit.setPlaceholderText(tr("/path/to/a/folder"))
+        self.edit.setPlaceholderText(tr("/path/to/a/folder or /path/to/a/file"))
+        self.edit.setAccessibleName(tr("Folder or file"))
         row = QHBoxLayout()
         row.addWidget(self.edit, 1)
+        self.browse_buttons = []
         if not remote:
-            browse = QPushButton(tr("Choose…"))
-            browse.clicked.connect(self.browse)
-            row.addWidget(browse)
-        form.addRow(tr("Folder on {host}", host=printable(host)) if remote else tr("Folder"), row)
+            for text, slot in ((tr("Folder…"), self.browse), (tr("File…"), self.browse_file)):
+                button = QPushButton(text)
+                button.clicked.connect(lambda _=False, s=slot: s())
+                row.addWidget(button)
+                self.browse_buttons.append(button)
+        form.addRow(tr("Folder or file on {host}", host=printable(host)) if remote else tr("Folder or file"), row)
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText(tr("its own name"))
+        self.name_edit.setToolTip(tr("At /workspaces/NAME: 1-64 letters, digits, _ . -, starting with a letter or "
+                                     "digit (sandbox-ai workspace add --name); empty: the folder's or file's name"))
+        self.name_edit.setAccessibleName(tr("Name under /workspaces"))
+        self.name_edit.textChanged.connect(lambda _="": self.check())
+        form.addRow(tr("Name under /workspaces"), self.name_edit)
         self.read_only = QCheckBox(tr("Read-only (the agent cannot change it)"))
         form.addRow("", self.read_only)
-        form.addRow(plain_label(tr("It appears at /workspaces/NAME until the sandbox ends; a session keeps it for a "
-                                   "restart unless it is read-only. sandbox-ai checks it as at a start: private "
-                                   "places, package stores and the policy are refused."), role="secondary"))
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        form.addRow(buttons)
+        self.problem = plain_label(role="notice-warn")
+        self.problem.hide()
+        form.addRow(self.problem)
+        form.addRow(plain_label(tr("It appears at /workspaces/NAME until the sandbox ends; a session keeps a folder "
+                                   "for a restart (with its name) unless it is read-only, a file only for this run. "
+                                   "sandbox-ai checks it as at a start: private places, package stores and the "
+                                   "policy are refused."), role="secondary"))
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        form.addRow(self.buttons)
         self.resize(560, 0)
 
     def browse(self):
@@ -1051,8 +1082,79 @@ class WorkspaceDialog(QDialog):
         if path:
             self.edit.setText(path)
 
+    def browse_file(self):
+        path = choose_file(self, tr("File for the sandbox"), key="workspace-file")
+        if path:
+            self.edit.setText(path)
+
+    def check(self):
+        """A name sandbox-ai would refuse is said at once, and OK waits for a good one."""
+        name = self.name()
+        bad = bool(name) and not backend.valid_workspace_name(name)
+        self.problem.setText(tr("A name is 1-64 letters, digits, _ . -, starting with a letter or digit.") if bad
+                             else "")
+        self.problem.setVisible(bad)
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(not bad)
+
     def directory(self):
         return self.edit.text().strip()
+
+    def name(self):
+        return self.name_edit.text().strip()
+
+
+HELPER_TITLES = {"claude": "Claude Code", "codex": "Codex", "opencode": "OpenCode"}
+
+
+class LiveMcpDialog(QDialog):
+    """Add MCP server…: a server defined on the start's HOST (SERVERS: [(name, status)] of `sandbox-ai mcp list`
+    there) or another agent as a helper (claude, codex, opencode), into the running sandbox of START now (sandbox-ai
+    mcp attach … --live) and kept for its later starts. PROBLEM: why the servers could not be read."""
+
+    def __init__(self, parent, start, host=LOCAL, servers=(), agent="", problem=None):
+        super().__init__(parent)
+        self.setWindowTitle(tr("Add MCP server to {start} on {host}", start=printable(start), host=printable(host))
+                            if host != LOCAL else tr("Add MCP server to {start}", start=printable(start)))
+        form = QFormLayout(self)
+        self.choice = QComboBox()
+        self.choice.setAccessibleName(tr("MCP server"))
+        for name, status in servers:
+            if re.fullmatch(backend.MCP_NAME, str(name)) and not backend.helper_of(name):
+                self.choice.addItem(printable(f"{name} ({status})" if status else name), "server:" + name)
+        for helper in backend.LIVE_HELPERS:
+            self.choice.addItem(tr("{agent} as a helper", agent=HELPER_TITLES[helper]), "helper:" + helper)
+        self.choice.setToolTip(tr("A server of sandbox-ai mcp list there, or another agent as a helper (an MCP "
+                                  "server in a sandbox of its own on the same main workspace)"))
+        form.addRow(tr("MCP server"), self.choice)
+        if problem:
+            form.addRow(plain_label(tr("The servers there could not be read: {error}", error=printable(problem)[:300]),
+                                    role="notice-warn"))
+        how = {"claude": tr("Claude Code finds it in /mcp; if it is not listed there, restart the agent."),
+               "codex": tr("Codex reads its MCP servers when it starts: restart the agent to use it."),
+               "opencode": tr("OpenCode reads its MCP servers when it starts: restart the agent to use it.")}
+        form.addRow(plain_label(tr("It is opened in the running sandbox now, without a restart, and kept for its "
+                                   "later starts.") + (" " + how[agent] if agent in how else ""), role="secondary"))
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+        self.resize(520, 0)
+
+    def value(self):
+        """("server", NAME) or ("helper", AGENT)."""
+        kind, _, value = str(self.choice.currentData() or "").partition(":")
+        return kind, value
+
+
+def workspace_label(entry):
+    """An added workspace in one line: where it is in the sandbox, from where on its host, a file or a folder, named
+    with --name, read-only (`sandbox-ai workspace list --json`'s kind, named, mode)."""
+    marks = [tr("file") if entry.get("kind") == "file" else tr("folder")]
+    if entry.get("named"):
+        marks.append(tr("named"))
+    if entry.get("mode") == "ro":
+        marks.append(tr("read-only"))
+    return f"{printable(entry.get('sandbox'))} ← {printable(entry.get('host'))} ({', '.join(marks)})"
 
 
 def size_text(size):
@@ -1249,6 +1351,7 @@ class SandboxesPage(QWidget):
     launchers that have not registered yet. The actions follow the kind of the selected row; what does not
     apply is greyed out with the reason in its tooltip. Read again every few seconds in the background."""
     open_log = Signal(str)
+    open_remote_log = Signal(str, object)  # (host, sandbox-ai activity's arguments) of a host's start
     counted = Signal(int, int)  # instances that run, of them in the current project
     updated = Signal(object)  # {key: Instance} after each read (the window's tabs follow it)
     fleet_changed = Signal(object)  # {host: {"running", "seen", "problem"}} after each look at a host (Hosts page)
@@ -1372,10 +1475,17 @@ class SandboxesPage(QWidget):
                 ("add-device", tr("Add device…"), tr("Hand a host device to the selected sandbox until it ends"),
                  self.add_device),
                 ("remove-device", tr("Remove device"), tr("Take back a device added during the run"), self.remove_device),
-                ("add-workspace", tr("Add workspace…"), tr("Mount a folder of its host into the selected sandbox until "
-                                                          "it ends (sandbox-ai workspace add)"), self.add_workspace),
+                ("add-workspace", tr("Add workspace…"), tr("Mount a folder or a file of its host into the selected "
+                                                          "sandbox until it ends (sandbox-ai workspace add)"),
+                 self.add_workspace),
                 ("remove-workspace", tr("Remove workspace…"), tr("Take back a workspace added during the run "
                                                                 "(sandbox-ai workspace remove)"), self.remove_workspace),
+                ("add-mcp", tr("Add MCP server…"), tr("Give the selected kept start an MCP server or a helper agent "
+                                                      "now, without a restart, and at its later starts (sandbox-ai "
+                                                      "mcp attach --live)"), self.add_mcp),
+                ("remove-mcp", tr("Remove MCP server…"), tr("Take an MCP server from the selected start now and from "
+                                                            "its later starts (sandbox-ai mcp detach --live)"),
+                 self.remove_mcp),
                 ("limits", tr("Limits…"), tr("Change memory, CPUs and processes of the selected sandbox"), self.limits)):
             button = QPushButton(text)
             button.setToolTip(tip)
@@ -1939,10 +2049,11 @@ class SandboxesPage(QWidget):
             gone = tr("It ended: History… shows what happened to it.")
         mcp = instance.kind == "mcp"
         for key, button in self.run_named.items():
-            why = gone or (tr("Its connection log is on {host} (sandbox-ai there).", host=host) if key == "log" else
-                           tr("An MCP server's sandbox: it only stops (sandbox-ai stop there).") if mcp else
-                           None if running else tr("Not while it is {state} on {host}.", state=shown_state, host=host))
+            why = gone or (tr("An MCP server's sandbox: it only stops (sandbox-ai stop there).") if mcp else
+                           None if running or key == "log" else tr("Not while it is {state} on {host}.",
+                                                                   state=shown_state, host=host))
             set_enabled(button, why is None, why)
+        self.update_mcp_buttons(instance, gone)
         # As sandbox-ai there takes them (starts.act): an MCP server only stops; a run without a kept start pauses
         # and resumes but keeps nothing to attach to or delete.
         rules = {"attach": state == "running" and attachable, "attach-app": state == "running" and attachable,
@@ -2011,6 +2122,7 @@ class SandboxesPage(QWidget):
                    tr("It does not run.") if not instance.run else None)
         for button in self.run_buttons:
             set_enabled(button, run_why is None, run_why)
+        self.update_mcp_buttons(instance, run_why)
         rules = {"attach": state == "running", "attach-app": state == "running", "pause": state == "running",
                  "resume": state in ("paused", "stopped"), "delete": state == "stopped"}
         foreground = bool(instance is not None and getattr(instance, "foreground", False))
@@ -2039,6 +2151,19 @@ class SandboxesPage(QWidget):
             why = None
         set_enabled(self.stop_button, why is None, why, tooltip=tr("End the selected sandbox: a session (its state is "
                                                                   "kept), an MCP server, or a run (sandbox-ai net stop)"))
+
+    def update_mcp_buttons(self, instance, why=None):
+        """Add and Remove MCP server: a kept start (a session) that runs now - sandbox-ai mcp attach --live checks it
+        against what the start keeps; paused, it is resumed first."""
+        if why is None and instance is not None:
+            state = tr(STATE_TITLES.get(instance.state, instance.state))
+            why = (tr("An MCP server's sandbox: a server is attached to an agent's start.") if instance.kind == "mcp"
+                   else tr("Only for kept starts (sessions): a run without one keeps nothing to check the server "
+                           "against.") if instance.kind != "session" else
+                   tr("It is paused: resume it first.") if instance.state == "paused" else
+                   None if instance.state == "running" else tr("Not while it is {state}.", state=state))
+        for key in ("add-mcp", "remove-mcp"):
+            set_enabled(self.run_named[key], why is None, why)
 
     def update_manage_buttons(self, instance, gone=None):
         """Rename… and History… follow the selected start; Clean up… acts on the host chosen above."""
@@ -2225,9 +2350,7 @@ class SandboxesPage(QWidget):
             return
         def shown(entry):
             note = entry.get("note") if isinstance(entry.get("note"), str) else ""  # what sandbox-ai says of it
-            return (f"{printable(entry.get('sandbox'))} ← {printable(entry.get('host'))}"
-                    + (f" ({tr('read-only')})" if entry.get("mode") == "ro" else "")
-                    + (f": {printable(note)[:300]}" if note else ""))
+            return workspace_label(entry) + (f": {printable(note)[:300]}" if note else "")
         self.workspaces_label.setText(tr("Workspaces added during the run: {list}",
                                          list=", ".join(map(shown, self.added_workspaces)))
                                       if self.added_workspaces else tr("No workspace added during the run."))
@@ -2352,8 +2475,12 @@ class SandboxesPage(QWidget):
         if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.directory():
             return
         directory, read_only = dialog.directory(), dialog.read_only.isChecked()
+        name = dialog.name()
         if not backend.valid_directory(directory):
-            warn(self, tr("Not added"), tr("Give the folder as an absolute path."))
+            warn(self, tr("Not added"), tr("Give the folder or file as an absolute path."))
+            return
+        if name and not backend.valid_workspace_name(name):
+            warn(self, tr("Not added"), tr("A name is 1-64 letters, digits, _ . -, starting with a letter or digit."))
             return
         title = tr("Add workspace on {host}", host=printable(host)) if remote else tr("Add workspace")
         if not ask_first(self, "workspace-writable", title, tr(
@@ -2362,8 +2489,8 @@ class SandboxesPage(QWidget):
                 "Let {run} change {path} until it ends? The agent can write, delete and run there.",
                 run=printable(run), path=printable(directory)), tr("Add"), detail={"read_only": read_only}):
             return
-        background(self.on_host(host, self.sai.add_workspace, run, directory, read_only), owner=self,
-                   source=self.run_buttons, timeout=150,
+        background(self.on_host(host, self.sai.add_workspace, run, directory, read_only, *([name] if name else [])),
+                   owner=self, source=self.run_buttons, timeout=150,
                    done=lambda result, error: self.device_done(title, result, error))
 
     def remove_workspace(self):
@@ -2391,7 +2518,7 @@ class SandboxesPage(QWidget):
             inform(self, title, tr("No workspace was added to {run} during its run (those of the start stay).",
                                    run=printable(run)), modal=False)
             return
-        choices = [f"{printable(e.get('sandbox'))} ← {printable(e.get('host'))}" for e in added]
+        choices = [workspace_label(e) for e in added]
         index = 0
         if len(choices) > 1:
             choice, ok = QInputDialog.getItem(self, title, tr("Workspace"), choices, 0, False)
@@ -2424,6 +2551,145 @@ class SandboxesPage(QWidget):
             self.device_done(title, result, error)
         background(self.on_host(host, self.sai.remove_workspace, run, target, False), owner=self,
                    source=self.run_buttons, timeout=150, done=done)
+
+    # -- MCP servers while it runs (sandbox-ai mcp attach|detach … --live) --
+
+    def live_start(self):
+        """(host, start name, instance) of the selected running kept start, as `sandbox-ai mcp attach START` takes
+        it there; None, said, when none is selected."""
+        instance = self.current()
+        if instance is None or instance.kind != "session" or instance.state != "running":
+            QMessageBox.information(self, tr("Sandboxes"), tr("Select a running kept start (a session) first."))
+            return None
+        host, name = self.start_host(instance)
+        if not backend.valid_run(name):
+            warn(self, tr("Sandboxes"), tr("Not a start's name: {ident}", ident=printable(name)[:60]))
+            return None
+        return host, name, instance
+
+    def add_mcp(self):
+        """Add MCP server…: the servers defined on the start's host (`sandbox-ai mcp list` there, in the background),
+        then the dialog, asked first (mcp-attach), then `mcp attach … --live` and what sandbox-ai says of it - with
+        the offer to restart the agent where it needs one to see the server."""
+        target = self.live_start()
+        if not target:
+            return
+        host, name, instance = target
+        background(self.sai.host_mcp_servers, host, owner=self, source=self.run_buttons, timeout=90,
+                   done=lambda rows, error: self.choose_live_mcp(host, name, instance.agent, rows, error))
+
+    def choose_live_mcp(self, host, start, agent, rows, error):
+        self.update_buttons()
+        servers = [(row[0], row[1]) for row in rows or []] if error is None else []
+        dialog = LiveMcpDialog(self, start, host, servers, agent, problem=None if error is None else str(error))
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        kind, value = dialog.value()
+        server, helper = (value, None) if kind == "server" else (None, value)
+        what = tr("the MCP server {name}", name=printable(value)) if server else \
+            tr("{agent} as a helper", agent=HELPER_TITLES.get(value, printable(value)))
+        title = tr("Add MCP server on {host}", host=printable(host)) if host != LOCAL else tr("Add MCP server")
+        try:
+            backend.mcp_live_args(start, server, helper)
+        except ValueError as exc:
+            warn(self, title, printable(exc))
+            return
+        where = tr("On {host}: ", host=printable(host)) if host != LOCAL else ""
+        if not ask_first(self, "mcp-attach", title, where + tr(
+                "Give {start} the tools of {what} now, while it runs, and at its later starts?", start=printable(start),
+                what=what), tr("Attach")):
+            return
+        background(lambda: self.sai.host_mcp_attach_live(host, start, server, helper), owner=self,
+                   source=self.run_buttons,
+                   timeout=630, done=lambda result, error_: self.live_mcp_done(host, start, title, result, error_))
+
+    def live_mcp_done(self, host, start, title, result, error):
+        """What sandbox-ai said of the attach, as it said it; where the agent needs (or may need) a restart to see
+        the server, the offer to restart it now (`sandbox-ai resume START --restart`, asked as start-restart)."""
+        self.update_buttons()
+        self.after_live_change(host)
+        if error is not None:
+            warn(self, title, tr("Not attached: {reason}", reason=printable(error)[:1500]), modal=False)
+            return
+        text = "\n\n".join([result.get("message") or "", *result.get("notes", [])]).strip()
+        if result.get("agent_restart") in ("required", "maybe"):
+            if ask_first(self, "start-restart", title, text + "\n\n" + (
+                    tr("Codex and OpenCode see a new server only after a restart.")
+                    if result.get("agent_restart") == "required" else
+                    tr("If /mcp does not list it, restart the agent.")),
+                    tr("Restart the agent now (the conversation goes on)")):
+                self.restart_agent(host, start, title)
+            return
+        inform(self, title, text, modal=False)
+
+    def restart_agent(self, host, start, title):
+        args = backend.resume_args(start, restart=True)
+        background(lambda: self.sai.host_run(host, *args, timeout=300), owner=self, source=self.run_buttons,
+                   timeout=330, done=lambda result, error: (self.command_done(title, result, error),
+                                                            self.after_live_change(host)))
+
+    def after_live_change(self, host):
+        """The start's rows are read again: the server it reaches now shows below it."""
+        self.refresh_soon(again=True)
+        if host != LOCAL:
+            self.refresh_remote([host])
+
+    def live_servers(self, instance):
+        """The MCP servers INSTANCE reaches now (run.json's mcp_servers, `sandbox-ai list`'s mcp_running)."""
+        from .start_tree import reached
+        return [name for name, now in reached(instance) if now]
+
+    def remove_mcp(self):
+        """Remove MCP server…: one of the servers the start reaches now (as its rows say; else as `sandbox-ai mcp
+        list` there says whom each serves), taken out with `mcp detach … --live` - a helper as --helper AGENT."""
+        target = self.live_start()
+        if not target:
+            return
+        host, name, instance = target
+        servers = self.live_servers(instance)
+        if servers:
+            self.choose_detach(host, name, servers, None)
+            return
+        background(self.sai.host_mcp_servers, host, owner=self, source=self.run_buttons, timeout=90,
+                   done=lambda rows, error: self.choose_detach(host, name, [
+                       row[0] for row in rows or [] if name in [part.strip() for part in str(row[2]).split(",")]],
+                       error))
+
+    def choose_detach(self, host, start, servers, error):
+        self.update_buttons()
+        title = tr("Remove MCP server from {start} on {host}", start=printable(start), host=printable(host)) \
+            if host != LOCAL else tr("Remove MCP server from {start}", start=printable(start))
+        servers = [s for s in dict.fromkeys(servers) if re.fullmatch(backend.MCP_NAME, str(s))]
+        if not servers:
+            inform(self, title, tr("{start} reaches no MCP server now.", start=printable(start)) + (
+                " " + tr("The servers there could not be read: {error}", error=printable(error)[:300])
+                if error is not None else ""), modal=False)
+            return
+        labels = [tr("{agent} as a helper ({name})", agent=HELPER_TITLES[backend.helper_of(s)], name=s)
+                  if backend.helper_of(s) else s for s in servers]
+        choice, ok = QInputDialog.getItem(self, title, tr("MCP server"), labels, 0, False)
+        if not ok or choice not in labels:
+            return
+        server = servers[labels.index(choice)]
+        helper = backend.helper_of(server)
+        where = tr("On {host}: ", host=printable(host)) if host != LOCAL else ""
+        if not ask_first(self, "mcp-detach", title, where + tr(
+                "Take {name} from {start} now? Its relay closes at once: the agent's connections to it end and its "
+                "calls fail; its later starts go without it.", name=printable(choice), start=printable(start)),
+                tr("Remove")):
+            return
+        background(lambda: self.sai.host_mcp_detach_live(host, start, None if helper else server, helper),
+                   owner=self, source=self.run_buttons, timeout=630,
+                   done=lambda result, error_: self.detached(host, title, result, error_))
+
+    def detached(self, host, title, result, error):
+        self.update_buttons()
+        self.after_live_change(host)
+        if error is not None:
+            warn(self, title, tr("Not removed: {reason}", reason=printable(error)[:1500]), modal=False)
+            return
+        inform(self, title, "\n\n".join([result.get("message") or "", *result.get("notes", [])]).strip(),
+               modal=False)
 
     def limits(self):
         """The limits dialog, filled with the limits now (read in the background first)."""
@@ -2595,6 +2861,12 @@ class SandboxesPage(QWidget):
 
     def log(self):
         instance = self.current()
+        if instance is not None and getattr(instance, "host", LOCAL) != LOCAL:
+            # That host's log: its proxy's records through sandbox-ai there (the Connections page's host chooser).
+            if backend.valid_run(instance.name):
+                self.open_remote_log.emit(instance.host, ["--session", instance.name] if instance.kind == "session"
+                                          else [instance.name])
+            return
         if instance is not None and instance.project:
             self.open_log.emit(instance.project)
 
@@ -2740,11 +3012,20 @@ class ConnectionsPage(QWidget):
         super().__init__()
         self.sai = sai
         layout = QVBoxLayout(self)
+        # Whose log: this machine's (its files, read here), or a host's (sandbox-ai activity and logs there, over SSH).
+        from .host_choice import HostChooser
+        self.hosts = HostChooser(sai, tr("The connection logs of this machine, or of a host's sandboxes (over SSH)"))
+        self.hosts.changed.connect(lambda _host: self.host_changed())
+        self.remote_sources, self.remote_token, self.remote_read_at = [], 0, 0.0
         self.directory = QComboBox()
         self.directory.setMinimumWidth(320)
-        self.directory.currentIndexChanged.connect(self.list_files)
+        self.directory.currentIndexChanged.connect(lambda _=0: self.source_changed())
         browse = QPushButton(tr("Other folder…"))
         browse.clicked.connect(self.browse)
+        self.summary_button = QPushButton(tr("Summary…"))
+        self.summary_button.setToolTip(tr("What the logs of the chosen folder say in short: refusals, their targets, "
+                                          "requests per host (sandbox-ai logs --json)"))
+        self.summary_button.clicked.connect(lambda _=False: self.show_summary())
         self.file = QComboBox()
         self.file.setMinimumWidth(280)
         self.file.currentIndexChanged.connect(lambda _=0: self.load())
@@ -2756,8 +3037,13 @@ class ConnectionsPage(QWidget):
         self.refused.toggled.connect(lambda _=False: self.show_records())
         self.follow = QCheckBox(tr("follow"))
         self.follow.setChecked(True)
-        layout.addWidget(flow(QLabel(tr("Logs")), self.directory, browse, QLabel(tr("Run")), self.file, self.filter,
-                              self.refused, self.follow))
+        self.run_label = QLabel(tr("Run"))
+        layout.addWidget(self.hosts)
+        layout.addWidget(flow(QLabel(tr("Logs")), self.directory, browse, self.run_label, self.file, self.filter,
+                              self.refused, self.follow, self.summary_button))
+        self.remote_note = plain_label(role="secondary")
+        self.remote_note.hide()
+        layout.addWidget(self.remote_note)
         split = self.split = QSplitter(Qt.Orientation.Vertical)
         self.table = table([tr("Time"), tr("Event"), tr("Method"), tr("Status"), tr("Target"), tr("Bytes")])
         self.table.itemSelectionChanged.connect(self.details)
@@ -2779,9 +3065,130 @@ class ConnectionsPage(QWidget):
         self.timer.start(backend.setting("connections_interval"))
         self.refresh_directories()
 
+    # -- another host: its sandboxes' connections through sandbox-ai there (activity --kind=network, logs --json) --
+
+    def host(self):
+        return self.hosts.host() or LOCAL
+
+    def remote(self):
+        return self.host() != LOCAL
+
+    def host_changed(self):
+        """Another host: its running starts and sessions (and folders typed in) are the sources, read over SSH;
+        this machine: its log folders and files, as before."""
+        remote = self.remote()
+        self.file.setVisible(not remote)
+        self.run_label.setVisible(not remote)
+        self.remote_note.setVisible(remote)
+        self.remote_note.setText(self.remote_text() if remote else "")
+        self.position, self.reading = None, None
+        self.apply(None, [])
+        if remote:
+            self.refresh_remote_sources()
+        else:
+            self.refresh_directories()
+
+    def remote_text(self):
+        return tr("The connections the proxy on {host} logged: refusals, pushes and the first request to each host, "
+                  "repeats counted (sandbox-ai activity there); Summary… reads its logs in short (sandbox-ai logs).",
+                  host=self.hosts.label())
+
+    def open_remote(self, host, source):
+        """The connection log of the start SOURCE (sandbox-ai activity's arguments) on HOST (the Sandboxes page's
+        Connection log of a host's start)."""
+        if self.host() != host:
+            self.hosts.set_host(host)
+        if self.host() == host and host != LOCAL:
+            self.refresh_remote_sources(select=list(source))
+
+    def refresh_remote_sources(self, select=None):
+        """That host's running starts and sessions (`sandbox-ai list --json` there, in the background)."""
+        host = self.host()
+        self.remote_token += 1
+        token = self.remote_token
+        self.remote_note.setText(tr("Asking {host}…", host=self.hosts.label(host)))
+        background(lambda: self.sai.host_instances(host), timeout=90,  # a look, not work quitting would interrupt
+                   done=lambda found, error: alive(self) and self.remote_listed(host, token, select, found, error))
+
+    def remote_listed(self, host, token, select, found, error):
+        if token != self.remote_token or host != self.host():
+            return
+        sources = []
+        for instance in found if error is None else []:
+            project = instance.project if backend.valid_directory(instance.project) else None
+            folder = ["--project", project] if project else None
+            if instance.kind == "session" and backend.valid_run(instance.name):
+                sources.append((tr("Session: {name} ({status})", name=printable(instance.name),
+                                   status=printable(instance.state)), ["--session", instance.name], folder))
+            elif instance.kind == "run" and backend.valid_run(instance.name):
+                sources.append((tr("Running: {run} ({workspace})", run=printable(instance.name),
+                                   workspace=printable(instance.project)), [instance.name], folder))
+        typed = [entry for entry in self.remote_sources if entry[1][0] in ("--log-dir", "--project")]
+        self.remote_sources = sources + [entry for entry in typed if entry[1] not in [e[1] for e in sources]]
+        if select and select not in [entry[1] for entry in self.remote_sources]:
+            self.remote_sources.append(self.typed_source(select))
+        self.remote_note.setText(tr("{host}: no answer", host=self.hosts.label(host)) + f" ({printable(error)[:300]})"
+                                 if error is not None else self.remote_text())
+        self.fill_remote_sources(select)
+
+    def typed_source(self, source):
+        """(title, activity arguments, logs arguments) of a folder typed in, or of a start chosen elsewhere."""
+        if source[0] in ("--log-dir", "--project"):
+            return tr("Folder: {path}", path=printable(source[-1])), list(source), list(source)
+        return printable(" ".join(source)), list(source), None
+
+    def fill_remote_sources(self, select=None):
+        current = select or self.directory.currentData()
+        self.directory.blockSignals(True)
+        self.directory.clear()
+        for title, source, _ in self.remote_sources:
+            self.directory.addItem(title, source)
+        index = self.directory.findData(current) if current else -1
+        self.directory.setCurrentIndex(index if index >= 0 else 0)
+        self.directory.blockSignals(False)
+        self.source_changed()
+
+    def source_changed(self):
+        if self.remote():
+            self.position = None
+            self.apply(None, [])
+            self.load(force=True)
+        else:
+            self.list_files()
+
+    def summary_source(self):
+        """The arguments of `sandbox-ai logs` for the folder chosen (here: its log folder; a host's start: its
+        project's), or None."""
+        if not self.remote():
+            directory = self.directory.currentData()
+            return ["--log-dir", directory] if isinstance(directory, str) and backend.valid_directory(directory) \
+                else None
+        chosen = self.directory.currentData()
+        return next((folder for _, source, folder in self.remote_sources if source == chosen), None)
+
+    def show_summary(self):
+        source, host = self.summary_source(), self.host()
+        title = tr("Logs on {host}", host=self.hosts.label(host)) if host != LOCAL else tr("Logs")
+        if source is None:
+            inform(self, title, tr("Choose a log folder first (a start whose project is not known has none here)."),
+                   modal=False)
+            return
+        background(self.sai.host_log_summary, host, source, owner=self, source=self.summary_button, timeout=150,
+                   done=lambda data, error: self.summary_read(title, data, error))
+
+    def summary_read(self, title, data, error):
+        if error is not None:
+            warn(self, title, printable(error)[:1500], modal=False)
+            return
+        show_text(self, title, "\n".join(log_summary_lines(data)), modal=False)
+
     def refresh_directories(self, select=None, log_suffix=None):
         """The log folders, listed in a thread (a slow disk must not hold up a tab switch); SELECT: the folder
         to choose, LOG_SUFFIX: the end of the name of the log to choose there (e.g. "-RUN.jsonl")."""
+        if self.remote():  # this machine's folder (a project, a start of this machine): this machine's logs
+            self.hosts.set_host(LOCAL)
+            if self.remote():
+                return
         self.wanted_log = log_suffix
         current = select or self.directory.currentData()
         self.listing += 1
@@ -2804,6 +3211,19 @@ class ConnectionsPage(QWidget):
         self.list_files()
 
     def browse(self):
+        if self.remote():  # a folder on that host: typed (this machine's file dialog cannot see it)
+            path, ok = QInputDialog.getText(self, tr("Log folder"), tr(
+                "A project folder or a log folder on {host} (absolute path):", host=self.hosts.label()))
+            path = (path or "").strip()
+            if ok and backend.valid_directory(path):
+                kind = "--log-dir" if "/sandbox-ai/logs/" in path or path.rstrip("/").endswith("/logs") else "--project"
+                entry = self.typed_source([kind, path])
+                if entry[1] not in [e[1] for e in self.remote_sources]:
+                    self.remote_sources.append(entry)
+                self.fill_remote_sources(entry[1])
+            elif ok and path:
+                warn(self, tr("Log folder"), tr("Not an absolute path: {path}", path=printable(path)), modal=False)
+            return
         path = choose_folder(self, tr("Log folder"), "logs")
         if path:
             self.refresh_directories(select=path)
@@ -2814,6 +3234,8 @@ class ConnectionsPage(QWidget):
 
     def list_files(self):
         """The logs of the chosen folder, listed in a thread."""
+        if self.remote():
+            return
         directory = self.directory.currentData()
         self.listing += 1
         token = self.listing
@@ -2843,12 +3265,17 @@ class ConnectionsPage(QWidget):
 
     def showEvent(self, event):  # noqa: N802
         super().showEvent(event)
+        self.hosts.load()  # a host added on the Hosts page meanwhile (a small local file)
         self.load()
 
-    def load(self):
+    def load(self, force=False):
         """Look at the chosen log in a thread - its state (inode, size, time: a stat may hang on a network file
         system, so not on the GUI thread) and, if that changed since it was last read, its records. At most
-        one look at a time: while one has not come back (even a stuck one), no other starts."""
+        one look at a time: while one has not come back (even a stuck one), no other starts. Another host's:
+        load_remote."""
+        if self.remote():
+            self.load_remote(force)
+            return
         if self.reading is not None:
             return
         path = self.file.currentData()
@@ -2866,6 +3293,33 @@ class ConnectionsPage(QWidget):
             return state, backend.read_connections(path, strict=True, since=since, track=True)
         self.reading = path
         background(look, owner=self, timeout=60, done=lambda result, error: self.loaded(path, result, error))
+
+    def load_remote(self, force=False):
+        """The chosen start's connections on that host (`sandbox-ai activity SOURCE --kind=network --json` there),
+        at most every REMOTE_LOG_SECONDS while it follows, one read at a time; the table changes only when they
+        did."""
+        source, host = self.directory.currentData(), self.host()
+        if self.reading is not None or not isinstance(source, list) or not source:
+            return
+        if not force and time.monotonic() - self.remote_read_at < REMOTE_LOG_SECONDS:
+            return
+        key = ("remote", host, tuple(source))
+        self.reading, self.remote_read_at = key, time.monotonic()
+        background(lambda: self.sai.host_connections(host, source, tail=CONNECTIONS_LIMIT), timeout=150,
+                   done=lambda records, error: alive(self) and self.remote_loaded(key, records, error))
+
+    def remote_loaded(self, key, records, error):
+        self.reading = None
+        if key != ("remote", self.host(), tuple(self.directory.currentData() or ())):
+            self.load(force=True)  # another source or host was chosen meanwhile
+            return
+        if error is not None:
+            self.detail.setPlainText(tr("{host}: no answer", host=self.hosts.label(key[1])) +
+                                     f" ({printable(error)[:500]})")
+            return
+        if self.state is not None and self.state[0] == key and records == self.records:
+            return
+        self.apply((key, len(records)), records)
 
     def loaded(self, path, result, error):
         self.reading = None
@@ -2953,6 +3407,40 @@ class ConnectionsPage(QWidget):
         record = self.record_of(rows[0]) if rows else None
         if record is not None:
             self.detail.setPlainText(json.dumps(record, indent=2, ensure_ascii=True))
+
+
+def log_summary_lines(data):
+    """`sandbox-ai logs --json` in lines (escaped): the folder, refusals and their targets, the requests per host,
+    pushes, the newest refusals with why."""
+    data = data if isinstance(data, dict) else {}
+
+    def pairs(value):
+        return [(printable(str(entry[0]))[:300], entry[1]) for entry in value or []
+                if isinstance(entry, (list, tuple)) and len(entry) == 2 and isinstance(entry[1], int)][:20]
+    telemetry = data.get("telemetry") if isinstance(data.get("telemetry"), dict) else {}
+    lines = [tr("Logs in {path}", path=printable(str(data.get("directory") or "?")))]
+    if isinstance(data.get("denied"), int):
+        lines.append(tr("Dropped by the firewall: {count}", count=data["denied"]))
+    lines += [f"  {count:>6}  {target}" for target, count in pairs(data.get("targets"))]
+    if isinstance(telemetry.get("requests"), int):
+        lines += ["", tr("Requests: {count}", count=telemetry["requests"])]
+        lines += [f"  {count:>6}  {target}" for target, count in pairs(telemetry.get("hosts"))]
+    refused = pairs(telemetry.get("refused"))
+    if refused:
+        lines += ["", tr("Refused by the proxy:")] + [f"  {count:>6}  {target}" for target, count in refused]
+    pushes = telemetry.get("pushes") if isinstance(telemetry.get("pushes"), dict) else {}
+    if pushes:
+        lines += ["", tr("Pushes: {ok} checked, {refused} refused", ok=int(pushes.get("ok") or 0),
+                         refused=int(pushes.get("refused") or 0))]
+    newest = [entry for entry in data.get("refusals") or [] if isinstance(entry, dict)][-20:]
+    if newest:
+        lines += ["", tr("The newest refusals:")]
+        for entry in newest:
+            when, what = printable(str(entry.get("time") or ""))[:19], printable(str(entry.get("what") or ""))[:200]
+            lines.append(f"  {when}  {what}")
+            if entry.get("reason"):
+                lines.append(f"      {printable(str(entry['reason']))[:300]}")
+    return lines
 
 
 class AddServerDialog(QDialog):
@@ -4253,6 +4741,7 @@ class MainWindow(QMainWindow):
         self.nav.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.nav.customContextMenuRequested.connect(self.nav_menu)
         self.sandboxes.open_log.connect(self.show_log)
+        self.sandboxes.open_remote_log.connect(self.show_remote_log)
         self.sandboxes.counted.connect(lambda running, here: self.update_activity(sandboxes=here))
         self.sandboxes.updated.connect(self.sync_tabs)
         self.approvals.pending_changed.connect(self.questions_changed)
@@ -5382,6 +5871,10 @@ class MainWindow(QMainWindow):
 
     def show_log(self, workspace):
         self.connections.open_for_workspace(workspace)
+        self.show_page("connections")
+
+    def show_remote_log(self, host, source):
+        self.connections.open_remote(host, source)
         self.show_page("connections")
 
     def projects(self):
