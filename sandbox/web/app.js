@@ -3483,10 +3483,12 @@ async function updateHost(name, output, sudo, version, fromHere) {
   else if (r.error && !r.after) {
     say(t("{host}: not updated: {error}", { host: name, error: r.error }));
     output.append(el("div", { class: "notice error" }, t("{host}: not updated: {error}", { host: name, error: r.error }),
-      r.needs_password && terminalsHere() ? el("button", { onclick: () => openTerminal({ host: name, kind: "update" }, t("update {host}", { host: name })) }, t("Update in a terminal (sudo asks there)")) : null,
-      r.needs_sudo ? el("button", { onclick: (ev) => busy(ev.target, () => updateHost(name, output, true).catch(failed(t("Could not update {host}", { host: name })))) }, t("Update with sudo")) : null,
+      r.needs_password && terminalsHere() ? el("button", { onclick: () => openTerminal(fromHere
+        ? Object.assign({ host: name, kind: "install" }, installQuery({ mode: r.mode || "user", prefix: r.prefix, source: "here", sudo: true }))
+        : { host: name, kind: "update" }, t("update {host}", { host: name })) }, t("Update in a terminal (sudo asks there)")) : null,
+      r.needs_sudo ? el("button", { onclick: (ev) => busy(ev.target, () => updateHost(name, output, true, "", fromHere).catch(failed(t("Could not update {host}", { host: name })))) }, t("Update with sudo")) : null,
       !fromHere && /no published release/.test(r.error) ? fromHereButton(name, output, sudo) : null));
-    if (r.needs_password) output.append(passwordHelp(name, ["sandbox-ai", "hosts", "update", name, "--sudo"]));
+    if (r.needs_password) output.append(passwordHelp(name, ["sandbox-ai", "hosts", "update", name, "--sudo", ...(fromHere ? ["--from-here"] : [])]));
   } else output.append(notice(`${name}: ${t("{version}, up to date", { version: r.after || r.before })}${r.error ? ` (${r.error})` : ""}`, r.error ? "warn" : "ok"));
   for (const note of r.notes || []) output.append(notice(`${name}: ${note}`, "warn"));
   return r;

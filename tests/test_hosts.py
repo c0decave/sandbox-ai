@@ -946,6 +946,7 @@ def test_update_from_here_installs_this_machines_copy_as_the_same_kind(remote):
     result = h.update("ct1", from_here=True)
     assert not result["error"], result
     assert any("from this machine's copy" in note for note in result["notes"])
+    assert result["from_here"] and result["mode"] == "user" and result["prefix"] is None
     assert list((remote["home"] / ".local/share/sandbox-ai").glob("versions/*/sandbox/agent_sandbox.py"))
     with pytest.raises(ValueError, match="--version is for the signed release"):
         h.update("ct1", version="0.1.77", from_here=True)

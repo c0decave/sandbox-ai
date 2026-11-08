@@ -878,7 +878,8 @@ def update(name, version=None, sudo=None, path=None, runner=subprocess.run, from
                        terminal=terminal)
         result.update(sudo=done.get("sudo", False), error=done.get("error"), output=done.get("output", ""),
                       needs_password=done.get("needs_password", False), after=done.get("after"),
-                      changed=bool(done.get("after")) and done.get("after") != result["before"])
+                      changed=bool(done.get("after")) and done.get("after") != result["before"],
+                      from_here=True, mode=mode, prefix=done.get("prefix") or (info.get("prefix") if mode == "system" else None))
         result["notes"] += ["from this machine's copy (hosts install --from-here)", *done.get("notes", [])]
         if not result["error"]:
             forget_status(name)
