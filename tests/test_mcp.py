@@ -917,3 +917,294 @@ def test_a_thread_that_cannot_start_does_not_end_the_mcp_server(monkeypatch):
                 return None
     assert talk() == "", "closed: no thread for it"
     assert talk() == ping, "the next connection is served, its slot was given back"
+
+
+# --- an MCP server into a running sandbox: mcp attach|detach NAME START --live ---------------------------------
+#
+# The supervisor is real (runtime.control_server with the run's McpRelays, in a short directory); the server's own
+# sandbox is a fake one listening on its socket directory (ensure_running is faked); the launcher's checks of a start
+# (start_arguments) are the real ones.
+
+rt = s.RUNTIME
+
+
+def fake_server_socket(directory):
+    """A running MCP server's socket in DIRECTORY: each request line is answered with its method (tools/list with
+    one tool); (stop event, thread)."""
+    listener = rt.listen_unix(str(directory / "server.sock"))
+    listener.settimeout(0.2)
+    stop = threading.Event()
+
+    def serve():
+        while not stop.is_set():
+            try:
+                connection, _ = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+
+            def answer(connection=connection):
+                with connection:
+                    for line in connection.makefile("rb"):
+                        request = json.loads(line)
+                        if "id" in request:
+                            result = ({"tools": [{"name": "echo", "inputSchema": {"type": "object"}}]}
+                                      if request.get("method") == "tools/list" else {"method": request.get("method")})
+                            connection.sendall((json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result})
+                                                + "\n").encode())
+            threading.Thread(target=answer, daemon=True).start()
+        listener.close()
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    return stop, thread
+
+
+def ask_relay(path, method="tools/list"):
+    with socket.socket(socket.AF_UNIX) as client:
+        client.settimeout(10)
+        client.connect(str(path))
+        client.sendall((json.dumps(rpc(method, id=5)) + "\n").encode())
+        line = client.makefile("rb").readline()
+        return json.loads(line) if line else None
+
+
+@pytest.fixture
+def live(tmp_path, monkeypatch):
+    """A kept start "web" (claude) whose run is registered and running, with a real supervisor on its control socket
+    (forbid/mode as SUPERVISOR says), and servers that "start" by listening on their socket directory."""
+    short = Path(tempfile.mkdtemp(prefix="live-", dir="/tmp"))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(short))
+    starts = m.starts_module()
+    sessions, net = starts.module("sessions"), m.net_module()
+    monkeypatch.setattr(sessions, "PROC", tmp_path / "proc")
+    monkeypatch.setattr(net, "USER_RUNTIME", tmp_path / "run-user")
+    monkeypatch.setattr(starts.module("net"), "USER_RUNTIME", tmp_path / "run-user")
+    monkeypatch.setattr(m.launcher(), "load_policy", lambda path=None: {})
+    (tmp_path / "cfg/sandbox-ai").mkdir(parents=True)
+    (tmp_path / "cfg/sandbox-ai/mcp.json").write_text(json.dumps({
+        "web-search": {"command": ["python3", "-I", "/opt/x.py"], "options": ["--allow-github"]}}))
+    folder = tmp_path / "projects" / "web"
+    folder.mkdir(parents=True)
+    home = tmp_path / "agent-home"
+    home.mkdir()
+    stops, started, supervisors = [], [], []
+
+    def make(key="web", agent="claude", options=("--backend", "podman"), record=None, forbid=(), mode=None,
+             relays_live=True):
+        directory = sessions.session_dir(key)
+        for path in (directory, directory / "home", directory / "tmux"):
+            path.mkdir(parents=True, exist_ok=True)
+        pid = 4100 + len(supervisors)
+        entry = tmp_path / "proc" / str(pid)
+        entry.mkdir(parents=True)
+        (entry / "cmdline").write_bytes(b"\0".join(os.fsencode(str(part)) for part in [
+            "python3", "agent_sandbox.py", "--tmux-socket-dir", directory / "tmux"]) + b"\0")
+        (entry / "stat").write_text(f"{pid} (python3) S 1 1 1 0 -1\n")
+        sessions.save(key, {"agent": agent, "options": list(options), "agent_args": [], "backend": "podman",
+                            "workspace": str(folder), "cwd": str(folder), "created": "2026-11-01T10:00:00Z",
+                            "pod": f"agent-session-{key}", "pid": pid, "started": "2026-11-02T09:30:00Z"})
+        run = s.runs_dir() / f"session-{key}"
+        run.mkdir(parents=True)
+        (run / "run.json").write_text(json.dumps({
+            "run": f"session-{key}", "agent": agent, "kind": "agent", "backend": "podman", "workspace": str(folder),
+            "pid": os.getpid(), "start": key, "session": f"agent-session-{key}", "mcp_servers": [],
+            "mcp_live": True, "agent_home": str(home), "mode": {"name": "medium", "refuses": []}, **(record or {})}))
+        relays = rt.McpRelays(run_dir=short / f"relays-{key}", log=short / f"calls-{key}.jsonl", live=relays_live)
+        stop = threading.Event()
+        network = rt.RuntimeNetwork({}, None, lambda script: None)
+        thread = threading.Thread(target=rt.control_server, args=(run / "control.sock", network, stop, list(forbid),
+                                                                  mode, None, relays), daemon=True)
+        thread.start()
+        deadline = time.monotonic() + 5
+        while not (run / "control.sock").exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        supervisors.append((stop, thread, relays))
+        return run, relays
+
+    def ensure_running(name, a, vpn=None):
+        sock = s.mcp_socket_dir(name)
+        if (sock / "server.sock").exists():
+            return "running"
+        sock.mkdir(mode=0o700, parents=True, exist_ok=True)
+        stops.append(fake_server_socket(sock))
+        started.append((name, a.backend, list(a.mcp), sorted(getattr(a, "helper_definitions", None) or {})))
+        return "started"
+    monkeypatch.setattr(m, "ensure_running", ensure_running)
+    said = []
+    yield SimpleNamespace(make=make, said=said, out=said.append, home=home, started=started, sessions=sessions,
+                          folder=folder)
+    for stop, thread, relays in supervisors:
+        for name in relays.names():
+            relays.detach(name)
+        stop.set()
+        thread.join(5)
+    for stop, thread in stops:
+        stop.set()
+        thread.join(5)
+    import shutil
+    shutil.rmtree(short, ignore_errors=True)
+
+
+from types import SimpleNamespace  # noqa: E402
+
+
+def test_attach_live_opens_the_relay_now_and_detach_live_closes_it(live):
+    run, relays = live.make()
+    result = m.attach_live("demo", "web", out=live.out)
+    assert result["attached"] == "live" and result["server_started"] and result["kept"]
+    assert result["relay"] == "/run/sandbox-mcp/demo/server.sock" and result["agent_restart"] == "maybe"
+    assert live.started == [("demo", "podman", ["demo"], [])], "started as the start starts it"
+    # The agent's bridge reaches the server through the run's relay at once.
+    reply = ask_relay(relays.run_dir / "demo" / "server.sock")
+    assert reply["id"] == 5 and reply["result"]["tools"][0]["name"] == "echo"
+    assert json.loads((run / "run.json").read_text())["mcp_servers"] == ["demo"]
+    assert "--mcp" in live.sessions.load("web")["options"], "kept for its later starts"
+    claude = json.loads((live.home / ".claude.json").read_text())
+    assert claude["mcpServers"]["demo"] == {"type": "stdio", "command": "python3", "env": {},
+                                            "args": s.mcp_bridge_args("demo")}
+    assert "/mcp" in live.said[-1] and "resume web --restart" in live.said[-1]
+    # Again: already there, nothing doubled.
+    assert m.attach_live("demo", "web", out=live.out)["attached"] == "already"
+    assert live.sessions.load("web")["options"].count("demo") == 1
+    # mcp list (and sandbox-ai list) say whom it serves now.
+    assert m.serving()["demo"] == ["web"]
+    # detach --live: the relay is closed (a new connection is refused), out of run.json, the options and ~/.claude.json
+    result = m.detach("demo", "web", live=True, out=live.out)
+    assert result["detached"] == "live" and result["relay_closed"] and result["removed_from_options"]
+    with pytest.raises(OSError):
+        ask_relay(relays.run_dir / "demo" / "server.sock")
+    assert json.loads((run / "run.json").read_text())["mcp_servers"] == []
+    assert "--mcp" not in live.sessions.load("web")["options"]
+    assert "mcpServers" not in json.loads((live.home / ".claude.json").read_text())  # as it was before
+    assert m.detach("demo", "web", live=True, out=live.out)["detached"] == "not attached"
+    calls = [json.loads(line).get("event") for line in (relays.log).read_text().splitlines()]
+    assert calls == ["attached", "detached"]
+
+
+def test_attach_live_keeps_every_check_of_a_start(live, monkeypatch, tmp_path):
+    live.make()
+    monkeypatch.setattr(m.launcher(), "load_policy", lambda path=None: {"forbid": ["--mcp"]})
+    with pytest.raises(ValueError, match="--mcp.*policy"):
+        m.attach_live("demo", "web", out=live.out)
+    monkeypatch.setattr(m.launcher(), "load_policy", lambda path=None: {})
+    with pytest.raises(ValueError, match="Unknown MCP server: nope"):
+        m.attach_live("nope", "web", out=live.out)
+    # The security mode: paranoid refuses a server that reaches the network, as at a start.
+    live.make("tight", options=["--backend", "podman", "--mode", "paranoid", "--no-keep"])
+    with pytest.raises(ValueError, match="widens the security mode paranoid"):
+        m.attach_live("web-search", "tight", out=live.out)
+    # ... and the mode the run has, should its options say another one now.
+    live.make("strict", record={"mode": {"name": "paranoid", "refuses": []}})
+    with pytest.raises(ValueError, match="widens the security mode paranoid of this run"):
+        m.attach_live("web-search", "strict", out=live.out)
+    # The supervisor checks for itself: its policy forbids --mcp (a request written by hand reaches it too).
+    live.make("guarded", forbid=["--mcp"])
+    with pytest.raises(ValueError, match="sandbox refused: --mcp is not allowed"):
+        m.attach_live("demo", "guarded", out=live.out)
+    record = json.loads((s.runs_dir() / "session-guarded" / "run.json").read_text())
+    assert record["mcp_servers"] == [] and not (live.home / ".claude.json").exists()
+    assert live.started == [("demo", "podman", ["demo"], [])]  # only the one the supervisor then refused
+
+
+def test_what_cannot_take_a_server_while_it_runs(live, tmp_path):
+    live.make("old", record={"mcp_live": False})
+    with pytest.raises(ValueError, match="cannot take an MCP server while it runs.*--restart"):
+        m.attach_live("demo", "old", out=live.out)
+    live.make("remote", record={"podman_url": "ssh://vm/run/podman.sock"})
+    with pytest.raises(ValueError, match="another machine"):
+        m.attach_live("demo", "remote", out=live.out)
+    live.make("older", relays_live=False)  # its supervisor made no read-only place for live relays
+    with pytest.raises(ValueError, match="older version"):
+        m.attach_live("demo", "older", out=live.out)
+    live.make("paused")
+    (live.sessions.session_dir("paused") / "paused").touch()
+    with pytest.raises(ValueError, match="paused: resume it first"):
+        m.attach_live("demo", "paused", out=live.out)
+    live.sessions.session_dir("idle").mkdir(parents=True)
+    live.sessions.save("idle", {"agent": "claude", "options": [], "agent_args": [], "cwd": str(live.folder),
+                                "workspace": str(live.folder), "created": "2026-11-01T10:00:00Z"})
+    with pytest.raises(ValueError, match="does not run.*without it the server is attached for its next start"):
+        m.attach_live("demo", "idle", out=live.out)
+    # Without --live a stopped start loses it from its options only.
+    live.sessions.save("idle", {**live.sessions.load("idle"), "options": ["--mcp", "demo"]})
+    result = m.detach("demo", "idle", out=live.out)
+    assert result["detached"] == "next start" and live.sessions.load("idle")["options"] == []
+
+
+def test_attach_live_for_codex_and_a_helper(live):
+    """Codex reads its MCP servers when it starts: the relay is open, nothing is written into its configuration and
+    the human is told to restart the agent. A helper (--helper AGENT) is an MCP server like any other."""
+    run, relays = live.make(agent="codex")
+    result = m.attach_live("demo", "web", out=live.out)
+    assert result["agent"] == "codex" and result["agent_config"] is None and result["agent_restart"] == "required"
+    assert "Codex reads its MCP servers only when it starts" in live.said[-1]
+    assert "sandbox-ai resume web --restart" in live.said[-1] and not (live.home / ".claude.json").exists()
+    result = m.attach_live(None, "web", helper="claude", out=live.out)
+    name = s.helper_name("claude", str(live.folder))
+    assert result["server"] == name and live.started[-1] == (name, "podman", ["demo", name], [name])
+    assert ask_relay(relays.run_dir / name / "server.sock")["result"]["tools"][0]["name"] == "echo"
+    options = live.sessions.load("web")["options"]
+    assert options[-2:] == ["--helper", "claude"] and "--mcp" in options
+    assert m.detach(None, "web", helper="claude", live=True, out=live.out)["relay_closed"]
+    assert "--helper" not in live.sessions.load("web")["options"]
+
+
+def test_the_end_of_the_run_takes_the_live_entries_out_of_claudes_configuration(live):
+    run, _ = live.make()
+    (live.home / ".claude.json").write_text(json.dumps({"mcpServers": {"own": {"command": "x"}}, "theme": "dark"}))
+    m.attach_live("demo", "web", out=live.out)
+    m.attach_live("web-search", "web", out=live.out)
+    assert sorted(json.loads((live.home / ".claude.json").read_text())["mcpServers"]) == ["demo", "own", "web-search"]
+    m.forget_live_config(run)
+    assert json.loads((live.home / ".claude.json").read_text()) == {"mcpServers": {"own": {"command": "x"}},
+                                                                    "theme": "dark"}
+    m.forget_live_config(run / "gone")  # never raises
+    # A server of that name of Claude's own is left as it is (and said), the relay is open all the same.
+    (live.home / ".claude.json").write_text(json.dumps({"mcpServers": {"demo": {"command": "mine"}}}))
+    m.detach("demo", "web", live=True, out=live.out)
+    result = m.attach_live("demo", "web", out=live.out)
+    assert result["attached"] == "live" and result["agent_config"] is None
+    assert any("names an MCP server demo of its own" in line for line in live.said)
+
+
+def test_the_command_line_of_attach_and_detach_live(live, capsys, monkeypatch):
+    live.make()
+    monkeypatch.setattr(m.sys.stdin, "isatty", lambda: False)
+    assert m.cli(["attach", "demo", "web", "--live", "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["attached"] == "live" and result["server"] == "demo"
+    assert m.cli(["detach", "demo", "web", "--live", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["detached"] == "live"
+    with pytest.raises(ValueError, match="choose one"):
+        m.cli(["attach", "demo", "web", "--live", "--restart"])
+    with pytest.raises(ValueError, match="give NAME START"):
+        m.cli(["attach", "web", "--live"])
+    with pytest.raises(ValueError, match="--helper AGENT goes with --live"):
+        m.cli(["attach", "--helper", "codex", "web"])
+
+
+def test_the_supervisor_takes_the_descriptor_over_its_control_socket(live):
+    """net.ask hands the directory over (SCM_RIGHTS); the supervisor keeps it, never one it was not asked to take."""
+    run, relays = live.make()
+    upstream = s.mcp_socket_dir("demo")
+    upstream.mkdir(parents=True)
+    stop, thread = fake_server_socket(upstream)
+    try:
+        fd = os.open(upstream, os.O_PATH | os.O_DIRECTORY)
+        try:
+            answer = m.net_module().ask(run, {"op": "mcp-open", "name": "demo",
+                                              "relay": {"server": "demo", "rules": []}}, fds=[fd])
+        finally:
+            os.close(fd)  # the supervisor holds its own copy
+        assert answer["opened"] and ask_relay(relays.run_dir / "demo" / "server.sock")["id"] == 5
+        fd = os.open(upstream, os.O_PATH | os.O_DIRECTORY)
+        try:
+            with pytest.raises(ValueError, match="takes the server's socket directory as one descriptor"):
+                m.net_module().ask(run, {"op": "mcp-open", "name": "x", "relay": {"server": "x"}}, fds=[fd, fd])
+        finally:
+            os.close(fd)
+        assert m.net_module().ask(run, {"op": "mcp-list"}) == {"ok": True, "servers": ["demo"], "live": True}
+    finally:
+        stop.set()
+        thread.join(5)

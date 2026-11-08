@@ -384,7 +384,7 @@ und passen so immer zur installierten Version.
 | `sandbox-ai activity [LAUF\|--session NAME\|--project P\|--log-dir VERZ] [-f] [--since Z] [-k ART] [--json]` | | was die Agenten getan haben: Eingaben, Antworten, Tool-Aufrufe, Befehle, Dateiänderungen, Netzwerk, Rückfragen, Tokens ([Aktivität der Agenten](#aktivität-der-agenten)) |
 | `sandbox-ai net list\|show\|allow\|revoke\|untaint …` | | ändern, was eine laufende Sandbox erreichen darf ([Netzwerkänderungen](#netzwerk-einer-laufenden-sandbox-ändern)); beendet wird sie mit `sandbox-ai stop NAME` |
 | `sandbox-ai devices list\|add\|remove [LAUF] PFAD\|usb:VID:PID`, `sandbox-ai limits [LAUF] …` | | Geräte und Limits einer laufenden Sandbox ([Hardware](#hardware-geräte-und-gpus), [Limits](#ressourcenlimits)) |
-| `sandbox-ai workspace list\|add\|remove [LAUF] VERZ [--ro] [--force]` | | ein Host-Verzeichnis, einer laufenden Sandbox unter `/workspaces/<name>` hinzugefügt, mit den Prüfungen eines Starts, und wieder weggenommen |
+| `sandbox-ai workspace list\|add\|remove [LAUF] VERZ\|DATEI [--ro] [--name NAME] [--force]` | | ein Host-Verzeichnis (oder eine einzelne Datei), einer laufenden Sandbox unter `/workspaces/<name>` (oder `/workspaces/NAME`) hinzugefügt, mit den Prüfungen eines Starts, und wieder weggenommen |
 | `sandbox-ai approvals list\|allow\|deny\|history\|remembered\|forget …` | | beantworten, was laufende Sandboxen fragen; was immer erlaubt wurde ([Rückfragen](#rückfragen-und-browser-anfragen)) |
 | `sandbox-ai canaries list [LAUF]`, `sandbox-ai canaries resume LAUF` | | die Köderdateien der Läufe und was mit ihnen geschah; eine Sandbox fortsetzen, die ein Köder angehalten hat ([Köderdateien](#köderdateien-canaries)) |
 | `sandbox-ai secrets list\|set\|delete\|backend` | | API-Schlüssel und Tokens im System-Schlüsselbund ([Geheimnisse](#geheimnisse)) |
@@ -785,7 +785,7 @@ Arbeitsverzeichnisses erst nach Freigabe: `-- --add-dir /workspaces/<name>`
 ```
 
 **Ein Workspace, der während des Laufs hinzukommt.** `sandbox-ai workspace add
-[LAUF] VERZ [--ro]` hängt VERZ ohne Neustart unter `/workspaces/<name>` ein;
+[LAUF] VERZ [--ro] [--name NAME]` hängt VERZ ohne Neustart unter `/workspaces/<name>` ein;
 `workspace list` zeigt die Workspaces des Laufs, `workspace remove [LAUF]
 VERZ|NAME` nimmt einen hinzugefügten wieder weg. VERZ wird geprüft wie
 `--workspace` beim Start (kein HOME-, Temp- oder Laufverzeichnis, kein privater
@@ -821,9 +821,32 @@ nach dem Lauf sieht ihn auch an. Läufe, die
 0.1.75 oder älter gestartet hat, haben dafür keinen Platz: mit `resume NAME
 --restart --workspace VERZ` neu starten.
 
+`--name NAME` legt ihn unter `/workspaces/NAME` statt unter dem Namen seines
+Verzeichnisses ab (1-64 Buchstaben, Ziffern, `_`, `.`, `-`, beginnend mit
+Buchstabe oder Ziffer; abgelehnt, wenn ein Workspace des Laufs diesen Namen
+hat oder ein Workspace, den die Session behält, ihn nach einem Neustart
+zurückbekommt). Eine Session behält den Namen mit (`--workspace VERZ
+--workspace-name NAME=VERZ` in ihren Optionen), ein Neustart legt ihn also an
+denselben Ort. VERZ darf auch eine einzelne reguläre **Datei** sein: Sie wird
+genauso geprüft (die Datei und die Ordner, in denen sie liegt: an einem privaten
+Ort mit Warnung, in sandbox-ais eigenen Ordnern abgelehnt; ein Socket, FIFO oder
+Gerät wird nie genommen) und genauso eingehängt, auf eine leere Datei, die der
+Helfer unter `/workspaces/NAME` anlegt (der Kernel hängt eine Datei nur auf eine
+Datei). Eine Datei gilt für den Lauf: Ein Start nimmt keine Datei als Workspace,
+sie bleibt also nicht für die Session, und Datei-Log, Push-Prüfung und
+Privacy-Prüfung nach dem Lauf sehen nur Verzeichnisse an. Ein Editor, der
+speichert, indem er eine neue Datei schreibt und über die alte umbenennt, ändert
+den Namen auf dem Host, nicht die eingehängte Datei: Die Sandbox behält die
+Datei, die sie bekam (erneut hinzufügen). `workspace list --json` nennt für
+jeden Workspace `kind` (`dir` oder `file`) und für einen hinzugefügten, ob er
+`named` ist.
+
 ```bash
 sandbox-ai workspace add claude-1a2b3c4d ~/src/shared-lib --ro
 #   added /home/me/src/shared-lib to claude-1a2b3c4d at /workspaces/shared-lib (ro)
+sandbox-ai workspace add claude-1a2b3c4d ~/data/2026 --name data
+sandbox-ai workspace add claude-1a2b3c4d ~/notes/todo.md --ro
+#   added the file /home/me/notes/todo.md to claude-1a2b3c4d at /workspaces/todo.md (ro)
 sandbox-ai workspace remove claude-1a2b3c4d shared-lib
 ```
 
@@ -2086,6 +2109,9 @@ Server läuft für weitere Agenten und Sessions weiter.
 ```bash
 ./sandbox-ai mcp attach demo web               # web bekommt demo (auch für seine späteren Starts)
 ./sandbox-ai mcp attach demo web --restart     # web läuft: jetzt damit neu gestartet
+./sandbox-ai mcp attach demo web --live        # web läuft: demo erreicht es jetzt, ohne Neustart
+./sandbox-ai mcp attach --helper codex web --live   # ein Codex-Helfer für das laufende web
+./sandbox-ai mcp detach demo web --live        # sein Relay in web schließt jetzt; aus den Optionen
 ./sandbox-ai mcp start demo --for web          # demo so starten, wie web es startet, und verbinden
 ./sandbox-ai resume web --mcp demo             # dasselbe für einen gestoppten Start, jetzt gestartet
 ```
@@ -2095,19 +2121,56 @@ den Optionen des behaltenen Starts hinzu, geprüft wie sein Start es prüft: die
 Richtlinie des Administrators (`forbid` `--mcp`), sein Sicherheitsmodus
 (`paranoid` lehnt einen Server mit Netz ab) und die Definition des Servers.
 `--for` startet den Server sofort mit Backend und Regeln dieses Starts, sodass
-der Start ihn laufend vorfindet. Eine laufende Sandbox kann keinen neuen
-MCP-Server aufnehmen, solange sie läuft, mit keinem Backend: Ihr Agent liest
-seine MCP-Server einmal, beim Start (`--mcp-config`, `-c mcp_servers`,
-`opencode.json`), und der Socket des Servers erreicht die Sandbox nur über
-einen beim Start eingehängten Ordner (ein laufender Podman-Container nimmt
-keinen neuen Mount, der Mount-Namespace von Bubblewrap auch nicht). Darum wird
-ein laufender Start damit neu gestartet (`--restart`, oder ja im Terminal; der
-Agent setzt sein Gespräch fort), sonst erreicht er den Server ab seinem
-nächsten Start, und der Befehl sagt, wie man ihn neu startet. Ein Lauf ohne
+der Start ihn laufend vorfindet. Ohne `--live` (unten) erreicht eine laufende
+Sandbox einen neuen MCP-Server erst nach einem Neustart: Ihr Agent liest seine
+MCP-Server beim Start (`--mcp-config`, `-c mcp_servers`, `opencode.json`).
+Darum wird ein laufender Start damit neu gestartet (`--restart`, oder ja im
+Terminal; der Agent setzt sein Gespräch fort), sonst erreicht er den Server ab
+seinem nächsten Start, und der Befehl sagt, wie man ihn neu startet oder mit
+`--live` verbindet. Ein Lauf ohne
 behaltenen Start (`--no-keep`) hat nichts zum erneuten Starten: beenden und mit
 `--mcp NAME` neu starten. `mcp list` und `sandbox-ai list` zeigen, wen jeder
 Server bedient; die MCP-Seite der App hat **Verbinden mit…**, die
 Weboberfläche dasselbe in der Zeile eines Servers unter Starts und Sitzungen.
+
+**Während des Laufs: `--live`.** `mcp attach NAME START --live` (oder `--helper
+AGENT` statt NAME) gibt einem laufenden Start den Server ohne Neustart. Jede
+Prüfung eines Starts gilt (die Richtlinie des Administrators, der
+Sicherheitsmodus des Starts und der, den sein Lauf hat, die Definition des
+Servers, sein Netz und seine Ordner); die Sandbox des Servers wird gestartet,
+wie dieser Start sie starten würde, falls sie nicht läuft. Dann öffnet der
+Launcher das Socket-Verzeichnis des Servers und reicht diesen Deskriptor (keinen
+Pfad, keinen Mount) über den Kontroll-Socket an den Supervisor des Laufs, der
+das Relay des Servers unter `/run/sandbox-mcp/NAME/server.sock` öffnet wie bei
+einem Start: dasselbe Gateway, die Fragen des Laufs (`sandbox-ai approvals`),
+Taint und die Regeln für getaintete Läufe, `mcp-calls.jsonl` (mit einem
+Eintrag `attached` und später `detached`). Der Supervisor prüft Richtlinie und
+Modus auch selbst und verbindet sich mit dem Socket des Servers, ohne einem
+Link zu folgen, den der Server in sein Verzeichnis gelegt haben könnte. Der
+Lauf vermerkt ihn (`run.json` `mcp_servers`: `sandbox-ai list`, `mcp list`),
+der Start behält ihn (`--mcp NAME` oder `--helper AGENT`), und die
+MCP-Konfiguration des Agenten bekommt ihn dort, wo der Agent eine liest:
+
+| Agent | Was `--live` für ihn schreibt | Was Sie tun |
+|---|---|---|
+| Claude Code | `mcpServers.NAME` in `~/.claude.json` der Sandbox (User-Scope; am Ende des Laufs wieder entfernt: der nächste Start nennt ihn auf seiner Kommandozeile) | `/mcp` öffnen und nach NAME sehen. Claude Code liest seine MCP-Server beim Start; ob ein laufendes einen seitdem hinzugefügten Server übernimmt, ist nicht dokumentiert, darum, falls `/mcp` ihn nicht zeigt, den Agenten neu starten: `sandbox-ai resume START --restart` (das Gespräch geht weiter) |
+| Codex | nichts: es liest seine MCP-Server nur beim Start (`-c mcp_servers`) | den Agenten neu starten: `sandbox-ai resume START --restart` (das Gespräch geht weiter) |
+| OpenCode | nichts: es liest seine MCP-Server nur beim Start (`OPENCODE_CONFIG_CONTENT`) | ebenso |
+
+`mcp detach NAME START --live` schließt das Relay sofort (die Verbindungen des
+Agenten dazu enden, seine Aufrufe schlagen fehl; der Agent nennt den Server
+womöglich bis zu seinem Neustart weiter), nimmt ihn aus `run.json`, der
+Konfiguration des Agenten und den Optionen des Starts; ohne `--live` nur aus
+den späteren Starts. Keines von beiden beendet die Sandbox des Servers (andere
+Starts nutzen sie vielleicht: `mcp stop NAME`). Abgelehnt für einen pausierten
+Start (erst fortsetzen), einen Lauf einer älteren Version (er hat keinen
+schreibgeschützten Ort für später geöffnete Relays: `--restart`), einen Lauf
+auf einem anderen Rechner (`--podman-url`) und einen Lauf ohne behaltenen
+Start. Mit `--json` geben beide `{"server", "start", "run", "state",
+"attached": "live" | "already" (attach) / "detached": "live" | "next start" |
+"not attached" (detach), "agent", "agent_config", "agent_restart": "maybe" |
+"required", "relay", "kept" / "relay_closed", "removed_from_options",
+"message"}` aus.
 
 Zwischen den Sandboxes gibt es keinen Netzweg: Die Server-Sandbox lauscht auf
 einem Unix-Socket in `~/.local/state/sandbox-ai/mcp/NAME/sock/` und startet je
@@ -4558,7 +4621,7 @@ Siehe [Projektkonfiguration](#projektkonfiguration-und-wizard) und
 | `sandbox-ai net stop LAUF [--wait SEKUNDEN]` | Die ältere Form von `sandbox-ai stop NAME` für einen Lauf: SIGTERM an ihren geprüften Launcher, der aufräumt |
 | `sandbox-ai net untaint [LAUF]` | Den Taint des Laufs zurücknehmen: Die Regeln für Läufe mit Taint gelten nicht mehr, bis wieder nicht vertrauenswürdiger Inhalt hineinkommt (siehe [Regelwerke](#regelwerke)) |
 | `sandbox-ai devices list\|add\|remove [LAUF] PFAD\|usb:VID:PID[:SERIAL]`, `sandbox-ai limits [LAUF] [--memory GRÖSSE] [--cpus N] [--pids N]` | Einer laufenden Sandbox Geräte geben und wieder nehmen; ihre Limits ändern |
-| `sandbox-ai workspace list [LAUF] [--json]`, `add [LAUF] VERZ [--ro]`, `remove [LAUF] VERZ\|NAME [--force]` | Ein Host-Verzeichnis in eine laufende Sandbox unter `/workspaces/<name>` einhängen (die Prüfungen von `--workspace`; für den nächsten Start einer Session behalten) und wieder wegnehmen |
+| `sandbox-ai workspace list [LAUF] [--json]`, `add [LAUF] VERZ\|DATEI [--ro] [--name NAME]`, `remove [LAUF] VERZ\|DATEI\|NAME [--force]` | Ein Host-Verzeichnis (oder eine einzelne Datei) in eine laufende Sandbox unter `/workspaces/<name>` (oder `/workspaces/NAME`) einhängen (die Prüfungen von `--workspace`; ein Verzeichnis bleibt für den nächsten Start einer Session, unter seinem Namen) und wieder wegnehmen |
 | `sandbox-ai approvals list\|history [LAUF]`, `allow ID [--scope once\|run\|always]`, `deny ID`, `remembered`, `forget PROJEKT EINTRAG` | Die Fragen laufender Sandboxen beantworten; was je Projekt immer erlaubt wurde, und einen Eintrag davon vergessen |
 | `sandbox-ai canaries list [LAUF] [--tokens] [--json]`, `canaries log [LAUF] [--json]`, `canaries resume LAUF` | Die [Köderdateien](#köderdateien-canaries) der Läufe und was mit ihnen geschah; jedes Ereignis mit Prozess, Tool-Aufruf und Modellanfragen; eine von einem Canary pausierte Sandbox fortsetzen |
 | `sandbox-ai secrets list\|set NAME [--from-env VAR]\|delete NAME\|backend` | Geheimnisse im System-Schlüsselbund, sonst in privaten Dateien |
@@ -4584,7 +4647,8 @@ Siehe [Projektkonfiguration](#projektkonfiguration-und-wizard) und
 | `sandbox-ai mcp list` | Definierte MCP-Server und ihr Status |
 | `sandbox-ai mcp catalog`, `sandbox-ai mcp add NAME [-m ZIEL=HOST[:ro\|rw]] [-e VAR] [-n none\|full] [-M GRÖSSE] [-p N] [-v VPN]` | Server der MCP-Kataloge; einen als Container-Server hinzufügen (siehe [Lokale MCP-Server](#server-aus-einem-mcp-katalog)) |
 | `sandbox-ai mcp start NAME [--backend podman\|bwrap] [--vpn PROFIL] [--for START [--restart]]`, `sandbox-ai mcp stop NAME` | MCP-Server-Sandbox starten oder stoppen (`--for`: für diesen Start, mit ihm verbunden) |
-| `sandbox-ai mcp attach NAME START [--restart] [--json]` | Einen MCP-Server mit einem behaltenen Agenten-Start verbinden (ein laufender: damit neu gestartet) |
+| `sandbox-ai mcp attach NAME START [--restart \| --live] [--json]`, `--helper AGENT START --live` | Einen MCP-Server (oder einen Helfer) mit einem behaltenen Agenten-Start verbinden (ein laufender: damit neu gestartet, oder `--live`: sofort, ohne Neustart) |
+| `sandbox-ai mcp detach NAME START [--live] [--json]`, `--helper AGENT START [--live]` | Ihn aus den Optionen des Starts nehmen (`--live`: und sein Relay in der laufenden Sandbox sofort schließen) |
 | `sandbox-ai wizard [new]` | Interaktive Projekteinrichtung; bietet an, eine vorhandene Konfiguration zu bearbeiten |
 | `sandbox-ai wizard edit [VERZ\|DATEI]` | Vorhandene Konfiguration eines Projekts ändern (Menü, Änderungen vor dem Schreiben) |
 | `sandbox-ai login AGENT [Launcher-Optionen] [-- Login-Argumente]`, `--status`, `AGENT --logout` | Login-Speicher für Sandboxes |

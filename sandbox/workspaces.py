@@ -2,8 +2,10 @@
 """sandbox-ai workspace: give a running sandbox another host directory, or take one back, without a restart.
 
   sandbox-ai workspace list [RUN] [--json]             the run's workspaces: the start's and the added ones
-  sandbox-ai workspace add [RUN] DIR [--ro]            mount DIR at /workspaces/<name> while the sandbox runs
-  sandbox-ai workspace remove [RUN] DIR|NAME [--force] take an added workspace away again
+  sandbox-ai workspace add [RUN] DIR|FILE [--ro] [--name NAME]
+                                                       mount DIR (or a single regular FILE) at /workspaces/NAME
+                                                       (default NAME: its own name) while the sandbox runs
+  sandbox-ai workspace remove [RUN] DIR|FILE|NAME [--force] take an added workspace away again
 
 RUN as for `sandbox-ai net` (its run id or the name of its start; may be left out when only one sandbox runs).
 A directory added gets the checks of --workspace at a start (no HOME, temporary or run directory, no private
@@ -12,7 +14,15 @@ none of the files the launcher reads inside it, no directory of your PATH in it)
 always when the run's security mode or --workspace-ro keeps further workspaces read-only. A workspace added to a
 session is kept in its options, so `sandbox-ai resume NAME --restart` starts with it at the same place (not one
 added with --ro: it would come back writable; in a session it is named NAME-ro, so that it never takes the place a
-kept one gets back at a restart); `remove` takes it out again.
+kept one gets back at a restart); `remove` takes it out again. --name NAME (1-64 letters, digits, '_', '.', '-',
+starting with a letter or digit; no name a workspace of the run holds, nor one a kept workspace gets back at a
+restart) is kept with it (--workspace-name NAME=DIR), so a restart puts it at /workspaces/NAME again.
+
+A FILE gets the same checks (the file, the folders it lies in); only a regular file is taken (never a socket, FIFO
+or device), mounted on an empty file the helper makes at /workspaces/NAME. It lasts for the run: a start takes no file
+as a workspace, so it is not kept for the session, and the file log, the push check and the privacy check after the
+run look at directories only. An editor that saves by writing a new file and renaming it over the old one replaces
+the name on the host, not the mounted file: the sandbox keeps seeing the file it was given (add it again).
 
 How: nothing runs in the sandbox. A helper of your own user opens DIR and checks that it is the directory that
 was checked (device and inode), that each PID it is given still names the process found (its start time), enters
@@ -62,6 +72,9 @@ MNT_DETACH, UMOUNT_NOFOLLOW = 2, 8
 # attached, partial (a removal that stopped half-way: gone in the namespaces of "gone_in", still in the others),
 # removed. Every state but removed counts as present (names, overlaps, remove).
 STATES = ("pending", "attached", "partial", "removed")
+KINDS = ("dir", "file")  # what an added workspace is: a directory, or a single regular file (workspace add FILE)
+# --name NAME: what /workspaces/NAME may be called (no "/", no leading "." or "-", nothing a shell or a list splits).
+NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 PRESENT = ("pending", "attached", "partial")
 # File systems of the kernel itself: never handed to a sandbox, neither as DIR nor mounted somewhere below it.
 KERNEL_FILESYSTEMS = frozenset({"proc", "sysfs", "cgroup", "cgroup2", "devtmpfs", "devpts", "mqueue", "debugfs",
@@ -165,15 +178,17 @@ def kernel_mounts(text, holder, source):
         ident == holder or ((point == source or point.startswith(prefix)) and hangs_off_holder(parent)))]
 
 
-def clone(c, source, identity, mode):
-    """A detached copy (open_tree) of the directory SOURCE, refused unless it is still IDENTITY (device, inode):
-    what was checked is what is mounted, whatever was swapped in on the way since. Refused when it holds a file
-    system of the kernel's own (KERNEL_FILESYSTEMS: proc, sysfs, cgroup ...). Read-only for MODE ro; never
-    set-user-ID or device files: without mount_setattr (Linux 5.12) nothing is added."""
-    fd = os.open(source, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+def clone(c, source, identity, mode, kind="dir"):
+    """A detached copy (open_tree) of the directory SOURCE (KIND file: the regular file SOURCE), refused unless it is
+    still IDENTITY (device, inode): what was checked is what is mounted, whatever was swapped in on the way since.
+    Refused when it holds a file system of the kernel's own (KERNEL_FILESYSTEMS: proc, sysfs, cgroup ...). Read-only
+    for MODE ro; never set-user-ID or device files: without mount_setattr (Linux 5.12) nothing is added."""
+    fd = os.open(source, os.O_PATH | (os.O_DIRECTORY if kind == "dir" else 0) | os.O_NOFOLLOW | os.O_CLOEXEC)
     tree = None
     try:
         info = os.fstat(fd)
+        if kind == "file" and not stat.S_ISREG(info.st_mode):
+            raise OSError(errno.EINVAL, f"{source} is no regular file: not added")
         if (info.st_dev, info.st_ino) != tuple(identity):
             raise OSError(errno.ESTALE, f"{source} changed after it was checked; add it again")
         tree = check(c.syscall(SYS_OPEN_TREE, fd, b"", OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_RECURSIVE
@@ -206,22 +221,35 @@ def clone(c, source, identity, mode):
     return tree
 
 
-def mount_point(name, create):
+def mount_point(name, create, kind="dir"):
     """(fd of /workspaces, fd of /workspaces/NAME or None) in the current mount namespace, neither through a link:
-    the agent may have put anything there. CREATE makes the directory."""
+    the agent may have put anything there. CREATE makes the directory (KIND file: an empty regular file, the mount
+    point of a file: the kernel mounts a file only on a file)."""
     base = os.open(WORKSPACES_DIR, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    if create:
-        with contextlib.suppress(FileExistsError):
-            os.mkdir(name, 0o755, dir_fd=base)
+    what = "directory" if kind == "dir" else "regular file"
     try:
-        target = os.open(name, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=base)
+        if create and kind == "dir":
+            with contextlib.suppress(FileExistsError):
+                os.mkdir(name, 0o755, dir_fd=base)
+        elif create:
+            with contextlib.suppress(FileExistsError):  # O_EXCL: never through a link the agent put there
+                os.close(os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644,
+                                 dir_fd=base))
+        # O_PATH with O_NOFOLLOW opens a link itself: refused below (not a directory, not a regular file).
+        target = os.open(name, os.O_PATH | (os.O_DIRECTORY if kind == "dir" else 0) | os.O_NOFOLLOW | os.O_CLOEXEC,
+                         dir_fd=base)
     except FileNotFoundError:
         if create:
+            os.close(base)
             raise
         return base, None
     except OSError as exc:
         os.close(base)
-        raise OSError(exc.errno, f"{WORKSPACES_DIR}/{name} is no directory in the sandbox (made there?)") from None
+        raise OSError(exc.errno, f"{WORKSPACES_DIR}/{name} is no {what} in the sandbox (made there?)") from None
+    if kind != "dir" and not stat.S_ISREG(os.fstat(target).st_mode):
+        os.close(target)
+        os.close(base)
+        raise OSError(errno.ENOTDIR, f"{WORKSPACES_DIR}/{name} is no {what} in the sandbox (made there?)")
     return base, target
 
 
@@ -254,9 +282,10 @@ class Partial(OSError):
 
 
 def helper(op, user_pid, name, targets, source=None, identity=None, mode="rw", proc=PROC, c=None, force=False,
-           starts=None):
+           starts=None, kind="dir"):
     """In this (fresh, single-threaded) process: enter the user namespace of USER_PID, then mount SOURCE (op add)
-    at /workspaces/NAME, or unmount it there (op remove), in the mount namespace of every pid in TARGETS. STARTS
+    at /workspaces/NAME, or unmount it there (op remove), in the mount namespace of every pid in TARGETS (KIND: dir,
+    or file for a single regular file, whose mount point is an empty file). STARTS
     ({pid: start time}) are the processes' start times when they were found: a PID that names another process now
     is refused. An add that fails in one namespace is undone in those it reached; a removal that fails in one is
     undone in those it left (mounted again from the one where it failed), else Partial."""
@@ -274,15 +303,15 @@ def helper(op, user_pid, name, targets, source=None, identity=None, mode="rw", p
         # A mount namespace of our own, owned by the sandbox's user namespace, may clone the host's directory;
         # each namespace needs a clone of its own (a detached tree is attached once).
         check(c.unshare(CLONE_NEWNS), "a private mount namespace")
-        trees = [clone(c, source, identity, mode) for _ in namespaces]
+        trees = [clone(c, source, identity, mode, kind) for _ in namespaces]
     reached = []
     try:
         for index, fd in enumerate(namespaces):
             check(c.setns(fd, CLONE_NEWNS), "enter a mount namespace of the sandbox")
             if op == "add":
-                attach(c, name, trees[index])
+                attach(c, name, trees[index], kind)
             else:
-                detach(c, name, force)
+                detach(c, name, force, kind)
             reached.append(index)
     except OSError as exc:
         if op == "add":
@@ -290,7 +319,7 @@ def helper(op, user_pid, name, targets, source=None, identity=None, mode="rw", p
             for index in reached:
                 try:
                     check(c.setns(namespaces[index], CLONE_NEWNS), "enter a mount namespace of the sandbox")
-                    detach(c, name, True)
+                    detach(c, name, True, kind)
                 except OSError:
                     failed = True
             if failed:
@@ -299,7 +328,7 @@ def helper(op, user_pid, name, targets, source=None, identity=None, mode="rw", p
             raise
         if not reached:
             raise
-        lost = restore(c, name, [namespaces[index] for index in reached])
+        lost = restore(c, name, [namespaces[index] for index in reached], kind)
         if lost:
             gone = [targets[index] for index in reached if namespaces[index] in lost]
             raise Partial(exc.errno or errno.EBUSY, f"{WORKSPACES_DIR}/{name} is {REFUSED_PARTIAL}: gone in the mount "
@@ -310,13 +339,13 @@ def helper(op, user_pid, name, targets, source=None, identity=None, mode="rw", p
     return 0
 
 
-def restore(c, name, namespaces):
+def restore(c, name, namespaces, kind="dir"):
     """Mount /workspaces/NAME again in the mount namespaces NAMESPACES (descriptors) a removal had left, from clones
     of the mount in the current one, where the removal failed (a clone keeps read-only, nosuid and nodev); the
     descriptors of those where it could not."""
     trees = []
     try:
-        base, target = place(name, False)
+        base, target = place(name, False, kind)
     except OSError:
         return list(namespaces)
     try:
@@ -336,7 +365,7 @@ def restore(c, name, namespaces):
     for fd, tree in zip(namespaces, trees):
         try:
             check(c.setns(fd, CLONE_NEWNS), "enter a mount namespace of the sandbox")
-            attach(c, name, tree)
+            attach(c, name, tree, kind)
         except OSError:
             lost.append(fd)
         finally:
@@ -345,17 +374,17 @@ def restore(c, name, namespaces):
     return lost
 
 
-def place(name, create):
+def place(name, create, kind="dir"):
     try:
-        return mount_point(name, create)
+        return mount_point(name, create, kind)
     except FileNotFoundError:
         raise OSError(errno.ENOENT, f"the sandbox has no {WORKSPACES_DIR} of its own (started by sandbox-ai 0.1.75 "
                                     "or older?): restart it with the workspace") from None
 
 
-def attach(c, name, tree):
-    """Mount TREE at /workspaces/NAME of the current mount namespace."""
-    base, target = place(name, True)
+def attach(c, name, tree, kind="dir"):
+    """Mount TREE at /workspaces/NAME of the current mount namespace (KIND file: on an empty file made there)."""
+    base, target = place(name, True, kind)
     try:
         if mounted(base, target):
             raise OSError(errno.EBUSY, f"{WORKSPACES_DIR}/{name} is in use in the sandbox")
@@ -366,12 +395,14 @@ def attach(c, name, tree):
         os.close(base)
 
 
-def detach(c, name, force=False):
+def detach(c, name, force=False, kind="dir"):
     """Unmount /workspaces/NAME of the current mount namespace if something is mounted there; remove the mount
-    point once no namespace has a mount on it (the tmpfs is shared, rmdir fails while one has). Strictly first: the
-    kernel refuses (EBUSY) while anything still holds the tree, also what no look at /proc shows (a descriptor in
-    flight over a socket, io_uring); FORCE detaches it then (what is held stays usable until it is closed)."""
-    base, target = place(name, False)
+    point once no namespace has a mount on it (the tmpfs is shared, rmdir fails while one has; a file's mount point
+    is removed when this namespace has none: an unlink of a mount point another namespace still uses fails with
+    EBUSY). Strictly first: the kernel refuses (EBUSY) while anything still holds the tree, also what no look at
+    /proc shows (a descriptor in flight over a socket, io_uring); FORCE detaches it then (what is held stays usable
+    until it is closed)."""
+    base, target = place(name, False, kind)
     try:
         if target is None:
             return
@@ -390,7 +421,7 @@ def detach(c, name, force=False):
                     check(-1 if code else 0, f"unmount {WORKSPACES_DIR}/{name}")
                 check(c.umount2(path, MNT_DETACH | UMOUNT_NOFOLLOW), f"unmount {WORKSPACES_DIR}/{name}")
         with contextlib.suppress(OSError):
-            os.rmdir(name, dir_fd=base)
+            (os.rmdir if kind == "dir" else os.unlink)(name, dir_fd=base)
     finally:
         if target is not None:
             os.close(target)
@@ -409,7 +440,7 @@ def own_namespaces(found, proc=PROC):
     return [pid for pid in found["mntns"].values() if own is not None and user(pid) == own]
 
 
-def run_helper(op, found, name, source=None, identity=None, mode="rw", force=False, proc=PROC, runner=None):
+def run_helper(op, found, name, source=None, identity=None, mode="rw", force=False, proc=PROC, runner=None, kind="dir"):
     """Run helper() in a process of its own; (status, error text), and for status PARTIAL a third item:
     {"gone": [pids of the namespaces the removal left]}; for a failed add whose undo is not confirmed (killed on
     the way and the undo failed too, or its rollback failed): {"undone": False}."""
@@ -423,7 +454,7 @@ def run_helper(op, found, name, source=None, identity=None, mode="rw", force=Fal
     if gone:
         return 1, f"process {gone[0]} of the sandbox is gone (has it ended?)"
     request = {"op": op, "user": found["user"], "name": name, "targets": targets, "source": source,
-               "identity": identity, "mode": mode, "force": force, "starts": starts}
+               "identity": identity, "mode": mode, "force": force, "starts": starts, "kind": kind}
     command = [sys.executable, "-I", str(Path(__file__)), "--internal-helper", json.dumps(request)]
     try:
         result = runner(command, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
@@ -454,9 +485,12 @@ def run_helper(op, found, name, source=None, identity=None, mode="rw", force=Fal
 def helper_main(argument):
     request = json.loads(argument)
     starts = request.get("starts")
+    kind = request.get("kind", "dir")
+    if kind not in KINDS:
+        raise OSError(errno.EINVAL, f"no such kind of workspace: {kind!r}")
     return helper(request["op"], int(request["user"]), request["name"], [int(p) for p in request["targets"]],
                   request.get("source"), request.get("identity"), request.get("mode", "rw"),
-                  force=bool(request.get("force")), starts=starts if isinstance(starts, dict) else None)
+                  force=bool(request.get("force")), starts=starts if isinstance(starts, dict) else None, kind=kind)
 
 
 # --- which processes use a workspace -----------------------------------------------------------------
@@ -581,11 +615,12 @@ def overlaps(path, other):
 
 
 def opened(value):
-    """(fd, real path, identity) of the directory VALUE, opened once: the checks look at what this descriptor is,
-    the helper mounts only that (clone)."""
+    """(fd, real path, identity, kind) of the directory (kind dir) or regular file (kind file) VALUE, opened once: the
+    checks look at what this descriptor is, the helper mounts only that (clone). Anything else (a socket, a FIFO, a
+    device) is refused: whoever reaches a socket gets what runs behind it, a device is --device's."""
     l = module("agent_sandbox")
     if not isinstance(value, str) or not value.strip():
-        raise ValueError("give a directory")
+        raise ValueError("give a directory or a file")
     source = Path(os.path.normpath(Path(value).expanduser().absolute()))
     if any(c in str(source) for c in (",", "\n", "\r")) or not str(source).isprintable():
         raise ValueError("a workspace path cannot hold commas or control characters")
@@ -594,22 +629,26 @@ def opened(value):
     # An agent of an earlier run may have planted a link to get a host directory mounted read-write.
     l.check_planted(str(source), "Workspace", l.exposed_before())
     try:
-        fd = os.open(source, os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
+        fd = os.open(source, os.O_PATH | os.O_CLOEXEC)  # O_PATH: a FIFO is not opened for reading (never waited on)
     except FileNotFoundError:
-        raise ValueError(f"{shown(source)}: no such directory") from None
+        raise ValueError(f"{shown(source)}: no such directory or file") from None
     except NotADirectoryError:
         raise ValueError(f"{shown(source)}: not a directory") from None
     real = Path(os.readlink(f"/proc/self/fd/{fd}"))
     info = os.fstat(fd)
-    if not stat.S_ISDIR(info.st_mode) or not real.is_absolute():
+    kind = "dir" if stat.S_ISDIR(info.st_mode) else "file" if stat.S_ISREG(info.st_mode) else None
+    if kind is None or not real.is_absolute():
         os.close(fd)
-        raise ValueError(f"{shown(source)}: not a directory")
-    return fd, real, [info.st_dev, info.st_ino]
+        what = ("a socket: whoever connects to it gets what runs behind it" if stat.S_ISSOCK(info.st_mode) else
+                "a device (use --device for a device)" if stat.S_ISCHR(info.st_mode) or stat.S_ISBLK(info.st_mode)
+                else "a FIFO" if stat.S_ISFIFO(info.st_mode) else "not a directory or a regular file")
+        raise ValueError(f"{shown(source)}: {what}; only a directory or a regular file is added")
+    return fd, real, [info.st_dev, info.st_ino], kind
 
 
-def judged(record, real, read_only=False):
-    """The mode (ro or rw) RUN gives the workspace REAL (resolved), or ValueError: the start's checks of a
-    workspace, with what run.json recorded of the run (workspace_checks)."""
+def judged(record, real, read_only=False, kind="dir"):
+    """The mode (ro or rw) RUN gives the workspace REAL (resolved; KIND dir or file), or ValueError: the start's
+    checks of a workspace, with what run.json recorded of the run (workspace_checks)."""
     l = module("agent_sandbox")
     checks = record.get("workspace_checks")
     if not isinstance(checks, dict):
@@ -628,11 +667,13 @@ def judged(record, real, read_only=False):
     # A start lets a workspace hold the project's own .venv/bin or node_modules/.bin on your PATH, and checks what
     # the agent changed there after the run (tool_dirs_state); for a workspace added later nothing would.
     for directory in l.private_locations()[1]:
-        if (directory == real or real in directory.parents) and not read_only:
+        if (directory == real or real in directory.parents or (kind == "file" and directory in real.parents)) \
+                and not read_only:
             # You decide what a sandbox gets: given, with what it means (a start would check it after the run).
-            print(f"sandbox-ai workspace: warning: {shown(real)} holds {shown(directory)}, a directory on your PATH: "
-                  "programs the agent puts there run on this host; nothing checks them after the run",
-                  file=sys.stderr)
+            print(f"sandbox-ai workspace: warning: {shown(real)} "
+                  f"{'lies in' if kind == 'file' and directory in real.parents else 'holds'} {shown(directory)}, a "
+                  "directory on your PATH: programs the agent puts there run on this host; nothing checks them "
+                  "after the run", file=sys.stderr)
             break
     for entry in checks.get("workspaces", []) + present_workspaces(record):
         other = Path(entry["host"])
@@ -668,16 +709,35 @@ def restart_names(record, extra=()):
     (their --workspace options), each its directory's name, -2, -3 ... after the names taken before it."""
     checks = record.get("workspace_checks") or {}
     used = {PurePosixPath(entry["sandbox"]).name for entry in checks.get("workspaces", [])[1:]}
-    kept = [entry["host"] for entry in sorted(present_workspaces(record), key=lambda e: e.get("since") or 0)
+    kept = [entry for entry in sorted(present_workspaces(record), key=lambda e: e.get("since") or 0)
             if entry.get("kept")]
-    names = {}
-    for host in [*kept, *extra]:
+    # One added with --name keeps it (--workspace-name NAME=DIR in the session's options); the others' names are
+    # given around those (workspace_targets).
+    names = {entry["host"]: PurePosixPath(entry["sandbox"]).name for entry in kept if entry.get("named")}
+    used |= set(names.values())
+    for host in [*(entry["host"] for entry in kept if not entry.get("named")), *extra]:
         names[host] = free_name(PurePosixPath(host).name or "root", used)
         used.add(names[host])
     return names
 
 
-def sandbox_name(record, real, keeping=False):
+def check_name(record, name):
+    """NAME (workspace add --name) for /workspaces/NAME, or ValueError: a plain name (NAME) that no workspace of the
+    run holds, nor one a restart gives a workspace the session keeps."""
+    if not isinstance(name, str) or not NAME.fullmatch(name) or name in (".", ".."):
+        raise ValueError(f"--name {shown(name)!r}: 1-64 letters, digits, '_', '.' or '-', starting with a letter or "
+                         "a digit")
+    checks = record.get("workspace_checks") or {}
+    for entry in checks.get("workspaces", [])[1:] + present_workspaces(record):
+        if PurePosixPath(entry.get("sandbox") or "").name == name:
+            raise ValueError(f"{WORKSPACES_DIR}/{name} is taken by {shown(entry.get('host'))}: choose another --name")
+    if name in restart_names(record).values():
+        raise ValueError(f"{WORKSPACES_DIR}/{name} is where a workspace the session keeps comes back after a "
+                         "restart: choose another --name")
+    return name
+
+
+def sandbox_name(record, real, keeping=False, kind="dir"):
     """(name, its name after a restart or None) of /workspaces/<name> for REAL. One the session keeps (KEEPING) gets
     the name a restart gives it (restart_names), so that it is at the same place then. One that is not kept while
     the run has a session (added read-only) is named <name>-ro (-ro-2 ...): it never takes the name a later kept one
@@ -693,6 +753,8 @@ def sandbox_name(record, real, keeping=False):
         if later not in taken:
             return later, None
         return free_name(base, taken), later
+    if kind == "file":  # never kept (a start takes no file as a workspace): its own name
+        return free_name(base, taken), None
     return free_name(f"{base}-ro" if session_of(record) is not None else base, taken), None
 
 
@@ -732,8 +794,10 @@ def save(record, entries):
     os.replace(temporary, path)
 
 
-def added_workspaces(record):
-    return [entry for entry in load(record) if entry.get("state") == "attached"]
+def added_workspaces(record, kind=None):
+    """The attached workspaces (KIND dir or file: only those; an entry of an older version is a directory)."""
+    return [entry for entry in load(record) if entry.get("state") == "attached"
+            and (kind is None or entry.get("kind", "dir") == kind)]
 
 
 def present_workspaces(record):
@@ -755,7 +819,7 @@ def publish_push_rules(record, entries=None):
         config = json.loads((directory / "push.json").read_text())
         derived = privacy.parse_rules(config.get("derived") or {}, "derived")
         workspaces = []
-        for entry in added_workspaces(record) if entries is None else entries:
+        for entry in added_workspaces(record, "dir") if entries is None else entries:
             rules = privacy.builtin_rules().add(derived).add(privacy.user_rules(push.get("rules_dir"),
                                                                                Path(entry["host"]).name))
             workspaces.append({"path": entry["sandbox"], "rules": privacy.rules_document(rules)})
@@ -801,8 +865,9 @@ def session_of(record):
         return None
 
 
-def keep(record, host, add=True):
-    """Add HOST to the saved options of the run's session (or take out what `add` put there); True if kept."""
+def keep(record, host, add=True, named=None):
+    """Add HOST to the saved options of the run's session (or take out what `add` put there); True if kept. NAMED:
+    its name, kept as --workspace-name NAMED=HOST beside --workspace HOST (a restart puts it at /workspaces/NAMED)."""
     name = session_of(record)
     if name is None:
         return False
@@ -812,11 +877,17 @@ def keep(record, host, add=True):
         options = list(data.get("options", []))
         if add:
             data["options"] = sessions.added_options(data, workspaces=[host])
+            if named:
+                data["options"] = [*data["options"], "--workspace-name", f"{named}={host}"]
         else:
             pairs = [i for i in range(len(options) - 1) if options[i] == "--workspace" and options[i + 1] == host]
             if not pairs:
                 return False
             del options[pairs[-1]:pairs[-1] + 2]
+            names = [i for i in range(len(options) - 1) if options[i] == "--workspace-name"
+                     and options[i + 1].partition("=")[2] == host]
+            if names:
+                del options[names[-1]:names[-1] + 2]
             data["options"] = options
         sessions.save(name, data)
     return True
@@ -840,17 +911,24 @@ def watch_file_log(record, sandbox_path, out=print):
 
 
 def add(record, value, read_only=False, out=print, runner=run_helper, finder=finder_default, remember=None,
-        watcher=None):
-    """Mount the host directory VALUE into the running sandbox RECORD at /workspaces/<name>; its sandbox path."""
+        watcher=None, name=None):
+    """Mount the host directory or regular file VALUE into the running sandbox RECORD at /workspaces/<name> (NAME:
+    that name, see check_name); its sandbox path."""
     l = module("agent_sandbox")
-    fd, real, identity = opened(value)
+    fd, real, identity, kind = opened(value)
     try:
         with locked(record):
-            mode = judged(record, real, read_only)
+            mode = judged(record, real, read_only, kind)
             checks = record.get("workspace_checks") or {}
-            # Kept in the session's options (see below) unless read-only without --workspace-ro.
-            keeping = session_of(record) is not None and not (mode == "ro" and not checks.get("read_only"))
-            name, elsewhere = sandbox_name(record, real, keeping)
+            # Kept in the session's options (see below) unless read-only without --workspace-ro, or a file (a start
+            # takes no file as a workspace).
+            keeping = kind == "dir" and session_of(record) is not None and \
+                not (mode == "ro" and not checks.get("read_only"))
+            named = name is not None
+            if named:
+                name, elsewhere = check_name(record, name), None
+            else:
+                name, elsewhere = sandbox_name(record, real, keeping, kind)
             found = finder(record)
             if not found:
                 raise ValueError("the sandbox's processes were not found (has it ended?)")
@@ -860,9 +938,10 @@ def add(record, value, read_only=False, out=print, runner=run_helper, finder=fin
             # Recorded before the mount (pending): a save failing afterwards, or a launcher killed on the way, never
             # leaves a mount the registry does not know (listed as pending, `remove` takes it out).
             entry = {"host": str(real), "sandbox": f"{WORKSPACES_DIR}/{name}", "mode": mode, "state": "pending",
-                     "since": time.time(), "identity": identity, "kept": False}
+                     "since": time.time(), "identity": identity, "kept": False, "kind": kind,
+                     "named": named}
             save(record, load(record) + [entry])
-            result = runner("add", found, name, str(real), identity, mode)
+            result = runner("add", found, name, str(real), identity, mode, kind=kind)
             status, error = result[:2]
             if status:
                 undone = (result[2] if len(result) > 2 and isinstance(result[2], dict) else {}).get("undone", True)
@@ -895,18 +974,20 @@ def add(record, value, read_only=False, out=print, runner=run_helper, finder=fin
                 raise ValueError(f"{shown(real)} is mounted at {entry['sandbox']}, but the run's registry could not "
                                  f"be written ({exc.strerror or exc}): it is listed as pending; sandbox-ai workspace "
                                  f"remove {entry['sandbox']} takes it out") from None
-            pushed, why = publish_push_rules(record)
+            pushed, why = publish_push_rules(record) if kind == "dir" else (None, None)
     finally:
         os.close(fd)
     if not keeping:
         # Kept as --workspace it would come back writable at a restart (only --workspace-ro or the mode make further
-        # workspaces read-only): this one lasts for the run.
-        if session_of(record) is not None:
+        # workspaces read-only): this one lasts for the run. A file: a start takes none as a workspace.
+        if session_of(record) is not None and kind == "file":
+            out("  not kept for the session's next start: a file lasts for this run (add it again after a restart)")
+        elif session_of(record) is not None:
             out("  not kept for the session's next start: it was added read-only (add it again after a restart, or "
                 "start with --workspace-ro)")
     else:
         try:
-            entry["kept"] = keep(record, str(real))
+            entry["kept"] = keep(record, str(real), named=name if named else None)
         except (OSError, ValueError) as exc:
             out(f"  not kept for the session's next start: {shown(exc, 500)}")
     if entry["kept"]:
@@ -916,13 +997,14 @@ def add(record, value, read_only=False, out=print, runner=run_helper, finder=fin
                 if other.get("sandbox") == entry["sandbox"] and other.get("state") == "attached":
                     other["kept"] = True
             save(record, entries)
-    watched = (watcher or watch_file_log)(record, entry["sandbox"], out)
-    log(record, "add", entry, kept=entry["kept"], watched=watched)
+    # The file log watches directories (a file added is not in it).
+    watched = (watcher or watch_file_log)(record, entry["sandbox"], out) if kind == "dir" else None
+    log(record, "add", entry, kept=entry["kept"], watched=watched, kind=kind if kind != "dir" else None)
     push_note = ("; the push check takes its commits" if pushed else
                  "; its commits cannot be pushed from the sandbox (the push check could not take it: "
                  f"{shown(why, 300)}): push them from the host" if pushed is False else "")
-    out(f"added {shown(real)} to {shown(record.get('run'))} at {entry['sandbox']} ({mode}"
-        f"{', kept for the session' if entry['kept'] else ''}){push_note}")
+    out(f"added {'the file ' if kind == 'file' else ''}{shown(real)} to {shown(record.get('run'))} at "
+        f"{entry['sandbox']} ({mode}{', kept for the session' if entry['kept'] else ''}){push_note}")
     if entry["kept"] and elsewhere:
         holder = next((other for other in present_workspaces(record)
                        if PurePosixPath(other.get("sandbox") or "").name == elsewhere), None)
@@ -993,6 +1075,8 @@ def remove(record, value, force=False, out=print, runner=run_helper, finder=find
     taken = taken or copies
     with locked(record):
         entry = matching(record, value)
+        if entry.get("kind", "dir") not in KINDS:
+            raise ValueError(f"{entry['sandbox']}: an unknown kind of workspace ({shown(entry.get('kind'))})")
         found = finder(record)
         if not found:
             raise ValueError("the sandbox's processes were not found (has it ended?)")
@@ -1015,7 +1099,8 @@ def remove(record, value, force=False, out=print, runner=run_helper, finder=find
                                  f"{' ...' if len(busy) > 8 else ''}: {REFUSED_IN_USE}. Let the agent leave it, or "
                                  "--force (what is open stays usable, also for writing, until it is closed; only a "
                                  "restart is sure)")
-            result = runner("remove", found, PurePosixPath(entry["sandbox"]).name, force=force)
+            result = runner("remove", found, PurePosixPath(entry["sandbox"]).name, force=force,
+                            kind=entry.get("kind", "dir"))
         status, error = result[:2]
         if status == PARTIAL:
             # Gone in some of the sandbox's namespaces, still there in others: the registry says so, and which.
@@ -1040,7 +1125,7 @@ def remove(record, value, force=False, out=print, runner=run_helper, finder=find
     kept = False
     if entry.get("kept"):
         try:
-            kept = keep(record, entry["host"], add=False)
+            kept = keep(record, entry["host"], add=False)  # its --workspace-name with it
         except (OSError, ValueError) as exc:
             out(f"  still in the session's options: {shown(exc, 500)}")
         if kept:  # the kept ones after it are named anew at a restart
@@ -1063,12 +1148,13 @@ def remove(record, value, force=False, out=print, runner=run_helper, finder=find
 
 def listing(record):
     checks = record.get("workspace_checks") or {}
-    result = [{"host": e.get("host"), "sandbox": e.get("sandbox"), "mode": e.get("mode"), "source": "start"}
-              for e in checks.get("workspaces", [])]
+    result = [{"host": e.get("host"), "sandbox": e.get("sandbox"), "mode": e.get("mode"), "source": "start",
+               "kind": "dir"} for e in checks.get("workspaces", [])]
     if not checks and record.get("workspace"):
-        result.append({"host": record["workspace"], "sandbox": "/work", "mode": None, "source": "start"})
+        result.append({"host": record["workspace"], "sandbox": "/work", "mode": None, "source": "start", "kind": "dir"})
     for entry in present_workspaces(record):
         row = {"host": entry["host"], "sandbox": entry["sandbox"], "mode": entry["mode"], "source": "added",
+               "kind": entry.get("kind", "dir"), "named": bool(entry.get("named")),
                "kept": bool(entry.get("kept")), "state": entry["state"],
                "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(entry.get("since") or 0))}
         if entry["state"] == "partial":
@@ -1082,7 +1168,8 @@ def listing(record):
 def list_lines(record, entries):
     rows = [["SANDBOX", "MODE", "SOURCE", "HOST"]]
     for entry in entries:
-        source = entry["source"] + (", kept" if entry.get("kept") else "") + \
+        source = entry["source"] + (", file" if entry.get("kind") == "file" else "") + \
+            (", kept" if entry.get("kept") else "") + \
             (f", {entry['state']}" if entry.get("state") not in (None, "attached") else "")
         rows.append([entry["sandbox"], entry["mode"] or "-", source, shown(entry["host"], 500)])
     widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]) - 1)]
@@ -1093,14 +1180,16 @@ def main(argv, out=print):
     net = module("net")
     parser = argparse.ArgumentParser(prog="sandbox-ai workspace", description=__doc__.split("\n\n")[0],
                                      formatter_class=argparse.RawDescriptionHelpFormatter,
-                                     epilog="\n\n".join(__doc__.split("\n\n")[1:5]))
+                                     epilog="\n\n".join(__doc__.split("\n\n")[1:6]))
     commands = parser.add_subparsers(dest="command", required=True)
     lister = commands.add_parser("list", help="the run's workspaces")
     lister.add_argument("run", nargs="?")
     lister.add_argument("--json", action="store_true", help="as JSON")
-    adder = commands.add_parser("add", help="mount a host directory into the running sandbox")
-    adder.add_argument("args", nargs="+", metavar="[RUN] DIR")
+    adder = commands.add_parser("add", help="mount a host directory or file into the running sandbox")
+    adder.add_argument("args", nargs="+", metavar="[RUN] DIR|FILE")
     adder.add_argument("--ro", action="store_true", help="read-only")
+    adder.add_argument("--name", metavar="NAME", help="at /workspaces/NAME (default: the directory's or file's name); "
+                                                      "kept for the session under that name")
     remover = commands.add_parser("remove", help="take an added workspace away again")
     remover.add_argument("args", nargs="+", metavar="[RUN] DIR|NAME")
     remover.add_argument("--force", action="store_true", help="also while a process in the sandbox uses it")
@@ -1112,11 +1201,11 @@ def main(argv, out=print):
             out(json.dumps(entries, indent=2) if args.json else "\n".join(list_lines(record, entries)))
             return 0
         if len(args.args) > 2:
-            raise ValueError("give [RUN] DIR")
+            raise ValueError("give [RUN] DIR|FILE" if args.command == "add" else "give [RUN] DIR|NAME")
         run, value = args.args if len(args.args) == 2 else (None, args.args[0])
         record = net.choose(net.running(), run)
         if args.command == "add":
-            add(record, value, args.ro, out=out)
+            add(record, value, args.ro, out=out, name=args.name)
         else:
             remove(record, value, args.force, out=out)
         return 0

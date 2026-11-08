@@ -373,7 +373,7 @@ match the installed version.
 | `sandbox-ai activity [RUN\|--session NAME\|--project P\|--log-dir DIR] [-f] [--since T] [-k KIND] [--json]` | | what the agents did: prompts, replies, tool calls, commands, file changes, network, approvals, tokens ([agent activity](#agent-activity)) |
 | `sandbox-ai net list\|show\|allow\|revoke\|untaint …` | | change what a running sandbox may reach ([network changes](#changing-the-network-of-a-running-sandbox)); it ends with `sandbox-ai stop NAME` |
 | `sandbox-ai devices list\|add\|remove [RUN] PATH\|usb:VID:PID`, `sandbox-ai limits [RUN] …` | | devices and limits of a running sandbox ([hardware](#hardware-devices-and-gpus), [limits](#resource-limits)) |
-| `sandbox-ai workspace list\|add\|remove [RUN] DIR [--ro] [--force]` | | a host directory added to a running sandbox at `/workspaces/<name>`, with the checks of a start, and taken back ([workspaces and mounts](#workspaces-and-mounts)) |
+| `sandbox-ai workspace list\|add\|remove [RUN] DIR\|FILE [--ro] [--name NAME] [--force]` | | a host directory (or a single file) added to a running sandbox at `/workspaces/<name>` (or `/workspaces/NAME`), with the checks of a start, and taken back ([workspaces and mounts](#workspaces-and-mounts)) |
 | `sandbox-ai approvals list\|allow\|deny\|history\|remembered\|forget …` | | answer what running sandboxes ask; what was allowed always ([approvals](#approvals-and-browser-requests)) |
 | `sandbox-ai canaries list [RUN]`, `sandbox-ai canaries resume RUN` | | the decoy files of the runs and what happened to them; continue a sandbox a canary paused ([canary files](#canary-files)) |
 | `sandbox-ai secrets list\|set\|delete\|backend` | | API keys and tokens in your system keyring ([secrets](#secrets)) |
@@ -753,7 +753,7 @@ all. Claude Code edits outside its working directory only after approval: pass
 ```
 
 **A workspace added while the sandbox runs.** `sandbox-ai workspace add [RUN] DIR
-[--ro]` mounts DIR at `/workspaces/<name>` without a restart; `workspace list`
+[--ro] [--name NAME]` mounts DIR at `/workspaces/<name>` without a restart; `workspace list`
 shows the run's workspaces, `workspace remove [RUN] DIR|NAME` takes an added one
 away again. DIR gets the checks of `--workspace` at a start (no HOME, temporary
 or run directory, no private location, no link a sandbox may have planted, no
@@ -787,9 +787,30 @@ and the privacy check after the run looks at it too.
 Runs started by 0.1.75 or older have no place for it: restart them with
 `resume NAME --restart --workspace DIR`.
 
+`--name NAME` puts it at `/workspaces/NAME` instead of its directory's name
+(1-64 letters, digits, `_`, `.`, `-`, starting with a letter or digit; refused
+when a workspace of the run holds that name, or a workspace the session keeps
+gets it back at a restart). A session keeps the name with it
+(`--workspace DIR --workspace-name NAME=DIR` in its options), so a restart puts
+it at the same place. DIR may also be a single regular **file**: it gets the
+same checks (the file and the folders it lies in: in a private location with
+a warning, in sandbox-ai's own folders refused; a socket, FIFO or device is
+never taken) and is mounted the same way, on an empty file the helper makes at
+`/workspaces/NAME` (the kernel mounts a file only on a file). A file lasts for
+the run: a start takes no file as a workspace, so it is not kept for the
+session, and the file log, the push check and the privacy check after the run
+look at directories only. An editor that saves by writing a new file and
+renaming it over the old one changes the name on the host, not the mounted
+file: the sandbox keeps the file it was given (add it again).
+`workspace list --json` gives each workspace's `kind` (`dir` or `file`) and,
+for an added one, whether it was `named`.
+
 ```bash
 sandbox-ai workspace add claude-1a2b3c4d ~/src/shared-lib --ro
 #   added /home/me/src/shared-lib to claude-1a2b3c4d at /workspaces/shared-lib (ro)
+sandbox-ai workspace add claude-1a2b3c4d ~/data/2026 --name data
+sandbox-ai workspace add claude-1a2b3c4d ~/notes/todo.md --ro
+#   added the file /home/me/notes/todo.md to claude-1a2b3c4d at /workspaces/todo.md (ro)
 sandbox-ai workspace remove claude-1a2b3c4d shared-lib
 ```
 
@@ -1974,6 +1995,9 @@ agents and sessions.
 ```bash
 ./sandbox-ai mcp attach demo web               # web gets demo (kept for its later starts)
 ./sandbox-ai mcp attach demo web --restart     # web runs: restarted with it now
+./sandbox-ai mcp attach demo web --live        # web runs: demo reaches it now, without a restart
+./sandbox-ai mcp attach --helper codex web --live   # a Codex helper for the running web
+./sandbox-ai mcp detach demo web --live        # its relay in web closes now; gone from its options
 ./sandbox-ai mcp start demo --for web          # start demo as web starts it, and attach it
 ./sandbox-ai resume web --mcp demo             # the same for a stopped start, started now
 ```
@@ -1983,18 +2007,52 @@ to the kept start's options, checked as its start checks it: the
 administrator's policy (`forbid` `--mcp`), its security mode (`paranoid`
 refuses a server with network) and the server's definition. `--for` starts
 the server now with that start's backend and rules, so the start finds it
-running. A running sandbox cannot take a new MCP server while it runs, with
-either backend: its agent reads its MCP servers once, when it starts
-(`--mcp-config`, `-c mcp_servers`, `opencode.json`), and the server's socket
-reaches the sandbox only through a folder mounted at its start (a running
-Podman container takes no new mount, and neither does Bubblewrap's mount
-namespace). So a running start is restarted with it (`--restart`, or yes in
-a terminal; the agent continues its conversation), else it reaches the
-server from its next start, and the command says how to restart it. A run
+running. Without `--live` (below) a running sandbox reaches a new MCP
+server only after a restart: its agent reads its MCP servers when it starts
+(`--mcp-config`, `-c mcp_servers`, `opencode.json`). So a running start is
+restarted with it (`--restart`, or yes in a terminal; the agent continues its
+conversation), else it reaches the server from its next start, and the
+command says how to restart it or attach it `--live`. A run
 without a kept start (`--no-keep`) has nothing to start again: end it and
 start anew with `--mcp NAME`. `mcp list` and `sandbox-ai list` show whom
 each server serves; the app's MCP page has **Attach to…**, the web
 interface the same on a server's row of Starts and sessions.
+
+**While it runs: `--live`.** `mcp attach NAME START --live` (or `--helper
+AGENT` in place of NAME) gives a running start the server without a restart.
+Every check of a start holds (the administrator's policy, the start's security
+mode and the one its run has, the server's definition, its network and
+folders); the server's sandbox is started as that start would start it, if it
+does not run. Then the launcher opens the server's socket directory and hands
+that descriptor (not a path, no mount) to the run's supervisor over its
+control socket, which opens the server's relay at
+`/run/sandbox-mcp/NAME/server.sock` as at a start: the same gateway, the run's
+questions (`sandbox-ai approvals`), taint and rules for tainted runs,
+`mcp-calls.jsonl` (with an `attached` and later a `detached` record). The
+supervisor checks the policy and the mode itself as well, and connects to the
+server's socket without following a link the server may have put in its
+directory. The run records it (`run.json` `mcp_servers`: `sandbox-ai list`,
+`mcp list`), the start keeps it (`--mcp NAME` or `--helper AGENT`), and the
+agent's MCP configuration gets it where the agent reads one:
+
+| Agent | What `--live` writes for it | What you do |
+|---|---|---|
+| Claude Code | `mcpServers.NAME` in the sandbox's `~/.claude.json` (user scope; taken out again when the run ends: the next start names it on its command line) | open `/mcp` and look for NAME. Claude Code reads its MCP servers when it starts; whether a running one takes up a server added since is not documented, so if `/mcp` does not list it, restart the agent: `sandbox-ai resume START --restart` (the conversation continues) |
+| Codex | nothing: it reads its MCP servers only when it starts (`-c mcp_servers`) | restart the agent: `sandbox-ai resume START --restart` (the conversation continues) |
+| OpenCode | nothing: it reads its MCP servers only when it starts (`OPENCODE_CONFIG_CONTENT`) | the same |
+
+`mcp detach NAME START --live` closes the relay now (the agent's connections
+to it end and its calls fail; the agent may still name the server until it
+restarts), takes it out of `run.json`, the agent's configuration and the
+start's options; without `--live` it only leaves the start's later starts.
+Neither stops the server's own sandbox (other starts may use it: `mcp stop
+NAME`). Refused for a paused start (resume it first), a run of an older
+version (it has no read-only place for relays opened later: `--restart`), a
+run on another machine (`--podman-url`) and a run without a kept start. With
+`--json` both print `{"server", "start", "run", "state", "attached": "live" |
+"already" (attach) / "detached": "live" | "next start" | "not attached"
+(detach), "agent", "agent_config", "agent_restart": "maybe" | "required",
+"relay", "kept" / "relay_closed", "removed_from_options", "message"}`.
 
 There is no network path between the sandboxes: the server sandbox listens on
 a Unix socket in `~/.local/state/sandbox-ai/mcp/NAME/sock/` and starts one
@@ -4299,7 +4357,7 @@ See [Project configuration](#project-configuration-and-wizard) and
 | `sandbox-ai net stop RUN [--wait SECONDS]` | The older form of `sandbox-ai stop NAME` for a run: SIGTERM to its checked launcher, which cleans up |
 | `sandbox-ai net untaint [RUN]` | Take back the run's taint: the rules for tainted runs no longer hold, until untrusted content enters it again (see [Rulesets](#rulesets)) |
 | `sandbox-ai devices list\|add\|remove [RUN] PATH\|usb:VID:PID[:SERIAL]`, `sandbox-ai limits [RUN] [--memory SIZE] [--cpus N] [--pids N]` | Hand devices to a running sandbox, take them away; change its limits |
-| `sandbox-ai workspace list [RUN] [--json]`, `add [RUN] DIR [--ro]`, `remove [RUN] DIR\|NAME [--force]` | Mount a host directory into a running sandbox at `/workspaces/<name>` (the checks of `--workspace`; kept for a session's next start), take it away again |
+| `sandbox-ai workspace list [RUN] [--json]`, `add [RUN] DIR\|FILE [--ro] [--name NAME]`, `remove [RUN] DIR\|FILE\|NAME [--force]` | Mount a host directory (or a single file) into a running sandbox at `/workspaces/<name>` (or `/workspaces/NAME`; the checks of `--workspace`; a directory is kept for a session's next start, under its name), take it away again |
 | `sandbox-ai approvals list\|history [RUN]`, `allow ID [--scope once\|run\|always]`, `deny ID`, `remembered`, `forget PROJECT ENTRY` | Answer the questions of running sandboxes; what was allowed always, per project, and forget one |
 | `sandbox-ai canaries list [RUN] [--tokens] [--json]`, `canaries log [RUN] [--json]`, `canaries resume RUN` | The [canary files](#canary-files) of the runs and what happened to them; every event with its process, tool call and model requests; continue a sandbox a canary paused |
 | `sandbox-ai secrets list\|set NAME [--from-env VAR]\|delete NAME\|backend` | Secrets in the system keyring, else private files |
@@ -4325,7 +4383,8 @@ See [Project configuration](#project-configuration-and-wizard) and
 | `sandbox-ai mcp list` | Defined MCP servers and their status |
 | `sandbox-ai mcp catalog`, `sandbox-ai mcp add NAME [-m TARGET=HOST[:ro\|rw]] [-e VAR] [-n none\|full] [-M SIZE] [-p N] [-v VPN]` | Servers of the MCP catalogs; add one as a container server (see [Local MCP servers](#servers-from-an-mcp-catalog)) |
 | `sandbox-ai mcp start NAME [--backend podman\|bwrap] [--vpn PROFILE] [--for START [--restart]]`, `sandbox-ai mcp stop NAME` | Start or stop an MCP server sandbox (`--for`: for that start, attached to it) |
-| `sandbox-ai mcp attach NAME START [--restart] [--json]` | Connect an MCP server to a kept agent start (a running one: restarted with it) |
+| `sandbox-ai mcp attach NAME START [--restart \| --live] [--json]`, `--helper AGENT START --live` | Connect an MCP server (or a helper) to a kept agent start (a running one: restarted with it, or `--live`: now, without a restart) |
+| `sandbox-ai mcp detach NAME START [--live] [--json]`, `--helper AGENT START [--live]` | Take it from the start's options (`--live`: and close its relay in the running sandbox now) |
 | `sandbox-ai wizard [new]` | Interactive project setup; offers to edit an existing configuration |
 | `sandbox-ai wizard edit [DIR\|FILE]` | Change the existing configuration of a project (menu, diff before writing) |
 | `sandbox-ai login AGENT [launcher options] [-- login arguments]`, `--status`, `AGENT --logout` | Login store for sandboxes |

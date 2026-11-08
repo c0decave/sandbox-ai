@@ -228,11 +228,15 @@ def test_a_planted_link_or_odd_path_is_refused_before_anything_is_opened(run, mo
     with pytest.raises(ValueError, match="no such directory"):
         w.opened(str(tmp / "missing"))
     (tmp / "file").write_text("")
-    with pytest.raises(ValueError, match="not a directory"):
-        w.opened(str(tmp / "file"))
-    fd, real, identity = w.opened(str(tmp / "start" / ".." / "secret"))
+    fd, real, identity, kind = w.opened(str(tmp / "file"))  # a regular file is taken (workspace add FILE)
     os.close(fd)
-    assert real == tmp / "secret" and identity == [real.stat().st_dev, real.stat().st_ino]
+    assert kind == "file" and real == tmp / "file"
+    os.mkfifo(tmp / "fifo")
+    with pytest.raises(ValueError, match="a FIFO; only a directory or a regular file"):
+        w.opened(str(tmp / "fifo"))  # O_PATH: never opened for reading, so this does not wait for a writer
+    fd, real, identity, kind = w.opened(str(tmp / "start" / ".." / "secret"))
+    os.close(fd)
+    assert kind == "dir" and real == tmp / "secret" and identity == [real.stat().st_dev, real.stat().st_ino]
 
 
 @pytest.fixture(autouse=True)
@@ -386,14 +390,15 @@ def test_the_command_line(run, monkeypatch, capsys):
     net = w.module("net")
     monkeypatch.setattr(net, "running", lambda: {"mine": record})
     added = []
-    monkeypatch.setattr(w, "add", lambda r, value, ro, out=print: added.append((r["run"], value, ro)))
-    assert w.main(["add", "mine", str(tmp), "--ro"]) == 0 and added == [("mine", str(tmp), True)]
-    assert w.main(["add", str(tmp)]) == 0 and added[-1] == ("mine", str(tmp), False)
-    assert w.main(["add", "a", "b", "c"]) == 1 and "[RUN] DIR" in capsys.readouterr().err
+    monkeypatch.setattr(w, "add", lambda r, value, ro, out=print, name=None: added.append((r["run"], value, ro, name)))
+    assert w.main(["add", "mine", str(tmp), "--ro"]) == 0 and added == [("mine", str(tmp), True, None)]
+    assert w.main(["add", str(tmp)]) == 0 and added[-1] == ("mine", str(tmp), False, None)
+    assert w.main(["add", str(tmp), "--name", "docs"]) == 0 and added[-1] == ("mine", str(tmp), False, "docs")
+    assert w.main(["add", "a", "b", "c"]) == 1 and "[RUN] DIR|FILE" in capsys.readouterr().err
     lines = []
     assert w.main(["list", "--json"], out=lines.append) == 0
     assert json.loads(lines[0])[0] == {"host": str(tmp / "start"), "sandbox": "/work", "mode": "rw",
-                                       "source": "start"}
+                                       "source": "start", "kind": "dir"}
     main = w.module("main")
     assert main.PYTHON_COMMANDS["workspace"] == ("workspaces.py",) and "sandbox-ai workspace" in main.__doc__
 
@@ -516,7 +521,7 @@ def test_a_read_only_add_is_not_kept_for_a_restart(run, monkeypatch):
     record, tmp = run
     kept = []
     monkeypatch.setattr(w, "session_of", lambda r: "s1")
-    monkeypatch.setattr(w, "keep", lambda r, host, add=True: kept.append(host) or True)
+    monkeypatch.setattr(w, "keep", lambda r, host, add=True, named=None: kept.append(host) or True)
     lines = []
     w.add(record, make(tmp / "fresh"), read_only=True, out=lines.append, runner=lambda *a, **kw: (0, ""),
           finder=fake_found, remember=lambda trees: None)
@@ -888,7 +893,7 @@ def test_a_kept_workspace_is_at_the_same_place_after_a_restart(run, monkeypatch)
     record, tmp = run
     options = []
     monkeypatch.setattr(w, "session_of", lambda r: "s1")
-    monkeypatch.setattr(w, "keep", lambda r, host, add=True: (options.append(host) if add else options.remove(host))
+    monkeypatch.setattr(w, "keep", lambda r, host, add=True, named=None: (options.append(host) if add else options.remove(host))
                         or True)
     ok = lambda *a, **kw: (0, "")  # noqa: E731
     lines = []
@@ -943,3 +948,158 @@ def test_a_partial_removal_leaves_the_push_check(run):
     with pytest.raises(ValueError, match=w.REFUSED_PARTIAL):
         w.remove(record, "fresh", runner=partial, finder=fake_found, using=lambda f, p: [])
     assert listed() == []
+
+
+# --- a single file, and a workspace named with --name ------------------------------------------------------------
+
+
+def test_the_helper_mounts_a_file_on_an_empty_file_it_makes(space, tmp_path):
+    """A file is mounted on a file (the kernel mounts a file only on a non-directory): the helper makes an empty
+    regular file at /workspaces/NAME, clones the checked file, and removes the mount point again."""
+    proc, mounts, _, _ = space
+    source = tmp_path / "notes.txt"
+    source.write_text("x")
+    identity = [source.stat().st_dev, source.stat().st_ino]
+    c = FakeLibc()
+    w.helper("add", 100, "notes.txt", [100, 101], str(source), identity, "rw", proc, c, kind="file")
+    assert kinds(c.calls).count(w.SYS_MOVE_MOUNT) == 2
+    assert (mounts / "notes.txt").is_file() and (mounts / "notes.txt").stat().st_size == 0
+    w.helper("remove", 100, "notes.txt", [100, 101], proc=proc, c=FakeLibc(), kind="file")
+    assert not (mounts / "notes.txt").exists()
+    # A directory given as a file, or a file swapped for a directory after the check: nothing is mounted.
+    with pytest.raises(OSError, match="no regular file"):
+        w.helper("add", 100, "x", [100], str(tmp_path), [tmp_path.stat().st_dev, tmp_path.stat().st_ino], "rw",
+                 proc, FakeLibc(), kind="file")
+    with pytest.raises(OSError, match="no such kind"):
+        w.helper_main(json.dumps({"op": "add", "user": 100, "name": "x", "targets": [100], "kind": "device"}))
+
+
+def test_a_file_mount_point_the_agent_made_otherwise_is_refused(space, tmp_path):
+    """What the agent put at /workspaces/NAME (a directory, a link to a host path it hopes for, a FIFO) is never
+    mounted on or followed."""
+    proc, mounts, _, _ = space
+    source = tmp_path / "notes.txt"
+    source.write_text("x")
+    identity = [source.stat().st_dev, source.stat().st_ino]
+    (mounts / "dir").mkdir()
+    (mounts / "link").symlink_to(source)
+    os.mkfifo(mounts / "fifo")
+    for name in ("dir", "link", "fifo"):
+        c = FakeLibc()
+        with pytest.raises(OSError, match="is no regular file in the sandbox"):
+            w.helper("add", 100, name, [100], str(source), identity, "rw", proc, c, kind="file")
+        assert w.SYS_MOVE_MOUNT not in kinds(c.calls)
+    assert (mounts / "link").is_symlink() and source.read_text() == "x"
+
+
+def test_a_file_is_added_for_the_run_only_and_listed_as_a_file(run, monkeypatch):
+    record, tmp = run
+    calls, lines, watched = [], [], []
+    monkeypatch.setattr(w, "session_of", lambda r: "s1")
+    monkeypatch.setattr(w, "keep", lambda *a, **kw: pytest.fail("a file is never kept"))
+    runner = lambda op, found, name, *rest, **kw: calls.append((op, name, *rest, kw)) or (0, "")  # noqa: E731
+    path = tmp / "elsewhere" / "notes.txt"
+    path.parent.mkdir()
+    path.write_text("x")
+    sandbox = w.add(record, str(path), out=lines.append, runner=runner, finder=fake_found, remember=lambda t: None,
+                    watcher=lambda *a: watched.append(a))
+    assert sandbox == "/workspaces/notes.txt" and calls[0][1:5] == ("notes.txt", str(path), [
+        path.stat().st_dev, path.stat().st_ino], "rw") and calls[0][-1] == {"kind": "file"}
+    assert watched == [] and any("a file lasts for this run" in line for line in lines)
+    assert lines[-1].startswith(f"added the file {path} to mine at /workspaces/notes.txt (rw)")
+    row = w.listing(record)[-1]
+    assert row["kind"] == "file" and row["kept"] is False and row["named"] is False
+    assert "added, file" in w.list_lines(record, w.listing(record))[-1]
+    w.remove(record, "notes.txt", out=lines.append, runner=runner, finder=fake_found, using=lambda f, p: [])
+    assert calls[-1][0] == "remove" and calls[-1][-1] == {"force": False, "kind": "file"}
+    # The checks of a start hold for a file as for a directory: here, the run's HOME and its log directory.
+    for refused, why in ((tmp / "sandbox-home" / "f", "HOME of the run"), (tmp / "logs" / "f", "--log-dir")):
+        refused.write_text("")
+        with pytest.raises(ValueError, match=why):
+            w.add(record, str(refused), runner=runner, finder=fake_found, remember=lambda t: None)
+
+
+def test_a_file_is_never_in_the_push_check_nor_in_the_check_after_the_run(run, tmp_path, monkeypatch):
+    record, tmp = run
+    push = tmp / "push"
+    push.mkdir()
+    (push / "push.json").write_text(json.dumps({"derived": {}}))
+    record["push_check"] = {"dir": str(push)}
+    path = tmp / "notes.txt"
+    path.write_text("x")
+    ok = lambda *a, **kw: (0, "")  # noqa: E731
+    w.add(record, str(path), out=lambda line: None, runner=ok, finder=fake_found, remember=lambda t: None)
+    assert not (push / w.module("privacy").ADDED_PUSH).exists()
+    monkeypatch.setattr(L, "runs_dir", lambda: Path(record["directory"]).parent)
+    a = type("A", (), {"run_id": Path(record["directory"]).name})()
+    assert L.added_workspaces_of_run(a) == []
+
+
+def test_a_named_workspace_is_at_its_name_and_kept_under_it(run, monkeypatch):
+    record, tmp = run
+    saved = {"options": ["--workspace", str(tmp / "start")], "agent": "claude", "cwd": str(tmp)}
+    sessions = w.module("sessions")
+    monkeypatch.setattr(w, "session_of", lambda r: "s1")
+    monkeypatch.setattr(sessions, "session_lock", lambda name: __import__("contextlib").nullcontext())
+    monkeypatch.setattr(sessions, "load", lambda name: json.loads(json.dumps(saved)))
+    monkeypatch.setattr(sessions, "save", lambda name, data: saved.update(data))
+    monkeypatch.setattr(sessions, "added_options", lambda data, workspaces=(): data["options"] + sum(
+        (["--workspace", path] for path in workspaces), []))
+    ok = lambda *a, **kw: (0, "")  # noqa: E731
+    lines = []
+    path = make(tmp / "elsewhere" / "lib")
+    assert w.add(record, path, out=lines.append, runner=ok, finder=fake_found, remember=lambda t: None,
+                 name="shared") == "/workspaces/shared"
+    assert saved["options"][-4:] == ["--workspace", path, "--workspace-name", f"shared={path}"]
+    assert w.listing(record)[-1]["named"] is True and w.restart_names(record) == {path: "shared"}
+    # A restart (the launcher, with the session's options) puts it there again; the others go around the name.
+    a = L.parse_args(["claude", *saved["options"], "--workspace", make(tmp / "x" / "shared")])
+    assert dict(L.workspace_targets(a))[path] == "/workspaces/shared"
+    assert dict(L.workspace_targets(a))[str(tmp / "x" / "shared")] == "/workspaces/shared-2"
+    # Taken names are refused: the start's, an added one's, and a bad name.
+    for name, why in (("lib", "taken by"), ("shared", "taken by"), ("../x", "1-64 letters"), (".hidden", "1-64"),
+                      ("-rf", "1-64"), ("a" * 65, "1-64")):
+        with pytest.raises(ValueError, match=why):
+            w.add(record, make(tmp / "third"), runner=ok, finder=fake_found, remember=lambda t: None, name=name)
+    w.remove(record, "shared", out=lines.append, runner=ok, finder=fake_found, using=lambda f, p: [])
+    assert saved["options"] == ["--workspace", str(tmp / "start")]
+
+
+def test_a_name_a_kept_workspace_gets_back_at_a_restart_is_refused(run, monkeypatch):
+    """y/lib is kept and comes back as /workspaces/lib-2 after a restart; --name lib-2 for another one would take
+    that place after the restart: refused even while y/lib is at another place now."""
+    record, tmp = run
+    monkeypatch.setattr(w, "session_of", lambda r: "s1")
+    monkeypatch.setattr(w, "keep", lambda r, host, add=True, named=None: True)
+    ok = lambda *a, **kw: (0, "")  # noqa: E731
+    w.save(record, [{"host": str(tmp / "y" / "lib"), "sandbox": "/workspaces/lib-7", "mode": "rw",
+                     "state": "attached", "kept": True, "since": 1}])
+    with pytest.raises(ValueError, match="comes back after a restart"):
+        w.add(record, make(tmp / "third"), runner=ok, finder=fake_found, remember=lambda t: None, name="lib-2")
+
+
+@pytest.fixture(params=["happy", "sad", "edge"])
+def scenario(request):
+    return request.param
+
+
+def test_the_start_takes_workspace_names_as_kept(scenario, tmp_path):
+    one, two = make(tmp_path / "one"), make(tmp_path / "two")
+    if scenario == "happy":
+        a = L.parse_args(["codex", "--workspace", f"{one},{two}", "--workspace-name", f"docs={two}", "--no-config"])
+        L.validate(a)
+        assert L.workspace_targets(a) == [(one, "/work"), (two, "/workspaces/docs")]
+    elif scenario == "sad":
+        for value, why in ((f"docs={one}", "the first workspace is /work"),
+                           (f"docs={tmp_path / 'three'}", "names no --workspace"), (f"../x={two}", "NAME 1-64")):
+            with pytest.raises(ValueError, match=why):
+                L.validate(L.parse_args(["codex", "--workspace", f"{one},{two}", "--workspace-name", value,
+                                         "--no-config"]))
+        assert "--workspace-name" in L.CONFIG_FORBIDDEN  # a project file names no workspace
+    else:  # one name twice: refused; the option stays out of --help (an internal one: what workspace add keeps)
+        with pytest.raises(ValueError, match="each NAME and each DIR once"):
+            L.validate(L.parse_args(["codex", "--workspace", f"{one},{two},{make(tmp_path / 'x')}",
+                                     "--workspace-name", f"d={two}", "--workspace-name", f"d={tmp_path / 'x'}",
+                                     "--no-config"]))
+        assert "--workspace-name" not in L.build_parser().format_help()
+        assert L.WORKSPACE_NAME == w.NAME.pattern

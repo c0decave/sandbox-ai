@@ -307,7 +307,7 @@ export const SandboxAiHooks = async ({ directory }) => ({
 # Options a project file may not set: internal ones, config selection itself,
 # workspace order (main workspace = where the file lives) and sessions.
 CONFIG_FORBIDDEN = ("--config", "--no-config", "--tmux-socket-dir", "--pod-name", "--mcp-socket-dir", "--helper-of",
-                    "--workspace",
+                    "--workspace", "--workspace-name",
                     "--session", "--dry-run", "--mcp-approvals-dir", "--rules", "--mode", "--name", "--project-name",
                     "--start-id", "--")
 # Mutually exclusive auth choices: one given on the command line replaces the file's.
@@ -473,6 +473,8 @@ def build_parser():
                    help="Host directory at /work (default: current directory); further entries, repeated or "
                         "comma-separated, appear at /workspaces/<name>")
     p.add_argument("--workspace-ro", action="store_true", help="Mount every workspace read-only")
+    # NAME=DIR: the further workspace DIR (a --workspace) at /workspaces/NAME; what `workspace add --name` keeps.
+    p.add_argument("--workspace-name", action="append", default=[], metavar="NAME=DIR", help=argparse.SUPPRESS)
     p.add_argument("--mount", action="append", default=[], metavar="SRC:DEST:ro|rw", help="Repeatable; DEST under /work, /mnt or /opt")
     p.add_argument("--device", action="append", default=[], metavar="PATH|usb:VID:PID[:SERIAL]",
                    help="Hand a host device to the agent: a character device under /dev (symlinks such as "
@@ -2374,10 +2376,33 @@ WORKSPACES_DIR = "/workspaces"
 WORKSPACES_TMPFS = "rw,nosuid,nodev,noexec,size=1m,nr_inodes=4096,mode=0755"
 
 
+# --workspace-name NAME=DIR: what /workspaces/NAME may be called (as sandbox-ai workspace add --name checks it).
+WORKSPACE_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"
+
+
+def workspace_names(a):
+    """{resolved host path: NAME} of the --workspace-name NAME=DIR options (hidden: `sandbox-ai workspace add --name`
+    keeps a workspace so in a session's options, so that a restart puts it at /workspaces/NAME again)."""
+    found = {}
+    for value in getattr(a, "workspace_name", None) or []:
+        name, separator, path = value.partition("=")
+        if not separator or not path or not re.fullmatch(WORKSPACE_NAME, name):
+            raise ValueError(f"--workspace-name NAME=DIR: NAME 1-64 letters, digits, '_', '.' or '-', starting with "
+                             f"a letter or digit: {printable(value)!r}")
+        found[os.path.realpath(os.path.expanduser(path))] = name
+    return found
+
+
 def workspace_targets(a):
-    """[(host path, sandbox path)]: the first workspace is always /work."""
-    targets, used = [(a.workspaces[0], "/work")], set()
+    """[(host path, sandbox path)]: the first workspace is always /work; one named by --workspace-name is at
+    /workspaces/NAME, the others at their directory's name (-2, -3 ... after the names taken)."""
+    names = workspace_names(a)
+    targets, used = [(a.workspaces[0], "/work")], set(names.values())
     for value in a.workspaces[1:]:
+        named = names.get(os.path.realpath(os.path.expanduser(value)))
+        if named is not None:
+            targets.append((value, f"/workspaces/{named}"))
+            continue
         base = PurePosixPath(value).name or "root"
         name, suffix = base, 2
         while name in used:
@@ -3108,6 +3133,14 @@ def validate(a):
     a.workspaces = [str(path) for path in resolved]
     a.workspace = a.workspaces[0]
     workspace = resolved[0]
+    names = workspace_names(a)
+    if len(set(names.values())) != len(names) or len(names) != len(a.workspace_name):
+        raise ValueError("--workspace-name: each NAME and each DIR once")
+    for path, name in names.items():
+        if path == a.workspaces[0]:
+            raise ValueError(f"--workspace-name {name}={printable(path)}: the first workspace is /work")
+        if path not in a.workspaces[1:]:
+            raise ValueError(f"--workspace-name {name}={printable(path)}: names no --workspace of this start")
     add_helpers(a)
     check_companions(a)
     if any(parse_mount(m)[1] == "/work" for m in a.mount):
@@ -4983,7 +5016,7 @@ def added_workspaces_of_run(a):
     found = []
     for entry in entries if isinstance(entries, list) else []:
         if isinstance(entry, dict) and entry.get("mode") == "rw" and isinstance(entry.get("host"), str) \
-                and entry["host"].startswith("/"):
+                and entry["host"].startswith("/") and entry.get("kind", "dir") == "dir":  # a file: no project
             path = Path(entry["host"])
             if path not in found:
                 found.append(path)
@@ -5971,6 +6004,10 @@ def register_run(a, run, session):
         "host_relay": True,
         # The MCP servers this run reaches (--mcp, helpers included): sandbox-ai mcp list names whom each serves.
         "mcp_servers": [] if a.mcp_socket_dir else list(dict.fromkeys(a.mcp)),
+        # `sandbox-ai mcp attach NAME START --live`: its supervisor opens relays during the run (control op mcp-open),
+        # and the agent's HOME (host path) is where its MCP configuration is updated for it (mcp.py LIVE_AGENTS).
+        "mcp_live": not (a.mcp_socket_dir or a.probe),
+        "agent_home": str(a.sandbox_home) if getattr(a, "sandbox_home", None) else None,
         # The security mode: `sandbox-ai net allow` and `sandbox-ai approvals` keep to it (modes.py).
         "mode": a.runtime_mode,
         # --allow-host *.DOMAIN: the launcher answers the lookups below them itself (approvals.watch).
@@ -7775,6 +7812,9 @@ def launch(argv):
         a.sandbox_home = home  # run.json: a workspace added later must not overlap it
         a.control_dir = register_run(a, a.run_id, session)
         cleanup.callback(shutil.rmtree, a.control_dir, True)
+        # Before the run's directory goes (callbacks run last first): what `mcp attach --live` wrote into the agent's
+        # configuration is taken out again (a later start names the servers it keeps on its command line).
+        cleanup.callback(lambda directory=a.control_dir: load_mcp_module().forget_live_config(directory))
         if a.canary_plan:
             a.canary_plan.arm(a.control_dir, a.log_dir)
             cleanup.callback(a.canary_plan.drain)  # before the control directory goes: what is left is read

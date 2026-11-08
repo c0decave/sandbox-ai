@@ -303,19 +303,20 @@ def change_wildcards(record, op, wildcards, apply=True):
 ASK_SECONDS = 45
 
 
-def ask(directory, request, timeout=ASK_SECONDS):
+def ask(directory, request, timeout=ASK_SECONDS, fds=()):
     """The supervisor's answer to REQUEST on the run's control socket; ValueError when it refuses, does not answer
-    (paused, or busy longer than TIMEOUT) or the socket fails."""
+    (paused, or busy longer than TIMEOUT) or the socket fails. FDS: descriptors handed over with it (SCM_RIGHTS;
+    sandbox-ai mcp attach --live hands over an MCP server's socket directory)."""
     if (Path(directory) / "paused").exists():
         raise ValueError("the sandbox is paused: resume it first (sandbox-ai resume NAME), then change it")
     try:
-        return ask_socket(directory, request, timeout)
+        return ask_socket(directory, request, timeout, fds)
     except (OSError, TimeoutError) as exc:  # socket.timeout is an OSError
         raise ValueError(f"the sandbox did not answer ({getattr(exc, 'strerror', None) or exc or 'timed out'}); "
                          "see sandbox-ai net show") from None
 
 
-def ask_socket(directory, request, timeout):
+def ask_socket(directory, request, timeout, fds=()):
     path = Path(directory) / "control.sock"
     with socket.socket(socket.AF_UNIX) as client:
         client.settimeout(timeout)
@@ -327,7 +328,12 @@ def ask_socket(directory, request, timeout):
             raise ValueError(f"the sandbox does not answer on {path}: {exc.strerror or exc}") from None
         finally:
             os.close(fd)
-        client.sendall(json.dumps(request).encode() + b"\n")
+        data = json.dumps(request).encode() + b"\n"
+        if fds:  # the descriptors go with the first byte; the rest as usual
+            sent = socket.send_fds(client, [data], list(fds))
+            client.sendall(data[sent:])
+        else:
+            client.sendall(data)
         answer = b""
         while not answer.endswith(b"\n"):
             chunk = client.recv(65536)
@@ -1040,6 +1046,13 @@ def running_options(record, result, everything=False):
     workspaces = []
     checks = record.get("workspace_checks") or {}
     for entry in load_workspaces_module().added_workspaces(record):
+        if entry.get("kind", "dir") == "file":
+            notes.append(f"{entry['host']} is a file added during the run: not kept (a project file names directories "
+                         "as workspaces)")
+            continue
+        if entry.get("named"):
+            notes.append(f"{entry['host']} is kept as a workspace, without its name {entry['sandbox']} (a project file's "
+                         "workspaces are named after their directories)")
         if entry.get("mode") == "ro" and not checks.get("read_only"):
             notes.append(f"{entry['host']} was added read-only: not kept (a project file has no read-only workspace "
                          "of its own; start with --workspace-ro, or add it again with --ro)")

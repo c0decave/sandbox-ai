@@ -36,8 +36,10 @@ approvals/, which `sandbox-ai approvals` lists as the run mcp-NAME.
 
 `mcp attach NAME START` (and `mcp start NAME --for START`, which starts the server as that start starts it)
 connects a server to an agent start that exists: --mcp NAME joins its kept options, checked as its start checks
-it. A running sandbox cannot take a new server while it runs (LIVE says why), so a running start is restarted
-with it (--restart) or gets it at its next start. `mcp list` names the starts each server serves.
+it. A running start is restarted with it (--restart), gets it at its next start, or takes it while it runs
+(--live: the run's supervisor opens a relay for it over its control socket; see attach_live and LIVE_AGENTS for what
+each agent makes of it). `mcp detach NAME START [--live]` takes it out again (with --live: its relay closes now);
+--helper AGENT in place of NAME does the same for a helper. `mcp list` names the starts each server serves.
 """
 import argparse
 import base64
@@ -959,11 +961,12 @@ def stop_locked(name, timeout=30):
 
 # --- an MCP server for a named start (mcp start NAME --for START, mcp attach NAME START) ---------------------
 
-# Why a running sandbox is not given a new MCP server while it runs, for either backend.
-LIVE = ("a running sandbox cannot take a new MCP server while it runs: its agent (claude, codex or opencode) reads "
-        "its MCP servers once, when it starts (--mcp-config, -c mcp_servers, opencode.json), and a server's socket "
-        "reaches the sandbox only through a folder mounted at its start (a running Podman container takes no new "
-        "mount, and neither does Bubblewrap's mount namespace)")
+# Why a running sandbox reaches a new MCP server only after a restart unless it is attached with --live: its agent
+# (claude, codex or opencode) reads its MCP servers when it starts (--mcp-config, -c mcp_servers, opencode.json).
+LIVE = ("a running sandbox cannot take a new MCP server while it runs unless it is attached with --live: its agent "
+        "(claude, codex or opencode) reads its MCP servers when it starts (--mcp-config, -c mcp_servers, "
+        "opencode.json); --live opens the server's relay in the running sandbox now (Codex and OpenCode see it after "
+        "a restart of the agent all the same)")
 
 _starts = None
 
@@ -1067,10 +1070,332 @@ def attach(name, start, restart=False, start_server=False, vpn=None, ask=None, o
         result.update(attached="after a restart",
                       message=f"{shown} reaches the MCP server {name} from its next start on, not now: {LIVE}. "
                               f"Restart it now (the agent continues its conversation): sandbox-ai mcp attach {name} "
-                              f"{shown} --restart (or: sandbox-ai resume {shown} --restart)")
+                              f"{shown} --restart (or: sandbox-ai resume {shown} --restart), or attach it to the "
+                              f"running sandbox: sandbox-ai mcp attach {name} {shown} --live")
     else:
         result.update(attached="next start", message=f"{shown} reaches the MCP server {name} from its next start on: "
                                                      f"sandbox-ai resume {shown}")
+    out(result["message"])
+    return result
+
+
+# --- an MCP server for a running sandbox, while it runs (mcp attach|detach NAME START --live) ----------------------
+#
+# The host starts the server if it does not run (as the start would: ensure_running, with the start's own options,
+# policy and security mode), opens the server's socket directory (O_PATH) and hands that descriptor to the run's
+# supervisor over its control socket (op mcp-open): the supervisor opens a relay for it at /run/sandbox-mcp/NAME, as
+# it does at a start for each --mcp server, with the run's broker (questions), taint and mcp-calls.jsonl, behind the
+# same gateway (the server's own rules are in the server's relay, as at a start). No mount is made: the agent never
+# reaches the server's directory. Then the run records it (run.json mcp_servers), the start keeps it (--mcp NAME, or
+# --helper AGENT, for its later starts) and the agent's MCP configuration gets it where the agent reads one at run
+# time (LIVE_AGENTS). `detach --live` closes the relay (the agent's connections to it end at once).
+
+# What each agent makes of a server attached while it runs: where it is written for it, and what the human does.
+LIVE_AGENTS = {
+    "claude": {"config": "~/.claude.json (mcpServers, user scope)", "restart": "maybe",
+               "attach": "Claude Code: the server is in the sandbox's ~/.claude.json (user scope). Open /mcp in Claude "
+                         "and look for {name}; Claude Code reads its MCP servers when it starts, and whether a "
+                         "running one takes up a server added since is not documented: if /mcp does not list it, "
+                         "restart the agent: sandbox-ai resume {start} --restart (the conversation continues).",
+               "detach": "Claude Code: its connection to {name} ends now and its calls fail; /mcp may still list it "
+                         "until the agent restarts (sandbox-ai resume {start} --restart; the conversation continues)."},
+    "codex": {"config": None, "restart": "required",
+              "attach": "Codex reads its MCP servers only when it starts (its -c mcp_servers options): restart the "
+                        "agent to use {name}: sandbox-ai resume {start} --restart (the conversation continues). Until "
+                        "then the relay is open, but Codex does not know it.",
+              "detach": "Codex: its connection to {name} ends now and its calls fail; it still names the server until "
+                        "the agent restarts (sandbox-ai resume {start} --restart; the conversation continues)."},
+    "opencode": {"config": None, "restart": "required",
+                 "attach": "OpenCode reads its MCP servers only when it starts (OPENCODE_CONFIG_CONTENT): restart the "
+                           "agent to use {name}: sandbox-ai resume {start} --restart (the conversation continues). "
+                           "Until then the relay is open, but OpenCode does not know it.",
+                 "detach": "OpenCode: its connection to {name} ends now and its calls fail; it still names the server "
+                           "until the agent restarts (sandbox-ai resume {start} --restart; the conversation "
+                           "continues)."},
+}
+LIVE_STATE = "mcp-live.json"  # in the run's directory: what attach --live wrote into the agent's configuration
+_net = None
+
+
+def net_module():
+    global _net
+    if _net is None:
+        spec = importlib.util.spec_from_file_location("net_for_mcp", HERE / "net.py")
+        _net = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_net)
+    return _net
+
+
+def live_target(start):
+    """(entry, record, data): the running agent start START (sandbox-ai list), its run (run.json, with "directory")
+    and its kept start (session.json); ValueError when it cannot take a server while it runs."""
+    printable = launcher().printable
+    starts = starts_module()
+    entry = starts.find(start)
+    shown = printable(entry["name"])
+    if entry["kind"] == "mcp":
+        raise ValueError(f"{shown} is an MCP server's sandbox: a server is attached to an agent's start")
+    if entry["state"] == "paused":
+        raise ValueError(f"{shown} is paused: resume it first (sandbox-ai resume {shown}), then attach")
+    if entry["state"] != "running":
+        raise ValueError(f"{shown} does not run ({entry['state']}): --live is for a running sandbox; without it the "
+                         "server is attached for its next start")
+    if not entry.get("directory"):
+        raise ValueError(f"{shown} is a run without a kept start, which keeps nothing to check the server against; "
+                         f"end it (sandbox-ai stop {shown}) and start anew with --mcp NAME")
+    record = net_module().running().get(entry.get("run") or "")
+    if record is None:
+        raise ValueError(f"{shown}: its run is not found (has it ended?)")
+    if not record.get("mcp_live") or record.get("kind") != "agent":
+        raise ValueError(f"{shown} was started by a version of sandbox-ai that cannot take an MCP server while it "
+                         f"runs: restart it with the server (sandbox-ai mcp attach NAME {shown} --restart)")
+    if record.get("podman_url"):
+        raise ValueError(f"{shown} runs on another machine (--podman-url): an MCP server's socket on this host does "
+                         f"not reach it while it runs; restart it with the server (--restart)")
+    return entry, record, starts.module("sessions").load(entry["id"])
+
+
+def live_arguments(data, record, name=None, helper=None):
+    """(a, server name): the start's arguments with --mcp NAME (or --helper AGENT), checked as its start checks
+    them (start_arguments: the administrator's policy, the security mode, the project file), and against the
+    security mode the run has (run.json) if that is another one now."""
+    l = launcher()
+    a = start_arguments(data, ["--helper", helper] if helper else ["--mcp", name])
+    if helper:
+        # The helper's name hashes the main workspace as the start resolved it: the same server as its start's.
+        a.workspaces = [record.get("workspace") or a.workspaces[0], *a.workspaces[1:]]
+        l.add_helpers(a)
+        name = l.helper_name(helper, a.workspaces[0])
+    mode = (record.get("mode") or {}).get("name") if isinstance(record.get("mode"), dict) else None
+    if mode in l.MODES.NAMES and mode != a.mode:
+        found = l.MODES.widening(l.launcher_namespace(), a, mode)
+        if found:
+            raise ValueError(f"{found[0][0]} widens the security mode {mode} of this run: {found[0][1]}")
+    return a, name
+
+
+@contextlib.contextmanager
+def run_lock(record):
+    fd = os.open(Path(record["directory"]) / "mcp.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def record_server(record, name, add=True):
+    """NAME in (or out of) run.json's mcp_servers: sandbox-ai list, mcp list and the front ends show whom it serves."""
+    path = Path(record["directory"]) / "run.json"
+    current = starts_module().read_json(path) or {}
+    servers = [n for n in current.get("mcp_servers") or [] if isinstance(n, str) and n != name]
+    starts_module().rewrite_json(path, {"mcp_servers": servers + ([name] if add else [])})
+
+
+def live_state(record):
+    try:
+        data = json.loads((Path(record["directory"]) / LIVE_STATE).read_text())
+    except (OSError, ValueError):
+        return {"claude": [], "created": False}
+    return data if isinstance(data, dict) else {"claude": [], "created": False}
+
+
+def agent_config(record, name, add=True):
+    """Claude: mcpServers[NAME] (the bridge to the run's relay, as --mcp-config names it at a start) added to, or
+    taken out of, the sandbox HOME's ~/.claude.json (user scope); a server of that name of its own stays as it is.
+    What was written is kept in the run's directory (LIVE_STATE), so that the end of the run takes it out again
+    (forget_live_config). Codex and OpenCode read none at run time: None. Returns a short description of what was
+    done, or None."""
+    l = launcher()
+    if record.get("agent") != "claude" or not record.get("agent_home"):
+        return None
+    home = Path(record["agent_home"])
+    wanted = {"type": "stdio", "command": "python3", "args": l.mcp_bridge_args(name), "env": {}}
+    state = live_state(record)
+    created = []
+
+    def apply(document):
+        servers = document.get("mcpServers")
+        if add:
+            if servers is None:
+                servers = document["mcpServers"] = {}
+                created.append(True)
+            if not isinstance(servers, dict):
+                raise ValueError("~/.claude.json in the sandbox: mcpServers is no object; left as it is")
+            if servers.get(name) == wanted:
+                return False
+            if name in servers:
+                raise ValueError(f"~/.claude.json in the sandbox names an MCP server {name} of its own; left as it is")
+            servers[name] = wanted
+            return True
+        if not isinstance(servers, dict) or servers.get(name) != wanted:
+            return False
+        del servers[name]
+        if not servers and state.get("created"):
+            del document["mcpServers"]
+        return True
+    if not add and not (home / ".claude.json").exists():
+        return None
+    problem = l.update_json_defaults(home, ".claude.json", apply, l.CLAUDE_STATE_LIMIT)
+    if problem:
+        raise ValueError(f"~/.claude.json in the sandbox was left as it is ({problem})")
+    names = [n for n in state.get("claude", []) if n != name] + ([name] if add else [])
+    state = {"claude": names, "created": bool(state.get("created") or created) and (add or bool(names))}
+    write_private(Path(record["directory"]) / LIVE_STATE, state)
+    return "~/.claude.json (mcpServers)"
+
+
+def forget_live_config(directory):
+    """At the end of a run (the launcher's cleanup): take out of the agent's configuration what attach --live put
+    there (the next start names the servers it keeps with --mcp-config, as always); never raises."""
+    with contextlib.suppress(Exception):
+        record = {**json.loads((Path(directory) / "run.json").read_text()), "directory": str(directory)}
+        for name in live_state(record).get("claude", []):
+            with contextlib.suppress(Exception):
+                agent_config(record, name, add=False)
+
+
+def keep_server(key, name=None, helper=None, add=True):
+    """--mcp NAME (or --helper AGENT) into (or out of) the saved options of the start KEY; True if they changed."""
+    sessions = starts_module().module("sessions")
+    with sessions.session_lock(key):
+        data = sessions.load(key)
+        options = list(data["options"])
+        option, value = ("--helper", helper) if helper else ("--mcp", name)
+        short = launcher().SHORT_OPTIONS.get(option)
+        given = [i for i, token in enumerate(options) if token in (option, short) and i + 1 < len(options)
+                 and options[i + 1] == value]
+        given += [i for i, token in enumerate(options) if token == f"{option}={value}"]
+        if add and given:
+            return False
+        if add:
+            data["options"] = sessions.added_options(data, mcp=[name]) if not helper else [*options, option, value]
+        else:
+            if not given:
+                return False
+            for index in sorted(given, reverse=True):
+                del options[index:index + (1 if "=" in options[index] else 2)]
+            data["options"] = options
+        sessions.save(key, data)
+    return True
+
+
+def attach_live(name, start, helper=None, out=print):
+    """`sandbox-ai mcp attach NAME START --live` (HELPER: --helper AGENT instead of NAME): the server into the
+    running sandbox of START now, without a restart. {"server", "start", "run", "state", "attached": "live" |
+    "already", "server_started", "kept", "agent", "agent_config", "agent_restart", "relay", "message"}."""
+    printable = launcher().printable
+    entry, record, data = live_target(start)
+    a, name = live_arguments(data, record, name, helper)
+    servers = {**definitions(a.project_document), **(getattr(a, "helper_definitions", None) or {})}
+    if name not in servers:
+        raise ValueError(f"Unknown MCP server: {name}; defined: {', '.join(sorted(servers))}")
+    shown = printable(entry["name"])
+    net = net_module()
+    listed = net.ask(record["directory"], {"op": "mcp-list"})
+    if not listed.get("live"):
+        raise ValueError(f"{shown} made no place for MCP servers attached while it runs (started by an older version): "
+                         f"restart it with the server (sandbox-ai mcp attach {name} {shown} --restart)")
+    agent = record.get("agent") if record.get("agent") in LIVE_AGENTS else "codex"
+    result = {"server": name, "start": entry["name"], "run": record.get("run"), "state": "running",
+              "server_started": False, "agent": agent, "agent_config": None,
+              "agent_restart": LIVE_AGENTS[agent]["restart"], "relay": f"{launcher().MCP_AGENT_DIR}/{name}/server.sock"}
+    result["server_started"] = ensure_running(name, a) == "started"  # its own checks, as at a start
+    with run_lock(record):
+        if name in listed.get("servers", []):
+            result["attached"] = "already"
+        else:
+            directory = launcher().mcp_socket_dir(name)
+            fd = os.open(directory, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            try:
+                if os.fstat(fd).st_uid != os.getuid():
+                    raise ValueError(f"{directory} is not yours: not handed to the sandbox")
+                answer = net.ask(record["directory"], {"op": "mcp-open", "name": name,
+                                                       "relay": launcher().mcp_relay_config(a, name)}, fds=[fd])
+            finally:
+                os.close(fd)
+            result["attached"] = "live" if answer.get("opened") else "already"
+        record_server(record, name)
+        try:
+            # Relayed already: a server of the start is on the agent's command line, one attached live was written
+            # then; never twice.
+            if result["attached"] == "live":
+                result["agent_config"] = agent_config(record, name)
+        except (OSError, ValueError) as exc:
+            out(f"  the agent's configuration was not changed: {printable(str(exc))}")
+    try:
+        keep_server(entry["id"], name, helper)  # False: named there already
+        result["kept"] = True
+    except (OSError, ValueError) as exc:
+        result["kept"] = False
+        out(f"  not kept for the next start: {printable(str(exc))}")
+    how = LIVE_AGENTS[agent]["attach"].format(name=name, start=shown)
+    result["message"] = (f"{shown} reaches the MCP server {name} now"
+                         f"{' (it was attached already)' if result['attached'] == 'already' else ''}"
+                         f"{', kept for its later starts' if result['kept'] else ''}. {how}")
+    out(result["message"])
+    return result
+
+
+def detach(name, start, helper=None, live=False, out=print):
+    """`sandbox-ai mcp detach NAME START [--live]`: the server out of the start's options (its later starts); with
+    LIVE (a running start) its relay in the sandbox closed now. The server's own sandbox keeps running (other starts
+    may use it; sandbox-ai mcp stop NAME ends it). {"server", "start", "run", "state", "detached": "live" |
+    "next start" | "not attached", "relay_closed", "kept", "agent", "agent_config", "message"}."""
+    printable = launcher().printable
+    starts = starts_module()
+    if live:
+        entry, record, data = live_target(start)
+    else:
+        entry = starts.find(start)
+        record, data = None, None
+        if entry["kind"] == "mcp":
+            raise ValueError(f"{printable(entry['name'])} is an MCP server's sandbox: a server is attached to an "
+                             "agent's start")
+        if not entry.get("directory"):
+            raise ValueError(f"{printable(entry['name'])} is a run without a kept start: it keeps no options to "
+                             "take the server out of; --live closes its relay while it runs")
+    shown = printable(entry["name"])
+    if helper:
+        workspace = (record or {}).get("workspace") or entry.get("workspace")
+        if not workspace:
+            raise ValueError(f"{shown}: its main workspace is not known, so its helper's name is not either")
+        name = launcher().helper_name(helper, workspace)
+    if not re.fullmatch(launcher().MCP_NAME, name or ""):
+        raise ValueError(f"Invalid MCP server name: {name!r}")
+    agent = (record or {}).get("agent") if (record or {}).get("agent") in LIVE_AGENTS else entry.get("agent")
+    result = {"server": name, "start": entry["name"], "run": (record or {}).get("run") or entry.get("run"),
+              "state": entry["state"], "relay_closed": False, "agent": agent, "agent_config": None}
+    if live:
+        with run_lock(record):
+            answer = net_module().ask(record["directory"], {"op": "mcp-close", "name": name})
+            result["relay_closed"] = bool(answer.get("closed"))
+            record_server(record, name, add=False)
+            try:
+                result["agent_config"] = agent_config(record, name, add=False)
+            except (OSError, ValueError) as exc:
+                out(f"  the agent's configuration was not changed: {printable(str(exc))}")
+    try:
+        result["removed_from_options"] = keep_server(entry["id"], name, helper, add=False)
+    except (OSError, ValueError) as exc:
+        result["removed_from_options"] = False
+        out(f"  still in its options: {printable(str(exc))}")
+    removed = result["removed_from_options"]
+    later = ", and its later starts go without it" if removed else ""
+    if result["relay_closed"]:
+        result["detached"] = "live"
+        how = LIVE_AGENTS.get(agent, LIVE_AGENTS["codex"])["detach"].format(name=name, start=shown)
+        result["message"] = f"{shown} no longer reaches the MCP server {name}: its relay is closed{later}. {how}"
+    elif removed:
+        result["detached"] = "next start"
+        result["message"] = (f"{shown} goes without the MCP server {name} from its next start on" +
+                             (f"; it still reaches it now (sandbox-ai mcp detach {name} {shown} --live closes it now)"
+                              if entry["state"] in ("running", "paused") and not live else ""))
+    else:
+        result["detached"] = "not attached"
+        result["message"] = f"{shown} does not use the MCP server {name}"
+    result["message"] += ". The server's own sandbox keeps running (sandbox-ai mcp stop NAME ends it)" \
+        if result["detached"] != "not attached" else ""
     out(result["message"])
     return result
 
@@ -1093,13 +1418,32 @@ def cli(argv):
                        help="with --for: a running start is restarted with it now (the agent continues its "
                             "conversation)")
     start.add_argument("-j", "--json", action="store_true", help="with --for: the result as JSON")
-    attaching = commands.add_parser("attach", help="Connect a server to an agent start (kept for its later starts)")
-    attaching.add_argument("name")
-    attaching.add_argument("start", metavar="START", help="the agent start (sandbox-ai list)")
+    attaching = commands.add_parser("attach", help="Connect a server to an agent start (kept for its later starts)",
+                                    usage="sandbox-mcp attach NAME START [--live | --restart] [--json]\n"
+                                          "       sandbox-mcp attach --helper AGENT START --live [--json]")
+    attaching.add_argument("name", metavar="NAME", help="the server (sandbox-ai mcp list); with --helper: START")
+    attaching.add_argument("start", metavar="START", nargs="?", help="the agent start (sandbox-ai list)")
+    attaching.add_argument("-H", "--helper", metavar="AGENT", choices=["claude", "codex", "opencode"],
+                           help="the agent AGENT as a helper (an MCP server of its own sandbox), as --helper at a start")
     attaching.add_argument("-r", "--restart", action="store_true",
                            help="a running start is restarted with it now (the agent continues its conversation); "
-                                "without it a running start reaches the server from its next start")
+                                "without it (and without --live) a running start reaches the server from its next "
+                                "start")
+    attaching.add_argument("-l", "--live", action="store_true",
+                           help="into the running sandbox now, without a restart: its relay is opened and the agent's "
+                                "MCP configuration updated (Claude Code: /mcp; Codex and OpenCode: after a restart "
+                                "of the agent)")
     attaching.add_argument("-j", "--json", action="store_true")
+    detaching = commands.add_parser("detach", help="Take a server from an agent start (and with --live from its "
+                                                   "running sandbox now)",
+                                    usage="sandbox-mcp detach NAME START [--live] [--json]\n"
+                                          "       sandbox-mcp detach --helper AGENT START [--live] [--json]")
+    detaching.add_argument("name", metavar="NAME", help="the server; with --helper: START")
+    detaching.add_argument("start", metavar="START", nargs="?", help="the agent start (sandbox-ai list)")
+    detaching.add_argument("-H", "--helper", metavar="AGENT", choices=["claude", "codex", "opencode"])
+    detaching.add_argument("-l", "--live", action="store_true",
+                           help="close its relay in the running sandbox now (the agent's connections to it end)")
+    detaching.add_argument("-j", "--json", action="store_true")
     commands.add_parser("stop", help="Stop a server sandbox").add_argument("name")
     catalog = commands.add_parser("catalog", help="Servers of the MCP catalogs (sandbox-ai-mcp, axross-mcp-hub)")
     catalog.add_argument("-c", "--catalog", action="append", default=[], metavar="FILE_OR_URL",
@@ -1168,6 +1512,23 @@ def cli(argv):
             raise ValueError("--restart and --json go with --for START")
         ensure_running(a.name, launcher().parse_args(["codex", "--backend", a.backend]), a.vpn)
         return 0
+    if a.command in ("attach", "detach"):
+        if (a.start is None) != bool(a.helper):
+            raise ValueError(f"give {'--helper AGENT START' if a.helper else 'NAME START'}")
+        name, target = (None, a.name) if a.helper else (a.name, a.start)
+        say = (lambda text: print(text, file=sys.stderr)) if a.json else print
+        if a.command == "detach" or a.live:
+            if a.command == "attach" and a.restart:
+                raise ValueError("--live attaches without a restart; --restart restarts: choose one")
+            result = (detach(name, target, a.helper, a.live, out=say) if a.command == "detach" else
+                      attach_live(name, target, a.helper, out=say))
+            if a.json:
+                print(json.dumps(result, indent=2))
+            return 0
+        if a.helper:
+            raise ValueError("--helper AGENT goes with --live here (a running start: sandbox-ai mcp attach --helper "
+                             f"{a.helper} {target} --live), or give it at a start (--helper {a.helper})")
+        a.name, a.start = name, target
     if a.command in ("start", "attach"):
         interactive = sys.stdin.isatty() and sys.stdout.isatty() and not a.json
 

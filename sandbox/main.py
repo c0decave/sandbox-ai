@@ -7,7 +7,7 @@
   sandbox-ai attach|pause|resume|stop|delete NAME                    any start by its name (detach: Ctrl-b d)
   sandbox-ai gc [--older-than DAYS] [--dry-run]                      remove leftovers and old kept starts
   sandbox-ai session list|attach|pause|resume|stop|delete ...       the same for sessions (older form)
-  sandbox-ai mcp list|start|stop|attach ...                         MCP server sandboxes (attach: to a start)
+  sandbox-ai mcp list|start|stop|attach|detach ... [--live]         MCP server sandboxes (attach/detach: a start's, --live: while it runs)
   sandbox-ai login claude|codex|opencode | --status                  log in inside a sandbox; kept for all sandboxes
   sandbox-ai plugins [claude [--update] | --status]                  install the plugins the kits declare
   sandbox-ai kits [list|show|new|add-skill|new-skill|add-plugin|...] see and change kits (skills, plugins)
@@ -19,7 +19,7 @@
   sandbox-ai privacy-check [PATH ...]                                what the next push would publish that should stay private
   sandbox-ai net list|show|allow|revoke|untaint ...                  change what a running sandbox may reach
   sandbox-ai devices list|add|remove [RUN] PATH|usb:VID:PID          hand devices to a running sandbox
-  sandbox-ai workspace list|add|remove [RUN] DIR [--ro]             hand a host directory to a running sandbox
+  sandbox-ai workspace list|add|remove [RUN] DIR|FILE [--ro] [--name NAME]  hand a host folder or file to a running sandbox
   sandbox-ai limits [RUN] --memory|--cpus|--pids ...                 change a running sandbox's limits
   sandbox-ai approvals list|allow|deny|history|remembered|forget ... answer what running sandboxes ask
   sandbox-ai canaries list [RUN] | resume RUN                        decoy files of the runs, and what happened to them

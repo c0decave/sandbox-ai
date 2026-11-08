@@ -1560,6 +1560,25 @@ def test_workspace_targets(scenario, tmp_path):
                                              (str(other), "/workspaces/lib-2"), (str(tmp_path / "x y"), "/workspaces/x y")]
 
 
+def test_workspace_names(scenario, tmp_path):
+    """--workspace-name NAME=DIR (what `sandbox-ai workspace add --name` keeps for a session): by resolved path."""
+    main, lib = tmp_path / "main", tmp_path / "lib"
+    if scenario == "happy":
+        a = s.parse_args(["codex", "--workspace", f"{main},{lib}", "--workspace-name", f"docs={tmp_path}/./lib"])
+        assert s.workspace_names(a) == {str(lib): "docs"}
+        assert s.workspace_targets(a) == [(str(main), "/work"), (str(lib), "/workspaces/docs")]
+    elif scenario == "sad":
+        for value in ("docs", f"={lib}", f"../x={lib}", "docs="):
+            with pytest.raises(ValueError, match="--workspace-name NAME=DIR"):
+                s.workspace_names(s.parse_args(["codex", "--workspace-name", value]))
+    else:  # the others go around a name (a kept lib-named one keeps "lib"): never two at one place
+        other = tmp_path / "other" / "lib"
+        a = s.parse_args(["codex", "--workspace", f"{main},{other},{lib}", "--workspace-name", f"lib={lib}"])
+        assert s.workspace_targets(a) == [(str(main), "/work"), (str(other), "/workspaces/lib-2"),
+                                          (str(lib), "/workspaces/lib")]
+        assert s.workspace_names(s.parse_args(["codex"])) == {}
+
+
 def test_check_private_dir(scenario, tmp_path):
     work = tmp_path / "work"
     args = s.parse_args(["codex", "--workspace", f"{work},{tmp_path / 'lib'}"])
@@ -6001,6 +6020,8 @@ def test_register_run(scenario, tmp_path, monkeypatch):
         assert record["session_dir"] == str(tmp_path / "session") and record["proxy"]
         assert stat.S_IMODE(directory.stat().st_mode) == 0o700
         assert record["own_cgroup"] is True  # Podman: the pod's cgroup is the run's own
+        # sandbox-ai mcp attach --live: its supervisor opens relays during the run, the agent's HOME is named.
+        assert record["mcp_live"] is True and "agent_home" in record
         # sandbox-ai workspace add checks against what the start recorded.
         assert record["workspace_checks"]["workspaces"] == [{"host": str(tmp_path / "app"), "sandbox": "/work",
                                                               "mode": "rw"}]
@@ -8553,6 +8574,148 @@ def test_start_mcp_relays(scenario, tmp_path, capsys):
             assert threads[0].is_alive() and "MCP server failed" in capsys.readouterr().err
     finally:
         shutil.rmtree(directory, ignore_errors=True)
+
+
+def test_connect_socket_file(scenario, tmp_path):
+    """The relay reaches a server's socket without following a link the server put in its directory."""
+    directory = Path(tempfile.mkdtemp(prefix="csf-", dir="/tmp"))
+    try:
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(str(directory / "server.sock"))
+        listener.listen(1)
+        with listener, socket.socket(socket.AF_UNIX) as client:
+            if scenario == "happy":
+                rt.connect_socket_file(client, str(directory / "server.sock"))
+                listener.accept()[0].close()
+            elif scenario == "sad":  # a link to the socket (or to the supervisor's control socket): refused
+                (directory / "link.sock").symlink_to(directory / "server.sock")
+                with pytest.raises(OSError, match="no socket"):
+                    rt.connect_socket_file(client, str(directory / "link.sock"))
+                (directory / "file").write_text("")
+                with pytest.raises(OSError, match="no socket"):
+                    rt.connect_socket_file(client, str(directory / "file"))
+            else:  # a name in a directory given as a descriptor (a server attached during the run)
+                fd = os.open(directory, os.O_PATH | os.O_DIRECTORY)
+                try:
+                    rt.connect_socket_file(client, "server.sock", fd)
+                finally:
+                    os.close(fd)
+                listener.accept()[0].close()
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def fake_mcp_upstream(directory):
+    """An MCP server's socket in DIRECTORY (as the server's sandbox listens): answers each request line with a result
+    that names the method; (thread, stop)."""
+    listener = rt.listen_unix(str(directory / "server.sock"))
+    listener.settimeout(0.2)
+    stop = threading.Event()
+
+    def serve():
+        while not stop.is_set():
+            try:
+                connection, _ = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            def answer(connection=connection):
+                with connection:
+                    for line in connection.makefile("rb"):
+                        request = json.loads(line)
+                        if "id" in request:
+                            reply = {"jsonrpc": "2.0", "id": request["id"],
+                                     "result": {"tools": [{"name": "echo", "inputSchema": {"type": "object"}}]}
+                                     if request["method"] == "tools/list" else {"method": request["method"]}}
+                            connection.sendall((json.dumps(reply) + "\n").encode())
+            threading.Thread(target=answer, daemon=True).start()
+        listener.close()
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    return thread, stop
+
+
+def mcp_request(path, message, timeout=10):
+    """One request to the relay at PATH as the agent's bridge sends it; the answer (dict), or None if cut."""
+    with socket.socket(socket.AF_UNIX) as client:
+        client.settimeout(timeout)
+        client.connect(str(path))
+        client.sendall((json.dumps(message) + "\n").encode())
+        line = client.makefile("rb").readline()
+        return json.loads(line) if line else None
+
+
+def test_mcp_control(scenario, tmp_path):
+    """mcp-open hands the relay a descriptor of the server's socket directory: the agent reaches the server through
+    the run's relay at once (and mcp-calls.jsonl says so); mcp-close cuts it; policy, mode and odd requests refuse."""
+    base = Path(tempfile.mkdtemp(prefix="mcpc-", dir="/tmp"))
+    upstream = base / "up"
+    upstream.mkdir()
+    thread, stop = fake_mcp_upstream(upstream)
+    relays = rt.McpRelays(run_dir=base / "run", log=base / "calls.jsonl", live=True)
+    fd = os.open(upstream, os.O_PATH | os.O_DIRECTORY)
+    try:
+        if scenario == "happy":
+            fds = [fd]
+            answer = rt.mcp_control({"op": "mcp-open", "name": "web", "relay": {"server": "web", "rules": []}},
+                                    relays, fds)
+            fd = None  # taken over (closed with the relay)
+            assert answer["opened"] and fds == [] and answer["servers"] == ["web"]
+            reply = mcp_request(base / "run/web/server.sock", {"jsonrpc": "2.0", "id": 7, "method": "tools/list"})
+            assert reply["id"] == 7 and reply["result"]["tools"][0]["name"] == "echo"
+            assert rt.mcp_control({"op": "mcp-list"}, relays, [])["servers"] == ["web"]
+            again = os.open(upstream, os.O_PATH | os.O_DIRECTORY)
+            assert rt.mcp_control({"op": "mcp-open", "name": "web", "relay": {"server": "web"}}, relays,
+                                  [again])["already"]  # closed by the relays: not leaked
+            with pytest.raises(OSError):
+                os.fstat(again)
+            events = [json.loads(line).get("event") for line in (base / "calls.jsonl").read_text().splitlines()]
+            assert "attached" in events
+        elif scenario == "sad":
+            for request, fds, why, kwargs in (
+                    ({"op": "mcp-open", "name": "web", "relay": {"server": "web"}}, [fd], "policy",
+                     {"forbid": ["--mcp"]}),
+                    ({"op": "mcp-open", "name": "web", "relay": {"server": "web"}}, [fd], "security mode high",
+                     {"mode": {"name": "high", "refuses": ["--mcp"]}}),
+                    ({"op": "mcp-open", "name": "web", "relay": {"server": "web"}}, [], "one descriptor", {}),
+                    ({"op": "mcp-open", "name": "../x", "relay": {}}, [fd], "1-32 letters", {}),
+                    ({"op": "mcp-open", "name": "web", "relay": {"server": "other"}}, [fd], "configuration", {})):
+                with pytest.raises(ValueError, match=why):
+                    rt.mcp_control(request, relays, list(fds), **kwargs)
+            assert relays.names() == [] and not (base / "run/web").exists()
+            with pytest.raises(ValueError, match="relays no MCP servers"):
+                rt.mcp_control({"op": "mcp-list"}, None, [])
+            old = rt.McpRelays(run_dir=base / "old", live=False)  # an older start: no read-only place for the agent
+            with pytest.raises(ValueError, match="older version"):
+                rt.mcp_control({"op": "mcp-open", "name": "web", "relay": {"server": "web"}}, old,
+                               [os.open(upstream, os.O_PATH | os.O_DIRECTORY)])
+        else:  # closed: the agent's open connection is cut, the socket goes, a new connection is refused
+            rt.mcp_control({"op": "mcp-open", "name": "web", "relay": {"server": "web", "rules": []}}, relays, [fd])
+            fd = None
+            client = socket.socket(socket.AF_UNIX)
+            client.settimeout(10)
+            client.connect(str(base / "run/web/server.sock"))
+            client.sendall(b'{"jsonrpc": "2.0", "id": 1, "method": "ping"}\n')
+            stream = client.makefile("rb")
+            assert json.loads(stream.readline())["result"] == {"method": "ping"}
+            assert rt.mcp_control({"op": "mcp-close", "name": "web"}, relays, []) == {"ok": True, "closed": True,
+                                                                                       "servers": []}
+            assert stream.readline() == b""  # cut
+            client.close()
+            assert not (base / "run/web").exists()
+            assert rt.mcp_control({"op": "mcp-close", "name": "web"}, relays, [])["closed"] is False
+            events = [json.loads(line).get("event") for line in (base / "calls.jsonl").read_text().splitlines()]
+            assert events[-1] == "detached"
+    finally:
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        for name in relays.names():
+            relays.detach(name)
+        stop.set()
+        thread.join(5)
+        shutil.rmtree(base, ignore_errors=True)
 
 
 HOOK_RULES = {"version": 1, "untrusted": [{"id": "search", "agent": "claude", "tool": "WebSearch"}],
