@@ -129,8 +129,8 @@ def test_adding_on_this_machine_keeps_the_key_as_a_secret_never_on_a_command_lin
 
     def run(dialog):
         dialogs.append(dialog)
-        assert not dialog.remote and dialog.form.isRowVisible(dialog.value)
-        assert dialog.value.echoMode() == QLineEdit.EchoMode.Password
+        assert not dialog.remote and dialog.form.isRowVisible(dialog.value_row)
+        assert dialog.value.echoMode() == QLineEdit.EchoMode.Normal and dialog.value.show_toggle.isChecked()
         dialog.name.setText("lm2")
         dialog.kind.setCurrentIndex(dialog.kind.findData("lmstudio"))
         dialog.url.setText("http://192.168.1.21:1234")
@@ -218,7 +218,7 @@ def test_adding_on_a_host_names_a_secret_kept_there(qapp, sai, monkeypatch):
     page.host_box.setCurrentIndex(page.host_box.findData("ct1"))
 
     def run(dialog):
-        assert dialog.remote and not dialog.form.isRowVisible(dialog.value), "no key is typed for another host"
+        assert dialog.remote and not dialog.form.isRowVisible(dialog.value_row), "no key is typed for another host"
         dialog.name.setText("gpu2")
         dialog.kind.setCurrentIndex(dialog.kind.findData("vllm"))
         dialog.url.setText("http://100.64.0.8:8000")
@@ -244,7 +244,7 @@ def test_check_and_models_show_what_the_host_says(qapp, sai):
     check = ("llm", "check", "lm", "--agent", "claude")
     sai.answers[("local", check)] = (1, "lm: LM Studio at http://192.168.1.20:1234\n  ok    address 192.168.1.20\n"
                                         "  FAIL  the server refused the key\x07", "")
-    models = ("llm", "models", "lm", "--sort", "name", "--json")
+    models = ("llm", "models", "lm", "--sort", "loaded", "--json")  # loaded first, then by name: the default
     sai.answers[("local", models)] = (0, json.dumps(MODELS), "")
     page.servers.selectRow(0)
     page.agent.setCurrentIndex(page.agent.findData("claude"))
@@ -258,13 +258,13 @@ def test_check_and_models_show_what_the_host_says(qapp, sai):
     assert sai.asked[-1] == ("local", ("llm", "check", "lm"))
     page.models_button.click()
     assert sai.asked[-1] == ("local", models)
-    title, text, _ = widgets.SHOWN[-1]
-    assert title == "Models of lm (local (this machine))"
-    assert "qwen2.5-coder:7b" in text and "4.5 GB" in text and "llama3.1:8b" in text and "Loaded" in text
+    assert page.models_title.text().startswith("Models of lm (local (this machine)): 2"), "in the page's table"
+    cells = [[page.model_table.item(r, c).text() for c in range(page.model_table.columnCount())] for r in range(2)]
+    assert cells == [["qwen2.5-coder:7b", "yes", "4.5 GB"], ["llama3.1:8b", "", ""]]
     args = parsed(sai, list(check))
     assert (args.command, args.name, args.agent) == ("check", "lm", "claude")
     args = parsed(sai, list(models))
-    assert (args.command, args.name, args.json, args.sort) == ("models", "lm", True, "name")
+    assert (args.command, args.name, args.json, args.sort) == ("models", "lm", True, "loaded")
     page.close()
     page.deleteLater()
 
@@ -308,6 +308,6 @@ def test_a_name_that_reads_as_an_option_is_never_passed_on(qapp, sai, monkeypatc
     monkeypatch.setattr(llm_page.LlmDialog, "exec", run)
     page.add()
     assert sai.asked == [] and sai.secrets_set == [], "refused before the key is kept"
-    assert widgets.SHOWN[-1][0] == "New LLM server" and "not starting with '-'" in widgets.SHOWN[-1][1]
+    assert widgets.SHOWN[-1][0] == "New LLM server" and "not '-'" in widgets.SHOWN[-1][1]
     page.close()
     page.deleteLater()

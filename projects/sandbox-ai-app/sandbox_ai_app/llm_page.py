@@ -1,5 +1,5 @@
 """The LLM servers page (sandbox-ai llm): the endpoints kept on this machine or on a host of `sandbox-ai hosts`,
-with Add, Check, Models and Remove, as the web interface's LLM page offers them.
+with Add, Edit, Check, Models and Remove, as the web interface's LLM page offers them.
 
 Every command runs in the background (`sandbox-ai llm ...` here, `sandbox-ai hosts run HOST -- llm ...` for a
 host), only while the page is shown or a button asks: no command at every start of the app.
@@ -9,54 +9,72 @@ value on standard input), and the endpoint only names that secret (--api-key-sec
 command line, in a file of the app or in sandbox-ai's llm.json. For another host the app has no way to hand a value
 to that host's secrets without a command line, so the dialog asks for the name of a secret kept there already.
 
+The dialog (new or Edit…, a double-click) checks the name as it is typed (the character that cannot be in it, a
+name to use instead; OK only for a valid one) and stays open with everything typed whatever goes wrong: a field the
+CLI would refuse, a question answered No, `llm add` refusing (its message shown in the dialog). Test connection
+lists the models of a server not saved yet (`sandbox-ai wizard models --kind --url --json`: nothing is stored and no
+key is sent; an OpenAI-compatible server cannot be asked that way, so `llm check` runs once it is saved; an edited
+server whose address and key are as saved: `llm models NAME`) and fills the Default model choice. Edit prefills from
+`llm show NAME --json` and saves with --replace, every setting kept - the CA it has stays by itself, and only a file
+named in the dialog replaces it - after a yes naming what changes (llm-replace).
+
+Models lists a server's models in a table (the columns the server has values for, loaded first, a filter) where one
+becomes the server's default model (Use as default: `llm add --replace --model`, its other settings kept, asked
+first: llm-replace) or is copied as NAME:MODEL for --llm.
+
 What the CLI or a host answers is shown through printable(); names that go back as arguments are checked first
 (never one that reads as an option). The dialog also offers the further options of `llm add`: headers the proxy adds
 from secrets (--header-secret), a CA (--ca, a file of that host), plain http to a public address (--insecure-http,
-asked first: llm-insecure) and replacing an endpoint of the same name (--replace); Show runs `llm show`, Models
-`llm models --sort`."""
+asked first: llm-insecure) and replacing an endpoint of the same name (--replace); Show runs `llm show`."""
 from __future__ import annotations
 
+import functools
 import json
 import re
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLineEdit, QPushButton, QVBoxLayout,
-    QWidget,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLineEdit, QPushButton,
+    QVBoxLayout, QWidget,
 )
 
 from .files import printable
+from .host_choice import on_host
+from . import theme, widgets
+from . import wizard_llm as WL
 from .i18n import N_, tr
 from .widgets import (
-    ask_first, background, fill, outcome, plain_label, selected_keys, set_enabled, show_text, table, warn,
+    ask_first, background, fill, outcome, plain_label, row_key, selected_keys, set_enabled, show_text, table, warn,
 )
 
 # As sandbox-ai llm checks them (llm.py: NAME, SECRET, MODEL_NAME, VPN_PROFILE, URL).
-NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
-SECRET = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
-MODEL = re.compile(r"[\w.:/@+-]{1,200}", re.ASCII)
+NAME = WL.NAME
+SECRET = WL.SECRET
+MODEL = WL.MODEL
 VPN = NAME
-HEADER = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,63}")  # llm.py's HEADER
-RESERVED_HEADERS = {"host", "content-length", "transfer-encoding", "connection", "upgrade", "te", "trailer"}
-SORTS = (("name", N_("by name")), ("size", N_("by size")), ("loaded", N_("loaded first")))
+HEADER = WL.HEADER
+RESERVED_HEADERS = WL.RESERVED_HEADERS
+SORTS = (("loaded", N_("loaded first")), ("name", N_("by name")), ("size", N_("by size")))
 HEADER_EXAMPLE = "X-Gateway-Key=GATEWAY_KEY"
-URL = re.compile(r"https?://(\[[0-9A-Fa-f:.]{2,45}\]|[A-Za-z0-9.-]{1,253})(?::[0-9]{1,5})?(/[A-Za-z0-9._~/-]{0,200})?")
+URL = WL.URL
 LOCAL = "local"  # this machine, as sandbox-ai hosts names it
 HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 KINDS = (("lmstudio", N_("LM Studio")), ("ollama", N_("Ollama")), ("llamacpp", N_("llama.cpp server")),
          ("vllm", N_("vLLM")), ("openai-compatible", N_("OpenAI-compatible server (a gateway, LiteLLM, …)")))
 AGENTS = ("claude", "codex", "opencode")
-NAME_EXAMPLE = "lmstudio"  # the same in every language
+NAME_EXAMPLE = WL.NAME_EXAMPLE
 URL_EXAMPLE = "http://192.168.1.20:1234"
 MODEL_EXAMPLE = "qwen2.5-coder:7b"
 SECRET_EXAMPLE = "LLM_KEY"
 VPN_EXAMPLE = "home"
 LIST_SECONDS, ADD_SECONDS, CHECK_SECONDS, MODELS_SECONDS, REMOVE_SECONDS = 60, 90, 150, 120, 60
 SHOW_SECONDS = 60
+CONNECTION = ("kind", "url", "secret", "headers", "ca")  # what decides how the server is reached
 
 
 def valid_name(name):
     """NAME if it may go back to sandbox-ai as an endpoint's name (never one that reads as an option), else None."""
-    return name if isinstance(name, str) and not name.startswith("-") and NAME.fullmatch(name) else None
+    return WL.valid_name(name)
 
 
 def valid_host(name):
@@ -105,41 +123,52 @@ def failure(result, error):
     return lines_of((err or out).strip()[-1500:]) or tr("exit status {status}", status=status)
 
 
-def size_text(value):
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        return "?"
-    for unit, factor in (("GB", 1e9), ("MB", 1e6), ("KB", 1e3)):
-        if value >= factor:
-            return f"{value / factor:.1f} {unit}"
-    return f"{value} B"
+def add_argv(fields):
+    """The arguments of `sandbox-ai llm add` for FIELDS (see LlmDialog.request), each value checked as sandbox-ai
+    llm checks it and none that reads as an option; ValueError says what is wrong. Keys are not among them."""
+    return WL.server_argv(fields)
 
 
-def models_text(models):
-    """`sandbox-ai llm models --json` ([{name, size, loaded, details}]) as aligned lines."""
-    loaded = {True: tr("yes"), False: tr("no")}
-    rows = [[tr("Name"), tr("Size"), tr("Loaded"), tr("Details")]]
-    rows += [[text_of(m.get("name"), 200), size_text(m.get("size")),
-              loaded[m["loaded"]] if isinstance(m.get("loaded"), bool) else "?",
-              text_of(m.get("details"), 120)]
-             for m in models if isinstance(m, dict)]
-    if len(rows) == 1:
-        return tr("The server lists no models.")
-    widths = [max(len(row[i]) for row in rows) for i in range(4)]
-    return "\n".join("  ".join(v.ljust(w) for v, w in zip(row, widths)).rstrip() for row in rows)
+def colored(label, status):
+    """LABEL's text in a status colour ("ok", "bad"; None: the usual one)."""
+    label.setStyleSheet(f"color: {theme.color(status)};" if status else "")
 
 
 class LlmDialog(QDialog):
-    """A new LLM server: its name, kind, URL, default model, VPN profile and key. REMOTE: the key is a secret of
-    that host, named only (the value cannot reach it without a command line)."""
+    """A new LLM server, or EXISTING (its fields as wizard_llm.fields_of gives them) edited: its name, kind, URL,
+    default model, VPN profile and key. REMOTE: the key is a secret of that host, named only (the value cannot reach
+    it without a command line). RUN(*args, timeout=...) runs a sandbox-ai command on that host (blocking: in the
+    background) for Test connection; TAKEN: the names registered there.
 
-    def __init__(self, parent=None, host_label="", remote=False):
+    OK hands the fields to ON_SAVE(fields, value) - the page saves while the dialog stays open - and the dialog
+    closes only once it saved (finish); failed(message) keeps it open with everything typed."""
+
+    def __init__(self, parent=None, host_label="", remote=False, existing=None, run=None, taken=()):
         super().__init__(parent)
-        self.remote = remote
-        self.setWindowTitle(tr("New LLM server on {host}", host=host_label))
+        self.remote, self.existing, self.run, self.taken = remote, existing, run, set(taken or ())
+        self.on_save, self.saved, self.saving, self.check_after, self.tests = None, False, False, False, 0
+        self.suggestion = None
+        editing = existing is not None
+        self.title_text = tr("Edit LLM server") if editing else tr("New LLM server")
+        self.setWindowTitle(tr("Edit the LLM server {name} on {host}", name=printable(existing.get("name", "")),
+                               host=host_label) if editing else tr("New LLM server on {host}", host=host_label))
         layout = QVBoxLayout(self)
         self.form = QFormLayout()
         self.name = QLineEdit()
         self.name.setPlaceholderText(NAME_EXAMPLE)
+        self.name.setAccessibleName(tr("Name"))
+        self.name.setToolTip(tr("1-32 letters A-Z or a-z, digits, '_' or '-'; a digit may come first, '-' and '_' "
+                                "not. It is what --llm NAME names."))
+        self.name_hint = plain_label()
+        self.name_hint.setAccessibleName(tr("What is wrong with the name"))
+        self.suggest_button = QPushButton()
+        self.suggest_button.setToolTip(tr("Take this name instead (the characters a name cannot hold as '-')"))
+        self.suggest_button.clicked.connect(lambda _=False: self.name.setText(self.suggestion or self.name.text()))
+        self.hint_row = QWidget()
+        hint = QHBoxLayout(self.hint_row)
+        hint.setContentsMargins(0, 0, 0, 0)
+        hint.addWidget(self.name_hint, 1)
+        hint.addWidget(self.suggest_button)
         self.kind = QComboBox()
         for key, label in KINDS:
             self.kind.addItem(tr(label), key)
@@ -147,9 +176,26 @@ class LlmDialog(QDialog):
         self.url.setPlaceholderText(URL_EXAMPLE)
         self.url.setToolTip(tr("The server's root, http(s)://HOST[:PORT][/PREFIX]; each agent gets the API path it "
                                "needs. Plain http only to this host, private or Tailscale addresses."))
-        self.model = QLineEdit()
+        self.test_button = QPushButton(tr("Test connection"))
+        self.test_button.setAccessibleName(tr("Test connection"))
+        self.test_button.setToolTip(tr("Ask the server for its models now, without saving it (sandbox-ai wizard "
+                                       "models), and offer them as the default model"))
+        self.test_button.clicked.connect(lambda _=False: self.test())
+        self.test_result = plain_label(role="secondary")
+        self.test_result.setAccessibleName(tr("Result of the test"))
+        self.test_row = QWidget()
+        test = QHBoxLayout(self.test_row)
+        test.setContentsMargins(0, 0, 0, 0)
+        test.addWidget(self.test_button)
+        test.addWidget(self.test_result, 1)
+        self.model_box = QComboBox()
+        self.model_box.setEditable(True)
+        self.model_box.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.model_box.setAccessibleName(tr("Default model"))
+        self.model = self.model_box.lineEdit()  # what is typed or chosen
         self.model.setPlaceholderText(MODEL_EXAMPLE)
-        self.model.setToolTip(tr("The model a start uses when --llm names none (optional)"))
+        self.model_box.setToolTip(tr("The model a start uses when --llm names none (optional): type it, or choose one "
+                                     "Test connection listed"))
         self.vpn = QLineEdit()
         self.vpn.setPlaceholderText(VPN_EXAMPLE)
         self.vpn.setToolTip(tr("The VPN profile the server is reached through (optional)"))
@@ -157,7 +203,6 @@ class LlmDialog(QDialog):
         self.secret = QLineEdit()
         self.secret.setPlaceholderText(SECRET_EXAMPLE)
         self.value = QLineEdit()
-        self.value.setEchoMode(QLineEdit.EchoMode.Password)
         self.value.setPlaceholderText(tr("typed here: kept as that secret (or leave it empty if it is kept already)"))
         self.headers = QLineEdit()
         self.headers.setPlaceholderText(HEADER_EXAMPLE)
@@ -166,16 +211,21 @@ class LlmDialog(QDialog):
         self.ca = QLineEdit()
         self.ca.setPlaceholderText(tr("a PEM file on that host (optional)"))
         self.ca.setToolTip(tr("The CA that signed the server's certificate (copied)"))
+        if (existing or {}).get("has_ca"):
+            self.ca.setPlaceholderText(tr("a CA is kept and stays; name a PEM file of that host to replace it"))
         self.insecure = QCheckBox(tr("Allow plain http to an address outside the local networks (unencrypted)"))
         self.replace = QCheckBox(tr("Replace an LLM server of that name"))
         self.form.addRow(tr("Name"), self.name)
+        self.form.addRow("", self.hint_row)
         self.form.addRow(tr("Kind"), self.kind)
         self.form.addRow(tr("URL"), self.url)
-        self.form.addRow(tr("Model"), self.model)
+        self.form.addRow("", self.test_row)
+        self.form.addRow(tr("Default model"), self.model_box)
         self.form.addRow(tr("VPN profile"), self.vpn)
         self.form.addRow("", self.anthropic)
         self.form.addRow(tr("Secret for the API key (optional)"), self.secret)
-        self.form.addRow(tr("Its value"), self.value)
+        self.value_row = widgets.secret_value(self.value)  # the field with its "Show value" toggle
+        self.form.addRow(tr("Its value"), self.value_row)
         self.form.addRow(tr("Headers from secrets"), self.headers)
         self.form.addRow(tr("CA certificate"), self.ca)
         self.form.addRow("", self.insecure)
@@ -188,76 +238,198 @@ class LlmDialog(QDialog):
             note = tr("A key typed here is kept as a secret of sandbox-ai (standard input, never a command line); the "
                       "server's entry only names that secret, and the proxy adds the key on the wire.")
         layout.addWidget(plain_label(note, role="secondary"))
-        self.form.setRowVisible(self.value, not remote)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        self.form.setRowVisible(self.value_row, not remote)
+        self.note = plain_label()
+        self.note.setAccessibleName(tr("Status"))
+        self.note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.note.hide()
+        layout.addWidget(self.note)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.ok_button = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self.ok_button.setText(tr("Save") if editing else tr("Add"))
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
         self.kind.currentIndexChanged.connect(self.show_fields)
+        self.kind.currentIndexChanged.connect(lambda *_: self.forget_test())
+        self.url.textChanged.connect(lambda *_: self.forget_test())
+        self.name.textChanged.connect(lambda *_: self.check_name())
+        self.replace.toggled.connect(lambda *_: self.check_name())
+        if editing:
+            self.prefill(existing)
+            self.name.setReadOnly(True)
+            self.name.setToolTip(tr("A server keeps its name: add one under another name, then remove this one"))
+            self.form.setRowVisible(self.replace, False)
         self.show_fields()
+        self.check_name()
+
+    def prefill(self, fields):
+        """The dialog's fields as FIELDS (wizard_llm.fields_of) say."""
+        self.name.setText(fields.get("name") or "")
+        self.kind.setCurrentIndex(max(self.kind.findData(fields.get("kind")), 0))
+        self.url.setText(fields.get("url") or "")
+        self.model.setText(fields.get("model") or "")
+        self.vpn.setText(fields.get("vpn") or "")
+        self.anthropic.setChecked(bool(fields.get("anthropic")))
+        self.secret.setText(fields.get("secret") or "")
+        self.headers.setText(fields.get("headers") or "")
+        self.ca.setText(fields.get("ca") or "")
+        self.insecure.setChecked(bool(fields.get("insecure")))
+        self.replace.setChecked(True)
 
     def show_fields(self):
         # Ollama, LM Studio, llama.cpp and vLLM offer the Messages API themselves (sandbox-ai llm knows since when).
         self.form.setRowVisible(self.anthropic, self.kind.currentData() == "openai-compatible")
 
     def request(self):
-        """{name, kind, url, model, vpn, anthropic, secret} as typed, and the typed key (None: none)."""
+        """{name, kind, url, model, vpn, anthropic, secret, headers, ca, insecure, replace} as typed, and the typed
+        key (None: none)."""
         fields = {"name": self.name.text().strip(), "kind": self.kind.currentData(), "url": self.url.text().strip(),
                   "model": self.model.text().strip(), "vpn": self.vpn.text().strip(),
                   "anthropic": self.anthropic.isChecked() and self.kind.currentData() == "openai-compatible",
                   "secret": self.secret.text().strip(), "headers": self.headers.text().strip(),
                   "ca": self.ca.text().strip(), "insecure": self.insecure.isChecked(),
-                  "replace": self.replace.isChecked()}
+                  "replace": self.replace.isChecked() or self.existing is not None}
         value = None if self.remote else (self.value.text() or None)
         return fields, value
 
+    # -- the name, as it is typed --
 
-def add_argv(fields):
-    """The arguments of `sandbox-ai llm add` for FIELDS (see LlmDialog.request), each value checked as sandbox-ai
-    llm checks it and none that reads as an option; ValueError says what is wrong. Keys are not among them."""
-    name = valid_name(fields.get("name"))
-    if name is None:
-        raise ValueError(tr("A server's name is 1-32 letters, digits, '_' or '-', not starting with '-'."))
-    kind = fields.get("kind")
-    if kind not in dict(KINDS):
-        raise ValueError(tr("Choose the kind of server."))
-    url = fields.get("url") or ""
-    if not URL.fullmatch(url):
-        raise ValueError(tr("The URL is http(s)://HOST[:PORT][/PREFIX], without user, query or fragment."))
-    args = ["llm", "add", name, "--kind", kind, "--url", url]
-    model = fields.get("model")
-    if model:
-        if model.startswith("-") or not MODEL.fullmatch(model):
-            raise ValueError(tr("Not a model name: {model}", model=printable(model)))
-        args += ["--model", model]
-    vpn = fields.get("vpn")
-    if vpn:
-        if valid_name(vpn) is None:
-            raise ValueError(tr("Not a VPN profile's name: {name}", name=printable(vpn)))
-        args += ["--vpn", vpn]
-    secret = fields.get("secret")
-    if secret:
-        if not SECRET.fullmatch(secret):
-            raise ValueError(tr("A secret's name is letters, digits and '_', not starting with a digit."))
-        args += ["--api-key-secret", secret]
-    if fields.get("anthropic") and kind == "openai-compatible":
-        args.append("--anthropic")
-    for pair in (fields.get("headers") or "").replace(",", " ").split():
-        header, sep, secret = pair.partition("=")
-        if not sep or not HEADER.fullmatch(header) or header.lower() in RESERVED_HEADERS or not SECRET.fullmatch(secret):
-            raise ValueError(tr("A header from a secret is HEADER=SECRET (a header name, a secret's name): {value}",
-                                value=printable(pair)))
-        args.append(f"--header-secret={header}={secret}")
-    ca = fields.get("ca")
-    if ca:
-        if not ca.startswith("/") or "\0" in ca or not ca.isprintable():
-            raise ValueError(tr("The CA is a file with its absolute path."))
-        args.append(f"--ca={ca}")
-    if fields.get("insecure"):
-        args.append("--insecure-http")
-    if fields.get("replace"):
-        args.append("--replace")
-    return args
+    def check_name(self):
+        """The hint below the name: what cannot be in it (red) and a name to use instead, or that a server of that
+        name is there already; OK only for a valid name."""
+        name = self.name.text().strip()
+        problem = WL.name_problem(name)
+        self.suggestion = WL.suggest_name(name) if problem else None
+        text, status = "", None
+        if problem and name:
+            text, status = problem, "bad"
+        elif not problem and self.existing is None and name in self.taken and not self.replace.isChecked():
+            text, status = tr("A server named {name} is registered on this host already: check Replace below, or "
+                              "cancel and use Edit… in the list.", name=name), "warn"
+        self.name_hint.setText(text)
+        colored(self.name_hint, status)
+        self.suggest_button.setText(tr("Use {name}", name=self.suggestion) if self.suggestion else "")
+        self.suggest_button.setVisible(bool(self.suggestion))
+        self.form.setRowVisible(self.hint_row, bool(text))
+        set_enabled(self.ok_button, problem is None and not self.saving, problem or tr("Saving…"))
+        return problem
+
+    # -- Test connection --
+
+    def forget_test(self):
+        """Another kind or URL: an earlier test says nothing about it."""
+        self.tests += 1
+        self.check_after = False
+        self.test_result.setText("")
+        colored(self.test_result, None)
+
+    def test(self):
+        """The models of the server as typed, without saving it: `sandbox-ai wizard models` for a server not saved
+        yet (plain http, no prefix), `llm models NAME` for an edited one reached as it was saved. Neither: said so,
+        and `llm check` runs once it is saved."""
+        fields, _ = self.request()
+        self.tests += 1
+        ticket = self.tests
+        same = self.existing is not None and all((self.existing.get(k) or "") == (fields.get(k) or "")
+                                                 for k in CONNECTION)
+        if same and valid_name(fields["name"]):
+            args, probe = ["llm", "models", fields["name"], "--sort", "loaded", "--json"], False
+        else:
+            try:
+                args, probe = WL.probe_argv(fields["kind"], fields["url"]), True
+            except ValueError as exc:
+                self.check_after = True
+                self.test_result.setText(tr("{reason} It is checked with sandbox-ai llm check (its key, TLS and CA) "
+                                            "once it is saved.", reason=printable(exc)))
+                colored(self.test_result, "warn")
+                return
+        if self.run is None:
+            return
+        self.check_after = False
+        self.test_result.setText(tr("Asking the server…"))
+        colored(self.test_result, None)
+        run = self.run
+        background(lambda: run(*args, timeout=WL.PROBE_SECONDS), owner=self, source=self.test_button,
+                   timeout=WL.PROBE_SECONDS + 15,
+                   done=lambda result, error: self.tested(ticket, probe, fields, result, error))
+
+    def tested(self, ticket, probe, fields, result, error):
+        if ticket != self.tests:
+            return  # the kind or URL changed meanwhile: that answer is about another server
+        status, out, err = outcome(result, error)
+        try:
+            if status != 0:
+                raise ValueError(failure(result, error))
+            models = WL.parse_models(out)
+        except ValueError as exc:
+            text = tr("Not reachable: {error}", error=printable(exc))
+            if probe and (fields.get("secret") or fields.get("headers")):
+                text += "\n" + tr("(Tested without its key: a server that needs one refuses this test; llm check "
+                                  "uses the key once it is saved.)")
+            self.test_result.setText(text)
+            colored(self.test_result, "bad")
+            return
+        usable = [m["name"] for m in models]
+        loaded = sum(1 for m in models if m.get("loaded") is True)
+        typed = self.model.text()
+        self.model_box.clear()
+        self.model_box.addItems(usable)
+        self.model_box.setEditText(typed or (usable[0] if len(usable) == 1 else ""))
+        if not models:
+            text = tr("Reachable, but the server lists no models: load or pull one first.")
+        else:
+            text = tr("Reachable: {count} models, {loaded} loaded. Choose the default model below (or leave it "
+                      "empty).", count=len(models), loaded=loaded)
+        self.test_result.setText(text)
+        colored(self.test_result, "ok")
+
+    # -- OK: saved while the dialog stays open --
+
+    def problem(self, text, status="bad", quiet=False):
+        """TEXT below the fields (empty: none). A dialog that is not on screen (never shown) tells in a message
+        unless QUIET (a question the human answered No: nothing to tell)."""
+        self.note.setText(text)
+        colored(self.note, status if text else None)
+        self.note.setVisible(bool(text))
+        if text and status == "bad" and not quiet and not self.isVisible():
+            warn(self.parentWidget() or self, self.title_text, text, modal=False)
+
+    def accept(self):
+        if self.saving:
+            return
+        if self.check_name() is not None:
+            self.problem(WL.name_problem(self.name.text().strip()))
+            return
+        fields, value = self.request()
+        try:
+            add_argv(fields)  # checked as sandbox-ai llm checks it, before anything runs
+            if value and not fields["secret"]:
+                raise ValueError(tr("A typed key needs the name of the secret to keep it as."))
+        except ValueError as exc:
+            self.problem(printable(exc))
+            return
+        if self.on_save is None:
+            self.finish()
+            return
+        self.problem("")
+        self.on_save(fields, value)
+
+    def busy(self, text):
+        self.saving = True
+        self.problem(text, status=None)
+        self.check_name()
+
+    def failed(self, text, quiet=False):
+        """Not saved: TEXT (the CLI's message; QUIET: a question answered No) shown, everything typed kept."""
+        self.saving = False
+        self.check_name()
+        self.problem(text, quiet=quiet)
+
+    def finish(self):
+        self.saving, self.saved = False, True
+        self.problem("")
+        super().accept()
 
 
 class LlmPage(QWidget):
@@ -266,6 +438,9 @@ class LlmPage(QWidget):
     def __init__(self, sai):
         super().__init__()
         self.sai, self.entries, self.asked, self.loaded_host = sai, [], 0, None
+        self.dialog = None  # the dialog open now (what a save's answer goes to)
+        self.kept_status = ""  # what a change said: the list asked again after it says it first
+        self.models_of, self.model_list, self.models_default = None, [], ""
         layout = QVBoxLayout(self)
         layout.addWidget(plain_label(tr("LLM servers (sandbox-ai llm) the agents can use: start one with --llm NAME. "
                                         "Keys stay secrets of sandbox-ai; the connection proxy adds them on the wire, "
@@ -282,9 +457,11 @@ class LlmPage(QWidget):
                              stretch=2)
         self.servers.setAccessibleName(tr("LLM servers"))
         self.servers.itemSelectionChanged.connect(self.update_buttons)
-        layout.addWidget(self.servers, 1)
+        self.servers.cellDoubleClicked.connect(lambda *_: self.edit())
+        layout.addWidget(self.servers, 2)
         row = QHBoxLayout()
         self.add_button = QPushButton(tr("Add…"))
+        self.edit_button = QPushButton(tr("Edit…"))
         self.check_button = QPushButton(tr("Check"))
         self.agent = QComboBox()
         self.agent.addItem(tr("every agent"), "")
@@ -306,28 +483,72 @@ class LlmPage(QWidget):
         self.refresh_button = QPushButton(tr("Refresh"))
         for button, name, tip in (
                 (self.add_button, tr("Add a server"), tr("Add an LLM server on the chosen host")),
+                (self.edit_button, tr("Edit the server"), tr("Change the server's settings, the others kept (sandbox-ai "
+                                                             "llm add --replace); a double-click does it too")),
                 (self.check_button, tr("Check"), tr("Reachability, TLS, the key, the models and the agents' APIs")),
-                (self.models_button, tr("Models"), tr("The models the server offers now")),
+                (self.models_button, tr("Models"), tr("The models the server offers now: choose its default model "
+                                                      "there")),
                 (self.remove_button, tr("Remove"), tr("Forget the server (its secrets stay in sandbox-ai secrets)")),
                 (self.refresh_button, tr("Refresh"), tr("Ask the chosen host again"))):
             button.setAccessibleName(name)
             button.setToolTip(tip)
         self.add_button.clicked.connect(self.add)
+        self.edit_button.clicked.connect(lambda _=False: self.edit())
         self.check_button.clicked.connect(self.check)
         self.models_button.clicked.connect(self.models)
         self.remove_button.clicked.connect(self.remove)
         self.refresh_button.clicked.connect(self.refresh)
-        for widget in (self.add_button, self.check_button, self.agent, self.models_button, self.sort,
-                       self.show_button, self.remove_button):
+        for widget in (self.add_button, self.edit_button, self.check_button, self.agent, self.models_button,
+                       self.sort, self.show_button, self.remove_button):
             row.addWidget(widget)
         row.addStretch(1)
         row.addWidget(self.refresh_button)
         layout.addLayout(row)
+        layout.addWidget(self.build_models(), 3)
         self.status = plain_label(role="secondary")
         self.status.setAccessibleName(tr("Status"))
         layout.addWidget(self.status)
         self.load_hosts()
         self.update_buttons()
+
+    def build_models(self):
+        """The models of one server (Models): a filter, the table, Use as default and Copy NAME:MODEL."""
+        self.models_box = QWidget()
+        box = QVBoxLayout(self.models_box)
+        box.setContentsMargins(0, 0, 0, 0)
+        head = QHBoxLayout()
+        self.models_title = plain_label(role="section")
+        head.addWidget(self.models_title, 1)
+        self.model_filter = QLineEdit()
+        self.model_filter.setPlaceholderText(tr("Filter the models"))
+        self.model_filter.setAccessibleName(tr("Filter the models"))
+        self.model_filter.setToolTip(tr("Show only the models whose name holds this text"))
+        self.model_filter.setClearButtonEnabled(True)
+        self.model_filter.textChanged.connect(lambda *_: self.apply_filter())
+        head.addWidget(self.model_filter, 1)
+        box.addLayout(head)
+        self.model_table = table([tr(title) for _, title in WL.MODEL_COLUMNS], stretch=0)
+        self.model_table.setAccessibleName(tr("Models"))
+        self.model_table.itemSelectionChanged.connect(self.update_model_buttons)
+        self.model_table.horizontalHeader().sortIndicatorChanged.connect(lambda *_: self.apply_filter())
+        box.addWidget(self.model_table, 1)
+        buttons = QHBoxLayout()
+        self.default_button = QPushButton(tr("Use as default"))
+        self.default_button.setAccessibleName(tr("Use as default"))
+        self.default_button.setToolTip(tr("Make the selected model the one a start uses when --llm names none "
+                                          "(sandbox-ai llm add --replace --model, the other settings kept)"))
+        self.default_button.clicked.connect(lambda _=False: self.use_model())
+        self.copy_button = QPushButton(tr("Copy NAME:MODEL"))
+        self.copy_button.setAccessibleName(tr("Copy NAME:MODEL"))
+        self.copy_button.setToolTip(tr("Copy the value for --llm that starts with the selected model"))
+        self.copy_button.clicked.connect(lambda _=False: self.copy_model())
+        buttons.addWidget(self.default_button)
+        buttons.addWidget(self.copy_button)
+        buttons.addStretch(1)
+        box.addLayout(buttons)
+        self.models_box.hide()
+        self.update_model_buttons()
+        return self.models_box
 
     # -- hosts --
 
@@ -378,6 +599,9 @@ class LlmPage(QWidget):
             self.entries = []
             fill(self.servers, [], keys=[])
             self.update_buttons()
+        if self.models_of and self.models_of[0] != host:
+            self.models_box.hide()
+            self.models_of = None
         self.status.setText(tr("Asking {host}…", host=self.host_label(host)))
         background(lambda: self.sai.host_run(host, "llm", "list", "--json", timeout=LIST_SECONDS), owner=self,
                    source=self.refresh_button, timeout=LIST_SECONDS + 15,
@@ -398,8 +622,10 @@ class LlmPage(QWidget):
                  text_of(e.get("model")), text_of(e.get("api_key_secret"), 64), text_of(e.get("vpn"), 64),
                  text_of(e.get("agents"))] for e in entries]
         fill(self.servers, rows, keys=[e["name"] for e in entries])
-        lines = [tr("LLM servers on {host}: {count}", count=len(entries), host=self.host_label(host))
-                 if entries else tr("No LLM server yet on {host}.", host=self.host_label(host))]
+        lines = [self.kept_status] if self.kept_status else []
+        self.kept_status = ""
+        lines += [tr("LLM servers on {host}: {count}", count=len(entries), host=self.host_label(host))
+                  if entries else tr("No LLM server yet on {host}.", host=self.host_label(host))]
         lines += [lines_of(note) for note in notes]
         self.status.setText("\n".join(lines))
         self.update_buttons()
@@ -417,49 +643,120 @@ class LlmPage(QWidget):
         return name
 
     def update_buttons(self):
-        chosen = bool(selected_keys(self.servers))
-        for button in (self.check_button, self.models_button, self.show_button, self.remove_button):
-            set_enabled(button, chosen, tr("Select a server first."))
+        keys = selected_keys(self.servers)
+        for button in (self.edit_button, self.check_button, self.models_button, self.show_button, self.remove_button):
+            set_enabled(button, bool(keys), tr("Select a server first."))
+        if keys and self.models_of and self.models_of != (self.host(), keys[0]):
+            self.models_box.hide()  # the models shown are another server's
+            self.models_of = None
+            self.update_model_buttons()
 
-    # -- actions --
+    # -- add and edit: the dialog stays open until the server is saved --
+
+    def runner(self, host):
+        """A command on HOST for the dialog's Test connection (blocking: the dialog runs it in the background)."""
+        return functools.partial(self.sai.host_run, host)
 
     def add(self):
         host = valid_host(self.host())
         if host is None:
             return
-        dialog = LlmDialog(self, self.host_label(host), remote=host != "local")
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            dialog.value.clear()
-            dialog.deleteLater()
+        taken = [e["name"] for e in self.entries] if host == self.loaded_host else []
+        self.open_dialog(LlmDialog(self, self.host_label(host), remote=host != "local", run=self.runner(host),
+                                   taken=taken), host, None)
+
+    def edit(self):
+        """The dialog prefilled from `llm show NAME --json` (and the CA's path from `llm show NAME`)."""
+        host, name = valid_host(self.host()), self.chosen()
+        if host is None or name is None:
             return
-        fields, value = dialog.request()
-        # The typed key is passed on below and kept nowhere else (not in a hidden dialog of the page).
-        dialog.value.clear()
-        dialog.deleteLater()
+        self.status.setText(tr("Reading {name}…", name=name))
+        self.server_fields(host, name, self.edit_button, lambda old: self.open_dialog(
+            LlmDialog(self, self.host_label(host), remote=host != "local", existing=old, run=self.runner(host)),
+            host, old))
+
+    def server_fields(self, host, name, source, then):
+        """THEN(fields) with the settings of server NAME on HOST as the dialog has them (wizard_llm.fields_of), read
+        in the background; the status says why when they cannot be read."""
+        def work():
+            status, out, err = self.sai.host_run(host, "llm", "show", name, "--json", timeout=SHOW_SECONDS)
+            if status != 0:
+                raise ValueError((err or out).strip()[-1500:] or tr("exit status {status}", status=status))
+            return WL.fields_of(WL.parse_show(out))
+
+        def done(fields, error):
+            if error is not None:
+                self.status.setText(tr("Could not read {name}: {error}", name=name, error=lines_of(str(error))))
+                return
+            self.status.setText("")
+            then(fields)
+        background(work, owner=self, source=source, timeout=SHOW_SECONDS + 15, done=done)
+
+    def open_dialog(self, dialog, host, old):
+        """DIALOG until it saved or was cancelled; the typed key is kept nowhere afterwards."""
+        self.dialog = dialog
+        dialog.on_save = lambda fields, value: self.save(dialog, host, fields, value, old)
+        try:
+            if dialog.exec() == QDialog.DialogCode.Accepted and not dialog.saved:
+                dialog.accept()  # an exec() that stood in for the human (the tests): OK as they would press it
+        finally:
+            # The typed key is passed on and kept nowhere else (not in a hidden dialog of the page).
+            dialog.value.clear()
+            self.dialog = None
+            dialog.deleteLater()
+
+    def save(self, dialog, host, fields, value, old=None):
+        """`llm add` for the dialog's FIELDS (OLD: the server's settings when it is edited; --replace), after the
+        questions it needs; whatever stops it is said in the dialog, which keeps what was typed."""
+        name = fields["name"]
         try:
             args = add_argv(fields)
-            if value and not fields["secret"]:
-                raise ValueError(tr("A typed key needs the name of the secret to keep it as."))
         except ValueError as exc:
-            warn(self, tr("New LLM server"), printable(exc))
+            dialog.failed(printable(exc))
             return
-        # Plain http to a public address: prompts, answers and the key unencrypted on the way - asked first.
-        if fields.get("insecure") and not ask_first(self, "llm-insecure", tr("New LLM server"), tr(
-                "Allow plain http to {url} even outside your local networks? Prompts, answers, code and the key "
-                "cross the network unencrypted.", url=printable(fields["url"])), tr("Allow")):
+        title = dialog.title_text
+        changed = WL.changes(old, fields) if old is not None else []
+        if old is not None and not changed and not value:
+            self.status.setText(tr("{name}: nothing changed.", name=name))
+            dialog.finish()
+            return
+        # Plain http to a public address: prompts, answers and the key unencrypted on the way - asked first (an
+        # edited server that had it already keeps it without a question).
+        if fields.get("insecure") and not (old or {}).get("insecure") and not ask_first(
+                dialog, "llm-insecure", title, on_host(host, tr(
+                    "Allow plain http to {url} even outside your local networks? Prompts, answers, code and the key "
+                    "cross the network unencrypted.", url=printable(fields["url"]))), tr("Allow")):
             self.status.setText(tr("Not added."))
+            dialog.failed(tr("Not saved: plain http outside the local networks was not allowed."), quiet=True)
             return
+        # --replace: a server of that name changes for every start that uses it - asked first (llm-replace), naming
+        # what changes when it is an edit.
+        if old is not None and changed:
+            if not ask_first(dialog, "llm-replace", title, on_host(host, tr(
+                    "Change the LLM server {name}? Every start that uses it gets the new settings:\n{changes}",
+                    name=name, changes="\n".join(changed))), tr("Replace")):
+                self.status.setText(tr("Not changed."))
+                dialog.failed(tr("Not saved."), quiet=True)
+                return
+        elif old is None and fields.get("replace") and not ask_first(dialog, "llm-replace", title, on_host(host, tr(
+                "Replace an LLM server named {name} if there is one? Every start that uses it sends its prompts to "
+                "the new address.", name=printable(name))), tr("Replace")):
+            self.status.setText(tr("Not added."))
+            dialog.failed(tr("Not saved."), quiet=True)
+            return
+        check = dialog.check_after
         if not value or host != "local":
-            self.start_add(host, fields, args, None)
+            self.start_add(host, fields, args, None, dialog=dialog, check=check)
             return
         # A typed key replaces the value of a secret of that name: whether there is one is looked at first.
         secret = fields["secret"]
+        dialog.busy(tr("Looking for the secret {name}…", name=secret))
         self.status.setText(tr("Looking for the secret {name}…", name=secret))
         background(lambda: self.sai.secret_exists(secret, host), owner=self, source=self.add_button, timeout=90,
                    done=lambda exists, error: self.start_add(host, fields, args, value,
-                                                              exists if error is None else None))
+                                                              exists if error is None else None, dialog, check))
 
-    def start_add(self, host, fields, args, value, exists=False):
+    def start_add(self, host, fields, args, value, exists=False, dialog=None, check=False):
         """`sandbox-ai llm add` first (it checks the name, the URL and every field; a secret not kept yet is only a
         note there), then the typed key VALUE as its secret (standard input): a server refused keeps no key. A secret
         of that name that EXISTS (None: not known) is replaced only after a yes."""
@@ -469,9 +766,11 @@ class LlmPage(QWidget):
                       "it. Replace it?", name=secret) if exists else \
                 tr("Whether a secret {name} is kept already could not be told: the key typed would replace its "
                    "value. Go on?", name=secret)
-            if not ask_first(self, "secret-replace", tr("New LLM server"), text, tr("Replace"),
-                             detail={"exists": exists}):
+            if not ask_first(dialog if self.dialog is dialog and dialog is not None else self, "secret-replace",
+                             tr("New LLM server"), text, tr("Replace"), detail={"exists": exists}):
                 self.status.setText(tr("Not added: the secret {name} stays as it is.", name=secret))
+                if dialog is not None and self.dialog is dialog:
+                    dialog.failed(self.status.text(), quiet=True)
                 return
 
         def work():
@@ -482,30 +781,50 @@ class LlmPage(QWidget):
             return (status, out, err), None if kept[0] == 0 else (kept[2] or kept[1]).strip() or "?"
 
         self.status.setText(tr("Adding {name} on {host}…", name=fields["name"], host=self.host_label(host)))
-        background(work, owner=self, source=self.add_button, timeout=ADD_SECONDS + 90,
-                   done=lambda result, error: self.added(host, fields["name"], result, error, secret))
+        sources = [self.add_button, self.edit_button]
+        if dialog is not None and self.dialog is dialog:
+            dialog.busy(self.status.text())
+            sources.append(dialog.test_button)
+        background(work, owner=self, source=sources, timeout=ADD_SECONDS + 90,
+                   done=lambda result, error: self.added(host, fields["name"], result, error, secret, dialog, check))
 
-    def added(self, host, name, result, error, secret=""):
-        """RESULT: (the outcome of llm add, why the key was not kept or None)."""
+    def added(self, host, name, result, error, secret="", dialog=None, check=False):
+        """RESULT: (the outcome of llm add, why the key was not kept or None). An open DIALOG closes once the server
+        is saved and shows the CLI's message otherwise (everything typed kept); CHECK: `llm check` it then."""
         result, problem = result if error is None else (None, None)
         status, out, err = outcome(result, error)
+        open_ = dialog is not None and self.dialog is dialog
         if status == 0 and problem is not None:
             self.status.setText(tr("{name} added, but its key was not kept as the secret {secret}: {error}",
                                    name=name, secret=secret, error=printable(problem)[:300]))
+            if open_:
+                dialog.finish()  # the server is saved: only its key is not
             warn(self, tr("New LLM server"), self.status.text(), modal=False)
         elif status != 0:
             self.status.setText(tr("Could not add {name} on {host}.", name=name, host=self.host_label(host)))
-            warn(self, tr("New LLM server"), failure(result, error), modal=False)
+            if open_:
+                dialog.failed(tr("sandbox-ai llm add refused it: {error}", error=failure(result, error)))
+            else:
+                warn(self, tr("New LLM server"), failure(result, error), modal=False)
         else:
             self.status.setText(lines_of(out.strip()[-1500:]) or tr("{name} added.", name=name))
+            if open_:
+                dialog.finish()
         if host == self.host():
+            self.kept_status = self.status.text()
             self.refresh()
+        if status == 0 and check:
+            self.run_check(host, name, None)
+
+    # -- check, models, show, remove --
 
     def check(self):
         host, name = valid_host(self.host()), self.chosen()
         if host is None or name is None:
             return
-        agent = self.agent.currentData()
+        self.run_check(host, name, self.agent.currentData())
+
+    def run_check(self, host, name, agent):
         args = ["llm", "check", name] + (["--agent", agent] if agent in AGENTS else [])
         self.status.setText(tr("Checking {name}…", name=name))
         background(lambda: self.sai.host_run(host, *args, timeout=CHECK_SECONDS), owner=self,
@@ -524,7 +843,7 @@ class LlmPage(QWidget):
         if host is None or name is None:
             return
         self.status.setText(tr("Asking {host}…", host=self.host_label(host)))
-        sort = self.sort.currentData() if self.sort.currentData() in dict(SORTS) else "name"
+        sort = self.sort.currentData() if self.sort.currentData() in dict(SORTS) else "loaded"
         background(lambda: self.sai.host_run(host, "llm", "models", name, "--sort", sort, "--json",
                                              timeout=MODELS_SECONDS),
                    owner=self, source=self.models_button, timeout=MODELS_SECONDS + 30,
@@ -533,16 +852,122 @@ class LlmPage(QWidget):
     def listed_models(self, host, name, result, error):
         status, out, err = outcome(result, error)
         try:
-            models = json.loads(out)
-            if not isinstance(models, list):
-                raise ValueError("not a list")
+            if status != 0:
+                raise ValueError("failed")
+            models = WL.parse_models(out)
         except ValueError:
             self.status.setText(tr("Could not list the models of {name}: {error}", name=name,
                                    error=failure(result, error)))
             return
+        entry = next((e for e in self.entries if e.get("name") == name), {})
+        self.models_of, self.model_list = (host, name), models
+        self.models_default = entry.get("model") if isinstance(entry.get("model"), str) else ""
         self.status.setText(tr("Models listed: {count}", count=len(models)))
-        show_text(self, tr("Models of {server}", server=f"{name} ({self.host_label(host)})"), models_text(models),
-                  modal=False)
+        self.show_models()
+
+    def show_models(self):
+        """The models of self.models_of in the table: the columns with values, the default model marked."""
+        host, name = self.models_of
+        models = self.model_list
+        loaded = sum(1 for m in models if m.get("loaded") is True)
+        title = tr("Models of {server}", server=f"{name} ({self.host_label(host)})")
+        self.models_title.setText(f"{title}: {len(models)}, {tr('{count} loaded', count=loaded)}" if models
+                                  else f"{title}: {tr('The server lists no models.')}")
+        columns = WL.model_columns(models)
+        widget = self.model_table
+        widget.setColumnCount(len(columns))
+        widget.setHorizontalHeaderLabels([tr(t) for _, t in columns])
+        rows, sorts, tips, icons = [], [], [], []
+        for model in models:
+            cells = [WL.model_cell(model, key) for key, _ in columns]
+            rows.append([text for text, _ in cells])
+            sorts.append([value for _, value in cells])
+            default = model["name"] == self.models_default
+            tips.append("\n".join(part for part in (
+                model["name"], model.get("details") or "", model.get("arch") or "",
+                tr("the default model of {name}", name=name) if default else "") if part))
+            icons.append("ok" if default else None)
+        fill(widget, rows, tooltips=tips, icons=icons, sort=sorts, keys=[m["name"] for m in models])
+        self.models_box.show()
+        self.apply_filter()
+        self.update_model_buttons()
+
+    def apply_filter(self):
+        text = self.model_filter.text().strip().lower()
+        widget = self.model_table
+        for row in range(widget.rowCount()):
+            hidden = bool(text) and text not in str(row_key(widget, row) or "").lower()
+            widget.setRowHidden(row, hidden)
+            if hidden and widget.item(row, 0) is not None and widget.item(row, 0).isSelected():
+                widget.clearSelection()
+        self.update_model_buttons()
+
+    def chosen_model(self):
+        widget = self.model_table
+        rows = [index.row() for index in widget.selectionModel().selectedRows()] if widget.selectionModel() else []
+        rows = [row for row in rows if not widget.isRowHidden(row)]
+        model = row_key(widget, rows[0]) if rows else None
+        return model if self.models_of and WL.valid_model(model) else None
+
+    def update_model_buttons(self):
+        model = self.chosen_model() if hasattr(self, "model_table") else None
+        set_enabled(self.copy_button, model is not None, tr("Select a model first."))
+        set_enabled(self.default_button, model is not None and model != self.models_default,
+                    tr("It is the default model already.") if model else tr("Select a model first."))
+
+    def copy_model(self):
+        model = self.chosen_model()
+        if model is None:
+            return
+        value = WL.llm_value(self.models_of[1], model)
+        QApplication.clipboard().setText(value)
+        self.status.setText(tr("Copied {value}: start with --llm {value}", value=value))
+
+    def use_model(self):
+        """The selected model as the server's default: `llm add NAME ... --model MODEL --replace` with every other
+        setting of `llm show NAME --json`, after a yes naming the change (llm-replace)."""
+        model = self.chosen_model()
+        if model is None or self.models_of is None:
+            return
+        host, name = self.models_of
+        if valid_host(host) is None or valid_name(name) is None:
+            return
+        self.status.setText(tr("Reading {name}…", name=name))
+        self.server_fields(host, name, self.default_button, lambda old: self.set_default(host, name, model, old))
+
+    def set_default(self, host, name, model, old):
+        new = dict(old, model=model)
+        changed = WL.changes(old, new)
+        if not changed:
+            self.status.setText(tr("{model} is the default model of {name} already.", model=model, name=name))
+            return
+        try:
+            args = add_argv(new)
+        except ValueError as exc:
+            self.status.setText(tr("Could not change {name}: {error}", name=name, error=printable(exc)))
+            return
+        if not ask_first(self, "llm-replace", tr("Use as default"), on_host(host, tr(
+                "Change the LLM server {name}? Every start that uses it gets the new settings:\n{changes}",
+                name=name, changes="\n".join(changed))), tr("Replace")):
+            self.status.setText(tr("Not changed."))
+            return
+        self.status.setText(tr("Changing {name}…", name=name))
+        background(lambda: self.sai.host_run(host, *args, timeout=ADD_SECONDS), owner=self,
+                   source=[self.default_button, self.edit_button], timeout=ADD_SECONDS + 15,
+                   done=lambda result, error: self.default_set(host, name, model, result, error))
+
+    def default_set(self, host, name, model, result, error):
+        status, out, err = outcome(result, error)
+        if status != 0:
+            self.status.setText(tr("Could not change {name}: {error}", name=name, error=failure(result, error)))
+            return
+        self.status.setText(tr("{model} is the default model of {name} now.", model=model, name=name))
+        if self.models_of == (host, name):
+            self.models_default = model
+            self.show_models()
+        if host == self.host():
+            self.kept_status = self.status.text()
+            self.refresh()
 
     def show_server(self):
         """`sandbox-ai llm show NAME` on the host chosen, as it says it."""
@@ -580,5 +1005,8 @@ class LlmPage(QWidget):
                                    error=failure(result, error)))
         else:
             self.status.setText(tr("{name} removed.", name=name))
+            if self.models_of == (host, name):
+                self.models_box.hide()
+                self.models_of = None
         if host == self.host():
             self.refresh()

@@ -244,9 +244,11 @@ def test_the_preset_form_offers_servers_with_their_models_and_adds_one(wizard, w
     monkeypatch.setattr(wizard.sai, "llm_endpoints", lambda: listed)
     form = PlaceholderForm(wizard.sai, PR.find("local-llm"), agent="opencode")
     combo = form.fields["<llm:local>"]
-    assert wait(lambda: combo.count() == 4, 10)
-    assert [combo.itemText(i) for i in range(4)] == ["", "lm", "lm:qwen2.5-coder-7b", "lm:llama3.1-8b"]
-    assert combo.currentText() == "lm", "the only server there is"
+    assert wait(lambda: combo.count() == 3, 10)
+    # Several models and no default model: the launcher refuses a bare NAME, so only NAME:MODEL is offered, and none
+    # is chosen for the human (which model is theirs to say).
+    assert [combo.itemText(i) for i in range(3)] == ["", "lm:qwen2.5-coder-7b", "lm:llama3.1-8b"]
+    assert combo.currentText() == "", "no bare NAME preselected"
     buttons = [b for b in form.findChildren(QtWidgets.QPushButton) if b.text() == "Add a server…"]
     assert len(buttons) == 1
     seen = []

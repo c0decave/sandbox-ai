@@ -5,7 +5,12 @@ Qt (tested without a display).
 - the registered servers (`sandbox-ai llm list --json`, an unusable entry reported in a line before the JSON),
 - a new one (`sandbox-ai llm add NAME --kind KIND --url URL [--api-key-secret NAME] [--vpn PROFILE] [--anthropic]`),
   then checked for the chosen agent (`sandbox-ai llm check NAME --agent AGENT`),
-- its models (`sandbox-ai llm models NAME --json`: [{name, size, loaded, details}]),
+- its models (`sandbox-ai llm models NAME --json`: [{name, size, loaded, details}] and, when the server gives them,
+  type, arch, parameters, quantization and context), as the columns of a table (model_columns, model_cells),
+- the LLM servers page's dialog: a name checked as it is typed (name_problem, suggest_name), every option of `llm add`
+  (server_argv), an existing server's settings from `llm show NAME --json` kept by a --replace (fields_of, changes;
+  the CA it has stays without --ca), and the models of a server not registered yet (`sandbox-ai wizard models --kind
+  --url --json`: probe_argv),
 - the Model choice beside the agent on the launch page and the board's agent node (model_choices, form_values,
   apply): the agent's provider, or a registered server as NAME or NAME:MODEL,
 - what goes on the board: --llm NAME[:MODEL] for whichever agent (Claude Code needs a server with the Anthropic
@@ -20,6 +25,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 
 from .files import printable
 from .i18n import N_, tr
@@ -84,7 +90,8 @@ def add_argv(fields):
     are allowed as the CLI allows them (it refuses plain http to a public address itself)."""
     name = valid_name(fields.get("name"))
     if name is None:
-        raise ValueError(tr("A server's name is 1-32 letters, digits, '_' or '-', not starting with '-'."))
+        raise ValueError(name_problem(fields.get("name")) or tr("Not a server's name: {name}",
+                                                                 name=printable(fields.get("name"))))
     kind = fields.get("kind")
     if kind not in [key for key, _, _ in KINDS]:
         raise ValueError(tr("Choose the kind of server."))
@@ -148,7 +155,7 @@ def parse_endpoints(out):
             raise ValueError(printable(text.strip()[-500:]) or tr("no answer")) from None
         notes = [printable(line) for line in lines[:start] if line.strip()]
         try:
-            data = json.loads("\n".join(lines[start:]))
+            data = json.JSONDecoder().raw_decode("\n".join(lines[start:]))[0]  # notes after it: left out
         except ValueError:
             raise ValueError(printable(text.strip()[-500:])) from None
     if not isinstance(data, list):
@@ -193,10 +200,19 @@ def parse_models(out):
         if valid_model(name) is None:
             continue
         size, loaded, details = entry.get("size"), entry.get("loaded"), entry.get("details")
-        found.append({"name": name,
-                      "size": size if isinstance(size, int) and not isinstance(size, bool) and size >= 0 else None,
-                      "loaded": loaded if isinstance(loaded, bool) else None,
-                      "details": printable(details)[:80] if isinstance(details, str) else ""})
+        model = {"name": name,
+                 "size": size if isinstance(size, int) and not isinstance(size, bool) and size >= 0 else None,
+                 "loaded": loaded if isinstance(loaded, bool) else None,
+                 "details": printable(details)[:80] if isinstance(details, str) else ""}
+        # The further columns (LM Studio, Ollama give them; llm.py's clean_models): only when known.
+        for key, limit in (("type", 20), ("arch", 40), ("parameters", 20), ("quantization", 20)):
+            value = entry.get(key)
+            if isinstance(value, str) and value.strip():
+                model[key] = printable(value.strip())[:limit]
+        context = entry.get("context")
+        if isinstance(context, int) and not isinstance(context, bool) and 0 < context < 1 << 31:
+            model["context"] = context
+        found.append(model)
     return found
 
 
@@ -243,15 +259,24 @@ def loopback(endpoint):
     return host in ("localhost", "::1") or host.startswith("127.")
 
 
+def bare_name_works(endpoint):
+    """Whether --llm NAME alone (no :MODEL) starts with ENDPOINT: it has a default model (llm add --model), or it
+    listed at most one model when it was last checked (none listed: not known, the launcher tells). With several
+    models and no default the launcher refuses NAME and asks for NAME:MODEL."""
+    models = [m for m in endpoint.get("models") or [] if valid_model(m)] if isinstance(endpoint.get("models"), list) \
+        else []
+    return bool(endpoint.get("model")) or len(models) <= 1
+
+
 def placeholder_choices(endpoint):
-    """What an <llm:...> placeholder may take for ENDPOINT: its name (the server's default or only model), then
-    NAME:MODEL for each model it listed when it was last checked."""
+    """What an <llm:...> placeholder may take for ENDPOINT: its name when that alone starts (bare_name_works: the
+    server's default or only model), then NAME:MODEL for each model it listed when it was last checked."""
     name = valid_name(endpoint.get("name"))
     if name is None:
         return []
     models = [m for m in endpoint.get("models") or [] if valid_model(m)] if isinstance(endpoint.get("models"), list) \
         else []
-    return [name] + [f"{name}:{model}" for model in models[:30]]
+    return ([name] if bare_name_works(endpoint) else []) + [f"{name}:{model}" for model in models[:30]]
 
 
 def endpoint_row(endpoint):
@@ -367,8 +392,8 @@ def from_board(board):
 
 def model_choices(endpoints, agent, sai=None):
     """[(label, value, hint)] for the Model choice beside AGENT: the agent's own provider first (value ""), then each
-    registered server as NAME (its default or only model) and as NAME:MODEL for each model it listed. HINT says why
-    AGENT cannot use that server ("" when it can): the choice is shown, not offered."""
+    registered server as NAME (when that alone starts: its default or only model) and as NAME:MODEL for each model
+    it listed. HINT says why AGENT cannot use that server ("" when it can): the choice is shown, not offered."""
     found = [(tr("the agent's provider (cloud)"), "", "")]
     for endpoint in endpoints or []:
         values = placeholder_choices(endpoint)
@@ -426,3 +451,221 @@ def prefilled(preset, choice, endpoint=None):
 def needs_form(preset, values):
     """Whether PRESET leaves something to ask for once VALUES ({marker: value}) are filled in."""
     return any(p.marker not in values for p in getattr(preset, "placeholders", ()) or ())
+
+
+# -- the LLM servers page's dialog: a name as it is typed, every option of llm add, an edit kept by --replace --
+
+NAME_LIMIT = 32
+NAME_CHAR = re.compile(r"[A-Za-z0-9_-]")
+HEADER = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,63}")  # llm.py's HEADER
+RESERVED_HEADERS = {"host", "content-length", "transfer-encoding", "connection", "upgrade", "te", "trailer"}
+NAME_EXAMPLE = "lmstudio"  # the same in every language
+
+
+def char_name(char):
+    """CHAR as a message names it: '.', a space, or U+0009 for one that does not print."""
+    if char == " ":
+        return tr("a space")
+    return f"'{char}'" if char.isprintable() else f"U+{ord(char):04X}"
+
+
+def name_problem(name):
+    """Why NAME cannot be a server's name, naming what is wrong (the first character that cannot be in it, a first
+    character that may not come first, the length), or None. As sandbox-ai llm checks it: 1-32 of A-Z, a-z, 0-9,
+    '_' and '-', the first a letter or a digit (so a name may start with digits: 4090-box)."""
+    name = name if isinstance(name, str) else ""
+    if not name:
+        return tr("Give the server a name: 1-32 letters, digits, '_' or '-', e.g. {example}.", example=NAME_EXAMPLE)
+    bad = next((char for char in name if not NAME_CHAR.fullmatch(char)), None)
+    if bad is not None:
+        return tr("Not allowed in a server's name: {char}. A name holds only the letters A-Z and a-z, digits, '_' "
+                  "and '-' (a digit may come first).", char=char_name(bad))
+    if name[0] in "-_":
+        return tr("A server's name starts with a letter or a digit, not '{char}'.", char=name[0])
+    if len(name) > NAME_LIMIT:
+        return tr("A server's name is at most 32 characters; this one has {count}.", count=len(name))
+    return None
+
+
+def suggest_name(name):
+    """A valid name close to NAME (an accented letter without its accent, each other character that cannot be in a
+    name as '-', no '-' or '_' first, at most 32 characters), or None when there is none or NAME is valid already."""
+    if not isinstance(name, str) or valid_name(name):
+        return None
+    out = []
+    for char in name:
+        plain = unicodedata.normalize("NFKD", char).encode("ascii", "ignore").decode()
+        out.append(plain if plain and all(NAME_CHAR.fullmatch(c) for c in plain) else "-")
+    text = re.sub(r"-{2,}", "-", "".join(out)).lstrip("-_")[:NAME_LIMIT].rstrip("-")
+    return text if valid_name(text) and text != name else None
+
+
+def server_argv(fields):
+    """The arguments of `sandbox-ai llm add` for FIELDS ({name, kind, url, model, vpn, secret, anthropic, headers,
+    ca, insecure, replace}: the LLM servers page's dialog), each value checked as sandbox-ai llm checks it and none
+    that reads as an option; ValueError says what is wrong. Keys are never among them."""
+    name = valid_name(fields.get("name"))
+    if name is None:
+        raise ValueError(name_problem(fields.get("name")) or tr("Not a server's name: {name}",
+                                                                 name=printable(fields.get("name"))))
+    kind = fields.get("kind")
+    if kind not in [key for key, _, _ in KINDS]:
+        raise ValueError(tr("Choose the kind of server."))
+    url = fields.get("url") or ""
+    if not URL.fullmatch(url):
+        raise ValueError(tr("The URL is http(s)://HOST[:PORT][/PREFIX], without user, query or fragment."))
+    args = ["llm", "add", name, "--kind", kind, "--url", url]
+    model = fields.get("model")
+    if model:
+        if valid_model(model) is None:
+            raise ValueError(tr("Not a model name: {model}", model=printable(model)))
+        args += ["--model", model]
+    vpn = fields.get("vpn")
+    if vpn:
+        if vpn.startswith("-") or not VPN.fullmatch(vpn):
+            raise ValueError(tr("Not a VPN profile's name: {name}", name=printable(vpn)))
+        args += ["--vpn", vpn]
+    secret = fields.get("secret")
+    if secret:
+        if not SECRET.fullmatch(secret):
+            raise ValueError(tr("A secret's name is letters, digits and '_', not starting with a digit."))
+        args += ["--api-key-secret", secret]
+    if fields.get("anthropic") and kind == "openai-compatible":
+        args.append("--anthropic")
+    for pair in (fields.get("headers") or "").replace(",", " ").split():
+        header, sep, secret = pair.partition("=")
+        if not sep or not HEADER.fullmatch(header) or header.lower() in RESERVED_HEADERS or not SECRET.fullmatch(secret):
+            raise ValueError(tr("A header from a secret is HEADER=SECRET (a header name, a secret's name): {value}",
+                                value=printable(pair)))
+        args.append(f"--header-secret={header}={secret}")
+    ca = fields.get("ca")
+    if ca:
+        if not ca.startswith("/") or "\0" in ca or not ca.isprintable():
+            raise ValueError(tr("The CA is a file with its absolute path."))
+        args.append(f"--ca={ca}")
+    if fields.get("insecure"):
+        args.append("--insecure-http")
+    if fields.get("replace"):
+        args.append("--replace")
+    return args
+
+
+def parse_show(out):
+    """The endpoint of `sandbox-ai llm show NAME --json` (a dict with a valid name); ValueError otherwise."""
+    try:
+        data = json.loads(out or "")
+    except ValueError:
+        raise ValueError(printable((out or "").strip()[-500:]) or tr("no answer")) from None
+    if not isinstance(data, dict) or valid_name(data.get("name")) is None:
+        raise ValueError(tr("not an LLM server"))
+    return data
+
+
+def fields_of(view):
+    """The dialog's FIELDS (see server_argv) of an endpoint as `llm show NAME --json` gives it, with replace on: what
+    `llm add NAME ... --replace` needs to keep every setting it has. The CA is not among them: the store holds only a
+    copy of it, which `llm add --replace` keeps by itself (without --ca; --no-ca drops it), so "has_ca" only says
+    there is one, and a path typed into the dialog replaces it."""
+    def text(key):
+        value = view.get(key)
+        return value if isinstance(value, str) else ""
+    headers = view.get("headers") if isinstance(view.get("headers"), dict) else {}
+    return {"name": text("name"), "kind": text("kind"), "url": text("url"), "model": text("model"),
+            "vpn": text("vpn"), "secret": text("api_key_secret"),
+            "anthropic": view.get("anthropic") is True and view.get("kind") == "openai-compatible",
+            "headers": " ".join(f"{h}={s}" for h, s in sorted(headers.items()) if isinstance(h, str) and
+                                isinstance(s, str)),
+            "ca": "", "has_ca": bool(view.get("ca")), "insecure": view.get("insecure_http") is True,
+            "replace": True}
+
+
+FIELD_LABELS = (("kind", N_("Kind")), ("url", N_("URL")), ("model", N_("Default model")), ("vpn", N_("VPN profile")),
+                ("anthropic", N_("Anthropic Messages API")), ("secret", N_("Key secret")),
+                ("headers", N_("Headers from secrets")), ("ca", N_("CA certificate")),
+                ("insecure", N_("Plain http outside the local networks")))
+
+
+def changes(old, new):
+    """["Label: old → new"] for each field of the dialog that NEW changes from OLD (both as fields_of gives them)."""
+    def shown(value):
+        if isinstance(value, bool):
+            return tr("yes") if value else tr("no")
+        return printable(str(value)) if value else tr("none")
+    found = []
+    for key, label in FIELD_LABELS:
+        before, after = old.get(key), new.get(key)
+        if key == "ca" and old.get("has_ca"):
+            # The endpoint has a CA and `llm add --replace` keeps it: only a file named in the dialog replaces it.
+            if (after or "").strip():
+                found.append(f"{tr(label)}: {tr('the CA kept now')} \u2192 {printable(str(after))}")
+            continue
+        if isinstance(before, bool) or isinstance(after, bool):
+            before, after = bool(before), bool(after)
+        else:
+            before, after = (before or "").strip(), (after or "").strip()
+        if before != after:
+            found.append(f"{tr(label)}: {shown(before)} → {shown(after)}")
+    return found
+
+
+# -- a server's models as a table --
+
+MODEL_COLUMNS = (("name", N_("Name")), ("loaded", N_("Loaded")), ("type", N_("Type")), ("parameters", N_("Params")),
+                 ("quantization", N_("Quant")), ("context", N_("Context")), ("size", N_("Size")))
+
+
+def size_text(value):
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        return ""
+    for unit, factor in (("GB", 1e9), ("MB", 1e6), ("KB", 1e3)):
+        if value >= factor:
+            return f"{value / factor:.1f} {unit}"
+    return f"{value} B"
+
+
+def model_cell(model, key):
+    """(text, sort value) of column KEY for MODEL (parse_models' entry)."""
+    value = model.get(key)
+    if key == "loaded":
+        text = {True: tr("yes"), False: tr("no")}.get(value, "") if isinstance(value, bool) else ""
+        return text, {True: 0, False: 1}.get(value, 2) if isinstance(value, bool) else 2
+    if key == "context":
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            return "", -1
+        return (f"{value // 1024}k" if value >= 1024 else str(value)), value
+    if key == "size":
+        return size_text(value), value if isinstance(value, int) and not isinstance(value, bool) else -1
+    text = printable(value) if isinstance(value, str) else ""
+    return text, text.lower()
+
+
+def model_columns(models):
+    """The columns (key, title) a table of MODELS shows: the name, and each other column some model has a value in."""
+    return [(key, title) for key, title in MODEL_COLUMNS
+            if key == "name" or any(model_cell(m, key)[0] for m in models)]
+
+
+def model_order(models):
+    """MODELS loaded first, then by name (as `llm models --sort loaded` lists them)."""
+    return sorted(models, key=lambda m: ({True: 0, False: 1}.get(m.get("loaded"), 2), str(m.get("name", ""))))
+
+
+# -- the models of a server not registered yet: sandbox-ai wizard models --
+
+# The kinds `sandbox-ai wizard models --kind` knows (wizard.py's SERVERS): an OpenAI-compatible server is not among
+# them, so that one is reached with `llm check` once it is saved.
+PROBE_KINDS = ("ollama", "lmstudio", "llamacpp", "vllm")
+PROBE_SECONDS = 60
+
+
+def probe_argv(kind, url):
+    """`sandbox-ai wizard models --kind KIND --url URL --sort loaded --json` for a server at URL that is not
+    registered anywhere: it lists the models, stores nothing and sends no key (https and a path prefix included).
+    ValueError says why that command cannot ask this one (an OpenAI-compatible server is tested with `llm check`
+    once it is saved)."""
+    if kind not in PROBE_KINDS:
+        raise ValueError(tr("An OpenAI-compatible server cannot be tested before it is saved."))
+    url = (url or "").strip()
+    if not URL.fullmatch(url):
+        raise ValueError(tr("The URL is http(s)://HOST[:PORT][/PREFIX], without user, query or fragment."))
+    return ["wizard", "models", "--kind", kind, "--url", url, "--sort", "loaded", "--json"]
