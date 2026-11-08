@@ -4408,6 +4408,7 @@ See [Project configuration](#project-configuration-and-wizard) and
 | `sandbox-ai wizard trust FILE [--yes]`, `sandbox-ai wizard forget FILE` | Trust a project configuration, or remove it from the trusted list |
 | `sandbox-ai llm add NAME --kind KIND --url URL [...]`, `list`, `show NAME`, `remove NAME`, `models NAME`, `check NAME [--agent AGENT]` | LLM servers, local or remote, for `--llm` (see [LLM servers](#llm-servers-local-and-remote)) |
 | `sandbox-ai wizard models --kind ollama\|lmstudio\|llamacpp\|vllm --host HOST [--port PORT] [--sort name\|size\|loaded]`, `sandbox-ai wizard models --llm NAME` | List the models of a local LLM server, or of a registered one |
+| `sandbox-ai wizard models --kind KIND --url URL [--ca FILE] [--api-key-secret NAME] [--insecure-http]` | The models of a server not registered yet (the app's and the web's Test connection); a key goes over plain http only to local addresses, elsewhere only with `--insecure-http`, as `llm add` |
 
 ## Testing
 

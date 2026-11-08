@@ -3005,13 +3005,22 @@ pages.llm = async (main) => {
   // that host), before anything is stored: nothing is saved, no name is needed, and the form is left as it is. Its
   // key is named (the command reads that secret there) and its CA goes as a file of that host; a header secret and
   // a VPN profile do not, so a server that needs one of those can refuse the test and still work for the starts.
-  const test = el("button", { onclick: (ev) => busy(ev.target, async () => {
+  // With "Plain http outside the local networks" ticked and a key named, the test sends that key unencrypted too:
+  // asked first, as Add asks (the command refuses plain http to a public address otherwise, as llm add does).
+  const test = el("button", { onclick: (ev) => {
+    const risky = insecure.checked && keySecret.value.trim() && url.value.trim().toLowerCase().startsWith("http://");
+    if (!risky) { runTest(ev, false); return; }
+    confirmIn(addRow, t("Send the prompts to {url} over plain http, unencrypted, from {host}? Whoever is on the way can read them, the answers and the key.", { url: url.value.trim(), host }),
+      t("Yes, do it"), () => runTest(ev, true), { kind: "primary", trigger: ev.target });
+  } }, t("Test connection"));
+  const runTest = (ev, insecureConfirmed) => busy(ev.target, async () => {
     clear(status);
     const address = url.value.trim();
     if (!address) { status.append(notice(t("Which URL? {example} of the server to test.", { example: "http://192.168.1.20:1234" }), "error")); return; }
     const secret = keySecret.value.trim();
     if (secret && !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(secret)) { status.append(notice(t("A secret's name: letters, digits and _ (up to 64), not starting with a digit."), "error")); return; }
-    const sent = Object.assign({ kind: kind.value, url: address }, textOf(ca) ? { ca: textOf(ca) } : {}, secret ? { api_key_secret: secret } : {});
+    const sent = Object.assign({ kind: kind.value, url: address }, textOf(ca) ? { ca: textOf(ca) } : {}, secret ? { api_key_secret: secret } : {},
+      insecureConfirmed ? { insecure_http: true, confirm: true } : {});
     clear(testBox).append(el("p", { class: "hint" }, t("Testing {url}…", { url: address })));
     let models;
     try { models = await api("POST", hostPath("/llm-models", host), sent); }
@@ -3023,7 +3032,7 @@ pages.llm = async (main) => {
       ...[listed.length ? modelsTable(address, listed) : null,
         partly ? el("p", { class: "hint" }, t("The test sends no header secret and does not go through a VPN profile: a server that needs one can refuse it and still work for the starts. {check} checks it as the agents reach it, once it is saved.", { check: t("Check") })) : null].filter(Boolean));
     fillModels(listed);
-  }) }, t("Test connection"));
+  });
   const cancelEdit = el("button", { onclick: () => {
     for (const input of [name, url, model, keySecret, headerSecrets, ca, vpn]) input.value = "";
     for (const box of [anthropic, replace, insecure]) box.checked = false;
@@ -3979,9 +3988,12 @@ function closeTerminal(entry) {
 }
 
 // A start refused because its project configuration is not trusted (or changed since): the launcher says
-// "Project configuration PATH is not trusted" (agent_sandbox.load_project_config). The path, or null.
+// "Project configuration PATH is not trusted" (agent_sandbox.load_project_config). The path, or null. Only the
+// launcher's own words count: what comes after its "agent-sandbox: /work is ..." line (printed once the
+// configuration is accepted) is the sandbox's, and an agent must not raise this offer with text of its own.
+const SANDBOX_RUNS = "agent-sandbox: /work is ";
 function untrustedConfig(text) {
-  const plain = String(text).replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "").replace(/\r/g, "");
+  const plain = String(text).replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "").replace(/\r/g, "").split(SANDBOX_RUNS)[0];
   const match = /Project configuration (\/[^\n]*?) is (?:not trusted|changed since it was trusted)/.exec(plain);
   return match ? match[1] : null;
 }
@@ -4017,13 +4029,16 @@ function openTerminal(params, title) {
   const entry = { id, title: `${host}: ${title}`, key, closed: false, opened: false, dismissed: false, ended: "", term, ws, box, fit: () => { if (fit) { fit.fit(); if (ws.readyState === 1) ws.send(JSON.stringify({ resize: [term.cols, term.rows] })); } } };
   ws.onopen = () => { entry.opened = true; };
   const decoder = new TextDecoder();
-  let seen = "", offered = false;
+  // Only a new start's terminal is read for the launcher's refusal, and only until the sandbox runs (attached
+  // ones show only what runs inside).
+  let seen = "", offered = params.kind !== "start";
   ws.onmessage = (event) => {
     term.write(typeof event.data === "string" ? event.data : new Uint8Array(event.data));
     if (offered) return;
     seen = (seen + (typeof event.data === "string" ? event.data : decoder.decode(new Uint8Array(event.data), { stream: true }))).slice(-4000);
     const path = untrustedConfig(seen);
     if (path) { offered = true; offerReview(host, path); }
+    else if (seen.includes(SANDBOX_RUNS)) offered = true;  // it runs: what follows is the sandbox's
   };
   ws.onclose = (event) => {
     entry.closed = true;

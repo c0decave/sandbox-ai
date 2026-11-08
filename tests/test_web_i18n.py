@@ -208,6 +208,8 @@ NOT_WORDS = {
     "GH_WORK",
     # examples of the start form, the teams, the kits' marketplaces and the images (names, a Containerfile line)
     "my-plugins", "review", "ffmpeg jq", "RUN apt-get update && apt-get install -y --no-install-recommends tree", "data",
+    # the launcher's own words a start's terminal is read for (never shown by the page)
+    "agent-sandbox: /work is ",
 }
 # Where a literal is read by people even when it is one lowercase word: (callee, argument) of the page's helpers.
 TEXT_POSITIONS = {("toast", 1), ("toast", 2), ("notice", 0), ("failed", 0), ("ask", 0), ("ask", 1), ("say", 0),

@@ -1581,6 +1581,9 @@ def cli(argv):
                                                             "certificate")
     models.add_argument("-s", "--api-key-secret", metavar="NAME", dest="api_key_secret",
                         help="with --url: the secret (sandbox-ai secrets) holding its API key")
+    models.add_argument("--insecure-http", action="store_true", dest="insecure_http",
+                        help="with --url http://... and --api-key-secret: send the key over plain http to a server "
+                             "outside your local networks (as llm add --insecure-http)")
     models.add_argument("--sort", choices=["name", "size", "loaded"], default="loaded")
     models.add_argument("-j", "--json", action="store_true", help="as JSON")
     a = parser.parse_args(argv)
@@ -1610,7 +1613,8 @@ def cli(argv):
             # app's and the web's "Test connection" asks before anything is stored.
             if not a.kind:
                 parser.error("--url needs --kind")
-            found = llm().discover_url(a.kind, a.url, ca=a.ca, api_key_secret=a.api_key_secret)
+            found = llm().discover_url(a.kind, a.url, ca=a.ca, api_key_secret=a.api_key_secret,
+                                       insecure_http=a.insecure_http)
         elif a.kind and a.host:
             port = a.port or (SERVERS[a.kind][1] if a.kind in SERVERS else None)
             if port is None:

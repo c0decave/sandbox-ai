@@ -178,6 +178,19 @@ def plain_http_problem(parsed, addresses=None):
     return None
 
 
+def plain_http_resolved(parsed, resolver=None):
+    """(why plain http to PARSED is refused or None, whether its name did not resolve): plain_http_problem with a
+    host name resolved here first, as `llm add` and the "test connection" before it check it. A name that does not
+    resolve now is checked again at every start."""
+    if parsed["scheme"] != "http" or parsed["loopback"] or parsed["address"]:
+        return plain_http_problem(parsed), False
+    try:
+        addresses = (resolver or resolve)(parsed["host"], parsed["port"])
+    except OSError:
+        return None, True
+    return plain_http_problem(parsed, addresses), False
+
+
 # --- the store -----------------------------------------------------------------------------------------
 
 def config_dir():
@@ -605,14 +618,22 @@ def name_refusal(name):
     return f"an LLM endpoint's name is 1-32 letters, digits, _ or -: {printable(name)!r}"
 
 
-def discover_url(kind, url, get=None, client=None, ca=None, api_key_secret=None):
+def discover_url(kind, url, get=None, client=None, ca=None, api_key_secret=None, insecure_http=False, resolver=None):
     """The models a server of KIND at URL lists, before it is registered anywhere (the "test connection" of the app
-    and the web): the URL is checked as `llm add` checks it, nothing is stored, no key is sent."""
+    and the web): the URL is checked as `llm add` checks it, nothing is stored. The key of API_KEY_SECRET is sent
+    only where `llm add` would accept the URL: plain http to a public address (or a name that resolves to one)
+    needs INSECURE_HTTP, as `llm add --insecure-http`."""
     if kind not in KINDS:
         raise ValueError(f"Unknown server type: {printable(kind)}")
     parsed = parse_url(url)
     if api_key_secret is not None and not SECRET.fullmatch(str(api_key_secret)):
         raise ValueError("the API key's secret is named with letters, digits and _")
+    if insecure_http and parsed["scheme"] != "http":
+        raise ValueError("--insecure-http is for plain http URLs")
+    if api_key_secret is not None and not insecure_http:
+        problem, _ = plain_http_resolved(parsed, resolver)  # a name that does not resolve is not reached either
+        if problem:
+            raise ValueError(f"{problem} (the API key would go with it)")
     text = None
     if ca is not None:
         text = read_private(Path(ca).expanduser(), CA_LIMIT, f"--ca {ca}").decode("ascii", "strict")
@@ -1176,20 +1197,12 @@ def add(args, out=print, get=None):
     record = {"kind": args.kind, "url": parsed["url"], "api_key_secret": args.api_key_secret, "headers": headers,
               "vpn": args.vpn, "model": args.model, "anthropic": args.anthropic, "insecure_http": args.insecure_http}
     record = {key: value for key, value in record.items() if value not in (None, False, {})}
-    if parsed["scheme"] == "http" and not parsed["loopback"] and not parsed["address"]:
-        try:
-            addresses = resolve(parsed["host"], parsed["port"])
-        except OSError:
-            addresses = []
-            out(f"note: {parsed['host']} does not resolve here now; plain http is checked again at every start "
-                "(local addresses only)")
-        problem = plain_http_problem(parsed, addresses)
-        if problem and not args.insecure_http:
-            raise ValueError(problem)
-    else:
-        problem = plain_http_problem(parsed)
-        if problem and not args.insecure_http:
-            raise ValueError(problem)
+    problem, unresolved = plain_http_resolved(parsed)
+    if unresolved:
+        out(f"note: {parsed['host']} does not resolve here now; plain http is checked again at every start "
+            "(local addresses only)")
+    if problem and not args.insecure_http:
+        raise ValueError(problem)
     if args.insecure_http:
         if parsed["scheme"] != "http":
             raise ValueError("--insecure-http is for plain http URLs")

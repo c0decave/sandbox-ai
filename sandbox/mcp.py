@@ -558,6 +558,9 @@ def add(name, local=None, mounts=(), env=(), network=None, memory=None, pids=Non
         raise ValueError(f"invalid or reserved server name: {local}")
     if entry.get("network") == "allowlist":
         out(f"sandbox-mcp: {local} gets the full outside network; it needs only {', '.join(entry.get('hosts', []))}")
+    elif definition.get("network") == "full":
+        out(f"sandbox-mcp: {local} gets the full outside network ("
+            + ("--network full" if network == "full" else "its catalog entry asks for it") + ")")
     if pull:
         subprocess.run(["podman", "pull", "--quiet", definition["image"]], check=True, stdout=subprocess.DEVNULL)
     path = config_file()
@@ -1602,7 +1605,12 @@ def cli(argv):
                 "  signed" if signature.get("state") == "good" else "  SIGNATURE BAD" if signature.get("state") == "bad"
                 else "  unsigned")
             network = entry.get("network", "none") + (f" {','.join(entry.get('hosts', []))}" if entry.get("hosts") else "")
-            print(f"{prefix}:{entry.get('name')}  [{network}]  {entry.get('title', '')}{state}")
+            # One line per entry, whatever a catalog holds: its texts printable (a newline in an unsigned
+            # catalog's title would otherwise forge another, "signed" row for the readers of these lines).
+            def shown(text):
+                return launcher().printable(" ".join(str(text).split()))
+            print(f"{shown(prefix)}:{shown(str(entry.get('name')))}  [{shown(network)}]  "
+                  f"{shown(str(entry.get('title', '')))}{state}")
         return 0
     if a.command == "add":
         add(a.name, a.local, a.mount, a.env, a.network, a.memory, a.pids, sources, pull=not a.no_pull, vpn=a.vpn,

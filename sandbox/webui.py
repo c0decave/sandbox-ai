@@ -86,7 +86,12 @@ TERMINALS_PER_SESSION = 8
 # WS_DEADLINE seconds is gone, and one that takes nothing of the output for that long is dropped.
 WS_PING, WS_DEADLINE = 30, 90
 # Connections served at once, each a thread of its own (open terminals among them): one more is closed at once.
+# One address holds at most MAX_PER_ADDRESS of them, so that a few slow clients cannot take every place.
 MAX_CONNECTIONS = 64
+MAX_PER_ADDRESS = 16
+# Seconds a request may take from its first line to the end of its headers, and its body to arrive: a client that
+# sends one byte every few seconds (under the per-read timeout) is cut off, not served for minutes.
+HEAD_DEADLINE, BODY_DEADLINE = 10, 30
 # Seconds an idle HTTP connection is kept: KEEPALIVE once it carried a session, GUEST_KEEPALIVE before (one that
 # never logs in holds its thread a few seconds, not two minutes).
 KEEPALIVE, GUEST_KEEPALIVE = 120, 10
@@ -736,6 +741,9 @@ NEEDS_CONFIRM = {
     "mcp-unsigned": "an MCP server from a catalog no trusted key signed is taken without that check",
     "mcp-writable-mount": "a writable mount lets the MCP server change that directory on the host",
     "git-login-add": "a Git login is used by the connection proxy of every sandbox that reaches that server",
+    "login-replace": "a login for that server or kind exists: its token is replaced by this secret's for every later "
+                     "start that uses it",
+    "mcp-replace": "an MCP server of that name exists: its definition is replaced for every start that uses it",
     "login-remove": "removing a login or an identity takes it from every later start that uses it",
     "net-keep": "keeping what the run was given writes it into the project's .sandbox-ai.json: every later start of "
                 "that project gets it",
@@ -981,7 +989,7 @@ class Api:
             ("GET", H + r"/logs", self.logs, ()),
             ("GET", H + r"/llm", self.llm, ()),
             ("GET", H + r"/llm/(?P<name>[^/]+)/models", self.llm_models, ()),
-            ("POST", H + r"/llm-models", self.llm_models_of_url, ()),
+            ("POST", H + r"/llm-models", self.llm_models_of_url, ("llm-insecure",)),
             ("POST", H + r"/llm", self.add_llm, ("llm-insecure", "llm-replace")),
             ("POST", H + r"/llm/(?P<name>[^/]+)/check", self.check_llm, ()),
             ("DELETE", H + r"/llm/(?P<name>[^/]+)", self.remove_llm, ("llm-remove",)),
@@ -1019,7 +1027,7 @@ class Api:
             ("POST", H + r"/projects/forget", self.project_forget, ("project-forget",)),
             # MCP servers (sandbox-ai mcp)
             ("GET", H + r"/mcp", self.mcp_list, ()),
-            ("POST", H + r"/mcp", self.mcp_add, ("mcp-unsigned", "mcp-writable-mount")),
+            ("POST", H + r"/mcp", self.mcp_add, ("mcp-unsigned", "mcp-writable-mount", "mcp-replace")),
             ("POST", H + r"/mcp-catalog", self.mcp_catalog, ()),
             ("POST", H + r"/mcp/(?P<name>[^/]+)/start", self.mcp_start, ("mcp-attach", "mcp-restart")),
             ("POST", H + r"/mcp/(?P<name>[^/]+)/stop", self.mcp_stop, ("mcp-stop",)),
@@ -1030,7 +1038,7 @@ class Api:
             ("POST", H + r"/git-logins/check", self.git_login_check, ()),
             ("GET", H + r"/publish-logins", self.publish_logins, ()),
             ("GET", H + r"/publish-logins/kinds", self.publish_kinds, ()),
-            ("POST", H + r"/publish-logins", self.publish_login_add, ()),
+            ("POST", H + r"/publish-logins", self.publish_login_add, ("login-replace",)),
             ("POST", H + r"/publish-logins/check", self.publish_login_check, ()),
             ("POST", H + r"/publish-logins/(?P<kind>[^/]+)/remove", self.publish_login_remove, ("login-remove",)),
             ("GET", H + r"/identities", self.identities, ()),
@@ -1038,7 +1046,8 @@ class Api:
             ("POST", H + r"/identities-check", self.identity_check, ()),
             ("GET", H + r"/identities/(?P<name>[^/]+)", self.identity_show, ()),
             ("POST", H + r"/identities/(?P<name>[^/]+)", self.identity_set, ()),
-            ("POST", H + r"/identities/(?P<name>[^/]+)/(?P<action>login|publish)", self.identity_login, ()),
+            ("POST", H + r"/identities/(?P<name>[^/]+)/(?P<action>login|publish)", self.identity_login,
+             ("login-replace",)),
             ("POST", H + r"/identities/(?P<name>[^/]+)/(?P<action>logout|unpublish)", self.identity_logout,
              ("login-remove",)),
             ("DELETE", H + r"/identities/(?P<name>[^/]+)", self.identity_remove, ("login-remove",)),
@@ -2135,7 +2144,8 @@ class Api:
         """sandbox-ai wizard models --kind KIND --url URL [--ca FILE] [--api-key-secret NAME] --json: what a server
         at that URL lists, before anything is registered (the page's "Test connection"). Nothing is stored on the
         host; the key is named, never sent (the command reads that secret there), and no header secret goes with it,
-        so a server that wants one of those answers as it answers an anonymous caller."""
+        so a server that wants one of those answers as it answers an anonymous caller. The command refuses to send the
+        key over plain http to a public address, as `llm add` does, unless insecure_http (confirmed as llm-insecure)."""
         kind, url = llm_kind(body.get("kind")), body.get("url")
         if not (isinstance(url, str) and LLM_URL.fullmatch(url)):
             raise Refused(400, "url is http(s)://HOST[:PORT][/PREFIX]")
@@ -2144,6 +2154,9 @@ class Api:
             args.append(f"--ca={clean_path(body['ca'], 'ca')}")
         if body.get("api_key_secret") not in (None, ""):
             args.append(f"--api-key-secret={secret_name(body['api_key_secret'])}")
+            if flag(body, "insecure_http"):
+                confirmed(body, "llm-insecure", printable(url)[:200])
+                args.append("--insecure-http")
         return self.json_of(params["host"], [*args, "--json"], 60)
 
     def add_llm(self, params, body):
@@ -2430,6 +2443,11 @@ class Api:
             args.append("--unsigned")
         if writable:
             confirmed(body, "mcp-writable-mount", ", ".join(writable))
+        if body.get("confirm") is not True:  # the name it gets: --as, else the entry's own (without its catalog)
+            local = body.get("as") or entry.rsplit(":", 1)[-1]
+            defined = self.json_of(params["host"], ["mcp", "list", "--json"], 60, ok=(0,))
+            if any(isinstance(server, dict) and server.get("name") == local for server in defined or []):
+                confirmed(body, "mcp-replace", local)
         return self.done(params["host"], [*args, entry], 900)  # it pulls the image: that takes its time
 
     # logins and identities: the token is always a secret of that host, named, never a value here
@@ -2471,9 +2489,14 @@ class Api:
         return [f"--url={url}"]
 
     def publish_login_add(self, params, body):
+        """publish-logins add: one that replaces the login of that kind is asked first (login-replace)."""
         kind = publish_kind(body.get("kind"))
-        return self.done(params["host"], ["publish-logins", "add", f"--secret={secret_name(body.get('secret'))}",
-                                          *self.publish_url(body), kind], 30)
+        args = ["publish-logins", "add", f"--secret={secret_name(body.get('secret'))}", *self.publish_url(body), kind]
+        if body.get("confirm") is not True and any(isinstance(entry, dict) and entry.get("kind") == kind for entry in
+                                                   self.json_of(params["host"], ["publish-logins", "list", "--json"],
+                                                                30, ok=(0,))):
+            confirmed(body, "login-replace", kind)
+        return self.done(params["host"], args, 30)
 
     def publish_login_remove(self, params, body):
         kind = publish_kind(params["kind"])
@@ -2528,9 +2551,17 @@ class Api:
                 if not (isinstance(body["user"], str) and LOGIN_USER.fullmatch(body["user"])):
                     raise Refused(400, "user is 1-64 letters, digits, '.', '_' or '-'")
                 user = [f"--user={body['user']}"]
-            return self.done(params["host"], ["identities", "login", secret, *user, name, url], 30)
-        kind = publish_kind(body.get("kind"))
-        return self.done(params["host"], ["identities", "publish", secret, *self.publish_url(body), name, kind], 30)
+            args, key, what = ["identities", "login", secret, *user, name, url], ("git", "url", url), url
+        else:
+            kind = publish_kind(body.get("kind"))
+            args = ["identities", "publish", secret, *self.publish_url(body), name, kind]
+            key, what = ("publish", "kind", kind), kind
+        if body.get("confirm") is not True:  # one that replaces a login of the identity is asked first
+            identity = self.json_of(params["host"], ["identities", "show", "--json", name], 30, ok=(0,))
+            listed = identity.get(key[0]) if isinstance(identity, dict) else None
+            if any(isinstance(e, dict) and e.get(key[1]) == key[2] for e in listed or []):
+                confirmed(body, "login-replace", f"{what} of {name}")
+        return self.done(params["host"], args, 30)
 
     def identity_logout(self, params, body):
         name = identity_name(params["name"])
@@ -3524,6 +3555,41 @@ def vendored():
     return all((vendor_dir() / name).is_file() for name in VENDOR_FILES)
 
 
+def loopback_address(address):
+    """ADDRESS (a client's) is this machine's loopback (127.0.0.0/8, ::1, ::ffff:127.x)."""
+    try:
+        ip = ipaddress.ip_address(str(address).split("%", 1)[0])
+    except ValueError:
+        return False
+    return ip.is_loopback or (ip.version == 6 and ip.ipv4_mapped is not None and ip.ipv4_mapped.is_loopback)
+
+
+class Deadline:
+    """A reader of the connection's file (RFILE) that ends at DEADLINE (time.monotonic()) whatever the per-read
+    timeout: every read waits at most what is left, and none starts once it is over (TimeoutError)."""
+
+    def __init__(self, rfile, connection, deadline):
+        self.rfile, self.connection, self.deadline = rfile, connection, deadline
+
+    def bounded(self, read, *args):
+        left = self.deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("the request took too long to arrive")
+        before = self.connection.gettimeout()
+        self.connection.settimeout(min(left, before) if before else left)
+        try:
+            return read(*args)
+        finally:
+            with contextlib.suppress(OSError):
+                self.connection.settimeout(before)
+
+    def readline(self, *args):
+        return self.bounded(self.rfile.readline, *args)
+
+    def read(self, *args):
+        return self.bounded(self.rfile.read, *args)
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version, sys_version = "sandbox-ai", ""
@@ -3552,6 +3618,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):  # noqa: A002 - the audit log has what matters
         pass
 
+    def parse_request(self):
+        """The headers within HEAD_DEADLINE of the request line (which ended the idle wait)."""
+        original = self.rfile
+        self.rfile = Deadline(original, self.connection, time.monotonic() + HEAD_DEADLINE)
+        try:
+            return super().parse_request()
+        finally:
+            self.rfile = original
+
     def send(self, status, headers, body):
         self.send_response(status)
         for key, value in [*headers, ("Content-Length", str(len(body))), ("Content-Security-Policy", CSP),
@@ -3576,7 +3651,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send(*self.service.error(413, "too big"))
             self.close_connection = True
             return
-        body = self.rfile.read(size) if size else b""
+        body = Deadline(self.rfile, self.connection, time.monotonic() + BODY_DEADLINE).read(size) if size else b""
         status, headers, data = self.service.handle(self.command, self.path, self.headers, body,
                                                     self.client_address[0])
         self.send(status, headers, data)
@@ -3682,34 +3757,46 @@ class Server(http.server.ThreadingHTTPServer):
         self.address_family = socket.AF_INET6 if ipv6 else socket.AF_INET
         self.context = context
         self.limit = MAX_CONNECTIONS if limit is None else limit
-        self.active, self.active_lock = 0, threading.Lock()
+        self.per_address = MAX_PER_ADDRESS
+        self.active, self.active_lock, self.by_address = 0, threading.Lock(), {}
         super().__init__(address, Handler)
 
     def process_request(self, request, client_address):
-        """A thread for the connection, while fewer than LIMIT are served: else it is closed at once. The accept loop
-        never waits for a free place, and a flood of connections cannot start threads without bound."""
+        """A thread for the connection, while fewer than LIMIT are served and its address holds fewer than
+        PER_ADDRESS of them: else it is closed at once. The accept loop never waits for a free place, a flood of
+        connections cannot start threads without bound, and one address cannot take every place."""
+        address = client_address[0] if isinstance(client_address, tuple) else str(client_address)
         with self.active_lock:
-            full = self.active >= self.limit
+            # This machine's own address shares one count: the browser here (and a reverse proxy) is not capped.
+            full = self.active >= self.limit or (not loopback_address(address)
+                                                 and self.by_address.get(address, 0) >= self.per_address)
             if not full:
                 self.active += 1
+                self.by_address[address] = self.by_address.get(address, 0) + 1
         if full:
             self.shutdown_request(request)
             return
         try:
             super().process_request(request, client_address)
         except BaseException:
-            self.finished()
+            self.finished(address)
             raise
 
     def process_request_thread(self, request, client_address):
         try:
             super().process_request_thread(request, client_address)
         finally:
-            self.finished()
+            self.finished(client_address[0] if isinstance(client_address, tuple) else str(client_address))
 
-    def finished(self):
+    def finished(self, address=None):
         with self.active_lock:
             self.active -= 1
+            if address is not None:
+                left = self.by_address.get(address, 1) - 1
+                if left > 0:
+                    self.by_address[address] = left
+                else:
+                    self.by_address.pop(address, None)
 
     def get_request(self):
         sock, address = super().get_request()

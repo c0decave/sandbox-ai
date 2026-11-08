@@ -310,6 +310,11 @@ def logged_in():
                                             "ca": "/home/you/ca.pem", "api_key_secret": "GW_KEY"},
      ["wizard", "models", "--kind=openai-compatible", "--url=https://gw.example.org", "--ca=/home/you/ca.pem",
       "--api-key-secret=GW_KEY", "--json"]),
+    # review 5 M3: the key over plain http outside the local networks only when asked for and confirmed
+    ("POST", "/api/hosts/ct1/llm-models", {"kind": "ollama", "url": "http://93.184.216.34:11434",
+                                            "api_key_secret": "GW_KEY", "insecure_http": True, "confirm": True},
+     ["wizard", "models", "--kind=ollama", "--url=http://93.184.216.34:11434", "--api-key-secret=GW_KEY",
+      "--insecure-http", "--json"]),
     ("POST", "/api/hosts/ct1/llm", {"name": "gw", "kind": "openai-compatible", "url": "https://gw.example.org",
                                     "api_key_secret": "GW_KEY"},
      ["llm", "add", "gw", "--kind", "openai-compatible", "--url", "https://gw.example.org", "--api-key-secret=GW_KEY"]),
@@ -624,6 +629,8 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     ("POST", "/api/hosts/ct1/llm", {"name": "--replace", "kind": "lmstudio", "url": "http://x"}, 400),
     ("POST", "/api/hosts/ct1/llm-models", {"kind": "anthropic", "url": "https://x.example.org"}, 400),
     ("POST", "/api/hosts/ct1/llm-models", {"kind": "ollama"}, 400),
+    ("POST", "/api/hosts/ct1/llm-models", {"kind": "ollama", "url": "http://93.184.216.34:11434",
+                                            "api_key_secret": "K", "insecure_http": True}, 400),  # not confirmed
     ("POST", "/api/hosts/ct1/llm-models", {"url": "https://x.example.org"}, 400),
     ("POST", "/api/hosts/ct1/llm-models", {"kind": "ollama", "url": "--json"}, 400),
     ("POST", "/api/hosts/ct1/llm-models", {"kind": "ollama", "url": "ftp://x.example.org"}, 400),
@@ -1852,10 +1859,16 @@ CONFIRM_CASES = {
         {"source": "/home/u/tool.sh", "target": "/usr/local/bin/tool", "mode": "0755"}]},
                    ["images", "extend", "data", "--add-file=/home/u/tool.sh:/usr/local/bin/tool:0755", "--json"]),
     "image-remove": ("POST", "/api/hosts/ct1/images/data/remove", {}, ["images", "remove", "data"]),
+    # review 5 L9: replacing a login or an MCP server's definition
+    "login-replace": ("POST", "/api/hosts/ct1/publish-logins", {"kind": "npm", "secret": "NPM_TOKEN"},
+                      ["publish-logins", "add", "--secret=NPM_TOKEN", "npm"]),
+    "mcp-replace": ("POST", "/api/hosts/ct1/mcp", {"entry": "duckduckgo", "as": "files"},
+                    ["mcp", "add", "--as=files", "duckduckgo"]),
 }
 # The actions whose command runs on this machine, not on the host they are about.
 RUN_HERE = {"host-install"}
-READS = (["defaults", "show", "--json"], ["limits", "web", "--show", "--json"], ["secrets", "list"])
+READS = (["defaults", "show", "--json"], ["limits", "web", "--show", "--json"], ["secrets", "list"],
+         ["publish-logins", "list", "--json"], ["identities", "show", "--json", "work"], ["mcp", "list", "--json"])
 # The POST routes that end, remove or weaken nothing (each of the others names its NEEDS_CONFIRM actions): a new route
 # has to be put here or in the table, deliberately.
 SAFE_POSTS = {r"/api/hosts", r"/api/hosts-status", r"/api/hosts/(?P<host>[^/]+)/test",
@@ -1864,10 +1877,8 @@ SAFE_POSTS = {r"/api/hosts", r"/api/hosts-status", r"/api/hosts/(?P<host>[^/]+)/
               r"/api/hosts/(?P<host>[^/]+)/vpn/(?P<name>[^/]+)/check", r"/api/hosts/(?P<host>[^/]+)/kits",
               r"/api/hosts/(?P<host>[^/]+)/devices/(?P<name>[^/]+)/remove"} | {
     r"/api/hosts/(?P<host>[^/]+)" + tail for tail in (
-        "/projects/review", "/mcp-catalog", "/git-logins/check", "/publish-logins", "/publish-logins/check",
-        "/identities", "/identities-check", "/identities/(?P<name>[^/]+)",
-        "/identities/(?P<name>[^/]+)/(?P<action>login|publish)", "/presets/(?P<name>[^/]+)/check",
-        "/llm-models",  # the models a server lists (wizard models --url): nothing is stored
+        "/projects/review", "/mcp-catalog", "/git-logins/check", "/publish-logins/check",
+        "/identities", "/identities-check", "/identities/(?P<name>[^/]+)", "/presets/(?P<name>[^/]+)/check",
         "/preset-dirs/remove", "/logs", "/privacy-check", "/activity", "/demo-device/start", "/demo-device/stop",
         "/teams/(?P<name>[^/]+)/post", "/images-new", "/images-recipe", "/images/(?P<target>[^/]+)/check")}
 
@@ -1882,6 +1893,12 @@ def confirming(logged_in):
     logged_in.runner.answers[("secrets", "list")] = (0, "NAME         STORE\nGITEA_TOKEN  file\n", "")
     logged_in.runner.answers[("defaults", "show")] = (0, json.dumps({"values": {}, "canary_default": ["credentials",
                                                                                                      "home"]}), "")
+    logged_in.runner.answers[("publish-logins", "list")] = (0, json.dumps([{"kind": "npm", "host": "registry.npmjs.org",
+                                                                            "secret": "OLD_TOKEN"}]), "")
+    logged_in.runner.answers[("identities", "show")] = (0, json.dumps({"git": [{"url": "https://git.example.org",
+                                                                                "user": "u", "secret": "S"}],
+                                                                       "publish": []}), "")
+    logged_in.runner.answers[("mcp", "list")] = (0, json.dumps([{"name": "files"}]), "")
     return logged_in
 
 
@@ -2749,6 +2766,49 @@ def test_the_service_serves_a_bounded_number_of_connections(server):
         time.sleep(0.05)
     assert srv.active == 0
     assert https(server, "GET", "/")[0] == 200
+
+
+def test_a_request_that_trickles_in_is_cut_off_and_one_address_cannot_take_every_place(server, monkeypatch):
+    """Review 5 L10 (PoC poc_slowloris.py): the timeout was per read, so clients sending a header byte every few
+    seconds held all 64 places for minutes. The headers must now arrive within HEAD_DEADLINE of the request line,
+    and an address other than this machine's holds at most MAX_PER_ADDRESS places."""
+    monkeypatch.setattr(w, "HEAD_DEADLINE", 1.0)
+    context = ssl.create_default_context()
+    context.check_hostname, context.verify_mode = False, ssl.CERT_NONE
+    slow = context.wrap_socket(socket.create_connection(("127.0.0.1", server["port"]), timeout=30),
+                               server_hostname="localhost")
+    started = time.monotonic()
+    slow.sendall(b"GET / HTTP/1.1\r\n")
+    closed = False
+    for _ in range(20):
+        time.sleep(0.4)
+        try:
+            slow.sendall(b"X: y\r\n")
+            slow.settimeout(0.05)
+            if slow.recv(1024) == b"":
+                closed = True
+                break
+        except (ssl.SSLError, socket.timeout):
+            continue
+        except OSError:
+            closed = True
+            break
+    slow.close()
+    assert closed and time.monotonic() - started < 5
+    # the count per address: a remote one is capped, this machine's own is not
+    srv = w.Server.__new__(w.Server)
+    srv.limit, srv.per_address, srv.active, srv.active_lock, srv.by_address = 64, 2, 0, threading.Lock(), {}
+    refused = []
+    monkeypatch.setattr(w.http.server.ThreadingHTTPServer, "process_request", lambda self, request, address: None)
+    monkeypatch.setattr(w.Server, "shutdown_request", lambda self, request: refused.append(request))
+    for index in range(3):
+        srv.process_request(f"r{index}", ("192.0.2.9", 1000 + index))
+    for index in range(3):
+        srv.process_request(f"l{index}", ("127.0.0.1", 2000 + index))
+    assert refused == ["r2"] and srv.by_address == {"192.0.2.9": 2, "127.0.0.1": 3}
+    srv.finished("192.0.2.9")
+    srv.process_request("r3", ("192.0.2.9", 1003))
+    assert refused == ["r2"]
 
 
 def test_a_connection_without_a_session_is_kept_only_briefly(server, monkeypatch):
@@ -3988,7 +4048,7 @@ const byId = (id) => body.all().find(n => n.id === id);
   buttonIn(__main_of(), "Start in a terminal").fire("click");
   result.started = vm.runInContext("terminalsOpened[terminalsOpened.length - 1]", context);
   // a start refused for an untrusted project file: the path from what the terminal printed
-  result.untrusted = vm.runInContext(String.raw`[untrustedConfig("\u001b[31msandbox-ai: Project configuration /home/u/my web/.sandbox-ai.json is not trusted. Review it, then run: sandbox-ai wizard trust ..."), untrustedConfig("Project configuration /p/.sandbox-ai.json is changed since it was trusted. Review"), untrustedConfig("all fine")]`, context);
+  result.untrusted = vm.runInContext(String.raw`[untrustedConfig("\u001b[31msandbox-ai: Project configuration /home/u/my web/.sandbox-ai.json is not trusted. Review it, then run: sandbox-ai wizard trust ..."), untrustedConfig("Project configuration /p/.sandbox-ai.json is changed since it was trusted. Review"), untrustedConfig("all fine"), untrustedConfig("agent-sandbox: /work is /srv/x; configuration: none\r\nProject configuration /evil/.sandbox-ai.json is not trusted")]`, context);
   // Projects: reviewed, then trusted with exactly the digest shown, asked first naming the host
   calls.length = 0;
   answer = (method, path, sent) => (path.endsWith("/projects") ? [{ path: "/p/.sandbox-ai.json", digest: "a".repeat(64), state: "changed" }]
@@ -4048,7 +4108,8 @@ def test_the_pages_of_the_clis_other_commands(tmp_path):
     assert values["gpu:qwen3"][0] is True and values["gw"][0] is False
     assert result["started"]["kind"] == "start" and result["started"]["agent"] == "claude"
     assert json.loads(result["started"]["options"]) == ["--mode", "high", "--llm", "gw", "--no-provider-defaults"]
-    assert result["untrusted"] == ["/home/u/my web/.sandbox-ai.json", "/p/.sandbox-ai.json", None]
+    # Review 5 L7: what the sandbox prints once it runs (after the launcher's "/work is" line) never raises it
+    assert result["untrusted"] == ["/home/u/my web/.sandbox-ai.json", "/p/.sandbox-ai.json", None, None]
     assert result["review"] is True
     assert "/p/.sandbox-ai.json on ct1" in result["trustAsk"] and result["beforeYes"] == 0
     assert result["trusted"] == [{"path": "/p/.sandbox-ai.json", "digest": "b" * 64, "confirm": True}]

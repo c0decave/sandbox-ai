@@ -583,6 +583,38 @@ def test_discover_url_lists_a_server_that_is_not_registered():
         llm.discover_url("lmstudio", "127.0.0.1:1234")
 
 
+def test_test_connection_sends_no_key_over_plain_http_to_a_public_address(monkeypatch):
+    """Review 5 M3 (PoC llm_plain_http.py): "Test connection" (wizard models --url, the web's and the app's) sent
+    the API key over plain http to a public address, which `llm add` refuses: now refused the same way, before
+    anything is sent, unless --insecure-http; local addresses and names that resolve to them are fine, and
+    without a key there is nothing to keep."""
+    sent = []
+
+    class FakeClient:
+        def __init__(self, endpoint):
+            self.endpoint = endpoint
+
+        def json(self, path):
+            sent.append((self.endpoint["url"] + path, self.endpoint.get("api_key_secret")))
+            return {"models": []}
+    monkeypatch.setattr(llm, "Client", lambda endpoint, get=None: FakeClient(endpoint))
+    public = "http://93.184.216.34:11434"
+    with pytest.raises(ValueError, match="would cross networks you do not control.*the API key would go with it"):
+        llm.discover_url("ollama", public, api_key_secret="GITHUB_TOKEN")
+    with pytest.raises(ValueError, match="cross networks"):
+        llm.discover_url("ollama", "http://gpu.example.org:11434", api_key_secret="K",
+                         resolver=lambda host, port: ["93.184.216.34"])
+    assert sent == []
+    llm.discover_url("ollama", public, api_key_secret="K", insecure_http=True)
+    llm.discover_url("ollama", public)  # no key: nothing to keep
+    llm.discover_url("ollama", "http://192.168.1.9:11434", api_key_secret="K")
+    llm.discover_url("ollama", "http://gpu.lan:11434", api_key_secret="K", resolver=lambda host, port: ["10.0.0.5"])
+    assert {url.split("/api/")[0] for url, _ in sent} == {"http://93.184.216.34:11434", "http://192.168.1.9:11434",
+                                                           "http://gpu.lan:11434"}
+    with pytest.raises(ValueError, match="for plain http"):
+        llm.discover_url("ollama", "https://gpu.example.org", api_key_secret="K", insecure_http=True)
+
+
 @pytest.mark.skipif(not shutil.which("openssl"), reason="needs openssl")
 def test_replace_keeps_the_ca_unless_no_ca_is_given(tmp_path):
     """A front end can only send the CA's file once: --replace without --ca keeps the stored copy, --no-ca drops it."""
