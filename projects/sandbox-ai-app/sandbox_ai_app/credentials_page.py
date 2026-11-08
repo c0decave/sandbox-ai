@@ -9,16 +9,17 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox, QCompleter, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QLineEdit, QMessageBox,
-    QPushButton, QTabWidget, QVBoxLayout, QWidget,
+    QComboBox, QCompleter, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+    QMessageBox, QPushButton, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from . import theme
 from .backend import SandboxAI
 from .files import printable
 from .i18n import N_, tr
-from .widgets import background, confirm, fill, outcome, plain_label, selected, table
+from .widgets import ask_first, background, confirm, fill, outcome, plain_label, selected, table
 
+LOCAL = "local"  # the host of this machine's own secrets (sandbox-ai hosts' name for it)
 # The overview's kinds, in the order of the tabs.
 KINDS = (("logins", N_("Agent login")), ("secrets", N_("Secret")), ("git", N_("Git login")),
          ("publish", N_("Publish login")), ("identities", N_("Identity")), ("vpn", N_("VPN profile")))
@@ -236,6 +237,19 @@ class CredentialsPage(QWidget):
         # secrets
         secrets = QGroupBox(tr("Secrets (API keys and tokens for --secret-env and MCP servers)"))
         secrets_layout = QVBoxLayout(secrets)
+        # Whose secrets: this machine's, or a host's of `sandbox-ai hosts` (secrets list, set and delete there, over
+        # SSH; a value goes on standard input there too, never as an argument).
+        host_row = QHBoxLayout()
+        self.secret_host = QComboBox()
+        self.secret_host.setAccessibleName(tr("Secrets on"))
+        self.secret_host.setToolTip(tr("This machine's secrets, or a host's (over SSH)"))
+        self.secret_host.addItem(tr("This machine"), LOCAL)
+        self.secret_host.activated.connect(lambda _=0: self.load_secrets())
+        host_row.addWidget(QLabel(tr("Secrets on")))
+        host_row.addWidget(self.secret_host)
+        host_row.addStretch()
+        secrets_layout.addLayout(host_row)
+        self.remote_secrets, self.secrets_token = {}, 0  # {host: [(name, where)]} as last read there
         self.backend_label = plain_label()
         secrets_layout.addWidget(self.backend_label)
         self.secrets = table([tr("Name"), tr("Kept in"), tr("Used by")])
@@ -319,9 +333,13 @@ class CredentialsPage(QWidget):
             except Exception:  # noqa: BLE001 - an older sandbox-ai: those tabs stay empty
                 pass
             try:
-                return rows, self.sai.secrets(), None, git, publish
+                hosts = list(self.sai.remote_hosts())
+            except Exception:  # noqa: BLE001 - an older sandbox-ai, or no list of hosts: this machine's only
+                hosts = []
+            try:
+                return rows, self.sai.secrets(), None, git, publish, hosts
             except Exception as exc:  # noqa: BLE001 - shown on the page
-                return rows, ("?", []), exc, git, publish
+                return rows, ("?", []), exc, git, publish, hosts
         # The keyring is asked with timeouts of its own (secret-tool: 10 s and 30 s); this one is the last word.
         background(read, owner=self, timeout=90, done=lambda result, error: self.refreshed(token, result, error))
 
@@ -331,8 +349,9 @@ class CredentialsPage(QWidget):
         if error is not None:
             self.message.setText(printable(error))
             return
-        rows, (store, names), problem, git, publish = result
+        rows, (store, names), problem, git, publish, hosts = result
         self.state.update(logins=rows, secrets=names, store=store, git=git, publish=publish)
+        self.fill_secret_hosts(hosts)
         states = {None: tr("logged in"), "missing": tr("no login"), "expired": tr("expired, log in again"),
                   "error": tr("cannot be read")}
         fill(self.logins, [[agent, self.login_source(where), states.get(problem_, problem_), source]
@@ -340,14 +359,62 @@ class CredentialsPage(QWidget):
              ["ok" if problem_ is None else "warn" for _, _, problem_, _ in rows])
         if problem is not None:
             self.message.setText(printable(problem))
-        self.backend_label.setText(tr("Kept in: {store}", store={"keyring": tr("your system keyring (Secret Service)"),
-                                                                 "file": tr("private files (mode 0600)")}.get(store, store)))
-        uses = self.secret_uses()
-        fill(self.secrets, [[name, where, ", ".join(uses.get(name, [])) or "—"] for name, where in names])
+        if self.secret_host.currentData() in (None, "local"):
+            self.show_secrets("local", store, names)
         secret_names = [name for name, _ in names]
         self.git.show_entries(git, secret_names)
         self.publish.show_entries(publish, secret_names)
         self.show_overview()
+
+    def fill_secret_hosts(self, hosts):
+        """This machine and each host of `sandbox-ai hosts`; the choice stays while its host does."""
+        chosen = self.secret_host.currentData()
+        self.secret_host.blockSignals(True)
+        self.secret_host.clear()
+        self.secret_host.addItem(tr("This machine"), LOCAL)
+        for host in hosts:
+            if isinstance(host, str) and host != "local":
+                self.secret_host.addItem(printable(host), host)
+        index = self.secret_host.findData(chosen)
+        self.secret_host.setCurrentIndex(max(0, index))
+        self.secret_host.blockSignals(False)
+        if index < 0 and chosen not in (None, "local"):
+            self.load_secrets()  # its host is gone: this machine's, not that host's rows under another name
+
+    def secret_host_of(self):
+        return self.secret_host.currentData() or "local"
+
+    def show_secrets(self, host, store, names):
+        stores = {"keyring": tr("your system keyring (Secret Service)"), "file": tr("private files (mode 0600)")}
+        text = tr("Kept in: {store}", store=stores.get(store, printable(store)))
+        self.backend_label.setText(text if host == "local" else tr("On {host}: {text}", host=printable(host),
+                                                                    text=text))
+        uses = self.secret_uses() if host == "local" else {}  # what uses them: this machine's logins
+        fill(self.secrets, [[name, where, ", ".join(uses.get(name, [])) or "—"] for name, where in names])
+
+    def load_secrets(self):
+        """The secrets of the host chosen: this machine's from the last refresh; a host's read there (names only)."""
+        host = self.secret_host_of()
+        self.secrets_token += 1
+        token = self.secrets_token
+        if host == "local":
+            self.show_secrets("local", self.state.get("store", "?"), self.state.get("secrets", []))
+            return
+        self.remote_secrets.pop(host, None)  # not known until it answered: a replace is asked about
+        fill(self.secrets, [])
+        self.backend_label.setText(tr("Asking {host}…", host=printable(host)))
+        background(self.sai.host_secrets, host, owner=self, timeout=90,
+                   done=lambda result, error: self.secrets_read(token, host, result, error))
+
+    def secrets_read(self, token, host, result, error):
+        if token != self.secrets_token or host != self.secret_host_of():
+            return
+        if error is not None:
+            self.backend_label.setText(tr("{host}: no answer", host=printable(host)) + f" ({printable(error)[:300]})")
+            return
+        store, names = result
+        self.remote_secrets[host] = list(names)
+        self.show_secrets(host, store, names)
 
     @staticmethod
     def login_source(where):
@@ -453,7 +520,7 @@ class CredentialsPage(QWidget):
             self.terminal(self.sai.command("login", agent), f"sandbox-ai login {agent}")
 
     def set_secret(self):
-        name, value = self.name.text().strip(), self.value.text()
+        name, value, host = self.name.text().strip(), self.value.text(), self.secret_host_of()
         if not self.sai.valid_secret(name):
             QMessageBox.warning(self, tr("Secret"), tr("A name is letters, digits and _ (up to 64), not starting "
                                                        "with a digit."))
@@ -462,31 +529,58 @@ class CredentialsPage(QWidget):
             QMessageBox.warning(self, tr("Secret"), tr("Enter the value first."))
             return
         self.value.clear()  # at once: the value goes on standard input of the command, and nowhere else
-        background(self.sai.set_secret, name, value, owner=self, source=self.secret_buttons, timeout=90,
-                   done=self.secret_kept)
+        # A secret of that name: its value is replaced, for everything that names it - asked first (not known: too).
+        listed = self.state.get("secrets") if host == "local" else self.remote_secrets.get(host)
+        exists = None if listed is None else any(found == name for found, _ in listed)
+        text = tr("A secret {name} is kept already: replace its value? Everything that names it gets the new one.",
+                  name=printable(name)) if exists else             tr("Whether a secret {name} is kept there could not be told: a value it has would be replaced. Go on?",
+               name=printable(name))
+        if host != "local":
+            text = tr("On {host}: {text}", host=printable(host), text=text)
+        if not ask_first(self, "secret-replace", tr("Secret"), text, tr("Replace"), detail={"exists": exists}):
+            self.message.setText(tr("Not kept: the secret {name} stays as it is.", name=printable(name)))
+            return
+        if host == "local":
+            background(self.sai.set_secret, name, value, owner=self, source=self.secret_buttons, timeout=90,
+                       done=self.secret_kept)
+        else:
+            background(lambda: self.sai.set_secret(name, value, host=host), owner=self, source=self.secret_buttons,
+                       timeout=120, done=self.secret_kept)
         value = None  # noqa: F841 - not kept
 
     def secret_kept(self, result, error):
         status, out, err = outcome(result, error)
         self.message.setText(printable((out + err).strip()) if status == 0 else
                              tr("Not kept: {error}", error=printable(err.strip() or out.strip())))
-        self.refresh()
+        self.secrets_changed()
+
+    def secrets_changed(self):
+        if self.secret_host_of() == "local":
+            self.refresh()
+        else:
+            self.load_secrets()
 
     def delete_secret(self):
-        name = self.name.text().strip() or selected(self.secrets)
+        name, host = self.name.text().strip() or selected(self.secrets), self.secret_host_of()
         if not name or not self.sai.valid_secret(name):
             QMessageBox.information(self, tr("Secret"), tr("Select a secret first."))
             return
-        if not confirm(self, tr("Delete secret"), tr("Delete the secret {name}?", name=printable(name)), tr("Delete"),
-                       destructive=True):
+        text = tr("Delete the secret {name}?", name=printable(name))
+        if host != "local":
+            text = tr("On {host}: {text}", host=printable(host), text=text)
+        if not ask_first(self, "secret-delete", tr("Delete secret"), text, tr("Delete")):
             return
-        background(self.sai.delete_secret, name, owner=self, source=self.secret_buttons, timeout=90,
-                   done=self.secret_deleted)
+        if host == "local":
+            background(self.sai.delete_secret, name, owner=self, source=self.secret_buttons, timeout=90,
+                       done=self.secret_deleted)
+        else:
+            background(lambda: self.sai.delete_secret(name, host=host), owner=self, source=self.secret_buttons,
+                       timeout=120, done=self.secret_deleted)
 
     def secret_deleted(self, result, error):
         status, out, err = outcome(result, error)
         self.message.setText(printable((out + err).strip()))
-        self.refresh()
+        self.secrets_changed()
 
 
 __all__ = ["CredentialsPage"]

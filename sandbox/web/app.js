@@ -12,6 +12,7 @@ const state = {
   toastQuestions: new Map(), questionToast: null, answered: new Map(), questions: [],
   boxes: null, terminalCount: 0, polling: false, pollAgain: false, policy: null, session: null, loginMessage: null,
   cards: [], shown: null,
+  installing: {},  // host -> when its install began (it may outlast the page that started it)
 };
 const AGENTS = ["claude", "codex", "opencode"];
 const PAGES = [
@@ -934,7 +935,8 @@ async function refreshStarts(main, now) {
 function firstRunCard() {
   const doctor = el("span", { class: "hint" }, t("Checking…"));
   api("GET", hostPath("/doctor", "local")).then((results) => {
-    const list = (Array.isArray(results) ? results : []).filter(r => r && typeof r === "object");
+    if (typeof results === "string") { doctor.textContent = t("an older doctor: open it to read it"); return; }
+    const list = doctorChecks(results);
     const problems = list.filter(r => r.status === "fail").length, warnings = list.filter(r => r.status === "warn").length;
     doctor.textContent = problems ? t("{problems} problem(s), {warnings} warning(s)", { problems, warnings }) : warnings ? t("no problems, {warnings} warning(s)", { warnings }) : t("no problems");
   }).catch((e) => { doctor.textContent = e.message; });
@@ -1690,13 +1692,143 @@ pages.approvals = async (main, known) => {
   view.table.hidden = !view.rows.size; view.empty.hidden = Boolean(view.rows.size) || Boolean(Object.keys(errors).length);
 };
 
+// --- the doctor, for a human: the desktop app's view (projects/sandbox-ai-app/sandbox_ai_app/doctor_view.py) ----
+// The checks grouped by area, problems and warnings first and open, each with its status in an icon and a word, what
+// was found as text to read, the advice, and the fix command in a block of its own to copy (never run here); the
+// fine ones folded away. An older sandbox-ai that answers with text: that text, as it is.
+const DOCTOR_STATUSES = ["fail", "warn", "ok", "skip"];
+const DOCTOR_SYMBOLS = { ok: "✔", warn: "!", fail: "✘", skip: "–" };
+const DOCTOR_WORDS = { ok: N_("Fine"), warn: N_("Warning"), fail: N_("Problem"), skip: N_("Not checked") };
+// The doctor's own areas (doctor.GROUPS), in its order; a check that fits none is in the last.
+const DOCTOR_AREAS = { System: N_("System"), Engine: N_("Engine (Podman, Bubblewrap, images)"), Agents: N_("Agents (logins, kits, plugins)"),
+  Project: N_("Project and security mode") };
+const DOCTOR_GROUPS = Object.entries(DOCTOR_AREAS);
+// The doctor's titles by area, for results without a group (an older sandbox-ai's --json).
+const DOCTOR_PREFIXES = {
+  System: ["Ordinary user", "Python", "sandbox-ai", "User namespaces", "systemd user session", "Connection proxy"],
+  Engine: ["Podman", "podman machine", "pasta", "Delegated UID/GID ranges", "newuidmap", "Image ", "VPN", "Bubblewrap", "TIOCSTI", "Firejail", "nft", "setpriv", "slirp"],
+  Agents: ["Login ", "Kit ", "Kits", "Plugins"],
+};
+const DOCTOR_COMMAND_WORDS = ["sandbox-ai", "sudo", "podman", "systemctl", "loginctl", "modprobe", "sysctl", "apt", "apt-get", "dnf",
+  "pacman", "zypper", "brew", "usermod", "git", "echo", "chmod", "mkdir"];
+
+// The area of the check titled CHECK.
+function doctorGroupOf(check) {
+  for (const [name, prefixes] of Object.entries(DOCTOR_PREFIXES)) if (prefixes.some(p => check === p || check.startsWith(p))) return name;
+  return DOCTOR_GROUPS[DOCTOR_GROUPS.length - 1][0];
+}
+
+// The command in a doctor's hint, to copy (`podman info`, "sandbox-ai build claude", "sudo modprobe tun ..."), or ""
+// when the hint is advice in words.
+function doctorCommand(hint) {
+  const whole = String(hint || "").trim();
+  const quoted = /\x60([^\x60]+)\x60/.exec(whole);  // `a command` (\x60: the backtick)
+  if (quoted) return quoted[1].trim();
+  const text = whole.replace(/^(?:run|try|then run)\s*:\s+/i, "");
+  if (!DOCTOR_COMMAND_WORDS.includes(text.split(" ", 1)[0])) return "";
+  return text.split(/\s+\(|;\s|,\s+(?:or|then|and)\s/)[0].trim().replace(/\.+$/, "");
+}
+
+// [{status, check, detail, hint, group, command}] of a doctor --json answer (anything else in it is left out).
+function doctorChecks(results) {
+  const groups = DOCTOR_GROUPS.map(([key]) => key);
+  return (Array.isArray(results) ? results : []).filter(r => r && typeof r === "object").map(r => {
+    const status = DOCTOR_STATUSES.includes(r.status) ? r.status : "skip";
+    const [check, detail, hint] = [r.check, r.detail, r.hint].map(v => (v === undefined || v === null ? "" : String(v)));
+    return { status, check, detail, hint, group: groups.includes(r.group) ? r.group : doctorGroupOf(check), command: doctorCommand(hint) };
+  });
+}
+
+// A command to copy: in a block of its own, with a Copy button (the clipboard, else the command selected).
+function commandBlock(command) {
+  const code = el("code", { class: "mono" }, command);
+  const copy = el("button", { class: "small", "aria-label": t("Copy the command {command}", { command }), onclick: async () => {
+    let copied = false;
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard && typeof navigator.clipboard.writeText === "function") { await navigator.clipboard.writeText(command); copied = true; }
+    } catch (e) { copied = false; }
+    if (!copied) selectText(code);
+    copy.textContent = copied ? t("Copied") : t("Selected: copy it with Ctrl+C");
+    say(copied ? t("Copied: {command}", { command }) : t("The command is selected: copy it with Ctrl+C"));
+  } }, t("Copy"));
+  return el("div", { class: "command-block" }, code, copy);
+}
+
+function selectText(node) {
+  try {
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return true;
+  } catch (e) { return false; }
+}
+
+const DOCTOR_STATE_CLASS = { ok: "doctor-state status-ok", warn: "doctor-state status-warn", fail: "doctor-state status-fail", skip: "doctor-state status-skip" };
+
+// One check: its status (icon and word), its name, what was found, and for a problem or warning how to fix it.
+function doctorItem(c) {
+  const item = el("li", { class: "doctor-check", "data-status": c.status },
+    el("div", { class: "doctor-head" }, el("span", { class: DOCTOR_STATE_CLASS[c.status] }, el("span", { "aria-hidden": "true" }, DOCTOR_SYMBOLS[c.status]), " ", t(DOCTOR_WORDS[c.status])),
+      el("strong", { class: "doctor-name" }, c.check)),
+    c.detail ? el("p", { class: "doctor-detail" }, c.detail) : null);
+  if (c.hint && (c.status === "fail" || c.status === "warn")) {
+    // advice in words; a hint that is only the command is the command alone
+    const bare = c.hint.trim().replace(/^(?:run|try|then run)\s*:\s+/i, "").replace(/\.+$/, "");
+    if (!c.command || bare !== c.command) item.append(el("p", { class: "doctor-hint" }, el("span", { class: "doctor-label" }, t("What to do:")), " ", c.hint));
+    if (c.command) item.append(commandBlock(c.command));
+  }
+  return item;
+}
+
+// The doctor's RESULTS (--json: a list of checks; an older sandbox-ai: its text) as one readable view. OPTIONS.level:
+// the heading level of its areas (2 on the doctor page, 3 below a host's test); OPTIONS.host: whose doctor it is.
+function doctorView(results, options) {
+  const opts = options || {};
+  const heading = `h${opts.level || 2}`, sub = `h${(opts.level || 2) + 1}`;
+  if (typeof results === "string") {
+    return el("div", { class: "doctor" }, notice(t("The sandbox-ai of {host} answered with text (an older version without the doctor's list): shown as it is. An update gives the readable list.", { host: opts.host || state.host }), "warn"),
+      el("pre", { class: "doctor-text" }, results));
+  }
+  const checks = doctorChecks(results);
+  const count = (status) => checks.filter(c => c.status === status).length;
+  const problems = count("fail"), warnings = count("warn"), fine = count("ok"), skipped = count("skip");
+  const view = el("div", { class: "doctor" });
+  if (!checks.length) { view.append(notice(t("The doctor found nothing to check."), "")); return view; }
+  view.append(el("p", { class: `doctor-summary notice ${problems ? "error" : warnings ? "warn" : "ok"}`, role: "status" },
+    problems || warnings ? t("{problems} problem(s), {warnings} warning(s), {fine} fine: each says how to fix it.", { problems, warnings, fine })
+      : t("Everything needed is in place: {fine} checks are fine.", { fine }),
+    skipped ? ` ${t("{count} not checked.", { count: skipped })}` : ""));
+  const order = (c) => DOCTOR_STATUSES.indexOf(c.status);
+  for (const [key, title] of DOCTOR_GROUPS) {
+    const open = checks.filter(c => c.group === key && (c.status === "fail" || c.status === "warn")).sort((a, b) => order(a) - order(b));
+    if (!open.length) continue;
+    const failedHere = open.filter(c => c.status === "fail").length, warnedHere = open.length - failedHere;
+    view.append(el("section", { class: "doctor-group", "data-group": key }, el(heading, {}, t(title), " ",
+      el("span", { class: "hint" }, t("{problems} problem(s), {warnings} warning(s)", { problems: failedHere, warnings: warnedHere }))),
+    el("ul", { class: "doctor-checks" }, open.map(doctorItem))));
+  }
+  // the fine ones, and those not checked here, folded away, by area
+  const folded = (status, summary) => {
+    const rest = checks.filter(c => c.status === status);
+    if (!rest.length) return null;
+    return el("details", { class: "doctor-folded", "data-status": status }, el("summary", {}, summary),
+      DOCTOR_GROUPS.filter(([key]) => rest.some(c => c.group === key)).map(([key, title]) => el("section", { class: "doctor-group", "data-group": key },
+        el(sub, {}, t(title)), el("ul", { class: "doctor-checks compact" }, rest.filter(c => c.group === key).map(doctorItem)))));
+  };
+  view.append(folded("ok", fine === 1 ? t("1 check is fine") : t("{count} checks are fine", { count: fine })),
+    folded("skip", skipped === 1 ? t("1 check was not made here") : t("{count} checks were not made here", { count: skipped })));
+  return view;
+}
+
 pages.doctor = async (main) => {
-  main.append(el("h1", {}, t("Doctor on {host}", { host: state.host })), el("p", { class: "hint" }, t("Checking…")));
+  const host = state.host;
+  main.append(el("h1", {}, t("Doctor on {host}", { host })), el("p", { class: "hint" }, t("Checking…")));
   const results = await api("GET", hostPath("/doctor"));
-  const problems = results.filter(r => r.status === "fail").length, warnings = results.filter(r => r.status === "warn").length;
-  clear(main).append(el("h1", {}, t("Doctor on {host}", { host: state.host })),
-    notice(problems ? t("{problems} problem(s), {warnings} warning(s)", { problems, warnings }) : warnings ? t("no problems, {warnings} warning(s)", { warnings }) : t("no problems"), problems ? "error" : "ok"),
-    table(["", t("column|Check"), t("Detail"), t("What to do")], results.map(r => el("tr", {}, statusCell(r.status), el("td", {}, r.check), el("td", {}, r.detail || ""), el("td", { class: "mono" }, r.hint || "")))));
+  clear(main).append(el("h1", {}, t("Doctor on {host}", { host })),
+    el("p", { class: "hint" }, t("Each command is only shown to copy: run it yourself in a terminal on {host}.", { host })),
+    doctorView(results, { level: 2, host }));
 };
 
 pages.logs = async (main) => {
@@ -2121,10 +2253,16 @@ pages.secrets = async (main) => {
 // The version of a host's sandbox-ai and whether an update is there (hosts list's status; null: not asked yet).
 function versionText(s) {
   if (!s) return "…";
-  if (!s.version) return s.error ? t("unreachable") : "?";
+  if (!s.version) return s.error ? (sandboxMissing(s) ? t("not installed") : t("unreachable")) : "?";
   if (["checkout", "pip", "package"].includes(s.kind)) return `${s.version} (${s.kind})`;
   if (s.update) return t("{version} → {available} available", { version: s.version, available: s.available });
   return s.update === false ? t("{version}, up to date", { version: s.version }) : s.version;
+}
+
+// Whether a host answers over SSH but has no sandbox-ai (the shell found none: exit status 127, "not found").
+function sandboxMissing(s) {
+  const error = String((s && s.error) || "");
+  return Boolean(s && !s.version && error && !/\(SSH:/.test(error) && /No such file or directory|not found|exit status 127/.test(error));
 }
 
 // What a key made private (ssh refuses key files others can read) and what was only named.
@@ -2132,6 +2270,12 @@ function keyNotices(r) {
   return [...(r.fixed || []).map(f => notice(t("{path} could be read by others (mode {was}), which ssh refuses: made private ({now}).", { path: f.path, was: f.was, now: f.now }), "ok")),
 
     ...(r.warnings || []).map(w => notice(w, "warn"))];
+}
+
+// The sudo of an update as a select says it: undefined (the host's setting), true or false.
+function sudoChoice(select) {
+  const value = select ? select.value : "";
+  return value === "sudo" ? true : value === "none" ? false : undefined;
 }
 
 // One host's update: its own signed sandbox-ai update; a sudo that wants a password is asked in a terminal tab.
@@ -2142,11 +2286,161 @@ async function updateHost(name, output, sudo) {
   if (r.changed) output.append(notice(`${name}: ${r.before || "?"} → ${r.after}${r.sudo ? " (sudo)" : ""}`, "ok"));
   else if (r.error && !r.after) {
     output.append(el("div", { class: "notice error", role: "alert" }, t("{host}: not updated: {error}", { host: name, error: r.error }),
-      r.needs_password ? el("button", { onclick: () => openTerminal({ host: name, kind: "update" }, t("update {host}", { host: name })) }, t("Update in a terminal (sudo asks there)")) : null,
+      r.needs_password && terminalsHere() ? el("button", { onclick: () => openTerminal({ host: name, kind: "update" }, t("update {host}", { host: name })) }, t("Update in a terminal (sudo asks there)")) : null,
       r.needs_sudo ? el("button", { onclick: (ev) => busy(ev.target, () => updateHost(name, output, true).catch(failed(t("Could not update {host}", { host: name })))) }, t("Update with sudo")) : null));
+    if (r.needs_password) output.append(passwordHelp(name, ["sandbox-ai", "hosts", "update", name, "--sudo"]));
   } else output.append(notice(`${name}: ${t("{version}, up to date", { version: r.after || r.before })}${r.error ? ` (${r.error})` : ""}`, r.error ? "warn" : "ok"));
   for (const note of r.notes || []) output.append(notice(`${name}: ${note}`, "warn"));
   return r;
+}
+
+// Whether this page has terminals (xterm.js on the server): a sudo that wants a password is asked in one.
+function terminalsHere() { return Boolean(state.me && state.me.terminals) && typeof window !== "undefined" && Boolean(window.Terminal); }
+
+// sudo on NAME wants a password, which this page cannot type: what to do, with the exact command (WORDS) to copy.
+function passwordHelp(name, words) {
+  return el("div", { class: "notice warn password-help" },
+    el("p", {}, t("sudo on {host} wants a password, and this page never asks for one.", { host: name }), " ",
+      terminalsHere() ? t("Run it in a terminal tab (the button above), where sudo asks, or on this machine:") : t("Run this in a terminal on this machine, where sudo asks for it:")),
+    commandBlock(words.join(" ")),
+    el("p", { class: "hint" }, t("Or allow it there without a password (sudoers NOPASSWD).")));
+}
+
+// sandbox-ai on a host, from this machine (`sandbox-ai hosts install`): for the SSH user or for every user, as root
+// or with sudo (sudo -n: a password is asked in a terminal), from this machine's copy or the host downloads the
+// signed release. It can take minutes (up to 15 for a step): the page stays usable, a toast tells the end.
+// What the form says, as the service takes it ({mode, prefix, sudo, source, version}).
+function installBody(form, root) {
+  const mode = form.mode.value, source = form.source.value;
+  const body = { mode, source };
+  if (mode === "system") {
+    body.prefix = form.prefix.value.trim() || "/usr/local";
+    if (!root) body.sudo = form.sudo.value === "sudo";
+  }
+  if (source === "download" && form.version.value.trim()) body.version = form.version.value.trim();
+  return body;
+}
+
+// The words of an install BODY on host H: for whom, how, from where (for its question and its result).
+function installWords(body, root) {
+  const who = body.mode === "system" ? t("for every user in {prefix}", { prefix: body.prefix || "/usr/local" }) : t("for the SSH user");
+  const how = body.mode !== "system" ? t("without sudo") : root ? t("as root (the SSH user is root)") : body.sudo === false ? t("without sudo") : t("with sudo");
+  const from = body.source === "download" ? (body.version ? t("the host downloads the signed release {version}", { version: body.version }) : t("the host downloads the newest signed release")) : t("from this machine's copy");
+  return { who, how, from };
+}
+
+// The command line of an install BODY on NAME, as typed in a terminal of this machine.
+function installCommand(name, body) {
+  const words = ["sandbox-ai", "hosts", "install", name, body.mode === "system" ? "--system" : "--user"];
+  if (body.mode === "system" && body.prefix && body.prefix !== "/usr/local") words.push(`--prefix=${body.prefix}`);
+  if (body.mode === "system" && body.sudo === false) words.push("--no-sudo");
+  if (body.source === "download") words.push("--download");
+  if (body.version) words.push(`--version=${body.version}`);
+  return words;
+}
+
+function installCard(main, h, onDone) {
+  const old = document.getElementById("host-install-card");
+  if (old) old.remove();
+  const root = String(h.ssh || "").startsWith("root@");
+  const user = String(h.ssh || "").split("@")[0] || "?";
+  const form = {
+    mode: el("select", { id: "install-mode" }, el("option", { value: "user", selected: !root }, t("for the SSH user ({user}): in its ~/.local", { user })),
+      el("option", { value: "system", selected: root }, t("for every user: in a prefix (root's)"))),
+    sudo: el("select", { id: "install-sudo", disabled: root }, root ? el("option", { value: "root" }, t("as root: the SSH user is root"))
+      : [el("option", { value: "sudo", selected: true }, t("with sudo (sudo -n; a password is asked in a terminal)")), el("option", { value: "none" }, t("without sudo"))]),
+    prefix: el("input", { id: "install-prefix", class: "mono", value: "/usr/local", pattern: "/[A-Za-z0-9._/-]{0,200}" }),
+    source: el("select", { id: "install-source" }, el("option", { value: "here", selected: true }, t("this machine's copy (version {version})", { version: (state.me && state.me.version) || "?" })),
+      el("option", { value: "download" }, t("the host downloads the signed release"))),
+    version: el("input", { id: "install-version", class: "mono", placeholder: t("newest"), size: 10, pattern: "[0-9]+\\.[0-9]+\\.[0-9]+" }),
+  };
+  const howNote = el("span", { class: "hint", id: "install-how-note" });
+  const rows = { sudo: [el("label", { for: "install-sudo" }, t("How")), el("div", {}, form.sudo, " ", howNote)],
+    prefix: [el("label", { for: "install-prefix" }, t("Prefix")), form.prefix], version: [el("label", { for: "install-version" }, t("Version")), form.version] };
+  const sync = () => {
+    const system = form.mode.value === "system";
+    for (const node of rows.prefix) node.hidden = !system;
+    for (const node of rows.version) node.hidden = form.source.value !== "download";
+    form.sudo.disabled = root || !system;
+    howNote.textContent = system ? "" : t("for the SSH user: no sudo, nothing outside its HOME");
+  };
+  form.mode.addEventListener("change", sync); form.source.addEventListener("change", sync);
+  const status = el("div", { class: "wide", "aria-live": "polite" });
+  const buttons = el("div", { class: "row" });
+  const install = el("button", { class: "primary", disabled: Boolean(state.installing[h.name]), onclick: () => {
+    clear(status);
+    const body = installBody(form, root);
+    if (body.prefix && (!/^\/[A-Za-z0-9._/-]{0,200}$/.test(body.prefix) || body.prefix.split("/").some(part => part === "." || part === ".."))) { status.append(notice(t("The prefix is an absolute path of letters, digits, . _ - and / (no . or .. parts)."), "error")); return; }
+    if (body.version && !/^[0-9]+\.[0-9]+\.[0-9]+$/.test(body.version)) { status.append(notice(t("The version is X.Y.Z (empty: the newest)."), "error")); return; }
+    const words = installWords(body, root);
+    confirmIn(buttons, t("Install sandbox-ai on {host} ({ssh}) {who}, {how}; {from}?", { host: h.name, ssh: h.ssh, who: words.who, how: words.how, from: words.from }), t("Yes, install it"),
+      () => runInstall(h, body, status, install, onDone), { kind: "primary", trigger: install });
+  } }, state.installing[h.name] ? t("Installing…") : t("Install"));
+  buttons.append(install, el("button", { onclick: () => card.remove() }, t("Close")));
+  const card = el("div", { class: "card", id: "host-install-card" }, el("h2", {}, t("Install sandbox-ai on {host}", { host: h.name })),
+    el("p", { class: "hint" }, root ? t("The SSH user of {host} is root: an installation for every user needs no sudo.", { host: h.name })
+      : t("The SSH user of {host} is {user}: an installation for every user needs sudo there.", { host: h.name, user })),
+    el("div", { class: "form" },
+      el("label", { for: "install-mode" }, t("For whom")), form.mode, ...rows.sudo, ...rows.prefix,
+      el("label", { for: "install-source" }, t("From")), form.source, ...rows.version, status,
+      el("span"), buttons),
+    el("p", { class: "hint" }, t("The host needs sshd, bash, tar, gzip and python3. Nothing is run there but install.sh, in a private temporary folder that is removed afterwards.")));
+  sync();
+  main.append(card);
+  focusFirst(card);
+  return card;
+}
+
+// The install of BODY on host H, confirmed: busy until it ends (the page stays usable), then its result in STATUS
+// and a toast (STATUS may be gone by then: another page).
+async function runInstall(h, body, status, button, onDone) {
+  const name = h.name, root = String(h.ssh || "").startsWith("root@");
+  state.installing[name] = Date.now();
+  if (button) { button.disabled = true; button.textContent = t("Installing…"); }
+  clear(status).append(el("div", { class: "notice", role: "status" }, t("Installing sandbox-ai on {host}… This can take several minutes (up to 15 for a step); you can use the page meanwhile.", { host: name }), " ",
+    el("progress", { "aria-label": t("Installing on {host}", { host: name }) })));
+  let r = null;
+  try { r = await api("POST", `/api/hosts/${encodeURIComponent(name)}/install`, Object.assign({}, body, { confirm: true })); }
+  catch (e) {
+    clear(status).append(notice(t("{host}: not installed: {error}", { host: name, error: e.message }), "error"));
+    toast("error", t("Could not install on {host}", { host: name }), e.message);
+  } finally {
+    delete state.installing[name];
+    if (button) { button.disabled = false; button.textContent = t("Install"); }
+  }
+  if (!r) return null;
+  clear(status).append(...installResult(name, body, r, root));
+  if (r.error) toast("error", t("Could not install on {host}", { host: name }), r.error);
+  else toast("success", t("sandbox-ai installed on {host}", { host: name }), `${r.before || t("none")} → ${r.after || "?"}`);
+  if (onDone) onDone(r);
+  return r;
+}
+
+// What an install answered: before → after, how, its notes, what to do when sudo wants a password, its output.
+function installResult(name, body, r, root) {
+  const nodes = [];
+  if (r.error) nodes.push(notice(t("{host}: not installed: {error}", { host: name, error: r.error }), "error"));
+  else {
+    const words = installWords({ mode: r.mode || body.mode, prefix: r.prefix || body.prefix, sudo: r.sudo, source: r.source || body.source, version: body.version }, Boolean(r.root) || root);
+    nodes.push(notice(t("{host}: sandbox-ai {before} → {after}, installed {who}, {how}.", { host: name, before: r.before || t("none"), after: r.after || "?", who: words.who, how: r.root ? t("as root") : r.sudo ? t("with sudo") : t("without sudo") }), "ok"));
+  }
+  if (r.needs_password) {
+    const sent = Object.assign({}, body, { mode: "system" });
+    if (terminalsHere()) nodes.push(el("div", { class: "row" }, el("button", { class: "primary", onclick: () => openTerminal(Object.assign({ host: name, kind: "install" }, installQuery(sent)), t("install on {host}", { host: name })) }, t("Install in a terminal (sudo asks there)"))));
+    nodes.push(passwordHelp(name, installCommand(name, sent)));
+  }
+  for (const note of r.notes || []) nodes.push(notice(`${name}: ${note}`, "warn"));
+  if (r.output) nodes.push(el("details", { class: "install-output" }, el("summary", {}, t("What install.sh said")), el("pre", {}, String(r.output))));
+  return nodes;
+}
+
+// An install BODY as the terminal's query (strings: sudo 1 or 0).
+function installQuery(body) {
+  const query = { mode: body.mode, source: body.source || "here" };
+  if (body.prefix) query.prefix = body.prefix;
+  if (body.version) query.version = body.version;
+  if (body.sudo === true || body.sudo === false) query.sudo = body.sudo ? "1" : "0";
+  return query;
 }
 
 // A host's settings changed (hosts.json on this service's machine): a field left empty is left out.
@@ -2197,10 +2491,21 @@ pages.hosts = async (main) => {
   const output = el("div", { "aria-live": "polite" });
   const versions = {};
   const versionCells = {};
+  const byName = Object.fromEntries(state.hosts.map(h => [h.name, h]));
+  // a host whose sandbox-ai is missing or does not answer: its version cell says so and offers the install
   const showVersions = (found) => {
     Object.assign(versions, found);
-    for (const [name, cell] of Object.entries(versionCells)) cell.textContent = versionText(versions[name]);
+    for (const [name, cell] of Object.entries(versionCells)) {
+      const v = versions[name];
+      clear(cell).append(versionText(v));
+      if (v && !v.version && v.error) {
+        cell.setAttribute("title", String(v.error));
+        cell.append(" ", el("button", { class: "small primary", "aria-label": t("Install sandbox-ai on {host}", { host: name }), disabled: Boolean(state.installing[name]),
+          onclick: () => installCard(main, byName[name], afterInstall) }, t("Install…")));
+      } else cell.removeAttribute("title");
+    }
   };
+  const afterInstall = () => { if (state.page === "hosts") loadVersions(true); };
   const loadVersions = async (refresh) => {
     try { showVersions(await api(refresh ? "POST" : "GET", "/api/hosts-status", refresh ? {} : undefined)); }
     catch (e) { for (const cell of Object.values(versionCells)) cell.textContent = "?"; output.append(notice(t("Versions: {error}", { error: e.message }), "error")); }
@@ -2220,6 +2525,10 @@ pages.hosts = async (main) => {
       starts.setAttribute("title", title); questions.setAttribute("title", title);
     }
   };
+  // how each host's update runs: as its setting says (update_sudo), with sudo, or without
+  const updateSudo = Object.fromEntries(remote.map(h => [h.name, el("select", { class: "small", "aria-label": t("sudo for the update of {host}", { host: h.name }) },
+    el("option", { value: "" }, h.update_sudo ? t("as set: with sudo") : t("as set: without sudo")),
+    el("option", { value: "sudo" }, t("with sudo")), el("option", { value: "none" }, t("without sudo")))]));
   const rows = state.hosts.map(h => {
     const version = el("td", { class: "mono" }, h.kind === "local" ? t("this machine") : "…");
     if (h.kind !== "local") versionCells[h.name] = version;
@@ -2233,16 +2542,17 @@ pages.hosts = async (main) => {
             const r = await api("POST", `/api/hosts/${encodeURIComponent(h.name)}/test`);
             output.append(...keyNotices(r));
             output.append(notice(r.error ? `${h.name}: ${r.error}` : `${h.name}: ${r.version}${(r.fixed || []).length ? t(" (tried again after making the key private)") : ""}`, r.error ? "error" : "ok"));
-            if (r.doctor) output.append(table(["", t("column|Check"), t("Detail")],
- r.doctor.filter(d => d.status !== "ok").map(d => el("tr", {}, statusCell(d.status), el("td", {}, d.check), el("td", {}, d.detail || ""))), t("The doctor found nothing to do.")));
+            if (r.doctor) output.append(el("h2", {}, t("Doctor on {host}", { host: h.name })), doctorView(r.doctor, { level: 3, host: h.name }));
           } catch (e) { output.append(notice(e.message, "error")); }
         }) }, t("Test")),
-        h.kind === "local" ? null : el("button", { onclick: (ev) => busy(ev.target, async () => {
+        h.kind === "local" ? null : updateSudo[h.name],
+        h.kind === "local" ? null : el("button", { "aria-label": t("Update {host}", { host: h.name }), onclick: (ev) => busy(ev.target, async () => {
           clear(output);
           output.append(notice(t("Updating {host}…", { host: h.name })));
-          try { await updateHost(h.name, output); } catch (e) { output.append(notice(`${h.name}: ${e.message}`, "error")); }
+          try { await updateHost(h.name, output, sudoChoice(updateSudo[h.name])); } catch (e) { output.append(notice(`${h.name}: ${e.message}`, "error")); }
           loadVersions(false);
         }) }, t("Update")),
+        h.kind === "local" ? null : el("button", { "aria-label": t("Install sandbox-ai on {host}", { host: h.name }), onclick: () => installCard(main, h, afterInstall) }, t("Install…")),
         h.kind === "local" ? null : el("button", { onclick: () => hostEditCard(main, h) }, t("Edit…")),
         h.kind === "local" ? null : el("button", { class: "danger", onclick: (ev) => confirmIn(ev.target.parentNode, t("Remove {host} ({ssh}) from the list? Nothing changes on it; this service no longer manages it.", { host: h.name, ssh: h.ssh }), t("Yes, remove it"), async () => {
           try { await api("DELETE", `/api/hosts/${encodeURIComponent(h.name)}`, { confirm: true }); render(); } catch (e) { failed(t("Could not remove {value}", { value: h.name }))(e); }
@@ -2267,6 +2577,7 @@ pages.hosts = async (main) => {
   main.append(table([t("Name"), "SSH", "sandbox-ai", t("Starts"), t("Open questions"), t("Description"), ""], rows, null, t("Hosts")),
     el("div", { class: "actions" }, updateAll, check, progress),
     el("p", { class: "hint" }, t("Update runs each host's own sandbox-ai update (signed, as install.sh installed it); a system installation updates with {sudo}, and when sudo wants a password a terminal tab asks for it. This machine updates with: {command}.", { sudo: "sudo -n", command: "sandbox-ai update" })),
+    el("p", { class: "hint" }, t("Install… puts sandbox-ai on a host that has none (or another version): this machine's copy, or the host downloads the signed release; for the SSH user, or for every user as root or with sudo.")),
     output);
   if (remote.length) loadVersions(false);
   loadActivity();

@@ -10,6 +10,16 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# Before anything else (Qt and QtWebEngine write below HOME too): the real logins are fingerprinted and HOME and the
+# XDG folders move to a temporary directory for the whole session (home_guard, the same as sandbox-ai's own tests).
+# The app's tests call sandbox-ai's commands and modules: run in the real HOME, one of them could write a login over
+# the real one and log out the agent running them. pytest_sessionfinish fails the session if a real login changed.
+import home_guard  # noqa: E402
+
+_REAL_LOGINS = home_guard.fingerprint(home_guard.login_files()) if not os.environ.get(home_guard.MARKER) else {}
+home_guard.ensure()
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--no-sandbox --disable-gpu")
 os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
@@ -89,6 +99,17 @@ def wait(qapp):
 
 
 def pytest_sessionfinish(session, exitstatus):
+    """The real logins must be as they were (see home_guard at the top); the exit status is kept for
+    pytest_unconfigure, which ends the process with it when Qt is loaded."""
+    touched = home_guard.changed(_REAL_LOGINS) if _REAL_LOGINS else []
+    if touched:
+        message = ("tests changed the real login files: " + ", ".join(touched) + " (a test wrote into the real HOME)")
+        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+        if reporter is not None:
+            reporter.write_line(message, red=True, bold=True)
+        else:
+            print(message, file=sys.stderr)
+        session.exitstatus = exitstatus = 1
     session.config.qt_exit_status = int(exitstatus)
 
 
@@ -100,3 +121,4 @@ def pytest_unconfigure(config):
         sys.stdout.flush()
         sys.stderr.flush()
         os._exit(config.qt_exit_status)
+

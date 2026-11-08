@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QDockWidget, QFrame, QScrollArea, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QStyle, QSystemTrayIcon, QTabBar,
-    QTabWidget, QToolButton, QVBoxLayout, QWidget,
+    QTabWidget, QToolButton, QTreeView, QVBoxLayout, QWidget,
 )
 
 from . import applog, backend, i18n, notifications, terminal, theme
@@ -32,7 +32,8 @@ from .state import State, scrub_arguments
 from .pages import ApprovalsPage, CredentialsPage, FilesPage, ImagesPage, StatisticsPage
 from .reviews import home_review, review_refusal
 from .widgets import (
-    MONO, AsyncCommand, ThreadCall, append_rows, background, busy, confirm, fill, find_row, fit_columns, flow, inform,
+    MONO, AsyncCommand, ThreadCall, append_rows, ask_first, background, busy, confirm, fill, find_row, fit_columns, flow,
+    inform,
     local_time,
     outcome, plain_label, row_key, safe_tooltip, selected, selected_rows, set_enabled, show_text, table, warn,
 )
@@ -47,10 +48,11 @@ TRAY_WAIT = 30  # seconds a start at login waits for the system tray to appear
 def report(parent, title, result, error):
     """The outcome of a background sandbox-ai command, as plain text (its output may quote the agent)."""
     status, out, err = outcome(result, error)
-    if status == 0:  # a success says so without blocking the window (approvals stay answerable)
+    # Neither blocks the window: a question may wait meanwhile, and it must stay answerable.
+    if status == 0:
         inform(parent, title, (out + err).strip(), modal=False)
     else:
-        warn(parent, title, (out + err).strip())
+        warn(parent, title, (out + err).strip(), modal=False)
     return status
 
 GROUP_TITLES = {  # the launcher's option groups (backend.GROUPS), translated
@@ -739,7 +741,6 @@ class AllowedDialog(QDialog):
 
 
 DEVICE_EXAMPLE = "/dev/..."  # the same in every language
-DEVICE_PREFIX = "/dev/"
 LOCAL = "local"  # Instance.host of this machine's own sandboxes
 
 
@@ -961,7 +962,7 @@ class SandboxesPage(QWidget):
         super().__init__()
         self.sai, self.terminal = sai, terminal
         self.project, self.instances, self.problems, self.stoppable = None, {}, [], None
-        self.reading, self.added, self.devices_token = None, [], 0
+        self.reading, self.read_again, self.added, self.devices_token = None, False, [], 0
         self.added_workspaces = []
         # (host, run) of the starts with an open question (the Approvals page's poller): marked "asking".
         self.asking = set()
@@ -987,7 +988,7 @@ class SandboxesPage(QWidget):
         refresh = QPushButton(tr("Refresh"))
         refresh.setAccessibleName(tr("Refresh the sandboxes"))
         refresh.setToolTip(tr("Read again now (it is read every few seconds anyway)"))
-        refresh.clicked.connect(lambda _=False: (self.refresh(), self.refresh_remote()))
+        refresh.clicked.connect(lambda _=False: (self.refresh_soon(again=True), self.refresh_remote()))
         top.addWidget(self.summary, 1)
         top.addWidget(self.host_filter)
         top.addWidget(self.only_project)
@@ -1021,6 +1022,9 @@ class SandboxesPage(QWidget):
             button.setAccessibleName(text.rstrip("…"))
             button.clicked.connect(lambda _=False, s=slot: s())
             self.manage_buttons[key] = button
+        # By name too: the (?) and the area tour point at them.
+        self.rename_button, self.history_button, self.clean_button = (self.manage_buttons[key] for key in (
+            "rename", "history", "clean"))
         below.addWidget(self.detail, 1)
         for button in self.manage_buttons.values():
             below.addWidget(button)
@@ -1077,8 +1081,13 @@ class SandboxesPage(QWidget):
         # The other hosts' starts (sandbox-ai hosts), over SSH: read now and then in the background, never on the
         # GUI thread, each host apart (a slow one holds up no other); a host that does not answer is said in the
         # summary and keeps its last rows, greyed out with when it was seen last, their buttons off.
-        self.remote, self.remote_problems, self.remote_reading, self.remote_again = {}, {}, None, False
-        self.remote_seen, self.hosts_problem, self.remote_names, self.round = {}, None, [], 0
+        # One read per host at a time (as the web interface's FanOut): every look asks each host that has no read
+        # open; a host that hangs (it takes its whole timeout) delays no other and is not asked again on top.
+        # remote_flight: {host: token of its read running}; remote_again: hosts to read once more when their read is
+        # done (after an action there); ended_flight: the same for "Ended" (sandbox-ai list --all there, apart).
+        self.remote, self.remote_problems, self.remote_flight, self.remote_again = {}, {}, {}, set()
+        self.remote_seen, self.hosts_problem, self.remote_names = {}, None, []
+        self.hosts_reading, self.hosts_again, self.ended_flight, self.flights = False, False, {}, 0
         self.remote_timer = QTimer(self)
         self.remote_timer.timeout.connect(self.refresh_remote)
         self.remote_timer.start(REMOTE_SECONDS * 1000)
@@ -1088,22 +1097,29 @@ class SandboxesPage(QWidget):
     # -- reading --
 
     def refresh(self):
-        """Read now, on this thread (the registry and /proc of this user: small files)."""
+        """Read now, on this thread: only for the first look, before the window is shown (and tests). Everything
+        else reads with refresh_soon(): sandbox-ai's registry read also prunes what ended (it removes files), and
+        a disk that hangs must not hang the window."""
         try:
             result, error = self.sai.instances(), None
         except Exception as exc:  # noqa: BLE001 - shown, read again
             result, error = None, exc
         self.apply(result, error)
 
-    def refresh_soon(self):
-        """The timer's way: read in a thread, one read at a time."""
+    def refresh_soon(self, again=False):
+        """Read in a thread, one read at a time (the timer's way). AGAIN (after an action, the Refresh button): when
+        a read runs already, one more once it is done - what the action changed is shown."""
         if self.reading is not None:
+            self.read_again = self.read_again or again
             return
+        self.read_again = False
         self.reading = background(self.sai.instances, timeout=60, done=self.read_done)
 
     def read_done(self, result, error):
         self.reading = None
         self.apply(result, error)
+        if self.read_again:
+            self.refresh_soon()
 
     def showEvent(self, event):  # noqa: N802
         """Shown: the hosts are looked at every REMOTE_SHOWN_SECONDS (hidden: every REMOTE_SECONDS)."""
@@ -1116,28 +1132,40 @@ class SandboxesPage(QWidget):
         super().hideEvent(event)
         self.remote_timer.start(REMOTE_SECONDS * 1000)
 
-    def refresh_remote(self):
-        """Read the other hosts' starts in the background: the list of hosts, then every host at the same time, each
-        in its own thread with its own timeout; each host's rows are shown as soon as it answered. Asked while a round
-        runs (after an action there), it reads once more when that one is done: what the action changed is shown,
+    @property
+    def remote_reading(self):
+        """The hosts whose read runs ("" for the list of hosts), or None when no read runs."""
+        reading = set(self.remote_flight) | ({""} if self.hosts_reading else set())
+        return reading or None
+
+    def refresh_remote(self, hosts=None):
+        """Read the other hosts' starts in the background: the list of hosts, then every host that has no read open,
+        each in its own thread with its own timeout; each host's rows are shown as soon as it answered. HOSTS (after
+        an action there): those hosts now, or once more when their read is done - what the action changed is shown,
         not only what was read before it. A list of hosts that cannot be read: the hosts known are read again."""
-        if self.remote_reading is not None:
-            self.remote_again = True
+        if hosts is not None:
+            for name in hosts:
+                if name == LOCAL:
+                    continue
+                if name in self.remote_flight:
+                    self.remote_again.add(name)
+                else:
+                    self.read_host(name)
             return
-        self.remote_again = False
-        self.round += 1
-        token = self.round
-        self.remote_reading = {""}  # "" the list of hosts; then the names of the hosts still asked
+        if self.hosts_reading:
+            self.hosts_again = True
+            return
+        self.hosts_reading = True
         # Reads, not work: no owner, so they neither grey out the buttons (busy()) nor hold up closing the window.
         background(self.sai.remote_hosts, timeout=30,
-                   done=lambda hosts, error: alive(self) and self.hosts_listed(token, hosts, error))
+                   done=lambda hosts_, error: alive(self) and self.hosts_listed(hosts_, error))
 
-    def hosts_listed(self, token, hosts, error):
-        if token != self.round:
-            return
+    def hosts_listed(self, hosts, error):
+        self.hosts_reading = False
         if error is None:
             hosts, self.hosts_problem = list(hosts or []), None
-            for gone in set(self.remote) | set(self.remote_seen) | set(self.remote_problems) | set(self.ended):
+            for gone in set(self.remote) | set(self.remote_seen) | set(self.remote_problems) | set(self.ended) | \
+                    set(self.remote_flight):
                 if gone not in hosts and gone != LOCAL:
                     self.drop_host(gone)
             self.remote_names = list(hosts)
@@ -1145,41 +1173,55 @@ class SandboxesPage(QWidget):
         else:
             self.hosts_problem = printable(error)[:200]
             hosts = list(self.remote_names)
-        self.remote_reading = set(hosts)
-        ended = self.show_ended.isChecked()
-
-        def read(name):
-            """[Instance] of host NAME, and with "Ended" its starts that ended (in the worker thread)."""
-            return self.sai.host_instances(name, REMOTE_WAIT), (self.sai.ended_starts(name) if ended else None)
         for name in hosts:
-            background(read, name, timeout=REMOTE_WAIT + 15,
-                       done=lambda result, error_, n=name: alive(self) and self.host_read(token, n, result, error_))
-        self.round_done(token)
+            if name not in self.remote_flight:  # one that still answers the last look is not asked on top
+                self.read_host(name)
+        self.merge_remote()
+        if self.hosts_again:
+            self.hosts_again = False
+            self.refresh_remote()
 
-    def host_read(self, token, name, result, error):
-        if token != self.round or name not in (self.remote_reading or ()):
+    def read_host(self, name):
+        """[Instance] of host NAME in a thread; with "Ended" its starts that ended too, in a read of their own (each
+        with its own time: both are sandbox-ai list there, one may take as long as the other)."""
+        self.flights += 1
+        token = self.remote_flight[name] = self.flights
+        background(self.sai.host_instances, name, REMOTE_WAIT, timeout=REMOTE_WAIT + 15,
+                   done=lambda result, error, n=name, t=token: alive(self) and self.host_read(n, result, error, t))
+        if self.show_ended.isChecked():
+            self.read_ended(name)
+
+    def read_ended(self, name):
+        if name in self.ended_flight:
             return
-        self.remote_reading.discard(name)
-        if name in self.remote_names:  # not removed meanwhile (Hosts › Remove)
+        self.flights += 1
+        token = self.ended_flight[name] = self.flights
+        background(self.sai.ended_starts, name, timeout=REMOTE_WAIT + 15,
+                   done=lambda found, error, n=name, t=token: alive(self) and self.host_ended(n, found, error, t))
+
+    def host_read(self, name, result, error, token=None):
+        if self.remote_flight.get(name) != token:
+            return  # removed (Hosts › Remove) or dropped from the list meanwhile: its late answer counts no more
+        del self.remote_flight[name]
+        if name in self.remote_names:
             if error is None:
-                instances, ended = result
-                self.remote[name] = list(instances)
+                self.remote[name] = list(result)
                 self.remote_seen[name] = time.time()
                 self.remote_problems.pop(name, None)
-                if ended is not None:
-                    self.ended[name] = list(ended)
             else:
                 self.remote_problems[name] = printable(error)[:300]
-            self.merge_remote()
-        self.round_done(token)
-
-    def round_done(self, token):
-        if token != self.round or self.remote_reading:
-            return
-        self.remote_reading = None
+        if name in self.remote_again:  # asked again meanwhile (an action there): a fresh read
+            self.remote_again.discard(name)
+            self.read_host(name)
         self.merge_remote()
-        if self.remote_again:  # asked again meanwhile (an action there): a fresh read
-            self.refresh_remote()
+
+    def host_ended(self, name, found, error, token):
+        if self.ended_flight.get(name) != token:
+            return
+        del self.ended_flight[name]
+        if name in self.remote_names and error is None and self.show_ended.isChecked():
+            self.ended[name] = list(found or [])
+            self.show_instances()
 
     def merge_remote(self):
         self.instances = {**{k: i for k, i in self.instances.items() if i.host == LOCAL},
@@ -1199,10 +1241,11 @@ class SandboxesPage(QWidget):
         return found
 
     def drop_host(self, name):
-        for store in (self.remote, self.remote_seen, self.remote_problems, self.ended):
+        """Everything of host NAME goes, its reads running too (their answers, when they come, are ignored)."""
+        for store in (self.remote, self.remote_seen, self.remote_problems, self.ended, self.remote_flight,
+                      self.ended_flight):
             store.pop(name, None)
-        if self.remote_reading:
-            self.remote_reading.discard(name)
+        self.remote_again.discard(name)
 
     def forget_host(self, name):
         """Host NAME was removed from the list (the Hosts page): its rows go at once, not at the next look."""
@@ -1248,7 +1291,8 @@ class SandboxesPage(QWidget):
     def ended_toggled(self):
         self.load_ended()
         if self.show_ended.isChecked():
-            self.refresh_remote()
+            for name in self.remote_names:  # each host's own read, whether a read of its starts runs or not
+                self.read_ended(name)
         self.show_instances()
 
     def load_ended(self):
@@ -1315,10 +1359,12 @@ class SandboxesPage(QWidget):
         host lists already as kept are not listed twice)."""
         found = dict(self.instances)
         if self.show_ended.isChecked():
-            names = {(i.host, i.name) for i in self.instances.values()}
+            names = {(i.host, i.name) for i in self.instances.values()} | \
+                {(i.host, getattr(i, "ident", i.name)) for i in self.instances.values()}
             for host, ended in self.ended.items():
                 if host == LOCAL or host in self.remote_names:
-                    found.update({i.key: i for i in ended if (i.host, i.name) not in names})
+                    found.update({i.key: i for i in ended if (i.host, i.name) not in names
+                                  and (i.host, getattr(i, "ident", i.name)) not in names})
         return found
 
     def show_instances(self):
@@ -1463,7 +1509,7 @@ class SandboxesPage(QWidget):
 
         def done(result, error):
             self.command_done(title, result, error)
-            self.refresh_remote()  # a fresh read, also when one runs already
+            self.refresh_remote([instance.host])  # a fresh read of that host, also when one runs already
         background(lambda: self.sai.host_run(instance.host, *args, timeout=180), owner=self,
                    source=[self.stop_button, *self.session_buttons.values()], timeout=210, done=done)
 
@@ -1471,10 +1517,13 @@ class SandboxesPage(QWidget):
         instance = self.current()
         if busy(self):
             # A command runs: its buttons stay greyed out until it is done; a row of another host never keeps
-            # the buttons of the row chosen before (they would act on this machine).
+            # the buttons of the row chosen before (they would act on this machine). Rename, History and Clean up
+            # follow the row chosen, so they wait too (they would act on a row the running command may change).
             if instance is not None and getattr(instance, "host", "local") != "local":
                 for button in [*self.run_buttons, *self.session_buttons.values(), self.stop_button]:
                     set_enabled(button, False, tr("A command runs."))
+            for button in self.manage_buttons.values():
+                set_enabled(button, False, tr("A command runs."))
             return
         none = tr("Select a row first.")
         if instance is not None and getattr(instance, "host", "local") != "local":
@@ -1567,7 +1616,7 @@ class SandboxesPage(QWidget):
         def done(result, error):
             self.command_done(title, result, error, quiet_success=False)
             if host != LOCAL:
-                self.refresh_remote()
+                self.refresh_remote([host])
         background(lambda: self.sai.host_run(host, "rename", old, new, timeout=60), owner=self,
                    source=list(self.manage_buttons.values()), timeout=90, done=done)
 
@@ -1612,21 +1661,25 @@ class SandboxesPage(QWidget):
         text = tr("Remove these? Kept starts go with their HOME; this cannot be undone.") + "\n\n" + "\n".join(lines)
         if host != LOCAL:
             text = tr("On {host}: {text}", host=printable(host), text=text)
-        if not confirm(self, title, text, tr("Remove"), destructive=True):
+        if not ask_first(self, "gc", title, text, tr("Remove")):
             return
 
         def done(result, error_):
-            if error_ is not None:
+            if isinstance(error_, backend.GcChanged):
+                warn(self, title, tr("Nothing was removed: what would go has changed since it was shown. Clean up… "
+                                     "shows it again."), modal=False)
+            elif error_ is not None:
                 warn(self, title, printable(error_), modal=False)
             else:
                 lines = gc_lines(result)
                 inform(self, title, tr("Removed:") + "\n" + "\n".join(lines) if lines else tr("Nothing to remove."),
                        modal=False)
-            self.refresh()
+            self.refresh_soon(again=True)
             if host != LOCAL:
-                self.refresh_remote()
-        background(self.sai.collect, host, False, owner=self, source=list(self.manage_buttons.values()), timeout=330,
-                   done=done)
+                self.refresh_remote([host])
+        # The same --older-than as the list shown, and only if a dry run still lists exactly that (GcChanged).
+        background(self.sai.collect_as_shown, host, found, owner=self, source=list(self.manage_buttons.values()),
+                   timeout=630, done=done)
 
     def stop(self, instance=None):
         instance = instance or self.current()
@@ -1643,7 +1696,7 @@ class SandboxesPage(QWidget):
         remote = getattr(instance, "host", "local") != "local"
         if remote:  # the host is named: the same name may run on this machine too
             text = tr("On {host}: {text}", host=printable(instance.host), text=text)
-        if not confirm(self, tr("Stop"), text, tr("Stop"), destructive=True):
+        if not ask_first(self, "start-stop", tr("Stop"), text, tr("Stop")):
             return
         if remote:
             self.remote_action(instance, "stop")
@@ -1660,8 +1713,9 @@ class SandboxesPage(QWidget):
     def command_done(self, title, result, error, quiet_success=True):
         status, out, err = outcome(result, error)
         if status != 0 or not quiet_success:
-            (inform if status == 0 else warn)(self, title, (out + err).strip())
-        self.refresh()
+            # The outcome of a job in the background: shown without blocking (a question may wait meanwhile).
+            (inform if status == 0 else warn)(self, title, (out + err).strip(), modal=False)
+        self.refresh_soon(again=True)
 
     # -- devices and limits --
 
@@ -1736,9 +1790,10 @@ class SandboxesPage(QWidget):
                 warn(self, tr("Not added"), tr("A device is a path under /dev/."))
                 return
             title = tr("Add device on {host}", host=printable(host))
-            if confirm(self, title, tr("Give {path} of {host} to {run} until it ends? Devices weaken the isolation; "
-                                       "sandbox-ai there checks the device as at a start.", path=printable(path),
-                                       host=printable(host), run=printable(run)), tr("Add"), destructive=True):
+            if ask_first(self, "device-add", title, tr("Give {path} of {host} to {run} until it ends? Devices weaken "
+                                                       "the isolation; sandbox-ai there checks the device as at a "
+                                                       "start.", path=printable(path), host=printable(host),
+                                                       run=printable(run)), tr("Add")):
                 background(self.on_host(host, self.sai.add_device, run, path), owner=self, source=self.run_buttons,
                            timeout=150, done=lambda result, error: self.device_done(title, result, error))
             return
@@ -1754,7 +1809,7 @@ class SandboxesPage(QWidget):
         resolved, notes = result
         text = "\n".join([tr("Give {path} to {run} until it ends? Devices weaken the isolation.",
                              path=printable(resolved), run=printable(run)), ""] + [printable(n) for n in notes])
-        if confirm(self, tr("Add device"), text, tr("Add"), destructive=True):
+        if ask_first(self, "device-add", tr("Add device"), text, tr("Add")):
             background(self.sai.add_device, run, path, owner=self, source=self.run_buttons, timeout=150,
                        done=lambda result, error: self.device_done(tr("Add device"), result, error))
 
@@ -1763,18 +1818,10 @@ class SandboxesPage(QWidget):
         if not target:
             return
         host, run = target
-        if host != "local":  # what was added there is not listed here: typed in
+        if host != "local":  # what was added there, as that host lists it (devices list RUN --json): chosen from
             title = tr("Remove device from {run} on {host}", run=printable(run), host=printable(host))
-            path, ok = QInputDialog.getText(self, title, tr("Device added during the run (a path under /dev/)"),
-                                            text=DEVICE_PREFIX)
-            path = path.strip()
-            if not ok or not path:
-                return
-            if not backend.valid_device(path):
-                warn(self, title, tr("A device is a path under /dev/."))
-                return
-            background(self.on_host(host, self.sai.remove_device, run, path), owner=self, source=self.run_buttons,
-                       timeout=150, done=lambda result, error: self.device_done(title, result, error))
+            background(self.sai.host_devices_added, host, run, owner=self, source=self.run_buttons, timeout=90,
+                       done=lambda found, error: self.remote_devices_listed(host, run, title, found, error))
             return
         if not self.added:
             inform(self, tr("Remove device"), tr("No device was added to {run} during its run (devices given at the "
@@ -1787,6 +1834,28 @@ class SandboxesPage(QWidget):
                 return
         background(self.sai.remove_device, run, path, owner=self, source=self.run_buttons, timeout=150,
                    done=lambda result, error: self.device_done(tr("Remove device"), result, error))
+
+    def remote_devices_listed(self, host, run, title, found, error):
+        """The devices added to RUN on HOST, read there: one is removed by its id (the one there is, or the one
+        chosen)."""
+        self.update_buttons()
+        if error is not None:
+            warn(self, title, tr("What was added there could not be read: {error}", error=printable(error)[:500]),
+                 modal=False)
+            return
+        if not found:
+            inform(self, title, tr("No device was added to {run} during its run (devices given at the start stay).",
+                                   run=printable(run)), modal=False)
+            return
+        ident = found[0][0]
+        if len(found) > 1:
+            labels = [label for _, label in found]
+            choice, ok = QInputDialog.getItem(self, title, tr("Device"), labels, 0, False)
+            if not ok:
+                return
+            ident = found[labels.index(choice)][0]
+        background(self.on_host(host, self.sai.remove_device, run, ident), owner=self, source=self.run_buttons,
+                   timeout=150, done=lambda result, error_: self.device_done(title, result, error_))
 
     def device_done(self, title, result, error):
         report(self, title, result, error)
@@ -1807,11 +1876,11 @@ class SandboxesPage(QWidget):
             warn(self, tr("Not added"), tr("Give the folder as an absolute path."))
             return
         title = tr("Add workspace on {host}", host=printable(host)) if remote else tr("Add workspace")
-        if not read_only and not confirm(self, title, tr(
+        if not ask_first(self, "workspace-writable", title, tr(
                 "Let {run} change {path} on {host} until it ends? The agent can write, delete and run there.",
                 run=printable(run), path=printable(directory), host=printable(host)) if remote else tr(
                 "Let {run} change {path} until it ends? The agent can write, delete and run there.",
-                run=printable(run), path=printable(directory)), tr("Add"), destructive=True):
+                run=printable(run), path=printable(directory)), tr("Add"), detail={"read_only": read_only}):
             return
         background(self.on_host(host, self.sai.add_workspace, run, directory, read_only), owner=self,
                    source=self.run_buttons, timeout=150,
@@ -1822,28 +1891,35 @@ class SandboxesPage(QWidget):
         if not target:
             return
         host, run = target
-        if host != "local":  # what was added there is not listed here: typed in
+        if host != "local":  # what was added there, as that host lists it (workspace list RUN --json): chosen from
             title = tr("Remove workspace from {run} on {host}", run=printable(run), host=printable(host))
-            value, ok = QInputDialog.getText(self, title, tr("The folder on {host}, or its name under /workspaces",
-                                                             host=printable(host)))
-            value = value.strip()
-            if not ok or not value:
-                return
-            self.detach_workspace(host, run, value, title)
+            background(self.sai.host_workspaces, host, run, owner=self, source=self.run_buttons, timeout=90,
+                       done=lambda found, error: self.choose_workspace(host, run, title, found, error))
             return
-        if not self.added_workspaces:
-            inform(self, tr("Remove workspace"), tr("No workspace was added to {run} during its run (those of the "
-                                                    "start stay).", run=printable(run)))
+        self.choose_workspace("local", run, tr("Remove workspace"), self.added_workspaces, None)
+
+    def choose_workspace(self, host, run, title, entries, error):
+        """One of the workspaces added to RUN (on HOST) during its run is taken back: the one there is, or the one
+        chosen."""
+        self.update_buttons()
+        if error is not None:
+            warn(self, title, tr("What was added there could not be read: {error}", error=printable(error)[:500]),
+                 modal=False)
             return
-        choices = [f"{e.get('sandbox')} ← {e.get('host')}" for e in self.added_workspaces]
+        added = [e for e in entries or [] if e.get("source") == "added"]
+        if not added:
+            inform(self, title, tr("No workspace was added to {run} during its run (those of the start stay).",
+                                   run=printable(run)), modal=False)
+            return
+        choices = [f"{printable(e.get('sandbox'))} ← {printable(e.get('host'))}" for e in added]
         index = 0
         if len(choices) > 1:
-            choice, ok = QInputDialog.getItem(self, tr("Remove workspace"), tr("Workspace"), choices, 0, False)
+            choice, ok = QInputDialog.getItem(self, title, tr("Workspace"), choices, 0, False)
             if not ok:
                 return
             index = choices.index(choice)
-        entry = self.added_workspaces[index]
-        self.detach_workspace("local", run, entry.get("sandbox") or entry.get("host"), tr("Remove workspace"))
+        entry = added[index]
+        self.detach_workspace(host, run, entry.get("sandbox") or entry.get("host"), title)
 
     def detach_workspace(self, host, run, target, title):
         """`sandbox-ai workspace remove RUN TARGET` (on HOST). Refused, sandbox-ai says why (a process uses it, the
@@ -1856,11 +1932,12 @@ class SandboxesPage(QWidget):
         def done(result, error):
             status, out, err = outcome(result, error)
             refusal = printable((err or out).strip())[-1500:]
-            if status != 0 and "--force" in (err or "") and confirm(
-                    self, title, tr("sandbox-ai did not remove {path} from {run}:\n\n{reason}\n\nDetach it anyway? "
-                                    "Whatever is open there stays usable until it is closed; a restart takes it away "
-                                    "for sure.", path=printable(target), run=printable(run), reason=refusal),
-                    tr("Detach"), destructive=True):
+            if status != 0 and "--force" in (err or "") and ask_first(
+                    self, "workspace-force", title, tr("sandbox-ai did not remove {path} from {run}:\n\n{reason}\n\n"
+                                                       "Detach it anyway? Whatever is open there stays usable until "
+                                                       "it is closed; a restart takes it away for sure.",
+                                                       path=printable(target), run=printable(run), reason=refusal),
+                    tr("Detach")):
                 background(self.on_host(host, self.sai.remove_workspace, run, target, True), owner=self,
                            source=self.run_buttons, timeout=150, done=lambda r, e: self.device_done(title, r, e))
                 return
@@ -1892,11 +1969,18 @@ class SandboxesPage(QWidget):
                 inform(self, title, tr("Nothing changed: an empty field leaves its limit as it is. To remove a limit, "
                                        "type none."), modal=False)
             return  # nothing changed
-        removed = [label for label, value in ((tr("memory"), memory), (tr("CPUs"), cpus), (tr("processes"), pids))
-                   if value == "none"]
-        if removed and not confirm(self, title, tr(
-                "Remove the limit of {limits} of {run}? Until it ends it may then take all of them its host has.",
-                limits=", ".join(removed), run=printable(run)), tr("Remove the limit"), destructive=True):
+        # More than now (or no limit, or not known what it has now): asked first, saying what grows.
+        values = {"memory": memory, "cpus": cpus, "pids": pids}
+        known = current if error is None else None
+        labels = {"memory": tr("memory"), "cpus": tr("CPUs"), "pids": tr("processes")}
+        raised = backend.raised_limits(known, values)
+        changes = ", ".join(tr("{limit}: no limit", limit=labels[key]) if str(values[key]).strip().lower() == "none"
+                            else tr("{limit}: {value}", limit=labels[key], value=printable(values[key]))
+                            for key in raised)
+        text = tr("Let {run} use more of its host until it ends: {changes}?", run=printable(run), changes=changes)
+        if known is None:
+            text += " " + tr("The limits it has now are not known: this may be more than now.")
+        if not ask_first(self, "limits-raise", title, text, tr("Raise"), detail={"current": known, "values": values}):
             return
         background(self.on_host(host, self.sai.set_limits, run, memory, cpus, pids), owner=self,
                    source=self.run_buttons, timeout=150, done=lambda result, error: self.reported(title, result, error))
@@ -1949,8 +2033,19 @@ class SandboxesPage(QWidget):
         dialog = NetworkDialog(self, presets, title, supported)
         if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.arguments():
             return
-        background(self.sai.host_run, host, "net", op, run, *dialog.arguments(), owner=self, source=self.run_buttons,
-                   timeout=150, done=lambda result, error_: self.reported(title, result, error_))
+        arguments = dialog.arguments()
+        done = lambda result, error_: self.reported(title, result, error_)  # noqa: E731
+        if op != "allow":  # a revoke narrows: sent at once
+            background(self.sai.host_run, host, "net", "revoke", run, *arguments, owner=self,
+                       source=self.run_buttons, timeout=150, done=done)
+            return
+        where = tr("on {host}", host=printable(host)) if host != LOCAL else tr("on this machine")
+        if not ask_first(self, "net-allow", title, tr("Let {run} ({where}) reach this until it ends, at once?\n\n{what}",
+                                                      run=printable(run), where=where,
+                                                      what=printable(" ".join(arguments))), tr("Allow")):
+            return
+        background(self.sai.host_run, host, "net", "allow", run, *arguments, owner=self, source=self.run_buttons,
+                   timeout=150, done=done)
 
     def show_allowed(self):
         target = self.target()
@@ -1976,10 +2071,10 @@ class SandboxesPage(QWidget):
         """`sandbox-ai net untaint RUN` (on HOST): the rules for tainted runs no longer hold - asked first."""
         title = tr("Untaint {run} on {host}", run=printable(run), host=printable(host)) if host != LOCAL else \
             tr("Untaint {run}", run=printable(run))
-        if not backend.valid_run(run) or not confirm(self, title, tr(
+        if not backend.valid_run(run) or not ask_first(self, "net-untaint", title, tr(
                 "Take back the taint of {run}? Untrusted content entered it; the rules for tainted runs (what it may "
                 "reach, what is asked) no longer hold until such content enters it again. Only when you checked what "
-                "came in.", run=printable(run)), tr("Untaint"), destructive=True):
+                "came in.", run=printable(run)), tr("Untaint")):
             return
         background(self.sai.host_run, host, "net", "untaint", run, owner=self, source=self.run_buttons, timeout=90,
                    done=lambda result, error: self.reported(title, result, error))
@@ -2002,9 +2097,9 @@ class SandboxesPage(QWidget):
                 except Exception as exc:  # noqa: BLE001 - shown, the window stays
                     warn(self, tr("Not attached"), printable(exc))
                 return
-            if action == "delete" and not confirm(
-                    self, tr("Delete"), tr("On {host}: delete session {name} and its HOME?", host=host,
-                                           name=printable(instance.name)), tr("Delete"), destructive=True):
+            if action == "delete" and not ask_first(
+                    self, "start-delete", tr("Delete"), tr("On {host}: delete session {name} and its HOME?", host=host,
+                                                           name=printable(instance.name)), tr("Delete")):
                 return
             if action == "resume" and instance.state == "stopped":
                 self.resume_checked(instance, lambda: self.remote_action(instance, "resume"))
@@ -2022,9 +2117,9 @@ class SandboxesPage(QWidget):
             except Exception as exc:  # noqa: BLE001 - attaching that cannot be run is a message, the window stays
                 warn(self, tr("Not attached"), printable(exc))
             return
-        if action == "delete" and not confirm(
-                self, tr("Delete"), tr("Delete session {name} and its HOME on this machine? This cannot be undone.",
-                                       name=printable(name)), tr("Delete"), destructive=True):
+        if action == "delete" and not ask_first(
+                self, "start-delete", tr("Delete"), tr("Delete session {name} and its HOME on this machine? This "
+                                                       "cannot be undone.", name=printable(name)), tr("Delete")):
             return
         title = tr(ACTION_TITLES.get(action, action))
 
@@ -2463,6 +2558,13 @@ class McpPage(QWidget):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         start, restart = dialog.values()
+        text = tr("Give {start} the tools of the MCP server {name}?", start=printable(start), name=printable(name))
+        if restart:
+            text += " " + tr("A running {start} is stopped and started again for it: what runs in it now ends.",
+                             start=printable(start))
+        if not ask_first(self, "mcp-restart" if restart else "mcp-attach", tr("Attach to…").rstrip("…"), text,
+                         tr("Attach")):
+            return
         background(lambda: self.sai.mcp_attach(name, start, restart), owner=self, source=self.server_buttons,
                    timeout=630, done=lambda result, error: self.attached(name, result, error))
 
@@ -2476,6 +2578,10 @@ class McpPage(QWidget):
     def server(self, action):
         name = selected(self.servers)
         if not name:
+            return
+        if action == "stop" and not ask_first(self, "start-stop", tr("Stop"), tr(
+                "Stop {what}? Agents that use it lose it until it is started again.",
+                what=tr("MCP server {name}", name=printable(name))), tr("Stop")):
             return
         background(lambda: self.sai.call("mcp", action, name, timeout=300), owner=self, source=self.server_buttons,
                    timeout=330, done=lambda result, error: self.server_done(action, result, error))
@@ -2762,6 +2868,7 @@ SECTIONS = ((N_("Project"), (("launch", N_("Start")), ("board", N_("Board")))),
             (N_("System"), (("system", N_("System")), ("hosts", N_("Hosts")), ("help", N_("Help")))))
 PAGES = tuple(page for _, pages in SECTIONS for page in pages)
 SHORTCUT_PAGES = 9
+NOTIFY_AT_ONCE = 5  # new questions announced one by one at once; more are counted in one notification
 NAV_WIDTH, COMPACT_NAV_WIDTH = 224, 52  # the navigation with titles, and as a strip of icons
 OWN_START_WINDOW = 120  # seconds in which a run that shows up is the one the app just started in its terminal
 
@@ -2926,7 +3033,10 @@ def instance_entry(instance):
     """The tab of a session or sandbox (backend.Instance)."""
     kind = "session" if instance.kind == "session" else "run"
     name = instance.session if kind == "session" else instance.run
-    return {"key": f"{kind}:{name}", "kind": kind, "name": name, "path": instance.project or "",
+    # Keyed by its id (a session's directory, a run's registry name): a rename keeps the tab; NAME is what attach takes.
+    ident = getattr(instance, "ident", None) if kind == "session" else instance.run
+    ident = ident if backend.valid_run(ident) else name
+    return {"key": f"{kind}:{ident}", "kind": kind, "name": name, "id": ident, "path": instance.project or "",
             "agent": instance.agent, "backend": instance.backend, "state": instance.state}
 
 
@@ -2940,8 +3050,9 @@ def tab_entry(value):
     if kind == "project":  # kept while the disk does not answer at once (the tab looks again when shown)
         return project_entry(path) if path and backend.is_folder(path) is not False else None
     if kind in ("session", "run") and backend.valid_run(name):
-        return {"key": f"{kind}:{name}", "kind": kind, "name": name, "path": path, "agent": "", "backend": "",
-                "state": "stopped"}
+        ident = value.get("id") if backend.valid_run(value.get("id")) else name
+        return {"key": f"{kind}:{ident}", "kind": kind, "name": name, "id": ident, "path": path, "agent": "",
+                "backend": "", "state": "stopped"}
     return None
 
 
@@ -3151,6 +3262,7 @@ class MainWindow(QMainWindow):
         self.nav.setObjectName("nav")
         self.nav.setIconSize(QSize(20, 20))
         self.nav.setFixedWidth(NAV_WIDTH)
+        self.nav.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.compact_nav = False
         self.own_starts = []  # (agent, project folder, when) of sandboxes started in the app's terminal
         self.pages = PageStack()
@@ -3224,13 +3336,18 @@ class MainWindow(QMainWindow):
         side.setSpacing(0)
         self.brand = brand = QLabel("sandbox-ai")
         brand.setObjectName("brand")
-        side.addWidget(brand)
-        side.addWidget(self.nav, 1)
+        # The toggle between titles and the strip of icons: at the top, beside the name (alone in the strip).
         self.compact_button = QToolButton()
         self.compact_button.setObjectName("navCompact")
         self.compact_button.setAutoRaise(True)
         self.compact_button.clicked.connect(lambda: self.set_compact_nav(not self.compact_nav))
-        side.addWidget(self.compact_button, 0, Qt.AlignmentFlag.AlignRight)
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 4, 0)
+        top.setSpacing(0)
+        top.addWidget(brand, 1)
+        top.addWidget(self.compact_button, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        side.addLayout(top)
+        side.addWidget(self.nav, 1)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(panel)
@@ -3422,6 +3539,11 @@ class MainWindow(QMainWindow):
                ["Ctrl+Shift+B"], checkable=True).setChecked(self.compact_nav)
         action(navigation, "nav-fold", tr("Fold all sections"), lambda: self.fold_all(True))
         action(navigation, "nav-unfold", tr("Unfold all sections"), lambda: self.fold_all(False))
+        # Settings: the app's own (themes, intervals, notifications, the agents' defaults ...) and the
+        # administrator's policy, from the menu bar as well as from the System page.
+        settings_menu = bar.addMenu(tr("&Settings"))
+        action(settings_menu, "settings", tr("Settings…"), lambda: self.open_settings(), ["Ctrl+,"])
+        action(settings_menu, "policy", tr("Administrator policy…"), lambda: self.open_settings(policy=True))
         go = bar.addMenu(tr("&Go"))
         self.shortcuts = []
         for number, (key, title) in enumerate(PAGES, 1):
@@ -3802,11 +3924,28 @@ class MainWindow(QMainWindow):
         self.state.set("nav_collapsed", sorted(self.collapsed))
 
     def fold_all(self, folded):
-        """Fold (FOLDED) or unfold every section of the navigation; the current page's section stays open."""
+        """Fold (FOLDED) or unfold everything that folds: every section of the navigation (the current page's
+        section stays open; in the strip of icons, which shows every page, it is kept for when the titles come back)
+        and every tree of the page shown (the kits and what they bring, the doctor's checks, the canaries), which
+        collapse to their top level or open all the way. Said in the status bar."""
         current = self.current_page()
         for section, (_, rows) in self.section_rows.items():
             here = any(self.nav.item(row).data(Qt.ItemDataRole.UserRole) == current for row in rows)
             self.toggle_section(section, folded and not here)
+        page = getattr(self, current, None) if current else None
+        trees = [tree for tree in (page.findChildren(QTreeView) if isinstance(page, QWidget) else [])
+                 if tree.isVisibleTo(page)]
+        for tree in trees:
+            if folded:
+                tree.collapseAll()
+            else:
+                tree.expandAll()
+        said = tr("Sections folded") if folded else tr("Sections unfolded")
+        if trees:
+            said += " · " + tr("the lists of this page too")
+        if self.compact_nav:
+            said += " · " + tr("the strip of icons shows every page: Only icons off shows the sections")
+        self.statusBar().showMessage(said, 5000)
 
     def section_of(self, key):
         return next((section for section, (_, rows) in self.section_rows.items() if self.nav_rows.get(key) in rows),
@@ -3816,9 +3955,15 @@ class MainWindow(QMainWindow):
         """The navigation as a narrow strip of icons (each page's title in its tooltip), or with titles and
         sections; kept for the next start. Saves room on a small screen."""
         self.compact_nav = bool(compact)
+        # The strip's own paddings (theme.COMPACT_NAV): the icons fit in its narrow rows, in every theme.
+        self.nav.setProperty("compact", "true" if self.compact_nav else "false")
+        self.nav.style().unpolish(self.nav)
+        self.nav.style().polish(self.nav)
+        self.nav.setIconSize(QSize(24, 24) if self.compact_nav else QSize(20, 20))
         for key, row in self.nav_rows.items():
             item = self.nav.item(row)
             item.setText("" if self.compact_nav else self.nav_title(key))
+            item.setIcon(theme.glyph(key, size=24 if self.compact_nav else 20))  # never an empty icon
             item.setToolTip(self.nav_tooltip(key))
             item.setData(Qt.ItemDataRole.AccessibleTextRole, self.nav_title(key))  # a strip of icons has no text
         self.show_question_count()
@@ -3851,8 +3996,8 @@ class MainWindow(QMainWindow):
         compact.setCheckable(True)
         compact.setChecked(self.compact_nav)
         menu.addSeparator()
-        menu.addAction(tr("Fold all sections"), lambda: self.fold_all(True)).setEnabled(not self.compact_nav)
-        menu.addAction(tr("Unfold all sections"), lambda: self.fold_all(False)).setEnabled(not self.compact_nav)
+        menu.addAction(tr("Fold all sections"), lambda: self.fold_all(True))
+        menu.addAction(tr("Unfold all sections"), lambda: self.fold_all(False))
         item = self.nav.itemAt(position)
         key = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
         if key in self.nav_rows and hasattr(guide_module(), "AREA_TOURS") and key in guide_module().AREA_TOURS:
@@ -4097,7 +4242,7 @@ class MainWindow(QMainWindow):
             return
         entries = [self.tabs.entry(i) for i in range(self.tabs.count())]
         current = self.tabs.entry(self.tabs.currentIndex())
-        self.state.set("tabs", [{k: e[k] for k in ("kind", "path", "name") if e.get(k)} for e in entries])
+        self.state.set("tabs", [{k: e[k] for k in ("kind", "path", "name", "id") if e.get(k)} for e in entries])
         self.state.set("tab_current", current["key"] if current else None)
 
     def restore_tabs(self):
@@ -4304,6 +4449,10 @@ class MainWindow(QMainWindow):
         count = getattr(self, "pending_count", 0)
         item = self.nav_item("approvals")
         item.setText("" if self.compact_nav else tr("Approvals") + (f"  ({count})" if count else ""))
+        # In the strip of icons the count is a badge on the icon (it has no text to put it in).
+        size = 24 if self.compact_nav else 20
+        item.setIcon(theme.counted_glyph("approvals", count, size) if count and self.compact_nav else
+                     theme.glyph("approvals", size=size))
         said = tr("{count} open questions, on this machine and every host", count=count) if count else ""
         item.setToolTip(self.nav_tooltip("approvals") + (f"\n{said}" if said else ""))
         item.setData(Qt.ItemDataRole.AccessibleTextRole, tr("Approvals") + (f": {said}" if said else ""))
@@ -4333,18 +4482,22 @@ class MainWindow(QMainWindow):
                 counts[host] = counts.get(host, 0) + 1
             self.hosts.set_questions(counts)
         if new and backend.setting("notify"):
-            entries = [(entry[0], entry[1], entry[2] if len(entry) > 2 else None) for entry in new]
-            run, question, key = entries[0]
-            more = tr(" and {count} more", count=len(new) - 1) if len(new) > 1 else ""
             from .pages import describe
-            # A canary that went off is an alarm (an error toast stays until it is closed); anything else
-            # waits for an answer (a warning).
-            canaries = [e for e in entries if isinstance(e[1], dict) and e[1].get("kind") == "canary"]
-            if canaries:
-                run, question, key = canaries[0]
-            self.notify(tr("sandbox-ai asks: {sandbox}", sandbox=run), f"{describe(question)}{more}",
-                        level="error" if canaries else "warning",
-                        action=(tr("Open approvals"), lambda k=key: self.open_question(k)))
+            entries = [(entry[0], entry[1], entry[2] if len(entry) > 2 else None) for entry in new]
+            # One notification per new question, each leading to its own question; a canary that went off first (an
+            # alarm: an error toast stays until it is closed), anything else waits for an answer (a warning). A flood
+            # of questions at once: the first NOTIFY_AT_ONCE apart, the rest counted in one more.
+            entries.sort(key=lambda e: not (isinstance(e[1], dict) and e[1].get("kind") == "canary"))
+            for run, question, key in entries[:NOTIFY_AT_ONCE]:
+                canary = isinstance(question, dict) and question.get("kind") == "canary"
+                self.notify(tr("sandbox-ai asks: {sandbox}", sandbox=run), describe(question),
+                            level="error" if canary else "warning",
+                            action=(tr("Open approvals"), lambda k=key: self.open_question(k)))
+            rest = entries[NOTIFY_AT_ONCE:]
+            if rest:
+                self.notify(tr("sandbox-ai asks: {count} more questions", count=len(rest)),
+                            tr("They wait on the Approvals page."), level="warning",
+                            action=(tr("Open approvals"), lambda: self.show_page("approvals")))
 
     def open_question(self, key):
         """A notification's action: the Approvals page with its question selected (when it is still open)."""
@@ -4356,7 +4509,8 @@ class MainWindow(QMainWindow):
         """A new theme: the navigation's icons and the question count take its colours."""
         if event.type() == QEvent.Type.PaletteChange and getattr(self, "nav_rows", None):
             for key in self.keys:
-                self.nav_item(key).setIcon(theme.glyph(key))
+                self.nav_item(key).setIcon(theme.glyph(key, size=24 if self.compact_nav else 20))
+            self.show_question_count()  # the Approvals entry's badge, in the new colours
             for section, (header, _) in getattr(self, "section_rows", {}).items():
                 self.nav.item(header).setIcon(theme.glyph("fold-closed" if section in self.collapsed else "fold-open",
                                                           theme.colors()["nav_text"], 14))

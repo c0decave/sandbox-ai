@@ -756,6 +756,22 @@ def test_the_open_questions_of_another_host_are_checked_and_count_down():
             s.host_questions("ct1")
 
 
+def test_a_slow_read_of_another_host_never_shows_more_time_than_there_is(monkeypatch):
+    """Regression: the time left of another host's question was counted from when its SSH read ended; that host said
+    seconds_left during the round trip, so a read of 20 s showed up to 20 s more than the question had."""
+    clock = [1000.0]
+    item = {"id": "1700000000-1-1", "run": "claude-abc", "kind": "dns", "timeout": 60, "seconds_left": 40}
+
+    def run(argv, **kwargs):
+        clock[0] += 20  # the read takes 20 s
+        return subprocess.CompletedProcess(argv, 0, json.dumps([item]), "")
+    monkeypatch.setattr(backend.time, "time", lambda: clock[0])
+    s = backend.SandboxAI(runner=run)
+    found = s.host_questions("ct1")
+    assert found[0].read_at == 1000.0, "counted from the start of the read"
+    assert found[0].timing(now=clock[0])[1] == 20
+
+
 def test_what_another_host_refuses_and_its_null_deadlines_are_kept():
     """The CLI contract of `approvals list --json`: null times are no deadline (never expired); max_scope null with
     allow_refused: only a deny; a browser question without its url (url_refused) names where it leads (url_host);
@@ -855,3 +871,199 @@ def test_devices_workspaces_and_limits_of_a_sandbox_on_another_host_are_its_comm
                 s.add_workspace("web", "relative", host="ct1"), s.set_limits("--x", "1g", host="ct1")):
         assert bad[0] == 2
     assert len(calls) == count, "nothing invalid reaches sandbox-ai"
+
+
+# -- review round 3: one confirmation policy, gc as shown, other hosts' secrets, lists and history, ids --
+
+
+def web_constants():
+    """NEEDS_CONFIRM, MODE_ORDER, TELEMETRY_ORDER, DEFAULT_MODE and DEFAULT_TELEMETRY of sandbox-ai's webui.py, read
+    from its source (never imported: the web interface is a server)."""
+    import ast
+    path = backend.SandboxAI().directory / "webui.py"
+    if not path.exists():
+        pytest.skip("this sandbox-ai has no web interface")
+    found = {}
+    for node in ast.parse(path.read_text()).body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                names = [target] if isinstance(target, ast.Name) else list(getattr(target, "elts", []))
+                values = [node.value] if isinstance(target, ast.Name) else list(getattr(node.value, "elts", []))
+                for name, value in zip(names, values):
+                    if isinstance(name, ast.Name):
+                        try:
+                            found[name.id] = ast.literal_eval(value)
+                        except ValueError:
+                            pass
+    return found
+
+
+def test_the_apps_confirmation_policy_is_the_web_interfaces():
+    """One table: what the web interface refuses without {"confirm": true}, the app asks first, for the same
+    reasons, with the same orders of protection; the app's own (APP_NEEDS_CONFIRM) are what no web route does."""
+    web = web_constants()
+    assert set(backend.NEEDS_CONFIRM) == set(web["NEEDS_CONFIRM"]), "the same actions as webui.py's NEEDS_CONFIRM"
+    assert not set(backend.APP_NEEDS_CONFIRM) & set(web["NEEDS_CONFIRM"]), "the app's own are what no web route does"
+    assert backend.MODE_ORDER == web["MODE_ORDER"] and backend.TELEMETRY_ORDER == web["TELEMETRY_ORDER"]
+    assert (backend.DEFAULT_MODE, backend.DEFAULT_TELEMETRY) == (web["DEFAULT_MODE"], web["DEFAULT_TELEMETRY"])
+    for action in (*backend.NEEDS_CONFIRM, *backend.APP_NEEDS_CONFIRM):
+        assert backend.needs_confirm(action, {}) or action in ("limits-raise", "defaults-lower")
+    with pytest.raises(KeyError):
+        backend.needs_confirm("rename")  # not in the table: a bug in the caller, never a pass
+
+
+def test_what_needs_a_confirmation_depends_on_what_it_does():
+    raise_ = lambda current, **values: backend.needs_confirm("limits-raise", {"current": current, "values": values})  # noqa: E731
+    now = {"memory": 8 << 30, "memory_high": None, "cpus": 2, "pids": None}
+    assert raise_(now, memory="4g") is None and raise_(now, cpus="1.5", pids="4096") is None, "lower: no question"
+    assert raise_(now, memory="16g") and raise_(now, cpus="3") and raise_(now, memory="none")
+    assert raise_(None, memory="1g"), "the limits now unknown: asked"
+    assert backend.raised_limits(now, {"memory": "9000m", "cpus": "", "pids": "100"}) == ["memory"]
+    lower = lambda old, new, default=None: backend.needs_confirm("defaults-lower", {  # noqa: E731
+        "old": old, "new": new, "canary_default": default})
+    assert lower({"mode": "high"}, {"mode": "low"}) and not lower({"mode": "low"}, {"mode": "high"})
+    assert lower({"telemetry": "strict"}, {}), "off (the default) is less private than strict"
+    assert not lower({"telemetry": "on"}, {"telemetry": "off"}) and lower({}, {"telemetry": "on"})
+    assert lower({}, {"canaries": ["credentials", "home"]}, ["credentials", "home", "workspace"]), "the host's own default"
+    assert not lower({}, {"canaries": ["credentials", "home"]}, ["credentials", "home"])
+    assert lower({"canaries": "all"}, {"canaries": "credentials,home"}) and lower({}, {"canaries": False})
+    assert lower({}, {"keep_days": 30}) and lower({"keep_days": 30}, {"keep_days": 7})
+    assert not lower({"keep_days": 7}, {"keep_days": 30}) and not lower({"keep_days": 7}, {})
+    assert backend.needs_confirm("workspace-writable", {"read_only": True}) is None
+    assert backend.needs_confirm("workspace-writable", {"read_only": False})
+    assert backend.needs_confirm("secret-replace", {"exists": False}) is None
+    assert backend.needs_confirm("secret-replace", {"exists": True})
+    assert backend.needs_confirm("secret-replace", {"exists": None}), "not known whether it exists: asked"
+
+
+def test_clean_up_removes_what_was_shown_with_the_same_days_or_nothing():
+    calls = []
+    plan = {"removed": [{"name": "old"}], "leftovers": [], "histories": ["gone"], "days": 30, "dry_run": True}
+    s = backend.SandboxAI(runner=json_runner(calls, {"gc": (0, json.dumps(plan), "")}))
+    s.collect_as_shown("ct1", dict(plan))
+    assert [argv[argv.index("--") + 1:] for argv in calls] == [["gc", "--older-than=30", "--dry-run", "--json"],
+                                                               ["gc", "--older-than=30", "--json"]]
+    calls.clear()
+    with pytest.raises(backend.GcChanged):
+        s.collect_as_shown("ct1", {**plan, "histories": []})  # a dry run now lists more than was shown
+    assert len(calls) == 1 and "--dry-run" in calls[0], "nothing removed"
+    with pytest.raises(ValueError):
+        s.collect("local", False, days=-1)
+
+
+def stdin_runner(calls, answers):
+    """Like json_runner, recording (argv, standard input)."""
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs.get("input")))
+        words = argv[argv.index("--") + 1:] if "--" in argv else argv[3:]
+        status, out, err = answers.get(tuple(words[:2]), answers.get(words[0], (0, "", "")))
+        return subprocess.CompletedProcess(argv, status, out, err)
+    return run
+
+
+def test_another_hosts_secrets_are_listed_kept_on_standard_input_and_deleted_there():
+    calls = []
+    table = "NAME      STORE\nLLM_KEY   keyring\n--evil    file\nBAD NAME x\n"
+    s = backend.SandboxAI(runner=stdin_runner(calls, {("secrets", "list"): (0, table, "")}))
+    assert s.host_secrets("ct1") == ("keyring", [("LLM_KEY", "keyring")])
+    assert s.secret_exists("LLM_KEY", "ct1") and not s.secret_exists("OTHER", "ct1")
+    s.set_secret("LLM_KEY", "sk-secret-value", host="ct1")
+    argv, given = calls[-1]
+    assert argv[3:] == ["hosts", "run", "ct1", "--", "secrets", "set", "LLM_KEY"] and given == "sk-secret-value\n"
+    assert "sk-secret-value" not in json.dumps([argv for argv, _ in calls]), "never an argument"
+    s.delete_secret("LLM_KEY", host="ct1")
+    assert calls[-1][0][3:] == ["hosts", "run", "ct1", "--", "secrets", "delete", "LLM_KEY"]
+    s = backend.SandboxAI(runner=stdin_runner(calls, {("secrets", "list"): (0, "no secrets\n", "")}))
+    assert s.host_secrets("ct1")[1] == []
+    s = backend.SandboxAI(runner=stdin_runner(calls, {("secrets", "list"): (255, "", "ssh: timed out")}))
+    with pytest.raises(ValueError):
+        s.secret_exists("LLM_KEY", "ct1")
+
+
+def test_what_was_added_to_a_start_on_another_host_and_its_approvals_history():
+    calls = []
+    devices = [{"id": "1", "value": "/dev/ttyUSB0", "source": "added", "state": "attached", "nodes": ["/dev/ttyUSB0"]},
+               {"id": "2", "value": "/dev/ttyUSB1", "source": "added", "state": "removed", "nodes": []},
+               {"id": "3", "value": "/dev/video0", "source": "start", "state": "attached", "nodes": []},
+               {"id": "--x", "value": "/dev/x", "source": "added", "state": "attached"}]
+    workspaces = [{"host": "/srv/data", "sandbox": "/workspaces/data", "mode": "ro", "source": "added",
+                   "note": "in use\x1b[2J"}, "junk"]
+    s = backend.SandboxAI(runner=stdin_runner(calls, {
+        ("devices", "list"): (0, json.dumps(devices), ""), ("workspace", "list"): (0, json.dumps(workspaces), ""),
+        ("approvals", "history"): (0, "TIME  SANDBOX  ANSWER\n2026-11-08  web  allow\x07\n", "")}))
+    assert s.host_devices_added("ct1", "web") == [("1", "/dev/ttyUSB0 (/dev/ttyUSB0)")]
+    assert calls[-1][0][3:] == ["hosts", "run", "ct1", "--", "devices", "list", "web", "--json"]
+    found = s.host_workspaces("ct1", "web")
+    assert found[0]["sandbox"] == "/workspaces/data" and "\x1b" not in found[0]["note"] and len(found) == 1
+    assert s.remove_device("web", "1", host="ct1")[0] == 0, "a device by its id"
+    assert calls[-1][0][3:] == ["hosts", "run", "ct1", "--", "devices", "remove", "web", "1"]
+    assert s.remove_device("web", "-1", host="ct1")[0] == 2
+    text = s.host_approvals_history("ct1")
+    assert "allow\\x07" in text and calls[-1][0][3:] == ["hosts", "run", "ct1", "--", "approvals", "history"]
+    with pytest.raises(ValueError):
+        s.host_devices_added("ct1", "--all")
+
+
+def test_a_start_of_another_host_is_keyed_by_its_id_and_keeps_its_backend():
+    """Review round 3 (A9): a rename gave a start another key, so its row, its selection and its tab came loose."""
+    listing = [{"name": "web-2", "id": "web", "kind": "session", "state": "running", "backend": "podman"},
+               {"name": "old", "kind": "run", "state": "running"}]
+    s = backend.SandboxAI(runner=json_runner([], {"list": (0, json.dumps(listing), "")}))
+    found = s.host_instances("ct1")
+    assert [(i.key, i.name, i.ident, i.backend) for i in found] == [
+        ("host:ct1:web", "web-2", "web", "podman"), ("host:ct1:old", "old", "old", "")]
+
+
+def test_a_kept_start_and_its_run_are_one_row(tmp_path, monkeypatch):
+    """User report: a new start showed as two rows, a stopped one and a running one. A kept start (a task or a
+    session) names its run by run.json's "start" (its start id, since 0.1.30) - not by "session" - so the app listed
+    its start directory and its run apart. They are merged as sandbox-ai list merges them (starts.entries)."""
+    assert backend.runs_of_starts({"claude-web-1a2b": {"start": "web-1a2b"}, "session-old-9": {},
+                                   "codex-x": {"session": "agent-session-work"}, "plain": {}},
+                                  {"web": "web-1a2b", "old": "old-9", "work": "work"}) == {
+        "web": "claude-web-1a2b", "old": "session-old-9", "work": "codex-x"}
+    s = backend.SandboxAI()
+    runs = {"claude-web-1a2b": {"run": "claude-web-1a2b", "start": "web-1a2b", "agent": "claude", "workspace": "/w",
+                                "pid": os.getpid(), "started": "2026-11-08T10:00:00Z", "backend": "podman"},
+            "claude-plain-77": {"run": "claude-plain-77", "agent": "claude", "workspace": "/w", "pid": os.getpid(),
+                                "started": "2026-11-08T11:00:00Z"}}
+    monkeypatch.setattr(s, "runs", lambda: runs)
+    monkeypatch.setattr(s, "sessions", lambda: [["web", "claude", "podman", "running", "/w", "2026-11-08T09:59:00Z"]])
+    monkeypatch.setattr(s, "session_ids", lambda: {"web": "web-1a2b"})
+    monkeypatch.setattr(s, "foreground_start", lambda name: False)
+    real_module = s.module
+    monkeypatch.setattr(s, "module", lambda name: (_ for _ in ()).throw(ValueError("no MCP servers here"))
+                        if name == "mcp" else real_module(name))
+    (tmp_path / "proc").mkdir()
+    found, _ = s.instances(proc=tmp_path / "proc")
+    web = [i for i in found if i.run == "claude-web-1a2b" or i.name == "web"]
+    assert [(i.kind, i.key, i.state, i.run) for i in web] == [("session", "session:web-1a2b", "running",
+                                                               "claude-web-1a2b")], "one row, running"
+    assert [i.key for i in found if i.kind == "run"] == ["run:claude-plain-77"], "a run without a start stays apart"
+
+
+def test_the_recent_project_folders_are_merged_newest_first_each_once(tmp_path, monkeypatch):
+    """The wizard's list of recent folders: the workspaces of kept and running starts and the folders opened in the
+    app, each folder once with its latest use, only those that exist, newest first, at most ten."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    folders = []
+    for index in range(12):
+        folder = tmp_path / f"p{index}"
+        folder.mkdir()
+        folders.append(str(folder))
+    link = tmp_path / "link"
+    link.symlink_to(folders[0])
+    merged = backend.merge_recent([(folders[1], 100), (str(link), 300), (folders[0], 200), (str(tmp_path / "gone"), 999),
+                                   (folders[2], None), (None, 5), (folders[3], 50)])
+    assert merged == [(folders[0], 300), (folders[1], 100), (folders[3], 50), (folders[2], None)]
+    assert len(backend.merge_recent([(f, i) for i, f in enumerate(folders)])) == 10
+    assert backend.merge_recent([(f, i) for i, f in enumerate(folders)])[0] == (folders[11], 11), "newest first"
+    s = backend.SandboxAI()
+    monkeypatch.setattr(s, "module", lambda name: type("Starts", (), {"entries": staticmethod(lambda *a, **k: [
+        {"kind": "session", "workspace": folders[4], "last_used": "2030-01-01T00:00:00Z"},
+        {"kind": "mcp", "workspace": folders[5], "started": "2031-01-01T00:00:00Z"},
+        {"kind": "run", "workspace": folders[6], "started": "2020-01-01T00:00:00Z"}])})())
+    s.remember_project(folders[7])
+    found = [path for path, _ in s.recent_folders()]
+    assert found[:3] == [folders[4], folders[7], folders[6]] and folders[5] not in found, "no MCP server's folder"
+    assert backend.home_short(str(Path.home() / "work")) == "~/work" and backend.home_short("/srv") == "/srv"

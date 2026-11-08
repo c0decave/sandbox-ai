@@ -23,7 +23,9 @@ from PySide6.QtWidgets import (
 
 from .files import printable
 from .i18n import N_, tr
-from .widgets import background, confirm, fill, outcome, plain_label, selected_keys, set_enabled, show_text, table, warn
+from .widgets import (
+    ask_first, background, fill, outcome, plain_label, selected_keys, set_enabled, show_text, table, warn,
+)
 
 # As sandbox-ai llm checks them (llm.py: NAME, SECRET, MODEL_NAME, VPN_PROFILE, URL).
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
@@ -159,8 +161,8 @@ class LlmDialog(QDialog):
         self.form.addRow(tr("Its value"), self.value)
         layout.addLayout(self.form)
         if remote:
-            note = tr("On another host the key is a secret of sandbox-ai there: keep it on that host first (sandbox-ai "
-                      "secrets set NAME), then name it here. The app does not send a key to another host.")
+            note = tr("On another host the key is a secret of sandbox-ai there: keep it on that host first "
+                      "(Credentials › Secrets, with that host chosen), then name it here.")
         else:
             note = tr("A key typed here is kept as a secret of sandbox-ai (standard input, never a command line); the "
                       "server's entry only names that secret, and the proxy adds the key on the wire.")
@@ -393,22 +395,51 @@ class LlmPage(QWidget):
         except ValueError as exc:
             warn(self, tr("New LLM server"), printable(exc))
             return
+        if not value or host != "local":
+            self.start_add(host, fields, args, None)
+            return
+        # A typed key replaces the value of a secret of that name: whether there is one is looked at first.
         secret = fields["secret"]
+        self.status.setText(tr("Looking for the secret {name}…", name=secret))
+        background(lambda: self.sai.secret_exists(secret, host), owner=self, source=self.add_button, timeout=90,
+                   done=lambda exists, error: self.start_add(host, fields, args, value,
+                                                              exists if error is None else None))
+
+    def start_add(self, host, fields, args, value, exists=False):
+        """`sandbox-ai llm add` first (it checks the name, the URL and every field; a secret not kept yet is only a
+        note there), then the typed key VALUE as its secret (standard input): a server refused keeps no key. A secret
+        of that name that EXISTS (None: not known) is replaced only after a yes."""
+        secret = fields["secret"]
+        if value:
+            text = tr("A secret {name} is kept already: the key typed replaces its value, for everything that names "
+                      "it. Replace it?", name=secret) if exists else \
+                tr("Whether a secret {name} is kept already could not be told: the key typed would replace its "
+                   "value. Go on?", name=secret)
+            if not ask_first(self, "secret-replace", tr("New LLM server"), text, tr("Replace"),
+                             detail={"exists": exists}):
+                self.status.setText(tr("Not added: the secret {name} stays as it is.", name=secret))
+                return
 
         def work():
-            if value and host == "local":
-                status, out, err = self.sai.set_secret(secret, value)
-                if status != 0:
-                    return status, out, err
-            return self.sai.host_run(host, *args, timeout=ADD_SECONDS)
+            status, out, err = self.sai.host_run(host, *args, timeout=ADD_SECONDS)
+            if status != 0 or not value:
+                return (status, out, err), None
+            kept = self.sai.set_secret(secret, value)
+            return (status, out, err), None if kept[0] == 0 else (kept[2] or kept[1]).strip() or "?"
 
         self.status.setText(tr("Adding {name} on {host}…", name=fields["name"], host=self.host_label(host)))
-        background(work, owner=self, source=self.add_button, timeout=ADD_SECONDS + 30,
-                   done=lambda result, error: self.added(host, fields["name"], result, error))
+        background(work, owner=self, source=self.add_button, timeout=ADD_SECONDS + 90,
+                   done=lambda result, error: self.added(host, fields["name"], result, error, secret))
 
-    def added(self, host, name, result, error):
+    def added(self, host, name, result, error, secret=""):
+        """RESULT: (the outcome of llm add, why the key was not kept or None)."""
+        result, problem = result if error is None else (None, None)
         status, out, err = outcome(result, error)
-        if status != 0:
+        if status == 0 and problem is not None:
+            self.status.setText(tr("{name} added, but its key was not kept as the secret {secret}: {error}",
+                                   name=name, secret=secret, error=printable(problem)[:300]))
+            warn(self, tr("New LLM server"), self.status.text(), modal=False)
+        elif status != 0:
             self.status.setText(tr("Could not add {name} on {host}.", name=name, host=self.host_label(host)))
             warn(self, tr("New LLM server"), failure(result, error), modal=False)
         else:
@@ -461,9 +492,9 @@ class LlmPage(QWidget):
         host, name = valid_host(self.host()), self.chosen()
         if host is None or name is None:
             return
-        if not confirm(self, tr("Remove"), tr("Forget the LLM server {name} on {host}? Starts with {option} cannot "
-                                              "start until it is added again.", name=name, host=self.host_label(host),
-                                              option=f"--llm {name}"), tr("Remove"), destructive=True):
+        if not ask_first(self, "llm-remove", tr("Remove"), tr(
+                "Forget the LLM server {name} on {host}? Starts with {option} cannot start until it is added again.",
+                name=name, host=self.host_label(host), option=f"--llm {name}"), tr("Remove")):
             return
         background(lambda: self.sai.host_run(host, "llm", "remove", name, timeout=REMOVE_SECONDS), owner=self,
                    source=self.remove_button, timeout=REMOVE_SECONDS + 15,

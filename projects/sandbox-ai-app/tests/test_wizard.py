@@ -195,3 +195,34 @@ def test_the_git_page_shows_how_tokens_get_there(wizard, tmp_path, monkeypatch, 
     assert "variable of the shell" in edit.placeholderText() and edit.completer() is None
     assert "git-logins add" in page.help.text() and "publish-logins add pypi" in page.help.text()
     assert page.validatePage()
+
+
+def test_the_folders_used_last_are_offered_and_taken(wizard, tmp_path, monkeypatch, wait):
+    """User request: the project folder step offers the ten folders used last (recent starts' workspaces and the
+    folders opened in the app); a click takes one, a double-click or Enter takes it and goes on; typing and
+    Browse… stay."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    one, two = tmp_path / "one", tmp_path / "two"
+    one.mkdir()
+    two.mkdir()
+    monkeypatch.setattr(wizard.sai, "recent_folders", lambda limit=10: [(str(one), 1762596000), (str(two), None)])
+    wizard.show()
+    page = wizard.folder_page
+    page.path.edit.setText("/typed/before")
+    page.initializePage()
+    assert wait(lambda: page.recent.count() == 2, 10)
+    assert page.path.edit.text() == "/typed/before", "filling the list chooses nothing"
+    assert page.recent.item(0).text().startswith(str(one)) and "(used " in page.recent.item(0).text()
+    assert page.recent.item(1).text() == str(two) and page.recent.accessibleName()
+    rect = page.recent.visualItemRect(page.recent.item(1))
+    QTest.mouseClick(page.recent.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, rect.center())
+    assert page.path.edit.text() == str(two)
+    page.recent.setFocus()
+    page.recent.setCurrentRow(0)
+    assert page.path.edit.text() == str(one), "the keys move through the list too"
+    went = []
+    monkeypatch.setattr(wizard, "next", lambda: went.append(True))
+    page.recent.itemActivated.emit(page.recent.item(0))  # what a double-click or Enter sends
+    assert went == [True] and page.path.edit.text() == str(one)
+    wizard.hide()

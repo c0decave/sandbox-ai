@@ -47,3 +47,15 @@ def test_a_changed_login_is_noticed(tmp_path):
     (home / ".claude/.credentials.json").write_text('{"claudeAiOauth": {"accessToken": "fixture-access"}}')
     assert home_guard.changed(before) == sorted([str(home / ".claude/.credentials.json"),
                                                  str(home / ".local/share/sandbox-ai/auth")])
+
+
+def test_the_apps_tests_move_home_as_well():
+    """The desktop app's tests (projects/sandbox-ai-app/tests) call sandbox-ai's modules and commands too: their
+    conftest.py moves HOME with the same home_guard before anything is imported, and fails a session that changed a
+    real login file (2026-11-08: an app test run in the real HOME was the next way to log the agent out)."""
+    app_tests = Path(__file__).resolve().parents[1] / "projects" / "sandbox-ai-app" / "tests"
+    assert (app_tests / "home_guard.py").read_text() == (Path(__file__).resolve().parent / "home_guard.py").read_text()
+    conftest = (app_tests / "conftest.py").read_text()
+    guard = conftest.index("home_guard.ensure()")
+    assert guard < conftest.index("import PySide6"), "HOME moves before Qt (or anything else) is loaded"
+    assert "home_guard.changed(_REAL_LOGINS)" in conftest

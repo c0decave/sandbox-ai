@@ -141,7 +141,7 @@ def test_adding_on_this_machine_keeps_the_key_as_a_secret_never_on_a_command_lin
     monkeypatch.setattr(llm_page.LlmDialog, "exec", run)
     sai.asked.clear()
     page.add_button.click()
-    assert sai.secrets_set == [("LLM_KEY", KEY)], "the key is kept as a secret first (standard input)"
+    assert sai.secrets_set == [("LLM_KEY", KEY)], "the key is kept as a secret once llm add took the server"
     add = ("llm", "add", "lm2", "--kind", "lmstudio", "--url", "http://192.168.1.21:1234", "--model",
            "qwen2.5-coder:7b", "--api-key-secret", "LLM_KEY")
     assert sai.asked[0] == ("local", add)
@@ -153,6 +153,42 @@ def test_adding_on_this_machine_keeps_the_key_as_a_secret_never_on_a_command_lin
     assert (args.command, args.name, args.kind, args.url, args.model, args.api_key_secret, args.vpn,
             args.anthropic) == ("add", "lm2", "lmstudio", "http://192.168.1.21:1234", "qwen2.5-coder:7b", "LLM_KEY",
                                 None, False)
+    page.close()
+    page.deleteLater()
+
+
+def test_a_refused_server_keeps_no_key_and_an_existing_secret_is_replaced_only_after_a_yes(qapp, sai, monkeypatch):
+    """Review round 3 (A3): `secrets set` ran before `llm add`, so a server that llm add refused had replaced an
+    existing secret's value anyway, without a word."""
+    from PySide6.QtWidgets import QDialog
+    page = llm_page.LlmPage(sai)
+    page.show()
+
+    def run(dialog):
+        dialog.name.setText("lm2")
+        dialog.kind.setCurrentIndex(dialog.kind.findData("lmstudio"))
+        dialog.url.setText("http://192.168.1.21:1234")
+        dialog.secret.setText("LLM_KEY")
+        dialog.value.setText(KEY)
+        return QDialog.DialogCode.Accepted
+    monkeypatch.setattr(llm_page.LlmDialog, "exec", run)
+    add = ("llm", "add", "lm2", "--kind", "lmstudio", "--url", "http://192.168.1.21:1234", "--api-key-secret",
+           "LLM_KEY")
+    sai.answers[("local", add)] = (1, "", "sandbox-ai llm: there is an LLM endpoint lm2 already")
+    page.add()
+    assert ("local", add) in sai.asked and sai.secrets_set == [], "refused: the key was not kept"
+    assert "already" in widgets.SHOWN[-1][1]
+    del sai.answers[("local", add)]
+    monkeypatch.setattr(sai, "secret_exists", lambda name, host="local": True)
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", False)  # Cancel
+    sai.asked.clear()
+    page.add()
+    title, text, _ = widgets.SHOWN[-1]
+    assert title == "New LLM server" and "LLM_KEY is kept already" in text
+    assert sai.asked == [] and sai.secrets_set == [], "declined: nothing added, the secret stays"
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    page.add()
+    assert sai.asked[0] == ("local", add) and sai.secrets_set == [("LLM_KEY", KEY)]
     page.close()
     page.deleteLater()
 

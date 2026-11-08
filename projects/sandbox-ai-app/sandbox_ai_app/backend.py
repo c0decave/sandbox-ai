@@ -72,6 +72,7 @@ REMOTE_QUESTION_WAIT = 30  # seconds a host may take to list its open questions 
 NET_OPTIONS_SECONDS = 600  # how long a host's `net allow --help` is kept when its sandbox-ai version is not known
 BASE_NET_OPTIONS = frozenset({"--allow-host", "--allow-tcp", "--allow"})  # what every sandbox-ai since 0.1.70 takes
 RECENT_PROJECTS = 12  # projects the app's own list keeps
+RECENT_FOLDERS = 10  # recent project folders the wizard offers
 KIT_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"  # kits.KIT_NAME
 SKILL_NAME = r"[a-z0-9][a-z0-9-]{0,63}"  # a new skill's name, as Claude wants it
 DRAIN = 2  # seconds call() still reads the output of a command it ended at its timeout
@@ -368,6 +369,24 @@ class SandboxAI:
     def sessions(self):
         """[[name, agent, backend, status, workspace, created]] of the named sessions."""
         return self.module("sessions").rows()
+
+    def session_ids(self):
+        """{name: id} of the named sessions: the id is the session's directory, which stays when it is renamed."""
+        sessions = self.module("sessions")
+        if not hasattr(sessions, "display") or not hasattr(sessions, "root"):
+            return {}
+        found, root = {}, sessions.root()
+        if not root.is_dir():
+            return found
+        for directory in root.iterdir():
+            try:
+                with open(directory / "session.json", "rb") as stream:
+                    data = json.loads(stream.read(1 << 20))
+            except (OSError, ValueError):
+                continue
+            if valid_run(directory.name):
+                found[sessions.display(directory.name, data)] = directory.name
+        return found
 
     def mcp_servers(self):
         """[(name, status, what)] of the defined MCP servers."""
@@ -732,9 +751,41 @@ class SandboxAI:
         return self.host_run(host, "devices", "add", run, path, timeout=120)
 
     def remove_device(self, run, path, host="local"):
-        if not valid_run(run) or not valid_device(path):
+        """`sandbox-ai devices remove RUN DEVICE` (on HOST): DEVICE a device added during the run, or its id (as
+        `devices list --json` gives it)."""
+        if not valid_run(run) or not (valid_device(path) or re.fullmatch(r"[0-9]{1,9}", str(path))):
             return 2, "", "invalid run or device"
         return self.host_run(host, "devices", "remove", run, path, timeout=120)
+
+    def host_devices_added(self, host, run):
+        """[(id, what)] of the devices added to the running sandbox RUN on HOST during its run and not removed
+        (`sandbox-ai devices list RUN --json` there): what a removal is chosen from. ValueError: not answered."""
+        if not valid_run(run):
+            raise ValueError("invalid run")
+        data = self.host_json(host, "devices", "list", run, "--json", timeout=60)
+        if not isinstance(data, list):
+            raise ValueError("not a list of devices")
+        found = []
+        for entry in data:
+            if not isinstance(entry, dict) or entry.get("source") != "added" or entry.get("state") == "removed" or \
+                    not re.fullmatch(r"[0-9]{1,9}", str(entry.get("id"))):
+                continue
+            nodes = [printable(n)[:200] for n in entry.get("nodes") or [] if isinstance(n, str)][:10]
+            what = printable(entry.get("value"))[:200] if isinstance(entry.get("value"), str) else "?"
+            found.append((str(entry["id"]), f"{what} ({', '.join(nodes)})" if nodes else what))
+        return found
+
+    def host_workspaces(self, host, run):
+        """The workspaces of the running sandbox RUN on HOST (`sandbox-ai workspace list RUN --json` there), as
+        workspaces() gives this machine's: [{host, sandbox, mode, source, note}], the text fields escaped. ValueError:
+        not answered."""
+        if not valid_run(run):
+            raise ValueError("invalid run")
+        data = self.host_json(host, "workspace", "list", run, "--json", timeout=60)
+        if not isinstance(data, list):
+            raise ValueError("not a list of workspaces")
+        return [{key: printable(entry[key])[:1000] for key in ("host", "sandbox", "mode", "source", "note")
+                 if isinstance(entry.get(key), str)} for entry in data if isinstance(entry, dict)]
 
     # -- workspaces of a running sandbox (sandbox-ai workspace) --
 
@@ -842,17 +893,22 @@ class SandboxAI:
             servers = {name: mcp.load_state(name) for name in sorted(mcp.definitions()) if mcp.status(name) == "running"}
         except Exception as exc:  # noqa: BLE001 - e.g. a damaged mcp.json
             servers, problems = {}, problems + [str(exc)]
-        by_session = {session_of(record): name for name, record in runs.items() if session_of(record)}
+        try:
+            ids = self.session_ids()
+        except Exception:  # noqa: BLE001 - keyed by name then (an older sandbox-ai)
+            ids = {}
+        by_session = runs_of_starts(runs, ids)
         used = set()
         for row in rows:
             name, agent, engine, state, workspace, created = (list(row) + [""] * 6)[:6]
             run = by_session.get(name)
             record = runs.get(run, {}) if run else {}
             used.add(run)
-            found.append(Instance("session", f"session:{name}", name, run=run, session=name, project=workspace,
+            ident = ids.get(name, name)  # its directory: a renamed session keeps its row and its tab
+            found.append(Instance("session", f"session:{ident}", name, run=run, session=name, project=workspace,
                                   agent=agent, backend=engine, started=record.get("started") or created, state=state,
                                   proxy=record.get("proxy") if run else None, pid=record.get("pid"), record=record,
-                                  foreground=self.foreground_start(name)))
+                                  foreground=self.foreground_start(name), ident=ident))
         for name, state in servers.items():
             run = f"mcp-{name}" if f"mcp-{name}" in runs else None
             record = runs.get(run, {}) if run else {}
@@ -908,8 +964,33 @@ class SandboxAI:
         data = self.settings()
         recent = [path] + [p for p in self.recent_projects() if p != path]
         data["recent_projects"], data["project"] = recent[:RECENT_PROJECTS], path
+        # When each was used last (the wizard's list of recent folders says it): only for the folders listed.
+        used = data.get("recent_projects_used") if isinstance(data.get("recent_projects_used"), dict) else {}
+        used[path] = int(time.time())
+        data["recent_projects_used"] = {p: used[p] for p in data["recent_projects"] if isinstance(used.get(p), int)}
         write_private_json(self.settings_file(), data)
         return path
+
+    def recent_folders(self, limit=RECENT_FOLDERS):
+        """[(folder, last used: seconds since the epoch or None)] of the project folders used last, newest first, at
+        most LIMIT: the workspaces of the kept and running starts (sandbox-ai's registry, as `sandbox-ai list --all`
+        has them; nothing is pruned) and the folders opened in this app. Only folders that exist, each once."""
+        found = []
+        try:
+            entries = self.module("starts").entries(True, prune=False)
+        except Exception:  # noqa: BLE001 - an older sandbox-ai, a damaged start: the app's own list still counts
+            entries = []
+        for entry in entries if isinstance(entries, list) else []:
+            if isinstance(entry, dict) and entry.get("kind") != "mcp":
+                when = max((parse_time(entry.get(key)) or 0 for key in ("last_used", "started", "created")),
+                           default=0)
+                found.append((entry.get("workspace"), when or None))
+        used = self.settings().get("recent_projects_used")
+        used = used if isinstance(used, dict) else {}
+        for path in self.recent_projects():
+            when = used.get(path)
+            found.append((path, when if isinstance(when, int) and not isinstance(when, bool) else None))
+        return merge_recent(found, limit)
 
     def forget_project(self, path):
         data = self.settings()
@@ -1105,12 +1186,36 @@ class SandboxAI:
         files = set(module.FileStore().names()) if store.name != "file" else set()
         return store.name, [(name, store.name if name in names else "file") for name in sorted(names | files)]
 
-    def set_secret(self, name, value):
-        """Keep VALUE as secret NAME with `sandbox-ai secrets set NAME`, the value on standard input."""
+    def set_secret(self, name, value, host="local"):
+        """Keep VALUE as secret NAME with `sandbox-ai secrets set NAME` (on HOST: over SSH), the value on standard
+        input - never an argument."""
         argv = self.set_secret_argv(name, value)
         if argv is None:
             return 2, "", "invalid name or value"
+        if host != "local":
+            return self.host_run(host, *argv[3:], timeout=90, input=value + "\n")
         return self.call(*argv[3:], input=value + "\n", timeout=60)
+
+    def host_secrets(self, host):
+        """(store, [(name, where)]) of the secrets kept on HOST - names only (`sandbox-ai secrets list` there, its
+        table read as the web interface reads it); this machine's from secrets(). ValueError: not answered."""
+        if host == "local":
+            return self.secrets()
+        status, out, err = self.host_run(host, "secrets", "list", timeout=60)
+        if status != 0:
+            raise ValueError((err or out).strip()[-500:] or f"exit status {status}")
+        lines, found = out.splitlines(), []
+        if lines and lines[0].split() == ["NAME", "STORE"]:
+            for line in lines[1:]:
+                parts = line.split()
+                if len(parts) == 2 and self.secret_name.fullmatch(parts[0]):
+                    found.append((parts[0], printable(parts[1])[:32]))
+        stores = {where for _, where in found}
+        return (stores.pop() if len(stores) == 1 else "?"), found
+
+    def secret_exists(self, name, host="local"):
+        """Whether a secret NAME is kept on HOST (names only are read)."""
+        return any(found == name for found, _ in self.host_secrets(host)[1])
 
     def save_token(self, url, token):
         """Keep a push TOKEN typed in the wizard as sandbox-ai's own wizard does: a private file (mode 0600,
@@ -1135,10 +1240,22 @@ class SandboxAI:
         """argv of `sandbox-ai secrets set NAME` (the value goes on standard input), or None if invalid."""
         return self.command("secrets", "set", name) if self.valid_secret(name, value) else None
 
-    def delete_secret(self, name):
+    def delete_secret(self, name, host="local"):
         if not self.valid_secret(name):
             return 2, "", "invalid name"
+        if host != "local":
+            return self.host_run(host, "secrets", "delete", name, timeout=90)
         return self.call("secrets", "delete", name, timeout=60)
+
+    def host_approvals_history(self, host, run=None):
+        """The questions of HOST's sandboxes with their answers, as `sandbox-ai approvals history [RUN]` there says
+        them (its table, escaped; the newest last). ValueError: not answered."""
+        if run is not None and not valid_run(run):
+            raise ValueError("invalid run")
+        status, out, err = self.host_run(host, "approvals", "history", *([run] if run else []), timeout=60)
+        if status != 0:
+            raise ValueError((err or out).strip()[-500:] or f"exit status {status}")
+        return "\n".join(printable(line) for line in out.strip()[-20000:].splitlines())
 
     # -- files --
 
@@ -1291,11 +1408,13 @@ class SandboxAI:
         except ValueError:
             raise ValueError((err or out).strip()[-500:] or f"exit status {status}") from None
 
-    def host_run(self, name, *args, timeout=120):
-        """(status, out, err) of `sandbox-ai ARGS` on host NAME (this machine for "local")."""
+    def host_run(self, name, *args, timeout=120, input=None):
+        """(status, out, err) of `sandbox-ai ARGS` on host NAME (this machine for "local"). INPUT, if given, is its
+        standard input (a secret's value: never an argument); `sandbox-ai hosts run` hands its own on to ssh."""
+        extra = {} if input is None else {"input": input}
         if name == "local":
-            return self.call(*args, timeout=timeout)
-        return self.call("hosts", "run", name, "--", *args, timeout=timeout)
+            return self.call(*args, timeout=timeout, **extra)
+        return self.call("hosts", "run", name, "--", *args, timeout=timeout, **extra)
 
     def host_instances(self, name, timeout=60):
         """The starts on host NAME (`sandbox-ai list --json` there, over SSH) as [Instance] with HOST set: what the
@@ -1308,9 +1427,11 @@ class SandboxAI:
                     not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}", entry["name"]):
                 continue
             kind = entry.get("kind") if entry.get("kind") in ("session", "run", "mcp") else "run"
-            found.append(Instance(kind, remote_key(name, entry["name"]), entry["name"], run=None, project=str(
+            ident = start_id(entry)
+            found.append(Instance(kind, remote_key(name, ident), entry["name"], run=None, project=str(
                 entry.get("workspace") or ""), agent=str(entry.get("agent") or ""), started=str(entry.get("started") or ""),
-                state=str(entry.get("state") or ""), record=entry, host=name))
+                state=str(entry.get("state") or ""), record=entry, host=name, backend=printable(entry.get("backend"))[:20]
+                if isinstance(entry.get("backend"), str) else "", ident=ident))
         return found
 
     def ended_starts(self, name="local"):
@@ -1327,10 +1448,13 @@ class SandboxAI:
             if state in ("running", "paused", "starting"):
                 continue
             kind = entry.get("kind") if entry.get("kind") in ("session", "run", "mcp") else "run"
-            found.append(Instance(kind, f"ended:{name}:{entry['name']}", entry["name"], project=str(
+            ident = start_id(entry)
+            found.append(Instance(kind, f"ended:{name}:{ident}", entry["name"], project=str(
                 entry.get("workspace") or ""), agent=str(entry.get("agent") or ""),
                 started=str(entry.get("started") or ""), state=state or "ended", record=entry, host=name,
-                session=entry["name"] if kind == "session" else None, mcp=entry["name"] if kind == "mcp" else None))
+                session=entry["name"] if kind == "session" else None, mcp=entry["name"] if kind == "mcp" else None,
+                backend=printable(entry.get("backend"))[:20] if isinstance(entry.get("backend"), str) else "",
+                ident=ident))
         return found
 
     def start_history(self, name, host="local"):
@@ -1343,13 +1467,26 @@ class SandboxAI:
             raise ValueError("not a history")
         return [entry for entry in data if isinstance(entry, dict)]
 
-    def collect(self, host="local", dry_run=True):
-        """`sandbox-ai gc [--dry-run] --json` on HOST: {"removed", "leftovers", "histories", "skipped", "damaged",
-        "days", "dry_run"}. ValueError: not answered."""
-        data = self.host_json(host, "gc", *(["--dry-run"] if dry_run else []), "--json", timeout=300)
+    def collect(self, host="local", dry_run=True, days=None):
+        """`sandbox-ai gc [--older-than DAYS] [--dry-run] --json` on HOST: {"removed", "leftovers", "histories",
+        "skipped", "damaged", "days", "dry_run"}. ValueError: not answered."""
+        if days is not None and not (isinstance(days, int) and not isinstance(days, bool) and 0 <= days <= 36500):
+            raise ValueError("invalid number of days")
+        data = self.host_json(host, "gc", *([f"--older-than={days}"] if days is not None else []),
+                              *(["--dry-run"] if dry_run else []), "--json", timeout=300)
         if not isinstance(data, dict):
             raise ValueError("not what sandbox-ai gc says")
         return data
+
+    def collect_as_shown(self, host, shown):
+        """`sandbox-ai gc` on HOST removing what its dry run SHOWN listed and nothing else: with the same
+        --older-than, and only when a dry run now still lists exactly that (GcChanged otherwise: a start was used or
+        ended meanwhile, keep_days changed). Returns what gc says it removed."""
+        days = shown.get("days") if isinstance(shown, dict) else None
+        days = days if isinstance(days, int) and not isinstance(days, bool) and days >= 0 else None
+        if gc_plan(self.collect(host, True, days=days)) != gc_plan(shown):
+            raise GcChanged(host)
+        return self.collect(host, False, days=days)
 
     def host_net_options(self, name, command="allow"):
         """The options `sandbox-ai net COMMAND` takes on host NAME (its --help there, parsed), kept per host and
@@ -1378,11 +1515,14 @@ class SandboxAI:
 
     def host_questions(self, name, timeout=REMOTE_QUESTION_WAIT):
         """The open questions of the sandboxes on host NAME (`sandbox-ai approvals list --json` there, over SSH) as
-        [RemoteQuestion]; what does not look like a question of sandbox-ai is left out. ValueError: no answer."""
+        [RemoteQuestion]; what does not look like a question of sandbox-ai is left out. ValueError: no answer.
+        Their time left counts from when the read STARTED: that host said "seconds_left" somewhere during the SSH
+        round trip, so a slow read never shows more time than there is."""
+        started = time.time()
         data = self.host_json(name, "approvals", "list", "--json", timeout=timeout)
         if not isinstance(data, list):
             raise ValueError(f"{name}: not a list of questions")
-        return remote_questions(name, data, self.question_id)
+        return remote_questions(name, data, self.question_id, read_at=started)
 
     def limits_shown(self, run, host="local"):
         """{"memory", "memory_high", "cpus", "pids"} (None: no limit) of the running sandbox RUN on HOST, from
@@ -1444,6 +1584,51 @@ class SandboxAI:
             return json.loads(out)[0]
         except (ValueError, IndexError, KeyError, TypeError):
             raise ValueError((err or out).strip()[-500:] or f"exit status {status}") from None
+
+    def host_install_supported(self):
+        return hasattr(self.module("hosts"), "install")
+
+    def host_install_args(self, name, mode=None, prefix=None, sudo=None, source="here", version=None):
+        """The words after `sandbox-ai` of `hosts install NAME ...`, every value checked: MODE "user" (for the SSH
+        user), "system" (for every user under PREFIX; as root, or with sudo) or None (system when the SSH user is
+        root); SUDO True/False/None (sandbox-ai decides); SOURCE "here" (this machine's copy) or "download" (the
+        signed release, VERSION or the newest). ValueError says what is wrong."""
+        if not (isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", name)) or name == "local":
+            raise ValueError("not a host of the list")
+        if mode not in (None, "user", "system"):
+            raise ValueError("an installation is for the user or for the system")
+        if prefix and (mode != "system" or not valid_directory(prefix)):
+            raise ValueError("a prefix is an absolute folder, for a system installation")
+        if source not in ("here", "download"):
+            raise ValueError("the source is this machine's copy or the signed release")
+        if version and (source != "download" or not re.fullmatch(r"[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,6}", version)):
+            raise ValueError("a version is X.Y.Z, for a download of the signed release")
+        args = ["hosts", "install", name]
+        args += {"user": ["--user"], "system": ["--system"], None: []}[mode]
+        args += [f"--prefix={prefix}"] if prefix else []
+        args += ["--sudo"] if sudo is True else ["--no-sudo"] if sudo is False else []
+        args += ["--download"] + ([f"--version={version}"] if version else []) if source == "download" else \
+            ["--from-here"]
+        return args
+
+    def host_install(self, name, mode=None, prefix=None, sudo=None, source="here", version=None):
+        """`sandbox-ai hosts install ... --json` on this machine (up to its INSTALL_TIMEOUT): {"name", "before",
+        "after", "changed", "mode", "prefix", "sudo", "root", "source", "error", "needs_password", "output",
+        "notes"}. ValueError: no such answer."""
+        args = self.host_install_args(name, mode, prefix, sudo, source, version)
+        timeout = getattr(self.module("hosts"), "INSTALL_TIMEOUT", 900) + 60
+        status, out, err = self.call(*args, "--json", timeout=timeout)
+        try:
+            result = json.loads(out)
+        except ValueError:
+            result = None
+        if not isinstance(result, dict):  # refused before it began (an option this sandbox-ai lacks, no such host)
+            raise ValueError((err or out).strip()[-500:] or f"exit status {status}")
+        return result
+
+    def host_install_terminal(self, name, mode=None, prefix=None, sudo=None, source="here", version=None):
+        """argv of the same installation in a terminal tab, where sudo on the host may ask for its password."""
+        return self.command(*self.host_install_args(name, mode, prefix, sudo, source, version))
 
     def host_update_terminal(self, name):
         """argv of host NAME's update in a terminal tab, where sudo may ask for its password."""
@@ -1762,10 +1947,168 @@ def valid_device(path):
     return path.startswith("/dev/") and len(path) <= 4096 and path.isprintable() and ".." not in path.split("/")
 
 
-def remote_key(host, name):
-    """The key of the start NAME of another HOST (Instance.key): in a namespace of its own, so it never equals a key
-    of this account's own (session:, run:, mcp:, pid:), whatever the host is called."""
-    return f"host:{host}:{name}"
+# -- one confirmation policy --
+# What ends, removes or weakens something: the web interface's table (webui.NEEDS_CONFIRM: the same actions;
+# tests/test_backend.py compares them with webui.py), and the app's own on top (APP_NEEDS_CONFIRM: what no route of the
+# web interface does; none now). Every call path of the app that does one of these asks first through
+# widgets.ask_first(), which asks needs_confirm() (tests/test_references.py walks the mutating calls of the pages).
+NEEDS_CONFIRM = {
+    "start-stop": "stopping a start ends what runs in it (and its HOME, unless it is kept)",
+    "start-delete": "deleting a start removes its kept HOME",
+    "gc": "gc removes the leftovers of ended starts, and kept starts unused for that long with their HOME, for good",
+    "approval-allow-always": "an allow always is remembered for the project: every later start of it gets this "
+                             "without asking",
+    "approval-deny-always": "a deny always is remembered for the project: every later question like it is refused",
+    "approval-forget": "forgetting a remembered answer changes what every later start of that project gets (a "
+                       "forgotten block is asked again)",
+    "defaults-lower": "this lowers the protection of every later start on that host",
+    "net-allow": "net allow widens what the running sandbox reaches, at once (real DNS, ports on the host, host "
+                 "wildcards, Git logins included)",
+    "net-untaint": "untaint takes back the rules for tainted runs: the sandbox is treated as if no untrusted content "
+                   "had entered it",
+    "workspace-writable": "a writable workspace lets the agent change the directory on that host",
+    "workspace-force": "a forced removal leaves what a process there still holds usable, also for writing, until it "
+                       "is closed; a copy the agent took stays usable until the sandbox restarts",
+    "device-add": "a device gives the agent that hardware of the host",
+    "limits-raise": "a limit above the current one (or none) lets the agent use more of that host",
+    "host-remove": "removing a host ends this service's management of it",
+    "vpn-remove": "removing a VPN profile stops the starts that use it from starting",
+    "llm-remove": "removing an LLM server stops the starts that use it from starting",
+    "kit-delete": "deleting a kit removes its folder",
+    "kit-remove": "removing a skill or plugin from a kit takes it from every later start with that kit",
+    "kit-add": "a skill, plugin or marketplace added to a kit is given to every later start with that kit",
+    "mcp-attach": "an attached MCP server is reached by that start from its next start on (kept for its later "
+                  "starts)",
+    "mcp-restart": "restarting a running start ends what runs in it now, so that it reaches the MCP server (the agent "
+                   "continues its conversation)",
+    "host-edit": "changing a host's SSH target, port, key, command or sudo setting changes where and how this "
+                 "service's commands run",
+    "host-install": "installing sandbox-ai on a host puts this machine's copy (or the signed release) there, for the "
+                    "SSH user or for every user, as root or with sudo",
+    "secret-delete": "deleting a secret takes it from every start, VPN profile and Git login that names it",
+    "secret-replace": "a secret of that name exists: its value is replaced",
+}
+APP_NEEDS_CONFIRM = {}
+MODE_ORDER = ("lax", "low", "medium", "high", "paranoid")  # the order of protection, weakest first (webui.MODE_ORDER)
+TELEMETRY_ORDER = ("on", "off", "strict")  # the agents' telemetry, the least private first (webui.TELEMETRY_ORDER)
+DEFAULT_MODE, DEFAULT_TELEMETRY = "medium", "off"
+DEFAULT_CANARIES = ("credentials", "home")  # canary.DEFAULT_CATEGORIES, when a host does not say its canary_default
+CANARY_CATEGORIES = ("credentials", "home", "workspace")
+LIMIT_SIZE = re.compile(r"([0-9]+(?:\.[0-9]+)?)([kmgt]?)b?", re.IGNORECASE)
+
+
+def needs_confirm(action, detail=None):
+    """Why ACTION must be confirmed first (the reason of NEEDS_CONFIRM or APP_NEEDS_CONFIRM), or None when it need not
+    be: DETAIL says what it does where that decides it - "limits-raise": {"current": limits_shown() or None, "values":
+    {"memory", "cpus", "pids": "8g", "none" or ""}}; "defaults-lower": {"old", "new", "canary_default"} (defaults
+    values); "workspace-writable": {"read_only": bool}; "secret-replace": {"exists": bool}. Every other action is
+    always confirmed. KeyError: an action the table does not have (a bug, never a pass)."""
+    reason = NEEDS_CONFIRM.get(action) or APP_NEEDS_CONFIRM[action]
+    detail = detail if isinstance(detail, dict) else {}
+    if action == "limits-raise":
+        return reason if raised_limits(detail.get("current"), detail.get("values") or {}) else None
+    if action == "defaults-lower":
+        return reason if defaults_lowered(detail.get("old") or {}, detail.get("new") or {},
+                                          detail.get("canary_default")) else None
+    if action == "workspace-writable" and detail.get("read_only") is True:
+        return None
+    if action == "secret-replace" and detail.get("exists") is False:
+        return None
+    return reason
+
+
+def limit_number(key, value):
+    """VALUE of limit KEY ("8g", "1.5", "4096") as a number (bytes, CPUs, processes); None: not a number."""
+    text = str(value).strip().lower()
+    if key == "memory":
+        match = LIMIT_SIZE.fullmatch(text)
+        if not match:
+            return None
+        return float(match.group(1)) * 1024 ** "_kmgt".index(match.group(2) or "_")
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def raised_limits(current, values):
+    """The keys of VALUES ({"memory", "cpus", "pids": text}, "" left as it is) that let the sandbox use more than now:
+    "none" (no limit), above CURRENT (limits_shown(); a missing one is no limit), or every one given when CURRENT is
+    not known (it cannot be told)."""
+    found = []
+    for key in ("memory", "cpus", "pids"):
+        value = values.get(key)
+        if value in (None, ""):
+            continue
+        number = limit_number(key, value)
+        now = current.get(key) if isinstance(current, dict) else None
+        if not isinstance(current, dict) or str(value).strip().lower() == "none" or number is None or \
+                (isinstance(now, (int, float)) and number > now):
+            found.append(key)
+    return found
+
+
+def canary_categories(value, default, categories=CANARY_CATEGORIES):
+    """The canary categories VALUE of defaults.json plants (None: DEFAULT, sandbox-ai's own default there), as
+    `defaults set canaries` takes it: false, a list, "a,b", "all" or "none"."""
+    value = list(default or DEFAULT_CANARIES) if value is None else value
+    if value is False:
+        return set()
+    items = value.split(",") if isinstance(value, str) else value if isinstance(value, list) else []
+    names = {str(item).strip() for item in items if str(item).strip()}
+    if names == {"all"}:
+        return set(categories)
+    return set() if names <= {"none"} else names
+
+
+def defaults_lowered(old, new, canary_default=None):
+    """What of the defaults OLD -> NEW ({key: value} of defaults.json, a key missing: sandbox-ai's own default)
+    lowers the protection of every later start: [(key, before, after)] - a weaker mode (MODE_ORDER), telemetry less
+    private (TELEMETRY_ORDER), canary categories no longer planted (against that host's own CANARY_DEFAULT), and a
+    keep_days set where there was none or lowered (kept starts and their HOME go sooner). Empty: nothing does."""
+    found = []
+    for key, order, default in (("mode", MODE_ORDER, DEFAULT_MODE), ("telemetry", TELEMETRY_ORDER, DEFAULT_TELEMETRY)):
+        before, after = old.get(key, default), new.get(key, default)
+        if after in order and (before not in order or order.index(after) < order.index(before)):
+            found.append((key, before, after))
+    lost = canary_categories(old.get("canaries"), canary_default) - canary_categories(new.get("canaries"),
+                                                                                       canary_default)
+    if lost:
+        found.append(("canaries", sorted(lost), new.get("canaries")))
+    before, after = old.get("keep_days"), new.get("keep_days")
+    if isinstance(after, int) and not isinstance(after, bool) and (
+            not isinstance(before, int) or isinstance(before, bool) or after < before):
+        found.append(("keep_days", before, after))
+    return found
+
+
+class GcChanged(ValueError):
+    """What `sandbox-ai gc` would remove is no longer what was shown and confirmed: nothing was removed."""
+
+
+def gc_plan(result):
+    """What a `sandbox-ai gc --json` result removes, comparable: (kept starts, leftovers, histories), each sorted."""
+    result = result if isinstance(result, dict) else {}
+
+    def names(key):
+        value = result.get(key)
+        return tuple(sorted(str(e.get("name") if isinstance(e, dict) else e) for e in value)) \
+            if isinstance(value, list) else ()
+    return names("removed"), names("leftovers"), names("histories")
+
+
+def remote_key(host, ident):
+    """The key of the start IDENT (its id, start_id) of another HOST (Instance.key): in a namespace of its own, so it
+    never equals a key of this account's own (session:, run:, mcp:, pid:), whatever the host is called. By its id, not
+    its name: a start renamed keeps its row, its selection and its tab."""
+    return f"host:{host}:{ident}"
+
+
+def start_id(entry):
+    """The id of a start as `sandbox-ai list --json` gives it ({"name", "id"}): "id" (it stays when the start is
+    renamed), else its name (an older sandbox-ai)."""
+    ident = entry.get("id") if isinstance(entry, dict) else None
+    return ident if isinstance(ident, str) and valid_run(ident) else entry["name"]
 
 
 def url_host(url):
@@ -2471,8 +2814,10 @@ class Instance:
     RUN: its name in the run registry while it runs (what `sandbox-ai net`, `devices` and `limits` take)."""
 
     def __init__(self, kind, key, name, run=None, session=None, mcp=None, project="", agent="", backend="",
-                 started="", state="", proxy=None, pid=None, record=None, foreground=False, host="local"):
+                 started="", state="", proxy=None, pid=None, record=None, foreground=False, host="local", ident=None):
         self.kind, self.key, self.name, self.run, self.session, self.mcp = kind, key, name, run, session, mcp
+        # Its id, which stays when it is renamed (a session's directory, a start's id there): what KEY is made of.
+        self.ident = ident or name
         self.host = host  # "local" (this account) or the name of a host of `sandbox-ai hosts` (read over SSH)
         self.project, self.agent, self.backend, self.started, self.state = project, agent, backend, started, state
         self.proxy, self.pid, self.record = proxy, pid, record or {}
@@ -2552,6 +2897,51 @@ def launcher_processes(agents=AGENTS, proc=Path("/proc")):
                 found.append((int(entry), argv[index + 1], options, cwd))
                 break
     return sorted(found)
+
+
+def merge_recent(candidates, limit=RECENT_FOLDERS):
+    """[(folder, when)] of CANDIDATES ([(path, seconds or None)]): each folder once (by its real path, with its
+    latest time), only those that exist, newest first (those without a time after, in the order given), at most
+    LIMIT."""
+    best, order = {}, []
+    for path, when in candidates:
+        if not isinstance(path, str) or not path or "\0" in path:
+            continue
+        real = os.path.realpath(os.path.expanduser(path))
+        if not os.path.isdir(real):
+            continue
+        if real not in best:
+            order.append(real)
+            best[real] = when
+        elif when and (best[real] or 0) < when:
+            best[real] = when
+    ranked = sorted(order, key=lambda p: (best[p] is None, -(best[p] or 0), order.index(p)))
+    return [(path, best[path]) for path in ranked[:limit]]
+
+
+def home_short(path):
+    """PATH with the HOME at its start shown as ~."""
+    home = str(Path.home())
+    path = str(path)
+    return "~" + path[len(home):] if path == home or path.startswith(home + os.sep) else path
+
+
+def runs_of_starts(runs, ids):
+    """{start's name: its run} - which running sandbox of RUNS ({run: run.json record}) is the run of which kept start
+    (IDS: {name: id} of the start directories), as sandbox-ai's own list merges them (starts.entries): by the
+    record's "start" (its start id, since 0.1.30), by "session" (the name, or agent-session-NAME), or by the run
+    name session-ID of older versions. A start and its run are one row, never a stopped start beside a running
+    run."""
+    names = {ident: name for name, ident in ids.items()}
+    found = {}
+    for run, record in runs.items():
+        record = record if isinstance(record, dict) else {}
+        start = record.get("start") if isinstance(record.get("start"), str) else ""
+        name = names.get(start) or (start if start in ids else None) or session_of(record) or (
+            names.get(run[len("session-"):]) if str(run).startswith("session-") else None)
+        if name:
+            found[name] = run
+    return found
 
 
 def session_of(record):

@@ -132,20 +132,34 @@ AREA_TOURS = {
               "Übriggebliebenes, nachdem es dies zuerst gezeigt hat."),
              ("Switch it on and look at the history of an old start.", "Schalten Sie es ein und sehen Sie sich den "
               "Verlauf eines alten Starts an.")),
-        step("stop_button", ("Stop", "Beenden"),
-             ("Ends the selected sandbox; its launcher cleans up. A session can also be paused and resumed; "
-              "Rename… gives a start another name.",
-              "Beendet die gewählte Sandbox; ihr Launcher räumt auf. Eine Session lässt sich auch pausieren und "
-              "fortsetzen; Umbenennen… gibt einem Start einen anderen Namen."),
-             ("Stop a run you no longer need.", "Beenden Sie einen Lauf, den Sie nicht mehr brauchen.")),
+        step("host_filter", ("Whose starts", "Wessen Starts"),
+             ("Once there are hosts, Host lists all starts, this machine's or one host's. Each host is read on its "
+              "own; one that does not answer keeps its rows greyed.",
+              "Sobald es Hosts gibt, listet Host alle Starts, die dieses Rechners oder die eines Hosts. Jeder Host "
+              "wird für sich gelesen; einer, der nicht antwortet, behält seine Zeilen ausgegraut."),
+             ("Choose one host to see only what runs there.", "Wählen Sie einen Host, um nur zu sehen, was dort "
+              "läuft.")),
+        step("rename_button", ("Rename, history, clean up", "Umbenennen, Verlauf, Aufräumen"),
+             ("Rename… gives the selected start another name; its run id, its row and its tab stay. History… shows "
+              "what happened to it; Clean up… removes what is left over after showing it, and only that.",
+              "Umbenennen… gibt dem gewählten Start einen anderen Namen; Lauf-ID, Zeile und Tab bleiben. Verlauf… "
+              "zeigt, was mit ihm geschah; Aufräumen… entfernt Übriggebliebenes, nachdem es dies gezeigt hat, und "
+              "nur das."),
+             ("Look at the history of a start.", "Sehen Sie sich den Verlauf eines Starts an.")),
+        step("stop_button", ("Stop", "Stoppen"),
+             ("Ends the selected sandbox; its launcher cleans up. A session can also be paused and resumed.",
+              "Stoppt die gewählte Sandbox; ihr Launcher räumt auf. Eine Session lässt sich auch pausieren und "
+              "fortsetzen."),
+             ("Stop a run you no longer need.", "Stoppen Sie einen Lauf, den Sie nicht mehr brauchen.")),
     ),
     "approvals": (
         step("open", ("Open questions", "Offene Fragen"),
              ("A sandbox waits here when its agent wants something not allowed yet: a destination, a push with "
-              "warnings, an MCP tool, a page to open. Without an answer within a minute it is refused.",
+              "warnings, an MCP tool, a page to open. Without an answer within a minute it is refused; a page to "
+              "open waits until it is answered.",
               "Eine Sandbox wartet hier, wenn ihr Agent etwas noch nicht Erlaubtes will: ein Ziel, einen Push mit "
               "Warnungen, ein MCP-Werkzeug, eine zu öffnende Seite. Ohne Antwort innerhalb einer Minute wird es "
-              "abgelehnt."),
+              "abgelehnt; eine zu öffnende Seite wartet, bis sie beantwortet ist."),
              ("Keep this page open while an agent works, or let the tray tell you.",
               "Lassen Sie die Seite offen, während ein Agent arbeitet, oder lassen Sie sich vom Tray benachrichtigen.")),
         step("host_filter", ("Whose questions", "Wessen Fragen"),
@@ -161,13 +175,13 @@ AREA_TOURS = {
               "Sicherheitsmodus bestimmt, was angeboten wird."),
              ("Choose once while you are unsure.", "Wählen Sie einmal, solange Sie unsicher sind.")),
         step("allow_button", ("Allow, deny, block", "Erlauben, ablehnen, sperren"),
-             ("Allow (Alt+A) lets it through; for another host's page it reads Open here and allow and opens the "
-              "page in your browser here. Deny for this run (Alt+D) refuses it until the run ends, Deny once only "
-              "this time, Block always… at every later start too, after asking.",
-              "Erlauben (Alt+A) lässt es durch; für eine Seite eines anderen Hosts heißt es Hier öffnen und erlauben "
-              "und öffnet die Seite hier in Ihrem Browser. Für diesen Lauf ablehnen (Alt+D) weist es bis zum Ende "
-              "des Laufs ab, Einmal ablehnen nur dieses Mal, Immer sperren… nach einer Rückfrage auch bei jedem "
-              "späteren Start."),
+             ("Allow (Ctrl+Return) lets it through; for another host's page it reads Open here and allow and opens "
+              "the page in your browser here. Deny for this run (Ctrl+Shift+D) refuses it until the run ends, Deny "
+              "once only this time, Block always… (Ctrl+Shift+K) at every later start too, after asking.",
+              "Erlauben (Strg+Eingabe) lässt es durch; für eine Seite eines anderen Hosts heißt es Hier öffnen und "
+              "erlauben und öffnet die Seite hier in Ihrem Browser. Für diesen Lauf ablehnen (Strg+Umschalt+D) weist "
+              "es bis zum Ende des Laufs ab, Einmal ablehnen nur dieses Mal, Immer sperren… (Strg+Umschalt+K) nach "
+              "einer Rückfrage auch bei jedem späteren Start."),
              ("Answer the next question here.", "Beantworten Sie die nächste Frage hier.")),
         step("always", ("What you allowed always", "Was Sie immer erlaubt haben"),
              ("Your standing answers, of this machine or of a host you choose below. Forget one and it is asked "

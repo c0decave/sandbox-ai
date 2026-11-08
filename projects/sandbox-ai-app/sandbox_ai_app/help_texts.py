@@ -290,7 +290,7 @@ AREA_TIPS = (
          ("Limits the list to the sandboxes and sessions of the project open now.",
           "Beschränkt die Liste auf die Sandboxen und Sitzungen des gerade offenen Projekts."),
          None, "", "page-sandboxes"),
-    _tip("sandboxes.ended", ("Ended", "Beendet"),
+    _tip("sandboxes.ended", ("Ended", "Beendete"),
          ("Also lists the starts that ended: stopped MCP servers and whatever else sandbox-ai keeps, on this "
           "computer and every host.",
           "Listet auch die beendeten Starts: gestoppte MCP-Server und was sandbox-ai sonst noch aufbewahrt, auf "
@@ -300,12 +300,33 @@ AREA_TIPS = (
           "Verlauf… zeigt, was mit dem gewählten Start geschah; Aufräumen… entfernt Reste und aufbewahrte Starts, "
           "die länger als keep_days ungenutzt sind, nachdem es gezeigt hat, was es entfernen würde."),
          "sandbox-ai list --all, sandbox-ai gc", "page-sandboxes"),
-    _tip("sandboxes.stop", ("Stop", "Beenden"),
-         ("Ends the selected sandbox after asking; its launcher cleans up. A session can be paused instead. "
-          "Rename… gives a start another name; its run id stays.",
-          "Beendet die gewählte Sandbox nach Rückfrage; ihr Launcher räumt auf. Eine Sitzung lässt sich stattdessen "
-          "pausieren. Umbenennen… gibt einem Start einen anderen Namen; seine Lauf-ID bleibt."),
-         None, "sandbox-ai stop NAME, sandbox-ai rename OLD NEW", "sessions"),
+    _tip("sandboxes.hosts", ("Host", "Host"),
+         ("Whose starts are listed: all of them, this machine's or one host's of sandbox-ai hosts. Shown once "
+          "there are hosts; Show starts on the Hosts page sets it.",
+          "Wessen Starts aufgelistet sind: alle, die dieses Rechners oder die eines Hosts von sandbox-ai hosts. "
+          "Zu sehen, sobald es Hosts gibt; Starts zeigen auf der Seite Hosts stellt es ein."),
+         ("Each host is read on its own: one that hangs holds up no other, and its rows stay greyed with when it "
+          "answered last. Clean up… acts on the host chosen here.",
+          "Jeder Host wird für sich gelesen: Einer, der hängt, hält keinen anderen auf, und seine Zeilen bleiben "
+          "ausgegraut mit der Zeit seiner letzten Antwort. Aufräumen… wirkt auf den hier gewählten Host."),
+         "sandbox-ai hosts run HOST -- list --json", "page-hosts"),
+    _tip("sandboxes.manage", ("Rename, History, Clean up", "Umbenennen, Verlauf, Aufräumen"),
+         ("Rename… gives the selected start another name: its run id stays, and so do its row and its tab. "
+          "History… shows its starts, ends, pauses and renames. Clean up… removes leftovers and kept starts unused "
+          "for longer than keep_days.",
+          "Umbenennen… gibt dem gewählten Start einen anderen Namen: Seine Lauf-ID bleibt, und mit ihr seine Zeile "
+          "und sein Tab. Verlauf… zeigt seine Starts, Enden, Pausen und Umbenennungen. Aufräumen… entfernt Reste "
+          "und aufbewahrte Starts, die länger als keep_days ungenutzt sind."),
+         ("Clean up shows what it would remove and asks; it removes exactly that, or nothing when the list "
+          "changed meanwhile. They wait while a command runs.",
+          "Aufräumen zeigt, was es entfernen würde, und fragt; es entfernt genau das, oder nichts, wenn sich die "
+          "Liste inzwischen geändert hat. Sie warten, solange ein Befehl läuft."),
+         "sandbox-ai rename OLD NEW, sandbox-ai list --history NAME, sandbox-ai gc --dry-run", "page-sandboxes"),
+    _tip("sandboxes.stop", ("Stop", "Stoppen"),
+         ("Ends the selected sandbox after asking; its launcher cleans up. A session can be paused instead.",
+          "Stoppt die gewählte Sandbox nach Rückfrage; ihr Launcher räumt auf. Eine Sitzung lässt sich "
+          "stattdessen pausieren."),
+         None, "sandbox-ai stop NAME", "sessions"),
     _tip("sandboxes.live", ("While it runs", "Während sie läuft"),
          ("Changes for a running sandbox: allow or revoke a host, hand over a device, change the limits, show "
           "its log.",
@@ -336,12 +357,12 @@ AREA_TIPS = (
           "the administrator decide what is offered.",
           "Wie lange ein Erlauben gilt: einmal, für diesen Lauf oder immer (für das Projekt gemerkt). "
           "Sicherheitsmodus und Administrator bestimmen, was angeboten wird."),
-         ("Allow (Alt+A) uses the scope chosen here. Deny for this run (Alt+D) refuses it until the run ends, "
-          "Deny once only this time, Block always… (Ctrl+Shift+B, asked first) at every later start of the "
-          "project.",
-          "Erlauben (Alt+A) nutzt die hier gewählte Geltung. Für diesen Lauf ablehnen (Alt+D) weist es bis zum "
-          "Ende des Laufs ab, Einmal ablehnen nur dieses Mal, Immer sperren… (Strg+Umschalt+B, mit Rückfrage) bei "
-          "jedem späteren Start des Projekts."),
+         ("Allow (Ctrl+Return) uses the scope chosen here. Deny for this run (Ctrl+Shift+D) refuses it until the "
+          "run ends, Deny once only this time, Block always… (Ctrl+Shift+K, asked first) at every later start of "
+          "the project.",
+          "Erlauben (Strg+Eingabe) nutzt die hier gewählte Geltung. Für diesen Lauf ablehnen (Strg+Umschalt+D) "
+          "weist es bis zum Ende des Laufs ab, Einmal ablehnen nur dieses Mal, Immer sperren… (Strg+Umschalt+K, "
+          "mit Rückfrage) bei jedem späteren Start des Projekts."),
          "sandbox-ai approvals allow | deny ID --scope once|run|always", "approvals"),
     _tip("approvals.always", ("Allowed or blocked always", "Immer erlaubt oder blockiert"),
          ("Your standing answers per project, of this machine or of a host chosen beside Refresh.",
@@ -714,7 +735,8 @@ PLACES = {
               ("apply_button", "board.apply", "after"), ("gallery_button", "board.presets", "after"),
               ("arrange_button", "board.tools", "after")),
     "sandboxes": (("table", "sandboxes.table", "corner"), ("only_project", "sandboxes.only_project", "after"),
-                  ("show_ended", "sandboxes.ended", "after"),
+                  ("show_ended", "sandboxes.ended", "after"), ("host_filter", "sandboxes.hosts", "after"),
+                  ("clean_button", "sandboxes.manage", "after"),
                   ("stop_button", "sandboxes.stop", "after"), ("devices_label", "sandboxes.live", "group")),
     "approvals": (("open", "approvals.open", "group"), ("host_filter", "approvals.hosts", "after"),
                   ("scope", "approvals.scope", "after"),

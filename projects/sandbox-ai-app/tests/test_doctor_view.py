@@ -85,3 +85,32 @@ Agents
     view.set_results([])
     assert view.summary.text() == "The doctor found nothing to check."
     view.deleteLater()
+
+
+def test_a_narrow_pane_stays_readable_and_an_unknown_answer_is_shown_as_it_came(qapp):
+    """User report: the doctor of an added host was hard to read on the Hosts page - long titles took the room,
+    the details were cut, everything was open. The check's column is capped, the others wrap, an area where all is
+    fine is folded, the chosen check is shown whole below with its command; an answer that holds no check it can
+    read (an older or unknown sandbox-ai) is shown as it came, never as "nothing to check"."""
+    view = D.DoctorView()
+    view.resize(560, 420)
+    long = ("ok", "Delegated UID/GID ranges of a very long user name that goes on and on", "65536 ids", "")
+    view.set_results(RESULTS + [long])
+    view.show()
+    qapp.processEvents()
+    assert view.tree.columnWidth(0) <= D.CHECK_COLUMN and view.tree.wordWrap()
+    groups = {view.tree.topLevelItem(i).text(0).split("  ")[0]: view.tree.topLevelItem(i)
+              for i in range(view.tree.topLevelItemCount())}
+    assert groups["System"].isExpanded() and groups["Engine (Podman, Bubblewrap, images)"].isExpanded()
+    assert not groups["Project and security mode"].isExpanded(), "all fine: folded"
+    namespaces = next(item for item in view.items() if "User namespaces" in item.text(0))
+    view.tree.setCurrentItem(namespaces)
+    text = view.detail.toPlainText()
+    assert text.startswith("Problem: User namespaces") and "user.max_user_namespaces is 0" in text
+    assert "Command (double-click the row or Copy copies it): sudo sysctl user.max_user_namespaces=15000" in text
+    view.set_text("sandbox-ai doctor: everything is \x1b[32mfine\x1b[0m here\nno table at all")
+    assert view.count() == 0 and "does not read" in view.summary.text()
+    assert "\\x1b[32mfine" in view.detail.toPlainText() and "no table at all" in view.detail.toPlainText()
+    view.set_text("")
+    assert view.summary.text() == "The doctor found nothing to check."
+    view.deleteLater()

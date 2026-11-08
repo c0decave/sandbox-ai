@@ -90,7 +90,9 @@ BLOCKING_SAI = {"call", "answer", "dry_run", "doctor", "mcp_catalog", "statistic
                 # over SSH to the hosts of `sandbox-ai hosts` (seconds; a host that does not answer: up to the timeout)
                 "host_run", "host_json", "host_instances", "host_questions", "host_test", "host_update",
                 "limits_shown", "review_home", "host_remembered", "host_net_options", "ended_starts", "start_history",
-                "collect", "host_set", "host_add", "host_remove"}
+                "collect", "host_set", "host_add", "host_remove", "collect_as_shown", "host_devices_added",
+                "host_workspaces", "host_secrets", "secret_exists", "host_approvals_history", "session_ids",
+                "recent_folders", "host_install"}
 # (host_statuses(cached=True) reads what `sandbox-ai hosts list` kept, without SSH: the Hosts page lists it at once.)
 # (stop_commands runs on the GUI thread on purpose: only when quitting, bounded by one grace period.)
 BLOCKING_MODULES = {"subprocess"}
@@ -178,3 +180,116 @@ class Page:
 '''
     assert [what for _, what in blocking_calls(source)] == ["sai.call()", "subprocess.run()",
                                                              "backend.read_connections()", "sai.doctor()"]
+
+
+# -- one confirmation policy: every call path that ends, removes or weakens something asks first --
+
+# How the pages do each action of backend.NEEDS_CONFIRM: a SandboxAI method, or the words of a sandbox-ai command
+# (consecutive string literals of one call or tuple). The functions that issue one must ask first with
+# widgets.ask_first(..., ACTION, ...): in themselves or in a function they are nested in.
+MUTATIONS = {
+    "start-stop": ["stop_run", "stop_mcp", ("session", "stop")],
+    "gc": ["collect_as_shown"],
+    "approval-forget": ["forget_remembered"],
+    "defaults-lower": [("defaults", "set"), ("defaults", "unset")],
+    "net-allow": [("net", "allow")],
+    "net-untaint": [("net", "untaint")],
+    "workspace-writable": ["add_workspace"],
+    "device-add": ["add_device"],
+    "limits-raise": ["set_limits"],
+    "host-remove": ["host_remove"],
+    "host-edit": ["host_set"],
+    "host-install": ["host_install"],
+    "vpn-remove": ["vpn_remove"],
+    "llm-remove": [("llm", "remove")],
+    "secret-delete": ["delete_secret"],
+    "secret-replace": ["set_secret", "vpn_add"],
+    "mcp-attach": ["mcp_attach"],
+}
+
+def string_runs(node):
+    """Every run of consecutive string literals among the arguments of a call or the items of a tuple or list."""
+    items = list(node.args) if isinstance(node, ast.Call) else list(getattr(node, "elts", []))
+    words = [item.value if isinstance(item, ast.Constant) and isinstance(item.value, str) else None for item in items]
+    return [tuple(words[i:j]) for i in range(len(words)) for j in range(i + 1, len(words) + 1)
+            if all(w is not None for w in words[i:j])]
+
+
+def issues(node, marker):
+    """True if NODE (a Call, Tuple, List or Attribute) is how MARKER is done."""
+    if isinstance(marker, str):
+        return isinstance(node, ast.Attribute) and node.attr == marker and is_sai(node.value)
+    return isinstance(node, (ast.Call, ast.Tuple, ast.List)) and marker in string_runs(node)
+
+
+def asked_actions(function):
+    """The actions FUNCTION (with what is nested in it) asks for: the string literals of ask_first's second argument."""
+    found = set()
+    for node in ast.walk(function):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", None)) == "ask_first" \
+                and len(node.args) > 1:
+            found |= {n.value for n in ast.walk(node.args[1]) if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    return found
+
+
+def unasked(source):
+    """[(line, action)] of the mutating calls in SOURCE whose function (or one it is nested in) does not ask first."""
+    tree = ast.parse(source)
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    found = []
+    for node in ast.walk(tree):
+        for action, markers in MUTATIONS.items():
+            if not any(issues(node, marker) for marker in markers):
+                continue
+            chain, parent = [], parents.get(node)
+            while parent is not None:
+                if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    chain.append(parent)
+                parent = parents.get(parent)
+            if not chain:
+                continue  # module level: a table, not a call path
+            if not any(action in asked_actions(function) for function in chain):
+                found.append((node.lineno, action))
+    return found
+
+
+def test_every_call_that_ends_removes_or_weakens_something_asks_first():
+    """The walk over the mutating calls of the pages (review round 3, A5): net allow, raised limits, a replaced or
+    deleted secret, kits, MCP attach and restart, defaults lowered, gc, forget, untaint, devices, workspaces, hosts,
+    stops - each asks through widgets.ask_first with its action of backend.NEEDS_CONFIRM."""
+    import sys
+    sys.path.insert(0, str(PACKAGE.parent))
+    from sandbox_ai_app import backend
+    actions = set(backend.NEEDS_CONFIRM) | set(backend.APP_NEEDS_CONFIRM)
+    assert set(MUTATIONS) <= actions
+    found, asked = [], set()
+    for path in sorted(PACKAGE.glob("*.py")):
+        if path.name in ("backend.py", "widgets.py"):
+            continue
+        source = path.read_text()
+        found += [f"{path.name}:{line} {action}" for line, action in unasked(source)]
+        asked |= asked_actions(ast.parse(source))
+    assert not found, "not asked first (widgets.ask_first):\n" + "\n".join(found)
+    assert not asked - actions, f"asked for actions the table does not have: {sorted(asked - actions)}"
+    assert actions <= asked, f"actions of the table no page asks for: {sorted(actions - asked)}"
+
+
+def test_the_walk_finds_a_call_that_does_not_ask():
+    source = '''
+class Page:
+    def bad(self):
+        background(self.sai.host_run, host, "net", "allow", run, done=self.done)
+        background(self.sai.set_limits, run, "16g", done=self.done)
+
+    def good(self):
+        if not ask_first(self, "net-allow", "t", "x", "Allow"):
+            return
+        def work():
+            return self.sai.host_run(host, "net", "allow", run)
+        background(work, done=self.done)
+
+    def unrelated(self):
+        if ask_first(self, "gc", "t", "x", "Remove"):
+            self.sai.set_limits(run, "16g")
+'''
+    assert unasked(source) == [(4, "net-allow"), (5, "limits-raise"), (16, "limits-raise")]

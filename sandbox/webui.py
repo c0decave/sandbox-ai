@@ -406,6 +406,75 @@ LIMIT_VALUE = re.compile(r"none|[0-9]{1,12}(?:\.[0-9]{1,6})?[kmgtKMGT]?")
 SIZE_UNITS = {"k": 1 << 10, "m": 1 << 20, "g": 1 << 30, "t": 1 << 40}  # as limits takes them (devices.bytes_of)
 
 
+# `sandbox-ai hosts install` (on the machine of the service: the local sandbox-ai copies itself, or install.sh with the
+# release keys, to the host over SSH). Each of its steps may take up to hosts.INSTALL_TIMEOUT (900 s): the copy and
+# install.sh; the route waits for all of them, with room to spare. The page stays usable meanwhile.
+INSTALL_PREFIX = re.compile(r"/[A-Za-z0-9._/-]{0,200}")
+INSTALL_KEYS = ("mode", "prefix", "sudo", "source", "version")
+
+
+def install_route_timeout():
+    return 2 * getattr(module("hosts"), "INSTALL_TIMEOUT", 900) + 120
+
+
+def install_choice(body):
+    """{"mode", "prefix", "sudo", "source", "version"} of BODY checked as `sandbox-ai hosts install` takes them (mode
+    user or system, or null: the host decides (system when the SSH user is root); prefix only for system, an
+    absolute path of letters, digits, . _ - and / without . or .. parts; sudo true, false or null (with sudo when a
+    system installation as no root needs it); source here (this machine's copy) or download (the signed release),
+    version X.Y.Z only with download)."""
+    hosts = module("hosts")
+    if set(body) - {*INSTALL_KEYS, "confirm"}:
+        raise Refused(400, "an install has mode, prefix, sudo, source and version")
+    mode, prefix, sudo = body.get("mode"), body.get("prefix") or None, body.get("sudo")
+    source, version = body.get("source") or "here", body.get("version") or None
+    if mode not in (None, "user", "system"):
+        raise Refused(400, "mode is user, system or null (the host decides)")
+    if prefix is not None:
+        if mode != "system":
+            raise Refused(400, "a prefix is for an installation for every user (mode system)")
+        if not (isinstance(prefix, str) and INSTALL_PREFIX.fullmatch(prefix)):
+            raise Refused(400, "the prefix is an absolute path of letters, digits, . _ - and /")
+        no_dots(prefix, "the prefix")
+        if "//" in prefix or (len(prefix) > 1 and prefix.endswith("/")):
+            raise Refused(400, "the prefix is an absolute path without empty parts")
+    if sudo not in (None, True, False):
+        raise Refused(400, "sudo is true, false or null (when needed)")
+    if sudo is True and mode == "user":
+        raise Refused(400, "sudo is for an installation for every user (mode system)")
+    if source not in ("here", "download"):
+        raise Refused(400, "source is here (this machine's sandbox-ai) or download (the signed release)")
+    if version is not None:
+        if source != "download":
+            raise Refused(400, "a version is for download (this machine's copy is its own version)")
+        if not (isinstance(version, str) and hosts.VERSION.fullmatch(version)):
+            raise Refused(400, "version is X.Y.Z")
+    return {"mode": mode, "prefix": prefix, "sudo": sudo, "source": source, "version": version}
+
+
+def install_argv(name, choice, as_json=True):
+    """The arguments of the local sandbox-ai that install it on host NAME as CHOICE (install_choice) says."""
+    args = ["hosts", "install", name]
+    args += {"user": ["--user"], "system": ["--system"], None: []}[choice["mode"]]
+    args += [f"--prefix={choice['prefix']}"] if choice["prefix"] else []
+    args += {True: ["--sudo"], False: ["--no-sudo"], None: []}[choice["sudo"]]
+    args += ["--download"] if choice["source"] == "download" else ["--from-here"]
+    args += [f"--version={choice['version']}"] if choice["version"] else []
+    return args + (["--json"] if as_json else [])
+
+
+def install_words(choice, entry):
+    """How CHOICE installs, in words for its confirmation (for whom, where, as root or with sudo, from where)."""
+    root = str((entry or {}).get("ssh", "")).startswith("root@")
+    mode = choice["mode"] or ("system" if root else "user")
+    who = f"for every user in {choice['prefix'] or '/usr/local'}" if mode == "system" else "for the SSH user"
+    how = ("as root (the SSH user)" if root else "without sudo" if choice["sudo"] is False else "with sudo") \
+        if mode == "system" else "without sudo"
+    where = (f"the signed release {choice['version']}" if choice["version"] else "the signed release") \
+        if choice["source"] == "download" else "this machine's copy"
+    return f"{who}, {how}, from {where}"
+
+
 def limit_number(key, value):
     """A limit as limits --show gives it (bytes, CPUs, processes) from VALUE as limits takes it; none: infinite."""
     if value == "none":
@@ -523,6 +592,8 @@ NEEDS_CONFIRM = {
                    "continues its conversation)",
     "host-edit": "changing a host's SSH target, port, key, command or sudo setting changes where and how this "
                  "service's commands run",
+    "host-install": "installing sandbox-ai on a host puts this machine's copy (or the signed release) there, for the "
+                    "SSH user or for every user, as root or with sudo",
     "secret-delete": "deleting a secret takes it from every start, VPN profile and Git login that names it",
     "secret-replace": "a secret of that name exists: its value is replaced",
 }
@@ -716,6 +787,7 @@ class Api:
             ("DELETE", H, self.remove_host, ("host-remove",)),
             ("POST", H + r"/test", self.test_host, ()),
             ("POST", H + r"/update", self.update_host, ()),
+            ("POST", H + r"/install", self.install_host, ("host-install",)),
             ("GET", H + r"/starts", self.starts, ()),
             ("POST", H + r"/starts/(?P<name>[^/]+)/(?P<action>pause|resume|stop|delete)", self.start_action,
              ("start-stop", "start-delete")),
@@ -941,7 +1013,7 @@ class Api:
             return result
         result["ssh"], result["version"] = (None if local else True), out.strip()
         try:
-            result["doctor"] = self.json_of(name, ["doctor", "--json"], 90)
+            result["doctor"] = self.doctor_of(name, 90)
         except Refused as exc:
             result["error"] = str(exc)
         return result
@@ -963,6 +1035,31 @@ class Api:
             if name != hosts.LOCAL:
                 hosts_file()  # a damaged hosts.json: that, as a 500 with why
             raise Refused(404 if "no host" in str(exc) else 400, printable(exc)) from None
+
+    def install_host(self, params, body):
+        """As `sandbox-ai hosts install NAME --json`, run by the local sandbox-ai (it reaches the host over SSH):
+        {"name", "before", "after", "changed", "mode", "prefix", "sudo", "root", "source", "error",
+        "needs_password", "output", "notes"}. Asked first (host-install), naming the host and how; when sudo there
+        wants a password, "needs_password" says so and the page offers a terminal (kind=install), where it asks."""
+        hosts = module("hosts")
+        name = host_name(params["host"])
+        if name == hosts.LOCAL:
+            raise Refused(400, "this machine installs with install.sh itself (and updates with: sandbox-ai update)")
+        choice = install_choice(body)
+        entry = hosts_file().get(name)
+        if entry is None:
+            raise Refused(404, "no such host")
+        confirmed(body, "host-install", f"{name} ({entry.get('ssh')}): {install_words(choice, entry)}")
+        status, out, err = self.run(hosts.LOCAL, install_argv(name, choice), install_route_timeout())
+        try:
+            result = json.loads(out)
+        except ValueError:
+            result = None
+        if not isinstance(result, dict):
+            raise Refused(502, f"sandbox-ai hosts install {name}: exit status {status}: "
+                               f"{printable((err or out).strip()[-600:])}")
+        self.forget_host(name)
+        return result
 
     # starts and sessions
     def starts(self, params, body):
@@ -1491,7 +1588,23 @@ class Api:
 
     # the doctor and the logs
     def doctor(self, params, body):
-        return self.json_of(params["host"], ["doctor", "--json"], 120)
+        return self.doctor_of(params["host"], 120)
+
+    def doctor_of(self, host, timeout):
+        """`sandbox-ai doctor --json` on HOST: its list of checks; from an older sandbox-ai that answers with text
+        (or has no --json yet: then its plain `doctor`), that text as one string, which the page shows as it is."""
+        status, out, err = self.run(host, ["doctor", "--json"], timeout)
+        try:
+            return json.loads(out)
+        except ValueError:
+            pass
+        if status != 0 and not out.strip() and "--json" in (err or ""):  # argparse: unrecognized arguments: --json
+            status, out, err = self.run(host, ["doctor"], timeout)
+        text = printable(out.rstrip()[-20000:]) if out.strip() and status in (0, 1) else ""
+        if not text:
+            raise Refused(502, f"sandbox-ai doctor on {host}: exit status {status}: "
+                               f"{printable((err or out).strip()[-600:])}")
+        return text
 
     def logs(self, params, body):
         return self.json_of(params["host"], ["logs", "--json"], 60)
@@ -1692,7 +1805,20 @@ def terminal_command(query):
             return host, hosts.update_terminal(host, version)
         except ValueError as exc:
             raise Refused(400, printable(exc)) from None
-    raise Refused(400, "kind is attach, start or update")
+    if kind == "install":
+        # The host's install where sudo may ask for its password (hosts install said it wants one): the local
+        # sandbox-ai's hosts install in this terminal, which asks there (ssh -tt ... sudo).
+        if host == hosts.LOCAL:
+            raise Refused(400, "this machine installs with install.sh itself")
+        if host not in hosts_file():
+            raise Refused(404, "no such host")
+        sudo = {"1": True, "0": False, None: None, "": None}.get(query.get("sudo"), "bad")
+        if sudo == "bad":
+            raise Refused(400, "sudo is 1, 0 or not given")
+        choice = install_choice({key: query[key] for key in ("mode", "prefix", "source", "version") if query.get(key)}
+                                | ({"sudo": sudo} if sudo is not None else {}))
+        return host, hosts.argv(hosts.LOCAL, install_argv(host, choice, as_json=False), tty=True)
+    raise Refused(400, "kind is attach, start, update or install")
 
 
 # --- WebSocket (RFC 6455) ---------------------------------------------------------------------------------

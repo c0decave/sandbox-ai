@@ -44,6 +44,22 @@ class FakeSai:
     def command(self, *args):
         return ["sandbox-ai", *args]
 
+    # another host (sandbox-ai hosts): its secrets over SSH, names only; a value on standard input there
+    def remote_hosts(self):
+        return ["ct1"]
+
+    def host_secrets(self, host):
+        self.calls.append(("host_secrets", host))
+        return "keyring", [("LLM_KEY", "keyring")]
+
+    def set_secret(self, name, value, host="local"):
+        self.calls.append(("set", name, value, host))
+        return 0, f"{name} kept", ""
+
+    def delete_secret(self, name, host="local"):
+        self.calls.append(("delete", name, host))
+        return 0, f"{name} deleted", ""
+
 
 @pytest.fixture
 def page(qapp, monkeypatch):
@@ -143,3 +159,39 @@ def test_deleting_a_secret_and_a_stored_login_ask_with_cancel_as_the_default(pag
     monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
     page.login(True)
     assert opened and opened[-1][-1] == "--logout"
+
+
+def test_the_secrets_of_another_host_and_a_replace_asked_first(page, monkeypatch, wait):
+    """Review round 3 (A3, A8): a secret of the name typed had its value replaced without a word; another host's
+    secrets could not be reached from the app."""
+    page.refresh()
+    assert wait(lambda: not widgets.busy(page) and page.secret_host.findData("ct1") >= 0)
+    # This machine: a secret kept already is replaced only after a yes, a new one is kept at once.
+    page.name.setText("GH_PUSH")
+    page.value.setText("ghp-new")
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", False)  # Cancel
+    page.set_secret()
+    assert widgets.SHOWN[-1][0] == "Secret" and "GH_PUSH is kept already" in widgets.SHOWN[-1][1]
+    assert page.value.text() == "" and not [c for c in page.sai.calls if c[0] == "set"], "declined: nothing kept"
+    count = len(widgets.SHOWN)
+    page.name.setText("NEW_TOKEN")
+    page.value.setText("tok")
+    page.set_secret()
+    assert wait(lambda: ("set", "NEW_TOKEN", "tok", "local") in page.sai.calls) and len(widgets.SHOWN) == count
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    # Another host: its own list, set and delete there.
+    assert wait(lambda: not widgets.busy(page))
+    page.secret_host.setCurrentIndex(page.secret_host.findData("ct1"))
+    page.load_secrets()
+    assert wait(lambda: not widgets.busy(page) and cells(page.secrets) == ["LLM_KEY"])
+    assert page.backend_label.text().startswith("On ct1: ")
+    widgets.SHOWN.clear()
+    page.name.setText("LLM_KEY")
+    page.value.setText("sk-new")
+    page.set_secret()
+    assert widgets.SHOWN[-1][1].startswith("On ct1: ") and "LLM_KEY is kept already" in widgets.SHOWN[-1][1]
+    assert wait(lambda: ("set", "LLM_KEY", "sk-new", "ct1") in page.sai.calls)
+    assert wait(lambda: not widgets.busy(page))
+    page.delete_secret()
+    assert widgets.SHOWN[-1][1] == "On ct1: Delete the secret LLM_KEY?"
+    assert wait(lambda: ("delete", "LLM_KEY", "ct1") in page.sai.calls)

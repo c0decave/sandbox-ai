@@ -17,19 +17,22 @@ import json
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLineEdit, QPlainTextEdit,
-    QPushButton, QSpinBox, QSplitter, QTabWidget, QVBoxLayout, QWidget,
+    QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLineEdit,
+    QPlainTextEdit, QPushButton, QRadioButton, QSpinBox, QSplitter, QTabWidget, QVBoxLayout, QWidget,
 )
 
+from . import backend
 from .files import printable
 from .i18n import tr
-from .widgets import MONO, background, confirm, fill, plain_label, row_key, selected_rows, set_enabled, table, warn
+from .widgets import (
+    MONO, ask_first, background, confirm, fill, inform, plain_label, row_key, selected_rows, set_enabled, table, warn,
+)
 
-# Security modes in rising strictness (sandbox-ai's modes.NAMES) and its default when defaults.json names none.
-MODES = ("lax", "low", "medium", "high", "paranoid")
-DEFAULT_MODE = "medium"
-TELEMETRY_RANK = {"off": 2, "strict": 1, "on": 0}  # the more private, the higher
-DEFAULT_CANARIES = ("credentials", "home")  # canary.DEFAULT_CATEGORIES, when the host does not say
+# Security modes in rising strictness (sandbox-ai's modes.NAMES) and its default when defaults.json names none; the
+# orders of protection are backend's (the web interface's): one policy for what counts as a step down.
+MODES = backend.MODE_ORDER
+DEFAULT_MODE = backend.DEFAULT_MODE
+DEFAULT_CANARIES = backend.DEFAULT_CANARIES  # canary.DEFAULT_CATEGORIES, when the host does not say
 CANARY_LIST = "list"  # the canaries choice "these categories"
 
 
@@ -84,25 +87,31 @@ def reach_text(info, now=None):
     return tr("yes") if seen else tr("not asked yet")
 
 
-def security_steps_down(old, new):
+def security_steps_down(old, new, canary_default=None):
     """What of the defaults OLD -> NEW ({key: value}, a key missing: sandbox-ai's own default) lowers the security
-    of every later start: [text] (empty: nothing does)."""
+    of every later start, as backend.defaults_lowered decides it (CANARY_DEFAULT: that host's own): [text] (empty:
+    nothing does)."""
     found = []
-    old_mode, new_mode = old.get("mode", DEFAULT_MODE), new.get("mode", DEFAULT_MODE)
-    if old_mode in MODES and new_mode in MODES and MODES.index(new_mode) < MODES.index(old_mode):
-        found.append(tr("the security mode from {old} down to {new}", old=old_mode, new=new_mode))
-    def canaries(value):
-        return set() if value is False else set(value) if isinstance(value, list) else set(DEFAULT_CANARIES)
-    lost = canaries(old.get("canaries")) - canaries(new.get("canaries"))
-    if lost:
-        found.append(tr("no canaries of {categories} any more", categories=", ".join(sorted(lost))))
-    if TELEMETRY_RANK.get(new.get("telemetry", "off"), 0) < TELEMETRY_RANK.get(old.get("telemetry", "off"), 0):
-        found.append(tr("the agents' telemetry from {old} to {new}", old=old.get("telemetry", "off"),
-                        new=new.get("telemetry", "off")))
-    old_days, new_days = old.get("keep_days"), new.get("keep_days")
-    if isinstance(new_days, int) and (not isinstance(old_days, int) or new_days < old_days):
-        found.append(tr("kept starts unused for {days} days removed with their HOME", days=new_days))
+    for key, before, after in backend.defaults_lowered(old, new, canary_default):
+        if key == "mode":
+            found.append(tr("the security mode from {old} down to {new}", old=printable(before), new=printable(after)))
+        elif key == "telemetry":
+            found.append(tr("the agents' telemetry from {old} to {new}", old=printable(before), new=printable(after)))
+        elif key == "canaries":
+            found.append(tr("no canaries of {categories} any more", categories=", ".join(map(printable, before))))
+        elif isinstance(before, int):
+            found.append(tr("kept starts unused for {days} days removed with their HOME (instead of {before})",
+                            days=after, before=before))
+        else:
+            found.append(tr("kept starts unused for {days} days removed with their HOME", days=after))
     return found
+
+
+def default_step(op, key, value):
+    """A change of the defaults in words: "mode = high", "canaries: sandbox-ai's default"."""
+    if op == "unset":
+        return tr("{setting}: sandbox-ai's default", setting=key)
+    return f"{key} = {printable(json.dumps(value))}"
 
 
 class EditHostDialog(QDialog):
@@ -125,6 +134,102 @@ class EditHostDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
+
+
+def ssh_user(entry):
+    """The user of a host's SSH target (USER@HOST), or "" when it names none."""
+    target = str(entry.get("ssh") or "")
+    return target.split("@", 1)[0] if "@" in target else ""
+
+
+class InstallDialog(QDialog):
+    """How sandbox-ai is installed on a host (`sandbox-ai hosts install`): for the SSH user or for every user (under
+    a prefix), as root, with sudo or without, from this machine's copy or the signed release the host downloads."""
+
+    def __init__(self, entry, version="", parent=None):
+        super().__init__(parent)
+        name, user = printable(entry.get("name", "")), printable(ssh_user(entry))
+        self.root = user == "root"
+        self.setWindowTitle(tr("Install sandbox-ai on {host}", host=name))
+        form = QFormLayout(self)
+        self.for_user = QRadioButton(tr("For the SSH user ({user}): in its ~/.local", user=user or "?"))
+        self.for_system = QRadioButton(tr("For every user, under:"))
+        self.prefix = QLineEdit("/usr/local")
+        self.prefix.setAccessibleName(tr("Prefix"))
+        where = QButtonGroup(self)
+        for button in (self.for_user, self.for_system):
+            where.addButton(button)
+        (self.for_system if self.root else self.for_user).setChecked(True)
+        system_row = QHBoxLayout()
+        system_row.addWidget(self.for_system)
+        system_row.addWidget(self.prefix, 1)
+        form.addRow(tr("Where"), self.for_user)
+        form.addRow("", system_row)
+        self.how = QComboBox()
+        self.how.setAccessibleName(tr("As whom"))
+        if self.root:
+            self.how.addItem(tr("as root (the SSH user is root)"), None)
+        else:
+            self.how.addItem(tr("with sudo (asked there when sudo wants a password)"), True)
+        self.how.addItem(tr("without sudo (refused where root is needed)"), False)
+        form.addRow(tr("As whom"), self.how)
+        self.here = QRadioButton(tr("This machine's copy ({version})", version=printable(version) or "?"))
+        self.download = QRadioButton(tr("The signed release, downloaded by the host"))
+        self.version = QLineEdit()
+        self.version.setPlaceholderText(tr("the newest (or X.Y.Z)"))
+        self.version.setAccessibleName(tr("Version"))
+        source = QButtonGroup(self)
+        for button in (self.here, self.download):
+            source.addButton(button)
+        self.here.setChecked(True)
+        download_row = QHBoxLayout()
+        download_row.addWidget(self.download)
+        download_row.addWidget(self.version, 1)
+        form.addRow(tr("From"), self.here)
+        form.addRow("", download_row)
+        for button in (self.for_user, self.for_system, self.here, self.download):
+            button.toggled.connect(lambda _=False: self.follow())
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+        self.follow()
+
+    def follow(self):
+        self.prefix.setEnabled(self.for_system.isChecked())
+        self.how.setEnabled(self.for_system.isChecked())  # an installation for the user needs no root
+        self.version.setEnabled(self.download.isChecked())
+
+    def values(self):
+        """{mode, prefix, sudo, source, version} for SandboxAI.host_install."""
+        system = self.for_system.isChecked()
+        download = self.download.isChecked()
+        return {"mode": "system" if system else "user",
+                "prefix": (self.prefix.text().strip() or None) if system else None,
+                "sudo": self.how.currentData() if system else None,
+                "source": "download" if download else "here",
+                "version": (self.version.text().strip() or None) if download else None}
+
+    def words(self):
+        """The choice in words, for the question before it runs."""
+        values = self.values()
+        where = tr("for every user under {prefix}", prefix=printable(values["prefix"] or "/usr/local")) \
+            if values["mode"] == "system" else tr("for the SSH user")
+        how = "" if values["mode"] != "system" else (" " + (tr("as root") if self.root else tr("with sudo")
+                                                            if values["sudo"] else tr("without sudo")))
+        source = tr("from the signed release ({version})", version=printable(values["version"] or tr("the newest"))) \
+            if values["source"] == "download" else tr("from this machine's copy")
+        return f"{where}{how}, {source}"
+
+
+def install_text(name, result):
+    """One host's installation in a line or two, as sandbox-ai hosts install says it."""
+    if result.get("error"):
+        line = tr("{host}: not installed: {error}", host=name, error=printable(result["error"]))
+    else:
+        line = tr("{host}: sandbox-ai {before} -> {after}", host=name, before=printable(result.get("before") or "-"),
+                  after=printable(result.get("after") or "?"))
+    return "\n".join([line, *("  " + printable(note) for note in result.get("notes") or [])])
 
 
 class AddHostDialog(QDialog):
@@ -201,15 +306,28 @@ class HostsPage(QWidget):
                                     self.remove, tr("Remove the host"))
         self.test_button = button(tr("Test"), tr("SSH, the host's sandbox-ai and its doctor (sandbox-ai hosts test)"),
                                   self.test, tr("Test the host"))
-        self.update_button = button(tr("Update"), tr("sandbox-ai update on this host (its own signed update; sudo for "
-                                                     "a system installation)"), self.update_host, tr("Update the host"))
+        self.update_button = button(tr("Update sandbox-ai"), tr("sandbox-ai update on this host (its own signed "
+                                                                "update; sudo for a system installation)"),
+                                    self.update_host, tr("Update the host"))
         self.update_all_button = button(tr("Update all"), tr("sandbox-ai update on every host of the list, one after "
                                                              "the other"), self.update_all)
+        self.install_button = button(tr("Install…"), tr("Install sandbox-ai on this host: for the SSH user or every "
+                                                        "user, as root, with sudo or without, from this machine's copy "
+                                                        "or the signed release (sandbox-ai hosts install)"),
+                                     self.install, tr("Install sandbox-ai on the host"))
+        # With sudo or not, for Update and Update all (default: as set for each host, hosts set --update-sudo).
+        self.update_sudo = QComboBox()
+        self.update_sudo.setAccessibleName(tr("Update with sudo"))
+        self.update_sudo.setToolTip(tr("Whether the update runs with sudo (a system installation needs it)"))
+        for text, value in ((tr("sudo as set for the host"), None), (tr("with sudo"), True),
+                            (tr("without sudo"), False)):
+            self.update_sudo.addItem(text, value)
         self.versions_button = button(tr("Check versions"), tr("Ask every host for its sandbox-ai version now"),
                                       lambda: self.load_versions(refresh=True))
         for group in ((self.starts_button, self.questions_button, self.refresh_button),
                       (self.add_button, self.edit_button, self.remove_button, self.test_button),
-                      (self.update_button, self.update_all_button, self.versions_button)):
+                      (self.install_button, self.update_button, self.update_sudo, self.update_all_button,
+                       self.versions_button)):
             row = QHBoxLayout()
             for widget in group:
                 row.addWidget(widget)
@@ -386,6 +504,18 @@ class HostsPage(QWidget):
         set_enabled(self.edit_button, remote, tr("This machine has no SSH settings.") if name else None)
         for widget in (self.starts_button, self.questions_button, self.test_button):
             widget.setEnabled(name is not None)
+        # Install… stands out where the host has no sandbox-ai that answers (missing, or not reachable).
+        set_enabled(self.install_button, remote and self.sai.host_install_supported(),
+                    tr("This machine installs with install.sh (or: sandbox-ai update).") if name == "local" else
+                    tr("This sandbox-ai cannot install on hosts yet: update it.") if remote else None)
+        info = (getattr(self, "versions", None) or {}).get(name) if remote else None
+        missing = remote and isinstance(info, dict) and not info.get("version")
+        self.install_button.setProperty("role", "primary" if missing else "")
+        self.install_button.style().unpolish(self.install_button)
+        self.install_button.style().polish(self.install_button)
+        entry = self.entry(name) if remote else {}
+        self.update_sudo.setItemText(0, tr("sudo as set for the host ({how})", how=tr("with sudo") if entry.get(
+            "update_sudo") else tr("without sudo")) if remote else tr("sudo as set for the host"))
         self.pane_title.setText(printable(self.label(name)) if name else "")
         if name != self.defaults_host:
             self.defaults, self.defaults_host = None, None
@@ -431,6 +561,10 @@ class HostsPage(QWidget):
         sudo = dialog.sudo.isChecked()
         if sudo == bool(self.entry(name).get("update_sudo")):
             return
+        if not ask_first(self, "host-edit", tr("Edit {host}", host=name), tr(
+                "Update sandbox-ai on {host} with sudo from now on?", host=self.label(name)) if sudo else tr(
+                "Update sandbox-ai on {host} without sudo from now on?", host=self.label(name)), tr("Change")):
+            return
         background(self.sai.host_set, name, sudo, owner=self, source=self.edit_button, timeout=60,
                    done=lambda result, error: warn(self, tr("Edit {host}", host=name), printable(str(error)))
                    if error else self.load_hosts(name))
@@ -439,10 +573,10 @@ class HostsPage(QWidget):
         name = self.host()
         if name in (None, "local"):
             return
-        if not confirm(self, tr("Remove host"), tr(
+        if not ask_first(self, "host-remove", tr("Remove host"), tr(
                 "Remove {host} from the list of hosts? Its sandbox-ai and its starts stay there; this app and sandbox-ai "
                 "web no longer reach it (its approvals are no longer answered from here).", host=self.label(name)),
-                tr("Remove"), destructive=True):
+                tr("Remove")):
             return
 
         def done(result, error):
@@ -509,6 +643,7 @@ class HostsPage(QWidget):
             self.mode.addItem(printable(mode), mode)
         self.mode.setCurrentIndex(max(0, self.mode.findData(values.get("mode"))) if values.get("mode") else 0)
         default = [c for c in result.get("canary_default") or DEFAULT_CANARIES if isinstance(c, str)]
+        self.canary_default = default  # what "sandbox-ai's default" plants there: what fewer canaries are counted from
         self.canaries.clear()
         self.canaries.addItem(tr("sandbox-ai's default ({categories})", categories=", ".join(default)), None)
         self.canaries.addItem(tr("off"), False)
@@ -567,26 +702,40 @@ class HostsPage(QWidget):
         if not steps:
             self.defaults_note.setText(tr("Nothing changed."))
             return
-        lower = security_steps_down(old, chosen)
-        if lower and not confirm(self, tr("Defaults of {host}", host=self.label(name)), tr(
+        canary_default = getattr(self, "canary_default", None)
+        lower = security_steps_down(old, chosen, canary_default)
+        if not ask_first(self, "defaults-lower", tr("Defaults of {host}", host=self.label(name)), tr(
                 "Every later start on {host} gets less protection: {changes}. Save anyway?", host=self.label(name),
-                changes="; ".join(lower)), tr("Save"), destructive=True):
+                changes="; ".join(lower)), tr("Save"), detail={"old": old, "new": chosen,
+                                                               "canary_default": canary_default}):
             return
         argv = [("defaults", "set", key, json.dumps(value)) if op == "set" else ("defaults", "unset", key)
                 for op, key, value in steps]
 
         def work():
-            said = []
-            for args in argv:
+            """Each change in turn; the first one refused stops it: (applied, refused step or None, its words)."""
+            applied = []
+            for step, args in zip(steps, argv):
                 status, out, err = self.sai.host_run(name, *args, timeout=60)
-                said.append((out + err).strip())
                 if status != 0:
-                    raise ValueError("\n".join(said))
-            return "\n".join(said)
+                    return applied, step, (err or out).strip()
+                applied.append(step)
+            return applied, None, ""
 
         def done(result, error):
-            if error:
-                warn(self, tr("Defaults"), printable(str(error)))
+            if error is not None:  # not known what was applied: the defaults read again say it
+                warn(self, tr("Defaults"), tr("Not known how much was saved on {host}: {error}. The values read "
+                                              "again show what it has now.", host=self.label(name),
+                                              error=printable(str(error))), modal=False)
+            else:
+                applied, refused, said = result
+                if refused is not None:
+                    warn(self, tr("Defaults"), tr(
+                        "Saved on {host}: {applied}. Refused: {refused} ({reason}). Not tried: {rest}.",
+                        host=self.label(name), applied=", ".join(default_step(*s) for s in applied) or tr("nothing"),
+                        refused=default_step(*refused), reason=printable(said)[-500:] or "?",
+                        rest=", ".join(default_step(*s) for s in steps[len(applied) + 1:]) or tr("nothing")),
+                        modal=False)
             self.defaults_host = None
             self.load_defaults()
         background(work, owner=self, source=self.save_defaults_button, timeout=60 * len(argv) + 30, done=done)
@@ -621,6 +770,7 @@ class HostsPage(QWidget):
         self.results, self.queue = [], [name]
         self.updates.clear()
         self.tabs.setCurrentWidget(self.updates)
+        self.queue_sudo = self.update_sudo.currentData()
         self.next_update()
 
     def update_all(self):
@@ -630,12 +780,14 @@ class HostsPage(QWidget):
         self.results, self.queue = [], list(names)
         self.updates.clear()
         self.tabs.setCurrentWidget(self.updates)
+        self.queue_sudo = self.update_sudo.currentData()
         self.next_update()
 
     def next_update(self, sudo=None):
         """The next host of the queue, one after the other (each may take minutes); the summary at the end."""
         if not self.queue:
             return self.updates_done()
+        sudo = getattr(self, "queue_sudo", None) if sudo is None else sudo  # the choice beside Update
         name, total = self.queue[0], len(self.results) + len(self.queue)
         self.status.setText(tr("Updating {host} ({index} of {count})…", host=name, index=len(self.results) + 1,
                                count=total))
@@ -676,6 +828,59 @@ class HostsPage(QWidget):
         except (OSError, ValueError):
             pass
         self.load_hosts()
+
+    # -- installing sandbox-ai on a host --
+
+    def install(self):
+        """`sandbox-ai hosts install NAME ...` on this machine (up to a quarter of an hour, in the background) after
+        the choice and a question naming the host, where and as whom; sudo that wants a password: the same in a
+        terminal tab, where it asks."""
+        name = self.host()
+        if name in (None, "local") or not self.sai.host_install_supported():
+            return
+        try:
+            version = self.sai.version()
+        except Exception:  # noqa: BLE001 - only shown
+            version = ""
+        dialog = InstallDialog(self.entry(name), version, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        values = dialog.values()
+        try:
+            self.sai.host_install_args(name, **values)
+        except ValueError as exc:
+            warn(self, tr("Install"), printable(str(exc)))
+            return
+        if not ask_first(self, "host-install", tr("Install sandbox-ai on {host}", host=name), tr(
+                "Install sandbox-ai on {host} {how}? An installation there is replaced.", host=self.label(name),
+                how=dialog.words()), tr("Install")):
+            return
+        self.tabs.setCurrentWidget(self.updates)
+        self.updates.appendPlainText(printable(tr("{host}: installing {how}…", host=name, how=dialog.words())))
+        self.status.setText(tr("Installing sandbox-ai on {host}…", host=name))
+        background(lambda: self.sai.host_install(name, **values), owner=self,
+                   source=[self.install_button, self.update_button, self.update_all_button], timeout=1200,
+                   done=lambda result, error: self.installed(name, values, result, error))
+
+    def installed(self, name, values, result, error):
+        if error is not None:
+            result = {"name": name, "error": str(error)}
+        text = install_text(name, result)
+        self.updates.appendPlainText(text)
+        self.status.setText(text.splitlines()[0])
+        if result.get("needs_password"):
+            # sudo there wants a password: the same installation in a terminal tab, where sudo asks for it.
+            try:
+                self.in_terminal(self.sai.host_install_terminal(name, **values), tr("{host}: install", host=name))
+                self.updates.appendPlainText(printable(tr("  {host}: the installation runs in a terminal tab, where "
+                                                          "sudo asks for the password", host=name)))
+            except (OSError, ValueError) as exc:
+                self.updates.appendPlainText(printable(f"  {exc}"))
+        else:
+            (warn if result.get("error") else inform)(self, tr("Install sandbox-ai on {host}", host=name), text,
+                                                       details=printable(result.get("output") or "") or None,
+                                                       modal=False)
+        self.load_versions(refresh=True)
 
     def show_doctor(self, results):
         """The host's doctor (--json: a list of checks; an older one's text output as a string)."""

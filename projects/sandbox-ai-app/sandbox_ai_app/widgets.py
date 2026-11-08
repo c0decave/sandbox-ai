@@ -180,6 +180,16 @@ def confirm(parent, title_text, text, accept, destructive=False, details=None, r
     return box.clickedButton() is yes
 
 
+def ask_first(parent, action, title_text, text, accept, detail=None, details=None):
+    """The app's one confirmation policy: True when ACTION (a key of backend.NEEDS_CONFIRM or APP_NEEDS_CONFIRM) may
+    go ahead - at once when backend.needs_confirm(ACTION, DETAIL) says it needs no confirmation, else only when the
+    human chose ACCEPT in a destructive confirmation (Cancel the default)."""
+    from . import backend  # here: backend never imports Qt, and the widgets need no backend otherwise
+    if backend.needs_confirm(action, detail) is None:
+        return True
+    return confirm(parent, title_text, text, accept, destructive=True, details=details)
+
+
 def show_text(parent, title_text, text, modal=True):
     """TEXT in a read-only view; not MODAL: shown without blocking (see inform)."""
     if AUTO_ANSWER is not None:

@@ -1971,7 +1971,14 @@ def test_approvals_of_every_host_are_one_table_answered_on_their_host(window, en
         return list(questions[name])
     monkeypatch.setattr(window.sai, "remote_hosts", lambda: ["ct1", "ct2"])
     monkeypatch.setattr(window.sai, "host_questions", host_questions)
-    monkeypatch.setattr(window.sai, "host_run", lambda name, *args, timeout=120: ran.append((name, args)) or (0, "ok", ""))
+    reads_at_answer = []
+
+    def host_run(name, *args, timeout=120):
+        ran.append((name, args))
+        if args[:1] == ("approvals",):
+            reads_at_answer.append(reads.count(name))  # the reads of that host until it took the answer
+        return 0, "ok", ""
+    monkeypatch.setattr(window.sai, "host_run", host_run)
     monkeypatch.setattr(pages.QDesktopServices, "openUrl", lambda url: opened.append(url.toString()) or True)
     window.notify = lambda title, text, **_: notes.append((title, text))
     page = window.approvals
@@ -2000,8 +2007,10 @@ def test_approvals_of_every_host_are_one_table_answered_on_their_host(window, en
     assert title == "Allow this request?" and "Host: ct1" in text and "claude-r (~/srv) on ct1" in text
     assert wait(lambda: page.answering is None, 15)
     assert ("ct1", ("approvals", "allow", "1700000000-1-1", "--scope", "run")) in ran
-    reads_before = reads.count("ct1")
-    assert wait(lambda: reads.count("ct1") > reads_before, 15), "read again at once after an answer there"
+    # Measured when the host took the answer, not after: the read it starts may have run before this line.
+    assert wait(lambda: reads.count("ct1") > reads_at_answer[0], 15), "read again at once after an answer there"
+    assert page.questions[("ct1", "claude-r", "1700000000-1-1")] and not page.allow_button.isEnabled(), \
+        "answered: no second answer while that host still lists it"
     # A browser question of another host: opened here (http/https only), allowed there without opening it.
     page.open.selectRow(widgets.find_row(page.open, ("ct1", "claude-r", "1700000000-1-2")))
     assert page.allow_button.text() == "Open here and allow" and "ct1" in page.url.text()
@@ -2030,8 +2039,9 @@ def test_approvals_of_every_host_are_one_table_answered_on_their_host(window, en
 
 def test_a_running_start_on_another_host_is_changed_there(window, monkeypatch, wait):
     """Allow, Revoke, Allowed, workspaces, devices and limits of a start on another host run as sandbox-ai there
-    (`sandbox-ai hosts run HOST -- ...`); every dialog and question names the host; its folders and devices are typed
-    in (nothing of this computer is offered); the limits dialog shows the limits it has now."""
+    (`sandbox-ai hosts run HOST -- ...`); every dialog and question names the host; folders and devices to add are
+    typed in (nothing of this computer is offered), what to take back is chosen from what that host lists; the limits
+    dialog shows the limits it has now."""
     from sandbox_ai_app import ui
     page = window.sandboxes
     there = backend.Instance("run", backend.remote_key("ct1", "web"), "web", project="/srv/app", agent="claude",
@@ -2043,7 +2053,16 @@ def test_a_running_start_on_another_host_is_changed_there(window, monkeypatch, w
                "(what is open there stays usable)")
     answers = {("limits", "web", "--show", "--json"): (0, json.dumps({"memory": 8 << 30, "memory_high": 6 << 30,
                                                                       "cpus": 2, "pids": None}), ""),
-               ("workspace", "remove", "web", "/srv/data"): (1, "", refusal)}
+               ("workspace", "remove", "web", "/workspaces/data"): (1, "", refusal),
+               # What was added there, as that host lists it: removals are chosen from these.
+               ("workspace", "list", "web", "--json"): (0, json.dumps([
+                   {"host": "/srv/app", "sandbox": "/work", "mode": "rw", "source": "start"},
+                   {"host": "/srv/data", "sandbox": "/workspaces/data", "mode": "rw", "source": "added"}]), ""),
+               ("devices", "list", "web", "--json"): (0, json.dumps([
+                   {"id": "1", "value": "/dev/ttyUSB0", "source": "added", "state": "attached",
+                    "nodes": ["/dev/ttyUSB0"]},
+                   {"id": "2", "value": "/dev/ttyUSB1", "source": "added", "state": "removed", "nodes": []},
+                   {"id": "3", "value": "/dev/video0", "source": "start", "state": "attached", "nodes": []}]), "")}
     monkeypatch.setattr(window.sai, "host_run", lambda name, *args, timeout=120: ran.append((name, args)) or
                         answers.get(tuple(args), (0, "done", "")))
 
@@ -2111,15 +2130,15 @@ def test_a_running_start_on_another_host_is_changed_there(window, monkeypatch, w
     assert seen[-1] == ("workspace", "web", "ct1") and "on ct1" in widgets.SHOWN[0][1], "a writable add is asked first"
     widgets.SHOWN.clear()
     page.remove_workspace()
-    done("workspace", "remove", "web", "/srv/data", "--force")
+    done("workspace", "remove", "web", "/workspaces/data", "--force")
+    assert ("ct1", ("workspace", "list", "web", "--json")) in ran, "chosen from what that host lists"
     assert refusal in widgets.SHOWN[0][1], "the question quotes sandbox-ai's own refusal"
     page.add_device()
     done("devices", "add", "web", "/dev/ttyUSB0")
     assert seen[-1] == ("device", [], "Add device to web on ct1"), "that host's devices: typed in"
-    page.remove_device()
-    monkeypatch.setattr(QtWidgets.QInputDialog, "getText", lambda *a, **k: ("/dev/ttyUSB0", True))
-    page.remove_device()
-    done("devices", "remove", "web", "/dev/ttyUSB0")
+    page.remove_device()  # the one added and not removed there, by its id
+    done("devices", "remove", "web", "1")
+    assert ("ct1", ("devices", "list", "web", "--json")) in ran
     page.limits()
     done("limits", "web", "--memory", "4g")
     assert seen[-1] == ("limits", "ct1", {"memory": 8 << 30, "memory_high": 6 << 30, "cpus": 2, "pids": None})
@@ -2163,11 +2182,46 @@ def test_an_action_on_another_host_reads_its_starts_again_even_while_a_read_runs
     monkeypatch.setattr(window.sai, "host_instances", host_instances)
     page.refresh_remote()
     assert wait(lambda: reads == ["ct1"], 10)
-    page.refresh_remote()  # e.g. after a pause there: queued, not dropped
+    page.refresh_remote(["ct1"])  # e.g. after a pause there: queued, not dropped
     assert page.remote_again
+    page.refresh_remote()  # the next look: a host whose read still runs is not asked on top of it
+    assert wait(lambda: not page.hosts_reading, 10) and reads == ["ct1"]
     release.set()
     assert wait(lambda: len(reads) == 2 and page.remote_reading is None, 15)
     assert not page.remote_again
+
+
+def test_a_host_that_hangs_delays_no_other_and_one_removed_mid_read_is_gone(window, monkeypatch, wait):
+    """Regression (review round 3, A5): the hosts were read in rounds; a host removed while its read ran was taken
+    from the round without ending it, so remote_reading stayed an empty set and every later look only queued
+    another one: the rows of every host froze for good. Now each host has at most one read open, a hung one delays
+    no other, and a removed host's late answer is ignored."""
+    import threading
+    page = window.sandboxes
+    release, reads = threading.Event(), []
+
+    def host_instances(name, timeout=60):
+        reads.append(name)
+        if name == "slow":
+            release.wait(20)
+        return [backend.Instance("session", backend.remote_key(name, "web"), "web", state="running", host=name)]
+    monkeypatch.setattr(window.sai, "remote_hosts", lambda: ["slow", "ct1"])
+    monkeypatch.setattr(window.sai, "host_instances", host_instances)
+    try:
+        page.refresh_remote()
+        assert wait(lambda: "ct1" in page.remote and "slow" in page.remote_flight, 10)
+        page.refresh_remote()  # the next look: ct1 again, the hung host not on top of its read
+        assert wait(lambda: reads.count("ct1") == 2 and not page.hosts_reading, 10) and reads.count("slow") == 1
+        window.hosts.host_removed.emit("slow")  # removed while its read runs
+        assert page.remote_reading is None and "slow" not in page.remote_names
+        monkeypatch.setattr(window.sai, "remote_hosts", lambda: ["ct1"])
+    finally:
+        release.set()
+    assert wait(lambda: reads.count("slow") == 1 and page.remote_reading is None, 10)
+    assert "slow" not in page.remote and page.table.rowCount() == 1, "its late answer is ignored"
+    page.refresh_remote()
+    assert wait(lambda: reads.count("ct1") == 3 and page.remote_reading is None, 10), "the next looks still read"
+    assert "slow" not in page.remote and "slow" not in page.remote_problems
 
 
 def test_resuming_a_stopped_kept_start_shows_what_changed_in_its_home(window, monkeypatch, wait):
@@ -2240,6 +2294,73 @@ def test_deleting_a_session_asks_with_cancel_as_the_default(window, monkeypatch,
     monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
     page.session("delete")
     assert wait(lambda: ("session", "delete", "work", "--yes") in calls, 15)
+
+
+def test_every_entry_of_the_strip_of_icons_shows_its_icon_and_approvals_its_count(window, qapp):
+    """Regression (user report): with Only icons every entry showed nothing - the paddings the titles need left no
+    room for the icon in the narrow strip - except Approvals. Every entry has a real icon (in each theme), its title
+    as accessible name and tooltip; Approvals has its icon with the count on a badge; the toggle is at the top."""
+    from sandbox_ai_app import theme, ui
+    window.resize(1280, 860)
+    window.show()
+    window.questions_changed(3, [])
+    for mode in ("light", "dark"):
+        theme.apply(mode)
+        qapp.processEvents()
+        window.set_compact_nav(True)
+        qapp.processEvents()
+        assert window.nav.property("compact") == "true"
+        for key, row in window.nav_rows.items():
+            item = window.nav.item(row)
+            assert item.text() == "" and not window.nav.isRowHidden(row), key
+            assert not item.icon().isNull() and not item.icon().pixmap(24, 24).isNull(), key
+            assert item.data(Qt.ItemDataRole.AccessibleTextRole) and item.toolTip(), key
+            rect = window.nav.visualItemRect(item)
+            assert rect.width() >= 24 + 6 and rect.width() <= ui.COMPACT_NAV_WIDTH, (key, rect)
+        badge = window.nav_item("approvals").icon().pixmap(24, 24).toImage()
+        plain = theme.glyph("approvals", size=24).pixmap(24, 24).toImage()
+        assert badge != plain, "the count is drawn on the Approvals icon"
+        assert "3 open questions" in window.nav_item("approvals").data(Qt.ItemDataRole.AccessibleTextRole)
+        window.set_compact_nav(False)
+        assert window.nav_item("approvals").text() == "Approvals  (3)"
+    theme.apply("light")
+    toggle, nav = window.compact_button, window.nav
+    assert toggle.mapTo(window, toggle.rect().topLeft()).y() < nav.mapTo(window, nav.rect().topLeft()).y(), \
+        "the toggle sits above the navigation"
+    window.questions_changed(0, [])
+
+
+def test_fold_all_folds_the_navigation_and_the_trees_of_the_page_shown(window, qapp):
+    """Regression (user report): View › Navigation › Fold all sections seemed to do nothing - in the strip of icons,
+    and on a page with lists that fold. It folds the navigation's sections (kept for when the titles come back) and
+    the trees of the page shown, and says so."""
+    from PySide6.QtWidgets import QTreeWidget, QTreeWidgetItem
+    window.resize(1280, 860)
+    window.show()
+    window.show_page("statistics", raise_window=False)
+    tree = QTreeWidget()  # a list that folds, as the Kits page's, the doctor's and the canaries' (no reads here)
+    window.statistics.layout().addWidget(tree)
+    tree.show()
+    top = QTreeWidgetItem(["mine"])
+    top.addChild(QTreeWidgetItem(["skills: review"]))
+    tree.addTopLevelItem(top)
+    tree.expandAll()
+    window.actions["nav-fold"].trigger()
+    assert not top.isExpanded(), "the page's tree folded"
+    assert window.nav.isRowHidden(window.nav_rows["launch"])
+    assert not window.nav.isRowHidden(window.nav_rows["statistics"]), "the current page's section stays open"
+    assert "folded" in window.statusBar().currentMessage()
+    window.actions["nav-unfold"].trigger()
+    assert top.isExpanded() and not window.nav.isRowHidden(window.nav_rows["launch"])
+    window.set_compact_nav(True)
+    window.actions["nav-fold"].trigger()
+    assert "Insight" not in window.collapsed and "Project" in window.collapsed, "kept for the titles"
+    assert not window.nav.isRowHidden(window.nav_rows["launch"]), "the strip shows every page"
+    assert "strip of icons" in window.statusBar().currentMessage()
+    window.set_compact_nav(False)
+    assert window.nav.isRowHidden(window.nav_rows["launch"]), "folded once the titles are back"
+    window.fold_all(False)
+    tree.deleteLater()
 
 
 def test_the_question_count_in_the_strip_of_icons(window):
@@ -2338,30 +2459,70 @@ def test_the_policy_is_read_at_every_scan_and_caps_allows_only(window, env, monk
     monkeypatch.setattr(window.sai, "call", lambda *args, timeout=120, input=None: calls.append(args) or (0, "", ""))
     page.answer("deny")
     assert wait(lambda: page.answering is None, 15)
-    assert calls[-1] == ("approvals", "deny", "1700000000-1-1", "--scope", "run")
+    # Only the answers: the window calls sandbox-ai for other things meanwhile (e.g. a launch's --dry-run).
+    answers = lambda: [args for args in calls if args[:1] == ("approvals",)]  # noqa: E731
+    assert answers()[-1] == ("approvals", "deny", "1700000000-1-1", "--scope", "run")
     page.scope.setCurrentIndex(always)
     page.answer("allow")
-    assert "at most" in page.message.text() and calls[-1][1] == "deny", "an allow above the policy is not sent"
+    assert "at most" in page.message.text() and len(answers()) == 1, "an allow above the policy is not sent"
 
 
 def test_the_approvals_keys_answer_the_selected_question(window, env, wait, qapp):
-    """Alt+D denies for the run, Alt+A allows (asked first), Ctrl+Shift+B blocks always (asked first): taken by the
-    page while the focus is on it, also where the menu bar would take Alt+letters."""
+    """Ctrl+Shift+D denies for the run, Ctrl+Return allows (asked first), Ctrl+Shift+K blocks always (asked first):
+    taken while the focus is in the open questions - which live in a panel of their own (a dock), not inside the page
+    itself (regression: the keys were taken only for the page's own children, so they never worked) - and in the
+    Questions window too. None of them is a menu mnemonic (Alt+A and Alt+D open &Ansicht and &Datei in German) or
+    the key of "Only icons" (Ctrl+Shift+B)."""
     from PySide6.QtTest import QTest
+    from sandbox_ai_app import pages
     run = fake_run(env)
     ask(run, "1700000000-1-1", kind="connect", destination="192.0.2.7:5432", address="192.0.2.7", port=5432)
     window.show()
     window.show_page("approvals")
     page = window.approvals
     page.poll()
-    assert page.current() is not None
+    assert page.current() is not None and not page.isAncestorOf(page.open), "the questions are in their panel"
     page.open.setFocus()
     qapp.processEvents()
-    QTest.keyClick(page.open, Qt.Key.Key_D, Qt.KeyboardModifier.AltModifier)
+    assert page.keys_on, "the keys are on while the open questions are shown"
+    control_shift = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
+    QTest.keyClick(page.open, Qt.Key.Key_D, control_shift)
     assert wait(lambda: (run / "approvals" / "1700000000-1-1.answer").exists(), 60)
     assert json.loads((run / "approvals" / "1700000000-1-1.answer").read_text()) == {"decision": "deny", "scope": "run"}
+    assert wait(lambda: page.answering is None, 60)
+    ask(run, "1700000000-1-2", kind="connect", destination="192.0.2.8:5432", address="192.0.2.8", port=5432)
+    page.poll()
+    page.open.selectRow(widgets.find_row(page.open, ("local", "claude-abc", "1700000000-1-2")))
+    page.open.setFocus()
+    widgets.SHOWN.clear()
+    QTest.keyClick(page.open, Qt.Key.Key_Return, Qt.KeyboardModifier.ControlModifier)
+    assert widgets.SHOWN and widgets.SHOWN[-1][0] == "Allow this request?", "an allow is asked first"
+    assert wait(lambda: (run / "approvals" / "1700000000-1-2.answer").exists(), 60)
+    assert json.loads((run / "approvals" / "1700000000-1-2.answer").read_text())["decision"] == "allow"
+    assert window.actions["nav-compact"].shortcuts()[0].toString() == "Ctrl+Shift+B"
+    assert not {pages.shortcut_of(type("E", (), {"key": lambda self, k=key: k, "modifiers": lambda self, m=mods: m})())
+                for key, mods in ((Qt.Key.Key_A, Qt.KeyboardModifier.AltModifier),
+                                  (Qt.Key.Key_D, Qt.KeyboardModifier.AltModifier),
+                                  (Qt.Key.Key_B, control_shift))} - {None}, "no menu's key is taken"
     assert all(w.accessibleName() for w in (page.open, page.history, page.always, page.allow_button, page.deny_button,
                                             page.deny_once_button, page.block_button, page.scope, page.host_filter))
+    # The Questions window answers with the same keys.
+    assert wait(lambda: page.answering is None, 60)
+    ask(run, "1700000000-1-3", kind="connect", destination="192.0.2.9:5432", address="192.0.2.9", port=5432)
+    page.poll()
+    questions = pages.QuestionsWindow(page)
+    page.questions_window = questions
+    questions.installEventFilter(page)
+    questions.setWindowModality(Qt.WindowModality.NonModal)  # here: shown without a dialog under it
+    questions.show()
+    questions.show_questions()
+    questions.table.selectRow(widgets.find_row(questions.table, ("local", "claude-abc", "1700000000-1-3")))
+    questions.table.setFocus()
+    qapp.processEvents()
+    QTest.keyClick(questions.table, Qt.Key.Key_D, control_shift)
+    assert wait(lambda: (run / "approvals" / "1700000000-1-3.answer").exists(), 60)
+    assert json.loads((run / "approvals" / "1700000000-1-3.answer").read_text())["scope"] == "run"
+    questions.close()
 
 
 def test_a_notification_selects_its_question(window, env, wait):
@@ -2376,6 +2537,47 @@ def test_a_notification_selects_its_question(window, env, wait):
     callback()
     assert window.current_page() == "approvals"
     assert window.approvals.current() is not None and window.approvals.current()[1]["name"] in ("a.example", "b.example")
+
+
+def test_a_host_that_stops_answering_loses_its_questions_after_a_grace_and_an_answer_is_not_sent_twice(
+        window, monkeypatch, wait):
+    """Review round 3 (A6): after an answer there the question stayed answerable until the next read, and a host
+    that stopped answering kept its questions whose time was not up - a page to open (no deadline) for ever."""
+    import time as clock
+    from sandbox_ai_app import pages
+    failing, ran = [], []
+
+    def host_questions(name, timeout=30):
+        if failing:
+            raise ValueError("ssh: connection timed out")
+        return [remote_question(id="1700000000-9-1", kind="browser", question="open a page", timeout=None,
+                                seconds_left=None, url="https://login.example/x"),
+                remote_question(id="1700000000-9-2", kind="connect", question="connect to 192.0.2.7:443")]
+    monkeypatch.setattr(window.sai, "remote_hosts", lambda: ["ct1"])
+    monkeypatch.setattr(window.sai, "host_questions", host_questions)
+    monkeypatch.setattr(window.sai, "host_run", lambda name, *args, timeout=120: ran.append(args) or (0, "ok", ""))
+    page = window.approvals
+    page.poll_remote()
+    assert wait(lambda: page.open.rowCount() == 2, 15)
+    key = ("ct1", "claude-r", "1700000000-9-2")
+    page.open.selectRow(widgets.find_row(page.open, key))
+    page.answer("deny")
+    assert wait(lambda: page.answering is None and key in page.answered_there, 15)
+    assert wait(lambda: page.remote_reading == {}, 15)
+    page.open.selectRow(widgets.find_row(page.open, key))
+    assert not page.deny_button.isEnabled() and "lists it until" in page.deny_button.toolTip()
+    page.answer("deny")
+    assert len([args for args in ran if args[:1] == ("approvals",)]) == 1, "answered there: never a second time"
+    assert page.open.item(widgets.find_row(page.open, key), 4).text() == "answered"
+    # The host stops answering: within the grace its questions stay, after it they go, the page to open too.
+    failing.append(True)
+    page.poll_remote(["ct1"])
+    assert wait(lambda: "ct1" in page.remote_problems and page.remote_reading == {}, 15)
+    assert page.open.rowCount() == 2, "within the grace: kept"
+    page.remote_seen["ct1"] = clock.monotonic() - pages.REMOTE_GRACE - 1
+    page.poll_remote(["ct1"])
+    assert wait(lambda: page.open.rowCount() == 0, 15), "after the grace: gone, the page to open included"
+    assert not page.answered_there
 
 
 def test_the_approvals_host_filter_and_a_removed_host(window, env, monkeypatch, wait):
@@ -2539,12 +2741,13 @@ def test_rename_history_clean_up_and_untaint(window, monkeypatch, wait):
     monkeypatch.setattr(window.sai, "start_history", lambda name, host="local": [
         {"time": "2026-11-07T10:00:00Z", "event": "start", "run": "claude-abc", "agent": "claude"},
         {"time": "2026-11-07T11:00:00Z", "event": "rename", "run": "claude-abc", "to": "work\x1b[2J"}])
-    collected = []
+    collected, histories = [], ["gone"]
 
-    def collect(host="local", dry_run=True):
-        collected.append((host, dry_run))
+    def collect(host="local", dry_run=True, days=None):
+        collected.append((host, dry_run, days))
         return {"removed": [{"name": "old", "agent": "codex", "last_used": "2026-08-01T10:00:00Z", "workspace": "/w"}],
-                "leftovers": [], "histories": ["gone"], "skipped": [], "damaged": [], "dry_run": dry_run}
+                "leftovers": [], "histories": list(histories), "skipped": [], "damaged": [], "dry_run": dry_run,
+                "days": 30}
     monkeypatch.setattr(window.sai, "collect", collect)
     page.refresh()
     page.table.selectRow(0)
@@ -2564,10 +2767,23 @@ def test_rename_history_clean_up_and_untaint(window, monkeypatch, wait):
     widgets.SHOWN.clear()
     page.clean_up()
     assert wait(lambda: widgets.SHOWN, 15) and "old" in widgets.SHOWN[-1][1] and "gone" in widgets.SHOWN[-1][1]
-    assert collected == [("local", True)], "declined: only shown"
+    assert collected == [("local", True, None)], "declined: only shown"
     monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
     page.clean_up()
-    assert wait(lambda: ("local", False) in collected, 15)
+    # Removed with the --older-than of the list shown, after a dry run that still lists the same.
+    assert wait(lambda: ("local", False, 30) in collected, 15) and ("local", True, 30) in collected
+    # What would go changed between the list and the yes: nothing is removed, and it is said.
+    real_collect_as_shown = window.sai.collect_as_shown
+
+    def changing(host, shown):
+        histories.append("new")
+        return real_collect_as_shown(host, shown)
+    monkeypatch.setattr(window.sai, "collect_as_shown", changing)
+    collected.clear()
+    widgets.SHOWN.clear()
+    page.clean_up()
+    assert wait(lambda: any("has changed" in text for _, text, _ in widgets.SHOWN), 15)
+    assert ("local", False, 30) not in collected
     page.allowed_shown("claude-abc", (0, "claude-abc: tainted\n  take it back: sandbox-ai net untaint claude-abc", ""),
                        None)
     page.allowed_dialog.untaint_button.click()
@@ -2592,3 +2808,15 @@ def test_ended_starts_and_the_asking_marker(window, env, monkeypatch, wait):
     window.approvals.poll()
     row = widgets.find_row(page.table, "run:claude-abc")
     assert row >= 0 and "asking" in page.table.item(row, 6).text()
+
+
+def test_the_settings_are_in_the_menu_bar(window, monkeypatch):
+    """A Settings menu of its own (Ctrl+,): the app's settings and the administrator's policy."""
+    titles = [a.text() for a in window.menuBar().actions()]
+    assert "&Settings" in titles and titles.index("&Settings") < titles.index("&Help")
+    opened = []
+    monkeypatch.setattr(window, "open_settings", lambda policy=False: opened.append(policy))
+    window.actions["settings"].trigger()
+    window.actions["policy"].trigger()
+    assert opened == [False, True]
+    assert "Ctrl+," in [s.toString() for s in window.actions["settings"].shortcuts()]

@@ -244,12 +244,12 @@ def test_approvals_of_the_current_project_stand_out(window, env):
     window.set_project(mine)
     page = window.approvals
     assert page.open.rowCount() == 2 and page.project_pending == 1
-    rows = {widgets.row_key(page.open, r)[0]: r for r in range(page.open.rowCount())}
+    rows = {widgets.row_key(page.open, r)[1]: r for r in range(page.open.rowCount())}  # (host, run, id)
     assert bold(page.open, rows["claude-mine"]) and not bold(page.open, rows["claude-other"])
     assert "(1 of the current project)" in page.open_box.title()
     assert "open questions: 1" in window.project_bar.activity.text()
     window.set_project(other)
-    rows = {widgets.row_key(page.open, r)[0]: r for r in range(page.open.rowCount())}
+    rows = {widgets.row_key(page.open, r)[1]: r for r in range(page.open.rowCount())}  # (host, run, id)
     assert bold(page.open, rows["claude-other"]) and not bold(page.open, rows["claude-mine"])
 
 

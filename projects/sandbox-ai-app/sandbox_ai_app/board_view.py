@@ -29,12 +29,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from . import board as B
+from . import backend, board as B
 from . import help_view, theme
 from .files import printable
 from .state import choose_file, choose_folder
 from .i18n import tr
-from .widgets import MONO, background, confirm, flow, inform, plain_label, safe_tooltip, warn
+from .widgets import MONO, ask_first, background, confirm, flow, inform, plain_label, safe_tooltip, warn
 
 
 def scrub_board(state):
@@ -1647,9 +1647,9 @@ class BoardPage(QWidget):
         if not devices:
             inform(self, tr("Board"), tr("Add devices to the node first."))
             return
-        if not confirm(self, tr("Add device"), tr("Give {list} to {run} until it ends? Devices weaken the isolation.",
-                                                  list=", ".join(map(printable, devices)), run=printable(run)),
-                       tr("Add"), destructive=True):
+        if not ask_first(self, "device-add", tr("Add device"), tr(
+                "Give {list} to {run} until it ends? Devices weaken the isolation.",
+                list=", ".join(map(printable, devices)), run=printable(run)), tr("Add")):
             return
         background(lambda: [self.sai.add_device(run, d) for d in devices], owner=self, source=button, timeout=300,
                    done=lambda results, error: self.live_done(tr("Add device"), results, error))
@@ -1658,6 +1658,24 @@ class BoardPage(QWidget):
         values = [props.get(o) for o in ("--memory", "--cpus", "--pids")]
         if not any(values):
             inform(self, tr("Board"), tr("Set a limit on the node first."))
+            return
+        # More than it has now is asked first (the limits now read in the background; not known: asked too).
+        background(self.sai.limits_shown, run, owner=self, source=button, timeout=90,
+                   done=lambda current, error: self.live_limits_known(run, values, button,
+                                                                      current if error is None else None))
+
+    def live_limits_known(self, run, values, button, current):
+        memory, cpus, pids = ("" if value in (None, "") else str(value) for value in values)
+        wanted = {"memory": memory, "cpus": cpus, "pids": pids}
+        labels = {"memory": tr("memory"), "cpus": tr("CPUs"), "pids": tr("processes")}
+        changes = ", ".join(tr("{limit}: no limit", limit=labels[key]) if wanted[key].lower() == "none" else
+                            tr("{limit}: {value}", limit=labels[key], value=printable(wanted[key]))
+                            for key in backend.raised_limits(current, wanted))
+        text = tr("Let {run} use more of its host until it ends: {changes}?", run=printable(run), changes=changes)
+        if current is None:
+            text += " " + tr("The limits it has now are not known: this may be more than now.")
+        if not ask_first(self, "limits-raise", tr("Limits"), text, tr("Raise"),
+                         detail={"current": current, "values": wanted}):
             return
         background(lambda: [self.sai.set_limits(run, *values)], owner=self, source=button, timeout=150,
                    done=lambda results, error: self.live_done(tr("Limits"), results, error))

@@ -166,6 +166,55 @@ def test_a_hosts_defaults_and_a_step_down_in_security_asks_first(qapp, env, monk
     page.close()
 
 
+def test_steps_down_follow_the_webs_order_and_the_hosts_own_canaries_and_a_half_save_is_said(qapp, env, monkeypatch):
+    """Review round 3 (A4): telemetry was ranked off > strict > on, so strict -> off saved without a question; the
+    canaries were compared with a fixed default, not the host's own; a refused `defaults set` left the others applied
+    unsaid."""
+    import sandbox_ai_app.hosts_page as hp
+    assert hp.security_steps_down({"telemetry": "strict"}, {"telemetry": "off"}), "off is less private than strict"
+    assert not hp.security_steps_down({"telemetry": "off"}, {"telemetry": "strict"})
+    assert hp.security_steps_down({}, {"canaries": ["credentials", "home"]},
+                                  canary_default=["credentials", "home", "workspace"]), "that host plants workspace too"
+    assert not hp.security_steps_down({}, {"canaries": ["credentials", "home"]}, canary_default=["credentials", "home"])
+    assert hp.security_steps_down({"keep_days": 30}, {"keep_days": 10}) and not hp.security_steps_down(
+        {"keep_days": 10}, {"keep_days": 30})
+    sai = backend.SandboxAI()
+    if not sai.hosts_supported():
+        pytest.skip("this sandbox-ai has no hosts.py")
+    sai.host_add("ct1", "admin@192.0.2.10", 22, "", "")
+    asked = []
+    shown = {"path": "/x/defaults.json", "values": {"mode": "high", "telemetry": "strict"},
+             "telemetry_levels": ["off", "strict", "on"], "modes": list(hp.MODES),
+             "canary_categories": ["credentials", "home", "workspace"], "canary_default": ["credentials", "home"]}
+
+    def host_run(name, *args, timeout=120):
+        asked.append((name, args))
+        if args[:2] == ("defaults", "show"):
+            return 0, json.dumps(shown), ""
+        if args[:3] == ("defaults", "unset", "telemetry"):  # off is the default: the key goes
+            return 1, "", "sandbox-ai defaults: telemetry levels need a newer agent"
+        return 0, "ok", ""
+    monkeypatch.setattr(sai, "host_run", host_run)
+    monkeypatch.setattr(widgets, "SHOWN", [])
+    page = HostsPage(sai, lambda argv, title: None)
+    choose(page, "ct1")
+    page.show()
+    page.mode.setCurrentIndex(page.mode.findData("paranoid"))
+    page.telemetry.setCurrentIndex(page.telemetry.findData("off"))
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", False)
+    page.save_defaults()
+    assert "telemetry from strict to off" in widgets.SHOWN[-1][1], "asked first"
+    assert not [a for _, a in asked if a[:2] == ("defaults", "set")]
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    widgets.SHOWN.clear()
+    page.save_defaults()
+    title, text, _ = widgets.SHOWN[-1]
+    assert ("ct1", ("defaults", "set", "mode", '"paranoid"')) in asked
+    assert text.startswith("Saved on ct1") and 'mode = "paranoid"' in text, text
+    assert "Refused: telemetry" in text and "newer agent" in text and "Not tried: nothing" in text
+    page.close()
+
+
 def test_versions_update_and_update_all(qapp, env, monkeypatch):
     sai = backend.SandboxAI()
     if not sai.hosts_supported() or not sai.host_update_supported():
@@ -218,3 +267,81 @@ def test_update_all_counts_the_hosts_as_everything_else_does(qapp, env, monkeypa
     from sandbox_ai_app import hosts_page
     assert hosts_page.is_remote({"name": "ct1", "kind": "ssh"}) and hosts_page.is_remote({"name": "ct2", "kind": "lxc"})
     assert not hosts_page.is_remote({"name": "local", "kind": "local"}) and not hosts_page.is_remote({"name": "local"})
+
+
+def test_install_sandbox_ai_on_a_host_for_the_user_or_the_system_and_a_password_in_a_terminal(qapp, env, monkeypatch):
+    """User request: install sandbox-ai on an added host - for the SSH user or every user, as root, with sudo or
+    without, from this machine's copy or the signed release - through `sandbox-ai hosts install` on this machine;
+    asked first naming the host, where and as whom; sudo that wants a password runs it in a terminal tab. Update
+    takes the same sudo choice."""
+    import sandbox_ai_app.hosts_page as hp
+    sai = backend.SandboxAI()
+    if not sai.hosts_supported() or not sai.host_install_supported():
+        pytest.skip("this sandbox-ai cannot install on hosts")
+    sai.host_add("ct1", "admin@192.0.2.10", 22, "", "")
+    calls, opened = [], []
+    answers = [{"name": "ct1", "before": None, "after": "0.1.80", "changed": True, "mode": "user", "prefix": None,
+                "sudo": False, "root": False, "source": "here", "error": None, "needs_password": False,
+                "output": "installed \x1b[2J", "notes": ["add ~/.local/bin to PATH"]},
+               {"name": "ct1", "before": None, "after": None, "changed": False, "mode": "system",
+                "prefix": "/opt/sai", "sudo": True, "root": False, "source": "download", "error": "sudo wants a password",
+                "needs_password": True, "output": "", "notes": []}]
+
+    def call(*args, timeout=120, input=None):
+        calls.append(args)
+        return (0 if not answers[0].get("error") else 1), json.dumps(answers.pop(0)), ""
+    monkeypatch.setattr(sai, "call", call)
+    monkeypatch.setattr(sai, "host_run", lambda name, *args, timeout=120: (0, "{}", ""))
+    monkeypatch.setattr(sai, "host_statuses", lambda refresh=False, cached=True: {"ct1": {"version": None,
+                                                                                           "error": "not found"}})
+    monkeypatch.setattr(widgets, "SHOWN", [])
+    page = HostsPage(sai, lambda argv, title: opened.append((argv, title)))
+    page.versions = {"ct1": {"version": None, "error": "not found"}}
+    choose(page, "ct1")
+    assert page.install_button.isEnabled() and page.install_button.property("role") == "primary", \
+        "prominent where the host has no sandbox-ai that answers"
+    choices = []
+
+    def accept_user(dialog):
+        choices.append(dialog)
+        assert dialog.for_user.isChecked() and "admin" in dialog.for_user.text(), "the SSH user is no root: for it"
+        assert [dialog.how.itemData(i) for i in range(dialog.how.count())] == [True, False]
+        return QtWidgets.QDialog.DialogCode.Accepted
+    monkeypatch.setattr(hp.InstallDialog, "exec", accept_user)
+    page.install()
+    title, text, _ = widgets.SHOWN[0]
+    assert title == "Install sandbox-ai on ct1" and "for the SSH user" in text and "this machine's copy" in text
+    assert calls[-1] == ("hosts", "install", "ct1", "--user", "--from-here", "--json")
+    title, text, details = widgets.SHOWN[-1]
+    assert "ct1: sandbox-ai - -> 0.1.80" in text and "add ~/.local/bin to PATH" in text
+    assert details == "installed \\x1b[2J", "the output, escaped, in the details"
+
+    def accept_system(dialog):
+        dialog.for_system.setChecked(True)
+        dialog.prefix.setText("/opt/sai")
+        dialog.how.setCurrentIndex(dialog.how.findData(True))
+        dialog.download.setChecked(True)
+        dialog.version.setText("0.1.80")
+        return QtWidgets.QDialog.DialogCode.Accepted
+    monkeypatch.setattr(hp.InstallDialog, "exec", accept_system)
+    widgets.SHOWN.clear()
+    page.install()
+    assert "for every user under /opt/sai with sudo" in widgets.SHOWN[0][1]
+    assert calls[-1] == ("hosts", "install", "ct1", "--system", "--prefix=/opt/sai", "--sudo", "--download",
+                         "--version=0.1.80", "--json")
+    argv, title = opened[-1]
+    assert argv[-7:] == ["install", "ct1", "--system", "--prefix=/opt/sai", "--sudo", "--download",
+                         "--version=0.1.80"] and "--json" not in argv, "sudo asks for its password there"
+    assert title == "ct1: install"
+    with pytest.raises(ValueError):
+        sai.host_install_args("ct1", "user", prefix="/opt")  # a prefix is for the system
+    with pytest.raises(ValueError):
+        sai.host_install_args("-x")
+    # Update with the sudo chosen beside it.
+    updates = []
+    monkeypatch.setattr(sai, "host_update", lambda name, sudo=None: updates.append((name, sudo)) or {
+        "name": name, "before": "0.1.79", "after": "0.1.80", "changed": True, "error": None})
+    page.update_sudo.setCurrentIndex(page.update_sudo.findData(False))
+    page.update_host()
+    assert updates == [("ct1", False)]
+    page.close()

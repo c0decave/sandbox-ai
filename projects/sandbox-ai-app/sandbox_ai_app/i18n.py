@@ -381,9 +381,6 @@ TEXTS = {
     'Deny': {
         'en': 'Deny',
         'de': 'Ablehnen'},
-    'Without an answer within {seconds} seconds a question is refused. A deny lasts at most for the run; “always” is remembered for the project. Allowing a URL opens it in your browser.': {
-        'en': 'Without an answer within {seconds} seconds a question is refused. A deny lasts at most for the run; “always” is remembered for the project. Allowing a URL opens it in your browser.',
-        'de': 'Ohne Antwort innerhalb von {seconds} Sekunden wird eine Frage abgelehnt. Eine Ablehnung gilt höchstens für den Lauf; „immer“ wird für das Projekt gemerkt. Eine erlaubte URL wird in deinem Browser geöffnet.'},
     'History': {
         'en': 'History',
         'de': 'Verlauf'},
@@ -1251,9 +1248,6 @@ TEXTS = {
     'Privacy check: {path}': {
         'en': 'Privacy check: {path}',
         'de': 'Datenschutzprüfung: {path}'},
-    ' and {count} more': {
-        'en': ' and {count} more',
-        'de': ' und {count} weitere'},
     'sandbox-ai asks: {sandbox}': {
         'en': 'sandbox-ai asks: {sandbox}',
         'de': 'sandbox-ai fragt: {sandbox}'},
@@ -3183,6 +3177,15 @@ TEXTS = {
     'Skills': {
         'en': 'Skills',
         'de': 'Skills'},
+    '&Settings': {
+        'en': '&Settings',
+        'de': '&Einstellungen'},
+    'Settings…': {
+        'en': 'Settings…',
+        'de': 'Einstellungen…'},
+    'Administrator policy…': {
+        'en': 'Administrator policy…',
+        'de': 'Richtlinie des Administrators…'},
     '&File': {
         'en': '&File',
         'de': '&Datei'},
@@ -5343,9 +5346,6 @@ TEXTS = {
     'Delete session {name} and its HOME on this machine? This cannot be undone.': {
         'en': 'Delete session {name} and its HOME on this machine? This cannot be undone.',
         'de': 'Die Sitzung {name} und ihr HOME auf diesem Rechner löschen? Das lässt sich nicht rückgängig machen.'},
-    'Device added during the run (a path under /dev/)': {
-        'en': 'Device added during the run (a path under /dev/)',
-        'de': 'Während des Laufs hinzugefügtes Gerät (ein Pfad unter /dev/)'},
     'Folder on {host}': {
         'en': 'Folder on {host}',
         'de': 'Ordner auf {host}'},
@@ -5409,9 +5409,6 @@ TEXTS = {
     "The HOME of {name} changed since its last start ({since}) in files that decide what runs at a start (shell, git, ssh, the agent's settings, hooks, plugins, skills):": {
         'en': "The HOME of {name} changed since its last start ({since}) in files that decide what runs at a start (shell, git, ssh, the agent's settings, hooks, plugins, skills):",
         'de': 'Das HOME von {name} hat sich seit dem letzten Start ({since}) in Dateien geändert, die bestimmen, was bei einem Start läuft (Shell, git, ssh, die Einstellungen des Agenten, Hooks, Plugins, Skills):'},
-    'The folder on {host}, or its name under /workspaces': {
-        'en': 'The folder on {host}, or its name under /workspaces',
-        'de': 'Der Ordner auf {host} oder sein Name unter /workspaces'},
     'The limits it has now could not be read: {error}': {
         'en': 'The limits it has now could not be read: {error}',
         'de': 'Ihre aktuellen Grenzen ließen sich nicht lesen: {error}'},
@@ -5605,9 +5602,6 @@ TEXTS = {
     'Deny for this run': {
         'en': 'Deny for this run',
         'de': 'Für diesen Lauf ablehnen'},
-    'Refused; not asked again in this run': {
-        'en': 'Refused; not asked again in this run',
-        'de': 'Abgelehnt; in diesem Lauf nicht mehr gefragt'},
     'Questions of': {
         'en': 'Questions of',
         'de': 'Fragen von'},
@@ -5620,12 +5614,6 @@ TEXTS = {
     'How long an allow lasts: once, for this run, or always for the project': {
         'en': 'How long an allow lasts: once, for this run, or always for the project',
         'de': 'Wie lange eine Erlaubnis gilt: einmal, für diesen Lauf oder immer für das Projekt'},
-    'Allow with the scope chosen (Alt+A)': {
-        'en': 'Allow with the scope chosen (Alt+A)',
-        'de': 'Mit der gewählten Geltung erlauben (Alt+A)'},
-    'Refused; not asked again in this run (Alt+D)': {
-        'en': 'Refused; not asked again in this run (Alt+D)',
-        'de': 'Abgelehnt; in diesem Lauf nicht mehr gefragt (Alt+D)'},
     'Deny once': {
         'en': 'Deny once',
         'de': 'Einmal ablehnen'},
@@ -5635,9 +5623,6 @@ TEXTS = {
     'Block always…': {
         'en': 'Block always…',
         'de': 'Immer sperren…'},
-    'Refused now and at every later start of this project, without a question (Forget… below lifts it; Ctrl+Shift+B)': {
-        'en': 'Refused now and at every later start of this project, without a question (Forget… below lifts it; Ctrl+Shift+B)',
-        'de': 'Jetzt und bei jedem späteren Start dieses Projekts ohne Frage abgelehnt (Vergessen… unten hebt es auf; Strg+Umschalt+B)'},
     'History of the answers': {
         'en': 'History of the answers',
         'de': 'Verlauf der Antworten'},
@@ -5836,12 +5821,6 @@ TEXTS = {
     'Nothing changed: an empty field leaves its limit as it is. To remove a limit, type none.': {
         'en': 'Nothing changed: an empty field leaves its limit as it is. To remove a limit, type none.',
         'de': 'Nichts geändert: ein leeres Feld lässt seine Grenze, wie sie ist. Um eine Grenze zu entfernen, geben Sie none ein.'},
-    'Remove the limit of {limits} of {run}? Until it ends it may then take all of them its host has.': {
-        'en': 'Remove the limit of {limits} of {run}? Until it ends it may then take all of them its host has.',
-        'de': 'Die Grenze für {limits} von {run} entfernen? Bis zu seinem Ende darf er dann alles davon nehmen, was sein Host hat.'},
-    'Remove the limit': {
-        'en': 'Remove the limit',
-        'de': 'Grenze entfernen'},
     'Take back the taint of {run}? Untrusted content entered it; the rules for tainted runs (what it may reach, what is asked) no longer hold until such content enters it again. Only when you checked what came in.': {
         'en': 'Take back the taint of {run}? Untrusted content entered it; the rules for tainted runs (what it may reach, what is asked) no longer hold until such content enters it again. Only when you checked what came in.',
         'de': 'Den Taint von {run} zurücknehmen? Nicht vertrauenswürdige Inhalte kamen hinein; die Regeln für Läufe mit Taint (was er erreichen darf, was gefragt wird) gelten dann nicht mehr, bis wieder solche Inhalte hineinkommen. Nur, wenn Sie geprüft haben, was hereinkam.'},
@@ -5890,9 +5869,6 @@ TEXTS = {
     'Secret for the API key (optional)': {
         'en': 'Secret for the API key (optional)',
         'de': 'Geheimnis für den API-Schlüssel (optional)'},
-    'On another host the key is a secret of sandbox-ai there: keep it on that host first (sandbox-ai secrets set NAME), then name it here. The app does not send a key to another host.': {
-        'en': 'On another host the key is a secret of sandbox-ai there: keep it on that host first (sandbox-ai secrets set NAME), then name it here. The app does not send a key to another host.',
-        'de': 'Auf einem anderen Host ist der Schlüssel ein Geheimnis von sandbox-ai dort: erst auf jenem Host ablegen (sandbox-ai secrets set NAME), dann hier nennen. Die App schickt keinen Schlüssel an einen anderen Host.'},
     "A key typed here is kept as a secret of sandbox-ai (standard input, never a command line); the server's entry only names that secret, and the proxy adds the key on the wire.": {
         'en': "A key typed here is kept as a secret of sandbox-ai (standard input, never a command line); the server's entry only names that secret, and the proxy adds the key on the wire.",
         'de': 'Ein hier eingegebener Schlüssel wird als Geheimnis von sandbox-ai abgelegt (Standardeingabe, nie eine Befehlszeile); der Eintrag des Servers nennt nur dieses Geheimnis, und der Proxy fügt den Schlüssel unterwegs hinzu.'},
@@ -6022,4 +5998,307 @@ TEXTS = {
     '(shortened)': {
         'en': '(shortened)',
         'de': '(gekürzt)'},
+    'A running {start} is stopped and started again for it: what runs in it now ends.': {
+        'en': 'A running {start} is stopped and started again for it: what runs in it now ends.',
+        'de': 'Ein laufender Start {start} wird dafür gestoppt und neu gestartet: Was jetzt darin läuft, endet.'},
+    'A secret {name} is kept already: replace its value? Everything that names it gets the new one.': {
+        'en': 'A secret {name} is kept already: replace its value? Everything that names it gets the new one.',
+        'de': 'Ein Geheimnis {name} ist schon abgelegt: seinen Wert ersetzen? Alles, was es nennt, bekommt den neuen.'},
+    'A secret {name} is kept already: the key typed replaces its value, for everything that names it. Replace it?': {
+        'en': 'A secret {name} is kept already: the key typed replaces its value, for everything that names it. Replace it?',
+        'de': 'Ein Geheimnis {name} ist schon abgelegt: Der eingegebene Schlüssel ersetzt seinen Wert, für alles, was es nennt. Ersetzen?'},
+    'Add {what} to the kit {name}? Every later start with this kit gets it; a plugin or a hook runs code there.': {
+        'en': 'Add {what} to the kit {name}? Every later start with this kit gets it; a plugin or a hook runs code there.',
+        'de': '{what} zum Kit {name} hinzufügen? Jeder spätere Start mit diesem Kit bekommt es; ein Plugin oder ein Hook führt dort Code aus.'},
+    'Allow with the scope chosen (Ctrl+Return)': {
+        'en': 'Allow with the scope chosen (Ctrl+Return)',
+        'de': 'Mit der gewählten Geltung erlauben (Strg+Eingabe)'},
+    'Allowed this time only (Ctrl+Return)': {
+        'en': 'Allowed this time only (Ctrl+Return)',
+        'de': 'Nur dieses Mal erlaubt (Strg+Eingabe)'},
+    'Answered: {host} lists it until it has read the answer.': {
+        'en': 'Answered: {host} lists it until it has read the answer.',
+        'de': 'Beantwortet: {host} listet sie, bis er die Antwort gelesen hat.'},
+    'Change': {
+        'en': 'Change',
+        'de': 'Ändern'},
+    'Give {start} the tools of the MCP server {name}?': {
+        'en': 'Give {start} the tools of the MCP server {name}?',
+        'de': '{start} die Werkzeuge des MCP-Servers {name} geben?'},
+    'History of': {
+        'en': 'History of',
+        'de': 'Verlauf von'},
+    'History of the answers on the host chosen': {
+        'en': 'History of the answers on the host chosen',
+        'de': 'Verlauf der Antworten auf dem gewählten Host'},
+    'Let {run} ({where}) reach this until it ends, at once?\n\n{what}': {
+        'en': 'Let {run} ({where}) reach this until it ends, at once?\n\n{what}',
+        'de': '{run} ({where}) ab sofort bis zu seinem Ende dies erreichen lassen?\n\n{what}'},
+    'Let {run} use more of its host until it ends: {changes}?': {
+        'en': 'Let {run} use more of its host until it ends: {changes}?',
+        'de': '{run} bis zu seinem Ende mehr von seinem Host nutzen lassen: {changes}?'},
+    'Looking for the secret {name}…': {
+        'en': 'Looking for the secret {name}…',
+        'de': 'Suche das Geheimnis {name}…'},
+    'No answers on {host} yet.': {
+        'en': 'No answers on {host} yet.',
+        'de': 'Noch keine Antworten auf {host}.'},
+    'Not added: the secret {name} stays as it is.': {
+        'en': 'Not added: the secret {name} stays as it is.',
+        'de': 'Nicht hinzugefügt: Das Geheimnis {name} bleibt, wie es ist.'},
+    'Not kept: the secret {name} stays as it is.': {
+        'en': 'Not kept: the secret {name} stays as it is.',
+        'de': 'Nicht abgelegt: Das Geheimnis {name} bleibt, wie es ist.'},
+    'Not known how much was saved on {host}: {error}. The values read again show what it has now.': {
+        'en': 'Not known how much was saved on {host}: {error}. The values read again show what it has now.',
+        'de': 'Nicht bekannt, wie viel auf {host} gespeichert wurde: {error}. Die neu gelesenen Werte zeigen, was er jetzt hat.'},
+    'Nothing was removed: what would go has changed since it was shown. Clean up… shows it again.': {
+        'en': 'Nothing was removed: what would go has changed since it was shown. Clean up… shows it again.',
+        'de': 'Nichts wurde entfernt: Was entfernt würde, hat sich geändert, seit es gezeigt wurde. Aufräumen… zeigt es erneut.'},
+    'On another host the key is a secret of sandbox-ai there: keep it on that host first (Credentials › Secrets, with that host chosen), then name it here.': {
+        'en': 'On another host the key is a secret of sandbox-ai there: keep it on that host first (Credentials › Secrets, with that host chosen), then name it here.',
+        'de': 'Auf einem anderen Host ist der Schlüssel ein Geheimnis von sandbox-ai dort: Legen Sie es zuerst auf diesem Host ab (Zugangsdaten › Geheimnisse, mit diesem Host gewählt), und nennen Sie es dann hier.'},
+    'Raise': {
+        'en': 'Raise',
+        'de': 'Erhöhen'},
+    'Refresh the history': {
+        'en': 'Refresh the history',
+        'de': 'Den Verlauf aktualisieren'},
+    'Refused now and at every later start of this project, without a question (Ctrl+Shift+K, asked first)': {
+        'en': 'Refused now and at every later start of this project, without a question (Ctrl+Shift+K, asked first)',
+        'de': 'Jetzt und bei jedem späteren Start dieses Projekts abgelehnt, ohne Frage (Strg+Umschalt+K, mit Rückfrage)'},
+    'Refused now and at every later start of this project, without a question (Forget… below lifts it; Ctrl+Shift+K)': {
+        'en': 'Refused now and at every later start of this project, without a question (Forget… below lifts it; Ctrl+Shift+K)',
+        'de': 'Jetzt und bei jedem späteren Start dieses Projekts abgelehnt, ohne Frage (Vergessen… unten hebt es auf; Strg+Umschalt+K)'},
+    'Refused; not asked again in this run (Ctrl+Shift+D)': {
+        'en': 'Refused; not asked again in this run (Ctrl+Shift+D)',
+        'de': 'Abgelehnt; in diesem Lauf nicht mehr gefragt (Strg+Umschalt+D)'},
+    'Replace': {
+        'en': 'Replace',
+        'de': 'Ersetzen'},
+    'Saved on {host}: {applied}. Refused: {refused} ({reason}). Not tried: {rest}.': {
+        'en': 'Saved on {host}: {applied}. Refused: {refused} ({reason}). Not tried: {rest}.',
+        'de': 'Gespeichert auf {host}: {applied}. Abgelehnt: {refused} ({reason}). Nicht versucht: {rest}.'},
+    'Secrets on': {
+        'en': 'Secrets on',
+        'de': 'Geheimnisse auf'},
+    'Take {what} ({agent}) out of the kit {name}? Every later start with this kit is without it.': {
+        'en': 'Take {what} ({agent}) out of the kit {name}? Every later start with this kit is without it.',
+        'de': '{what} ({agent}) aus dem Kit {name} nehmen? Jeder spätere Start mit diesem Kit ist ohne es.'},
+    'The limits it has now are not known: this may be more than now.': {
+        'en': 'The limits it has now are not known: this may be more than now.',
+        'de': 'Die Grenzen, die er jetzt hat, sind nicht bekannt: Das kann mehr sein als jetzt.'},
+    'They wait on the Approvals page.': {
+        'en': 'They wait on the Approvals page.',
+        'de': 'Sie warten auf der Seite Freigaben.'},
+    "This machine's secrets, or a host's (over SSH)": {
+        'en': "This machine's secrets, or a host's (over SSH)",
+        'de': 'Die Geheimnisse dieses Rechners oder eines Hosts (über SSH)'},
+    'This run approves at most once, and an allowed name stays pinned for the run: deny it, or allow the name at the next start (--allow-host).': {
+        'en': 'This run approves at most once, and an allowed name stays pinned for the run: deny it, or allow the name at the next start (--allow-host).',
+        'de': 'Dieser Lauf erlaubt höchstens einmal, und ein erlaubter Name bleibt für den Lauf festgehalten: Lehnen Sie ab, oder erlauben Sie den Namen beim nächsten Start (--allow-host).'},
+    'Update sandbox-ai on {host} with sudo from now on?': {
+        'en': 'Update sandbox-ai on {host} with sudo from now on?',
+        'de': 'sandbox-ai auf {host} ab jetzt mit sudo aktualisieren?'},
+    'Update sandbox-ai on {host} without sudo from now on?': {
+        'en': 'Update sandbox-ai on {host} without sudo from now on?',
+        'de': 'sandbox-ai auf {host} ab jetzt ohne sudo aktualisieren?'},
+    'What was added there could not be read: {error}': {
+        'en': 'What was added there could not be read: {error}',
+        'de': 'Was dort hinzugefügt wurde, ließ sich nicht lesen: {error}'},
+    'Whether a secret {name} is kept already could not be told: the key typed would replace its value. Go on?': {
+        'en': 'Whether a secret {name} is kept already could not be told: the key typed would replace its value. Go on?',
+        'de': 'Ob ein Geheimnis {name} schon abgelegt ist, ließ sich nicht feststellen: Der eingegebene Schlüssel würde seinen Wert ersetzen. Weiter?'},
+    'Whether a secret {name} is kept there could not be told: a value it has would be replaced. Go on?': {
+        'en': 'Whether a secret {name} is kept there could not be told: a value it has would be replaced. Go on?',
+        'de': 'Ob dort ein Geheimnis {name} abgelegt ist, ließ sich nicht feststellen: Ein Wert, den es hat, würde ersetzt. Weiter?'},
+    "Whose answers: this machine's or a host's": {
+        'en': "Whose answers: this machine's or a host's",
+        'de': 'Wessen Antworten: die dieses Rechners oder die eines Hosts'},
+    'Without an answer within {seconds} seconds a question is refused; a page to open waits until it is answered. A deny lasts at most for the run; “always” is remembered for the project. Allowing a URL opens it in your browser.': {
+        'en': 'Without an answer within {seconds} seconds a question is refused; a page to open waits until it is answered. A deny lasts at most for the run; “always” is remembered for the project. Allowing a URL opens it in your browser.',
+        'de': 'Ohne Antwort innerhalb von {seconds} Sekunden wird eine Frage abgelehnt; eine zu öffnende Seite wartet, bis sie beantwortet ist. Ein Ablehnen gilt höchstens für den Lauf; „immer“ wird für das Projekt gemerkt. Eine erlaubte URL öffnet sich in Ihrem Browser.'},
+    'answered': {
+        'en': 'answered',
+        'de': 'beantwortet'},
+    'kept starts unused for {days} days removed with their HOME (instead of {before})': {
+        'en': 'kept starts unused for {days} days removed with their HOME (instead of {before})',
+        'de': 'aufbewahrte Starts, {days} Tage ungenutzt, samt HOME entfernt (statt nach {before})'},
+    'on this machine': {
+        'en': 'on this machine',
+        'de': 'auf diesem Rechner'},
+    'on {host}': {
+        'en': 'on {host}',
+        'de': 'auf {host}'},
+    'sandbox-ai asks: {count} more questions': {
+        'en': 'sandbox-ai asks: {count} more questions',
+        'de': 'sandbox-ai fragt: {count} weitere Fragen'},
+    "{setting}: sandbox-ai's default": {
+        'en': "{setting}: sandbox-ai's default",
+        'de': '{setting}: Vorgabe von sandbox-ai'},
+    '{limit}: no limit': {
+        'en': '{limit}: no limit',
+        'de': '{limit}: keine Grenze'},
+    '{limit}: {value}': {
+        'en': '{limit}: {value}',
+        'de': '{limit}: {value}'},
+    '{name} added, but its key was not kept as the secret {secret}: {error}': {
+        'en': '{name} added, but its key was not kept as the secret {secret}: {error}',
+        'de': '{name} hinzugefügt, aber sein Schlüssel wurde nicht als Geheimnis {secret} abgelegt: {error}'},
+    '  {host}: the installation runs in a terminal tab, where sudo asks for the password': {
+        'en': '  {host}: the installation runs in a terminal tab, where sudo asks for the password',
+        'de': '  {host}: Die Installation läuft in einem Terminal-Tab, wo sudo nach dem Passwort fragt'},
+    'A click takes the folder; a double-click or Enter takes it and goes on': {
+        'en': 'A click takes the folder; a double-click or Enter takes it and goes on',
+        'de': 'Ein Klick übernimmt den Ordner; ein Doppelklick oder die Eingabetaste übernimmt ihn und geht weiter'},
+    'As whom': {
+        'en': 'As whom',
+        'de': 'Als wer'},
+    'Command (double-click the row or Copy copies it): {command}': {
+        'en': 'Command (double-click the row or Copy copies it): {command}',
+        'de': 'Befehl (ein Doppelklick auf die Zeile oder Kopieren kopiert ihn): {command}'},
+    'Folders used last': {
+        'en': 'Folders used last',
+        'de': 'Zuletzt genutzte Ordner'},
+    'For every user, under:': {
+        'en': 'For every user, under:',
+        'de': 'Für jeden Benutzer, unter:'},
+    'For the SSH user ({user}): in its ~/.local': {
+        'en': 'For the SSH user ({user}): in its ~/.local',
+        'de': 'Für den SSH-Benutzer ({user}): in seinem ~/.local'},
+    'From': {
+        'en': 'From',
+        'de': 'Woher'},
+    'How to fix: {hint}': {
+        'en': 'How to fix: {hint}',
+        'de': 'So beheben Sie es: {hint}'},
+    'Install': {
+        'en': 'Install',
+        'de': 'Installieren'},
+    'Install sandbox-ai on the host': {
+        'en': 'Install sandbox-ai on the host',
+        'de': 'sandbox-ai auf dem Host installieren'},
+    "Install sandbox-ai on this host: for the SSH user or every user, as root, with sudo or without, from this machine's copy or the signed release (sandbox-ai hosts install)": {
+        'en': "Install sandbox-ai on this host: for the SSH user or every user, as root, with sudo or without, from this machine's copy or the signed release (sandbox-ai hosts install)",
+        'de': 'sandbox-ai auf diesem Host installieren: für den SSH-Benutzer oder jeden Benutzer, als root, mit oder ohne sudo, aus der Kopie dieses Rechners oder der signierten Version (sandbox-ai hosts install)'},
+    'Install sandbox-ai on {host}': {
+        'en': 'Install sandbox-ai on {host}',
+        'de': 'sandbox-ai auf {host} installieren'},
+    'Install sandbox-ai on {host} {how}? An installation there is replaced.': {
+        'en': 'Install sandbox-ai on {host} {how}? An installation there is replaced.',
+        'de': 'sandbox-ai auf {host} installieren, {how}? Eine Installation dort wird ersetzt.'},
+    'Installing sandbox-ai on {host}…': {
+        'en': 'Installing sandbox-ai on {host}…',
+        'de': 'Installiere sandbox-ai auf {host}…'},
+    'Install…': {
+        'en': 'Install…',
+        'de': 'Installieren…'},
+    'Prefix': {
+        'en': 'Prefix',
+        'de': 'Präfix'},
+    'Sections folded': {
+        'en': 'Sections folded',
+        'de': 'Abschnitte eingeklappt'},
+    'Sections unfolded': {
+        'en': 'Sections unfolded',
+        'de': 'Abschnitte aufgeklappt'},
+    'Select a check to read it whole here.': {
+        'en': 'Select a check to read it whole here.',
+        'de': 'Wählen Sie eine Prüfung, um sie hier ganz zu lesen.'},
+    'The check chosen, whole': {
+        'en': 'The check chosen, whole',
+        'de': 'Die gewählte Prüfung, ganz'},
+    'The doctor answered in a form this app does not read: its text is below, as it came.': {
+        'en': 'The doctor answered in a form this app does not read: its text is below, as it came.',
+        'de': 'Der Doctor antwortete in einer Form, die diese App nicht liest: Sein Text steht unten, wie er kam.'},
+    "The doctor's checks": {
+        'en': "The doctor's checks",
+        'de': 'Die Prüfungen des Doctors'},
+    'The signed release, downloaded by the host': {
+        'en': 'The signed release, downloaded by the host',
+        'de': 'Die signierte Version, vom Host heruntergeladen'},
+    'This machine installs with install.sh (or: sandbox-ai update).': {
+        'en': 'This machine installs with install.sh (or: sandbox-ai update).',
+        'de': 'Dieser Rechner installiert mit install.sh (oder: sandbox-ai update).'},
+    "This machine's copy ({version})": {
+        'en': "This machine's copy ({version})",
+        'de': 'Die Kopie dieses Rechners ({version})'},
+    'This sandbox-ai cannot install on hosts yet: update it.': {
+        'en': 'This sandbox-ai cannot install on hosts yet: update it.',
+        'de': 'Dieses sandbox-ai kann noch nicht auf Hosts installieren: Aktualisieren Sie es.'},
+    'Used last': {
+        'en': 'Used last',
+        'de': 'Zuletzt genutzt'},
+    'What was found: {detail}': {
+        'en': 'What was found: {detail}',
+        'de': 'Gefunden: {detail}'},
+    'Where': {
+        'en': 'Where',
+        'de': 'Wo'},
+    'Whether the update runs with sudo (a system installation needs it)': {
+        'en': 'Whether the update runs with sudo (a system installation needs it)',
+        'de': 'Ob die Aktualisierung mit sudo läuft (eine Systeminstallation braucht es)'},
+    'as root': {
+        'en': 'as root',
+        'de': 'als root'},
+    'as root (the SSH user is root)': {
+        'en': 'as root (the SSH user is root)',
+        'de': 'als root (der SSH-Benutzer ist root)'},
+    'for every user under {prefix}': {
+        'en': 'for every user under {prefix}',
+        'de': 'für jeden Benutzer unter {prefix}'},
+    'for the SSH user': {
+        'en': 'for the SSH user',
+        'de': 'für den SSH-Benutzer'},
+    'from the signed release ({version})': {
+        'en': 'from the signed release ({version})',
+        'de': 'aus der signierten Version ({version})'},
+    "from this machine's copy": {
+        'en': "from this machine's copy",
+        'de': 'aus der Kopie dieses Rechners'},
+    'sudo as set for the host': {
+        'en': 'sudo as set for the host',
+        'de': 'sudo wie für den Host eingestellt'},
+    'sudo as set for the host ({how})': {
+        'en': 'sudo as set for the host ({how})',
+        'de': 'sudo wie für den Host eingestellt ({how})'},
+    'the lists of this page too': {
+        'en': 'the lists of this page too',
+        'de': 'auch die Listen dieser Seite'},
+    'the newest': {
+        'en': 'the newest',
+        'de': 'die neueste'},
+    'the newest (or X.Y.Z)': {
+        'en': 'the newest (or X.Y.Z)',
+        'de': 'die neueste (oder X.Y.Z)'},
+    'the strip of icons shows every page: Only icons off shows the sections': {
+        'en': 'the strip of icons shows every page: Only icons off shows the sections',
+        'de': 'die Symbolleiste zeigt jede Seite: Nur Symbole aus zeigt die Abschnitte'},
+    'with sudo': {
+        'en': 'with sudo',
+        'de': 'mit sudo'},
+    'with sudo (asked there when sudo wants a password)': {
+        'en': 'with sudo (asked there when sudo wants a password)',
+        'de': 'mit sudo (dort gefragt, wenn sudo ein Passwort will)'},
+    'without sudo': {
+        'en': 'without sudo',
+        'de': 'ohne sudo'},
+    'without sudo (refused where root is needed)': {
+        'en': 'without sudo (refused where root is needed)',
+        'de': 'ohne sudo (abgelehnt, wo root nötig ist)'},
+    '{folder}   (used {time})': {
+        'en': '{folder}   (used {time})',
+        'de': '{folder}   (genutzt {time})'},
+    '{host}: install': {
+        'en': '{host}: install',
+        'de': '{host}: Installation'},
+    '{host}: installing {how}…': {
+        'en': '{host}: installing {how}…',
+        'de': '{host}: Installation {how}…'},
+    '{host}: not installed: {error}': {
+        'en': '{host}: not installed: {error}',
+        'de': '{host}: nicht installiert: {error}'},
+    '{host}: sandbox-ai {before} -> {after}': {
+        'en': '{host}: sandbox-ai {before} -> {after}',
+        'de': '{host}: sandbox-ai {before} -> {after}'},
 }

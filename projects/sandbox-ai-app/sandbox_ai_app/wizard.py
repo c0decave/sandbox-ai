@@ -15,6 +15,7 @@ import difflib
 import json
 import os
 from pathlib import Path
+import time
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -63,13 +64,64 @@ class Page(QWizardPage):
 
 
 class FolderPage(Page):
+    """The project folder: typed, chosen with Browse…, or one of the folders used last (the workspaces of recent
+    starts and the folders opened in the app, read in the background): a click takes it, a double-click or Enter
+    takes it and goes on."""
+
     def __init__(self, wizard):
         super().__init__(wizard, tr("Project folder"), tr("The folder the agent works in (/work in the sandbox); "
                                                           "the project file is written there."))
         self.path = PathEdit()
         self.form.addRow(tr("Folder"), self.path)
+        self.recent = QListWidget()
+        self.recent.setAccessibleName(tr("Folders used last"))
+        self.recent.setToolTip(tr("A click takes the folder; a double-click or Enter takes it and goes on"))
+        self.recent.setMaximumHeight(220)
+        self.recent.currentItemChanged.connect(lambda item, _previous: self.take(item))
+        self.recent.itemClicked.connect(self.take)
+        self.recent.itemActivated.connect(self.take_and_go_on)
+        self.form.addRow(tr("Used last"), self.recent)
         self.note = plain_label(role="secondary")
         self.form.addRow(self.note)
+        self.recent_loaded = False
+
+    def initializePage(self):  # noqa: N802
+        super().initializePage()
+        if not self.recent_loaded:
+            self.recent_loaded = True
+            background(self.wizard_.sai.recent_folders, timeout=60, done=self.recent_read)
+
+    def recent_read(self, found, error):
+        try:
+            self.recent.blockSignals(True)  # filling it chooses nothing: what was typed meanwhile stays
+        except RuntimeError:  # the wizard closed meanwhile
+            return
+        self.recent.clear()
+        for path, when in (found or []) if error is None else []:
+            from .backend import home_short
+            shown = home_short(printable(path))
+            if when:
+                stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(when))
+                shown = tr("{folder}   (used {time})", folder=shown, time=stamp)
+            item = QListWidgetItem(shown)
+            item.setData(Qt.ItemDataRole.UserRole, path)
+            item.setToolTip(printable(path))
+            self.recent.addItem(item)
+        self.recent.setCurrentRow(-1)
+        self.recent.blockSignals(False)
+        self.recent.setVisible(self.recent.count() > 0)
+        label = self.form.labelForField(self.recent)
+        if label is not None:
+            label.setVisible(self.recent.count() > 0)
+
+    def take(self, item):
+        if item is not None and item.data(Qt.ItemDataRole.UserRole):
+            self.path.edit.setText(item.data(Qt.ItemDataRole.UserRole))
+
+    def take_and_go_on(self, item):
+        self.take(item)
+        if item is not None and self.wizard() is not None:
+            self.wizard().next()
 
     def validatePage(self):  # noqa: N802
         directory = self.path.edit.text().strip()

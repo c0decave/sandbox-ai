@@ -27,8 +27,8 @@ from .files import printable
 from .state import choose_file, choose_folder
 from .i18n import N_, tr
 from .widgets import (
-    background, busy, confirm, fill, flow, inform, outcome, plain_label, row_key, selected_rows, set_enabled, table,
-    warn,
+    ask_first, background, busy, fill, flow, inform, outcome, plain_label, row_key, selected_rows, set_enabled,
+    table, warn,
 )
 
 KIND_TITLES = {"always": N_("always (sandbox-ai)"), "default": N_("always (default kit)"), "builtin": N_("built-in"),
@@ -573,7 +573,14 @@ class KitsPage(QWidget):
 
     def run(self, action, name, *arguments, options=(), title=None, create=False):
         """`sandbox-ai kits ACTION ... NAME ARGUMENTS` in the background; CREATE: `sandbox-ai kits new NAME` first
-        (nothing more runs when that fails)."""
+        (nothing more runs when that fails). What is added to a kit reaches every later start with it: asked first."""
+        if action.startswith("add-") or action == "new-skill":
+            what = " ".join(printable(a) for a in arguments) or printable(name)
+            if not ask_first(self, "kit-add", title or tr("Kits"), tr(
+                    "Add {what} to the kit {name}? Every later start with this kit gets it; a plugin or a hook runs "
+                    "code there.", what=what, name=printable(name)), tr("Add")):
+                return
+
         def work():
             first = ""
             if create:
@@ -719,6 +726,10 @@ class KitsPage(QWidget):
             return
         kind, agent, value = dialog.chosen()
         action = {"skill": "remove-skill", "hook": "remove-hook"}.get(kind, "remove-plugin")
+        if not ask_first(self, "kit-remove", tr("Remove from the kit"), tr(
+                "Take {what} ({agent}) out of the kit {name}? Every later start with this kit is without it.",
+                what=printable(value), agent=printable(agent), name=printable(kit["name"])), tr("Remove")):
+            return
         self.run(action, kit["name"], value, options=[f"--agent={agent}"], title=tr("Remove from the kit"))
 
     def add_hook(self):
@@ -748,11 +759,10 @@ class KitsPage(QWidget):
         kit = self.current()
         if kit is None:
             return
-        if confirm(self, tr("Delete kit…").rstrip("…"), tr("Delete the kit {name} with everything in it ({path})? "
-                                                         "Projects that use it can no longer start until you remove "
-                                                         "--kit {name}.", name=printable(kit["name"]),
-                                                         path=printable(kit.get("path") or "")),
-                   tr("Delete"), destructive=True):
+        if ask_first(self, "kit-delete", tr("Delete kit…").rstrip("…"), tr(
+                "Delete the kit {name} with everything in it ({path})? Projects that use it can no longer start until "
+                "you remove --kit {name}.", name=printable(kit["name"]), path=printable(kit.get("path") or "")),
+                tr("Delete")):
             self.run("delete", kit["name"], options=["--yes"], title=tr("Delete"))
 
     def use(self):

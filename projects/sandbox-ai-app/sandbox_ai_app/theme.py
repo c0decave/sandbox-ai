@@ -561,6 +561,16 @@ EXTRAS = {"win311": _win311, "mac": _mac, "hacker": _hacker, "fallout": _fallout
           "cyberpunk": _cyberpunk, "unicorn": _unicorn}
 
 
+# The navigation as a strip of icons (MainWindow.set_compact_nav sets the property): no room is lost to the paddings
+# the titles need, so each icon fits in its narrow row whatever the theme pads (with them it was cut away). The
+# attribute makes these rules win over every theme's own QListWidget#nav::item.
+COMPACT_NAV = """
+QListWidget#nav[compact="true"] { padding: 4px 0px; }
+QListWidget#nav[compact="true"]::item { padding: 6px 0px 6px 10px; margin: 1px 4px; }
+QListWidget#nav[compact="true"]::item:disabled { padding: 0px; }
+"""
+
+
 def stylesheet():
     t = data()
     c, s, r = t["colors"], t["status"], t["radius"]
@@ -674,7 +684,7 @@ QSplitter::handle {{ background: {c['alternate']}; }}
 QMenu {{ background: {c['base']}; color: {c['text']}; border: 1px solid {c['border']}; padding: 4px; }}
 QMenu::item {{ padding: 5px 18px; border-radius: {small}px; }}
 QMenu::item:selected {{ background: {c['highlight']}; color: {c['highlight_text']}; }}
-""" + extra
+""" + extra + COMPACT_NAV
 
 
 def font(name=None):
@@ -871,6 +881,31 @@ def glyph(name, color_=None, size=20):
     icon = QIcon(_glyph_pixmap(name, color_ or colors()["nav_text"], size))
     if color_ is None:
         icon.addPixmap(_glyph_pixmap(name, colors()["nav_selected_text"], size), QIcon.Mode.Selected)
+    return icon
+
+
+def counted_glyph(name, count, size=24):
+    """The navigation icon NAME with COUNT on a badge in its corner (the strip of icons shows no text): in the
+    navigation's colours, the badge in the "bad" status colour."""
+    icon = QIcon()
+    text = str(count) if count < 100 else "99+"
+    for tint, mode in ((colors()["nav_text"], QIcon.Mode.Normal), (colors()["nav_selected_text"], QIcon.Mode.Selected)):
+        pixmap = _glyph_pixmap(name, tint, size)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        badge = QFont()
+        badge.setBold(True)
+        badge.setPixelSize(max(7, int(size * 0.36)))
+        painter.setFont(badge)
+        width = max(size * 0.5, painter.fontMetrics().horizontalAdvance(text) + size * 0.16)
+        area = QRectF(size - width, 0, width, size * 0.5)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(color("bad")))
+        painter.drawRoundedRect(area, area.height() / 2, area.height() / 2)
+        painter.setPen(QColor("#ffffff"))
+        painter.drawText(area, int(Qt.AlignmentFlag.AlignCenter), text)
+        painter.end()
+        icon.addPixmap(pixmap, mode)
     return icon
 
 

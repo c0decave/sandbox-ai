@@ -128,7 +128,9 @@ def test_a_typed_key_does_not_stay_behind_in_the_dialog(qapp, env, monkeypatch, 
     """Regression: the dialog of a new profile lived on as a child of the Credentials page after Add, holding the
     typed account number or auth key in its field until the window closed. The value is passed on, then cleared."""
     from PySide6.QtWidgets import QDialog, QLineEdit, QWidget
-    from sandbox_ai_app import vpn_page
+    from sandbox_ai_app import vpn_page, widgets
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)  # a question shown is collected, never a real dialog
+    monkeypatch.setattr(widgets, "SHOWN", [])
     sai = backend.SandboxAI()
     calls = []
     monkeypatch.setattr(sai, "call", lambda *args, timeout=120, input=None: calls.append((args, input)) or (0, "", ""))
@@ -150,6 +152,15 @@ def test_a_typed_key_does_not_stay_behind_in_the_dialog(qapp, env, monkeypatch, 
     assert calls[0] == (("secrets", "set", "TS_KEY"), "tskey-auth-kept-nowhere\n")
     assert [d.value.text() for d in dialogs] == ["", ""], "added or cancelled: the typed key is gone"
     assert not any(e.text() == "tskey-auth-kept-nowhere" for e in parent.findChildren(QLineEdit))
+    assert not widgets.SHOWN, "a secret not kept yet: nothing to replace, nothing asked"
+    # A secret of that name is kept already: its value is replaced only after a yes (review round 3, A3).
+    monkeypatch.setattr(sai, "secret_exists", lambda name, host="local": True)
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", False)
+    monkeypatch.setattr(vpn_page.VpnDialog, "exec", lambda dialog: run(dialog))
+    count = len(calls)
+    vpn_page.add_profile(parent, sai, names.append)
+    assert wait(lambda: widgets.SHOWN, 10) and "TS_KEY is kept already" in widgets.SHOWN[-1][1]
+    assert len(calls) == count, "declined: nothing kept, nothing added"
     parent.deleteLater()
 
 

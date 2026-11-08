@@ -253,8 +253,16 @@ def english_left(src, classes=frozenset()):
         yield lit, text in NOT_WORDS
 
 
+def doctor_titles_span():
+    """Where app.js keeps the doctor's check titles by area (DOCTOR_PREFIXES, the desktop app's doctor_view.PREFIXES):
+    compared with what a host's doctor names, never shown as the page's own text."""
+    start = APP.index("const DOCTOR_PREFIXES = {")
+    return start, APP.index("};", start)
+
+
 def test_no_english_text_of_the_page_is_left_outside_t():
-    found = list(english_left(APP, css_classes()))
+    start, end = doctor_titles_span()
+    found = [(lit, allowed) for lit, allowed in english_left(APP, css_classes()) if not start <= lit.start < end]
     left = [f"app.js:{APP.count(chr(10), 0, lit.start) + 1}: {lit.text!r}" for lit, allowed in found if not allowed]
     assert not left, "English text outside t():\n" + "\n".join(left)
     used = {lit.text for lit, allowed in found if allowed}

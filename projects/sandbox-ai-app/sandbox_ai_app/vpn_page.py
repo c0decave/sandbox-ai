@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 
 from .files import printable
 from .i18n import N_, tr
-from .widgets import background, confirm, fill, outcome, plain_label, selected, table
+from .widgets import ask_first, background, fill, outcome, plain_label, selected, table
 
 KINDS = (("wireguard", N_("WireGuard (a wg-quick file: Proton, IVPN, AirVPN, your own server)")),
          ("openvpn", N_("OpenVPN (an .ovpn file)")),
@@ -133,7 +133,25 @@ def add_profile(parent, sai, done=None):
             QMessageBox.warning(parent, tr("New VPN profile"), printable((err or out).strip()[-1500:]))
         if done:
             done(name if status == 0 else None)
-    background(lambda: sai.vpn_add(name, kind, secret_value=value, **fields), owner=parent, timeout=240, done=added)
+
+    def go():
+        background(lambda: sai.vpn_add(name, kind, secret_value=value, **fields), owner=parent, timeout=240,
+                   done=added)
+    if not value:
+        go()
+        return
+    # A typed key replaces the value of a secret of that name (for everything that names it): asked first.
+    secret = fields["secret"]
+
+    def looked(exists, error):
+        exists = exists if error is None else None
+        text = tr("A secret {name} is kept already: the key typed replaces its value, for everything that names it. "
+                  "Replace it?", name=printable(secret)) if exists else \
+            tr("Whether a secret {name} is kept already could not be told: the key typed would replace its value. "
+               "Go on?", name=printable(secret))
+        if ask_first(parent, "secret-replace", tr("New VPN profile"), text, tr("Replace"), detail={"exists": exists}):
+            go()
+    background(lambda: sai.secret_exists(secret), owner=parent, timeout=90, done=looked)
 
 
 class VpnBox(QGroupBox):
@@ -181,7 +199,7 @@ class VpnBox(QGroupBox):
 
     def remove(self):
         name = selected(self.profiles)
-        if not name or not confirm(self, tr("Remove"), tr("Remove the VPN profile {name}?", name=printable(name)),
-                                   tr("Remove"), destructive=True):
+        if not name or not ask_first(self, "vpn-remove", tr("Remove"), tr("Remove the VPN profile {name}?",
+                                                                          name=printable(name)), tr("Remove")):
             return
         background(lambda: self.sai.vpn_remove(name), owner=self, timeout=90, done=lambda *_: self.refresh())

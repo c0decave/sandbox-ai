@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import re
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QGuiApplication
 from PySide6.QtWidgets import (
-    QCheckBox, QHBoxLayout, QHeaderView, QMenu, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QCheckBox, QHBoxLayout, QHeaderView, QMenu, QPlainTextEdit, QPushButton, QSplitter, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from . import theme
@@ -112,8 +113,14 @@ def summary(checks):
     return tr("Everything needed is in place."), "ok"
 
 
+CHECK_COLUMN = 240  # px the check's title gets at most; what was found and how to fix it share the rest, wrapped
+
+
 class DoctorView(QWidget):
-    """The checks as a list by area: problems first in each area, a click on a row selects its fix command."""
+    """The checks as a list by area: problems first in each area, an area where all is fine folded; a click on a row
+    shows it whole below (wrapped, the fix command selectable) and selects its fix command for copying. A narrow pane
+    (the Hosts page) stays readable: the columns wrap, the rows grow when the columns change. An answer it cannot
+    read (an older or unknown sandbox-ai's text) is shown as it came."""
     copied = Signal(str)
 
     def __init__(self, parent=None):
@@ -134,29 +141,57 @@ class DoctorView(QWidget):
         layout.addLayout(top)
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels([tr("Check"), tr("What was found"), tr("How to fix")])
+        self.tree.setAccessibleName(tr("The doctor's checks"))
         self.tree.setWordWrap(True)
         self.tree.setUniformRowHeights(False)
         self.tree.setRootIsDecorated(True)
+        self.tree.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         header = self.tree.header()
         header.setStretchLastSection(False)
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        # Wrapped rows take their height from the column widths: laid out again when a column changes.
+        self.relayout = QTimer(self)
+        self.relayout.setSingleShot(True)
+        self.relayout.setInterval(50)
+        self.relayout.timeout.connect(self.tree.doItemsLayout)
+        header.sectionResized.connect(lambda *_: self.relayout.start())
         self.tree.itemSelectionChanged.connect(self.selection_changed)
         self.tree.itemDoubleClicked.connect(lambda item, _c: self.copy_item(item))
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self.menu)
-        layout.addWidget(self.tree, 1)
-        self.checks = []
+        # The selected check whole (status, what was found, how to fix, the command), or a text that could not be
+        # read as checks: selectable, wrapped, never cut.
+        self.detail = QPlainTextEdit()
+        self.detail.setReadOnly(True)
+        self.detail.setAccessibleName(tr("The check chosen, whole"))
+        self.detail.setPlaceholderText(tr("Select a check to read it whole here."))
+        self.detail.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        split = QSplitter(Qt.Orientation.Vertical)
+        split.addWidget(self.tree)
+        split.addWidget(self.detail)
+        split.setStretchFactor(0, 4)
+        split.setStretchFactor(1, 1)
+        layout.addWidget(split, 1)
+        self.checks, self.raw = [], ""
 
     def set_results(self, results, groups=None):
         """Show RESULTS (doctor tuples or --json dicts); GROUPS: the doctor module's group_of, if any."""
-        self.checks = normalize(results, groups)
+        self.checks, self.raw = normalize(results, groups), ""
         self.show_checks()
 
     def set_text(self, text):
-        """Show doctor's text output (an older sandbox-ai without --json)."""
+        """Show doctor's text output (an older sandbox-ai without --json); a text that holds no check it can read
+        is shown as it came (escaped)."""
         self.set_results(parse_text(text))
+        if not self.checks and (text or "").strip():
+            self.raw = "\n".join(printable(line) for line in str(text).strip().splitlines())
+            self.summary.setText(tr("The doctor answered in a form this app does not read: its text is below, as it "
+                                    "came."))
+            self.summary.setStyleSheet("")
+            self.detail.setPlainText(self.raw)
 
     def count(self):
         return len(self.checks)
@@ -202,8 +237,13 @@ class DoctorView(QWidget):
                     item.setToolTip(2, safe_tooltip(tr("Command: {command} (double-click copies it)",
                                                        command=check["command"])))
                 item.setData(0, Qt.ItemDataRole.UserRole, check["command"] if fix else "")
+                item.setData(1, Qt.ItemDataRole.UserRole, check)
                 group.addChild(item)
-            group.setExpanded(True)
+            group.setExpanded(worst != "ok")  # an area where all is fine is folded: the problems stand out
+        # The check's title gets what it needs up to CHECK_COLUMN; the rest is for what was found and the fix.
+        self.tree.resizeColumnToContents(0)
+        self.tree.setColumnWidth(0, min(self.tree.columnWidth(0), CHECK_COLUMN))
+        self.detail.setPlainText("")
         self.selection_changed()
 
     def items(self):
@@ -216,6 +256,20 @@ class DoctorView(QWidget):
 
     def selection_changed(self):
         self.copy_button.setEnabled(bool(self.selected_command()))
+        items = self.tree.selectedItems()
+        check = items[0].data(1, Qt.ItemDataRole.UserRole) if items else None
+        if isinstance(check, dict):
+            lines = [f"{tr(WORDS[check['status']])}: {check['check']}"]
+            if check["detail"]:
+                lines.append(tr("What was found: {detail}", detail=check["detail"]))
+            if check["status"] in ("fail", "warn") and check["hint"]:
+                lines.append(tr("How to fix: {hint}", hint=check["hint"]))
+            if check["status"] in ("fail", "warn") and check["command"]:
+                lines.append(tr("Command (double-click the row or Copy copies it): {command}",
+                                command=check["command"]))
+            self.detail.setPlainText("\n".join(lines))
+        elif not self.raw:
+            self.detail.setPlainText("")
 
     def copy_item(self, item):
         command = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else ""
