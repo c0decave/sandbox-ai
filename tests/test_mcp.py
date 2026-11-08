@@ -783,6 +783,34 @@ def test_an_unsigned_catalog_only_on_request(tmp_path):
     assert definition["signed_by"] is None and any("added unsigned" in line for line in out)
 
 
+TELEGRAM = {"id": "mcp:telegram", "name": "telegram", "title": "Telegram bot", "kind": "oci",
+            "image": "ghcr.io/c0decave/sandbox-ai-mcp-telegram", "network": "allowlist", "hosts": ["api.telegram.org:443"],
+            "env": [{"name": "TELEGRAM_BOT_TOKEN", "required": True, "secret": True},
+                    {"name": "TELEGRAM_ALLOWED_CHATS", "required": False, "secret": False}]}
+
+
+def test_an_unsigned_entry_refused_afterwards_is_not_said_to_be_added(tmp_path):
+    """The catalog of sandbox-ai-mcp as it is published now: unsigned, its entries without a digest. `mcp add telegram
+    --unsigned` is refused for the missing digest, and says nothing of "added"; once it has one, it is added with
+    the token from the environment (or sandbox-ai secrets) and the full network (it needs only api.telegram.org)."""
+    sources = catalog(tmp_path, [TELEGRAM], signed=False)
+    out = []
+    with pytest.raises(ValueError, match="no digest for it yet"):
+        m.add("telegram", env=["TELEGRAM_BOT_TOKEN"], catalogs=sources, pull=False, out=out.append, unsigned=True)
+    assert not any("added" in line for line in out)
+    sources = catalog(tmp_path, [{**TELEGRAM, "digest": DIGEST}], signed=False)
+    with pytest.raises(ValueError, match="needs api.telegram.org:443.*--network full"):
+        m.add("telegram", env=["TELEGRAM_BOT_TOKEN"], catalogs=sources, pull=False, out=out.append, unsigned=True)
+    with pytest.raises(ValueError, match="needs --env TELEGRAM_BOT_TOKEN"):
+        m.add("telegram", network="full", catalogs=sources, pull=False, out=out.append, unsigned=True)
+    assert not any("added" in line for line in out)
+    definition = m.add("telegram", env=["TELEGRAM_BOT_TOKEN"], network="full", catalogs=sources, pull=False,
+                       out=out.append, unsigned=True)
+    assert definition["env"] == ["TELEGRAM_BOT_TOKEN"] and definition["network"] == "full"
+    assert [line for line in out if "added" in line][0].endswith("added unsigned (" + sources[0][1] + ".sig cannot be "
+                                                                 "read)")
+
+
 @pytest.mark.parametrize("how", ["changed", "other key", "release namespace", "garbage"])
 def test_a_signature_that_does_not_verify_is_refused_even_unsigned(tmp_path, how, mcp_key):
     sources = catalog(tmp_path, [ENTRY])

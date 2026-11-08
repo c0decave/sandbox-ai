@@ -22,5 +22,8 @@
       "optional": true
     }
   },
+  "notes": [
+    "The GPU, if given: dri (Intel/AMD, /dev/dri), rocm (AMD, /dev/kfd and /dev/dri) or nvidia (Podman with a CDI specification: sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml). A GPU weakens the isolation; the security modes high and paranoid refuse it."
+  ],
   "prompt": "Design a logo for this project, drawn only with code (Pillow, SVG or a shader): three variants in /work/logo/, each with the code that makes it, and a screenshot of them side by side."
 }

@@ -4,7 +4,8 @@
   sandbox-ai presets list [--json]                      the built-in presets and your own
   sandbox-ai presets show NAME [--json]                 what NAME sets, needs and asks for
   sandbox-ai presets check NAME [--value KEY=VALUE]... [--agent AGENT]
-                                                        what is missing before NAME can start (values, MCP servers)
+                                                        what is missing before NAME can start (values, MCP
+                                                        servers, VPN profiles, LLM servers the agent can use)
   sandbox-ai presets dirs [list] [--json]               the extra preset directories (defaults.json)
   sandbox-ai presets dirs add|remove DIR                add or remove one
   sandbox-ai AGENT --preset NAME [--preset-value KEY=VALUE]... [options]   start with it
@@ -41,6 +42,7 @@ import re
 import shlex
 import stat
 import sys
+from types import SimpleNamespace
 
 HERE = Path(__file__).resolve().parent
 BUILTIN = HERE / "presets"
@@ -50,7 +52,7 @@ ID = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 VALUE_NAME = re.compile(r"[a-z][a-z0-9_]{0,31}")
 PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_]{0,31})\}")
 KINDS = ("text", "folder", "file", "port", "device", "host", "secret", "llm", "vpn", "number")
-CATEGORIES = ("simple", "development", "analysis", "research", "media", "privacy", "testing", "fun")
+CATEGORIES = ("simple", "development", "llm", "analysis", "research", "media", "privacy", "testing", "fun")
 AGENTS = ("claude", "codex", "opencode")
 KEYS = {"format", "version", "id", "title", "description", "category", "agents", "options", "mcp", "rules",
         "values", "prompt", "notes", "needs"}
@@ -63,7 +65,10 @@ REFUSED = ("--copy-auth", "--auth-file", "--import-codex-auth", "--git-credentia
 # A value of these kinds is checked before it goes into an option.
 CHECKS = {"port": re.compile(r"[1-9][0-9]{0,4}"), "number": re.compile(r"[0-9]+(?:\.[0-9]+)?"),
           "host": re.compile(r"[A-Za-z0-9.:\[\]_-]{1,255}"), "secret": re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}"),
-          "llm": re.compile(r"[A-Za-z0-9_.-]{1,64}"), "vpn": re.compile(r"[A-Za-z0-9_.-]{1,64}")}
+          # An LLM server as --llm takes it: NAME or NAME:MODEL (llm.py's NAME and MODEL_NAME; qwen2.5-coder:7b,
+          # org/Model-GGUF).
+          "llm": re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}(?::[\w.:/@+-]{1,200})?", re.ASCII),
+          "vpn": re.compile(r"[A-Za-z0-9_.-]{1,64}")}
 
 
 def config_home():
@@ -407,6 +412,7 @@ def missing(preset, given=None, agent=None, mcp_names=None):
         resolved_values(preset, given or {})
     except ValueError as exc:
         found.append(str(exc))
+    found += registered_values(preset, given or {}, agent)
     known = mcp_names if mcp_names is not None else registered_mcp()
     for server in preset.get("mcp", []):
         if PLACEHOLDER.search(server):
@@ -414,6 +420,35 @@ def missing(preset, given=None, agent=None, mcp_names=None):
         name = server.split(":", 1)[-1]
         if name not in known and server not in known:
             found.append(f"MCP server {server} is not added yet: sandbox-ai mcp add {server}")
+    return found
+
+
+def registered_values(preset, given, agent=None):
+    """What keeps the VPN profiles and LLM servers PRESET's values name from a start: [text] (a profile or server
+    that is not registered, a server AGENT cannot use); empty when nothing does."""
+    found = []
+    try:
+        values = resolved_values(preset, given)
+    except ValueError:
+        return found
+    for name, spec in preset.get("values", {}).items():
+        kind, value = spec.get("kind"), values.get(name)
+        if kind not in ("vpn", "llm") or not value:
+            continue
+        hint = f"; for this preset: {spec['hint']}" if spec.get("hint") else ""
+        try:
+            if kind == "vpn":
+                _module("vpn").load_profile(value)
+            else:
+                llm = _module("llm")
+                endpoint, _ = llm.selection(SimpleNamespace(llm=value))  # the server, and a model it can name
+                problem = llm.agent_problem(endpoint, agent) if agent else None
+                if problem:
+                    found.append(problem)
+        except ValueError as exc:
+            found.append(f"{name}: {exc}{hint}")
+        except Exception as exc:  # noqa: BLE001 - a damaged store: the start says it in detail
+            found.append(f"{name}: {value} cannot be checked ({exc})")
     return found
 
 
@@ -517,7 +552,8 @@ def describe(preset, out=print):
     for name, spec in preset.get("values", {}).items():
         default = f" (default {spec['default']})" if spec.get("default") not in (None, "") else ""
         optional = " (optional)" if spec.get("optional") else ""
-        out(f"  value {name}: {spec.get('label', name)} [{spec.get('kind', 'text')}]{default}{optional}")
+        hint = f"; {spec['hint']}" if spec.get("hint") else ""
+        out(f"  value {name}: {spec.get('label', name)} [{spec.get('kind', 'text')}]{default}{optional}{hint}")
     for need in preset.get("needs", []):
         out(f"  needs: {need}")
     for note in preset.get("notes", []):

@@ -1,0 +1,34 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "ollama",
+  "title": "Ollama",
+  "description": "The agent works with a model on your Ollama server instead of the cloud: only the server's address is opened, nothing else.",
+  "category": "llm",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--llm",
+    "{llm}",
+    "--no-provider-defaults"
+  ],
+  "values": {
+    "llm": {
+      "label": "Ollama server (sandbox-ai llm list), NAME or NAME:MODEL",
+      "kind": "llm",
+      "default": "ollama",
+      "hint": "sandbox-ai llm add ollama --kind ollama --url http://127.0.0.1:11434 --model MODEL"
+    }
+  },
+  "notes": [
+    "Register it once: sandbox-ai llm add ollama --kind ollama --url http://127.0.0.1:11434 (another address, --api-key-secret SECRET for a key, --vpn PROFILE for a server behind a VPN).",
+    "Start it with: ollama serve (OLLAMA_HOST=127.0.0.1:11434; OLLAMA_HOST=0.0.0.0 to serve your LAN). Agents need a model with tool calls (qwen3-coder, gpt-oss, ...) and a long context: OLLAMA_CONTEXT_LENGTH=32768 or more.",
+    "OpenCode works with any Ollama; Codex needs Ollama 0.13.3 or later (Responses API), Claude Code 0.14.0 or later (Anthropic Messages API).",
+    "NAME:MODEL picks a model (sandbox-ai llm models NAME lists them); without it the server's default (llm add --model) or its only one. sandbox-ai llm check NAME --agent AGENT asks the server whether it has the API that agent needs.",
+    "On this host's loopback (http://127.0.0.1:PORT) only with Podman: sandbox-ai opens that one port for the sandbox, and the server must listen on 127.0.0.1. In your LAN or tailnet: a private address, or https.",
+    "The agent reaches nothing but the server (--no-provider-defaults): no cloud provider, its login is not copied in; the server's key stays with the connection proxy."
+  ]
+}

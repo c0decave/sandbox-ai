@@ -31,5 +31,9 @@
       "optional": true
     }
   },
+  "notes": [
+    "Choose a subnet that is free on your networks; the sandbox gets .100, the gateway .2.",
+    "With a VPN profile: Podman only (the tunnel runs in a container of the pod); the address checks run before the agent starts."
+  ],
   "prompt": "Map what this sandbox can reach: its addresses and routes, DNS, the allowed TCP target, the provider. Try a few things that should be refused and say what refused them. Write /work/network-map.md."
 }

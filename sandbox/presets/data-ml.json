@@ -27,5 +27,9 @@
       "kind": "text",
       "optional": true
     }
-  }
+  },
+  "notes": [
+    "The GPU, if given: dri (Intel/AMD, /dev/dri), rocm (AMD, /dev/kfd and /dev/dri) or nvidia (Podman with a CDI specification: sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml). A GPU weakens the isolation; the security modes high and paranoid refuse it.",
+    "CUDA or ROCm libraries come from an image variant of yours (sandbox-ai images new NAME --from AGENT), started with --image-variant NAME."
+  ]
 }

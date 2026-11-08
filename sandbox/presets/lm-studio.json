@@ -1,0 +1,34 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "lm-studio",
+  "title": "LM Studio",
+  "description": "The agent works with a model on your LM Studio server instead of the cloud: only the server's address is opened, nothing else.",
+  "category": "llm",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--llm",
+    "{llm}",
+    "--no-provider-defaults"
+  ],
+  "values": {
+    "llm": {
+      "label": "LM Studio server (sandbox-ai llm list), NAME or NAME:MODEL",
+      "kind": "llm",
+      "default": "lmstudio",
+      "hint": "sandbox-ai llm add lmstudio --kind lmstudio --url http://127.0.0.1:1234 --model MODEL"
+    }
+  },
+  "notes": [
+    "Register it once: sandbox-ai llm add lmstudio --kind lmstudio --url http://127.0.0.1:1234 (another address, --api-key-secret SECRET for a key, --vpn PROFILE for a server behind a VPN).",
+    "Start its server: the Developer tab (Start Server), or lms server start (port 1234); load a model with tool calls and a context of 32k tokens or more.",
+    "OpenCode works with any LM Studio; Codex needs LM Studio 0.3.29 or later (Responses API), Claude Code 0.4.1 or later (Anthropic Messages API).",
+    "NAME:MODEL picks a model (sandbox-ai llm models NAME lists them); without it the server's default (llm add --model) or its only one. sandbox-ai llm check NAME --agent AGENT asks the server whether it has the API that agent needs.",
+    "On this host's loopback (http://127.0.0.1:PORT) only with Podman: sandbox-ai opens that one port for the sandbox, and the server must listen on 127.0.0.1. In your LAN or tailnet: a private address, or https.",
+    "The agent reaches nothing but the server (--no-provider-defaults): no cloud provider, its login is not copied in; the server's key stays with the connection proxy."
+  ]
+}

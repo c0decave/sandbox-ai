@@ -2323,6 +2323,9 @@ def every_builtin_preset_starts(m, dev):
         if m.agent not in preset.get("agents", PRESETS.AGENTS):
             m.refused("--preset", preset["id"], match=f"preset {preset['id']} is for")
             continue
+        if any(spec.get("kind") in ("vpn", "llm") and not spec.get("optional")
+               for spec in preset.get("values", {}).values()):
+            continue  # a registered VPN profile or LLM server: test_presets_all.py registers them and starts these
         if m.backend == "bwrap" and "--allow-host-port" in preset.get("options", []):
             # pasta forwards the host's ports: Podman only, as the start option says (the preset's note too).
             m.refused("--preset", preset["id"], *preset_values(m, preset, dev), match="needs the Podman backend")

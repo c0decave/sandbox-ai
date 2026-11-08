@@ -597,14 +597,21 @@ sandbox-ai claude --preset software-analysis --preset-value samples=~/samples
 Eingebaut: **Analyse** (`hardware-analysis`, `software-analysis`,
 `network-analysis`, `forensics`, `firmware-iot`), **Entwicklung**
 (`development`, `code-audit`, `docs-writer`, `data-ml`, `mobile-android`,
-`onboarding-buddy`), **Tests** (`commit-censor`, `chaos-monkey`,
+`onboarding-buddy`), **lokale Modelle** (`local-api` für jeden
+OpenAI-kompatiblen Server, `ollama`, `lm-studio`, `llama-cpp`, `vllm`: `--llm
+NAME[:MODELL] --no-provider-defaults`; Claude Code nur mit einem Server, der die
+Anthropic-Messages-API hat), **Privatsphäre** (`tor`: alles durch ein
+Tor-Profil von `sandbox-ai vpn add NAME --tor`, mit `--dns` für `.onion`-Namen),
+**Tests** (`commit-censor`, `chaos-monkey`,
 `docs-lie-detector`, `canary-course`, `network-maze`, `memory-hog`) und **Spaß**
 (`time-capsule`, `mini-ctf`, `archivist-1995`, `radio-sandbox-ai`,
 `agent-race`, `pixel-art-factory`, `sand-chess`). Die Analyse-Presets lassen
 den Agenten nur zu seinem Provider und die Proben schreibgeschützt; ihre
 Werkzeuge (capa, FLOSS, radare2, YARA, binwalk, TShark, The Sleuth Kit ...) sind
 MCP-Server aus den Katalogen, jeder in einem eigenen Container: `presets check`
-nennt die `sandbox-ai mcp add`-Befehle für die noch nicht hinzugefügten.
+nennt die `sandbox-ai mcp add`-Befehle für die noch nicht hinzugefügten und
+die VPN-Profile und LLM-Server in den Werten eines Presets, die nicht
+eingerichtet sind (oder die der Agent nicht nutzen kann).
 
 Eigene Presets sind JSON-Dateien in `~/.config/sandbox-ai/presets/` (außerhalb
 jedes Workspaces: Ein Agent darf nicht schreiben, womit er startet); eines mit

@@ -497,7 +497,9 @@ def definition_from_entry(entry, mounts=(), env=(), network=None, memory=None, p
 
 def check_signature(entry, unsigned=False, out=print):
     """Refuse ENTRY unless its catalog is signed by a trusted MCP key (catalog_signature); UNSIGNED takes an
-    unsigned one anyway (a catalog of your own, say), never a signature that does not verify."""
+    unsigned one anyway (a catalog of your own, say), never a signature that does not verify. OUT gets the note on
+    an unsigned one; add() passes a list and says it once the server is added (an entry refused afterwards, one
+    without a digest say, is not "added unsigned")."""
     signature = entry.get("_signature") or {"state": "unsigned", "reason": "no signature was read"}
     if signature["state"] == "good":
         return {"signed_by": signature["signer"]}
@@ -521,7 +523,8 @@ def add(name, local=None, mounts=(), env=(), network=None, memory=None, pids=Non
     for problem in problems:
         out(f"sandbox-mcp: catalog not read: {problem}")
     entry = find_entry(entries, name)
-    signed = check_signature(entry, unsigned, out)
+    unsigned_note = []
+    signed = check_signature(entry, unsigned, unsigned_note.append)
     backend = backend or ("podman" if shutil.which("podman") or not entry.get("rootfs") else "bwrap")
     if backend not in ("podman", "bwrap", "both"):
         raise ValueError("--backend is podman, bwrap or both")
@@ -549,6 +552,8 @@ def add(name, local=None, mounts=(), env=(), network=None, memory=None, pids=Non
     with os.fdopen(fd, "w") as stream:
         json.dump(document, stream, indent=2)
     os.replace(temporary, path)
+    for line in unsigned_note:
+        out(line)
     form = " and ".join(([definition["image"]] if "image" in definition else []) +
                         ([f"rootfs {definition['rootfs']['sha256'][:12]} (Bubblewrap)"] if "rootfs" in definition else []))
     out(f"sandbox-mcp: {local} added ({form}); use it with --mcp {local}")

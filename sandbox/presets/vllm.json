@@ -1,0 +1,35 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "vllm",
+  "title": "vLLM",
+  "description": "The agent works with a model on your vLLM server instead of the cloud: only the server's address is opened, nothing else.",
+  "category": "llm",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--llm",
+    "{llm}",
+    "--no-provider-defaults"
+  ],
+  "values": {
+    "llm": {
+      "label": "vLLM server (sandbox-ai llm list), NAME or NAME:MODEL",
+      "kind": "llm",
+      "default": "vllm",
+      "hint": "sandbox-ai llm add vllm --kind vllm --url http://127.0.0.1:8000 --model MODEL"
+    }
+  },
+  "notes": [
+    "Register it once: sandbox-ai llm add vllm --kind vllm --url http://127.0.0.1:8000 (another address, --api-key-secret SECRET for a key, --vpn PROFILE for a server behind a VPN).",
+    "Start it with: vllm serve MODEL --enable-auto-tool-choice --tool-call-parser PARSER (the parser of the model's family, e.g. hermes or qwen3_coder).",
+    "OpenCode works with any vLLM; Codex needs vLLM 0.10.0 or later (streamed tool calls 0.18.0), Claude Code 0.11.1 or later (Anthropic Messages API).",
+    "A GPU server elsewhere: sandbox-ai llm add gpu --kind vllm --url https://gpu.example.org:8443 --api-key-secret GPU_KEY, or http://100.x.y.z:8000 --vpn ts behind Tailscale; --llm gpu then brings its VPN along.",
+    "NAME:MODEL picks a model (sandbox-ai llm models NAME lists them); without it the server's default (llm add --model) or its only one. sandbox-ai llm check NAME --agent AGENT asks the server whether it has the API that agent needs.",
+    "On this host's loopback (http://127.0.0.1:PORT) only with Podman: sandbox-ai opens that one port for the sandbox, and the server must listen on 127.0.0.1. In your LAN or tailnet: a private address, or https.",
+    "The agent reaches nothing but the server (--no-provider-defaults): no cloud provider, its login is not copied in; the server's key stays with the connection proxy."
+  ]
+}

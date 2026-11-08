@@ -1,0 +1,35 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "tor",
+  "title": "Everything through Tor",
+  "description": "Every connection of the sandbox, the agent's own API connections included, leaves through Tor; lookups go to Tor's resolver and .onion names work. The allow-list, approvals and the connection proxy apply as always.",
+  "category": "privacy",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--vpn",
+    "{tor}",
+    "--vpn-check",
+    "stop",
+    "--dns"
+  ],
+  "values": {
+    "tor": {
+      "label": "Tor profile (sandbox-ai vpn list)",
+      "kind": "vpn",
+      "hint": "once: sandbox-ai build vpn; sandbox-ai vpn add anon --tor --socks (--bridges FILE for obfs4 bridges, --exit-country CC)"
+    }
+  },
+  "notes": [
+    "Make the profile once: sandbox-ai build vpn, then sandbox-ai vpn add anon --tor --socks (--bridges FILE for obfs4 bridges, --exit-country de); sandbox-ai vpn check anon tries it alone. The value must name a Tor profile: another VPN profile works too, but is no Tor.",
+    "Before the agent starts tor must bootstrap, check.torproject.org must see a Tor exit, and tor's resolver must answer and map an .onion name; a failed check stops the start.",
+    "TCP over IPv4 only: no UDP (no QUIC, ping or NTP) and no IPv6; slower than without, and many sites, the agent's provider among them, may refuse or challenge Tor exits.",
+    ".onion names resolve into 10.192.0.0/10 and connect through Tor; with --dns (set here) every .onion the agent looks up, not only those of its allow-list.",
+    "With --socks in the profile, 127.0.0.1:9050 in the sandbox is Tor's SocksPort for programs that speak SOCKS (curl --socks5-hostname, torsocks, Tor Browser with TOR_SKIP_LAUNCH=1); what goes through it passes the connection proxy by. torsocks and Tor Browser in the agent's image: sandbox-ai images recipe tor --from AGENT, sandbox-ai build tor, then add --image-variant tor.",
+    "The exit relay sees what is not encrypted: use HTTPS. Podman only (the tunnel runs in a container of the pod)."
+  ]
+}

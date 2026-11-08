@@ -1,0 +1,32 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "local-api",
+  "title": "Local OpenAI-compatible API (raw)",
+  "description": "Any server with the OpenAI API (/v1/chat/completions, /v1/responses): a LiteLLM gateway, LocalAI, text-generation-webui, your own; only its address is opened, nothing else.",
+  "category": "llm",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--llm",
+    "{llm}",
+    "--no-provider-defaults"
+  ],
+  "values": {
+    "llm": {
+      "label": "OpenAI-compatible server (sandbox-ai llm list), NAME or NAME:MODEL",
+      "kind": "llm",
+      "hint": "sandbox-ai llm add api --kind openai-compatible --url http://192.168.1.20:4000 --model MODEL"
+    }
+  },
+  "notes": [
+    "Register it once: sandbox-ai llm add api --kind openai-compatible --url URL (its root, a path prefix of a gateway included; a trailing /v1 is dropped), --api-key-secret SECRET for its key.",
+    "OpenCode needs /v1/chat/completions, Codex /v1/responses. Claude Code speaks only the Anthropic Messages API: it works only with a server that offers /v1/messages, added with --anthropic (a start of Claude with another one is refused).",
+    "NAME:MODEL picks a model (sandbox-ai llm models NAME lists them); without it the server's default (llm add --model) or its only one. sandbox-ai llm check NAME --agent AGENT asks the server whether it has the API that agent needs.",
+    "On this host's loopback (http://127.0.0.1:PORT) only with Podman: sandbox-ai opens that one port for the sandbox, and the server must listen on 127.0.0.1. In your LAN or tailnet: a private address, or https.",
+    "The agent reaches nothing but the server (--no-provider-defaults): no cloud provider, its login is not copied in; the server's key stays with the connection proxy."
+  ]
+}
