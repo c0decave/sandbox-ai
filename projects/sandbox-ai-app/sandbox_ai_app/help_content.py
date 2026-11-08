@@ -751,7 +751,12 @@ SECTIONS = (
          "with sudo (`sandbox-ai hosts set NAME --update-sudo on|off`); a new address or key is Remove… and Add…. "
          "Test runs SSH, the host's sandbox-ai and its doctor.\n"
          "- Update and Update all run each host's own signed `sandbox-ai update`; a sudo that wants a password "
-         "opens it in a terminal tab. Check versions asks every host for its version now.\n\n"
+         "opens it in a terminal tab. Check versions asks every host for its version now.\n"
+         "- Update from here… puts this machine's sandbox-ai on the chosen host instead (`sandbox-ai hosts update "
+         "NAME --from-here`), as the same kind of installation it has there (the user's own or the system's, with "
+         "sudo as chosen beside Update): for a host that cannot reach the release server, or before a release is "
+         "published. It is asked first, like an install; an update that finds no published release offers it at "
+         "once.\n\n"
          "The tabs on the right are about the chosen host: Doctor shows its checks with the commands that fix "
          "them, Updates what the updates printed, and Defaults what every start there uses unless it says "
          "otherwise: the security mode, the canaries, how many days unused kept starts stay (keep_days) and the "
@@ -775,7 +780,12 @@ SECTIONS = (
          "sandbox-ai des Hosts und seinen doctor.\n"
          "- Aktualisieren und Alle aktualisieren führen das eigene signierte `sandbox-ai update` jedes Hosts aus; "
          "ein sudo, das ein Passwort will, öffnet es in einem Terminal-Tab. Versionen prüfen fragt jetzt jeden "
-         "Host nach seiner Version.\n\n"
+         "Host nach seiner Version.\n"
+         "- Von hier aktualisieren… bringt stattdessen das sandbox-ai dieses Rechners auf den gewählten Host "
+         "(`sandbox-ai hosts update NAME --from-here`), als dieselbe Art Installation, die er dort hat (die des "
+         "Benutzers oder die des Systems, mit sudo wie neben Aktualisieren gewählt): für einen Host, der den "
+         "Release-Server nicht erreicht, oder bevor ein Release veröffentlicht ist. Es wird vorher gefragt, wie "
+         "eine Installation; ein Update, das kein veröffentlichtes Release findet, bietet es gleich an.\n\n"
          "Die Tabs rechts gelten dem gewählten Host: Doctor zeigt seine Prüfungen mit den Befehlen, die sie "
          "beheben, Updates, was die Updates ausgaben, und Standards, was jeder Start dort nutzt, wenn er nichts "
          "anderes sagt: den Sicherheitsmodus, die Canaries, wie viele Tage ungenutzte aufbewahrte Starts bleiben "
@@ -786,7 +796,8 @@ SECTIONS = (
          "danach streng geprüft. Auf den Hosts lauscht nichts außer sshd."),
         cli=("sandbox-ai hosts list", "sandbox-ai hosts add NAME USER@HOST",
              "sandbox-ai hosts set NAME --update-sudo on|off", "sandbox-ai hosts test NAME",
-             "sandbox-ai hosts update NAME|--all", "sandbox-ai hosts run NAME -- ARGS", "sandbox-ai hosts remove NAME",
+             "sandbox-ai hosts update NAME|--all", "sandbox-ai hosts update NAME --from-here",
+             "sandbox-ai hosts run NAME -- ARGS", "sandbox-ai hosts remove NAME",
              "sandbox-ai defaults set | unset"),
         see=("hosts", "web", "page-sandboxes", "page-approvals", "security-modes", "canaries"),
         tours=("area:hosts",)),

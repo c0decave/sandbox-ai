@@ -8,7 +8,9 @@ over SSH with your keys (no password prompt, the host key learnt once); nothing 
 
 Each host shows its sandbox-ai version and whether an update is there (hosts list's status, kept 10 minutes).
 Update and Update all run `sandbox-ai hosts update` (each host's own signed update); a sudo that wants a password
-opens the host's update in a terminal tab, where sudo asks. Adding and testing a host make a key file that others
+opens the host's update in a terminal tab, where sudo asks. Update from here (hosts update --from-here) puts this
+machine's copy there instead, as the same kind of installation, asked first like an install; an update that finds no
+published release offers it at once. Adding and testing a host make a key file that others
 can read private (ssh refuses it) and say so.
 """
 from __future__ import annotations
@@ -344,6 +346,11 @@ class HostsPage(QWidget):
                                     self.update_host, tr("Update the host"))
         self.update_all_button = button(tr("Update all"), tr("sandbox-ai update on every host of the list, one after "
                                                              "the other"), self.update_all)
+        # hosts update --from-here: this machine's copy instead of the signed release (asked first, like an install)
+        self.from_here_button = button(tr("Update from here…"), tr(
+            "hosts update --from-here: this machine's sandbox-ai, as the installation the host has (the user's own or "
+            "the system's): for a host that cannot reach the release server, or before a release is published"),
+            self.update_from_here, tr("Update the host from this machine's copy"))
         self.install_button = button(tr("Install…"), tr("Install sandbox-ai on this host: for the SSH user or every "
                                                         "user, as root, with sudo or without, from this machine's copy "
                                                         "or the signed release (sandbox-ai hosts install)"),
@@ -359,8 +366,8 @@ class HostsPage(QWidget):
                                       lambda: self.load_versions(refresh=True))
         for group in ((self.starts_button, self.questions_button, self.refresh_button),
                       (self.add_button, self.edit_button, self.remove_button, self.test_button),
-                      (self.install_button, self.update_button, self.update_sudo, self.update_all_button,
-                       self.versions_button)):
+                      (self.update_button, self.from_here_button, self.update_sudo),
+                      (self.install_button, self.update_all_button, self.versions_button)):
             row = QHBoxLayout()
             for widget in group:
                 row.addWidget(widget)
@@ -482,11 +489,11 @@ class HostsPage(QWidget):
         if not self.sai.hosts_supported():
             self.status.setText(tr("This sandbox-ai has no hosts yet: update it."))
             for widget in (self.add_button, self.remove_button, self.test_button, self.edit_button, self.tabs,
-                           self.update_button, self.update_all_button, self.versions_button):
+                           self.update_button, self.from_here_button, self.update_all_button, self.versions_button):
                 widget.setEnabled(False)
             return
         if not self.sai.host_update_supported():
-            for widget in (self.update_button, self.update_all_button, self.versions_button):
+            for widget in (self.update_button, self.from_here_button, self.update_all_button, self.versions_button):
                 widget.setEnabled(False)
                 widget.setToolTip(tr("This sandbox-ai cannot update hosts yet: update it."))
         else:
@@ -567,6 +574,10 @@ class HostsPage(QWidget):
         set_enabled(self.install_button, remote and self.sai.host_install_supported(),
                     tr("This machine installs with install.sh (or: sandbox-ai update).") if name == "local" else
                     tr("This sandbox-ai cannot install on hosts yet: update it.") if remote else None)
+        set_enabled(self.from_here_button, remote and self.sai.host_update_supported()
+                    and self.sai.host_update_from_here_supported(),
+                    tr("This machine updates on the page System (or: sandbox-ai update).") if name == "local" else
+                    tr("This sandbox-ai cannot update hosts from its own copy yet: update it.") if remote else None)
         info = (getattr(self, "versions", None) or {}).get(name) if remote else None
         missing = remote and isinstance(info, dict) and not info.get("version")
         self.install_button.setProperty("role", "primary" if missing else "")
@@ -855,7 +866,7 @@ class HostsPage(QWidget):
         self.results, self.queue = [], [name]
         self.updates.clear()
         self.tabs.setCurrentWidget(self.updates)
-        self.queue_sudo = self.update_sudo.currentData()
+        self.queue_sudo, self.queue_from_here = self.update_sudo.currentData(), False
         self.next_update()
 
     def update_all(self):
@@ -865,9 +876,32 @@ class HostsPage(QWidget):
         self.results, self.queue = [], list(names)
         self.updates.clear()
         self.tabs.setCurrentWidget(self.updates)
-        self.queue_sudo = self.update_sudo.currentData()
+        self.queue_sudo, self.queue_from_here = self.update_sudo.currentData(), False
         self.next_update()
 
+    def ask_from_here(self, name, why=""):
+        """True when the human says yes to this machine's copy on host NAME (as an install is asked: host-install)."""
+        text = tr("Put this machine's sandbox-ai on {host}, as the installation it has there? It runs there with the "
+                  "rights of that installation.", host=self.label(name))
+        return ask_first(self, "host-install", tr("Update from this machine's copy"), f"{why}\n\n{text}" if why else
+                         text, tr("Update from here"))
+
+    def update_from_here(self):
+        """`sandbox-ai hosts update NAME --from-here`: this machine's copy on the chosen host, as the same kind of
+        installation (sudo as chosen beside Update), after a question naming the host."""
+        name = self.host()
+        if name is None:
+            return
+        if name == "local":
+            warn(self, tr("Update"), tr("This machine updates on the page System (or: sandbox-ai update)."))
+            return
+        if not self.sai.host_update_from_here_supported() or not self.ask_from_here(name):
+            return
+        self.results, self.queue = [], [name]
+        self.updates.clear()
+        self.tabs.setCurrentWidget(self.updates)
+        self.queue_sudo, self.queue_from_here = self.update_sudo.currentData(), True
+        self.next_update()
 
     def next_update(self, sudo=None):
         """The next host of the queue, one after the other (each may take minutes); the summary at the end."""
@@ -877,8 +911,9 @@ class HostsPage(QWidget):
         name, total = self.queue[0], len(self.results) + len(self.queue)
         self.status.setText(tr("Updating {host} ({index} of {count})…", host=name, index=len(self.results) + 1,
                                count=total))
-        background(self.sai.host_update, name, sudo, owner=self,
-                   source=[self.update_button, self.update_all_button], timeout=1200,
+        from_here = [True] if getattr(self, "queue_from_here", False) else []  # host_update's FROM_HERE
+        background(self.sai.host_update, name, sudo, *from_here, owner=self,
+                   source=[self.update_button, self.from_here_button, self.update_all_button], timeout=1200,
                    done=lambda result, error: self.updated(name, result, error))
 
     def updated(self, name, result, error):
@@ -888,13 +923,30 @@ class HostsPage(QWidget):
                 self, tr("Update"), tr("The installation on {host} belongs to root. Update it with sudo?", host=name),
                 tr("Update with sudo")):
             return self.next_update(sudo=True)
+        from_here, shown = getattr(self, "queue_from_here", False), False
+        if not from_here and "no published release" in str(result.get("error") or "") and \
+                len(self.results) + len(self.queue) == 1 and self.sai.host_update_from_here_supported():
+            # Nothing to download (none published yet, or the host cannot reach the release server): offered at once.
+            self.updates.appendPlainText(printable(update_text(name, result)))
+            shown = True
+            if self.ask_from_here(name, tr("No release of sandbox-ai is published for {host} to download.",
+                                           host=self.label(name))):
+                self.queue_from_here = True
+                return self.next_update()
         self.queue.pop(0)
         self.results.append(result)
-        self.updates.appendPlainText(printable(update_text(name, result)))
+        if not shown:
+            self.updates.appendPlainText(printable(update_text(name, result)))
         if result.get("needs_password"):
-            # sudo there wants a password: the host's update in a terminal tab, where sudo asks for it.
+            # sudo there wants a password: the host's update in a terminal tab, where sudo asks for it (this machine's
+            # copy: its install, as the kind of installation the host has).
             try:
-                self.in_terminal(self.sai.host_update_terminal(name), tr("{host}: update", host=name))
+                info = (getattr(self, "versions", None) or {}).get(name) or {}
+                mode = "system" if result.get("kind") == "system" else "user"
+                argv = self.sai.host_install_terminal(name, mode, info.get("prefix") if mode == "system" else None,
+                                                      True, "here") if from_here else \
+                    self.sai.host_update_terminal(name)
+                self.in_terminal(argv, tr("{host}: update", host=name))
                 self.updates.appendPlainText(printable(tr("  {host}: the update runs in a terminal tab, where sudo "
                                                           "asks for the password", host=name)))
             except (OSError, ValueError) as exc:

@@ -11,6 +11,7 @@ import argparse
 import calendar
 import hashlib
 import importlib.util
+import inspect
 import json
 import os
 from pathlib import Path
@@ -1665,11 +1666,25 @@ class SandboxAI:
         names = sorted(hosts.load())
         return hosts.statuses(names, refresh=refresh, cached=cached and not refresh) if names else {}
 
-    def host_update(self, name, sudo=None):
+    def host_update_from_here_supported(self):
+        """Whether this sandbox-ai updates a host with its own copy (hosts update --from-here, 0.1.78)."""
+        update = getattr(self.module("hosts"), "update", None)
+        try:
+            return update is not None and "from_here" in inspect.signature(update).parameters
+        except (TypeError, ValueError):
+            return False
+
+    def host_update(self, name, sudo=None, from_here=False):
         """The result of `sandbox-ai hosts update NAME --json` ({"before", "after", "changed", "error",
-        "needs_sudo", "needs_password", "notes", "fixed"}); SUDO None: the host's own setting."""
-        args = ["hosts", "update", name, "--json", *(["--sudo"] if sudo else ["--no-sudo"] if sudo is False else [])]
-        status, out, err = self.call(*args, timeout=self.module("hosts").UPDATE_TIMEOUT + 60)
+        "needs_sudo", "needs_password", "notes", "fixed"}); SUDO None: the host's own setting. FROM_HERE: with this
+        machine's copy, as the same kind of installation (--from-here), instead of the host's signed update."""
+        if from_here and name == "local":
+            raise ValueError("this machine updates with: sandbox-ai update")
+        args = ["hosts", "update", name, "--json", *(["--sudo"] if sudo else ["--no-sudo"] if sudo is False else []),
+                *(["--from-here"] if from_here else [])]
+        hosts = self.module("hosts")
+        timeout = max(hosts.UPDATE_TIMEOUT, getattr(hosts, "INSTALL_TIMEOUT", 0) if from_here else 0) + 60
+        status, out, err = self.call(*args, timeout=timeout)
         try:
             return json.loads(out)[0]
         except (ValueError, IndexError, KeyError, TypeError):

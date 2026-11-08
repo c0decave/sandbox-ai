@@ -262,6 +262,80 @@ def test_versions_update_and_update_all(qapp, env, monkeypatch):
     page.close()
 
 
+def test_update_from_this_machines_copy_asks_first_and_is_offered_when_no_release_is_published(qapp, env, monkeypatch):
+    """User request: next to the release update, `sandbox-ai hosts update NAME --from-here` (this machine's copy, as
+    the installation the host has), asked first like an install and with the sudo choice beside Update; an update
+    that finds no published release offers it at once; a sudo that wants a password installs in a terminal tab."""
+    sai = backend.SandboxAI()
+    if not sai.hosts_supported() or not sai.host_update_from_here_supported():
+        pytest.skip("this sandbox-ai cannot update hosts from its own copy")
+    sai.host_add("ct1", "admin@192.0.2.10", 22, "", "")
+    monkeypatch.setattr(sai, "host_statuses", lambda refresh=False, cached=True: {
+        "ct1": {"version": "0.1.60", "available": None, "update": None, "kind": "system", "prefix": "/opt/sai"}})
+    monkeypatch.setattr(sai, "host_run", lambda name, *args, timeout=120: (0, "{}", ""))
+    asked, opened, answers = [], [], []
+
+    def host_update(name, sudo=None, from_here=False):
+        asked.append((name, sudo, from_here))
+        return answers.pop(0)
+    monkeypatch.setattr(sai, "host_update", host_update)
+    monkeypatch.setattr(widgets, "SHOWN", [])
+    page = HostsPage(sai, lambda argv, title: opened.append((argv, title)))
+    choose(page, "ct1")
+    assert page.from_here_button.isEnabled() and page.from_here_button.accessibleName()
+    # Asked first, naming the host; no: nothing runs.
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", False)
+    page.from_here_button.click()
+    assert asked == [] and "ct1" in widgets.SHOWN[-1][1] and "this machine's sandbox-ai" in widgets.SHOWN[-1][1]
+    # Yes: hosts update ct1 --from-here, with the sudo chosen beside Update.
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    page.update_sudo.setCurrentIndex(page.update_sudo.findData(True))
+    answers.append({"name": "ct1", "before": "0.1.60", "after": "0.1.78", "changed": True, "error": None,
+                    "notes": ["from this machine's copy (hosts install --from-here)"]})
+    page.from_here_button.click()
+    assert asked == [("ct1", True, True)]
+    assert "ct1: 0.1.60 -> 0.1.78" in page.updates.toPlainText() and "from this machine's copy" in \
+        page.updates.toPlainText()
+    # The release update finds none published: this machine's copy is offered at once (asked), then runs.
+    asked.clear()
+    widgets.SHOWN.clear()
+    page.update_sudo.setCurrentIndex(0)
+    answers += [{"name": "ct1", "before": "0.1.60", "after": None, "error": "update check: no published release; "
+                 "update it with this machine's copy instead: sandbox-ai hosts update ct1 --from-here"},
+                {"name": "ct1", "before": "0.1.60", "after": None, "error": "sudo wants a password",
+                 "needs_password": True, "kind": "system"}]
+    page.update_host()
+    assert asked == [("ct1", None, False), ("ct1", None, True)]
+    assert len(widgets.SHOWN) == 1 and "No release of sandbox-ai is published" in widgets.SHOWN[0][1]
+    log = page.updates.toPlainText()
+    assert log.count("no published release") == 1 and "1 hosts: 0 updated, 0 up to date, 1 not updated" in log
+    # sudo there wants a password: this machine's copy installed in a terminal tab, as the system installation it is
+    assert [argv[3:] for argv, _ in opened] == [["hosts", "install", "ct1", "--system", "--prefix=/opt/sai", "--sudo",
+                                                 "--from-here"]]
+    # Declined: the failed release update stays as it is.
+    asked.clear()
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", False)
+    answers.append({"name": "ct1", "before": "0.1.60", "after": None, "error": "no published release"})
+    page.update_host()
+    assert asked == [("ct1", None, False)] and page.updates.toPlainText().count("no published release") == 1
+    choose(page, "local")
+    assert not page.from_here_button.isEnabled(), "this machine updates with sandbox-ai update"
+    page.close()
+
+
+def test_host_update_from_here_is_the_launchers_option():
+    sai = backend.SandboxAI()
+    if not sai.hosts_supported() or not sai.host_update_from_here_supported():
+        pytest.skip("this sandbox-ai cannot update hosts from its own copy")
+    calls = []
+    sai.call = lambda *args, timeout=120, input=None: calls.append(args) or (0, json.dumps([{"name": "ct1"}]), "")
+    assert sai.host_update("ct1", True, from_here=True) == {"name": "ct1"}
+    assert sai.host_update("ct1") == {"name": "ct1"}
+    assert calls == [("hosts", "update", "ct1", "--json", "--sudo", "--from-here"), ("hosts", "update", "ct1", "--json")]
+    with pytest.raises(ValueError):
+        sai.host_update("local", from_here=True)
+
+
 def test_update_all_counts_the_hosts_as_everything_else_does(qapp, env, monkeypatch):
     """Update all took the hosts of kind "ssh" only; every other place counts each host but this machine."""
     from sandbox_ai_app import hosts_page

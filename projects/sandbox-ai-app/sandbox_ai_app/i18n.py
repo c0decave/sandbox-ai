@@ -8363,4 +8363,28 @@ TEXTS = {
     '{host}: sandbox-ai {before} -> {after}': {
         'en': '{host}: sandbox-ai {before} -> {after}',
         'de': '{host}: sandbox-ai {before} -> {after}'},
+    'Update from here…': {
+        'en': 'Update from here…',
+        'de': 'Von hier aktualisieren…'},
+    "hosts update --from-here: this machine's sandbox-ai, as the installation the host has (the user's own or the system's): for a host that cannot reach the release server, or before a release is published": {
+        'en': "hosts update --from-here: this machine's sandbox-ai, as the installation the host has (the user's own or the system's): for a host that cannot reach the release server, or before a release is published",
+        'de': 'hosts update --from-here: das sandbox-ai dieses Rechners, als die Installation, die der Host hat (die des Benutzers oder die des Systems): für einen Host, der den Release-Server nicht erreicht, oder bevor ein Release veröffentlicht ist'},
+    "Update the host from this machine's copy": {
+        'en': "Update the host from this machine's copy",
+        'de': 'Den Host mit der Kopie dieses Rechners aktualisieren'},
+    'This sandbox-ai cannot update hosts from its own copy yet: update it.': {
+        'en': 'This sandbox-ai cannot update hosts from its own copy yet: update it.',
+        'de': 'Dieses sandbox-ai kann Hosts noch nicht mit seiner eigenen Kopie aktualisieren; aktualisieren Sie es.'},
+    "Put this machine's sandbox-ai on {host}, as the installation it has there? It runs there with the rights of that installation.": {
+        'en': "Put this machine's sandbox-ai on {host}, as the installation it has there? It runs there with the rights of that installation.",
+        'de': 'Das sandbox-ai dieses Rechners auf {host} bringen, als die Installation, die es dort hat? Es läuft dort mit den Rechten dieser Installation.'},
+    "Update from this machine's copy": {
+        'en': "Update from this machine's copy",
+        'de': 'Mit der Kopie dieses Rechners aktualisieren'},
+    'Update from here': {
+        'en': 'Update from here',
+        'de': 'Von hier aktualisieren'},
+    'No release of sandbox-ai is published for {host} to download.': {
+        'en': 'No release of sandbox-ai is published for {host} to download.',
+        'de': 'Für {host} ist kein Release von sandbox-ai zum Herunterladen veröffentlicht.'},
 }
