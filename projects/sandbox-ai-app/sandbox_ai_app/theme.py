@@ -566,7 +566,7 @@ EXTRAS = {"win311": _win311, "mac": _mac, "hacker": _hacker, "fallout": _fallout
 # attribute makes these rules win over every theme's own QListWidget#nav::item.
 COMPACT_NAV = """
 QListWidget#nav[compact="true"] { padding: 4px 0px; }
-QListWidget#nav[compact="true"]::item { padding: 6px 0px 6px 10px; margin: 1px 4px; }
+QListWidget#nav[compact="true"]::item { padding: 6px 0px 6px 8px; margin: 1px 4px; }
 QListWidget#nav[compact="true"]::item:disabled { padding: 0px; }
 """
 

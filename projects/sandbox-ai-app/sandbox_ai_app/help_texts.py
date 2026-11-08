@@ -273,18 +273,27 @@ AREA_TIPS = (
          "", "page-board"),
     # Sandboxes & sessions
     _tip("sandboxes.table", ("Sandboxes, sessions, MCP servers", "Sandboxen, Sitzungen, MCP-Server"),
-         ("Everything that runs or is kept on this computer and on every host, with kind, project, agent, "
-          "backend, start time and host; rows of the current project are bold, a start with an open question is "
-          "marked asking. Rows of a host that did not answer are greyed (last seen N s ago) and cannot be acted "
-          "on.",
-          "Alles, was auf diesem Rechner und auf jedem Host läuft oder aufbewahrt wird, mit Art, Projekt, Agent, "
-          "Backend, Startzeit und Host; Zeilen des aktuellen Projekts sind fett, ein Start mit offener Frage ist "
-          "als fragt markiert. Zeilen eines Hosts, der nicht antwortete, sind ausgegraut (zuletzt vor N s "
-          "gesehen) und lassen sich nicht bedienen."),
-         ("Select a row for its details and the buttons that act on it. The hosts are read about every 10 "
-          "seconds while the page is shown, every minute otherwise.",
-          "Wählen Sie eine Zeile für ihre Details und die Knöpfe, die auf sie wirken. Die Hosts werden etwa alle "
-          "10 Sekunden gelesen, solange die Seite zu sehen ist, sonst jede Minute."),
+         ("Everything that runs or is kept on this computer and on every host, as a tree: each host (how many "
+          "starts, how many run, whether it answers), under it its starts with kind, project, agent, backend, "
+          "start time and host, and under each start what belongs to it: the MCP servers and helpers it reaches, "
+          "its Podman pod; under an MCP server the starts it serves. Rows of the current project are bold, a start "
+          "with an open question is marked asking. Rows of a host that did not answer are greyed (last seen N s "
+          "ago) and cannot be acted on.",
+          "Alles, was auf diesem Rechner und auf jedem Host läuft oder aufbewahrt wird, als Baum: jeder Host (wie "
+          "viele Starts, wie viele laufen, ob er antwortet), darunter seine Starts mit Art, Projekt, Agent, "
+          "Backend, Startzeit und Host, und unter jedem Start, was zu ihm gehört: die MCP-Server und Helfer, die er "
+          "erreicht, sein Podman-Pod; unter einem MCP-Server die Starts, die er bedient. Zeilen des aktuellen "
+          "Projekts sind fett, ein Start mit offener Frage ist als fragt markiert. Zeilen eines Hosts, der nicht "
+          "antwortete, sind ausgegraut (zuletzt vor N s gesehen) und lassen sich nicht bedienen."),
+         ("Select a start for its details and the buttons that act on it; a host's row and what hangs below a "
+          "start have no buttons (a double-click opens the row it stands for). Which groups are open is kept; "
+          "View › Fold all sections and Unfold all sections close or open them all. The hosts are read about "
+          "every 10 seconds while the page is shown, every minute otherwise.",
+          "Wählen Sie einen Start für seine Details und die Knöpfe, die auf ihn wirken; die Zeile eines Hosts und "
+          "was unter einem Start hängt, haben keine Knöpfe (ein Doppelklick öffnet die Zeile, für die es steht). "
+          "Welche Gruppen offen sind, bleibt erhalten; Ansicht › Alle Abschnitte einklappen und Alle Abschnitte "
+          "ausklappen schließen oder öffnen alle. Die Hosts werden etwa alle 10 Sekunden gelesen, solange die "
+          "Seite zu sehen ist, sonst jede Minute."),
          "sandbox-ai list", "sessions"),
     _tip("sandboxes.only_project", ("Only the current project", "Nur das aktuelle Projekt"),
          ("Limits the list to the sandboxes and sessions of the project open now.",

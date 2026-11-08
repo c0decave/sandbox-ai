@@ -367,9 +367,11 @@ def test_approvals_page_lists_counts_down_and_answers(window, env, wait):
     assert any(f"within {window.sai.approval_seconds} seconds" in text for text in texts(page.open_box))
     nav = window.nav_item("approvals")
     assert nav.text() == "Approvals  (2)" and nav.font().bold()
-    assert len(notes) == 1 and notes[0][0] == f"sandbox-ai asks: claude-abc ({env / 'project'})"
+    # One notification per new question (up to NOTIFY_AT_ONCE), each naming its sandbox.
+    assert len(notes) == 2 and {title for title, _ in notes} == {f"sandbox-ai asks: claude-abc ({env / 'project'})"}
+    assert "192.0.2.7:5432" in notes[0][1] and "https://login.example/device" in notes[1][1], notes
     page.poll()
-    assert len(notes) == 1, "a question is announced once"
+    assert len(notes) == 2, "a question is announced once"
     # A browser question shows its URL prominently, escaped.
     page.open.selectRow(1)
     assert page.url.isVisible() or not page.isVisible()
@@ -471,8 +473,12 @@ def test_allow_asks_first_with_cancel_as_default_for_always(window, env, monkeyp
     page.poll()
     assert page.current() is not None, "the one open question is selected, ready to answer"
     asked = []
-    monkeypatch.setattr(pages, "confirm", lambda parent, title, text, accept, destructive=False, **k:
-                        asked.append((text, destructive)) or False)
+    fake_confirm = lambda parent, title, text, accept, destructive=False, **k: asked.append((text, destructive)) \
+        or False  # noqa: E731
+    # An allow for the run is a plain confirmation; "always" outlives the run: the app's one policy, ask_first
+    # (widgets.confirm with Cancel the default).
+    monkeypatch.setattr(pages, "confirm", fake_confirm)
+    monkeypatch.setattr(widgets, "confirm", fake_confirm)
     page.scope.setCurrentIndex(page.scope.findData("always"))
     page.answer("allow")
     assert asked and asked[-1][1] is True and "always (this project)" in asked[-1][0], "Cancel is the default"
@@ -568,6 +574,10 @@ def copy(page, wait, start):
 
 
 def test_files_page_browses_copies_and_never_follows_links(window, env, tmp_path, wait):
+    """The two-pane Files page (files_page.py): a sandbox's folder on the left, this machine on the right. Both are
+    browsed, copies go both ways between them, and a symbolic link in a sandbox's folder is shown but never followed
+    (in either pane) nor copied."""
+    from sandbox_ai_app.files_page import host_relative
     fake_run(env)
     project = env / "project"
     (project / "src").mkdir()
@@ -575,51 +585,71 @@ def test_files_page_browses_copies_and_never_follows_links(window, env, tmp_path
     (project / "notes.txt").write_text("hello")
     (project / "outside").symlink_to("/etc")
     page = window.files
+    left, right = page.left, page.right
     page.refresh_roots()
-    titles = [page.roots.itemText(i) for i in range(page.roots.count())]
+    titles = [left.roots.itemText(i) for i in range(left.roots.count())]
     assert titles[0].startswith("Running sandbox claude-abc: workspace")
     assert any(t.startswith("Current project") for t in titles)
-    page.roots.setCurrentIndex(0)
-    names = {page.table.item(r, 0).text(): page.table.item(r, 1).text() for r in range(page.table.rowCount())}
+    left.roots.setCurrentIndex(0)
+    names = {left.table.item(r, 0).text(): left.table.item(r, 1).text() for r in range(left.table.rowCount())}
     assert names == {"src": "folder", "notes.txt": "file", "outside": "symbolic link"}
-    link_row = row_of(page.table, "outside")
-    assert page.table.item(link_row, 4).text() == "→ /etc"
-    page.open_row(link_row)
-    assert "not followed" in page.message.text() and page.relative == ""
-    page.open_row(row_of(page.table, "src"))
-    assert page.relative == "src" and page.table.item(0, 0).text() == "main.py"
-    page.up()
-    assert page.relative == ""
+    link_row = row_of(left.table, "outside")
+    assert left.table.item(link_row, 4).text() == "→ /etc"
+    left.open_row(link_row)
+    assert "not followed" in page.message.text() and left.relative == ""
+    left.open_row(row_of(left.table, "src"))
+    assert left.relative == "src" and left.table.item(0, 0).text() == "main.py"
+    left.up()
+    assert left.relative == ""
+    # This machine's pane shows the sandbox's folder too: its link is not followed there either.
+    right.go(host_relative(os.path.realpath(project)))
+    assert right.untrusted()
+    page.message.clear()
+    right.open_row(row_of(right.table, "outside"))
+    assert "not followed" in page.message.text() and right.path_text() == os.path.realpath(project)
+    # Out of the sandbox: its items into the host folder shown on the right; the link is not copied.
     host = tmp_path / "download"
     host.mkdir()
-    rows = [e for e in page.entries if e.name in ("src", "outside", "notes.txt")]
-    report = copy(page, wait, lambda: page.download(rows, host))
+    right.go(host_relative(os.path.realpath(host)))
+    assert right.path_text() == os.path.realpath(host) and not right.untrusted()
+    left.select(["src", "outside", "notes.txt"])
+    assert {e.name for e in left.chosen()} == {"src", "outside", "notes.txt"}
+    report = copy(page, wait, lambda: page.copy_selected(left))
     assert (host / "src" / "main.py").read_text() == "print(1)\n" and (host / "notes.txt").read_text() == "hello"
     assert not (host / "outside").exists() and any("symbolic link" in line for line in report)
-    upload = tmp_path / "upload.txt"
+    assert {right.table.item(r, 0).text() for r in range(right.table.rowCount())} == {"src", "notes.txt"}
+    # Into the sandbox: a host file into the folder shown on the left.
+    outbox = tmp_path / "outbox"
+    outbox.mkdir()
+    upload = outbox / "upload.txt"
     upload.write_text("from the host")
-    page.go("src")
-    copy(page, wait, lambda: page.upload([str(upload)]))
+    right.go(host_relative(os.path.realpath(outbox)))
+    left.go("src")
+    right.select(["upload.txt"])
+    copy(page, wait, lambda: page.copy_selected(right))
     assert (project / "src" / "upload.txt").read_text() == "from the host"
-    assert "upload.txt" in [page.table.item(r, 0).text() for r in range(page.table.rowCount())]
-    report = copy(page, wait, lambda: page.upload([str(upload)]))
+    assert "upload.txt" in [left.table.item(r, 0).text() for r in range(left.table.rowCount())]
+    right.select(["upload.txt"])
+    report = copy(page, wait, lambda: page.copy_selected(right))
     assert any("already exists" in line for line in report)
     page.replace.setChecked(True)
     upload.write_text("newer")
-    copy(page, wait, lambda: page.upload([str(upload)]))
+    right.select(["upload.txt"])
+    copy(page, wait, lambda: page.copy_selected(right))  # asked first (AUTO_ANSWER: Replace)
     assert (project / "src" / "upload.txt").read_text() == "newer"
     with pytest.raises(ValueError):
-        page.go("../..")
+        left.go("../..")
     # Sorted by name (descending), rows still stand for their own entries.
-    page.go("")
-    page.table.sortByColumn(0, Qt.SortOrder.DescendingOrder)
-    assert [page.table.item(r, 0).text() for r in range(3)] == ["src", "outside", "notes.txt"]
-    assert [e.name for e in page.entries][1] == "notes.txt"
+    left.go("")
+    left.table.sortByColumn(0, Qt.SortOrder.DescendingOrder)
+    assert [left.table.item(r, 0).text() for r in range(3)] == ["src", "outside", "notes.txt"]
+    assert [e.name for e in left.entries][1] == "notes.txt"
     page.message.clear()
-    page.open_row(1)
-    assert "not followed" in page.message.text() and page.relative == ""
-    page.table.selectRow(row_of(page.table, "notes.txt"))
-    assert [e.name for e in page.chosen()] == ["notes.txt"]
+    left.open_row(1)
+    assert "not followed" in page.message.text() and left.relative == ""
+    left.table.clearSelection()
+    left.table.selectRow(row_of(left.table, "notes.txt"))
+    assert [e.name for e in left.chosen()] == ["notes.txt"]
 
 
 def test_files_page_warns_about_copied_files_that_tools_run(window, env, tmp_path, wait):
@@ -2198,6 +2228,10 @@ def test_a_host_that_hangs_delays_no_other_and_one_removed_mid_read_is_gone(wind
     no other, and a removed host's late answer is ignored."""
     import threading
     page = window.sandboxes
+    # The window's own first look (a 0 ms timer) ends first: else it lands in this test's first read and is
+    # (rightly) folded into one more look, which reads ct1 once more than counted below.
+    QtWidgets.QApplication.processEvents()
+    assert wait(lambda: page.remote_reading is None, 10)
     release, reads = threading.Event(), []
 
     def host_instances(name, timeout=60):
@@ -2211,7 +2245,8 @@ def test_a_host_that_hangs_delays_no_other_and_one_removed_mid_read_is_gone(wind
         page.refresh_remote()
         assert wait(lambda: "ct1" in page.remote and "slow" in page.remote_flight, 10)
         page.refresh_remote()  # the next look: ct1 again, the hung host not on top of its read
-        assert wait(lambda: reads.count("ct1") == 2 and not page.hosts_reading, 10) and reads.count("slow") == 1
+        assert wait(lambda: reads.count("ct1") == 2 and page.remote_reading == {"slow"}, 10), (reads, page.remote_reading)
+        assert reads.count("slow") == 1
         window.hosts.host_removed.emit("slow")  # removed while its read runs
         assert page.remote_reading is None and "slow" not in page.remote_names
         monkeypatch.setattr(window.sai, "remote_hosts", lambda: ["ct1"])
@@ -2820,3 +2855,133 @@ def test_the_settings_are_in_the_menu_bar(window, monkeypatch):
     window.actions["policy"].trigger()
     assert opened == [False, True]
     assert "Ctrl+," in [s.toString() for s in window.actions["settings"].shortcuts()]
+
+
+# -- the Sandboxes page's tree: hosts, their starts, what belongs to each start --
+
+
+def sandboxes_tree(window, monkeypatch):
+    """This machine: a session that reaches an MCP server and a helper, in a Podman pod, and that MCP server; ct1: a
+    start that reaches an MCP server at its next start, and that server (which says whom it serves); ct2 does not
+    answer."""
+    work = backend.Instance("session", "session:work", "work", session="work", state="running", run="claude-abc",
+                            record={"mcp_servers": ["fetch", "helper-codex-1234abcd"], "pod": "sandbox-work"})
+    fetch = backend.Instance("mcp", "mcp:fetch", "fetch", mcp="fetch", state="running", run="mcp-fetch")
+    web = backend.Instance("session", backend.remote_key("ct1", "web"), "web", state="running", host="ct1",
+                           record={"attachable": True, "mcp": ["docs"], "mcp_running": []})
+    docs = backend.Instance("mcp", backend.remote_key("ct1", "mcp-docs"), "mcp-docs", state="running", host="ct1",
+                            record={"id": "mcp-docs", "serves": ["web"]}, ident="mcp-docs")
+    monkeypatch.setattr(window.sai, "instances", lambda: ([work, fetch], []))
+    monkeypatch.setattr(window.sai, "remote_hosts", lambda: ["ct1", "ct2"])
+    monkeypatch.setattr(window.sai, "host_instances", lambda name, timeout=60: [web, docs] if name == "ct1" else (
+        _ for _ in ()).throw(ValueError("ssh: connection timed out")))
+    page = window.sandboxes
+    page.refresh()
+    page.refresh_remote()
+    return page
+
+
+def tree_item(page, host, ident=""):
+    from sandbox_ai_app import start_tree
+    return page.table.find_item(start_tree.row_id(host, ident))
+
+
+def children(item, column=0):
+    return [item.child(i).text(column) for i in range(item.childCount())]
+
+
+def test_the_sandboxes_tree_groups_each_hosts_starts_and_what_belongs_to_them(window, monkeypatch, wait):
+    from sandbox_ai_app import start_tree
+    page = sandboxes_tree(window, monkeypatch)
+    assert wait(lambda: page.table.rowCount() == 4 and page.remote_reading is None, 15)
+    tree = page.table
+    # The hosts at the top: how many starts, how many run, whether they answer.
+    tops = [tree.topLevelItem(i) for i in range(tree.topLevelItemCount())]
+    assert [t.text(0) for t in tops] == ["This machine", "ct1", "ct2"]
+    assert tops[1].text(1) == "Starts: 2, running: 2" and tops[1].text(6).startswith("answers")
+    assert tops[2].text(1) == "Starts: 0, running: 0" and tops[2].text(6) == "no answer, not seen yet"
+    assert "connection timed out" in tops[2].toolTip(0)
+    # Only the starts are rows to act on (rowCount, item, find_row, row_key count them alone).
+    assert [widgets.row_key(tree, r) for r in range(tree.rowCount())] == [
+        "session:work", "mcp:fetch", backend.remote_key("ct1", "web"), backend.remote_key("ct1", "mcp-docs")]
+    # Under a start: the MCP servers it reaches (with their state), its helper, its pod.
+    work = tree_item(page, "local", "session:work")
+    assert children(work) == ["MCP server", "Helper", "Pod"]
+    assert children(work, 1) == ["fetch", "helper-codex-1234abcd", "sandbox-work"]
+    assert children(work, 6) == ["running", "not running", "running"]
+    assert "while it runs" in work.child(0).toolTip(0)
+    # Under an MCP server: whom it serves.
+    assert children(tree_item(page, "local", "mcp:fetch")) == ["Serves"]
+    assert children(tree_item(page, "local", "mcp:fetch"), 1) == ["work"]
+    web = tree_item(page, "ct1", backend.remote_key("ct1", "web"))
+    assert children(web, 1) == ["docs"] and children(web, 6) == ["running"], "mcp-docs is the server docs"
+    assert "next start" in web.child(0).toolTip(0)
+    assert children(tree_item(page, "ct1", backend.remote_key("ct1", "mcp-docs")), 1) == ["web"]
+    # Local or remote on every row.
+    assert {item.text(8) for item in tree.every_item()} == {"this machine", "ct1", "ct2"}
+    assert all(item.text(8) == "ct1" for item in tree.every_item()
+               if start_tree.id_host(item.data(0, start_tree.ID_ROLE)) == "ct1")
+
+
+def test_the_rows_of_the_sandboxes_tree_that_are_not_starts_have_no_actions(window, monkeypatch, wait):
+    page = sandboxes_tree(window, monkeypatch)
+    assert wait(lambda: page.table.rowCount() == 4 and page.remote_reading is None, 15)
+    buttons = [page.stop_button, *page.session_buttons.values(), *page.run_buttons, page.manage_buttons["rename"],
+               page.manage_buttons["history"]]
+    page.table.select_item(tree_item(page, "ct1"))
+    assert page.current() is None and "ct1" in page.detail.text()
+    assert not any(b.isEnabled() for b in buttons)
+    assert all("A host's row" in b.toolTip() for b in [page.stop_button, *page.session_buttons.values()])
+    pod = tree_item(page, "local", "session:work").child(2)
+    page.table.select_item(pod)
+    assert page.current() is None and not any(b.isEnabled() for b in buttons)
+    assert "select the start itself" in page.stop_button.toolTip()
+    # The start itself: its actions as ever.
+    page.table.selectRow(widgets.find_row(page.table, "session:work"))
+    assert page.current().key == "session:work"
+    assert page.stop_button.isEnabled() and page.session_buttons["pause"].isEnabled()
+    # Double-click on an MCP server below a start: that server's own row, which stops.
+    page.open_part(tree_item(page, "local", "session:work").child(0))
+    assert page.current().key == "mcp:fetch" and page.stop_button.isEnabled()
+    page.open_part(pod)  # stands for no row of its own: the selection stays
+    assert page.current().key == "mcp:fetch"
+
+
+def test_the_sandboxes_tree_keeps_its_folds_and_selection_across_reads(window, monkeypatch, wait):
+    page = sandboxes_tree(window, monkeypatch)
+    assert wait(lambda: page.table.rowCount() == 4 and page.remote_reading is None, 15)
+    work = tree_item(page, "local", "session:work")
+    assert tree_item(page, "local").isExpanded() and not work.isExpanded(), "hosts open, starts closed at first"
+    work.setExpanded(True)
+    tree_item(page, "ct1").setExpanded(False)
+    page.table.select_item(work.child(2))  # a part of a start: kept selected too
+    page.refresh()
+    page.refresh_remote()
+    assert wait(lambda: page.remote_reading is None, 15)
+    assert tree_item(page, "local", "session:work").isExpanded() and not tree_item(page, "ct1").isExpanded()
+    selected = page.table.selected_item()
+    assert selected is not None and selected.text(1) == "sandbox-work"
+    # Kept for the next start, by host and start.
+    groups = window.state.data["sandboxes-groups"]["open"]
+    assert groups == {"local\nsession:work": True, "ct1\n": False}
+    page.open_groups = {}
+    page.load_groups(window.state)
+    assert page.open_groups == groups
+    # A start of another host selected: it stays selected through the next reads.
+    page.table.selectRow(widgets.find_row(page.table, backend.remote_key("ct1", "web")))
+    assert tree_item(page, "ct1").isExpanded(), "selecting a start opens its host"
+    page.refresh_remote()
+    assert wait(lambda: page.remote_reading is None, 15)
+    page.refresh()
+    assert page.current().key == backend.remote_key("ct1", "web")
+    # View › Fold all / Unfold all act on the tree, and are kept.
+    window.show_page("sandboxes")
+    window.fold_all(True)
+    page.refresh()
+    tops = [page.table.topLevelItem(i) for i in range(page.table.topLevelItemCount())]
+    assert not any(t.isExpanded() for t in tops) and window.state.data["sandboxes-groups"]["hosts"] is False
+    window.fold_all(False)
+    page.refresh()
+    assert all(item.isExpanded() for item in page.table.every_item() if item.childCount())
+    assert window.state.data["sandboxes-groups"] == {"open": {}, "hosts": True, "starts": True}
+    assert page.current().key == backend.remote_key("ct1", "web")

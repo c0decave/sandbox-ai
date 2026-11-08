@@ -17,7 +17,7 @@ from . import theme
 from .backend import SandboxAI
 from .files import printable
 from .i18n import N_, tr
-from .widgets import ask_first, background, confirm, fill, outcome, plain_label, selected, table
+from .widgets import ask_first, background, fill, outcome, plain_label, selected, table
 
 LOCAL = "local"  # the host of this machine's own secrets (sandbox-ai hosts' name for it)
 # The overview's kinds, in the order of the tabs.
@@ -98,6 +98,10 @@ class GitLoginsBox(LoginsBox):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
         values = dialog.values()
+        # Every sandbox's proxy logs in there from now on: asked first (git-login-add).
+        if not ask_first(self, "git-login-add", tr("New Git login"), "\n\n".join([printable(values["url"]),
+                                                                                  self.about()]), tr("Add")):
+            return None
         args = ["add", values["url"], "--secret", values["secret"]] + (["--user", values["user"]]
                                                                       if values["user"] else [])
         self.run(*args, what="add")
@@ -105,8 +109,8 @@ class GitLoginsBox(LoginsBox):
 
     def remove(self):
         url = selected(self.list)
-        if not url or not confirm(self, tr("Remove"), tr("Remove the Git login for {name}? Its secret stays.",
-                                                         name=url), tr("Remove"), destructive=True):
+        if not url or not ask_first(self, "login-remove", tr("Remove"),
+                                    tr("Remove the Git login for {name}? Its secret stays.", name=url), tr("Remove")):
             return
         self.run("remove", url, what="remove")
 
@@ -136,8 +140,9 @@ class PublishLoginsBox(LoginsBox):
 
     def remove(self):
         kind = selected(self.list)
-        if not kind or not confirm(self, tr("Remove"), tr("Remove the publish login for {name}? Its secret stays.",
-                                                          name=kind), tr("Remove"), destructive=True):
+        if not kind or not ask_first(self, "login-remove", tr("Remove"),
+                                     tr("Remove the publish login for {name}? Its secret stays.", name=kind),
+                                     tr("Remove")):
             return
         self.run("remove", kind, what="remove")
 
@@ -512,8 +517,9 @@ class CredentialsPage(QWidget):
             QMessageBox.information(self, tr("Logins"), tr("Select an agent first."))
             return
         if logout:
-            if not confirm(self, tr("Log out"), tr("Forget the stored {agent} login? Sandboxes then use the host's login "
-                                                   "again.", agent=agent), tr("Log out"), destructive=True):
+            if not ask_first(self, "login-logout", tr("Log out"), tr("Forget the stored {agent} login? Sandboxes then "
+                                                                     "use the host's login again.", agent=agent),
+                             tr("Log out")):
                 return
             self.terminal(self.sai.command("login", agent, "--logout"), f"sandbox-ai login {agent} --logout")
         else:

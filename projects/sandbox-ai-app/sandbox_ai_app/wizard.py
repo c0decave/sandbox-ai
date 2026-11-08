@@ -1,6 +1,7 @@
 """The wizard: a new (or existing) project in a few pages, building the same board model as the Board page.
 
-Project folder -> agent -> preset (the Board page's library) or custom -> network -> connection proxy and TLS ->
+Project folder -> agent -> where its model runs (the agent's cloud provider and model, or a model server of your
+own: wizard_llm.py) -> preset (the Board page's library) or custom -> network -> connection proxy and TLS ->
 Git and tokens -> MCP servers -> devices and limits -> review (command line, security badges, problems, the file and what
 changes, the launcher's verdict) -> write and trust. Finishing opens the board.
 
@@ -19,20 +20,24 @@ import time
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QHeaderView, QLineEdit, QListWidget,
-    QListWidgetItem, QPlainTextEdit, QPushButton, QRadioButton, QTableWidget, QTableWidgetItem, QWizard, QWizardPage,
+    QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QHeaderView, QLineEdit,
+    QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QRadioButton, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWizard, QWizardPage,
 )
 
 from . import board as B
 from . import presets as PR
 from . import widgets
+from . import wizard_llm as WL
 from .board_view import LinesEdit, PathEdit, RulesEdit, read_small
 from .preset_gallery import PlaceholderForm
 from .files import printable
 from .i18n import N_, tr
-from .widgets import MONO, background, confirm, plain_label, warn
+from .widgets import MONO, ask_first, background, confirm, plain_label, show_text, warn
 
 DEFAULT_MEMORY = "8g"  # the launcher's default, as a placeholder
+SECRET_EXAMPLE = "LLM_KEY"  # the same in every language
+URL_EXAMPLE = "https://llm.example.org"
 TOKEN_KINDS = (("env", "--git-token-env"), ("secret", "--git-token-secret"), ("typed", "--git-token-file"),
                ("file", "--git-token-file"))
 
@@ -204,41 +209,521 @@ class AgentPage(Page):
         self.agent.setCurrentText(wizard.settings().get("default_agent", "claude"))
         self.danger = QCheckBox(tr("without the agent's own approval prompts (-D; the sandbox stays in force)"))
         self.forbid(self.danger, "--dangerously-skip-permissions")
-        # The model's choices are the agent's own with their versions (models.py), the effort's guide.AGENT_EFFORTS;
-        # a model it does not list can be typed.
+        self.form.addRow(tr("Agent"), self.agent)
+        self.form.addRow("", self.danger)
+
+    def initializePage(self):  # noqa: N802
+        existing = self.wizard_.existing
+        if existing is not None and existing.agent:
+            self.agent.setCurrentText(existing.agent)
+
+
+class ModelPage(Page):
+    """Where the model runs: the agent's own provider (its cloud models, each with its version: models.py), or a model
+    server of your own - the raw API of LM Studio, Ollama, llama.cpp, vLLM or any OpenAI-compatible server,
+    registered with `sandbox-ai llm add` - for any agent (Claude Code needs the Anthropic Messages API, Codex and
+    OpenCode take any OpenAI-compatible server: a server the agent cannot use is shown with why, never hidden). The
+    servers are read, added, checked and asked for their models in the background (wizard_llm.py). The choice goes
+    on the board as --llm NAME[:MODEL] (and --no-provider-defaults for "only this server"); the cloud model and
+    effort are not used meanwhile."""
+
+    def __init__(self, wizard):
+        super().__init__(wizard, tr("Model"), tr("Where the model runs: the agent's provider in the cloud, or a model "
+                                                 "server of your own (its raw API)."))
+        self.where = QButtonGroup(self)
+        self.cloud = QRadioButton(tr("The agent's provider (cloud)"))
+        # A radio button never wraps: its text stays short, the servers it means are said below it (wrapped).
+        self.own = QRadioButton(tr("A model server of your own (its raw API)"))
+        for button in (self.cloud, self.own):
+            self.where.addButton(button)
+        self.cloud.setChecked(True)
+        self.form.addRow(tr("Where the model runs"), self.cloud)
+        self.form.addRow("", self.own)
+        self.form.addRow("", widgets.plain_label(tr("LM Studio, Ollama, llama.cpp, vLLM or any OpenAI-compatible "
+                                                    "server, registered with sandbox-ai llm add."), role="secondary"))
+        # The cloud: the agent's own models with their versions (models.py), the effort's guide.AGENT_EFFORTS; a model
+        # it does not list can be typed.
         self.model = QComboBox()
         self.model.setEditable(True)
         self.effort = QComboBox()
-        self.form.addRow(tr("Agent"), self.agent)
-        self.form.addRow("", self.danger)
         self.form.addRow(tr("Model"), self.model)
         self.form.addRow(tr("Effort"), self.effort)
-        self.agent.currentTextChanged.connect(self.agent_changed)
-        self.agent_changed(self.agent.currentText())
+        # An own server.
+        self.servers = widgets.table([tr("Server"), tr("Kind"), tr("URL"), tr("Agents")], stretch=2)
+        self.servers.setAccessibleName(tr("Model servers"))
+        self.servers.setMaximumHeight(170)
+        self.servers.itemSelectionChanged.connect(self.server_chosen)
+        self.add_button = QPushButton(tr("Add a server…"))
+        self.add_button.setToolTip(tr("Register a model server of your own (sandbox-ai llm add), then check it for "
+                                      "the agent (sandbox-ai llm check)"))
+        self.add_button.clicked.connect(lambda: self.add_server())
+        self.refresh_button = QPushButton(tr("Refresh"))
+        self.refresh_button.setToolTip(tr("Read the registered servers again (sandbox-ai llm list)"))
+        self.refresh_button.clicked.connect(lambda: self.refresh())
+        self.models_button = QPushButton(tr("List its models"))
+        self.models_button.setToolTip(tr("Ask the server for the models it offers now (sandbox-ai llm models)"))
+        self.models_button.clicked.connect(lambda: self.list_models())
+        row = QHBoxLayout()
+        for button in (self.add_button, self.refresh_button, self.models_button):
+            row.addWidget(button)
+        row.addStretch()
+        self.form.addRow(tr("Servers"), self.servers)
+        self.form.addRow("", row)
+        self.server_model = QComboBox()
+        self.server_model.setEditable(True)
+        self.server_model.lineEdit().setPlaceholderText(tr("choose one the server lists, or type its name"))
+        self.form.addRow(tr("Its model"), self.server_model)
+        self.only = QCheckBox(tr("only this server (no cloud: --no-provider-defaults)"))
+        self.only.setToolTip(tr("The agent reaches this server and what you allow on the next pages, not its cloud "
+                                "provider"))
+        self.only.setChecked(True)
+        self.form.addRow("", self.only)
+        self.hint = plain_label(role="secondary")
+        self.form.addRow(self.hint)
+        self.status = plain_label(role="secondary")
+        self.form.addRow(self.status)
+        self.endpoints, self.notes, self.listed = {}, [], {}
+        self.loaded, self.shown_agent, self.existing_choice, self.seen_existing = False, None, None, None
+        self.wanted, self.wanted_model, self.models_for = None, "", None  # the server (and model) to choose once read
+        self.ticket = 0
+        self.where.buttonToggled.connect(lambda *_: self.where_changed())
+        self.own.toggled.connect(lambda on: self.server_chosen() if on else None)
+        self.where_changed()
+
+    # -- the agent and the cloud --
+
+    def agent(self):
+        return self.wizard_.agent_page.agent.currentText()
 
     def agent_changed(self, agent):
         from .guide import AGENT_EFFORTS
         from . import models
-        model, effort = self.model_name(), self.effort.currentData() or ""
+        same = agent == self.shown_agent
+        model, effort = (self.model_name(), self.effort.currentData() or "") if same else ("", "")
         models.fill_combo(self.model, agent, model)  # each with its version (models.py says where from)
         self.effort.clear()
         self.effort.addItem(tr("the agent's default"), "")
         for level in AGENT_EFFORTS.get(agent, ()):
             self.effort.addItem(level, level)
         self.effort.setCurrentIndex(max(0, self.effort.findData(effort)))
-        self.effort.setEnabled(self.effort.count() > 1)
-        self.effort.setToolTip("" if self.effort.count() > 1 else
-                               tr("{agent} sets its effort per model in its own configuration", agent=agent))
+        self.shown_agent = agent
+        self.where_changed()
 
     def model_name(self):
-        """The model chosen or typed ("" for the agent's default)."""
+        """The cloud model chosen or typed ("" for the agent's default)."""
         from . import models
         return models.combo_value(self.model)
 
     def initializePage(self):  # noqa: N802
+        agent = self.agent()
+        if agent != self.shown_agent:
+            self.agent_changed(agent)
         existing = self.wizard_.existing
-        if existing is not None and existing.agent:
-            self.agent.setCurrentText(existing.agent)
+        if existing is not self.seen_existing:  # an existing project's --llm is shown as chosen
+            self.seen_existing, self.existing_choice = existing, None
+            if existing is not None and existing.document is not None:
+                try:
+                    board = B.from_project(self.wizard_.sai, existing.document, self.wizard_.directory)
+                    self.existing_choice = WL.from_board(board)
+                except Exception:  # noqa: BLE001 - a project the board cannot read: shown on the next pages
+                    self.existing_choice = None
+            if self.existing_choice:
+                self.own.setChecked(True)
+                self.wanted, self.wanted_model = self.existing_choice["name"], self.existing_choice.get("model") or ""
+                self.only.setChecked(bool(self.existing_choice.get("only")))
+        if not self.loaded:
+            self.refresh()
+        else:
+            self.show_endpoints()
+        self.where_changed()
+
+    def where_changed(self):
+        own = self.own.isChecked()
+        why = tr("The model is the server's: --llm NAME:MODEL (the launcher refuses --model with --llm)")
+        for widget in (self.model, self.effort):
+            widget.setEnabled(not own and (widget is not self.effort or widget.count() > 1))
+        self.model.setToolTip(why if own else "")
+        self.effort.setToolTip(why if own else "" if self.effort.count() > 1 else
+                               tr("{agent} sets its effort per model in its own configuration",
+                                  agent=self.shown_agent or ""))
+        for widget in (self.servers, self.add_button, self.refresh_button, self.models_button, self.server_model,
+                       self.only):
+            widget.setEnabled(own)
+        self.update_hint()
+
+    # -- the servers --
+
+    def refresh(self):
+        self.status.setText(tr("Reading the model servers (sandbox-ai llm list)…"))
+        sai = self.wizard_.sai
+        background(lambda: WL.list_endpoints(sai), owner=self, source=self.refresh_button,
+                   timeout=WL.LIST_SECONDS + 30, done=self.endpoints_read)
+
+    def endpoints_read(self, result, error):
+        try:
+            self.status.text()
+        except RuntimeError:  # the wizard closed meanwhile
+            return
+        self.loaded = True
+        if error is not None:
+            self.endpoints, self.notes = {}, []
+            self.status.setText(tr("The model servers could not be read: {error}", error=printable(error)))
+        else:
+            found, self.notes = result
+            self.endpoints = {e["name"]: e for e in found}
+            self.status.setText("\n".join(self.notes) if self.notes else "" if self.endpoints else
+                                tr("No model server yet: “Add a server…” registers one (sandbox-ai llm add)."))
+        self.show_endpoints()
+
+    def show_endpoints(self):
+        agent = self.agent()
+        entries = list(self.endpoints.values())
+        chosen = self.wanted or self.chosen_name()
+        self.servers.blockSignals(True)
+        widgets.fill(self.servers, [WL.endpoint_row(e) for e in entries],
+                     colors=[None if WL.usable_by(e, agent) else "muted" for e in entries],
+                     tooltips=["\n".join(t for t in (WL.endpoint_detail(e), WL.agent_hint(e, agent, self.wizard_.sai))
+                                         if t) for e in entries],
+                     keys=[e["name"] for e in entries])
+        usable = [e["name"] for e in entries if WL.usable_by(e, agent)]
+        if chosen not in self.endpoints and len(usable) == 1:
+            chosen = usable[0]  # the only one the agent can use
+        widgets.select_keys(self.servers, [chosen] if chosen in self.endpoints else [])
+        self.servers.blockSignals(False)
+        self.server_chosen()
+        if chosen in self.endpoints:
+            self.wanted, self.wanted_model = None, ""
+
+    def chosen_name(self):
+        keys = widgets.selected_keys(self.servers)
+        return keys[0] if keys else None
+
+    def chosen_endpoint(self):
+        return self.endpoints.get(self.chosen_name())
+
+    def server_chosen(self):
+        endpoint = self.chosen_endpoint()
+        name = endpoint["name"] if endpoint is not None else None
+        # What was typed stays for the same server; another server starts from its own models.
+        typed = self.server_model_value() if name == self.models_for else \
+            self.wanted_model if name is not None and name == self.wanted else ""
+        self.models_for = name
+        self.fill_models(endpoint, self.listed.get(name), typed)
+        self.update_hint()
+        if endpoint is not None and endpoint["name"] not in self.listed and self.own.isChecked():
+            self.list_models()
+
+    def fill_models(self, endpoint, listed=None, typed=""):
+        """The models of ENDPOINT: its default (llm add --model), then those it LISTED now (with size and whether
+        loaded) or, until it answered, those it listed when it was last checked; TYPED stays."""
+        combo = self.server_model
+        combo.blockSignals(True)
+        combo.clear()
+        if endpoint is not None:
+            if endpoint.get("model"):
+                combo.addItem(tr("the server's default ({model})", model=printable(endpoint["model"])), "")
+            rows = listed if listed is not None else \
+                [{"name": m} for m in endpoint.get("models") or [] if WL.valid_model(m)]
+            for row in rows:
+                extra = [tr("loaded")] if row.get("loaded") else []
+                if row.get("size"):
+                    extra.append(f"{row['size'] / 1e9:.1f} GB")
+                combo.addItem(row["name"] + (f"  ({', '.join(extra)})" if extra else ""), row["name"])
+        index = combo.findData(typed) if typed else -1
+        if index >= 0:
+            combo.setCurrentIndex(index)
+        elif typed:
+            combo.setEditText(typed)
+        elif combo.count():
+            combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+
+    def server_model_value(self):
+        """The model chosen or typed for the server ("" for its default)."""
+        combo = self.server_model
+        text = combo.currentText().strip()
+        index = combo.findText(text)
+        if index >= 0 and combo.itemData(index) is not None:
+            return combo.itemData(index)
+        return text
+
+    def list_models(self):
+        endpoint = self.chosen_endpoint()
+        if endpoint is None:
+            return
+        name, sai = endpoint["name"], self.wizard_.sai
+        self.ticket += 1
+        ticket = self.ticket
+        self.status.setText(tr("Asking {name} for its models (sandbox-ai llm models)…", name=name))
+        background(lambda: WL.list_models(sai, name), owner=self, source=self.models_button,
+                   timeout=WL.MODELS_SECONDS + 30, done=lambda result, error: self.models_read(ticket, name, result,
+                                                                                               error))
+
+    def models_read(self, ticket, name, result, error):
+        try:
+            self.status.text()
+        except RuntimeError:
+            return
+        if ticket != self.ticket:
+            return  # another server was chosen meanwhile
+        if error is not None:
+            self.status.setText(tr("{name} did not list its models: {error}. Type the model's name, or check that the "
+                                   "server runs.", name=name, error=printable(error)))
+            return
+        self.listed[name] = result
+        self.status.setText(tr("{name} offers {count} models.", name=name, count=len(result)) if result else
+                            tr("{name} offers no model now: load one on the server, or type its name.", name=name))
+        if self.chosen_name() == name:
+            self.fill_models(self.endpoints.get(name), result, self.server_model_value())
+
+    def update_hint(self):
+        endpoint = self.chosen_endpoint() if self.own.isChecked() else None
+        if endpoint is None:
+            self.hint.setText("")
+            return
+        agent = self.agent()
+        lines = [WL.agent_hint(endpoint, agent, self.wizard_.sai) or
+                 tr("{agent} can use {name}.", agent=agent, name=endpoint["name"])]
+        if WL.loopback(endpoint) and self.wizard_.settings().get("default_backend") == "bwrap":
+            lines.append(tr("{name} is on this machine's loopback: only the Podman backend reaches it, not Bubblewrap.",
+                            name=endpoint["name"]))
+        self.hint.setText("\n".join(lines))
+
+    def add_server(self):
+        def added(name, checked_ok=None):
+            if not name:
+                return
+            self.wanted, self.wanted_model = name, ""
+            self.listed.pop(name, None)
+            self.status.setText(tr("{name} added and checked for {agent}.", name=name, agent=self.agent())
+                                if checked_ok else tr("{name} added.", name=name))
+            self.refresh()
+        add_server(self, self.wizard_.sai, self.agent(), list(self.endpoints), added, source=self.add_button)
+
+    # -- the choice --
+
+    def validatePage(self):  # noqa: N802
+        wizard = self.wizard_
+        if not self.own.isChecked():
+            wizard.llm_choice, wizard.llm_endpoint = None, None
+            return True
+        endpoint = self.chosen_endpoint()
+        if endpoint is None:
+            self.status.setText(tr("Choose a model server, or add one (Add a server…)."))
+            return False
+        agent = self.agent()
+        if not WL.usable_by(endpoint, agent):
+            self.status.setText(WL.agent_hint(endpoint, agent, wizard.sai))
+            return False
+        try:
+            model = WL.chosen_model(endpoint, self.server_model_value(), self.listed.get(endpoint["name"], ()))
+        except ValueError as exc:
+            self.status.setText(printable(exc))
+            return False
+        wizard.llm_choice = {"name": endpoint["name"], "model": model, "only": self.only.isChecked()}
+        wizard.llm_endpoint = endpoint
+        return True
+
+    def dropped_existing(self):
+        """True when the existing project's own server was let go for the agent's provider."""
+        return bool(self.existing_choice) and not self.own.isChecked()
+
+
+class ServerDialog(QDialog):
+    """A model server of your own for `sandbox-ai llm add` on this machine: its kind (LM Studio, Ollama, llama.cpp,
+    vLLM or an OpenAI-compatible API), its URL (this machine with the kind's usual port, editable), a name, and
+    optionally the secret that holds its API key (a key typed here becomes that secret: standard input, after the
+    server was added) and the VPN profile it is reached through."""
+
+    def __init__(self, sai, taken=(), parent=None):
+        super().__init__(parent)
+        self.sai, self.taken = sai, list(taken)
+        self.url_typed = self.name_typed = False
+        self.setWindowTitle(tr("Add a model server"))
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.form = form
+        layout.addLayout(form)
+        self.kind = QComboBox()
+        for key, label, _ in WL.KINDS:
+            self.kind.addItem(tr(label), key)
+        self.url = QLineEdit()
+        self.url.setToolTip(tr("The server's root, http(s)://HOST[:PORT][/PREFIX]; each agent gets the API path it "
+                               "needs. Plain http only to this host, private or Tailscale addresses."))
+        self.url.textEdited.connect(lambda _text: setattr(self, "url_typed", True))
+        self.name = QLineEdit()
+        self.name.setMaxLength(32)
+        self.name.setToolTip(tr("How starts name it: --llm NAME[:MODEL]"))
+        self.name.textEdited.connect(lambda _text: setattr(self, "name_typed", True))
+        self.secret = QLineEdit()
+        self.secret.setPlaceholderText(SECRET_EXAMPLE)
+        self.value = QLineEdit()
+        self.value.setEchoMode(QLineEdit.EchoMode.Password)
+        self.value.setPlaceholderText(tr("typed here: kept as that secret (or leave it empty if it is kept already)"))
+        self.vpn = QComboBox()
+        self.vpn.setEditable(True)
+        self.vpn.addItem("")
+        self.vpn.lineEdit().setPlaceholderText(tr("none"))
+        self.vpn.setToolTip(tr("The VPN profile the server is reached through (optional)"))
+        self.anthropic = QCheckBox(tr("It also offers the Anthropic Messages API (Claude Code)"))
+        form.addRow(tr("Kind"), self.kind)
+        form.addRow(tr("URL"), self.url)
+        form.addRow(tr("Name"), self.name)
+        form.addRow(tr("Secret for the API key (optional)"), self.secret)
+        form.addRow(tr("Its value"), self.value)
+        form.addRow(tr("VPN profile (optional)"), self.vpn)
+        form.addRow("", self.anthropic)
+        layout.addWidget(plain_label(tr("Most local servers need no key. A key typed here is kept as a secret of "
+                                        "sandbox-ai (standard input, never a command line); the server's entry only "
+                                        "names that secret, and the proxy adds the key on the wire."),
+                                     role="secondary"))
+        self.note = plain_label(role="notice-warn")
+        self.note.hide()
+        layout.addWidget(self.note)
+        buttons = QDialogButtonBox()
+        add = buttons.addButton(tr("Add and check"), QDialogButtonBox.ButtonRole.AcceptRole)
+        add.setProperty("role", "primary")
+        add.setDefault(True)
+        buttons.addButton(tr("Cancel"), QDialogButtonBox.ButtonRole.RejectRole)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.kind.currentIndexChanged.connect(lambda _index: self.kind_changed())
+        self.kind_changed()
+        background(sai.vpn_profiles, owner=self, timeout=90, done=self.vpns_read)
+
+    def kind_changed(self):
+        """The URL and name follow the kind until they were typed."""
+        kind = self.kind.currentData()
+        if not self.url_typed:
+            self.url.setText(WL.default_url(kind, self.sai))
+        self.url.setPlaceholderText(URL_EXAMPLE)
+        if not self.name_typed:
+            self.name.setText(WL.free_name(kind, self.taken))
+        self.form.setRowVisible(self.anthropic, kind == "openai-compatible")
+
+    def vpns_read(self, result, error):
+        try:
+            for entry in result or [] if error is None else []:
+                name = entry.get("profile")
+                if isinstance(name, str) and WL.VPN.fullmatch(name) and self.vpn.findText(name) < 0:
+                    self.vpn.addItem(name)
+        except RuntimeError:  # closed meanwhile
+            pass
+
+    def request(self):
+        """{name, kind, url, secret, vpn, anthropic} as typed, and the typed key (None: none)."""
+        kind = self.kind.currentData()
+        return ({"name": self.name.text().strip(), "kind": kind, "url": self.url.text().strip(),
+                 "secret": self.secret.text().strip(), "vpn": self.vpn.currentText().strip(),
+                 "anthropic": self.anthropic.isChecked() and kind == "openai-compatible"}, self.value.text() or None)
+
+    def accept(self):
+        fields, value = self.request()
+        try:
+            WL.add_argv(fields)  # checked as sandbox-ai llm checks it, before anything runs
+            if value and not fields["secret"]:
+                raise ValueError(tr("A typed key needs the name of the secret to keep it as."))
+            if fields["name"] in self.taken:
+                raise ValueError(tr("A server named {name} is registered already: choose another name.",
+                                    name=fields["name"]))
+        except ValueError as exc:
+            self.note.setText(printable(exc))
+            self.note.show()
+            return
+        super().accept()
+
+
+def add_server(parent, sai, agent=None, taken=(), done=None, source=None, fields=None, value=None):
+    """Ask for a model server of your own (ServerDialog; FIELDS and VALUE instead: the tests) and add it in the
+    background: `sandbox-ai llm add`, a typed key kept as its secret (standard input; a secret of that name is
+    replaced only after a yes), then `sandbox-ai llm check NAME --agent AGENT`. The CLI's errors and the check's
+    findings are shown; DONE(name or None, whether the check passed) afterwards."""
+    title = tr("Add a model server")
+    if fields is None:
+        dialog = ServerDialog(sai, taken, parent)
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        fields, value = dialog.request()
+        # The typed key is passed on below and kept nowhere else (not in a hidden dialog of the page).
+        dialog.value.clear()
+        dialog.deleteLater()
+        if not accepted:
+            return
+    finish = done or (lambda name, checked: None)
+
+    def finished(result, error):
+        if error is not None:
+            warn(parent, title, printable(error), modal=False)
+            finish(None, False)
+            return
+        name, (status, out, err) = result["name"], result["added"]
+        if status != 0:
+            warn(parent, title, tr("sandbox-ai llm add refused {name}: {error}", name=name,
+                                   error=WL.message(status, out, err)), modal=False)
+            finish(None, False)
+            return
+        kept = result.get("kept")
+        if kept is not None and kept[0] != 0:
+            warn(parent, title, tr("{name} added, but its key was not kept as the secret {secret}: {error}",
+                                   name=name, secret=fields.get("secret", ""), error=WL.message(*kept)), modal=False)
+        checked = result.get("checked")
+        ok = checked is not None and checked[0] == 0
+        if checked is not None and not ok:
+            show_text(parent, tr("Check of {name}", name=name),
+                      tr("{name} was added, but the check for {agent} found problems (does the server run, and at "
+                         "this URL?):", name=name, agent=agent or "?") + "\n\n" +
+                      "\n".join(printable(line) for line in ((checked[1] or "") + (checked[2] or "")).strip()
+                                [-6000:].splitlines()), modal=False)
+        finish(name, ok)
+
+    def go():
+        def work():
+            keep = (lambda: sai.set_secret(fields["secret"], value)) if value else None
+            return WL.add_and_check(sai, fields, agent, keep)
+        background(work, owner=parent, source=source, timeout=WL.ADD_SECONDS + WL.CHECK_SECONDS + 90, done=finished)
+    if not value:
+        go()
+        return
+    secret = fields["secret"]
+
+    def looked(exists, error):
+        exists = exists if error is None else None
+        text = tr("A secret {name} is kept already: the key typed replaces its value, for everything that names it. "
+                  "Replace it?", name=printable(secret)) if exists else \
+            tr("Whether a secret {name} is kept already could not be told: the key typed would replace its value. "
+               "Go on?", name=printable(secret))
+        if ask_first(parent, "secret-replace", title, text, tr("Replace"), detail={"exists": exists}):
+            go()
+        else:
+            finish(None, False)
+    background(lambda: sai.secret_exists(secret), owner=parent, timeout=90, done=looked)
+
+
+def fill_model_combo(combo, only, endpoints, agent, sai, value="", only_checked=False):
+    """COMBO as the Model choice beside AGENT (the launch page, the board's agent node): the agent's own provider,
+    then each registered server as NAME and NAME:MODEL (wizard_llm.model_choices); one AGENT cannot use is shown
+    greyed, with why. VALUE (--llm's, or a placeholder still to fill in) is chosen, added when it is not listed. ONLY,
+    the "only this server" box, is checked as ONLY_CHECKED says and only usable with a server. No signal fires."""
+    combo.blockSignals(True)
+    only.blockSignals(True)
+    try:
+        combo.clear()
+        for label, item, hint in WL.model_choices(endpoints, agent, sai):
+            combo.addItem(label, item)
+            index = combo.count() - 1
+            tip = (hint or f"--llm {item}") if item else tr("The agent's own provider and login "
+                                                                             "(no --llm)")
+            combo.setItemData(index, widgets.safe_tooltip(tip), Qt.ItemDataRole.ToolTipRole)
+            if hint:
+                combo.model().item(index).setEnabled(False)
+        if value and combo.findData(value) < 0:  # typed into the options, a placeholder, or no longer registered
+            combo.addItem(value, value)
+        combo.setCurrentIndex(max(0, combo.findData(value or "")))
+        only.setChecked(bool(value) and bool(only_checked))
+        only.setEnabled(bool(value))
+    finally:
+        combo.blockSignals(False)
+        only.blockSignals(False)
 
 
 class StartPage(Page):
@@ -336,18 +821,28 @@ class StartPage(Page):
 
     def validatePage(self):  # noqa: N802
         wizard, choice = self.wizard_, self.choice()
-        agent_page = wizard.agent_page
+        agent_page, model_page = wizard.agent_page, wizard.model_page
         agent = agent_page.agent.currentText()
+        llm = wizard.llm_choice  # an own model server chosen on the Model page, or None: the agent's provider
         preset = self.chosen_preset() if choice not in ("existing", "custom") else None
         if choice == "existing" and wizard.existing is not None:
             board = B.from_project(wizard.sai, wizard.existing.document, wizard.directory)
         elif preset is not None:
             values = self.values if self.values_for == preset.id else None
+            # The preset's LLM server (and the VPN that follows it) is the one chosen on the Model page.
+            given = WL.prefilled(preset, llm, wizard.llm_endpoint)
             if values is None and preset.placeholders and self.values_for != preset.id:
-                form = PlaceholderForm(wizard.sai, preset, self)
-                if widgets.AUTO_ANSWER is None and form.exec() != QDialog.DialogCode.Accepted:
-                    return False
-                values = form.values()
+                if given and not WL.needs_form(preset, given):
+                    values = given
+                else:
+                    form = PlaceholderForm(wizard.sai, preset, self, agent=agent)
+                    for marker, value in given.items():
+                        form.set_value(marker, value)
+                    if widgets.AUTO_ANSWER is None and form.exec() != QDialog.DialogCode.Accepted:
+                        return False
+                    values = form.values()
+            elif values is not None:
+                values = {**values, **given}
             board = PR.build(wizard.sai, preset, wizard.directory, agent=agent, values=values,
                              backend=wizard.settings().get("default_backend"))
         else:
@@ -358,10 +853,17 @@ class StartPage(Page):
             node.props["agent"] = agent
         if agent_page.danger.isChecked():
             node.props["--dangerously-skip-permissions"] = True
-        if agent_page.model_name():
-            node.props["model"] = agent_page.model_name()
-        if agent_page.effort.currentData():
-            node.props["effort"] = agent_page.effort.currentData()
+        if llm:
+            WL.apply(board, llm)  # --llm NAME[:MODEL] for whichever agent, no cloud model
+        elif model_page.dropped_existing():
+            WL.clear(board)  # the project's own server let go for the agent's provider
+        if not WL.uses_server(board):
+            if model_page.model_name():
+                node.props["model"] = model_page.model_name()
+            if model_page.effort.currentData():
+                node.props["effort"] = model_page.effort.currentData()
+        else:
+            node.props.pop("model", None)  # the launcher refuses --model with --llm: the model is the server's
         wizard.board = board
         return True
 
@@ -787,12 +1289,14 @@ class SandboxWizard(QWizard):
         self.sai, self.settings = sai, settings or (lambda: {})
         self.setWindowTitle(tr("New sandbox for a project"))
         self.board, self.directory, self.existing = B.Board(), None, None
+        self.llm_choice, self.llm_endpoint = None, None  # the Model page's own server ({name, model, only}), if any
         try:
             self.policy, self.forbidden = sai.policy()[0], sai.forbidden()
         except Exception:  # noqa: BLE001 - a broken policy is shown on the System page
             self.policy, self.forbidden = {}, {}
         self.folder_page = FolderPage(self)
         self.agent_page = AgentPage(self)
+        self.model_page = ModelPage(self)
         self.start_page = StartPage(self)
         self.network_page = NetworkPage(self)
         self.proxy_page = ProxyPage(self)
@@ -800,7 +1304,7 @@ class SandboxWizard(QWizard):
         self.mcp_page = McpPage(self)
         self.hardware_page = HardwarePage(self)
         self.review_page = ReviewPage(self)
-        for page in (self.folder_page, self.agent_page, self.start_page, self.network_page, self.proxy_page,
+        for page in (self.folder_page, self.agent_page, self.model_page, self.start_page, self.network_page, self.proxy_page,
                      self.git_page, self.mcp_page, self.hardware_page, self.review_page):
             self.addPage(page)
         self.currentIdChanged.connect(lambda _=0: self.lock_buttons())

@@ -420,9 +420,16 @@ def test_a_kits_hooks_are_shown_with_their_approval(hooked):
     assert not page.trust_button.isEnabled() and page.trust_button.toolTip() == widgets.safe_tooltip("The kit has no hooks.")
 
 
-def test_approving_hooks_opens_trust_hooks_in_a_terminal_without_yes(hooked):
+def test_approving_hooks_opens_trust_hooks_in_a_terminal_without_yes(hooked, monkeypatch):
     page = hooked.kits
     select_kit(page, "user", "mine")
+    # Trusted hooks run in every later start with the kit (kit-hooks-trust): asked first, Cancel opens nothing.
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", False)
+    started = len(hooked.started)
+    page.trust_hooks()
+    assert widgets.SHOWN[-1][0] == "Review and approve hooks…" and "every later start" in widgets.SHOWN[-1][1]
+    assert len(hooked.started) == started, "not trusted: no terminal"
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
     page.trust_hooks()
     argv = hooked.started[-1]
     assert argv[0] == "term" and argv[4:] == ["kits", "trust-hooks", "--", "mine"], "the review and the yes are there"

@@ -22,8 +22,8 @@ def key():
 @pytest.fixture(scope="module")
 def registered(tmp_path_factory):
     """A sandbox-ai configuration of its own (XDG_CONFIG_HOME, XDG_DATA_HOME) with VPN profiles (WireGuard,
-    Tailscale) and LLM servers (a local Ollama, a vLLM behind the Tailscale profile), added with sandbox-ai's own
-    commands. Nothing is contacted: profiles and endpoints are only written."""
+    Tailscale, Tor) and LLM servers (a local Ollama, an OpenAI-compatible API with the Anthropic one for Claude
+    Code, a vLLM behind the Tailscale profile), added with sandbox-ai's own commands. Nothing is contacted: profiles and endpoints are only written."""
     root = tmp_path_factory.mktemp("registered")
     patch = pytest.MonkeyPatch()
     for name, sub in (("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data"), ("XDG_STATE_HOME", "state")):
@@ -33,6 +33,9 @@ def registered(tmp_path_factory):
     conf.write_text(f"[Interface]\nPrivateKey = {key()}\nAddress = 10.66.0.2/32\nDNS = 10.66.0.1\n\n[Peer]\n"
                     f"PublicKey = {key()}\nEndpoint = 198.51.100.7:51820\nAllowedIPs = 0.0.0.0/0\n")
     for command in (("vpn", "add", "home", "--wireguard", str(conf)), ("vpn", "add", "ts", "--tailscale"),
+                    ("vpn", "add", "anon", "--tor", "--socks"),
+                    ("llm", "add", "api", "--kind", "openai-compatible", "--url", "https://192.168.1.21:4000",
+                     "--anthropic", "--model", "qwen3"),
                     ("llm", "add", "ollama", "--kind", "ollama", "--url", "http://127.0.0.1:11434", "--model", "qwen3"),
                     ("llm", "add", "gpu", "--kind", "vllm", "--url", "http://100.100.1.5:8000", "--vpn", "ts",
                      "--model", "Qwen/Qwen3-Coder")):
@@ -46,7 +49,7 @@ def registered(tmp_path_factory):
 
 def values_for(root):
     return {"<vpn:wireguard>": "home", "<vpn:search>": "home", "<vpn:fetch>": "ts", "<vpn:tailnet>": "ts",
-            "<llm:local>": "ollama", "<llm:remote>": "gpu", "<folder:samples>": str(root / "samples"),
+            "<llm:local>": "ollama", "<llm:remote>": "gpu", "<llm:api>": "api", "<vpn:tor>": "anon", "<folder:samples>": str(root / "samples"),
             "<folder:logs>": str(root / "logs"), "<gpu:kind>": "dri", "<mcp:browser>": "demo",
             "<mcp:unpack>": "demo", "<mcp:scan>": "scan", "<text:variant>": ""}
 

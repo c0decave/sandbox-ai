@@ -386,15 +386,18 @@ def test_wizard_end_to_end_to_the_board(qapp, env, monkeypatch, wait, agent, eng
         wizard.next()
         assert wizard.currentPage() is wizard.agent_page
         wizard.agent_page.agent.setCurrentText(agent)
+        wizard.next()
+        models = wizard.model_page  # where the model runs: the agent's provider here
+        assert wizard.currentPage() is models and models.cloud.isChecked()
         if model:
-            index = wizard.agent_page.model.findData(model)
+            index = models.model.findData(model)
             if index >= 0:
-                wizard.agent_page.model.setCurrentIndex(index)
+                models.model.setCurrentIndex(index)
             else:
-                wizard.agent_page.model.setEditText(model)
+                models.model.setEditText(model)
         if effort:
-            wizard.agent_page.effort.setCurrentIndex(wizard.agent_page.effort.findData(effort))
-        assert wizard.agent_page.effort.isEnabled() == (agent != "opencode"), "OpenCode sets it per model"
+            models.effort.setCurrentIndex(models.effort.findData(effort))
+        assert models.effort.isEnabled() == (agent != "opencode"), "OpenCode sets it per model"
         wizard.next()
         assert wizard.currentPage() is wizard.start_page
         if start == "custom":

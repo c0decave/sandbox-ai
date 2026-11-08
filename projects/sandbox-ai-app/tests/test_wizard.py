@@ -87,7 +87,7 @@ def test_the_write_finishing_closes_without_validating_a_page_again(wizard, tmp_
     project.mkdir()
     wizard.folder_page.path.edit.setText(str(project))
     wizard.show()
-    for _ in range(8):  # page by page, as the Next button goes
+    for _ in range(9):  # page by page, as the Next button goes (the Model page: the agent's provider)
         wizard.next()
     assert wizard.currentPage() is wizard.review_page
     assert wait(lambda: wizard.review_page.verdict_ok is not None, 60)

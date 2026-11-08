@@ -24,6 +24,15 @@ follows a symbolic link, not even one in the middle of a path:
   with all it holds unless the copy completes (never a folder that was there before). Temporary files and
   created folders of copies still running when the interpreter exits are removed by an atexit handler,
   which also stops those copies.
+
+The two-pane file manager (files_page.py) does everything else through the same primitives, relative to
+open directory descriptors and never through a link: copy_entry and move_entry between any two roots (the
+host is Root("/", sandbox=False)), and Root.delete_entry, rename_entry, make_folder, chmod_entry and
+chown_entry. A move copies first and removes the source only when the copy is complete, and then only the
+files it copied unchanged (what the agent added or changed meanwhile stays, and is reported). Below a sandbox
+root no set-user-ID, set-group-ID or sticky bit is ever set, and chown goes only to the user and their own
+groups; files a rootless Podman sandbox gave a subordinate UID (/etc/subuid) are taken back with
+take_ownership (podman unshare: inside Podman's user namespace, UID 0 is the user).
 """
 from __future__ import annotations
 
@@ -33,12 +42,17 @@ from dataclasses import dataclass, field
 import errno
 import fnmatch
 import os
+import json
+import pwd
 import secrets
+import shutil
 import stat
+import subprocess
+import sys
 import threading
 import time
 
-from .i18n import tr
+from .i18n import N_, tr
 
 LIMIT = 1 << 30  # bytes per copy
 MAX_ENTRIES = 20_000  # files and folders per copy, entries per listing
@@ -49,6 +63,12 @@ O_NOCTTY = getattr(os, "O_NOCTTY", 0)
 DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | O_CLOEXEC
 READ = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | O_NOCTTY | O_CLOEXEC
 CREATE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | O_NOCTTY | O_CLOEXEC
+O_PATH = getattr(os, "O_PATH", 0)
+SPECIAL_BITS = stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX
+WALK_ENTRIES = 200_000  # files and folders a delete or chown walks
+OWNERSHIP_TIMEOUT = 600  # seconds podman unshare may take
+TOO_MANY_COPY = N_("More than {count} files and folders; copy a smaller part.")
+TOO_MANY_WALK = N_("More than {count} files and folders; choose a smaller part.")
 # Files that tools execute or read as configuration when you use the copied folder on the host.
 RISKY = (".git/config", ".git/hooks/*", "*/.git/config", "*/.git/hooks/*", ".envrc", "*/.envrc", ".direnv/*",
          ".bashrc", ".bash_profile", ".profile", ".zshrc", ".npmrc", ".pypirc", ".vscode/*", "*/.vscode/*",
@@ -101,6 +121,9 @@ class Entry:
     size: int
     mtime: float
     target: str | None = None  # where a symbolic link points (shown, never followed)
+    mode: int = 0  # st_mode (of the link itself for a link)
+    uid: int = -1
+    gid: int = -1
 
 
 class Listing(list):
@@ -116,6 +139,15 @@ class Result:
     skipped: list = field(default_factory=list)  # [(relative path, why)]
     paths: list = field(default_factory=list)  # relative paths of the files copied
     executable: list = field(default_factory=list)  # copied out without the executable bits they had
+    # For a move: the files copied unchanged ((st_dev, st_ino, size, mtime_ns) of the source) and the folders
+    # walked ((st_dev, st_ino)); only those are removed from the source.
+    ids: set = field(default_factory=set)
+    folders: set = field(default_factory=set)
+    changed: list = field(default_factory=list)  # relative paths of files that changed while they were copied
+    moved: bool = False  # a move: the source is gone
+    kept: str = ""  # a move: why the source was kept
+    left: list = field(default_factory=list)  # a move: relative paths left in the source (added or changed meanwhile)
+    removed: int = 0  # files and folders deleted
 
     @property
     def risky(self):
@@ -181,10 +213,22 @@ def _undo_unless_complete(dir_fd, name):
         _forget_partial(key)
 
 
+class Progress:
+    """What running operations have done so far (summed over the items of one job): written in its thread,
+    read by the page's timer."""
+
+    def __init__(self):
+        self.count, self.bytes = 0, 0
+
+
 class Budget:
-    def __init__(self, limit, entries, cancelled=None):
+    def __init__(self, limit, entries, cancelled=None, too_many=TOO_MANY_COPY, progress=None):
         self.limit, self.entries, self.used, self.count = limit, entries, 0, 0
         self.cancelled = cancelled or (lambda: False)
+        self.too_many_text, self.progress = too_many, progress
+
+    def too_many(self):
+        return Refused(tr(self.too_many_text, count=self.entries))
 
     def check(self):
         if _closing or self.cancelled():
@@ -193,12 +237,16 @@ class Budget:
     def entry(self, count=1):
         self.check()
         self.count += count
+        if self.progress is not None:
+            self.progress.count += count
         if self.count > self.entries:
-            raise Refused(tr("More than {count} files and folders; copy a smaller part.", count=self.entries))
+            raise self.too_many()
 
     def take(self, size):
         self.check()
         self.used += size
+        if self.progress is not None:
+            self.progress.bytes += size
         if self.used > self.limit:
             raise Refused(tr("More than {size}; copy a smaller part.", size=size_text(self.limit)))
 
@@ -221,7 +269,7 @@ def _names(fd, budget=None):
             if budget is not None:
                 budget.entry(0)
                 if budget.count + len(names) >= budget.entries:
-                    raise Refused(tr("More than {count} files and folders; copy a smaller part.", count=budget.entries))
+                    raise budget.too_many()
             names.append(entry.name)
     return sorted(names)
 
@@ -377,11 +425,14 @@ def _too_deep(depth):
 class Root:
     """One directory whose contents may be shown and copied, e.g. a sandbox's workspace."""
 
-    def __init__(self, path, label=None):
+    def __init__(self, path, label=None, sandbox=True):
         # The root itself is chosen on the host (a workspace, a session's HOME): its own path is resolved
-        # once; everything below it is walked without following links.
+        # once; everything below it is walked without following links. SANDBOX: an agent may have written
+        # what is below it (copies out of it are never executable, no set-ID or sticky bits are set in it,
+        # take_ownership works only there); Root("/", sandbox=False) is the host.
         self.path = os.path.realpath(os.fspath(path))
         self.label = label or self.path
+        self.sandbox = sandbox
         fd = os.open(self.path, DIRECTORY)
         os.close(fd)
         self.hook = None  # tests: called between the steps of a walk
@@ -448,7 +499,8 @@ class Root:
                             target = os.readlink(entry.name, dir_fd=fd)
                         except OSError:
                             target = "?"
-                    found.append(Entry(entry.name, kind, info.st_size, info.st_mtime, target))
+                    found.append(Entry(entry.name, kind, info.st_size, info.st_mtime, target, info.st_mode,
+                                       info.st_uid, info.st_gid))
         finally:
             os.close(fd)
         result = Listing(sorted(found, key=lambda e: (e.kind != "dir", e.name.lower(), e.name)))
@@ -670,6 +722,642 @@ class Root:
                     result.skipped.append((path, tr("not a regular file")))
         finally:
             os.close(target)
+
+
+    # -- changing what is there (the two-pane file manager) --
+
+    def delete_entry(self, relative, entries=WALK_ENTRIES, cancelled=None, progress=None):
+        """Delete the file, link or folder (with all it holds) RELATIVE; a link is removed, never followed.
+        Counted first (too many entries or folders nested too deep: refused before anything is deleted);
+        CANCELLED stops it at the next entry (what was deleted stays deleted: Result.removed counts it, also
+        on the exception's .partial)."""
+        parent, name = self._parent(relative)
+        result = Result()
+        try:
+            self._count(parent, name, Budget(0, entries, cancelled, TOO_MANY_WALK), 0)
+            try:
+                self._delete(parent, name, Budget(0, entries, cancelled, TOO_MANY_WALK, progress), result, 0)
+            except (OSError, ValueError) as exc:
+                exc.partial = result
+                raise
+        finally:
+            os.close(parent)
+        return result
+
+    def _count(self, dir_fd, name, budget, depth):
+        try:
+            info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        budget.entry()
+        if stat.S_ISDIR(info.st_mode):
+            if depth >= MAX_DEPTH:
+                raise Refused(tr("Folders nested more than {count} deep are not changed.", count=MAX_DEPTH))
+            fd = self._open_child_dir(dir_fd, name)
+            try:
+                for child in _names(fd, budget):
+                    self._count(fd, child, budget, depth + 1)
+            finally:
+                os.close(fd)
+
+    def _delete(self, dir_fd, name, budget, result, depth):
+        try:
+            info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        budget.entry()
+        if stat.S_ISDIR(info.st_mode):
+            if depth >= MAX_DEPTH:
+                raise Refused(tr("Folders nested more than {count} deep are not changed.", count=MAX_DEPTH))
+            fd = self._open_child_dir(dir_fd, name)
+            try:
+                for child in _names(fd):
+                    self._delete(fd, child, budget, result, depth + 1)
+            finally:
+                os.close(fd)
+            os.rmdir(name, dir_fd=dir_fd)
+            result.directories += 1
+        else:
+            os.unlink(name, dir_fd=dir_fd)  # a link itself, never what it points to
+            result.files += 1
+        result.removed += 1
+
+    def rename_entry(self, relative, new_name):
+        """Give the file, link or folder RELATIVE the name NEW_NAME in the same folder; an existing name is
+        never replaced (atomically where the kernel can: renameat2 RENAME_NOREPLACE)."""
+        new_name = single_name(new_name)
+        parent, name = self._parent(relative)
+        try:
+            os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if name != new_name:
+                _rename_noreplace(parent, name, parent, new_name)
+        finally:
+            os.close(parent)
+
+    def make_folder(self, relative_dir, name):
+        """A new folder NAME in the folder RELATIVE_DIR (an existing name, a link too, is refused)."""
+        name = single_name(name)
+        fd = self.open_dir(relative_dir)
+        try:
+            self._mkdir(name, fd)
+        finally:
+            os.close(fd)
+
+    def chmod_entry(self, relative, mode, special=False):
+        """Set the permission bits MODE (0..0o7777) of the file or folder RELATIVE; a link is refused (it has
+        none of its own, and what it points to is not changed). Set-user-ID, set-group-ID and sticky bits only
+        with SPECIAL and never below a sandbox root."""
+        mode = int(mode)
+        if not 0 <= mode <= 0o7777:
+            raise Refused(tr("Not a permission mode: {mode}", mode=oct(mode)))
+        if mode & SPECIAL_BITS and (self.sandbox or not special):
+            raise Refused(tr("Set-user-ID, set-group-ID and sticky bits are not set here (never below a "
+                             "sandbox's folder)."))
+        parent, name = self._parent(relative)
+        try:
+            info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if stat.S_ISLNK(info.st_mode):
+                raise Refused(tr("{name} is a symbolic link; links are not followed.", name=printable(name)))
+            if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+                raise Refused(tr("{name} is not a regular file.", name=printable(name)))
+            _chmod_at(parent, name, info, mode)
+        finally:
+            os.close(parent)
+
+    def chown_entry(self, relative, uid=-1, gid=-1, recursive=False, entries=WALK_ENTRIES, cancelled=None,
+                    progress=None):
+        """Give the file, link or folder RELATIVE (with RECURSIVE: and all it holds) the owner UID and the
+        group GID (-1: unchanged). Only to the user and one of the user's groups; links themselves are changed,
+        never what they point to. Entries that cannot be changed (owned by someone else) are listed in
+        Result.skipped; Result.files counts those changed."""
+        if uid not in (-1, os.getuid()):
+            raise Refused(tr("Files can only be given to you (UID {uid}).", uid=os.getuid()))
+        if gid != -1 and gid not in user_groups():
+            raise Refused(tr("Group {gid} is not one of your groups.", gid=gid))
+        parent, name = self._parent(relative)
+        result = Result()
+        try:
+            self._chown(parent, name, name, uid, gid, recursive,
+                        Budget(0, entries, cancelled, TOO_MANY_WALK, progress), result, 0)
+        finally:
+            os.close(parent)
+        return result
+
+    def _chown(self, dir_fd, name, shown, uid, gid, recursive, budget, result, depth):
+        try:
+            info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        budget.entry()
+        try:
+            os.chown(name, uid, gid, dir_fd=dir_fd, follow_symlinks=False)
+            result.files += 1
+        except OSError as exc:
+            result.skipped.append((shown, exc.strerror or str(exc)))
+        if recursive and stat.S_ISDIR(info.st_mode):
+            if depth >= MAX_DEPTH:
+                raise Refused(tr("Folders nested more than {count} deep are not changed.", count=MAX_DEPTH))
+            fd = self._open_child_dir(dir_fd, name)
+            try:
+                for child in _names(fd, budget):
+                    self._chown(fd, child, f"{shown}/{child}", uid, gid, True, budget, result, depth + 1)
+            finally:
+                os.close(fd)
+
+
+# -- between two roots (and within one) --
+
+def single_name(name):
+    """NAME if it is the name of one file or folder (no '/', not '.' or '..', no NUL, at most 255 bytes)."""
+    name = os.fspath(name)
+    if not name or "/" in name or "\0" in name or name in (".", ".."):
+        raise Refused(tr("Not a name for a file or folder: {name}", name=printable(name)))
+    if len(os.fsencode(name)) > 255:
+        raise Refused(tr("That name is too long."))
+    return name
+
+
+def _identity(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+def _where(fd):
+    try:
+        return os.readlink(f"/proc/self/fd/{fd}")
+    except OSError:
+        return None
+
+
+def _refuse_into_itself(source_fd, target_fd):
+    source, target = _where(source_fd), _where(target_fd)
+    if source and target and (target == source or target.startswith(source.rstrip("/") + "/")):
+        raise Refused(tr("A folder cannot be copied or moved into itself."))
+
+
+def _refuse_same_place(source_parent, name, target_fd, new_name):
+    one, other = os.fstat(source_parent), os.fstat(target_fd)
+    if (one.st_dev, one.st_ino) == (other.st_dev, other.st_ino) and name == new_name:
+        raise Refused(tr("{name} is already there: the source and the target are the same folder.",
+                         name=printable(name)))
+
+
+def _rename_noreplace(src_dir, name, dst_dir, new_name):
+    """Rename without replacing an existing NEW_NAME: renameat2(RENAME_NOREPLACE) where libc and the file
+    system have it, else checked first, then renamed."""
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        renameat2 = libc.renameat2
+    except (OSError, AttributeError, ImportError):
+        renameat2 = None
+    if renameat2 is not None:
+        if renameat2(src_dir, os.fsencode(name), dst_dir, os.fsencode(new_name), 1) == 0:
+            return
+        error = ctypes.get_errno()
+        if error == errno.EEXIST:
+            raise Refused(tr("{name} already exists there.", name=printable(new_name)))
+        if error not in (errno.ENOSYS, errno.EINVAL, errno.ENOTSUP):
+            raise OSError(error, os.strerror(error), name)
+    _refuse_existing(new_name, dst_dir)
+    os.rename(name, new_name, src_dir_fd=src_dir, dst_dir_fd=dst_dir)
+
+
+def _chmod_at(parent, name, info, mode):
+    """chmod of NAME in PARENT, the file or folder INFO describes, without following a link: opened with
+    O_PATH | O_NOFOLLOW (also a file nobody may read), checked to be that file, changed through /proc."""
+    if O_PATH:
+        fd = os.open(name, O_PATH | os.O_NOFOLLOW | O_CLOEXEC, dir_fd=parent)
+        try:
+            _same_file(fd, info, name)
+            try:
+                os.chmod(f"/proc/self/fd/{fd}", mode)
+                return
+            except FileNotFoundError:
+                pass  # no /proc: opened for real below
+        finally:
+            os.close(fd)
+    if stat.S_ISDIR(info.st_mode):
+        fd = os.open(name, DIRECTORY, dir_fd=parent)
+    else:
+        fd, _ = _open_regular(name, parent)
+    try:
+        _same_file(fd, info, name)
+        os.fchmod(fd, mode)
+    finally:
+        os.close(fd)
+
+
+def _same_file(fd, info, name):
+    now = os.fstat(fd)
+    if (now.st_dev, now.st_ino) != (info.st_dev, info.st_ino) or stat.S_IFMT(now.st_mode) != stat.S_IFMT(info.st_mode):
+        raise Refused(tr("{name} was replaced meanwhile; nothing was changed.", name=printable(name)))
+
+
+def user_groups():
+    """The IDs of the user's groups."""
+    return sorted(set(os.getgroups()) | {os.getgid()})
+
+
+def copy_entry(source, relative, target, target_dir="", overwrite=False, untrusted=None, name=None, limit=LIMIT,
+               entries=MAX_ENTRIES, cancelled=None, progress=None):
+    """Copy the file or folder RELATIVE of the Root SOURCE into the folder TARGET_DIR of the Root TARGET (as
+    NAME, default its own). Both sides are walked relative to open directory descriptors without following a
+    link; links inside a folder are skipped and listed. UNTRUSTED (default: SOURCE.sandbox): an agent may
+    have written the source, so nothing copied is executable (listed in Result.executable) and files that
+    tools run are named in Result.risky. An existing file is replaced only with OVERWRITE (renamed over, never
+    written through); an existing folder is then filled. What the copy created is removed unless it completes."""
+    untrusted = source.sandbox if untrusted is None else untrusted
+    budget, result = Budget(limit, entries, cancelled, progress=progress), Result()
+    parent, source_name = source._parent(relative)
+    try:
+        name = single_name(name or source_name)
+        info = os.stat(source_name, dir_fd=parent, follow_symlinks=False)
+        if stat.S_ISLNK(info.st_mode):
+            raise Refused(tr("{name} is a symbolic link; links are not copied.", name=printable(source_name)))
+        target_fd = target.open_dir(target_dir)
+        try:
+            _refuse_same_place(parent, source_name, target_fd, name)
+            if stat.S_ISDIR(info.st_mode):
+                fd = source._open_child_dir(parent, source_name)
+                try:
+                    _refuse_into_itself(fd, target_fd)
+                    _copy_folder(source, fd, target, target_fd, name, name, overwrite, untrusted, budget, result, 0,
+                                 False, frozenset())
+                finally:
+                    os.close(fd)
+            elif stat.S_ISREG(info.st_mode):
+                fd, info = _open_regular(source_name, parent)
+                try:
+                    _copy_one(fd, info, target_fd, name, name, overwrite, untrusted, budget, result)
+                finally:
+                    os.close(fd)
+            else:
+                raise Refused(tr("{name} is not a regular file.", name=printable(source_name)))
+        finally:
+            os.close(target_fd)
+    finally:
+        os.close(parent)
+    return result
+
+
+def _copy_one(fd, info, target_dir, name, shown, overwrite, untrusted, budget, result):
+    budget.entry()
+    _write_file(fd, target_dir, name, 0o666 if untrusted else _mode(info), overwrite, budget)
+    after = os.fstat(fd)
+    if untrusted and info.st_mode & 0o111:
+        result.executable.append(shown)
+    result.files += 1
+    result.bytes += info.st_size
+    result.paths.append(shown)
+    if _identity(after) == _identity(info):
+        result.ids.add(_identity(after))
+    else:
+        result.changed.append(shown)
+
+
+def _copy_folder(source, source_fd, target, target_parent, name, shown, overwrite, untrusted, budget, result, depth,
+                 fresh, avoid):
+    """Copy the open folder SOURCE_FD as NAME into TARGET_PARENT (see Root._copy_tree_in: FRESH, and the outermost
+    folder created is removed unless the copy completes). AVOID: (st_dev, st_ino) of the folders this copy
+    writes into, never walked as a source (a folder copied into itself)."""
+    _too_deep(depth)
+    budget.entry()
+    created = False
+    try:
+        os.mkdir(name, 0o777, dir_fd=target_parent)
+        created = True
+    except FileExistsError:
+        if not overwrite:
+            raise Refused(tr("{name} already exists there.", name=printable(name))) from None
+    arguments = (source, source_fd, target, target_parent, name, shown, overwrite, untrusted, budget, result, depth)
+    if created and not fresh:
+        with _undo_unless_complete(target_parent, name):
+            _fill_folder(*arguments, True, avoid)
+    else:
+        _fill_folder(*arguments, fresh or created, avoid)
+
+
+def _fill_folder(source, source_fd, target, target_parent, name, shown, overwrite, untrusted, budget, result, depth,
+                 fresh, avoid):
+    target_fd = target._open_child_dir(target_parent, name)
+    try:
+        here, mine = os.fstat(target_fd), os.fstat(source_fd)
+        avoid = avoid | {(here.st_dev, here.st_ino)}
+        result.directories += 1
+        result.folders.add((mine.st_dev, mine.st_ino))
+        for child in _names(source_fd, budget):
+            path = f"{shown}/{child}"
+            try:
+                info = os.stat(child, dir_fd=source_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                result.skipped.append((path, tr("removed while it was copied")))
+                continue
+            if stat.S_ISLNK(info.st_mode):
+                result.skipped.append((path, tr("symbolic link")))
+            elif stat.S_ISDIR(info.st_mode):
+                if (info.st_dev, info.st_ino) in avoid:
+                    result.skipped.append((path, tr("the copy itself")))
+                    continue
+                sub = source._open_child_dir(source_fd, child)
+                try:
+                    _copy_folder(source, sub, target, target_fd, child, path, overwrite, untrusted, budget, result,
+                                 depth + 1, fresh, avoid)
+                finally:
+                    os.close(sub)
+            elif stat.S_ISREG(info.st_mode):
+                try:
+                    fd, info = _open_regular(child, source_fd)
+                except Refused as exc:
+                    result.skipped.append((path, str(exc)))
+                    continue
+                try:
+                    _copy_one(fd, info, target_fd, child, path, overwrite, untrusted, budget, result)
+                finally:
+                    os.close(fd)
+            else:
+                result.skipped.append((path, tr("not a regular file")))
+    finally:
+        os.close(target_fd)
+
+
+def move_entry(source, relative, target, target_dir="", overwrite=False, untrusted=None, limit=LIMIT,
+               entries=MAX_ENTRIES, cancelled=None, progress=None):
+    """Move the file or folder RELATIVE of SOURCE into TARGET_DIR of TARGET. Within one root: renamed (an
+    existing name only replaced with OVERWRITE, and only a file by a file). Otherwise copied (copy_entry), and
+    the source is removed only when the copy is complete - nothing skipped, nothing changed while it was
+    copied, not cancelled - and then only the files copied unchanged and the folders walked (Result.left:
+    what stayed because it appeared or changed meanwhile; Result.kept: why the source was kept)."""
+    if source.path == target.path and source.sandbox == target.sandbox:
+        moved = _rename_within(source, relative, target_dir, overwrite)
+        if moved is not None:
+            return moved
+    result = copy_entry(source, relative, target, target_dir, overwrite, untrusted, limit=limit, entries=entries,
+                        cancelled=cancelled, progress=progress)
+    if result.skipped or result.changed:
+        result.kept = tr("The source was kept: {count} item(s) were not copied or changed while they were copied.",
+                         count=len(result.skipped) + len(result.changed))
+        return result
+    if (cancelled and cancelled()) or _closing:
+        result.kept = tr("Cancelled after the copy: the source was kept.")
+        return result
+    parent, name = source._parent(relative)
+    try:
+        result.left = _remove_copied(source, parent, name, name, result, 0)
+    finally:
+        os.close(parent)
+    result.moved = not result.left
+    if result.left:
+        result.kept = tr("Kept in the source (added or changed after it was copied): {list}",
+                         list=", ".join(printable(path) for path in result.left[:20]))
+    return result
+
+
+def _rename_within(root, relative, target_dir, overwrite):
+    """A move inside ROOT by rename (Result), or None when it must be copied (another file system, or a folder
+    to be merged into an existing one)."""
+    parent, name = root._parent(relative)
+    try:
+        target_fd = root.open_dir(target_dir)
+        try:
+            info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            _refuse_same_place(parent, name, target_fd, name)
+            if stat.S_ISDIR(info.st_mode):
+                fd = root._open_child_dir(parent, name)
+                try:
+                    _refuse_into_itself(fd, target_fd)
+                finally:
+                    os.close(fd)
+            try:
+                existing = os.stat(name, dir_fd=target_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                existing = None
+            try:
+                if existing is None:
+                    _rename_noreplace(parent, name, target_fd, name)
+                elif not overwrite:
+                    raise Refused(tr("{name} already exists there.", name=printable(name)))
+                elif stat.S_ISDIR(existing.st_mode) or stat.S_ISDIR(info.st_mode):
+                    return None
+                else:
+                    os.replace(name, name, src_dir_fd=parent, dst_dir_fd=target_fd)  # the name, never through it
+            except OSError as exc:
+                if exc.errno == errno.EXDEV:
+                    return None
+                raise
+        finally:
+            os.close(target_fd)
+    finally:
+        os.close(parent)
+    result = Result(moved=True, paths=[name])
+    if stat.S_ISDIR(info.st_mode):
+        result.directories = 1
+    else:
+        result.files, result.bytes = 1, info.st_size
+    return result
+
+
+def _remove_copied(root, dir_fd, name, shown, result, depth):
+    """Remove from the source what RESULT copied unchanged; the relative paths of what stays."""
+    try:
+        info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return []
+    if stat.S_ISDIR(info.st_mode):
+        if (info.st_dev, info.st_ino) not in result.folders or depth > MAX_DEPTH:
+            return [shown]
+        fd = root._open_child_dir(dir_fd, name)
+        left = []
+        try:
+            for child in _names(fd):
+                left += _remove_copied(root, fd, child, f"{shown}/{child}", result, depth + 1)
+        finally:
+            os.close(fd)
+        if not left:
+            try:
+                os.rmdir(name, dir_fd=dir_fd)
+            except OSError:
+                left.append(shown)
+        return left
+    if stat.S_ISREG(info.st_mode) and _identity(info) in result.ids:
+        os.unlink(name, dir_fd=dir_fd)
+        return []
+    return [shown]
+
+
+def exists_in(root, relative_dir, names):
+    """Those of NAMES that exist (as anything, a link too) in the folder RELATIVE_DIR of ROOT."""
+    fd = root.open_dir(relative_dir)
+    found = []
+    try:
+        for name in names:
+            try:
+                os.stat(name, dir_fd=fd, follow_symlinks=False)
+                found.append(name)
+            except (FileNotFoundError, ValueError):
+                pass
+    finally:
+        os.close(fd)
+    return found
+
+
+# -- files a rootless Podman sandbox gave subordinate IDs --
+
+def subordinate_ranges(path="/etc/subuid", uid=None):
+    """[(first, count)] of the subordinate IDs /etc/subuid (or /etc/subgid) delegates to the user (by name
+    or by UID)."""
+    uid = os.getuid() if uid is None else uid
+    names = {str(uid)}
+    try:
+        names.add(pwd.getpwuid(uid).pw_name)
+    except KeyError:
+        pass
+    ranges = []
+    try:
+        with open(path, encoding="utf-8", errors="replace") as lines:
+            for line in lines:
+                fields = line.strip().split(":")
+                if len(fields) == 3 and fields[0] in names:
+                    try:
+                        first, count = int(fields[1]), int(fields[2])
+                    except ValueError:
+                        continue
+                    if first > 0 and count > 0:
+                        ranges.append((first, count))
+    except OSError:
+        pass
+    return ranges
+
+
+def ownership_problem(uid, ranges, user=None):
+    """None if a file owned by UID may be taken over (the user's own, or a subordinate ID of the user's: a file
+    a rootless Podman sandbox wrote as a UID other than its root); else why not."""
+    user = os.getuid() if user is None else user
+    if uid == user or any(first <= uid < first + count for first, count in ranges):
+        return None
+    return tr("It belongs to UID {uid}: neither you nor one of your subordinate IDs (/etc/subuid), so no rootless "
+              "Podman sandbox of yours made it.", uid=uid)
+
+
+# Run by `podman unshare` inside rootless Podman's user namespace (sandbox-ai's pods use --userns=host: that
+# namespace itself, where UID 0 is the user and 1.. are the subordinate IDs). Standard library only; walks
+# like Root (dir fds, O_NOFOLLOW, below the root, checked to be the entry checked before) and changes links
+# themselves (lchown), never what they point to. Prints a JSON summary.
+OWNERSHIP_HELPER = r'''
+import json, os, stat, sys
+root, relative = sys.argv[1], sys.argv[2]
+dev, ino, uid, gid = (int(value) for value in sys.argv[3:7])
+D = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+LIMIT, DEPTH = 200000, 64
+done = {"changed": 0, "skipped": [], "error": None}
+count = [0]
+
+def inside(fd):
+    try:
+        where = os.readlink("/proc/self/fd/%d" % fd)
+    except OSError:
+        return
+    if where != root and not where.startswith(root.rstrip("/") + "/"):
+        raise ValueError("no longer below the folder")
+
+def own(dir_fd, name, shown, depth):
+    info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    count[0] += 1
+    if count[0] > LIMIT:
+        raise ValueError("more than %d files and folders" % LIMIT)
+    if (info.st_uid, info.st_gid) != (uid, gid):
+        try:
+            os.chown(name, uid, gid, dir_fd=dir_fd, follow_symlinks=False)
+            done["changed"] += 1
+        except OSError as exc:
+            if len(done["skipped"]) < 50:
+                done["skipped"].append([shown, exc.strerror or str(exc)])
+    if stat.S_ISDIR(info.st_mode):
+        if depth >= DEPTH:
+            done["skipped"].append([shown, "nested too deep"])
+            return
+        fd = os.open(name, D, dir_fd=dir_fd)
+        try:
+            inside(fd)
+            for child in sorted(os.listdir(fd)):
+                own(fd, child, shown + "/" + child, depth + 1)
+        finally:
+            os.close(fd)
+
+try:
+    names = [part for part in relative.split("/") if part not in ("", ".")]
+    if not names or ".." in names or relative.startswith("/"):
+        raise ValueError("not a path below the folder")
+    fd = os.open(root, D)
+    try:
+        for part in names[:-1]:
+            child = os.open(part, D, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        inside(fd)
+        top = os.stat(names[-1], dir_fd=fd, follow_symlinks=False)
+        if (top.st_dev, top.st_ino) != (dev, ino) or stat.S_ISLNK(top.st_mode):
+            raise ValueError("replaced since it was checked")
+        own(fd, names[-1], names[-1], 0)
+    finally:
+        os.close(fd)
+except (OSError, ValueError) as exc:
+    done["error"] = str(exc)
+print(json.dumps(done))
+'''
+
+
+def ownership_command(podman, root_path, relative, info, owner=(0, 0)):
+    """The command that makes OWNER (in Podman's user namespace; 0:0 is the user) own RELATIVE below
+    ROOT_PATH, which INFO (its lstat) describes: `podman unshare chown -R 0:0`, done by OWNERSHIP_HELPER so
+    that no link is followed on the way or below."""
+    return [podman, "unshare", sys.executable, "-I", "-c", OWNERSHIP_HELPER, root_path, relative,
+            str(info.st_dev), str(info.st_ino), str(owner[0]), str(owner[1])]
+
+
+def take_ownership(root, relative, cancelled=None, podman=None, subuid="/etc/subuid", owner=(0, 0),
+                   timeout=OWNERSHIP_TIMEOUT):
+    """Make the user own RELATIVE below the sandbox root ROOT and all it holds, also what a rootless Podman
+    sandbox wrote as one of the user's subordinate UIDs. Only below a sandbox root, never through a link (the
+    entry is checked with lstat right before, and the helper checks it is still that entry); its owner must be
+    the user or a subordinate UID of the user's. Result.files: entries changed; Result.skipped: those not."""
+    if not getattr(root, "sandbox", False):
+        raise Refused(tr("Taking ownership works only below a sandbox's folder."))
+    components = parts(relative)
+    if not components:
+        raise Refused(tr("Choose a file or folder below the folder shown."))
+    relative = "/".join(components)
+    info = root.lstat(relative)
+    if stat.S_ISLNK(info.st_mode):
+        raise Refused(tr("{name} is a symbolic link; links are not followed.", name=printable(components[-1])))
+    problem = ownership_problem(info.st_uid, subordinate_ranges(subuid))
+    if problem:
+        raise Refused(f"{printable(components[-1])}: {problem}")
+    podman = podman or shutil.which("podman")
+    if not podman:
+        raise Refused(tr("Podman was not found: taking ownership needs rootless Podman (podman unshare)."))
+    process = subprocess.Popen(ownership_command(podman, root.path, relative, info, owner), stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            out, err = process.communicate(timeout=0.2)
+            break
+        except subprocess.TimeoutExpired:
+            if (cancelled and cancelled()) or _closing or time.monotonic() > deadline:
+                process.kill()
+                process.communicate()
+                raise Cancelled(tr("Cancelled.")) from None
+    try:
+        summary = json.loads(out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        summary = None
+    if process.returncode != 0 or not isinstance(summary, dict):
+        raise Refused(tr("podman unshare failed: {error}", error=printable((err or out).strip()[-500:])))
+    if summary.get("error"):
+        raise Refused(tr("Taking ownership failed: {error}", error=printable(summary["error"])))
+    result = Result(files=int(summary.get("changed") or 0))
+    result.skipped = [(str(path), str(why)) for path, why in summary.get("skipped") or []]
+    return result
 
 
 def size_text(size):

@@ -752,6 +752,13 @@ class KitsPage(QWidget):
         if kit is None:
             return
         name = kit["name"]
+        # Trusted hooks run in every later start with the kit: asked first (kit-hooks-trust), then reviewed and
+        # approved hook by hook in the terminal.
+        if not ask_first(self, "kit-hooks-trust", tr("Review and approve hooks…"), tr(
+                "Hooks of {name} you approve run in every later start with that kit. The terminal shows every hook "
+                "and the full text of every file before you approve there.", name=printable(name)),
+                tr("Open the review")):
+            return
         self.terminal(self.sai.trust_hooks_argv(name), f"sandbox-ai kits trust-hooks {name}")
         self.summary.setText(tr("Review the hooks of {name} in the terminal, then Refresh.", name=printable(name)))
 

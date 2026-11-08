@@ -6,6 +6,8 @@ Qt (tested without a display).
 - a new one (`sandbox-ai llm add NAME --kind KIND --url URL [--api-key-secret NAME] [--vpn PROFILE] [--anthropic]`),
   then checked for the chosen agent (`sandbox-ai llm check NAME --agent AGENT`),
 - its models (`sandbox-ai llm models NAME --json`: [{name, size, loaded, details}]),
+- the Model choice beside the agent on the launch page and the board's agent node (model_choices, form_values,
+  apply): the agent's provider, or a registered server as NAME or NAME:MODEL,
 - what goes on the board: --llm NAME[:MODEL] for whichever agent (Claude Code needs a server with the Anthropic
   Messages API; Codex and OpenCode take any OpenAI-compatible one), --no-provider-defaults for "only this server",
   and no --model (the launcher refuses --model with --llm: the model is the server's).
@@ -162,13 +164,18 @@ def list_endpoints(sai):
     return parse_endpoints(out)
 
 
-def add_and_check(sai, fields, agent=None):
-    """`sandbox-ai llm add` with FIELDS, then (when it was added) `sandbox-ai llm check NAME --agent AGENT`
-    (blocking). {"name", "added": (status, out, err), "checked": (status, out, err) or None}."""
+def add_and_check(sai, fields, agent=None, keep_key=None):
+    """`sandbox-ai llm add` with FIELDS, then (when it was added) KEEP_KEY() - the page's `sandbox-ai secrets set`
+    of a typed key, its value on standard input, asked for first when that secret exists - and `sandbox-ai llm
+    check NAME --agent AGENT` (blocking). A server refused keeps no key. {"name", "added": (status, out, err),
+    "kept": (status, out, err) or None, "checked": (status, out, err) or None}."""
     args = add_argv(fields)
     added = sai.call(*args, timeout=ADD_SECONDS)
-    checked = sai.call(*check_argv(args[2], agent), timeout=CHECK_SECONDS) if added[0] == 0 else None
-    return {"name": args[2], "added": added, "checked": checked}
+    kept = checked = None
+    if added[0] == 0:
+        kept = keep_key() if keep_key is not None else None
+        checked = sai.call(*check_argv(args[2], agent), timeout=CHECK_SECONDS)
+    return {"name": args[2], "added": added, "kept": kept, "checked": checked}
 
 
 def parse_models(out):
@@ -226,6 +233,25 @@ def agent_hint(endpoint, agent, sai=None):
         return tr("Claude Code needs a server with the Anthropic Messages API (Ollama, LM Studio, llama.cpp, vLLM, or "
                   "an OpenAI-compatible one added with --anthropic); Codex and OpenCode can use this one.")
     return tr("{agent} cannot use this server.", agent=agent)
+
+
+def loopback(endpoint):
+    """Whether ENDPOINT is on this machine's loopback (127.0.0.1, localhost, [::1]): only the Podman backend reaches
+    it (the launcher opens it with --allow-host-port), Bubblewrap does not."""
+    match = URL.fullmatch(str((endpoint or {}).get("url") or ""))
+    host = match[1].strip("[]").lower() if match else ""
+    return host in ("localhost", "::1") or host.startswith("127.")
+
+
+def placeholder_choices(endpoint):
+    """What an <llm:...> placeholder may take for ENDPOINT: its name (the server's default or only model), then
+    NAME:MODEL for each model it listed when it was last checked."""
+    name = valid_name(endpoint.get("name"))
+    if name is None:
+        return []
+    models = [m for m in endpoint.get("models") or [] if valid_model(m)] if isinstance(endpoint.get("models"), list) \
+        else []
+    return [name] + [f"{name}:{model}" for model in models[:30]]
 
 
 def endpoint_row(endpoint):
@@ -308,6 +334,23 @@ def apply(board, choice):
     return board
 
 
+def clear(board):
+    """Take an own server off BOARD (the agent's provider again): the LLM server node and --no-provider-defaults."""
+    node = board.first("llm")
+    if node is not None:
+        board.remove(node.id)
+    network = board.first("network")
+    if network is not None:
+        network.props.pop("--no-provider-defaults", None)
+    return board
+
+
+def uses_server(board):
+    """Whether BOARD starts with --llm (a value or a placeholder still to fill in): no --model then."""
+    node = board.first("llm")
+    return node is not None and board.connected(node) and bool(str(node.props.get("--llm") or "").strip())
+
+
 def from_board(board):
     """The choice ({name, model, only}) a board holds already (an existing project's --llm), or None."""
     node = board.first("llm")
@@ -320,12 +363,64 @@ def from_board(board):
     return {"name": name, "model": model, "only": bool(network and network.props.get("--no-provider-defaults"))}
 
 
-def prefilled(preset, choice):
-    """{marker: NAME[:MODEL]} for the <llm:...> placeholders of PRESET from the wizard's CHOICE ({} without one)."""
+# -- the "Model" choice beside the agent (the launch page, the board's agent node) --
+
+def model_choices(endpoints, agent, sai=None):
+    """[(label, value, hint)] for the Model choice beside AGENT: the agent's own provider first (value ""), then each
+    registered server as NAME (its default or only model) and as NAME:MODEL for each model it listed. HINT says why
+    AGENT cannot use that server ("" when it can): the choice is shown, not offered."""
+    found = [(tr("the agent's provider (cloud)"), "", "")]
+    for endpoint in endpoints or []:
+        values = placeholder_choices(endpoint)
+        if not values:
+            continue
+        hint = agent_hint(endpoint, agent, sai)
+        kind = kind_label(endpoint.get("kind"))
+        for value in values:
+            found.append((f"{value} ({kind})" if value == values[0] and kind else value, value, hint))
+    return found
+
+
+def choice_of(value, only=False):
+    """The choice ({name, model, only}) of a Model value NAME[:MODEL] ("" or an invalid one: None, the agent's
+    provider)."""
+    name, model = parse_value(value)
+    return {"name": name, "model": model, "only": bool(only)} if name else None
+
+
+def form_values(values, choice):
+    """The launch page's form VALUES ({option: value}) with CHOICE: --llm NAME[:MODEL], --no-provider-defaults as
+    "only this server" says, --model emptied (the launcher refuses it with --llm: the model is the server's); None
+    (the agent's provider) empties --llm and --no-provider-defaults."""
+    values = dict(values)
+    if choice:
+        values["--llm"] = llm_value(choice["name"], choice.get("model") or "")
+        values["--no-provider-defaults"] = bool(choice.get("only"))
+        if "--model" in values:
+            values["--model"] = ""
+    else:
+        values["--llm"] = ""
+        values["--no-provider-defaults"] = False
+    return values
+
+
+def from_values(values):
+    """The choice the form VALUES hold (--llm and --no-provider-defaults), or None."""
+    return choice_of(str((values or {}).get("--llm") or "").strip(), (values or {}).get("--no-provider-defaults"))
+
+
+def prefilled(preset, choice, endpoint=None):
+    """{marker: value} for the <llm:...> placeholders of PRESET from the wizard's CHOICE (NAME[:MODEL]), and for a
+    VPN placeholder that follows one of them the VPN profile ENDPOINT (the chosen server) is reached through
+    ({} without a choice)."""
     if not choice or preset is None:
         return {}
     value = llm_value(choice["name"], choice.get("model") or "")
-    return {p.marker: value for p in preset.placeholders if p.kind == "llm"}
+    found = {p.marker: value for p in preset.placeholders if p.kind == "llm"}
+    vpn = (endpoint or {}).get("vpn")
+    if isinstance(vpn, str) and VPN.fullmatch(vpn):
+        found.update({p.marker: vpn for p in preset.placeholders if p.follows in found})
+    return found
 
 
 def needs_form(preset, values):

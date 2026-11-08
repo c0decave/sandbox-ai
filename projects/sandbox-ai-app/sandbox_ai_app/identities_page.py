@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 from .backend import SandboxAI
 from .files import printable
 from .i18n import tr
-from .widgets import background, confirm, fill, plain_label, selected, table
+from .widgets import ask_first, background, fill, plain_label, selected, table
 
 PUBLISH_KINDS = tuple(SandboxAI.PUBLISH_HOSTS)
 
@@ -79,6 +79,12 @@ class IdentitiesBox(QGroupBox):
             return
         target, new = dialog.result_identity()
         old = self.known.get(target)
+        # Logins taken from the identity are taken from every later start that uses it: asked first (login-remove).
+        gone = [step[3] for step in self.sai.identity_steps(target, old, new) if step[1] in ("logout", "unpublish")]
+        if gone and not ask_first(self, "login-remove", tr("Remove"), tr(
+                "Remove these logins from the identity {name}: {list}? Their secrets stay in sandbox-ai secrets.",
+                name=printable(target), list=", ".join(printable(value) for value in gone)), tr("Remove")):
+            return
         self.message.setText(tr("Saving {name}…", name=target))
         background(lambda: self.sai.save_identity(target, old, new), owner=self, timeout=120,
                    source=[self.add_button, self.edit_button, self.remove_button],
@@ -91,9 +97,9 @@ class IdentitiesBox(QGroupBox):
 
     def remove(self):
         name = selected(self.list)
-        if not name or not confirm(self, tr("Remove identity"),
-                                   tr("Remove the identity {name}? Its secrets stay in sandbox-ai secrets.", name=name),
-                                   tr("Remove"), destructive=True):
+        if not name or not ask_first(self, "login-remove", tr("Remove identity"),
+                                     tr("Remove the identity {name}? Its secrets stay in sandbox-ai secrets.",
+                                        name=name), tr("Remove")):
             return
         background(lambda: self.sai.call("identities", "remove", name, timeout=60), owner=self, timeout=90,
                    done=lambda result, error: self.saved(name, (result[0], result[1] + result[2]) if error is None

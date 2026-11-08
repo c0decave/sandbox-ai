@@ -92,11 +92,18 @@ BLOCKING_SAI = {"call", "answer", "dry_run", "doctor", "mcp_catalog", "statistic
                 "limits_shown", "review_home", "host_remembered", "host_net_options", "ended_starts", "start_history",
                 "collect", "host_set", "host_add", "host_remove", "collect_as_shown", "host_devices_added",
                 "host_workspaces", "host_secrets", "secret_exists", "host_approvals_history", "session_ids",
-                "recent_folders", "host_install"}
+                "recent_folders", "host_install",
+                # `sandbox-ai llm list` and `vpn list` (the wizard's Model page, the preset form, the VPN page)
+                "llm_endpoints", "vpn_profiles", "listing"}
 # (host_statuses(cached=True) reads what `sandbox-ai hosts list` kept, without SSH: the Hosts page lists it at once.)
 # (stop_commands runs on the GUI thread on purpose: only when quitting, bounded by one grace period.)
 BLOCKING_MODULES = {"subprocess"}
 BLOCKING_BACKEND = {"read_connections"}
+# files.py: copies (up to 1 GiB), moves, deletes and owner changes of whole trees, podman unshare (the Files page
+# runs them in Task.thread). Called as root.NAME(...) or files.NAME(...): matched by the name alone.
+BLOCKING_FILES = {"copy_out", "copy_in", "copy_entry", "move_entry", "delete_entry", "chown_entry", "take_ownership"}
+# wizard_llm's functions that run `sandbox-ai llm list|add|check|models` (called as WL.NAME or wizard_llm.NAME).
+BLOCKING_WIZARD_LLM = {"list_endpoints", "add_and_check", "list_models"}
 WRAPPERS = {"background", "ThreadCall", "thread"}  # widgets.background, widgets.ThreadCall, Task.thread
 
 
@@ -115,6 +122,11 @@ def blocking(node):
             return f"{func.value.id}.{func.attr}()"
         if isinstance(func.value, ast.Name) and func.value.id == "backend" and func.attr in BLOCKING_BACKEND:
             return f"backend.{func.attr}()"
+        if func.attr in BLOCKING_FILES:
+            return f"{func.attr}()"
+        if isinstance(func.value, ast.Name) and func.value.id in ("WL", "wizard_llm") and \
+                func.attr in BLOCKING_WIZARD_LLM:
+            return f"wizard_llm.{func.attr}()"
     if isinstance(func, ast.Name) and func.id in BLOCKING_BACKEND:
         return f"{func.id}()"
     return None
@@ -151,10 +163,26 @@ def blocking_calls(source):
 def test_pages_run_commands_and_slow_reads_only_in_the_background():
     found = [f"{name}:{line} {what}"
              for name in ("pages.py", "images_page.py", "ui.py", "board_view.py", "wizard.py", "settings.py",
-                          "hosts_page.py", "llm_page.py", "terminal.py")
+                          "hosts_page.py", "llm_page.py", "terminal.py", "preset_gallery.py", "vpn_page.py",
+                          "files_page.py")
              if (PACKAGE / name).exists()
              for line, what in blocking_calls((PACKAGE / name).read_text())]
     assert not found, "on the GUI thread (use widgets.background, ThreadCall or Task):\n" + "\n".join(found)
+
+
+def test_the_blocking_check_knows_the_file_operations():
+    source = '''
+class Page:
+    def bad(self):
+        self.root.delete_entry("x")
+        files.copy_entry(a, "x", b, "")
+
+    def good(self):
+        def work(cancelled):
+            return files.move_entry(a, "x", b, "", cancelled=cancelled)
+        self.task.thread(work, self.done, "text", cancellable=True)
+'''
+    assert [what for _, what in blocking_calls(source)] == ["delete_entry()", "copy_entry()"]
 
 
 def test_the_blocking_check_tells_direct_calls_from_deferred_ones():
@@ -172,14 +200,18 @@ class Page:
             return self.sai.statistics(directory)
         self.task.thread(work, self.done, "text")
         ThreadCall(self.sai.answer, "1-1-1", "allow", "once").start()
+        background(lambda: WL.add_and_check(sai, fields, "opencode"), done=self.done)
 
     def also_bad(self):
         def helper():
             return self.sai.doctor()
         return helper()
+
+    def models(self):
+        return WL.list_models(self.sai, "lmstudio")
 '''
-    assert [what for _, what in blocking_calls(source)] == ["sai.call()", "subprocess.run()",
-                                                             "backend.read_connections()", "sai.doctor()"]
+    assert sorted(what for _, what in blocking_calls(source)) == sorted([
+        "sai.call()", "subprocess.run()", "backend.read_connections()", "sai.doctor()", "wizard_llm.list_models()"])
 
 
 # -- one confirmation policy: every call path that ends, removes or weakens something asks first --
@@ -188,7 +220,12 @@ class Page:
 # (consecutive string literals of one call or tuple). The functions that issue one must ask first with
 # widgets.ask_first(..., ACTION, ...): in themselves or in a function they are nested in.
 MUTATIONS = {
-    "start-stop": ["stop_run", "stop_mcp", ("session", "stop")],
+    "start-stop": ["stop_run", ("session", "stop")],
+    "mcp-stop": ["stop_mcp"],
+    "project-trust": ["trust_project"],
+    "login-remove": [("identities", "remove"), "save_identity"],
+    "login-logout": [("--logout",)],
+    "kit-hooks-trust": ["trust_hooks_argv"],
     "gc": ["collect_as_shown"],
     "approval-forget": ["forget_remembered"],
     "defaults-lower": [("defaults", "set"), ("defaults", "unset")],
@@ -205,6 +242,21 @@ MUTATIONS = {
     "secret-delete": ["delete_secret"],
     "secret-replace": ["set_secret", "vpn_add"],
     "mcp-attach": ["mcp_attach"],
+}
+
+# The actions of the web interface's table (backend.NEEDS_CONFIRM is the same set) that no page of the app does yet:
+# the app gets them with the command-line parity work, and asks first there then. Exact: an action a page asks for is
+# taken off this list (the test says so), and nothing else may be missing.
+WEB_ONLY = {
+    "project-forget",       # no "forget a trusted project configuration" in the app (backend.forget_project unused)
+    "mcp-unsigned",         # the app adds no MCP server from a catalog (sandbox-ai mcp add --unsigned)
+    "mcp-writable-mount",   # nor one with a writable mount
+    "net-keep",             # no sandbox-ai net keep
+    "start-restart",        # no restart of a running start (only mcp attach --restart: mcp-restart)
+    "canary-tokens",        # the Canaries tab shows the log, not the run's tokens in full
+    "canary-resume",        # no sandbox-ai canaries resume
+    "llm-insecure",         # the Model servers page offers no --insecure-http
+    "vpn-socks",            # the VPN page adds no Tor profile with --socks
 }
 
 def string_runs(node):
@@ -271,7 +323,9 @@ def test_every_call_that_ends_removes_or_weakens_something_asks_first():
         asked |= asked_actions(ast.parse(source))
     assert not found, "not asked first (widgets.ask_first):\n" + "\n".join(found)
     assert not asked - actions, f"asked for actions the table does not have: {sorted(asked - actions)}"
-    assert actions <= asked, f"actions of the table no page asks for: {sorted(actions - asked)}"
+    assert WEB_ONLY <= actions, f"WEB_ONLY names actions the table does not have: {sorted(WEB_ONLY - actions)}"
+    assert not WEB_ONLY & asked, f"asked for now: take them off WEB_ONLY: {sorted(WEB_ONLY & asked)}"
+    assert actions - WEB_ONLY <= asked, f"actions of the table no page asks for: {sorted(actions - WEB_ONLY - asked)}"
 
 
 def test_the_walk_finds_a_call_that_does_not_ask():

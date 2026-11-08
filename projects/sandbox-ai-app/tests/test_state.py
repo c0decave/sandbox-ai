@@ -254,6 +254,28 @@ def test_an_unapplied_board_draft_comes_back_with_undo_and_discard(window, env, 
         close(third)
 
 
+def test_the_folds_of_the_sandboxes_tree_come_back(window, env, monkeypatch):
+    """Which hosts and starts of the Sandboxes page are open is kept per host and start."""
+    from sandbox_ai_app.start_tree import row_id
+    folder = project(env, "p")
+    run = fake_run(env, "claude-one", folder)
+    record = json.loads((run / "run.json").read_text())
+    (run / "run.json").write_text(json.dumps({**record, "pod": "sandbox-claude-one", "mcp_servers": ["fetch"]}))
+    page = window.sandboxes
+    page.refresh()
+    start = page.table.find_item(row_id("local", "run:claude-one"))
+    assert start.childCount() == 2 and not start.isExpanded()
+    start.setExpanded(True)
+    page.table.find_item(row_id("local")).setExpanded(False)
+    again = restart(window, monkeypatch)
+    try:
+        tree = again.sandboxes.table
+        assert tree.find_item(row_id("local", "run:claude-one")).isExpanded()
+        assert not tree.find_item(row_id("local")).isExpanded()
+    finally:
+        close(again)
+
+
 def test_the_selected_sandbox_comes_back(window, env, monkeypatch):
     folder = project(env, "p")
     fake_run(env, "claude-one", folder)

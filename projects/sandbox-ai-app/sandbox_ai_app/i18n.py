@@ -47,6 +47,545 @@ def tr(key, **values):
 
 
 TEXTS = {
+    # the wizard's Model step: a short radio button, the servers it means below it (wizard.py)
+    'A model server of your own (its raw API)': {
+        'en': 'A model server of your own (its raw API)',
+        'de': 'Ein eigener Modell-Server (dessen rohe API)'},
+    'LM Studio, Ollama, llama.cpp, vLLM or any OpenAI-compatible server, registered with sandbox-ai llm add.': {
+        'en': 'LM Studio, Ollama, llama.cpp, vLLM or any OpenAI-compatible server, registered with sandbox-ai llm add.',
+        'de': 'LM Studio, Ollama, llama.cpp, vLLM oder ein anderer OpenAI-kompatibler Server, eingetragen mit sandbox-ai llm add.'},
+    # asked first (backend.NEEDS_CONFIRM): logins taken from an identity, a kit's hooks trusted (identities_page.py,
+    # kits_page.py)
+    'Remove these logins from the identity {name}: {list}? Their secrets stay in sandbox-ai secrets.': {
+        'en': 'Remove these logins from the identity {name}: {list}? Their secrets stay in sandbox-ai secrets.',
+        'de': 'Diese Anmeldungen aus der Identität {name} entfernen: {list}? Ihre Secrets bleiben in sandbox-ai secrets.'},
+    'Hooks of {name} you approve run in every later start with that kit. The terminal shows every hook and the full text of every file before you approve there.': {
+        'en': 'Hooks of {name} you approve run in every later start with that kit. The terminal shows every hook and the full text of every file before you approve there.',
+        'de': 'Hooks von {name}, die Sie freigeben, laufen bei jedem späteren Start mit diesem Kit. Das Terminal zeigt jeden Hook und den vollständigen Text jeder Datei, bevor Sie dort freigeben.'},
+    'Open the review': {
+        'en': 'Open the review',
+        'de': 'Prüfung öffnen'},
+    # presets and the Model choice beside the agent: Tor, the raw API, model servers (presets.py, ui.py, board_view.py,
+    # wizard.py, wizard_llm.py)
+    "The agent's own provider (cloud), or a model server of yours (sandbox-ai llm): --llm NAME[:MODEL], without --model": {
+        'en': "The agent's own provider (cloud), or a model server of yours (sandbox-ai llm): --llm NAME[:MODEL], without --model",
+        'de': 'Der eigene Provider des Agenten (Cloud) oder ein Modellserver von Ihnen (sandbox-ai llm): --llm NAME[:MODELL], ohne --model'},
+    'only this server': {
+        'en': 'only this server',
+        'de': 'nur dieser Server'},
+    '--no-provider-defaults: the agent reaches the model server and nothing else': {
+        'en': '--no-provider-defaults: the agent reaches the model server and nothing else',
+        'de': '--no-provider-defaults: Der Agent erreicht den Modellserver und sonst nichts'},
+    'Model server': {
+        'en': 'Model server',
+        'de': 'Modellserver'},
+    "With a model server the model is the server's: choose NAME:MODEL as the model server": {
+        'en': "With a model server the model is the server's: choose NAME:MODEL as the model server",
+        'de': 'Mit einem Modellserver ist das Modell das des Servers: Wählen Sie NAME:MODELL als Modellserver'},
+    'Local OpenAI-compatible API (raw)': {
+        'en': 'Local OpenAI-compatible API (raw)',
+        'de': 'Lokale OpenAI-kompatible API (roh)'},
+    'Any server with the OpenAI API (a LiteLLM gateway, LocalAI, your own): only its address is opened, no cloud.': {
+        'en': 'Any server with the OpenAI API (a LiteLLM gateway, LocalAI, your own): only its address is opened, no cloud.',
+        'de': 'Jeder Server mit der OpenAI-API (ein LiteLLM-Gateway, LocalAI, Ihr eigener): Nur seine Adresse wird geöffnet, keine Cloud.'},
+    'Everything through Tor': {
+        'en': 'Everything through Tor',
+        'de': 'Alles durch Tor'},
+    "Every connection, the agent's own API connections included, leaves through Tor; lookups go to Tor's resolver and .onion names work. The allow-list and approvals apply as always.": {
+        'en': "Every connection, the agent's own API connections included, leaves through Tor; lookups go to Tor's resolver and .onion names work. The allow-list and approvals apply as always.",
+        'de': 'Jede Verbindung, auch die API-Verbindungen des Agenten, geht durch Tor hinaus; Namensauflösungen gehen an Tors Resolver, und .onion-Namen funktionieren. Freigabeliste und Rückfragen gelten wie immer.'},
+    'OpenCode needs /v1/chat/completions, Codex /v1/responses. Claude Code speaks only the Anthropic Messages API: only with a server added with --anthropic.': {
+        'en': 'OpenCode needs /v1/chat/completions, Codex /v1/responses. Claude Code speaks only the Anthropic Messages API: only with a server added with --anthropic.',
+        'de': 'OpenCode braucht /v1/chat/completions, Codex /v1/responses. Claude Code spricht nur die Anthropic-Messages-API: nur mit einem Server, der mit --anthropic hinzugefügt wurde.'},
+    'NAME:MODEL chooses a model (sandbox-ai llm models NAME lists them).': {
+        'en': 'NAME:MODEL chooses a model (sandbox-ai llm models NAME lists them).',
+        'de': 'NAME:MODELL wählt ein Modell (sandbox-ai llm models NAME listet sie).'},
+    'Before the agent starts, tor must bootstrap and check.torproject.org must see a Tor exit; a failed check stops the start.': {
+        'en': 'Before the agent starts, tor must bootstrap and check.torproject.org must see a Tor exit; a failed check stops the start.',
+        'de': 'Bevor der Agent startet, muss tor sich verbinden und check.torproject.org einen Tor-Ausgang sehen; eine fehlgeschlagene Prüfung hält den Start an.'},
+    "TCP over IPv4 only: no UDP (no QUIC, ping or NTP), no IPv6, slower; the agent's provider may refuse or challenge Tor exits.": {
+        'en': "TCP over IPv4 only: no UDP (no QUIC, ping or NTP), no IPv6, slower; the agent's provider may refuse or challenge Tor exits.",
+        'de': 'Nur TCP über IPv4: kein UDP (kein QUIC, Ping oder NTP), kein IPv6, langsamer; der Provider des Agenten kann Tor-Ausgänge ablehnen oder prüfen.'},
+    '.onion names resolve and connect through Tor (with --dns every one the agent looks up).': {
+        'en': '.onion names resolve and connect through Tor (with --dns every one the agent looks up).',
+        'de': '.onion-Namen werden aufgelöst und durch Tor verbunden (mit --dns jeder, den der Agent nachschlägt).'},
+    "With --socks, 127.0.0.1:9050 is Tor's SocksPort (torsocks, curl --socks5-hostname); torsocks and Tor Browser in the image: sandbox-ai images recipe tor --from AGENT.": {
+        'en': "With --socks, 127.0.0.1:9050 is Tor's SocksPort (torsocks, curl --socks5-hostname); torsocks and Tor Browser in the image: sandbox-ai images recipe tor --from AGENT.",
+        'de': 'Mit --socks ist 127.0.0.1:9050 Tors SocksPort (torsocks, curl --socks5-hostname); torsocks und Tor Browser im Image: sandbox-ai images recipe tor --from AGENT.'},
+    'OpenAI-compatible server': {
+        'en': 'OpenAI-compatible server',
+        'de': 'OpenAI-kompatibler Server'},
+    'sandbox-ai llm add api --kind openai-compatible --url http://192.168.1.20:4000': {
+        'en': 'sandbox-ai llm add api --kind openai-compatible --url http://192.168.1.20:4000',
+        'de': 'sandbox-ai llm add api --kind openai-compatible --url http://192.168.1.20:4000'},
+    'Tor profile': {
+        'en': 'Tor profile',
+        'de': 'Tor-Profil'},
+    'sandbox-ai build vpn; sandbox-ai vpn add anon --tor --socks': {
+        'en': 'sandbox-ai build vpn; sandbox-ai vpn add anon --tor --socks',
+        'de': 'sandbox-ai build vpn; sandbox-ai vpn add anon --tor --socks'},
+    "The agent's own provider and login (no --llm)": {
+        'en': "The agent's own provider and login (no --llm)",
+        'de': 'Der eigene Provider und die Anmeldung des Agenten (kein --llm)'},
+    "the agent's provider (cloud)": {
+        'en': "the agent's provider (cloud)",
+        'de': 'der Provider des Agenten (Cloud)'},
+    # files: the two-pane file manager (files_page.py, files.py)
+    'More than {count} files and folders; choose a smaller part.': {
+        'en': 'More than {count} files and folders; choose a smaller part.',
+        'de': 'Mehr als {count} Dateien und Ordner; wählen Sie einen kleineren Teil.'},
+    'It belongs to UID {uid}: neither you nor one of your subordinate IDs (/etc/subuid), so no rootless Podman sandbox of yours made it.': {
+        'en': 'It belongs to UID {uid}: neither you nor one of your subordinate IDs (/etc/subuid), so no rootless Podman sandbox of yours made it.',
+        'de': 'Es gehört UID {uid}: weder Ihnen noch einer Ihrer untergeordneten IDs (/etc/subuid), also hat es keine Ihrer rootlosen Podman-Sandboxen angelegt.'},
+    'The source was kept: {count} item(s) were not copied or changed while they were copied.': {
+        'en': 'The source was kept: {count} item(s) were not copied or changed while they were copied.',
+        'de': 'Die Quelle wurde behalten: {count} Einträge wurden nicht kopiert oder änderten sich während des Kopierens.'},
+    'Cancelled after the copy: the source was kept.': {
+        'en': 'Cancelled after the copy: the source was kept.',
+        'de': 'Nach dem Kopieren abgebrochen: Die Quelle wurde behalten.'},
+    'Kept in the source (added or changed after it was copied): {list}': {
+        'en': 'Kept in the source (added or changed after it was copied): {list}',
+        'de': 'In der Quelle behalten (nach dem Kopieren hinzugekommen oder geändert): {list}'},
+    'Not a name for a file or folder: {name}': {
+        'en': 'Not a name for a file or folder: {name}',
+        'de': 'Kein Name für eine Datei oder einen Ordner: {name}'},
+    'That name is too long.': {
+        'en': 'That name is too long.',
+        'de': 'Dieser Name ist zu lang.'},
+    'A folder cannot be copied or moved into itself.': {
+        'en': 'A folder cannot be copied or moved into itself.',
+        'de': 'Ein Ordner kann nicht in sich selbst kopiert oder verschoben werden.'},
+    '{name} is already there: the source and the target are the same folder.': {
+        'en': '{name} is already there: the source and the target are the same folder.',
+        'de': '{name} ist schon dort: Quelle und Ziel sind derselbe Ordner.'},
+    '{name} was replaced meanwhile; nothing was changed.': {
+        'en': '{name} was replaced meanwhile; nothing was changed.',
+        'de': '{name} wurde inzwischen ersetzt; nichts wurde geändert.'},
+    "Taking ownership works only below a sandbox's folder.": {
+        'en': "Taking ownership works only below a sandbox's folder.",
+        'de': 'Besitz übernehmen geht nur unterhalb des Ordners einer Sandbox.'},
+    'Podman was not found: taking ownership needs rootless Podman (podman unshare).': {
+        'en': 'Podman was not found: taking ownership needs rootless Podman (podman unshare).',
+        'de': 'Podman wurde nicht gefunden: Besitz übernehmen braucht rootloses Podman (podman unshare).'},
+    'podman unshare failed: {error}': {
+        'en': 'podman unshare failed: {error}',
+        'de': 'podman unshare ist fehlgeschlagen: {error}'},
+    'Taking ownership failed: {error}': {
+        'en': 'Taking ownership failed: {error}',
+        'de': 'Besitz übernehmen ist fehlgeschlagen: {error}'},
+    'Not a permission mode: {mode}': {
+        'en': 'Not a permission mode: {mode}',
+        'de': 'Kein Berechtigungsmodus: {mode}'},
+    "Set-user-ID, set-group-ID and sticky bits are not set here (never below a sandbox's folder).": {
+        'en': "Set-user-ID, set-group-ID and sticky bits are not set here (never below a sandbox's folder).",
+        'de': 'Set-User-ID-, Set-Group-ID- und Sticky-Bits werden hier nicht gesetzt (nie unterhalb des Ordners einer Sandbox).'},
+    'Files can only be given to you (UID {uid}).': {
+        'en': 'Files can only be given to you (UID {uid}).',
+        'de': 'Dateien können nur Ihnen gegeben werden (UID {uid}).'},
+    'Group {gid} is not one of your groups.': {
+        'en': 'Group {gid} is not one of your groups.',
+        'de': 'Gruppe {gid} ist keine Ihrer Gruppen.'},
+    'Folders nested more than {count} deep are not changed.': {
+        'en': 'Folders nested more than {count} deep are not changed.',
+        'de': 'Ordner, die tiefer als {count} Ebenen verschachtelt sind, werden nicht geändert.'},
+    'removed while it was copied': {
+        'en': 'removed while it was copied',
+        'de': 'während des Kopierens entfernt'},
+    'the copy itself': {
+        'en': 'the copy itself',
+        'de': 'die Kopie selbst'},
+    'Owner': {
+        'en': 'Owner',
+        'de': 'Besitzer'},
+    "{uid} (a sandbox's)": {
+        'en': "{uid} (a sandbox's)",
+        'de': '{uid} (einer Sandbox)'},
+    'Deleting {count} item(s)…': {
+        'en': 'Deleting {count} item(s)…',
+        'de': '{count} Einträge werden gelöscht …'},
+    'Changing the owner of {count} item(s)…': {
+        'en': 'Changing the owner of {count} item(s)…',
+        'de': 'Besitzer von {count} Einträgen wird geändert …'},
+    'Taking ownership of {count} item(s)…': {
+        'en': 'Taking ownership of {count} item(s)…',
+        'de': 'Besitz von {count} Einträgen wird übernommen …'},
+    'Type a folder and press Enter': {
+        'en': 'Type a folder and press Enter',
+        'de': 'Ordner eingeben und Enter drücken'},
+    'Owner and group': {
+        'en': 'Owner and group',
+        'de': 'Besitzer und Gruppe'},
+    'unchanged': {
+        'en': 'unchanged',
+        'de': 'unverändert'},
+    'Also everything in the folders': {
+        'en': 'Also everything in the folders',
+        'de': 'Auch alles in den Ordnern'},
+    'Group': {
+        'en': 'Group',
+        'de': 'Gruppe'},
+    'Without it, names that exist in the target are left alone; with it, you are asked before they are replaced': {
+        'en': 'Without it, names that exist in the target are left alone; with it, you are asked before they are replaced',
+        'de': 'Ohne dies bleiben Namen, die im Ziel schon existieren, unangetastet; damit werden Sie gefragt, bevor sie ersetzt werden'},
+    '{text} {count} file(s) and folder(s), {size}': {
+        'en': '{text} {count} file(s) and folder(s), {size}',
+        'de': '{text} {count} Dateien und Ordner, {size}'},
+    'Moving {count} item(s) to {target}…': {
+        'en': 'Moving {count} item(s) to {target}…',
+        'de': '{count} Einträge werden nach {target} verschoben …'},
+    'Copying {count} item(s) to {target}…': {
+        'en': 'Copying {count} item(s) to {target}…',
+        'de': '{count} Einträge werden nach {target} kopiert …'},
+    'Replace existing files?': {
+        'en': 'Replace existing files?',
+        'de': 'Vorhandene Dateien ersetzen?'},
+    '{count} of the {total} item(s) from {source} already exist in {target}. Replace them? Files are replaced, folders are filled with what is copied.': {
+        'en': '{count} of the {total} item(s) from {source} already exist in {target}. Replace them? Files are replaced, folders are filled with what is copied.',
+        'de': '{count} der {total} Einträge aus {source} gibt es in {target} schon. Ersetzen? Dateien werden ersetzt, Ordner mit dem Kopierten gefüllt.'},
+    'Rename': {
+        'en': 'Rename',
+        'de': 'Umbenennen'},
+    'New name for {name}:': {
+        'en': 'New name for {name}:',
+        'de': 'Neuer Name für {name}:'},
+    '{name} renamed to {new}.': {
+        'en': '{name} renamed to {new}.',
+        'de': '{name} in {new} umbenannt.'},
+    'New folder': {
+        'en': 'New folder',
+        'de': 'Neuer Ordner'},
+    'Name of the new folder in {folder}:': {
+        'en': 'Name of the new folder in {folder}:',
+        'de': 'Name des neuen Ordners in {folder}:'},
+    'Folder {name} created.': {
+        'en': 'Folder {name} created.',
+        'de': 'Ordner {name} angelegt.'},
+    'Permissions': {
+        'en': 'Permissions',
+        'de': 'Berechtigungen'},
+    'Mode (octal, e.g. 644 or 755) for {count} item(s):': {
+        'en': 'Mode (octal, e.g. 644 or 755) for {count} item(s):',
+        'de': 'Modus (oktal, z. B. 644 oder 755) für {count} Einträge:'},
+    '{count} file(s) and folder(s) changed.': {
+        'en': '{count} file(s) and folder(s) changed.',
+        'de': '{count} Dateien und Ordner geändert.'},
+    'The folder above (Backspace)': {
+        'en': 'The folder above (Backspace)',
+        'de': 'Der Ordner darüber (Rücktaste)'},
+    'List the folder again (Ctrl+R)': {
+        'en': 'List the folder again (Ctrl+R)',
+        'de': 'Den Ordner neu auflisten (Strg+R)'},
+    'Sandboxes on {host}: not available here yet': {
+        'en': 'Sandboxes on {host}: not available here yet',
+        'de': 'Sandboxen auf {host}: hier noch nicht verfügbar'},
+    'The files of sandboxes on other hosts cannot be shown here yet; a command line for them comes later.': {
+        'en': 'The files of sandboxes on other hosts cannot be shown here yet; a command line for them comes later.',
+        'de': 'Die Dateien von Sandboxen auf anderen Hosts können hier noch nicht gezeigt werden; ein Befehl dafür kommt später.'},
+    'Owner and group of {count} item(s):': {
+        'en': 'Owner and group of {count} item(s):',
+        'de': 'Besitzer und Gruppe von {count} Einträgen:'},
+    'Copy (F5)': {
+        'en': 'Copy (F5)',
+        'de': 'Kopieren (F5)'},
+    "Copy the selected items into the other pane's folder": {
+        'en': "Copy the selected items into the other pane's folder",
+        'de': 'Die gewählten Einträge in den Ordner der anderen Seite kopieren'},
+    'Move (F6)': {
+        'en': 'Move (F6)',
+        'de': 'Verschieben (F6)'},
+    "Move the selected items into the other pane's folder: copied, the source removed only when the copy is complete": {
+        'en': "Move the selected items into the other pane's folder: copied, the source removed only when the copy is complete",
+        'de': 'Die gewählten Einträge in den Ordner der anderen Seite verschieben: kopiert, die Quelle erst entfernt, wenn die Kopie vollständig ist'},
+    'New folder (F7)': {
+        'en': 'New folder (F7)',
+        'de': 'Neuer Ordner (F7)'},
+    'A new folder in the active pane': {
+        'en': 'A new folder in the active pane',
+        'de': 'Ein neuer Ordner auf der aktiven Seite'},
+    'Delete (F8)': {
+        'en': 'Delete (F8)',
+        'de': 'Löschen (F8)'},
+    'Delete the selected items (asks first)': {
+        'en': 'Delete the selected items (asks first)',
+        'de': 'Die gewählten Einträge löschen (fragt vorher)'},
+    'Rename (F2)': {
+        'en': 'Rename (F2)',
+        'de': 'Umbenennen (F2)'},
+    'Rename the selected item': {
+        'en': 'Rename the selected item',
+        'de': 'Den gewählten Eintrag umbenennen'},
+    'Permissions…': {
+        'en': 'Permissions…',
+        'de': 'Berechtigungen …'},
+    "Change the permission bits (never set-ID or sticky bits in a sandbox's folder)": {
+        'en': "Change the permission bits (never set-ID or sticky bits in a sandbox's folder)",
+        'de': 'Die Berechtigungsbits ändern (nie Set-ID- oder Sticky-Bits im Ordner einer Sandbox)'},
+    'Owner…': {
+        'en': 'Owner…',
+        'de': 'Besitzer …'},
+    'Give the selected items to you or one of your groups': {
+        'en': 'Give the selected items to you or one of your groups',
+        'de': 'Die gewählten Einträge Ihnen oder einer Ihrer Gruppen geben'},
+    'Take ownership…': {
+        'en': 'Take ownership…',
+        'de': 'Besitz übernehmen …'},
+    'Take back what a rootless Podman sandbox wrote as another user (podman unshare chown)': {
+        'en': 'Take back what a rootless Podman sandbox wrote as another user (podman unshare chown)',
+        'de': 'Zurücknehmen, was eine rootlose Podman-Sandbox als anderer Benutzer schrieb (podman unshare chown)'},
+    'Another copy still runs.': {
+        'en': 'Another copy still runs.',
+        'de': 'Ein anderer Kopiervorgang läuft noch.'},
+    'Choose a folder in both panes first.': {
+        'en': 'Choose a folder in both panes first.',
+        'de': 'Wählen Sie zuerst auf beiden Seiten einen Ordner.'},
+    'Delete?': {
+        'en': 'Delete?',
+        'de': 'Löschen?'},
+    'Delete {count} item(s) in {folder}? Folders are deleted with everything in them; links are removed, not what they point to. This cannot be undone.': {
+        'en': 'Delete {count} item(s) in {folder}? Folders are deleted with everything in them; links are removed, not what they point to. This cannot be undone.',
+        'de': '{count} Einträge in {folder} löschen? Ordner werden mit allem darin gelöscht; Links werden entfernt, nicht ihr Ziel. Das lässt sich nicht rückgängig machen.'},
+    '{count} file(s) and folder(s) deleted.': {
+        'en': '{count} file(s) and folder(s) deleted.',
+        'de': '{count} Dateien und Ordner gelöscht.'},
+    'Permissions of {count} item(s) changed.': {
+        'en': 'Permissions of {count} item(s) changed.',
+        'de': 'Berechtigungen von {count} Einträgen geändert.'},
+    'not changed: {list}': {
+        'en': 'not changed: {list}',
+        'de': 'nicht geändert: {list}'},
+    'Take ownership': {
+        'en': 'Take ownership',
+        'de': 'Besitz übernehmen'},
+    'Make you the owner of {count} item(s) in {folder} and of everything in them? What the sandbox wrote as another user (one of your subordinate UIDs) becomes yours again (podman unshare chown); links are changed themselves, never followed.': {
+        'en': 'Make you the owner of {count} item(s) in {folder} and of everything in them? What the sandbox wrote as another user (one of your subordinate UIDs) becomes yours again (podman unshare chown); links are changed themselves, never followed.',
+        'de': 'Sie zum Besitzer von {count} Einträgen in {folder} und von allem darin machen? Was die Sandbox als anderer Benutzer (eine Ihrer untergeordneten UIDs) schrieb, gehört wieder Ihnen (podman unshare chown); Links werden selbst geändert, nie verfolgt.'},
+    'Look for sandboxes and sessions again': {
+        'en': 'Look for sandboxes and sessions again',
+        'de': 'Erneut nach Sandboxen und Sitzungen suchen'},
+    "Browse another folder as an agent's": {
+        'en': "Browse another folder as an agent's",
+        'de': 'Einen anderen Ordner wie einen des Agenten durchsuchen'},
+    'Home': {
+        'en': 'Home',
+        'de': 'Persönlicher Ordner'},
+    'Your HOME folder': {
+        'en': 'Your HOME folder',
+        'de': 'Ihr HOME-Ordner'},
+    "This folder belongs to a sandbox: what is copied from here is treated like the agent's files (never executable, links not followed).": {
+        'en': "This folder belongs to a sandbox: what is copied from here is treated like the agent's files (never executable, links not followed).",
+        'de': 'Dieser Ordner gehört einer Sandbox: Was von hier kopiert wird, wird wie Dateien des Agenten behandelt (nie ausführbar, Links nicht verfolgt).'},
+    '{files} file(s) in {folders} folder(s), {size} moved': {
+        'en': '{files} file(s) in {folders} folder(s), {size} moved',
+        'de': '{files} Dateien in {folders} Ordnern, {size} verschoben'},
+    'What a rootless Podman sandbox wrote as another user can be taken back with “Take ownership”.': {
+        'en': 'What a rootless Podman sandbox wrote as another user can be taken back with “Take ownership”.',
+        'de': 'Was eine rootlose Podman-Sandbox als anderer Benutzer schrieb, lässt sich mit „Besitz übernehmen“ zurücknehmen.'},
+    "{path} goes through a symbolic link in a sandbox's folder; it is not followed.": {
+        'en': "{path} goes through a symbolic link in a sandbox's folder; it is not followed.",
+        'de': '{path} führt über einen symbolischen Link im Ordner einer Sandbox; er wird nicht verfolgt.'},
+    # sandboxes: the tree of hosts, starts and what belongs to each start (start_tree.py)
+    'Helper': {
+        'en': 'Helper',
+        'de': 'Helfer'},
+    'Pod': {
+        'en': 'Pod',
+        'de': 'Pod'},
+    'Companion': {
+        'en': 'Companion',
+        'de': 'Begleiter'},
+    'Team': {
+        'en': 'Team',
+        'de': 'Team'},
+    'no answer, last seen {seconds} s ago': {
+        'en': 'no answer, last seen {seconds} s ago',
+        'de': 'keine Antwort, zuletzt vor {seconds} s gesehen'},
+    'no answer, not seen yet': {
+        'en': 'no answer, not seen yet',
+        'de': 'keine Antwort, noch nie gesehen'},
+    'answers, seen {seconds} s ago': {
+        'en': 'answers, seen {seconds} s ago',
+        'de': 'antwortet, vor {seconds} s gesehen'},
+    'not read yet': {
+        'en': 'not read yet',
+        'de': 'noch nicht gelesen'},
+    'Its starts, read over SSH (sandbox-ai hosts)': {
+        'en': 'Its starts, read over SSH (sandbox-ai hosts)',
+        'de': 'Seine Starts, über SSH gelesen (sandbox-ai hosts)'},
+    'Starts: {count}, running: {running}': {
+        'en': 'Starts: {count}, running: {running}',
+        'de': 'Starts: {count}, laufend: {running}'},
+    'not running': {
+        'en': 'not running',
+        'de': 'läuft nicht'},
+    'It reaches this MCP server while it runs.': {
+        'en': 'It reaches this MCP server while it runs.',
+        'de': 'Er erreicht diesen MCP-Server, solange er läuft.'},
+    'It reaches this MCP server at its next start (its --mcp).': {
+        'en': 'It reaches this MCP server at its next start (its --mcp).',
+        'de': 'Er erreicht diesen MCP-Server bei seinem nächsten Start (sein --mcp).'},
+    'A helper: another agent in a sandbox of its own, which it asks (--helper).': {
+        'en': 'A helper: another agent in a sandbox of its own, which it asks (--helper).',
+        'de': 'Ein Helfer: ein anderer Agent in einer eigenen Sandbox, den er fragt (--helper).'},
+    'This MCP server serves {name}: it reaches it while it runs or at its next start.': {
+        'en': 'This MCP server serves {name}: it reaches it while it runs or at its next start.',
+        'de': 'Dieser MCP-Server bedient {name}: der erreicht ihn, solange er läuft, oder bei seinem nächsten Start.'},
+    'Its Podman pod: Pause and Resume freeze and thaw it.': {
+        'en': 'Its Podman pod: Pause and Resume freeze and thaw it.',
+        'de': 'Sein Podman-Pod: Pausieren und Fortsetzen frieren ihn ein und tauen ihn auf.'},
+    'Another agent in the same sandbox (--with).': {
+        'en': 'Another agent in the same sandbox (--with).',
+        'de': 'Ein weiterer Agent in derselben Sandbox (--with).'},
+    'The team it works in (sandbox-ai team).': {
+        'en': 'The team it works in (sandbox-ai team).',
+        'de': 'Das Team, in dem er arbeitet (sandbox-ai team).'},
+    'Double-click: its own row, whose buttons act on it.': {
+        'en': 'Double-click: its own row, whose buttons act on it.',
+        'de': 'Doppelklick: seine eigene Zeile, deren Knöpfe auf ihn wirken.'},
+    "A host's row: select one of its starts below it.": {
+        'en': "A host's row: select one of its starts below it.",
+        'de': 'Die Zeile eines Hosts: einen seiner Starts darunter auswählen.'},
+    'What belongs to the start above it: select the start itself to act on it.': {
+        'en': 'What belongs to the start above it: select the start itself to act on it.',
+        'de': 'Gehört zum Start darüber: den Start selbst auswählen, um auf ihn zu wirken.'},
+    # the wizard's Model step and own model servers (wizard.py, wizard_llm.py, preset_gallery.py)
+    'Add a model server': {
+        'en': 'Add a model server',
+        'de': 'Einen Modell-Server hinzufügen'},
+    "The model is the server's: --llm NAME:MODEL (the launcher refuses --model with --llm)": {
+        'en': "The model is the server's: --llm NAME:MODEL (the launcher refuses --model with --llm)",
+        'de': 'Das Modell ist das des Servers: --llm NAME:MODELL (der Starter lehnt --model zusammen mit --llm ab)'},
+    "Where the model runs: the agent's provider in the cloud, or a model server of your own (its raw API).": {
+        'en': "Where the model runs: the agent's provider in the cloud, or a model server of your own (its raw API).",
+        'de': 'Wo das Modell läuft: beim Anbieter des Agenten in der Cloud oder auf einem eigenen Modell-Server (dessen rohe API).'},
+    "The agent's provider (cloud)": {
+        'en': "The agent's provider (cloud)",
+        'de': 'Der Anbieter des Agenten (Cloud)'},
+    'Where the model runs': {
+        'en': 'Where the model runs',
+        'de': 'Wo das Modell läuft'},
+    'Model servers': {
+        'en': 'Model servers',
+        'de': 'Modell-Server'},
+    'Add a server…': {
+        'en': 'Add a server…',
+        'de': 'Server hinzufügen…'},
+    'Register a model server of your own (sandbox-ai llm add), then check it for the agent (sandbox-ai llm check)': {
+        'en': 'Register a model server of your own (sandbox-ai llm add), then check it for the agent (sandbox-ai llm check)',
+        'de': 'Einen eigenen Modell-Server eintragen (sandbox-ai llm add) und dann für den Agenten prüfen (sandbox-ai llm check)'},
+    'Read the registered servers again (sandbox-ai llm list)': {
+        'en': 'Read the registered servers again (sandbox-ai llm list)',
+        'de': 'Die eingetragenen Server neu lesen (sandbox-ai llm list)'},
+    'List its models': {
+        'en': 'List its models',
+        'de': 'Seine Modelle auflisten'},
+    'Ask the server for the models it offers now (sandbox-ai llm models)': {
+        'en': 'Ask the server for the models it offers now (sandbox-ai llm models)',
+        'de': 'Den Server nach den Modellen fragen, die er jetzt anbietet (sandbox-ai llm models)'},
+    'Servers': {
+        'en': 'Servers',
+        'de': 'Server'},
+    'choose one the server lists, or type its name': {
+        'en': 'choose one the server lists, or type its name',
+        'de': 'eines wählen, das der Server auflistet, oder seinen Namen eingeben'},
+    'Its model': {
+        'en': 'Its model',
+        'de': 'Sein Modell'},
+    'only this server (no cloud: --no-provider-defaults)': {
+        'en': 'only this server (no cloud: --no-provider-defaults)',
+        'de': 'nur dieser Server (keine Cloud: --no-provider-defaults)'},
+    'The agent reaches this server and what you allow on the next pages, not its cloud provider': {
+        'en': 'The agent reaches this server and what you allow on the next pages, not its cloud provider',
+        'de': 'Der Agent erreicht diesen Server und was du auf den nächsten Seiten erlaubst, nicht seinen Cloud-Anbieter'},
+    'Reading the model servers (sandbox-ai llm list)…': {
+        'en': 'Reading the model servers (sandbox-ai llm list)…',
+        'de': 'Die Modell-Server werden gelesen (sandbox-ai llm list)…'},
+    'Asking {name} for its models (sandbox-ai llm models)…': {
+        'en': 'Asking {name} for its models (sandbox-ai llm models)…',
+        'de': '{name} wird nach seinen Modellen gefragt (sandbox-ai llm models)…'},
+    'How starts name it: --llm NAME[:MODEL]': {
+        'en': 'How starts name it: --llm NAME[:MODEL]',
+        'de': 'Wie Starts ihn nennen: --llm NAME[:MODELL]'},
+    'VPN profile (optional)': {
+        'en': 'VPN profile (optional)',
+        'de': 'VPN-Profil (optional)'},
+    'Add and check': {
+        'en': 'Add and check',
+        'de': 'Hinzufügen und prüfen'},
+    'The model servers could not be read: {error}': {
+        'en': 'The model servers could not be read: {error}',
+        'de': 'Die Modell-Server konnten nicht gelesen werden: {error}'},
+    "{name} did not list its models: {error}. Type the model's name, or check that the server runs.": {
+        'en': "{name} did not list its models: {error}. Type the model's name, or check that the server runs.",
+        'de': '{name} hat seine Modelle nicht aufgelistet: {error}. Gib den Namen des Modells ein oder prüfe, ob der Server läuft.'},
+    '{name} offers {count} models.': {
+        'en': '{name} offers {count} models.',
+        'de': '{name} bietet {count} Modelle an.'},
+    '{name} offers no model now: load one on the server, or type its name.': {
+        'en': '{name} offers no model now: load one on the server, or type its name.',
+        'de': '{name} bietet gerade kein Modell an: lade eines auf dem Server oder gib seinen Namen ein.'},
+    '{agent} can use {name}.': {
+        'en': '{agent} can use {name}.',
+        'de': '{agent} kann {name} nutzen.'},
+    "{name} is on this machine's loopback: only the Podman backend reaches it, not Bubblewrap.": {
+        'en': "{name} is on this machine's loopback: only the Podman backend reaches it, not Bubblewrap.",
+        'de': '{name} liegt auf dem Loopback dieses Rechners: nur das Podman-Backend erreicht ihn, nicht Bubblewrap.'},
+    'Choose a model server, or add one (Add a server…).': {
+        'en': 'Choose a model server, or add one (Add a server…).',
+        'de': 'Einen Modell-Server wählen oder einen hinzufügen (Server hinzufügen…).'},
+    "Most local servers need no key. A key typed here is kept as a secret of sandbox-ai (standard input, never a command line); the server's entry only names that secret, and the proxy adds the key on the wire.": {
+        'en': "Most local servers need no key. A key typed here is kept as a secret of sandbox-ai (standard input, never a command line); the server's entry only names that secret, and the proxy adds the key on the wire.",
+        'de': 'Die meisten lokalen Server brauchen keinen Schlüssel. Ein hier eingegebener Schlüssel wird als Geheimnis von sandbox-ai abgelegt (Standardeingabe, nie eine Befehlszeile); der Eintrag des Servers nennt nur dieses Geheimnis, und der Proxy fügt den Schlüssel unterwegs hinzu.'},
+    'sandbox-ai llm add refused {name}: {error}': {
+        'en': 'sandbox-ai llm add refused {name}: {error}',
+        'de': 'sandbox-ai llm add hat {name} abgelehnt: {error}'},
+    'Check of {name}': {
+        'en': 'Check of {name}',
+        'de': 'Prüfung von {name}'},
+    "the server's default ({model})": {
+        'en': "the server's default ({model})",
+        'de': 'die Vorgabe des Servers ({model})'},
+    '{name} added and checked for {agent}.': {
+        'en': '{name} added and checked for {agent}.',
+        'de': '{name} hinzugefügt und für {agent} geprüft.'},
+    'A server named {name} is registered already: choose another name.': {
+        'en': 'A server named {name} is registered already: choose another name.',
+        'de': 'Ein Server namens {name} ist schon eingetragen: wähle einen anderen Namen.'},
+    'No model server yet: “Add a server…” registers one (sandbox-ai llm add).': {
+        'en': 'No model server yet: “Add a server…” registers one (sandbox-ai llm add).',
+        'de': 'Noch kein Modell-Server: „Server hinzufügen…“ trägt einen ein (sandbox-ai llm add).'},
+    'loaded': {
+        'en': 'loaded',
+        'de': 'geladen'},
+    '{name} was added, but the check for {agent} found problems (does the server run, and at this URL?):': {
+        'en': '{name} was added, but the check for {agent} found problems (does the server run, and at this URL?):',
+        'de': '{name} wurde hinzugefügt, aber die Prüfung für {agent} fand Probleme (läuft der Server, und unter dieser URL?):'},
+    '{agent} cannot use this server.': {
+        'en': '{agent} cannot use this server.',
+        'de': '{agent} kann diesen Server nicht nutzen.'},
+    'llama.cpp': {
+        'en': 'llama.cpp',
+        'de': 'llama.cpp'},
+    'OpenAI-compatible API': {
+        'en': 'OpenAI-compatible API',
+        'de': 'OpenAI-kompatible API'},
+    'Claude Code needs a server with the Anthropic Messages API (Ollama, LM Studio, llama.cpp, vLLM, or an OpenAI-compatible one added with --anthropic); Codex and OpenCode can use this one.': {
+        'en': 'Claude Code needs a server with the Anthropic Messages API (Ollama, LM Studio, llama.cpp, vLLM, or an OpenAI-compatible one added with --anthropic); Codex and OpenCode can use this one.',
+        'de': 'Claude Code braucht einen Server mit der Anthropic Messages API (Ollama, LM Studio, llama.cpp, vLLM oder einen OpenAI-kompatiblen, mit --anthropic hinzugefügt); Codex und OpenCode können diesen nutzen.'},
+    'Choose or type a model: {name} has no default model, so a start needs one.': {
+        'en': 'Choose or type a model: {name} has no default model, so a start needs one.',
+        'de': 'Ein Modell wählen oder eingeben: {name} hat kein voreingestelltes Modell, also braucht ein Start eines.'},
+    "Not a server's name: {name}": {
+        'en': "Not a server's name: {name}",
+        'de': 'Kein Name eines Servers: {name}'},
+    'not a list of servers': {
+        'en': 'not a list of servers',
+        'de': 'keine Liste von Servern'},
+    'not a list of models': {
+        'en': 'not a list of models',
+        'de': 'keine Liste von Modellen'},
+    'Agents: {agents}': {
+        'en': 'Agents: {agents}',
+        'de': 'Agenten: {agents}'},
     # sandboxes: the other hosts' starts beside this account's own
     'A command runs.': {
         'en': 'A command runs.',
@@ -396,15 +935,6 @@ TEXTS = {
     'Up': {
         'en': 'Up',
         'de': 'Nach oben'},
-    'Copy to the host…': {
-        'en': 'Copy to the host…',
-        'de': 'Auf den Host kopieren…'},
-    'Copy files here…': {
-        'en': 'Copy files here…',
-        'de': 'Dateien hierher kopieren…'},
-    'Copy a folder here…': {
-        'en': 'Copy a folder here…',
-        'de': 'Einen Ordner hierher kopieren…'},
     'Replace existing files': {
         'en': 'Replace existing files',
         'de': 'Vorhandene Dateien ersetzen'},
@@ -432,9 +962,6 @@ TEXTS = {
     'Files to copy into {path}': {
         'en': 'Files to copy into {path}',
         'de': 'Dateien, die nach {path} kopiert werden'},
-    'Folder to copy into {path}': {
-        'en': 'Folder to copy into {path}',
-        'de': 'Ordner, der nach {path} kopiert wird'},
     'Build all': {
         'en': 'Build all',
         'de': 'Alle bauen'},

@@ -29,8 +29,11 @@ from . import help_view
 from .hosts_page import HostsPage
 from .kits_page import KitsPage
 from .state import State, scrub_arguments
-from .pages import ApprovalsPage, CredentialsPage, FilesPage, ImagesPage, StatisticsPage
+from .pages import ApprovalsPage, CredentialsPage, ImagesPage, StatisticsPage
+from .files_page import FilesPage
 from .reviews import home_review, review_refusal
+from .start_tree import ID_ROLE, KEY_ROLE, KIND_ROLE, StartTree, id_host, related, row_id
+from . import wizard_llm as WL
 from .widgets import (
     MONO, AsyncCommand, ThreadCall, append_rows, ask_first, background, busy, confirm, fill, find_row, fit_columns, flow,
     inform,
@@ -351,7 +354,16 @@ class LaunchPage(QWidget):
         project = self.open_button = QPushButton(tr("Open project folder…"))
         project.setToolTip(tr("Review a folder's .sandbox-ai.json, trust it if you agree, and start in that folder"))
         project.clicked.connect(lambda _=False: self.load_project())
-        layout.addWidget(flow(QLabel(tr("Agent")), self.agent, QLabel(tr("Profile")), self.profile, load, save, project))
+        # Right beside the agent: the model it works with, its own provider or a server of yours (--llm).
+        self.model_choice = QComboBox()
+        self.model_choice.setMinimumWidth(200)
+        self.model_choice.setToolTip(tr("The agent's own provider (cloud), or a model server of yours (sandbox-ai "
+                                        "llm): --llm NAME[:MODEL], without --model"))
+        self.model_only = QCheckBox(tr("only this server"))
+        self.model_only.setToolTip(tr("--no-provider-defaults: the agent reaches the model server and nothing else"))
+        self.llm_servers, self.llm_loading, self.llm_read_at, self.model_seen = [], False, 0.0, None
+        layout.addWidget(flow(QLabel(tr("Agent")), self.agent, QLabel(tr("Model")), self.model_choice,
+                              self.model_only, QLabel(tr("Profile")), self.profile, load, save, project))
         self.form = OptionsForm(self.options)
         try:
             self.form.apply_policy(sai.forbidden())
@@ -395,8 +407,71 @@ class LaunchPage(QWidget):
         self.form.changed.connect(self.update_preview)
         self.agent.currentTextChanged.connect(self.update_preview)
         self.agent_args.textChanged.connect(self.update_preview)
+        self.form.changed.connect(self.show_model)
+        self.agent.currentTextChanged.connect(lambda _text: self.show_model(force=True))
+        self.model_choice.activated.connect(lambda _index: self.model_chosen())
+        self.model_only.toggled.connect(lambda _on: self.model_chosen())
         self.refresh_profiles()
         self.update_preview()
+        self.show_model(force=True)
+        self.read_llm_servers()
+
+    # -- the model: the agent's provider or a server of yours (sandbox-ai llm) --
+
+    def read_llm_servers(self):
+        """The registered model servers (sandbox-ai llm list), read in the background; again when the page is shown
+        after a while (a server added on the Model servers page meanwhile)."""
+        if self.llm_loading or "--llm" not in self.form.widgets:
+            return
+        self.llm_loading = True
+        # A read, not work: no owner, so it neither greys out the page's buttons (busy()) nor holds up quitting.
+        background(self.sai.llm_endpoints, timeout=90,
+                   done=lambda result, error: alive(self) and self.llm_servers_read(result, error))
+
+    def llm_servers_read(self, result, error):
+        self.llm_loading, self.llm_read_at = False, time.monotonic()
+        self.llm_servers = result if error is None and isinstance(result, list) else []
+        self.show_model(force=True)
+
+    def showEvent(self, event):  # noqa: N802
+        super().showEvent(event)
+        if time.monotonic() - self.llm_read_at > 30:
+            self.read_llm_servers()
+
+    def show_model(self, force=False):
+        """The Model choice as the options say (--llm, --no-provider-defaults): after a change of the options, the
+        agent (which servers it can use) or the servers."""
+        from .wizard import fill_model_combo
+        values = self.form.values()
+        seen = (str(values.get("--llm") or "").strip(), bool(values.get("--no-provider-defaults")))
+        if not force and seen == self.model_seen:
+            return
+        self.model_seen = seen
+        self.model_choice.setEnabled("--llm" in self.form.widgets)
+        fill_model_combo(self.model_choice, self.model_only, self.llm_servers, self.agent.currentText(), self.sai,
+                         seen[0], seen[1])
+
+    def model_chosen(self):
+        """A model chosen beside the agent: a server sets --llm NAME[:MODEL] (and --no-provider-defaults with "only
+        this server") and empties --model (the launcher refuses it with --llm); the agent's provider takes both away."""
+        value = self.model_choice.currentData() or ""
+        choice = WL.choice_of(value, self.model_only.isChecked())
+        values = WL.form_values(self.form.values(), choice)
+        for option in ("--llm", "--no-provider-defaults", "--model"):
+            widget = self.form.widgets.get(option)
+            if widget is None or option not in values:
+                continue
+            widget.blockSignals(True)
+            try:
+                if isinstance(widget, QCheckBox):
+                    widget.setChecked(bool(values[option]))
+                elif isinstance(widget, QComboBox):
+                    widget.setCurrentText(str(values[option] or ""))
+                elif isinstance(widget, QLineEdit):
+                    widget.setText(str(values[option] or ""))
+            finally:
+                widget.blockSignals(False)
+        self.form.changed.emit()  # the preview, the state kept, and this choice once more
 
     # -- kept for the next start --
 
@@ -577,8 +652,9 @@ class LaunchPage(QWidget):
                      tr("{path} is not trusted yet.", path=printable(review.path)))
             question = "\n".join([state, "", *lines, "", tr("Trust exactly this content (see the details)? The "
                                                             "launcher refuses the file if it changes afterwards.")])
-            if not confirm(self, tr("Review the project configuration"), question, tr("Trust"),
-                           destructive=bool(review.widening), details=review.text()):
+            # Trusting outlives this start (every later start of the project gets the file's options): asked first.
+            if not ask_first(self, "project-trust", tr("Review the project configuration"), question, tr("Trust"),
+                             details=review.text()):
                 return False
             try:
                 self.sai.trust_project(review)
@@ -899,6 +975,10 @@ SESSION_ACTIONS = (("attach", N_("Attach")), ("attach-app", N_("Attach in the ap
                    ("resume", N_("Resume")), ("delete", N_("Delete")))
 ACTION_TITLES = {**dict(SESSION_ACTIONS), "stop": N_("Stop")}
 REMOTE_WAIT = 60  # seconds one host may take to list its starts (the hosts are asked at the same time, each apart)
+# What hangs below a start on the Sandboxes page (start_tree.related), by its kind.
+PART_TITLES = {"mcp": N_("MCP server"), "helper": N_("Helper"), "pod": N_("Pod"), "companion": N_("Companion"),
+               "team": N_("Team"), "serves": N_("Serves")}
+GROUPS_KEPT = 400  # groups of the Sandboxes page whose fold is kept (the ones changed last)
 
 
 def history_time(value):
@@ -995,10 +1075,18 @@ class SandboxesPage(QWidget):
         top.addWidget(self.show_ended)
         top.addWidget(refresh)
         layout.addLayout(top)
-        self.table = table([tr("Kind"), tr("Name"), tr("Project"), tr("Agent"), tr("Backend"), tr("Started"),
-                            tr("State"), tr("Proxy"), tr("Host"), tr("Memory")], stretch=2)
+        # A tree: each host, under it its starts, under each start what belongs to it (start_tree.py); the buttons
+        # act on the start rows only. Which groups are open is kept per host and start (open_groups).
+        self.table = StartTree([tr("Kind"), tr("Name"), tr("Project"), tr("Agent"), tr("Backend"), tr("Started"),
+                                tr("State"), tr("Proxy"), tr("Host"), tr("Memory")], stretch=2)
         self.table.setAccessibleName(tr("Sandboxes and sessions"))
         self.table.itemSelectionChanged.connect(self.selection_changed)
+        self.table.itemExpanded.connect(lambda item: self.group_toggled(item, True))
+        self.table.itemCollapsed.connect(lambda item: self.group_toggled(item, False))
+        self.table.itemDoubleClicked.connect(lambda item, _column: self.open_part(item))
+        self.table.folded.connect(self.all_folded)
+        # {row_id: open} of the groups the human opened or closed; new ones: a host open, a start closed.
+        self.open_groups, self.hosts_open, self.starts_open = {}, True, False
         layout.addWidget(self.table, 1)
         below = QHBoxLayout()
         self.detail = plain_label(role="secondary")
@@ -1349,6 +1437,7 @@ class SandboxesPage(QWidget):
         """The row selected last is selected again once it is there (kept for the next start)."""
         self.state = state
         self.wanted = state.get("sandboxes-selected", "")
+        self.load_groups(state)
         self.show_instances()
 
     def mine(self, instance):
@@ -1367,59 +1456,141 @@ class SandboxesPage(QWidget):
                                   and (i.host, getattr(i, "ident", i.name)) not in names})
         return found
 
+    def start_row(self, i):
+        """{cells, color, tip, sort} of the row of the start I."""
+        memory = backend.memory_share(i) if i.state in ("running", "paused") else None
+        state = tr(STATE_TITLES.get(i.state, i.state)) if i.state else ""
+        stale, asking = self.stale(i), self.is_asking(i)
+        if stale is not None:  # its host did not answer: what was seen then, not what is now
+            state = tr("{state}, last seen {seconds} s ago", state=state or "?", seconds=stale) \
+                if i.host in self.remote_seen else tr("{state}, not seen", state=state or "?")
+        elif asking:
+            state = tr("{state}, asking", state=state or "?")
+        cells = [tr(KIND_TITLES.get(i.kind, i.kind)), printable(i.name), printable(i.project), printable(i.agent),
+                 printable(i.backend), local_time(i.started), state,
+                 "" if i.proxy is None else tr("on") if i.proxy else tr("off"),
+                 tr("this machine") if getattr(i, "host", "local") == "local" else printable(i.host),
+                 "" if memory is None else f"{memory[0]:.0f} %"]
+        color = {"running": "ok", "paused": "warn", "damaged": "bad", "starting": "warn"}.get(i.state)
+        if memory is not None and memory[0] >= 95:
+            color = "bad"  # the watch is about to end a process in it
+        elif memory is not None and memory[0] >= 85 and color != "bad":
+            color = "warn"
+        if asking and color != "bad":
+            color = "warn"
+        if stale is not None or i.state in ENDED_STATES and i.key.startswith("ended:"):
+            color = "muted"
+        tip = [tr("Current project")] if self.mine(i) else []
+        if asking:
+            tip.append(tr("It waits for an answer on the Approvals page."))
+        if stale is not None:
+            tip.append(tr("{host} does not answer: {problem}", host=printable(i.host),
+                          problem=printable(self.remote_problems.get(i.host, ""))[:200]))
+        # By the share, not as text ("9 %" > "10 %").
+        return {"cells": cells, "color": color, "tip": "\n".join(tip) or None,
+                "sort": [None] * 9 + [memory[0] if memory else -1.0]}
+
+    def host_row(self, host, starts):
+        """{cells, color, tip, sort} of the row of HOST, above its STARTS: how many, how many run, whether it answers."""
+        running = sum(1 for i in starts if i.state in ACTIVE_STATES)
+        where = tr("this machine") if host == LOCAL else printable(host)
+        problem = getattr(self, "remote_problems", {}).get(host)
+        seen = getattr(self, "remote_seen", {}).get(host)
+        color, tip = None, None
+        if host == LOCAL:
+            state = ""
+        elif problem is not None:
+            state = tr("no answer, last seen {seconds} s ago", seconds=int(time.time() - seen)) if seen else \
+                tr("no answer, not seen yet")
+            color, tip = "muted", tr("{host} does not answer: {problem}", host=where, problem=printable(problem)[:200])
+        elif seen:
+            state = tr("answers, seen {seconds} s ago", seconds=int(time.time() - seen))
+        else:
+            state = tr("not read yet")
+        if host != LOCAL and tip is None:
+            tip = tr("Its starts, read over SSH (sandbox-ai hosts)")
+        cells = [tr("This machine") if host == LOCAL else printable(host),
+                 tr("Starts: {count}, running: {running}", count=len(starts), running=running),
+                 "", "", "", "", state, "", where, ""]
+        order = ("0" if host == LOCAL else "1") + str(host).lower()  # this machine first, by the header too
+        return {"cells": cells, "color": color, "tip": tip, "sort": [order] * len(cells)}
+
+    def part_row(self, host, start, part):
+        """{cells, color, tip} of the row of PART (start_tree.related), below the start (or MCP server) START."""
+        target = self.rows.get(part["key"]) if part["key"] else None
+        kind = part["kind"]
+        state = tr(STATE_TITLES.get(target.state, target.state)) if target is not None and target.state else ""
+        color = None if target is None or target.state in ACTIVE_STATES else "muted"
+        backend_name = ""
+        if kind in ("mcp", "helper"):
+            if target is None:
+                state, color = tr("not running"), "muted"
+            tip = tr("It reaches this MCP server while it runs.") if part["now"] else \
+                tr("It reaches this MCP server at its next start (its --mcp).")
+            if kind == "helper":
+                tip += "\n" + tr("A helper: another agent in a sandbox of its own, which it asks (--helper).")
+        elif kind == "serves":
+            tip = tr("This MCP server serves {name}: it reaches it while it runs or at its next start.",
+                     name=printable(part["name"]))
+        elif kind == "pod":
+            state, backend_name = tr(STATE_TITLES.get(start.state, start.state)) if start.state else "", "podman"
+            tip = tr("Its Podman pod: Pause and Resume freeze and thaw it.")
+        elif kind == "companion":
+            tip = tr("Another agent in the same sandbox (--with).")
+        else:
+            tip = tr("The team it works in (sandbox-ai team).")
+        if target is not None:
+            tip += "\n" + tr("Double-click: its own row, whose buttons act on it.")
+        cells = [tr(PART_TITLES.get(kind, kind)), printable(part["name"]), "", "", backend_name, "", state, "",
+                 tr("this machine") if host == LOCAL else printable(host), ""]
+        return {"cells": cells, "color": color, "tip": tip}
+
     def show_instances(self):
-        host = self.host_filter.currentData()
+        """The tree: each host (the one chosen above, or all), under it its starts, under each what belongs to it.
+        The row selected stays selected (by host and id), the groups stay open or closed as they were left."""
+        chosen = self.host_filter.currentData()
         self.rows = self.listed()
         shown = [i for i in self.rows.values() if (not self.only_project.isChecked() or self.mine(i))
-                 and (host is None or getattr(i, "host", "local") == host)]
+                 and (chosen is None or getattr(i, "host", "local") == chosen)]
         order = {"run": 0, "session": 1, "mcp": 2, "unregistered": 3}
         shown.sort(key=lambda i: (getattr(i, "host", "local") != "local", not self.mine(i), order.get(i.kind, 9),
                                   str(getattr(i, "host", "")), str(i.name)))
-        rows, colors, tips, sorts = [], [], [], []
-        for i in shown:
-            memory = backend.memory_share(i) if i.state in ("running", "paused") else None
-            sorts.append([None] * 9 + [memory[0] if memory else -1.0])  # by the share, not as text ("9 %" > "10 %")
-            state = tr(STATE_TITLES.get(i.state, i.state)) if i.state else ""
-            stale, asking = self.stale(i), self.is_asking(i)
-            if stale is not None:  # its host did not answer: what was seen then, not what is now
-                state = tr("{state}, last seen {seconds} s ago", state=state or "?", seconds=stale) \
-                    if i.host in self.remote_seen else tr("{state}, not seen", state=state or "?")
-            elif asking:
-                state = tr("{state}, asking", state=state or "?")
-            rows.append([tr(KIND_TITLES.get(i.kind, i.kind)), printable(i.name), printable(i.project), printable(i.agent),
-                         printable(i.backend), local_time(i.started), state,
-                         "" if i.proxy is None else tr("on") if i.proxy else tr("off"),
-                         tr("this machine") if getattr(i, "host", "local") == "local" else printable(i.host),
-                         "" if memory is None else f"{memory[0]:.0f} %"])
-            color = {"running": "ok", "paused": "warn", "damaged": "bad", "starting": "warn"}.get(i.state)
-            if memory is not None and memory[0] >= 95:
-                color = "bad"  # the watch is about to end a process in it
-            elif memory is not None and memory[0] >= 85 and color != "bad":
-                color = "warn"
-            if asking and color != "bad":
-                color = "warn"
-            if stale is not None or i.state in ENDED_STATES and i.key.startswith("ended:"):
-                color = "muted"
-            colors.append(color)
-            tip = [tr("Current project")] if self.mine(i) else []
-            if asking:
-                tip.append(tr("It waits for an answer on the Approvals page."))
-            if stale is not None:
-                tip.append(tr("{host} does not answer: {problem}", host=printable(i.host),
-                              problem=printable(self.remote_problems.get(i.host, ""))[:200]))
-            tips.append("\n".join(tip) or None)
-        fill(self.table, rows, colors, tooltips=tips, sort=sorts, keys=[i.key for i in shown])
-        if getattr(self, "wanted", "") and not selected_rows(self.table) and find_row(self.table, self.wanted) >= 0:
-            self.table.selectRow(find_row(self.table, self.wanted))
-        for row in range(self.table.rowCount()):
-            instance = self.rows.get(row_key(self.table, row))
-            if instance is not None and self.mine(instance):
-                for column in range(self.table.columnCount()):
-                    item = self.table.item(row, column)
-                    font = item.font()
-                    font.setBold(True)
-                    item.setFont(font)
-        fit_columns(self.table)  # bold text is wider
+        names = list(getattr(self, "remote_names", []))
+        hosts = [LOCAL, *names, *sorted({i.host for i in shown} - {LOCAL} - set(names))] if chosen is None else [chosen]
+        tree = self.table
+        selected_item = tree.selected_item()
+        previous = selected_item.data(0, ID_ROLE) if selected_item is not None else None
+        scroll = tree.verticalScrollBar().value()
+        tree.blockSignals(True)  # rebuilt: no selection or fold changes are said (selection_changed() below)
+        try:
+            tree.setSortingEnabled(False)
+            tree.clear()
+            groups = []
+            for host in hosts:
+                starts = [i for i in shown if i.host == host]
+                host_item = tree.add_row(None, row_id(host), "host", **self.host_row(host, starts))
+                groups.append((host_item, self.hosts_open))
+                parts = related([i for i in self.rows.values() if i.host == host])
+                for i in starts:
+                    item = tree.add_row(host_item, row_id(host, i.key), "start", key=i.key, bold=self.mine(i),
+                                        **self.start_row(i))
+                    for part in parts.get(i.key, []):
+                        tree.add_row(item, row_id(host, f"{i.key}\n{part['kind']}\n{part['name']}"), "part",
+                                     key=part["key"], **self.part_row(host, i, part))
+                    if item.childCount():
+                        groups.append((item, self.starts_open))
+            for item, default in groups:
+                item.setExpanded(self.open_groups.get(item.data(0, ID_ROLE), default))
+            tree.setSortingEnabled(True)  # the order the human chose by a header, if any
+            again = tree.find_item(previous) if previous else None
+            if again is not None:
+                tree.select_item(again, open_groups=False)
+        finally:
+            tree.blockSignals(False)
+        tree.verticalScrollBar().setValue(scroll)
+        if getattr(self, "wanted", "") and tree.selected_item() is None and find_row(tree, self.wanted) >= 0:
+            tree.selectRow(find_row(tree, self.wanted))
+        fit_columns(tree)  # bold text is wider
         active = [i for i in self.instances.values() if i.state in ("running", "paused", "starting")]
         running = [i for i in active if getattr(i, "host", "local") == "local"]
         here = [i for i in running if self.mine(i)]
@@ -1440,8 +1611,63 @@ class SandboxesPage(QWidget):
         self.selection_changed()
 
     def current(self):
-        rows = selected_rows(self.table)
-        return getattr(self, "rows", self.instances).get(row_key(self.table, rows[0])) if rows else None
+        """The start of the row selected, or None (none selected, or a host's row or a part of a start)."""
+        item = self.table.selected_item()
+        if item is None or item.data(0, KIND_ROLE) != "start":
+            return None
+        return getattr(self, "rows", self.instances).get(item.data(0, KEY_ROLE))
+
+    def no_start(self):
+        """Why the buttons do not act now: no row selected, or one that is not a start."""
+        item = self.table.selected_item()
+        kind = item.data(0, KIND_ROLE) if item is not None else None
+        if kind == "host":
+            return tr("A host's row: select one of its starts below it.")
+        if kind == "part":
+            return tr("What belongs to the start above it: select the start itself to act on it.")
+        return tr("Select a row first.")
+
+    # -- the groups: open or closed, kept per host and start --
+
+    def group_toggled(self, item, opened):
+        """The human opened or closed ITEM's group (or a start was selected inside it): kept for the next start."""
+        if item.childCount() == 0:
+            return
+        key = item.data(0, ID_ROLE)
+        self.open_groups.pop(key, None)
+        self.open_groups[key] = bool(opened)  # the newest last: the oldest go first when there are too many
+        while len(self.open_groups) > GROUPS_KEPT:
+            self.open_groups.pop(next(iter(self.open_groups)))
+        self.keep_groups()
+
+    def all_folded(self, folded):
+        """View › Fold all (FOLDED) or Unfold all: every group closes or opens, new ones too, kept."""
+        self.open_groups.clear()
+        self.hosts_open = self.starts_open = not folded
+        self.keep_groups()
+
+    def keep_groups(self):
+        if getattr(self, "state", None) is None:
+            return
+        section = self.state.section("sandboxes-groups")
+        section.update({"open": dict(self.open_groups), "hosts": self.hosts_open, "starts": self.starts_open})
+        self.state.schedule()
+
+    def load_groups(self, state):
+        saved = state.get("sandboxes-groups", {})
+        opened = saved.get("open") if isinstance(saved.get("open"), dict) else {}
+        self.open_groups = {key: value for key, value in list(opened.items())[-GROUPS_KEPT:]
+                            if isinstance(key, str) and len(key) < 500 and isinstance(value, bool)}
+        self.hosts_open = saved.get("hosts") if isinstance(saved.get("hosts"), bool) else True
+        self.starts_open = saved.get("starts") if isinstance(saved.get("starts"), bool) else False
+
+    def open_part(self, item):
+        """Double-click on what belongs to a start: the row of the start or MCP server it stands for, if listed."""
+        if item.data(0, KIND_ROLE) != "part" or not item.data(0, KEY_ROLE):
+            return
+        target = self.table.find_item(row_id(id_host(item.data(0, ID_ROLE)), item.data(0, KEY_ROLE)))
+        if target is not None:
+            self.table.select_item(target)
 
     # -- buttons --
 
@@ -1450,7 +1676,10 @@ class SandboxesPage(QWidget):
         if instance is not None and getattr(self, "state", None) is not None:
             self.wanted = instance.key
             self.state.set("sandboxes-selected", instance.key)
-        if instance is None:
+        item = self.table.selected_item()
+        if instance is None and item is not None:  # a host's row, or what belongs to a start: what it says
+            self.detail.setText(" · ".join(text for text in (item.text(0), item.text(1), item.text(6)) if text))
+        elif instance is None:
             self.detail.setText(tr("Select a row: the buttons below act on it."))
         elif getattr(instance, "host", "local") != "local":
             self.detail.setText(" · ".join([tr("On {host}", host=printable(instance.host)), printable(instance.name),
@@ -1525,7 +1754,7 @@ class SandboxesPage(QWidget):
             for button in self.manage_buttons.values():
                 set_enabled(button, False, tr("A command runs."))
             return
-        none = tr("Select a row first.")
+        none = self.no_start()
         if instance is not None and getattr(instance, "host", "local") != "local":
             self.update_remote_buttons(instance)
             return
@@ -1572,7 +1801,7 @@ class SandboxesPage(QWidget):
     def update_manage_buttons(self, instance, gone=None):
         """Rename… and History… follow the selected start; Clean up… acts on the host chosen above."""
         if instance is None:
-            why = tr("Select a row first.")
+            why = self.no_start()
         elif instance.kind in ("mcp", "unregistered"):
             why = tr("Only the starts of agents have a name to change.")
         elif not backend.valid_run(instance.name):
@@ -1580,7 +1809,7 @@ class SandboxesPage(QWidget):
         else:
             why = None
         set_enabled(self.manage_buttons["rename"], (gone or why) is None, gone or why)
-        history_why = tr("Select a row first.") if instance is None else None if backend.valid_run(instance.name) \
+        history_why = self.no_start() if instance is None else None if backend.valid_run(instance.name) \
             and instance.kind != "unregistered" else tr("Not a start's name: {ident}",
                                                         ident=printable(instance.name)[:60])
         if history_why is None and gone and self.stale(instance) is not None:
@@ -1696,7 +1925,9 @@ class SandboxesPage(QWidget):
         remote = getattr(instance, "host", "local") != "local"
         if remote:  # the host is named: the same name may run on this machine too
             text = tr("On {host}: {text}", host=printable(instance.host), text=text)
-        if not ask_first(self, "start-stop", tr("Stop"), text, tr("Stop")):
+        # An MCP server is shared by every start that uses it (mcp-stop); any other start ends alone (start-stop).
+        if not (ask_first(self, "mcp-stop", tr("Stop"), text, tr("Stop")) if instance.kind == "mcp" else
+                ask_first(self, "start-stop", tr("Stop"), text, tr("Stop"))):
             return
         if remote:
             self.remote_action(instance, "stop")
@@ -3926,8 +4157,9 @@ class MainWindow(QMainWindow):
     def fold_all(self, folded):
         """Fold (FOLDED) or unfold everything that folds: every section of the navigation (the current page's
         section stays open; in the strip of icons, which shows every page, it is kept for when the titles come back)
-        and every tree of the page shown (the kits and what they bring, the doctor's checks, the canaries), which
-        collapse to their top level or open all the way. Said in the status bar."""
+        and every tree of the page shown (the kits and what they bring, the doctor's checks, the canaries, the hosts and
+        starts of the Sandboxes page, which keeps it), which collapse to their top level or open all the way. Said in
+        the status bar."""
         current = self.current_page()
         for section, (_, rows) in self.section_rows.items():
             here = any(self.nav.item(row).data(Qt.ItemDataRole.UserRole) == current for row in rows)
@@ -3959,6 +4191,9 @@ class MainWindow(QMainWindow):
         self.nav.setProperty("compact", "true" if self.compact_nav else "false")
         self.nav.style().unpolish(self.nav)
         self.nav.style().polish(self.nav)
+        # A re-polish reads the ::item rules again but not the list's own padding (its contents margins): the strip
+        # kept the titles' side padding, its viewport 40 px wide, the icons cut. A style change reads that too.
+        QApplication.sendEvent(self.nav, QEvent(QEvent.Type.StyleChange))
         self.nav.setIconSize(QSize(24, 24) if self.compact_nav else QSize(20, 20))
         for key, row in self.nav_rows.items():
             item = self.nav.item(row)
@@ -3971,7 +4206,7 @@ class MainWindow(QMainWindow):
             self.nav.setRowHidden(header, self.compact_nav)
             for row in rows:
                 self.nav.setRowHidden(row, not self.compact_nav and section in self.collapsed)
-        self.nav.setFixedWidth(COMPACT_NAV_WIDTH if self.compact_nav else NAV_WIDTH)
+        self.fit_nav_width()
         self.brand.setVisible(not self.compact_nav)
         self.compact_button.setText("»" if self.compact_nav else "«")
         self.compact_button.setToolTip(tr("Show the page titles") if self.compact_nav
@@ -3979,6 +4214,15 @@ class MainWindow(QMainWindow):
         if "nav-compact" in getattr(self, "actions", {}):
             self.actions["nav-compact"].setChecked(self.compact_nav)
         self.state.set("nav_compact", self.compact_nav)
+
+    def fit_nav_width(self):
+        """The strip of icons is COMPACT_NAV_WIDTH inside the theme's own frame (a border or margin of the
+        navigation, e.g. win311, amber, fallout): its rows keep the room their icons need in every theme."""
+        if self.compact_nav:
+            margins = self.nav.contentsMargins()
+            self.nav.setFixedWidth(COMPACT_NAV_WIDTH + margins.left() + margins.right())
+        else:
+            self.nav.setFixedWidth(NAV_WIDTH)
 
     def nav_title(self, key):
         return tr(next(title for _, pages in SECTIONS for k, title in pages if k == key))
@@ -4511,6 +4755,7 @@ class MainWindow(QMainWindow):
             for key in self.keys:
                 self.nav_item(key).setIcon(theme.glyph(key, size=24 if self.compact_nav else 20))
             self.show_question_count()  # the Approvals entry's badge, in the new colours
+            QTimer.singleShot(0, lambda: alive(self) and self.fit_nav_width())  # the new theme's frame, once applied
             for section, (header, _) in getattr(self, "section_rows", {}).items():
                 self.nav.item(header).setIcon(theme.glyph("fold-closed" if section in self.collapsed else "fold-open",
                                                           theme.colors()["nav_text"], 14))

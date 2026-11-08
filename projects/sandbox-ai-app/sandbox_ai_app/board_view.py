@@ -758,6 +758,7 @@ class BoardPage(QWidget):
         self.ghost = None  # the drop indicator while something is dragged over the board
         self.project_request = None  # the window: open a folder dropped on the board as the project (in its tab)
         self.kit_inventory, self.kit_loading = None, False  # sandbox-ai kits list --json, once read
+        self.llm_servers, self.llm_loading = None, False  # sandbox-ai llm list --json, for the agent's Model server
         self.state, self.saved_boards, self.restored = None, {}, set()  # drafts and zoom kept between starts
         self.forbidden = self.read_forbidden()
         self.policy_data = self.read_policy()
@@ -1458,6 +1459,7 @@ class BoardPage(QWidget):
             agent.setCurrentText(node.props.get("agent", "claude"))
             agent.currentTextChanged.connect(lambda text: self.set_prop(node_id, "agent", text))
             self.inspector.addRow(tr("Agent"), agent)
+            self.llm_server_row(node)
             self.model_row(node)
             self.text_row(node, "arguments", tr("Agent arguments"), tr("e.g. --verbose"))
         elif kind == "workspace":
@@ -1688,6 +1690,73 @@ class BoardPage(QWidget):
         text = "\n".join(printable((out + err).strip()) for _, out, err in results)
         (warn if failed else inform)(self, title, text)
 
+    # -- the agent's model server: its own provider or one of yours (sandbox-ai llm) --
+
+    def set_llm_servers(self, servers):
+        self.llm_servers, self.llm_loading = servers if isinstance(servers, list) else [], False
+        if self.inspected in self.items and self.board.node(self.inspected).kind == "agent":
+            self.inspect_timer.start()
+
+    def load_llm_servers(self):
+        if self.llm_loading:
+            return
+        self.llm_loading = True
+        background(self.sai.llm_endpoints, timeout=90,
+                   done=lambda result, error: self.set_llm_servers(result if error is None else []))
+
+    def llm_server_row(self, node):
+        """Beside the agent: the model server it works with, its own provider (cloud) or a registered one as NAME or
+        NAME:MODEL (wizard_llm). A server puts the LLM server node on the board with --llm and takes the agent's own
+        model away (the launcher refuses --model with --llm); "only this server" is --no-provider-defaults."""
+        from . import wizard_llm as WL
+        from .wizard import fill_model_combo
+        if self.llm_servers is None:
+            self.load_llm_servers()
+        holder = QWidget()
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(0, 0, 0, 0)
+        combo = QComboBox()
+        combo.setToolTip(tr("The agent's own provider (cloud), or a model server of yours (sandbox-ai llm): --llm "
+                            "NAME[:MODEL], without --model"))
+        only = QCheckBox(tr("only this server"))
+        only.setToolTip(tr("--no-provider-defaults: the agent reaches the model server and nothing else"))
+        current = WL.from_board(self.board)
+        llm = self.board.first("llm")
+        value = WL.llm_value(current["name"], current["model"]) if current else \
+            str(llm.props.get("--llm") or "") if llm is not None and self.board.connected(llm) else ""
+        network = self.board.first("network")
+        fill_model_combo(combo, only, self.llm_servers or [], node.props.get("agent", "claude"), self.sai, value,
+                         bool(network and network.props.get("--no-provider-defaults")))
+
+        def chosen():
+            self.choose_llm_server(WL.choice_of(combo.currentData() or "", only.isChecked()))
+        combo.activated.connect(lambda _index: chosen())
+        only.toggled.connect(lambda _on: chosen())
+        row.addWidget(combo, 1)
+        row.addWidget(only)
+        self.inspector.addRow(tr("Model server"), holder)
+        if self.llm_servers is None:
+            self.inspector.addRow(plain_label(tr("Reading the model servers (sandbox-ai llm list)…"), role="secondary"))
+        self.llm_combo = combo
+        return combo
+
+    def choose_llm_server(self, choice):
+        """CHOICE ({name, model, only}, or None: the agent's own provider) on the board, as one undo step; a node
+        it adds goes into its column."""
+        from . import wizard_llm as WL
+
+        def update():
+            before = {n.id for n in self.board.nodes}
+            if choice:
+                WL.apply(self.board, choice)
+            else:
+                WL.clear(self.board)
+            for node in self.board.nodes:
+                if node.id not in before:
+                    node.x, node.y = B.snap(40.0 + B.KINDS[node.kind].column * 260.0, self.grid()), \
+                        B.snap(40.0 + 110.0 * len(self.board.nodes) % 700, self.grid())
+        self.change(tr("Model server"), update)
+
     def model_row(self, node):
         """The agent's model: its models with their versions to choose from (models.py), any other typed."""
         from . import models
@@ -1697,6 +1766,11 @@ class BoardPage(QWidget):
         models.fill_combo(combo, node.props.get("agent", "claude"), str(node.props.get("model", "") or ""))
         combo.activated.connect(lambda _i: self.set_prop(node.id, "model", models.combo_value(combo)))
         combo.lineEdit().editingFinished.connect(lambda: self.set_prop(node.id, "model", models.combo_value(combo)))
+        from . import wizard_llm as WL
+        if WL.uses_server(self.board):  # the launcher refuses --model with --llm: the model is the server's
+            combo.setEnabled(False)
+            combo.setToolTip(tr("With a model server the model is the server's: choose NAME:MODEL as the model "
+                                "server"))
         self.inspector.addRow(tr("Model"), combo)
         self.model_combo = combo
         return combo

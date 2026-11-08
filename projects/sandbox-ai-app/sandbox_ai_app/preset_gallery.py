@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 from . import board as B
 from . import presets as PR
 from . import theme, widgets
+from . import wizard_llm as WL
 from .board_view import NODE_H, NODE_W, PathEdit, elide
 from .files import printable
 from .i18n import tr
@@ -336,7 +337,7 @@ class PresetGallery(QDialog):
             return False
         preset, values = self.selected.preset, {}
         if preset.placeholders and not fill_later:
-            form = PlaceholderForm(self.sai, preset, self)
+            form = PlaceholderForm(self.sai, preset, self, agent=self.agent)
             if widgets.AUTO_ANSWER is None and form.exec() != QDialog.DialogCode.Accepted:
                 return False
             values = form.values()
@@ -413,11 +414,14 @@ class PresetGallery(QDialog):
 class PlaceholderForm(QDialog):
     """What a preset leaves to the user, one row each, with what sandbox-ai knows offered: VPN profiles
     (sandbox-ai vpn list --json), LLM servers (sandbox-ai llm list --json), MCP servers (the MCP servers
-    page's definitions). Empty rows stay placeholders on the board ("Fill in later" leaves them all)."""
+    page's definitions). Empty rows stay placeholders on the board ("Fill in later" leaves them all). An LLM server
+    is offered as NAME and as NAME:MODEL for the models it listed; "Add a server…" registers and checks one (for
+    AGENT: the preset's own, else the one given) without leaving the preset, as "New VPN profile…" does."""
 
-    def __init__(self, sai, preset, parent=None):
+    def __init__(self, sai, preset, parent=None, agent=None):
         super().__init__(parent)
         self.sai, self.preset, self.fields, self.later = sai, preset, {}, False
+        self.agent = preset.agent or agent
         self.endpoints = {}
         self.setWindowTitle(tr("Fill in: {name}", name=preset.text(preset.title)))
         self.resize(620, 120 + 70 * len(preset.placeholders))
@@ -440,6 +444,13 @@ class PlaceholderForm(QDialog):
                 # No profile yet, or another one: made here, without leaving the preset (sandbox-ai vpn add).
                 new = QPushButton(tr("New VPN profile…"))
                 new.clicked.connect(lambda _=False, marker=placeholder.marker: self.new_vpn(marker))
+                column.addWidget(new)
+            if placeholder.kind == "llm":
+                # No server yet, or another one: registered and checked here (sandbox-ai llm add, llm check).
+                new = QPushButton(tr("Add a server…"))
+                new.setToolTip(tr("Register a model server of your own (sandbox-ai llm add), then check it for "
+                                  "the agent (sandbox-ai llm check)"))
+                new.clicked.connect(lambda _=False, marker=placeholder.marker: self.new_llm(marker))
                 column.addWidget(new)
             if placeholder.hint:
                 column.addWidget(plain_label(preset.text(placeholder.hint), role="secondary"))
@@ -470,8 +481,9 @@ class PlaceholderForm(QDialog):
             self.offer("mcp", [{"name": n} for n in names])
 
     def field(self, placeholder):
+        default = getattr(placeholder, "default", "")  # sandbox-ai's presets: the value's default (a port, a name)
         if placeholder.kind == "folder":
-            return PathEdit("")
+            return PathEdit(default)
         combo = QComboBox()
         combo.setEditable(placeholder.kind != "gpu")
         combo.addItem("")
@@ -481,6 +493,8 @@ class PlaceholderForm(QDialog):
             combo.lineEdit().setPlaceholderText(tr("empty: fill in later"))
         if placeholder.kind == "llm":
             combo.currentTextChanged.connect(lambda text, marker=placeholder.marker: self.llm_chosen(marker, text))
+        if default and (combo.isEditable() or combo.findText(default) >= 0):
+            combo.setCurrentText(default)
         return combo
 
     def offer(self, kind, entries):
@@ -489,22 +503,40 @@ class PlaceholderForm(QDialog):
             if placeholder.kind != kind:
                 continue
             combo = self.fields[placeholder.marker]
-            for entry in entries:
+            for entry in entries if kind == "llm" else []:
+                choices = WL.placeholder_choices(entry)
+                if not choices:
+                    continue
+                self.endpoints[choices[0]] = entry
+                detail = WL.endpoint_detail(entry)
+                agents = entry.get("agents")
+                if isinstance(agents, list):
+                    detail += "\n" + tr("Agents: {agents}", agents=", ".join(a for a in agents if isinstance(a, str)))
+                hint = WL.agent_hint(entry, self.agent, self.sai) if self.agent else ""
+                for value in choices:
+                    if combo.findText(value) < 0:
+                        combo.addItem(value)
+                        combo.setItemData(combo.count() - 1, safe_tooltip(hint or detail),
+                                          Qt.ItemDataRole.ToolTipRole)
+                        if hint:  # e.g. Claude Code with a server without the Anthropic API: shown, not offered
+                            combo.model().item(combo.count() - 1).setEnabled(False)
+            for entry in entries if kind != "llm" else []:
                 name = entry.get("profile") or entry.get("name")
                 if not isinstance(name, str) or combo.findText(name) >= 0:
                     continue
-                detail = {"vpn": " · ".join(str(entry.get(k)) for k in ("type", "provider") if entry.get(k)),
-                          "llm": " · ".join(str(entry.get(k)) for k in ("kind", "url", "vpn") if entry.get(k)),
-                          }.get(kind, "")
+                detail = " · ".join(str(entry.get(k)) for k in ("type", "provider") if entry.get(k)) \
+                    if kind == "vpn" else ""
                 combo.addItem(name)
                 combo.setItemData(combo.count() - 1, safe_tooltip(printable(detail)), Qt.ItemDataRole.ToolTipRole)
-                if kind == "llm":
-                    self.endpoints[name] = entry
             if kind == "mcp" and not combo.currentText() and placeholder.marker == "<mcp:browser>":
                 browser = next((e["name"] for e in entries if e["name"].lower() in PR.BROWSER_SERVERS), "")
                 combo.setCurrentText(browser)
-            if not combo.currentText() and combo.count() == 2 and not placeholder.optional:
-                combo.setCurrentIndex(1)  # the only one there is
+            usable = [i for i in range(1, combo.count()) if combo.model().item(i) is None
+                      or combo.model().item(i).isEnabled()]
+            distinct = len([e for e in self.endpoints.values() if not self.agent or WL.usable_by(e, self.agent)]) \
+                if kind == "llm" else len(usable)
+            if not combo.currentText() and distinct == 1 and usable and not placeholder.optional:
+                combo.setCurrentIndex(usable[0])  # the only one there is (a server: by its name)
 
     def new_vpn(self, marker):
         from .vpn_page import add_profile
@@ -515,6 +547,17 @@ class PlaceholderForm(QDialog):
                            done=lambda result, error: (self.offer("vpn", result if error is None else []),
                                                        self.fields[marker].setCurrentText(name)))
         add_profile(self, self.sai, added)
+
+    def new_llm(self, marker):
+        """A model server of your own, added and checked for the agent (wizard.add_server), then chosen here."""
+        from .wizard import add_server
+
+        def added(name, _checked=None):
+            if name:
+                background(self.sai.llm_endpoints, owner=self, timeout=90,
+                           done=lambda result, error: (self.offer("llm", result if error is None else []),
+                                                       self.fields[marker].setCurrentText(name)))
+        add_server(self, self.sai, self.agent, list(self.endpoints), added)
 
     def llm_chosen(self, marker, text):
         """An LLM server registered with a VPN brings it along: the VPN row that follows it takes it."""

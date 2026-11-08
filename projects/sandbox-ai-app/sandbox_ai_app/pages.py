@@ -1,4 +1,4 @@
-"""The newer pages of the app: approvals, statistics, files and credentials (images: images_page.py)."""
+"""The newer pages of the app: approvals, statistics and credentials (images: images_page.py, files: files_page.py)."""
 from __future__ import annotations
 
 import json
@@ -9,16 +9,16 @@ import time
 from PySide6.QtCore import QEvent, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QFont
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QVBoxLayout, QWidget,
+    QApplication, QComboBox, QDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+    QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QVBoxLayout, QWidget,
 )
 
-from . import backend, files, theme
+from . import backend, theme
 from .files import printable
-from .state import choose_files, choose_folder
-from .i18n import N_, tr
+from .state import choose_folder
+from .i18n import tr
 from .widgets import (
-    MONO, SORT_ROLE, AsyncCommand, Task, ask_first, background, bars, confirm, fill, find_row, fit_columns, outcome,
+    MONO, SORT_ROLE, AsyncCommand, ask_first, background, bars, confirm, fill, find_row, fit_columns, outcome,
     plain_label,
     row_key, safe_tooltip, selected, selected_rows, set_enabled, table, warn,
 )
@@ -1378,259 +1378,6 @@ class StatisticsPage(QWidget):
                 tools.append([printable(server), printable(tool), count, refused.get(tool, 0)])
                 colours.append("bad" if refused.get(tool) else None)
         fill(self.tables["tools"], tools, colours)
-
-
-ROOT_KINDS = {
-    "run": N_("Running sandbox {name}: workspace"), "run-home": N_("Running sandbox {name}: HOME"),
-    "session": N_("Session {name}: workspace"), "session-home": N_("Session {name}: HOME"),
-    "project": N_("Current project"), "other": N_("Chosen folder"),
-}
-
-
-def root_title(kind, label, path):
-    template = ROOT_KINDS.get(kind, "Chosen folder")
-    return f"{tr(template, name=printable(label))}  ({printable(path)})"
-
-
-class FilesPage(QWidget):
-    """The workspaces and HOME folders of sandboxes and sessions: browse, copy out, copy in. Symbolic links
-    are shown, never followed (see files.py)."""
-
-    def __init__(self, sai, projects=lambda: []):
-        super().__init__()
-        self.sai, self.projects = sai, projects
-        self.root, self.relative, self.entries, self.others = None, "", [], []
-        layout = QVBoxLayout(self)
-        top = QHBoxLayout()
-        self.roots = QComboBox()
-        self.roots.setMinimumWidth(420)
-        self.roots.currentIndexChanged.connect(self.choose_root)
-        refresh_roots = QPushButton(tr("Refresh"))
-        refresh_roots.clicked.connect(lambda _=False: self.refresh_roots())
-        other = QPushButton(tr("Other folder…"))
-        other.clicked.connect(self.add_other)
-        for widget in (QLabel(tr("Folder")), self.roots, refresh_roots, other):
-            top.addWidget(widget)
-        top.addStretch()
-        layout.addLayout(top)
-        where = QHBoxLayout()
-        up = QPushButton(tr("Up"))
-        up.clicked.connect(self.up)
-        self.where = plain_label(word_wrap=False)
-        where.addWidget(up)
-        where.addWidget(self.where, 1)
-        layout.addLayout(where)
-        self.table = table([tr("Name"), tr("Type"), tr("Size"), tr("Modified"), tr("Points to (not followed)")],
-                           multi=True)
-        self.table.cellDoubleClicked.connect(self.open_row)
-        layout.addWidget(self.table, 1)
-        buttons = QHBoxLayout()
-        download = QPushButton(tr("Copy to the host…"))
-        download.clicked.connect(self.download_dialog)
-        upload = QPushButton(tr("Copy files here…"))
-        upload.clicked.connect(self.upload_dialog)
-        upload_dir = QPushButton(tr("Copy a folder here…"))
-        upload_dir.clicked.connect(self.upload_folder_dialog)
-        self.copy_buttons = (download, upload, upload_dir)
-        self.replace = QCheckBox(tr("Replace existing files"))
-        refresh = QPushButton(tr("Refresh"))
-        refresh.clicked.connect(self.list)
-        for widget in (download, upload, upload_dir, self.replace):
-            buttons.addWidget(widget)
-        buttons.addStretch()
-        buttons.addWidget(refresh)
-        layout.addLayout(buttons)
-        # Copies (up to 1 GiB) run in a thread with a Cancel button; one at a time.
-        self.task = Task()
-        self.task.changed.connect(lambda running: [b.setEnabled(not running) for b in self.copy_buttons])
-        layout.addWidget(self.task)
-        self.message = plain_label()
-        layout.addWidget(self.message)
-        self.last_report = []
-        note = plain_label(tr("Symbolic links are shown but never followed or copied; copies stop at {limit} MiB.",
-                              limit=files.LIMIT >> 20))
-        note.setEnabled(False)
-        layout.addWidget(note)
-        self.refresh_roots()
-
-    def set_project(self, path):
-        """Show the current project's folder."""
-        self.refresh_roots(select=os.path.realpath(path))
-
-    def refresh_roots(self, select=None):
-        keep = select or self.roots.currentData()
-        self.roots.blockSignals(True)
-        self.roots.clear()
-        for kind, label, path in self.sai.file_roots(extra=list(self.projects()) + self.others):
-            self.roots.addItem(root_title(kind, label, path), path)
-        index = self.roots.findData(keep) if keep else -1
-        self.roots.setCurrentIndex(index if index >= 0 else 0)
-        self.roots.blockSignals(False)
-        self.choose_root()
-
-    def add_other(self):
-        path = choose_folder(self, tr("Folder to browse"), "browse")
-        if path:
-            self.others.append(("other", "", path))
-            self.refresh_roots()
-            self.roots.setCurrentIndex(self.roots.findData(os.path.realpath(path)))
-
-    def choose_root(self):
-        path = self.roots.currentData()
-        self.root, self.relative = None, ""
-        self.table.clearSelection()  # names selected in another folder mean other files here
-        if path:
-            try:
-                self.root = files.Root(path)
-            except OSError as exc:
-                self.message.setText(tr("Cannot open {path}: {error}", path=printable(path), error=printable(exc)))
-        self.list()
-
-    def go(self, relative):
-        relative = "/".join(files.parts(relative))
-        if relative != self.relative:
-            self.table.clearSelection()  # src selected in the parent is not src/src here
-        self.relative = relative
-        self.list()
-
-    def up(self):
-        self.go("/".join(files.parts(self.relative)[:-1]))
-
-    def list(self):
-        self.entries = []
-        if self.root is None:
-            self.where.setText("")
-            fill(self.table, [])
-            return
-        self.where.setText(printable(self.root.path + ("/" + self.relative if self.relative else "")))
-        try:
-            self.entries = self.root.list(self.relative)
-        except (OSError, ValueError) as exc:
-            self.message.setText(printable(exc))
-            self.relative = ""
-            self.table.clearSelection()
-            try:
-                self.entries = self.root.list("")
-            except (OSError, ValueError):
-                self.entries = []
-        kinds = {"dir": tr("folder"), "file": tr("file"), "link": tr("symbolic link"), "other": tr("special file")}
-        rows, colors = [], []
-        for entry in self.entries:
-            rows.append([printable(entry.name), kinds[entry.kind], files.size_text(entry.size) if entry.kind == "file" else "",
-                         time.strftime("%Y-%m-%d %H:%M", time.localtime(entry.mtime)),
-                         "→ " + printable(entry.target) if entry.kind == "link" else ""])
-            colors.append("warn" if entry.kind == "link" else "muted" if entry.kind == "other" else None)
-        fill(self.table, rows, colors, keys=[entry.name for entry in self.entries])
-
-    def path_of(self, entry):
-        return f"{self.relative}/{entry.name}" if self.relative else entry.name
-
-    def entry_at(self, row):
-        """The entry shown in the visual ROW (found by its name: the table may be sorted), or None."""
-        name = row_key(self.table, row)
-        return next((entry for entry in self.entries if entry.name == name), None)
-
-    def open_row(self, row, _column=0):
-        entry = self.entry_at(row)
-        if entry is None:
-            return
-        if entry.kind == "dir":
-            self.go(self.path_of(entry))
-        elif entry.kind == "link":
-            self.message.setText(tr("{name} is a symbolic link to {target}; it is not followed.",
-                                    name=printable(entry.name), target=printable(entry.target)))
-
-    def chosen(self):
-        return [entry for entry in (self.entry_at(row) for row in selected_rows(self.table)) if entry is not None]
-
-    def report(self, done, problems, copied_out=False):
-        parts = []
-        if done:
-            parts.append(tr("{files} file(s) in {folders} folder(s), {size} copied",
-                            files=sum(r.files for r in done), folders=sum(r.directories for r in done),
-                            size=files.size_text(sum(r.bytes for r in done))))
-        skipped = [p for r in done for p in r.skipped]
-        if skipped:
-            parts.append(tr("skipped: {list}", list=", ".join(f"{printable(p)} ({printable(why)})"
-                                                               for p, why in skipped[:10])))
-        parts += [printable(problem) for problem in problems]
-        risky = [path for r in done for path in r.risky] if copied_out else []
-        executable = [path for r in done for path in r.executable] if copied_out else []
-        if executable:
-            parts.append(tr("Copied without the executable bit (make a file executable yourself once you trust it): "
-                            "{list}", list=", ".join(printable(path) for path in executable[:20])
-                            + (" …" if len(executable) > 20 else "")))
-        if risky:
-            listed = ", ".join(printable(path) for path in risky[:20]) + (" …" if len(risky) > 20 else "")
-            warning = tr("Careful: the agent could have written these files, and tools run them or read them as "
-                         "configuration when you use the copy on the host (git, direnv, shells, editors, make): "
-                         "{list}. Look at them before you use the copied folder. Copied files are never "
-                         "executable on the host.", list=listed)
-            parts.append(warning)
-            warn(self, tr("Files that run or configure tools"), warning)
-        self.message.setText("\n".join(parts))
-        self.last_report = parts
-        return parts
-
-    def download(self, entries, destination):
-        """Copy ENTRIES (of the shown folder) into the host folder DESTINATION, in a thread; the report
-        follows when it is done (False: another copy still runs)."""
-        root, items = self.root, [(entry.name, self.path_of(entry)) for entry in entries]
-
-        def work(cancelled):
-            done, problems = [], []
-            for name, path in items:
-                try:
-                    done.append(root.copy_out(path, destination, cancelled=cancelled))
-                except (OSError, ValueError) as exc:
-                    problems.append(f"{name}: {exc}")
-            return done, problems
-        return self.task.thread(work, lambda result, error: self.copied(result, error, True),
-                                tr("Copying to the host…"), cancellable=True)
-
-    def upload(self, paths):
-        """Copy the host files or folders PATHS into the shown folder, in a thread (see download)."""
-        root, relative, overwrite = self.root, self.relative, self.replace.isChecked()
-
-        def work(cancelled):
-            done, problems = [], []
-            for path in paths:
-                try:
-                    done.append(root.copy_in(path, relative, overwrite=overwrite, cancelled=cancelled))
-                except (OSError, ValueError) as exc:
-                    problems.append(f"{Path(path).name}: {exc}")
-            return done, problems
-        return self.task.thread(work, lambda result, error: self.copied(result, error, False),
-                                tr("Copying into the sandbox's folder…"), cancellable=True)
-
-    def copied(self, result, error, out):
-        done, problems = result if error is None else ([], [str(error)])
-        if not out:
-            self.list()
-        self.report(done, problems, copied_out=out)
-
-    def download_dialog(self):
-        entries = self.chosen()
-        if not entries or self.root is None:
-            QMessageBox.information(self, tr("Files"), tr("Select files or folders first."))
-            return
-        destination = choose_folder(self, tr("Copy to which folder on the host?"), "copy-out")
-        if destination:
-            self.download(entries, destination)
-
-    def upload_dialog(self):
-        if self.root is None:
-            return
-        paths = choose_files(self, tr("Files to copy into {path}", path=self.where.text()), "copy-in")
-        if paths:
-            self.upload(paths)
-
-    def upload_folder_dialog(self):
-        if self.root is None:
-            return
-        path = choose_folder(self, tr("Folder to copy into {path}", path=self.where.text()), "copy-in")
-        if path:
-            self.upload([path])
 
 
 from .credentials_page import CredentialsPage  # noqa: E402,F401 - the Credentials page lives in its own module

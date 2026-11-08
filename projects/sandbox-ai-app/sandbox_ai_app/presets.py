@@ -47,6 +47,7 @@ class Placeholder:
     hint: str = ""  # where to get it
     optional: bool = False  # left empty: what holds it is left out instead
     follows: str = ""  # the marker of an LLM server whose VPN this one is (filled in from its registration)
+    default: str = ""  # what the form offers first (sandbox-ai's presets: the value's default, e.g. a port)
 
     @property
     def kind(self):
@@ -203,6 +204,16 @@ PRESETS = (
            placeholders=(Placeholder("<llm:local>", N_("Local LLM server"),
                                      N_("sandbox-ai llm add ollama --kind ollama --url http://127.0.0.1:11434")),),
            notes=(N_("OpenCode lists both providers; choose the model per task."),)),
+    Preset("local-api", N_("Local OpenAI-compatible API (raw)"),
+           N_("Any server with the OpenAI API (a LiteLLM gateway, LocalAI, your own): only its address is opened, "
+              "no cloud."), "llm", "easy",
+           ("--llm", "<llm:api>", "--no-provider-defaults"),
+           placeholders=(Placeholder("<llm:api>", N_("OpenAI-compatible server"),
+                                     N_("sandbox-ai llm add api --kind openai-compatible --url "
+                                        "http://192.168.1.20:4000")),),
+           notes=(N_("OpenCode needs /v1/chat/completions, Codex /v1/responses. Claude Code speaks only the "
+                     "Anthropic Messages API: only with a server added with --anthropic."),
+                  N_("NAME:MODEL chooses a model (sandbox-ai llm models NAME lists them)."))),
     # -- privacy and VPN --
     Preset("vpn-all", N_("Everything through a WireGuard VPN"),
            N_("Every connection leaves through your WireGuard tunnel, lookups through its resolvers; a failed "
@@ -212,6 +223,20 @@ PRESETS = (
                                      N_("sandbox-ai vpn add home --wireguard wg.conf")),),
            notes=(N_("The kill switch lets nothing out but through the tunnel; the checks compare the address "
                      "seen outside with this host's."),)),
+    Preset("tor", N_("Everything through Tor"),
+           N_("Every connection, the agent's own API connections included, leaves through Tor; lookups go to "
+              "Tor's resolver and .onion names work. The allow-list and approvals apply as always."), "privacy",
+           "medium",
+           ("--vpn", "<vpn:tor>", "--vpn-check", "stop", "--dns"),
+           placeholders=(Placeholder("<vpn:tor>", N_("Tor profile"),
+                                     N_("sandbox-ai build vpn; sandbox-ai vpn add anon --tor --socks")),),
+           notes=(N_("Before the agent starts, tor must bootstrap and check.torproject.org must see a Tor exit; a "
+                     "failed check stops the start."),
+                  N_("TCP over IPv4 only: no UDP (no QUIC, ping or NTP), no IPv6, slower; the agent's provider may "
+                     "refuse or challenge Tor exits."),
+                  N_(".onion names resolve and connect through Tor (with --dns every one the agent looks up)."),
+                  N_("With --socks, 127.0.0.1:9050 is Tor's SocksPort (torsocks, curl --socks5-hostname); torsocks "
+                     "and Tor Browser in the image: sandbox-ai images recipe tor --from AGENT."))),
     Preset("vpn-mcp", N_("MCP servers behind different VPNs"),
            N_("Search through one VPN (e.g. Mullvad), page fetching through another (your own WireGuard); the "
               "agent reaches only its provider."), "privacy", "advanced",
@@ -371,7 +396,9 @@ def to_document(preset):
             "agent_args": list(preset.agent_args), "mcp": list(preset.mcp),
             "mcp_servers": {name: definition for name, definition in preset.servers}, "rules": preset.rules,
             "placeholders": [{"marker": p.marker, "label": preset.text(p.label), "hint": preset.text(p.hint),
-                              "optional": p.optional, "follows": p.follows} for p in preset.placeholders],
+                              "optional": p.optional, "follows": p.follows, **({"default": p.default} if p.default
+                                                                               else {})}
+                             for p in preset.placeholders],
             "notes": [preset.text(n) for n in preset.notes], "positions": dict(preset.positions)}
 
 
@@ -439,11 +466,11 @@ def from_document(sai, document):
         _check(isinstance(entry, dict) and isinstance(entry.get("marker"), str)
                and B.PLACEHOLDER.fullmatch(entry["marker"]) and isinstance(entry.get("label", ""), str)
                and isinstance(entry.get("hint", ""), str) and isinstance(entry.get("optional", False), bool)
-               and isinstance(entry.get("follows", ""), str),
+               and isinstance(entry.get("follows", ""), str) and isinstance(entry.get("default", ""), str),
                N_("A placeholder has a marker, a label, a hint and whether it is optional."))
         marks.append(Placeholder(entry["marker"], entry.get("label", "")[:120] or entry["marker"],
                                  entry.get("hint", "")[:200], entry.get("optional", False),
-                                 entry.get("follows", "")[:40]))
+                                 entry.get("follows", "")[:40], entry.get("default", "")[:200]))
     positions = document.get("positions") or {}
     _check(isinstance(positions, dict) and len(positions) <= 200 and all(
         isinstance(k, str) and re.fullmatch(r"[a-z]+#[0-9]{1,3}", k) and isinstance(v, list) and len(v) == 2
@@ -527,7 +554,9 @@ def from_sandbox_ai(sai, document):
         "rules": rules,
         "placeholders": [{"marker": markers[name], "label": str((spec or {}).get("label", name))[:200],
                           "hint": str((spec or {}).get("hint", ""))[:300], "optional": bool((spec or {}).get("optional")),
-                          "follows": ""} for name, spec in values.items()],
+                          "follows": "", **({"default": str(spec["default"])[:200]}
+                                            if (spec or {}).get("default") not in (None, "") else {})}
+                         for name, spec in values.items()],
         "notes": [str(note)[:1000] for note in (document.get("notes") or []) + (document.get("needs") or [])]
                  + ([tr("From the preset directory {path}", path=str(document["_dir"])[:900])]
                     if document.get("_origin") == "extra" and isinstance(document.get("_dir"), str) else [])}

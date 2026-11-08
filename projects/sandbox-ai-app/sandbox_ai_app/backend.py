@@ -1987,6 +1987,21 @@ NEEDS_CONFIRM = {
                     "SSH user or for every user, as root or with sudo",
     "secret-delete": "deleting a secret takes it from every start, VPN profile and Git login that names it",
     "secret-replace": "a secret of that name exists: its value is replaced",
+    'project-trust': 'a trusted project configuration gives every later start of that project its options',
+    'project-forget': 'a project configuration no longer trusted stops the starts of that project from starting until it is trusted again',
+    'mcp-stop': 'stopping an MCP server ends it for every start that uses it now',
+    'mcp-unsigned': 'an MCP server from a catalog no trusted key signed is taken without that check',
+    'mcp-writable-mount': 'a writable mount lets the MCP server change that directory on the host',
+    'git-login-add': 'a Git login is used by the connection proxy of every sandbox that reaches that server',
+    'login-remove': 'removing a login or an identity takes it from every later start that uses it',
+    'net-keep': "keeping what the run was given writes it into the project's .sandbox-ai.json: every later start of that project gets it",
+    'start-restart': 'restarting a running start ends what runs in it now (the agent continues its conversation)',
+    'canary-tokens': "the run's canary tokens in full: decoys, but shown here they can be copied and planted",
+    'canary-resume': 'resuming a sandbox a canary paused lets it go on after something opened a decoy or sent a token away',
+    'llm-insecure': 'plain http to an address outside your local networks is unencrypted: prompts, answers and the key can be read on the way',
+    'vpn-socks': 'a SOCKS port in the sandbox lets what goes through it pass the connection proxy by',
+    'login-logout': 'logging out forgets the stored login of that agent: its sandboxes need a new login',
+    'kit-hooks-trust': 'trusted hooks of a kit run in every later start with that kit',
 }
 APP_NEEDS_CONFIRM = {}
 MODE_ORDER = ("lax", "low", "medium", "high", "paranoid")  # the order of protection, weakest first (webui.MODE_ORDER)
