@@ -318,11 +318,29 @@ def test_install_protects_foreign_files_and_refuses_bad_input(scenario, tmp_path
         assert not (tmp_path / "escape").exists()
 
 
+def bundle_difference(first, second):
+    """What differs between two bundles: members only in one, members whose content, mode or time differ."""
+    def members(path):
+        found = {}
+        with tarfile.open(path) as tar:
+            for member in tar.getmembers():
+                data = tar.extractfile(member).read() if member.isfile() else b""
+                found[member.name] = (hashlib.sha256(data).hexdigest()[:12], member.mode, member.mtime, member.uid)
+        return found
+    a, b = members(first), members(second)
+    parts = [f"only in the first: {n}" for n in sorted(set(a) - set(b))][:5]
+    parts += [f"only in the second: {n}" for n in sorted(set(b) - set(a))][:5]
+    parts += [f"differs: {n} {a[n]} {b[n]}" for n in sorted(set(a) & set(b)) if a[n] != b[n]][:5]
+    return "; ".join(parts) or "the same members (the compression differs)"
+
+
 def test_make_dist_is_reproducible(scenario, tmp_path, dist):
     other = tmp_path / "again"
     make_dist(other)
     name = f"sandbox-ai-bundle-{VERSION}.tar.gz"
-    assert (other / name).read_bytes() == (dist / name).read_bytes()
+    if (other / name).read_bytes() != (dist / name).read_bytes():
+        # Said by member, never as a diff of two archives (pytest's diff of megabytes ran for an hour on CI).
+        pytest.fail("the bundle is not reproducible: " + bundle_difference(dist / name, other / name))
     sums = dict(reversed(line.split("  ")) for line in (dist / "SHA256SUMS").read_text().splitlines())
     assert sums[name] == hashlib.sha256((dist / name).read_bytes()).hexdigest()
     with tarfile.open(dist / name) as tar:
