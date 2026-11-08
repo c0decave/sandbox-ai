@@ -400,6 +400,7 @@ DEVICE_PATH = re.compile(r"/dev/[A-Za-z0-9_+:.@-][A-Za-z0-9_+:.@/-]{0,250}")
 USB_SELECTOR = re.compile(r"usb:[0-9A-Fa-f]{4}:[0-9A-Fa-f]{4}(?::[!-~]{1,126})?")  # usb:VENDOR:PRODUCT[:SERIAL]
 DEVICE_ID = re.compile(r"[0-9]{1,9}")  # a grant's id, as devices list shows it
 WORKSPACE_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.+@ -]{0,254}")  # the NAME of /workspaces/NAME
+WORKSPACE_AS = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")  # workspace add --name NAME (workspaces.NAME)
 # devices add waits up to devices.APPROVAL_SECONDS (60) for the answer to an "ask" rule; over SSH, with room to spare
 DEVICE_ADD_TIMEOUT = 180
 LIMIT_VALUE = re.compile(r"none|[0-9]{1,12}(?:\.[0-9]{1,6})?[kmgtKMGT]?")
@@ -691,6 +692,8 @@ NEEDS_CONFIRM = {
     "project-forget": "a project configuration no longer trusted stops the starts of that project from starting "
                       "until it is trusted again",
     "mcp-stop": "stopping an MCP server ends it for every start that uses it now",
+    "mcp-detach": "detaching an MCP server from a running start closes its relay there now: the agent's "
+                  "connections to it end and its calls fail (its later starts go without it)",
     "mcp-unsigned": "an MCP server from a catalog no trusted key signed is taken without that check",
     "mcp-writable-mount": "a writable mount lets the MCP server change that directory on the host",
     "git-login-add": "a Git login is used by the connection proxy of every sandbox that reaches that server",
@@ -915,6 +918,9 @@ class Api:
             ("GET", H + r"/gc/(?P<days>[^/]+)", self.gc_preview, ()),
             ("POST", H + r"/gc", self.gc, ("gc",)),
             ("POST", H + r"/mcp/(?P<name>[^/]+)/attach", self.mcp_attach, ("mcp-attach", "mcp-restart")),
+            # an MCP server (or a helper agent) into a running start now, and out of it (mcp attach|detach --live)
+            ("POST", H + r"/starts/(?P<name>[^/]+)/mcp-live", self.mcp_live_attach, ("mcp-attach",)),
+            ("POST", H + r"/starts/(?P<name>[^/]+)/mcp-live/remove", self.mcp_live_detach, ("mcp-detach",)),
             ("GET", H + r"/approvals", self.approvals, ()),
             ("GET", H + r"/approvals-history", self.approvals_history, ()),
             ("GET", H + r"/approvals-history/(?P<run>[^/]+)", self.approvals_history, ()),
@@ -1453,6 +1459,40 @@ class Api:
         return self.json_of(params["host"], ["mcp", "attach", name, start, "--json", *(["--restart"] if restart else [])],
                             timeout=300)
 
+    @staticmethod
+    def live_server(body):
+        """The server BODY names for mcp attach|detach --live, as (its argv before START, what the question names):
+        {"server": NAME} (sandbox-ai mcp list) or {"helper": AGENT} (claude, codex or opencode as a helper), one of
+        them; never a leading "-" (read as an option there)."""
+        server, helper = body.get("server"), body.get("helper")
+        if (server is None) == (helper is None):
+            raise Refused(400, "name the server (server: NAME) or a helper agent (helper: claude, codex or opencode)")
+        if helper is not None:
+            if helper not in AGENTS:
+                raise Refused(400, f"a helper is one of {', '.join(AGENTS)}")
+            return [f"--helper={helper}"], f"the helper {helper}"
+        if not (isinstance(server, str) and MCP_NAME.fullmatch(server)):
+            raise Refused(400, "an MCP server's name is 1-32 letters, digits, '_' or '-', starting with a letter or "
+                               "digit")
+        return [server], server
+
+    def mcp_live_attach(self, params, body):
+        """sandbox-ai mcp attach NAME START --live --json (or --helper AGENT START): the server reached by the running
+        start now, without a restart (kept for its later starts; asked first: mcp-attach). Its JSON says whether the
+        agent sees it at once (agent_restart: "maybe" for Claude Code, "required" for Codex and OpenCode)."""
+        start = start_name(params["name"])
+        server, shown = self.live_server(body)
+        confirmed(body, "mcp-attach", f"{shown} to {start}, now while it runs")
+        return self.json_of(params["host"], ["mcp", "attach", *server, start, "--live", "--json"], timeout=300)
+
+    def mcp_live_detach(self, params, body):
+        """sandbox-ai mcp detach NAME START --live --json (or --helper AGENT START): its relay in the running start
+        closed now, and out of its options (asked first: mcp-detach)."""
+        start = start_name(params["name"])
+        server, shown = self.live_server(body)
+        confirmed(body, "mcp-detach", f"{shown} from {start}")
+        return self.json_of(params["host"], ["mcp", "detach", *server, start, "--live", "--json"], timeout=120)
+
     # the network of a running sandbox (sandbox-ai net), and the presets to start from
     def net_show(self, params, body):
         return self.json_of(params["host"], ["net", "show", start_name(params["name"]), "--json"], 30)
@@ -1523,16 +1563,28 @@ class Api:
         return self.json_of(params["host"], ["workspace", "list", start_name(params["name"]), "--json"], 30)
 
     def workspace_add(self, params, body):
-        """sandbox-ai workspace add NAME DIR [--ro]: DIR, an absolute directory on that host, mounted at
-        /workspaces/<its name> in the running sandbox."""
+        """sandbox-ai workspace add NAME PATH [--name=AS] [--ro]: PATH, an absolute directory or regular file on that
+        host ("path"; "directory" as before), mounted at /workspaces/AS (default: its own name) in the running
+        sandbox. AS: 1-64 letters, digits, '_', '.' or '-', starting with a letter or digit (the command's --name)."""
         name = start_name(params["name"])
-        directory = no_dots(host_path(body.get("directory"), "directory"), "directory")
+        if ("path" in body) == ("directory" in body):
+            raise Refused(400, "path is the directory or file on that host (or directory, as before; not both)")
+        what = "path" if "path" in body else "directory"
+        path = no_dots(host_path(body.get(what), what), what)
         read_only = body.get("read_only", False)
         if not isinstance(read_only, bool):
             raise Refused(400, "read_only is true or false")
+        given = body.get("name")
+        if given in (None, ""):
+            named = []
+        elif isinstance(given, str) and WORKSPACE_AS.fullmatch(given):
+            named = [f"--name={given}"]
+        else:
+            raise Refused(400, "name is 1-64 letters, digits, '_', '.' or '-', starting with a letter or digit")
         if not read_only:
-            confirmed(body, "workspace-writable", directory)
-        return self.done(params["host"], ["workspace", "add", name, directory, *(["--ro"] if read_only else [])], 120)
+            confirmed(body, "workspace-writable", path)
+        return self.done(params["host"], ["workspace", "add", name, path, *named, *(["--ro"] if read_only else [])],
+                         120)
 
     def workspace_remove(self, params, body):
         """sandbox-ai workspace remove NAME DIR|NAME [--force]: a workspace added during the run (its path in the

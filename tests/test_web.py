@@ -347,8 +347,25 @@ def logged_in():
      ["workspace", "add", "web", "/home/u/src/other", "--ro"]),
     ("POST", "/api/hosts/ct1/workspaces/web", {"directory": "/home/u/src/my lib", "confirm": True},
      ["workspace", "add", "web", "/home/u/src/my lib"]),
+    # a file or a folder ("path"), with a name of its own at /workspaces/NAME
+    ("POST", "/api/hosts/ct1/workspaces/web", {"path": "/home/u/notes.md", "name": "notes.v2", "read_only": True},
+     ["workspace", "add", "web", "/home/u/notes.md", "--name=notes.v2", "--ro"]),
+    ("POST", "/api/hosts/ct1/workspaces/web", {"path": "/home/u/src/lib", "name": "", "confirm": True},
+     ["workspace", "add", "web", "/home/u/src/lib"]),
+    ("POST", "/api/hosts/ct1/workspaces/web", {"path": "/home/u/src/lib", "name": "Lib_2", "read_only": False,
+                                               "confirm": True},
+     ["workspace", "add", "web", "/home/u/src/lib", "--name=Lib_2"]),
     ("POST", "/api/hosts/ct1/workspaces/web/remove", {"workspace": "/workspaces/other"},
      ["workspace", "remove", "web", "/workspaces/other"]),
+    # an MCP server (or a helper agent) into a running start now, and out of it again (--live)
+    ("POST", "/api/hosts/ct1/starts/web/mcp-live", {"server": "files", "confirm": True},
+     ["mcp", "attach", "files", "web", "--live", "--json"]),
+    ("POST", "/api/hosts/ct1/starts/web/mcp-live", {"helper": "codex", "confirm": True},
+     ["mcp", "attach", "--helper=codex", "web", "--live", "--json"]),
+    ("POST", "/api/hosts/ct1/starts/web/mcp-live/remove", {"server": "helper-claude-0123abcd", "confirm": True},
+     ["mcp", "detach", "helper-claude-0123abcd", "web", "--live", "--json"]),
+    ("POST", "/api/hosts/ct1/starts/web/mcp-live/remove", {"helper": "opencode", "confirm": True},
+     ["mcp", "detach", "--helper=opencode", "web", "--live", "--json"]),
     ("POST", "/api/hosts/ct1/workspaces/web/remove", {"workspace": "other-2", "force": True, "confirm": True},
      ["workspace", "remove", "web", "other-2", "--force"]),
     ("GET", "/api/hosts/ct1/devices/web", None, ["devices", "list", "web", "--json"]),
@@ -823,6 +840,41 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     ("POST", "/api/hosts/ct1/starts/web/resume", {"mcp": ["-x"], "confirm": True}, 400),
     ("POST", "/api/hosts/ct1/starts/web/resume", {"mounts": [{"source": "/a:b", "destination": "/b"}], "confirm": True}, 400),
     ("POST", "/api/hosts/ct1/starts/web/resume", {"restart": "yes", "confirm": True}, 400),
+    # an MCP server while it runs: asked first; one server or one helper, never an option
+    ("POST", "/api/hosts/ct1/starts/web/mcp-live", {"server": "files"}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/mcp-live", {"server": "files", "confirm": "yes"}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/mcp-live", {"helper": "claude"}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/mcp-live", {"confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/mcp-live", {"server": "files", "helper": "claude", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/mcp-live", {"server": "--restart", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/mcp-live", {"server": "-h", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/mcp-live", {"server": "a" * 33, "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/mcp-live", {"server": ["files"], "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/mcp-live", {"helper": "bash", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/mcp-live", {"helper": "--live", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/mcp-live", {"helper": ["claude"], "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/starts/--all/mcp-live", {"server": "files", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/starts/-x/mcp-live/remove", {"server": "files", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/mcp-live/remove", {"server": "files"}, 400),  # cuts its connections: asked
+    ("POST", "/api/hosts/ct1/starts/web/mcp-live/remove", {"helper": "codex"}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/mcp-live/remove", {"server": "--live", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/mcp-live/remove", {"helper": "gpt", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/mcp-live/remove", {"confirm": True}, 400),
+    ("GET", "/api/hosts/ct1/starts/web/mcp-live", None, 405),
+    # a workspace: a file or folder, a name as --name takes it
+    ("POST", "/api/hosts/ct1/workspaces/web", {"path": "relative/notes.md", "read_only": True}, 400),
+    ("POST", "/api/hosts/ct1/workspaces/web", {"path": "/home/u/../etc", "read_only": True}, 400),
+    ("POST", "/api/hosts/ct1/workspaces/web", {"path": "/home/u/a", "directory": "/home/u/a", "read_only": True}, 400),
+    ("POST", "/api/hosts/ct1/workspaces/web", {"read_only": True}, 400),
+    ("POST", "/api/hosts/ct1/workspaces/web", {"path": "/home/u/a"}, 400),  # writable: asked first
+    ("POST", "/api/hosts/ct1/workspaces/web", {"path": "/home/u/a", "name": "x", "read_only": False}, 400),
+    ("POST", "/api/hosts/ct1/workspaces/web", {"path": "/home/u/a", "name": "-x", "read_only": True}, 400),
+    ("POST", "/api/hosts/ct1/workspaces/web", {"path": "/home/u/a", "name": ".hidden", "read_only": True}, 400),
+    ("POST", "/api/hosts/ct1/workspaces/web", {"path": "/home/u/a", "name": "a/b", "read_only": True}, 400),
+    ("POST", "/api/hosts/ct1/workspaces/web", {"path": "/home/u/a", "name": "a b", "read_only": True}, 400),
+    ("POST", "/api/hosts/ct1/workspaces/web", {"path": "/home/u/a", "name": "a" * 65, "read_only": True}, 400),
+    ("POST", "/api/hosts/ct1/workspaces/web", {"path": "/home/u/a", "name": "a\n", "read_only": True}, 400),
+    ("POST", "/api/hosts/ct1/workspaces/web", {"path": "/home/u/a", "name": 7, "read_only": True}, 400),
     ("GET", "/api/hosts/ct1/presets/-x", None, 400),
     ("POST", "/api/hosts/ct1/presets/dev/check", {"values": {"--x": "1"}}, 400),
     ("POST", "/api/hosts/ct1/presets/dev/check", {"values": {"a": "two\nlines"}}, 400),
@@ -1730,6 +1782,8 @@ CONFIRM_CASES = {
     "project-forget": ("POST", "/api/hosts/ct1/projects/forget", {"path": "/home/u/web/.sandbox-ai.json"},
                        ["wizard", "forget", "/home/u/web/.sandbox-ai.json"]),
     "mcp-stop": ("POST", "/api/hosts/ct1/mcp/files/stop", {}, ["mcp", "stop", "files"]),
+    "mcp-detach": ("POST", "/api/hosts/ct1/starts/web/mcp-live/remove", {"server": "files"},
+                   ["mcp", "detach", "files", "web", "--live", "--json"]),
     "mcp-unsigned": ("POST", "/api/hosts/ct1/mcp", {"entry": "hub:binwalk", "unsigned": True},
                      ["mcp", "add", "--unsigned", "hub:binwalk"]),
     "mcp-writable-mount": ("POST", "/api/hosts/ct1/mcp", {"entry": "duckduckgo", "mounts": [
@@ -4009,3 +4063,132 @@ def test_the_starts_of_every_host_with_the_mcp_servers_that_do_not_run(logged_in
     assert status == 200 and out["starts"] == [] and out["errors"] == {}
     assert ("local", ["list", "--all", "--json"]) in logged_in.runner.calls
     assert ("local", ["list", "--json"]) not in logged_in.runner.calls
+
+
+# --- a running start's MCP servers (mcp attach|detach --live) and its workspaces of a file or with a name --------
+
+RESOURCES_DRIVER = FAKE_DOM + r"""
+const confirmText = (node) => { const c = node.all().find(n => n.className === "confirm"); return c ? c.textContent : null; };
+const posts = () => calls.filter(c => c.method !== "GET").map(c => [c.path, JSON.parse(c.body)]);
+const byId = (id) => document.getElementById(id);
+(async () => {
+  const result = {};
+  vm.runInContext('state.me = { user: "admin", csrf: "c", terminals: true }; state.host = "ct1"; state.page = "logs"; state.hosts = [{ name: "ct1", kind: "ssh", ssh: "root@ct1", port: 22 }];', context);
+  let attached = { message: "web reaches the MCP server search now, kept for its later starts. Codex reads ...", agent_restart: "required", attached: "live" };
+  answer = (method, path, sent) => {
+    if (path === "/api/hosts/ct1/workspaces/web" && method === "GET") return [
+      { host: "/srv/web", sandbox: "/work", mode: "rw", source: "start", kind: "dir" },
+      { host: "/home/u/notes.md", sandbox: "/workspaces/notes", mode: "ro", source: "added", kind: "file", named: true, state: "attached" },
+      { host: "/home/u/lib", sandbox: "/workspaces/lib", mode: "ro", source: "added", kind: "dir", named: false, state: "attached" }];
+    if (path === "/api/hosts/ct1/starts") return [{ name: "other", id: "o-1", mcp_running: ["nope"] },
+      { name: "web", id: "web-1", kind: "session", state: "running", directory: "/d", mcp: ["files", "later"], mcp_running: ["files", "helper-codex-0123abcd"] }];
+    if (path === "/api/hosts/ct1/mcp") return [{ name: "files" }, { name: "search" }, { name: "-bad" }, { name: 7 }];
+    if (path.endsWith("/mcp-live")) return attached;
+    if (path.endsWith("/mcp-live/remove")) return { message: "web no longer reaches it", detached: "live" };
+    if (method === "GET") return path.includes("/limits/") ? {} : [];
+    return { output: "ok" };
+  };
+  vm.runInContext('resourcesCard(__main, { name: "web", id: "web-1", host: "ct1", state: "running", kind: "session", directory: "/d" })', context);
+  await settle();
+  const card = byId("resources-card");
+  const tables = card.all().filter(n => n.tagName === "table");
+  const rowsOf = (table) => table.all().filter(n => n.tagName === "tr").slice(1).map(r => r.children.slice(0, -1).map(c => c.textContent));
+  result.workspaces = rowsOf(tables[0]);
+  result.mcpRows = tables[1].all().filter(n => n.tagName === "tr").slice(1).map(r => r.children[0].textContent);
+  result.choices = byId("mcp-live-server").children.map(o => [o.value, o.textContent]);
+
+  // a workspace: a file with a name of its own, read-only at once; a bad name is refused here
+  const add = button(card, "Add workspace");
+  byId("ws-dir").value = "/home/u/todo.txt"; byId("ws-name").value = "bad name"; byId("ws-ro").checked = true;
+  add.fire("click"); await settle();
+  result.badName = [posts().length, toasts().some(t => t.includes("1-64 letters"))];
+  byId("ws-name").value = "todo.v2";
+  button(card, "Add workspace").fire("click"); await settle();
+  result.readOnlyPost = posts();
+  calls.length = 0;
+  byId("ws-dir").value = "/home/u/src/app"; byId("ws-name").value = ""; byId("ws-ro").checked = false;
+  button(card, "Add workspace").fire("click"); await settle();
+  result.writableAsk = [confirmText(card), posts().length];
+  button(card, "Yes, writable").fire("click"); await settle();
+  result.writablePost = posts();
+
+  // an MCP server now: asked first naming host and start; then its message and the restart of the agent offered
+  calls.length = 0;
+  byId("mcp-live-server").value = "search";
+  button(card, "Add now…").fire("click");
+  result.addAsk = [confirmText(card), posts().length];
+  button(card, "Yes, add it now").fire("click"); await settle();
+  result.addPost = posts();
+  result.message = card.textContent.includes("web reaches the MCP server search now");
+  const restart = button(card, "Restart the agent now (the conversation goes on)");
+  result.restartOffered = Boolean(restart);
+  calls.length = 0;
+  restart.fire("click");
+  result.restartAsk = [confirmText(card), posts().length];
+  button(card, "Yes, restart it").fire("click"); await settle();
+  result.restartPost = posts();
+  result.restartGone = !card.all().some(n => n.tagName === "button" && n.textContent === "Restart the agent now (the conversation goes on)" && !n.parent.hidden);
+  // a helper agent; an agent that sees it at once: no restart offered
+  calls.length = 0;
+  attached = { message: "web reaches it now", attached: "live" };
+  byId("mcp-live-server").value = "helper:opencode";
+  button(card, "Add now…").fire("click");
+  result.helperAsk = confirmText(card);
+  button(card, "Yes, add it now").fire("click"); await settle();
+  result.helperPost = posts();
+  result.noRestart = !button(card, "Restart the agent now (the conversation goes on)");
+
+  // Remove: asked first (it cuts the agent's connections); a helper by its agent, a server by its name
+  calls.length = 0;
+  const mcpTable = card.all().filter(n => n.tagName === "table")[1];
+  const rowOf = (text) => mcpTable.all().filter(n => n.tagName === "tr").find(r => r.children[0].textContent.startsWith(text));
+  button(rowOf("helper-codex"), "Remove").fire("click");
+  result.removeAsk = [confirmText(rowOf("helper-codex")), posts().length];
+  button(rowOf("helper-codex"), "Yes, detach it").fire("click"); await settle();
+  button(rowOf("files"), "Remove").fire("click");
+  button(rowOf("files"), "Yes, detach it").fire("click"); await settle();
+  result.removePosts = posts();
+  vm.runInContext('setLanguage("de")', context);
+  result.german = vm.runInContext('[t("Add an MCP server"), t("{agent} as a helper", { agent: "codex" }), t("file")]', context);
+  console.log(JSON.stringify(result));
+})().catch(e => { console.error(e.stack); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_a_running_starts_mcp_servers_and_workspaces_in_its_resources_card(tmp_path):
+    """The Resources card: workspaces with their kind and name, a file or folder added with a name of its own (a bad
+    name refused in the page, a writable one asked first); MCP servers it reaches now, one added (a server of that
+    host or a helper agent) and removed, each asked first naming host and start, the command's message shown and a
+    restart of the agent offered (asked first too) when the agent does not see it at once."""
+    result = run_driver(tmp_path, RESOURCES_DRIVER, "resources")
+    assert result["workspaces"] == [["/work", "folder", "-", "rw", "start", "/srv/web"],
+                                    ["/workspaces/notes", "file", "notes (chosen)", "ro", "added", "/home/u/notes.md"],
+                                    ["/workspaces/lib", "folder", "lib", "ro", "added", "/home/u/lib"]]
+    assert result["mcpRows"] == ["files", "helper-codex-0123abcd (codex as a helper)"], "its own row, not another's"
+    assert result["choices"] == [["search", "search"], ["helper:claude", "claude as a helper"],
+                                 ["helper:codex", "codex as a helper"], ["helper:opencode", "opencode as a helper"]]
+    assert result["badName"] == [0, True]
+    assert result["readOnlyPost"] == [["/api/hosts/ct1/workspaces/web",
+                                       {"path": "/home/u/todo.txt", "read_only": True, "name": "todo.v2"}]]
+    ask, before = result["writableAsk"]
+    assert before == 0 and all(part in ask for part in ("web", "/home/u/src/app", "ct1", "/workspaces/app")), ask
+    assert result["writablePost"] == [["/api/hosts/ct1/workspaces/web",
+                                       {"path": "/home/u/src/app", "read_only": False, "confirm": True}]]
+    ask, before = result["addAsk"]
+    assert before == 0 and all(part in ask for part in ("search", "web", "ct1", "now")), ask
+    assert result["addPost"] == [["/api/hosts/ct1/starts/web/mcp-live", {"server": "search", "confirm": True}]]
+    assert result["message"] and result["restartOffered"]
+    ask, before = result["restartAsk"]
+    assert before == 0 and "web on ct1" in ask and "continues its conversation" in ask, ask
+    assert result["restartPost"] == [["/api/hosts/ct1/starts/web/resume", {"restart": True, "confirm": True}]]
+    assert result["restartGone"]
+    assert "opencode as a helper" in result["helperAsk"] or "opencode" in result["helperAsk"]
+    assert "ct1" in result["helperAsk"] and "web" in result["helperAsk"]
+    assert result["helperPost"] == [["/api/hosts/ct1/starts/web/mcp-live", {"helper": "opencode", "confirm": True}]]
+    assert result["noRestart"]
+    ask, before = result["removeAsk"]
+    assert before == 0 and all(part in ask for part in ("codex", "web", "ct1", "connections")), ask
+    assert result["removePosts"] == [["/api/hosts/ct1/starts/web/mcp-live/remove", {"helper": "codex", "confirm": True}],
+                                     ["/api/hosts/ct1/starts/web/mcp-live/remove", {"server": "files", "confirm": True}]]
+    assert result["german"] == ["Einen MCP-Server hinzufügen", "codex als Helfer", "Datei"]

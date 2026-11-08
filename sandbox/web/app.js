@@ -720,6 +720,8 @@ function attachControls(s, starts) {
 // The cards below it (network, resources, a review) stay open; one whose start stopped or went is switched off.
 const startsView = { main: null, host: null, body: null, rows: new Map(), loading: false, again: false, seen: {} };
 const START_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$/;
+const WORKSPACE_AS = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;  // workspace add --name NAME
+const MCP_SERVER_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
 
 // A start's identity: its id (list --json; it stays when the start is renamed), else its name (an older sandbox-ai).
 // Rows and cards are keyed by host and that: a rename keeps them, and their Network or Resources card attached.
@@ -1655,7 +1657,7 @@ function resourcesCard(main, s) {
   // workspaces: the start's (they stay) and the added ones (Remove; when it is refused, Force… with the refusal and
   // what forcing it leaves)
   const wsBody = el("tbody"), wsStatus = el("div");
-  const wsTable = el("table", {}, el("caption", { class: "sr-only" }, t("Workspaces of {where}", { where })), head([t("In the sandbox"), t("Mode"), t("Source"), t("On the host"), ""]), wsBody);
+  const wsTable = el("table", {}, el("caption", { class: "sr-only" }, t("Workspaces of {where}", { where })), head([t("In the sandbox"), t("Kind"), t("Name"), t("Mode"), t("Source"), t("On the host"), ""]), wsBody);
   const workspaceRow = (w) => {
     const target = String(w.sandbox || w.host || ""), actions = el("td", { class: "actions" });
     const remove = (force) => async (event) => busy(event.target, async () => {
@@ -1681,7 +1683,12 @@ function resourcesCard(main, s) {
       focusCancel(actions);
     };
     buttons();
-    return el("tr", {}, el("td", { class: "mono" }, target, w.note ? el("div", { class: "hint" }, String(w.note)) : null), el("td", {}, w.mode || "-"),
+    // an added one: a folder or a single file at /workspaces/NAME, NAME chosen (--name) or its own
+    const added = w.source === "added", at = String(w.sandbox || "").split("/").filter(Boolean).pop() || "-";
+    return el("tr", {}, el("td", { class: "mono" }, target, w.note ? el("div", { class: "hint" }, String(w.note)) : null),
+      el("td", {}, w.kind === "file" ? t("file") : t("folder")),
+      el("td", { class: "mono" }, added ? at : "-", added && w.named ? el("span", { class: "hint" }, " ", t("(chosen)")) : null),
+      el("td", {}, w.mode || "-"),
       el("td", {}, `${w.source || ""}${w.kept ? t(", kept for the session") : ""}`), el("td", { class: "mono" }, w.host || ""), actions);
   };
   const loadWorkspaces = async () => {
@@ -1693,26 +1700,108 @@ function resourcesCard(main, s) {
     clear(wsBody).append(...list.map(workspaceRow));
     wsTable.hidden = !list.length;
   };
+  // a folder or a single regular file of that host (workspace add PATH [--name NAME] [--ro]); a writable one asked
+  // first. What Yes sends is what the question named.
   const directory = el("input", { id: "ws-dir", class: "mono", placeholder: t("{path} (on that host)", { path: "/home/you/src/other" }) });
+  const wsName = el("input", { id: "ws-name", class: "mono", size: 16, placeholder: t("its own name"), pattern: WORKSPACE_AS.source.slice(1, -1) });
   const readOnly = el("input", { id: "ws-ro", type: "checkbox", checked: true });
   const wsActions = el("div", { class: "row" });
-  const addWorkspace = (dir, ro) => async (event) => busy(event.target, async () => {
+  const addWorkspace = (path, as, ro) => async (event) => busy(event.target, async () => {
+    const sent = Object.assign({ path, read_only: ro }, as ? { name: as } : {}, ro ? {} : { confirm: true });
     try {
-      const r = await api("POST", hostPath(`/workspaces/${encodeURIComponent(name)}`, host), ro ? { directory: dir, read_only: true } : { directory: dir, read_only: false, confirm: true });
-      toast("success", t("Added {what} to {where}", { what: dir, where }), (r && r.output) || "");
-      directory.value = ""; loadWorkspaces();
-    } catch (e) { failed(t("Could not add {what} to {where}", { what: dir, where }))(e); }
+      const r = await api("POST", hostPath(`/workspaces/${encodeURIComponent(name)}`, host), sent);
+      toast("success", t("Added {what} to {where}", { what: path, where }), (r && r.output) || "");
+      directory.value = ""; wsName.value = ""; loadWorkspaces();
+    } catch (e) { failed(t("Could not add {what} to {where}", { what: path, where }))(e); }
     wsButtons();
   });
   const wsButtons = () => clear(wsActions).append(el("button", { class: "primary", onclick: (event) => {
-    const dir = directory.value.trim();
-    if (!dir.startsWith("/")) { toast("warning", t("Which directory?"), t("An absolute path on {host}.", { host })); return; }
-    if (readOnly.checked) { addWorkspace(dir, true)(event); return; }
-    clear(wsActions).append(...ask(t("Give {name} write access to {path} on {host}? The agent can change and delete what is in it, until you remove it (kept for the session's next start).", { name, path: dir, host }),
-      t("Yes, writable"), addWorkspace(dir, false), () => { wsButtons(); focusFirst(wsActions); }));
+    const path = directory.value.trim(), as = wsName.value.trim();
+    if (!path.startsWith("/")) { toast("warning", t("Which file or folder?"), t("An absolute path on {host}.", { host })); return; }
+    if (as && !WORKSPACE_AS.test(as)) { toast("warning", t("Which name?"), t("1-64 letters, digits, '_', '.' or '-', starting with a letter or digit.")); return; }
+    if (readOnly.checked) { addWorkspace(path, as, true)(event); return; }
+    clear(wsActions).append(...ask(t("Give {name} write access to {path} on {host}, at {at}? The agent can change and delete what is in it, until you remove it (a folder is kept for the session's next start).", { name, path, host, at: `/workspaces/${as || path.split("/").filter(Boolean).pop() || ""}` }),
+      t("Yes, writable"), addWorkspace(path, as, false), () => { wsButtons(); focusFirst(wsActions); }));
     focusCancel(wsActions);
-  } }, t("Add workspace")), el("span", { class: "hint" }, t("at /workspaces/its name")));
+  } }, t("Add workspace")), el("span", { class: "hint" }, t("at /workspaces/NAME (its own name unless one is given)")));
   wsButtons();
+
+  // MCP servers while it runs (sandbox-ai mcp attach|detach ... --live): a server of that host (mcp list) or a helper
+  // agent added now, through a relay of its own; each asked first, naming the host and the start. Whether the agent
+  // sees one at once is its own matter (agent_restart): then a restart of the agent is offered (resume --restart,
+  // asked first too; the conversation goes on).
+  const mcpBody = el("tbody"), mcpStatus = el("div"), mcpResult = el("div");
+  const mcpTable = el("table", {}, el("caption", { class: "sr-only" }, t("MCP servers of {where}", { where })), head([t("Server"), ""]), mcpBody);
+  const mcpChoice = el("select", { id: "mcp-live-server" });
+  const mcpActions = el("div", { class: "row" });
+  const helperOf = (server) => { const m = /^helper-(claude|codex|opencode)-[0-9a-f]{8}$/.exec(server); return m ? m[1] : null; };
+  const which = (value) => (value.startsWith("helper:") ? { helper: value.slice("helper:".length) } : { server: value });
+  const shownServer = (body) => (body.helper ? t("{agent} as a helper", { agent: body.helper }) : body.server);
+  const restartAgent = () => {
+    const holder = el("div", { class: "row" });
+    const again = el("button", { class: "primary", onclick: () => confirmIn(holder, t("Restart the agent of {name} on {host} now? What runs in it ends; the agent continues its conversation.", { name, host }), t("Yes, restart it"), async () => {
+      try {
+        const r = await api("POST", hostPath(`/starts/${encodeURIComponent(name)}/resume`, host), { restart: true, confirm: true });
+        toast("success", t("{name} on {host} restarted", { name, host }), (r && r.output) || "");
+        holder.hidden = true;  // done: what the question put back stays out of sight
+        if (state.page === "starts") refreshStarts(main, true);
+      } catch (e) { failed(t("Could not restart {name} on {host}", { name, host }))(e); }
+    }, { kind: "primary", trigger: again }) }, t("Restart the agent now (the conversation goes on)"));
+    holder.append(again);
+    return holder;
+  };
+  const mcpRow = (server) => {
+    const actions = el("td", { class: "actions" }), helper = helperOf(server);
+    const body = helper ? { helper } : { server };
+    const remove = el("button", { class: "danger", onclick: () => confirmIn(actions, t("Detach {server} from {name} on {host} now? Its relay there closes: the agent's connections to it end and its calls fail, and its later starts go without it. The server's own sandbox keeps running.", { server: shownServer(body), name, host }), t("Yes, detach it"), async () => {
+      try {
+        const r = await api("POST", hostPath(`/starts/${encodeURIComponent(name)}/mcp-live/remove`, host), Object.assign({}, body, { confirm: true }));
+        toast("success", t("Detached {server} from {where}", { server: shownServer(body), where }), (r && r.message) || "");
+        loadMcp();
+      } catch (e) { failed(t("Could not detach {server} from {where}", { server: shownServer(body), where }))(e); }
+    }, { trigger: remove }) }, t("Remove"));
+    actions.append(remove);
+    return el("tr", {}, el("td", { class: "mono" }, server, helper ? el("span", { class: "hint" }, " ", t("({agent} as a helper)", { agent: helper })) : null), actions);
+  };
+  const loadMcp = async () => {
+    // what it reaches now: list --json's mcp_running (a session), mcp (a run without a kept start)
+    let live = [], defined = [];
+    try {
+      const listed = await api("GET", hostPath("/starts", host));
+      const me = (Array.isArray(listed) ? listed : []).find(e => e && typeof e === "object" && (startId(e) === startId(s) || e.name === name));
+      const names = me ? (Array.isArray(me.mcp_running) ? me.mcp_running : !me.directory && Array.isArray(me.mcp) ? me.mcp : []) : [];
+      live = names.filter(n => typeof n === "string" && n);
+      clear(mcpStatus).append(live.length ? "" : el("p", { class: "hint" }, t("No MCP server reaches it now.")));
+    } catch (e) { clear(mcpStatus).append(notice(e.message, "error")); }
+    try {
+      const servers = await api("GET", hostPath("/mcp", host));
+      defined = (Array.isArray(servers) ? servers : []).map(d => d && typeof d === "object" ? d.name : null).filter(n => typeof n === "string" && MCP_SERVER_NAME.test(n));
+    } catch (e) { mcpStatus.append(notice(e.message, "error")); }
+    clear(mcpBody).append(...live.map(mcpRow));
+    mcpTable.hidden = !live.length;
+    const chosen = mcpChoice.value;
+    clear(mcpChoice).append(...defined.filter(n => !live.includes(n)).map(n => el("option", { value: n }, n)),
+      ...["claude", "codex", "opencode"].map(agent => el("option", { value: `helper:${agent}` }, t("{agent} as a helper", { agent }))));
+    if (chosen && [...mcpChoice.children].some(o => o.value === chosen)) mcpChoice.value = chosen;
+  };
+  const addMcp = el("button", { class: "primary", onclick: () => {
+    const value = mcpChoice.value || (mcpChoice.children[0] && mcpChoice.children[0].value);
+    if (!value) { toast("warning", t("Which MCP server?"), t("Choose one of {host}, or a helper agent.", { host })); return; }
+    const body = which(value);
+    const text = body.helper ? t("Add {agent} as a helper to {name} on {host} now, while it runs? It works in a sandbox of its own on the start's main workspace; the agent reaches it through a relay of its own (kept for its later starts).", { agent: body.helper, name, host })
+      : t("Add the MCP server {server} to {name} on {host} now, while it runs? The agent reaches it through a relay of its own (kept for its later starts).", { server: body.server, name, host });
+    confirmIn(mcpActions, text, t("Yes, add it now"), async () => {
+      clear(mcpResult);
+      try {
+        const r = await api("POST", hostPath(`/starts/${encodeURIComponent(name)}/mcp-live`, host), Object.assign({}, body, { confirm: true }));
+        toast(r && r.attached === "already" ? "warning" : "success", t("{server} → {where}", { server: shownServer(body), where }), (r && r.message) || "");
+        mcpResult.append(el("p", { class: "hint" }, String((r && r.message) || "")));
+        if (r && (r.agent_restart === "required" || r.agent_restart === "maybe")) mcpResult.append(restartAgent());
+        loadMcp();
+      } catch (e) { failed(t("Could not add {server} to {where}", { server: shownServer(body), where }))(e); }
+    }, { kind: "primary", trigger: addMcp });
+  } }, t("Add now…"));
+  mcpActions.append(addMcp);
 
   // devices: given at the start (they stay) or added (Remove); adding asks first
   const devBody = el("tbody"), devStatus = el("div");
@@ -1811,15 +1900,19 @@ function resourcesCard(main, s) {
       : t("Raise the {limits} limit of {where}? The agent can then use more of that host (a strict security mode keeps its cap).", { limits: names(raised), where });
     confirmIn(limActions, text, removed.length ? t("Yes, no limit") : t("Yes, raise it"), () => sendLimits(Object.assign(body, { confirm: true })), { trigger: apply });
   } }, t("Apply limits"));
-  limActions.append(apply, el("button", { onclick: () => { loadWorkspaces(); loadDevices(); loadLimits(); } }, t("Refresh")));
+  limActions.append(apply, el("button", { onclick: () => { loadWorkspaces(); loadMcp(); loadDevices(); loadLimits(); } }, t("Refresh")));
 
   const title = () => t("Workspaces, devices and limits of {where}", { where });
   const heading = el("h2", {}, title());
   const card = el("div", { class: "card", id: "resources-card" }, heading, notes,
-    el("p", { class: "hint" }, t("While it runs, without a restart; each change runs sandbox-ai workspace, devices or limits on that host, with its checks.")),
+    el("p", { class: "hint" }, t("While it runs, without a restart; each change runs sandbox-ai workspace, mcp, devices or limits on that host, with its checks.")),
     el("h3", {}, t("Workspaces")), wsStatus, wsTable,
-    el("div", { class: "form" }, el("label", { for: "ws-dir" }, t("Directory")), directory,
+    el("div", { class: "form" }, el("label", { for: "ws-dir" }, t("File or folder")), directory,
+      el("label", { for: "ws-name" }, t("Name (optional)")), wsName,
       el("label", { for: "ws-ro" }, t("Read-only")), readOnly, el("span"), wsActions),
+    el("h3", {}, t("MCP servers")), mcpStatus, mcpTable,
+    el("div", { class: "form" }, el("label", { for: "mcp-live-server" }, t("Add an MCP server")), mcpChoice, el("span"), mcpActions),
+    mcpResult,
     el("h3", {}, t("Devices")), devStatus, devTable,
     el("div", { class: "form" }, el("label", { for: "dev-value" }, t("Device")), device, el("span"), devActions),
     el("h3", {}, t("Resource limits")), limitsNow,
@@ -1832,6 +1925,7 @@ function resourcesCard(main, s) {
   main.append(card);
   registerCard(card, notes, cardRef(s, () => name, (fresh) => { name = fresh; where = t("{name} on {host}", { name, host }); }, heading, title));
   loadWorkspaces();
+  loadMcp();
   loadDevices();
   loadLimits();
 }
