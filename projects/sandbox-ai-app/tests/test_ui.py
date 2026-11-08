@@ -1274,7 +1274,9 @@ def test_quitting_stops_running_commands_with_their_children(window, env, monkey
     assert wait(lambda: pid_file.exists() and pid_file.read_text(), 20)
     child = int(pid_file.read_text())
     assert window.running_work() == ["System"]
-    assert window.stop_work(timeout=10) == [], "the command was stopped, so its thread ended"
+    left = window.stop_work(timeout=10)
+    assert left == [], ("the command was stopped, so its thread ended; still running: "
+                        + ", ".join(getattr(c.function, "__qualname__", repr(c.function)) for c in left))
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         try:
