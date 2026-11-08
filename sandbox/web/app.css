@@ -211,3 +211,19 @@ tr.related-note td:nth-child(2) { padding-left: 30px; overflow-wrap: anywhere; }
   #host-install-card .form .wide { grid-column: 1; }
 }
 .check-result pre { max-height: 24em; overflow: auto; }
+/* A card opened where the user is: a row of its own right below its start (or event, team) in that table. */
+tr.card-row > td { padding: 4px 0 10px 30px; background: transparent; }
+tr.card-row .card { margin: 0; }
+.card-slot:empty { display: none; }
+.error-detail { margin-top: 4px; font-size: .85em; opacity: .85; overflow-wrap: anywhere; }
+/* The new start's preset: one field per value, its MCP servers as that host has them. */
+.preset-values { margin: 4px 0; }
+.preset-values:empty, .preset-mcp:empty { display: none; }
+.preset-mcp ul { margin: 4px 0; padding-left: 20px; }
+.preset-problems { margin: 4px 0; }
+/* Help: a (?) beside each page's heading, the sections folded. */
+h1.with-help { display: inline-block; margin-right: 8px; }
+.help-link { vertical-align: super; border-radius: 50%; min-width: 1.8em; }
+.help-section summary { cursor: pointer; }
+.help-section summary h2 { display: inline; font-size: 1.1em; }
+.help-section code { font-family: var(--mono); }

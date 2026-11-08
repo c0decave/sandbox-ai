@@ -1,0 +1,638 @@
+{
+ "source": "projects/sandbox-ai-app/sandbox_ai_app/help_content.py (scripts/export_web_help.py)",
+ "sections": [
+  {
+   "id": "sandbox",
+   "title": {
+    "en": "What a sandbox is",
+    "de": "Was eine Sandbox ist"
+   },
+   "body": {
+    "en": "A sandbox runs one agent (Claude Code, Codex or OpenCode) inside two layers: a rootless Podman pod or Bubblewrap, and inside it Firejail. Before the agent starts, a guard checks that Firejail created its namespaces, dropped every capability and enabled NoNewPrivs and Seccomp; any failed check aborts the start.\n\n- `/work` is the first workspace, the agent's working directory. Further workspaces appear at `/workspaces/NAME`.\n- HOME is the sandbox's `/root`: conversations, settings, the copied login. It is kept per start unless `--no-keep`.\n- Shared with the sandbox is only what you name: workspaces and mounts, a copy of the agent's login, your kits (read-only) and the project's memory. Your own `~/.ssh` or `~/.config` stay outside.\n- The network is default-deny: only the agent's provider is reachable unless you widen it.\n\nSeeing `root` inside is expected: it maps to your user on the host. A sandbox does not protect against kernel exploits; use a virtual machine for that. Bubblewrap uses the host's `/usr`, Podman an image per agent.",
+    "de": "Eine Sandbox führt einen Agenten (Claude Code, Codex oder OpenCode) in zwei Schichten aus: einem rootless Podman-Pod oder Bubblewrap und darin Firejail. Bevor der Agent startet, prüft ein Wächter, dass Firejail seine Namespaces angelegt, alle Capabilities abgelegt und NoNewPrivs und Seccomp eingeschaltet hat; jede fehlgeschlagene Prüfung bricht den Start ab.\n\n- `/work` ist der erste Workspace, das Arbeitsverzeichnis des Agenten. Weitere Workspaces erscheinen unter `/workspaces/NAME`.\n- HOME ist `/root` der Sandbox: Unterhaltungen, Einstellungen, der kopierte Login. Es wird je Start aufbewahrt, außer mit `--no-keep`.\n- Geteilt wird nur, was Sie nennen: Workspaces und Mounts, eine Kopie des Logins des Agenten, Ihre Kits (nur lesbar) und das Memory des Projekts. Ihr eigenes `~/.ssh` oder `~/.config` bleiben draußen.\n- Das Netzwerk ist standardmäßig zu: Nur der Anbieter des Agenten ist erreichbar, solange Sie nicht erweitern.\n\nDass Sie innen `root` sehen, ist normal: Es entspricht Ihrem Benutzer auf dem Host. Eine Sandbox schützt nicht vor Kernel-Exploits; nehmen Sie dafür eine virtuelle Maschine. Bubblewrap nutzt `/usr` des Hosts, Podman ein Image je Agent."
+   },
+   "cli": [
+    "sandbox-ai doctor",
+    "sandbox-ai build AGENT",
+    "--backend",
+    "--probe",
+    "--dry-run"
+   ],
+   "see": [
+    "workspaces-mounts",
+    "network",
+    "sessions",
+    "security-modes"
+   ]
+  },
+  {
+   "id": "security-modes",
+   "title": {
+    "en": "Security modes",
+    "de": "Sicherheitsmodi"
+   },
+   "body": {
+    "en": "A security mode is a preset of options, from `lax` to `paranoid`, chosen with `--mode`. The mode sets defaults; options may only narrow it. In `high` and `paranoid` an option that would widen the sandbox is refused, with the laxer mode that would allow it.\n\n- `lax`: every destination, each connection logged, no questions.\n- `low`: the development hosts (provider, PyPI, npm, GitHub, the OpenAI and Anthropic APIs).\n- `medium` (default): the agent's provider only; exactly a start without `--mode`.\n- `high`: nothing can be opened by options, answers at most for the run, further workspaces read-only, no rw mounts, devices or GPU, a privacy check of every push, smaller limits.\n- `paranoid`: as high, every workspace read-only, answers only once, no HOME kept.\n\nThe mode comes from `--mode`, else `\"mode\"` in the project file, else in `~/.config/sandbox-ai/defaults.json`, else `medium`. The administrator's `min_mode` is a floor. The mode holds during the run too: `sandbox-ai net allow` opens nothing it refuses. The dry run shows the mode and where it came from.",
+    "de": "Ein Sicherheitsmodus ist eine Voreinstellung von Optionen, von `lax` bis `paranoid`, gewählt mit `--mode`. Der Modus setzt Vorgaben; Optionen dürfen sie nur enger machen. In `high` und `paranoid` wird eine Option, die die Sandbox erweitern würde, abgelehnt, mit dem laxeren Modus, der sie erlauben würde.\n\n- `lax`: jedes Ziel, jede Verbindung protokolliert, keine Fragen.\n- `low`: die Entwicklungs-Hosts (Anbieter, PyPI, npm, GitHub, die OpenAI- und Anthropic-APIs).\n- `medium` (Standard): nur der Anbieter des Agenten; genau ein Start ohne `--mode`.\n- `high`: Optionen öffnen nichts, Antworten höchstens für den Lauf, weitere Workspaces nur lesbar, keine rw-Mounts, Geräte oder GPU, Datenschutzprüfung jedes Pushs, kleinere Limits.\n- `paranoid`: wie high, jeder Workspace nur lesbar, Antworten nur einmal, kein HOME bleibt.\n\nDer Modus kommt aus `--mode`, sonst aus `\"mode\"` der Projektdatei, sonst aus `~/.config/sandbox-ai/defaults.json`, sonst `medium`. `min_mode` des Administrators ist eine Untergrenze. Der Modus gilt auch während des Laufs: `sandbox-ai net allow` öffnet nichts, was er ablehnt. Der Probelauf zeigt den Modus und woher er kommt."
+   },
+   "cli": [
+    "--mode lax|low|medium|high|paranoid",
+    "--mode-at-least",
+    "sandbox-ai doctor"
+   ],
+   "see": [
+    "network",
+    "approvals",
+    "taint",
+    "canaries",
+    "policy"
+   ]
+  },
+  {
+   "id": "workspaces-mounts",
+   "title": {
+    "en": "Workspaces and mounts",
+    "de": "Workspaces und Mounts"
+   },
+   "body": {
+    "en": "A workspace is a host folder the agent works in. `--workspace PATH` appears at `/work` and is writable unless `--workspace-ro`. Repeat the option for more: the first is always `/work`, every further one appears at `/workspaces/NAME`.\n\n- `--mount SOURCE:DESTINATION:ro|rw` adds a folder elsewhere; destinations lie under `/work`, `/mnt` or `/opt`. Sockets and device files are refused.\n- A workspace may not be or contain your HOME, `/`, `~/.config`, `~/.ssh`, `~/.local` and similar places, or sandbox-ai itself.\n- sandbox-ai records every tree a sandbox could write; a path through a symlink inside such a tree is refused.\n\nThe project's `.sandbox-ai.json` lives in the first workspace and takes effect only once you trust it. After a run, review a workspace's `.git/hooks` and `.git/config` before you use git there: they run code on the host. In the app the first workspace is the current project's folder; the Board shows workspaces and mounts as parts.",
+    "de": "Ein Workspace ist ein Ordner des Hosts, in dem der Agent arbeitet. `--workspace PFAD` erscheint unter `/work` und ist beschreibbar, außer mit `--workspace-ro`. Wiederholen Sie die Option für mehr: Der erste ist immer `/work`, jeder weitere erscheint unter `/workspaces/NAME`.\n\n- `--mount QUELLE:ZIEL:ro|rw` fügt einen Ordner anderswo hinzu; Ziele liegen unter `/work`, `/mnt` oder `/opt`. Sockets und Gerätedateien werden abgelehnt.\n- Ein Workspace darf nicht Ihr HOME, `/`, `~/.config`, `~/.ssh`, `~/.local` und ähnliche Orte oder sandbox-ai selbst sein oder enthalten.\n- sandbox-ai merkt sich jeden Baum, den eine Sandbox schreiben konnte; ein Pfad über einen Symlink in einem solchen Baum wird abgelehnt.\n\nDie `.sandbox-ai.json` des Projekts liegt im ersten Workspace und wirkt erst, wenn Sie ihr vertrauen. Prüfen Sie nach einem Lauf `.git/hooks` und `.git/config` eines Workspace, bevor Sie dort git benutzen: Sie führen Code auf dem Host aus. In der App ist der erste Workspace (Arbeitsordner) der Ordner des aktuellen Projekts; die Tafel zeigt Workspaces und Mounts als Teile."
+   },
+   "cli": [
+    "--workspace",
+    "--workspace-ro",
+    "--mount",
+    "--state-dir",
+    "sandbox-ai wizard trust FILE"
+   ],
+   "see": [
+    "sandbox"
+   ]
+  },
+  {
+   "id": "sessions",
+   "title": {
+    "en": "Starts and sessions",
+    "de": "Starts und Sitzungen"
+   },
+   "body": {
+    "en": "Every start of an agent has a name, `AGENT-PROJECT-xxxx` or what `--name` gives, and is listed by `sandbox-ai list`. An interactive start runs as a session: the agent runs in tmux inside the sandbox (windows `agent` and `shell`) and your terminal attaches.\n\n- Ctrl-b d or closing the terminal detaches; the agent works on. `sandbox-ai attach NAME` brings it back.\n- `pause` freezes every process, `resume` thaws it.\n- `stop` ends it; HOME, options and logs are kept. `resume` on a stopped start creates a new sandbox with the same HOME, and the agent continues its last conversation.\n- `rename` changes the name, the run id stays. `delete` removes a stopped start with its HOME.\n\nTasks (`-p`, `codex exec`, `opencode run`, a start without a terminal) run in the foreground and cannot be attached. Running processes are not saved: only HOME and the workspaces survive a stop. Before a kept HOME is reborn, the launcher names every change in its start files; look before you go on. `--no-keep` discards the HOME at the end.",
+    "de": "Jeder Start eines Agenten hat einen Namen, `AGENT-PROJEKT-xxxx` oder was `--name` angibt, und wird von `sandbox-ai list` gelistet. Ein interaktiver Start läuft als Sitzung: Der Agent läuft in tmux in der Sandbox (Fenster `agent` und `shell`), und Ihr Terminal verbindet sich.\n\n- Strg-b d oder das Schließen des Terminals löst sich; der Agent arbeitet weiter. `sandbox-ai attach NAME` holt ihn zurück.\n- `pause` friert jeden Prozess ein, `resume` taut ihn auf.\n- `stop` beendet ihn; HOME, Optionen und Logs bleiben. `resume` auf einem gestoppten Start legt eine neue Sandbox mit demselben HOME an, und der Agent setzt seine letzte Unterhaltung fort.\n- `rename` ändert den Namen, die Run-ID bleibt. `delete` entfernt einen gestoppten Start samt HOME.\n\nAufgaben (`-p`, `codex exec`, `opencode run`, ein Start ohne Terminal) laufen im Vordergrund und lassen sich nicht verbinden. Laufende Prozesse werden nicht gesichert: Nur HOME und die Workspaces überstehen einen Stopp. Bevor ein aufbewahrtes HOME wiedergeboren wird, nennt der Launcher jede Änderung seiner Startdateien; sehen Sie hin, bevor Sie weitermachen. `--no-keep` verwirft das HOME am Ende."
+   },
+   "cli": [
+    "sandbox-ai list",
+    "sandbox-ai attach NAME",
+    "sandbox-ai pause NAME",
+    "sandbox-ai resume NAME",
+    "sandbox-ai stop NAME",
+    "sandbox-ai rename OLD NEW",
+    "sandbox-ai delete NAME",
+    "sandbox-ai resume NAME --review-home",
+    "sandbox-ai gc",
+    "--name",
+    "--no-keep"
+   ],
+   "see": [
+    "sandbox"
+   ]
+  },
+  {
+   "id": "network",
+   "title": {
+    "en": "Network and allow-list",
+    "de": "Netzwerk und Freigabeliste"
+   },
+   "body": {
+    "en": "Each sandbox has its own network with a default-deny firewall. Only the agent's provider hosts are resolved at the start, pinned and allowed on HTTPS; there is no DNS inside by default.\n\n- `--profile NAME` opens a bundle: `development` (provider, PyPI, GitHub, the OpenAI and Anthropic APIs), `frontier`, `dns`, `egress-all`, `offline`.\n- Presets for known hosts: `--allow-pypi`, `--allow-github`, `--allow-gitlab`, `--allow-npm` and more.\n- `--allow-host NAME` pins a name on HTTPS, `--allow-tcp IP:PORT` one port, `--allow IP_OR_CIDR` everything to a destination.\n- `--allow-host-port PORT` (Podman) reaches a service on the host's own loopback, such as a local Git server.\n- `--dns` gives real DNS, `--offline` no network, `--egress-all-allow` every destination.\n\nA running sandbox can get more or less without a restart: `sandbox-ai net allow` and `net revoke`, with `--keep` also for the next starts. Every widening is a decision: `--dns` can carry data out in names, and IP filtering cannot tell apart domains that share CDN addresses. A destination not allowed becomes a question on the Approvals page.",
+    "de": "Jede Sandbox hat ihr eigenes Netzwerk mit einer standardmäßig sperrenden Firewall. Nur die Hosts des Anbieters werden beim Start aufgelöst, gepinnt und für HTTPS erlaubt; innen gibt es standardmäßig kein DNS.\n\n- `--profile NAME` öffnet ein Bündel: `development` (Anbieter, PyPI, GitHub, die OpenAI- und Anthropic-APIs), `frontier`, `dns`, `egress-all`, `offline`.\n- Voreinstellungen für bekannte Hosts: `--allow-pypi`, `--allow-github`, `--allow-gitlab`, `--allow-npm` und weitere.\n- `--allow-host NAME` pinnt einen Namen für HTTPS, `--allow-tcp IP:PORT` einen Port, `--allow IP_ODER_CIDR` alles zu einem Ziel.\n- `--allow-host-port PORT` (Podman) erreicht einen Dienst auf dem Loopback des Hosts, etwa einen lokalen Git-Server.\n- `--dns` gibt echtes DNS, `--offline` kein Netzwerk, `--egress-all-allow` jedes Ziel.\n\nEine laufende Sandbox bekommt mehr oder weniger ohne Neustart: `sandbox-ai net allow` und `net revoke`, mit `--keep` auch für die nächsten Starts. Jede Erweiterung ist eine Entscheidung: `--dns` kann Daten in Namen hinaustragen, und IP-Filter unterscheiden keine Domains, die sich CDN-Adressen teilen. Ein nicht erlaubtes Ziel wird zu einer Frage auf der Seite Freigaben."
+   },
+   "cli": [
+    "--profile",
+    "--allow-host",
+    "--allow-tcp",
+    "--allow",
+    "--allow-host-port",
+    "--dns",
+    "--offline",
+    "--egress-all-allow",
+    "--no-provider-defaults",
+    "--subnet",
+    "sandbox-ai net allow",
+    "sandbox-ai net revoke",
+    "sandbox-ai net show",
+    "sandbox-ai logs"
+   ],
+   "see": [
+    "proxy",
+    "approvals",
+    "vpn-tor"
+   ]
+  },
+  {
+   "id": "proxy",
+   "title": {
+    "en": "Connection proxy",
+    "de": "Verbindungs-Proxy"
+   },
+   "body": {
+    "en": "Every TCP connection of the agent passes a proxy that starts with the sandbox. It is on by default; `--no-proxy` switches it off.\n\n- Transparent: programs need no proxy settings, and what the network options do not allow is refused at once.\n- TLS inspection: TLS is opened with a CA made for this run alone, which the agent trusts; the proxy checks the real server against the system's CAs. `--no-inspect HOST` passes a host through unopened.\n- Logged: every request with method, URL, status, headers and bodies, credentials redacted.\n- Push check: a Git push over HTTP(S) waits until the privacy check has seen it.\n- Rules per host: `--allow-http 'HOST METHODS PATH'` lets only matching requests through; the rest gets a 403.\n- Tokens kept out: with `--token-proxy`, Git tokens go only to the proxy, which adds them to Git's own requests. `--api-key`, `--llm` and publish logins work the same way.\n\nPrograms that pin certificates reject the session CA; the log shows `tls-refused` with a hint. A determined agent can encode data past any pattern check, but the log records what was sent.",
+    "de": "Jede TCP-Verbindung des Agenten läuft durch einen Proxy, der mit der Sandbox startet. Er ist standardmäßig an; `--no-proxy` schaltet ihn ab.\n\n- Transparent: Programme brauchen keine Proxy-Einstellungen, und was die Netzwerkoptionen nicht erlauben, wird sofort abgewiesen.\n- TLS-Inspektion: TLS wird mit einer nur für diesen Lauf erzeugten CA geöffnet, der der Agent vertraut; der Proxy prüft den echten Server gegen die CAs des Systems. `--no-inspect HOST` lässt einen Host ungeöffnet durch.\n- Protokolliert: jede Anfrage mit Methode, URL, Status, Headern und Bodies, Anmeldedaten geschwärzt.\n- Push-Prüfung: Ein Git-Push über HTTP(S) wartet, bis die Datenschutzprüfung ihn gesehen hat.\n- Regeln je Host: `--allow-http 'HOST METHODEN PFAD'` lässt nur passende Anfragen durch; der Rest bekommt ein 403.\n- Tokens bleiben draußen: Mit `--token-proxy` gehen Git-Tokens nur an den Proxy, der sie in Gits eigene Anfragen einsetzt. `--api-key`, `--llm` und Publish-Logins funktionieren genauso.\n\nProgramme, die Zertifikate pinnen, lehnen die CA der Sitzung ab; das Log zeigt `tls-refused` mit einem Hinweis. Ein entschlossener Agent kann Daten an jeder Musterprüfung vorbei kodieren, aber das Log hält fest, was gesendet wurde."
+   },
+   "cli": [
+    "--no-proxy",
+    "--no-inspect",
+    "--allow-http",
+    "--token-proxy",
+    "--api-key",
+    "--log-dir"
+   ],
+   "see": [
+    "network",
+    "privacy-check",
+    "rulesets",
+    "secrets",
+    "logs"
+   ]
+  },
+  {
+   "id": "approvals",
+   "title": {
+    "en": "Approvals",
+    "de": "Freigaben"
+   },
+   "body": {
+    "en": "With the proxy on, a sandbox asks you instead of failing silently (`--ask on`, the default). It asks about a connection or name lookup the options do not allow, a push the privacy check has warnings about, a request or MCP tool call an `ask` rule holds, a device a device rule asks about, and a URL to open in your browser.\n\n- once allows this one connection, run until the sandbox ends, always also every later start of the same project.\n- deny refuses it for this run; always blocked refuses it at every later start.\n- A question nobody answers is refused after 60 seconds.\n\nQuestions appear as desktop notifications, in the app and in `sandbox-ai approvals`. The name in a connection question is the agent's claim: what you allow is the address, unless sandbox-ai can prove the name. `--ask off` refuses everything the options do not allow. The security mode `high` caps answers at run, `paranoid` at once, and the administrator's `max_approval_scope` can cap them further.",
+    "de": "Mit Proxy fragt eine Sandbox nach, statt still zu scheitern (`--ask on`, der Standard). Sie fragt nach einer Verbindung oder Namensauflösung, die die Optionen nicht erlauben, einem Push, zu dem die Datenschutzprüfung Warnungen hat, einer Anfrage oder einem MCP-Aufruf, den eine `ask`-Regel anhält, einem Gerät, nach dem eine Geräteregel fragt, und einer URL, die in Ihrem Browser öffnen soll.\n\n- einmal erlaubt diese eine Verbindung, für diesen Lauf bis zum Ende der Sandbox, immer auch jeden späteren Start desselben Projekts.\n- Ablehnen weist sie für diesen Lauf ab; Immer blockieren weist sie bei jedem späteren Start ab.\n- Eine Frage ohne Antwort wird nach 60 Sekunden abgelehnt.\n\nFragen erscheinen als Desktop-Benachrichtigung, in der App und in `sandbox-ai approvals`. Der Name in einer Verbindungsfrage ist eine Angabe des Agenten: Erlaubt wird die Adresse, außer sandbox-ai kann den Namen belegen. `--ask off` weist alles ab, was die Optionen nicht erlauben. Der Sicherheitsmodus `high` begrenzt Antworten auf den Lauf, `paranoid` auf einmal, und `max_approval_scope` des Administrators kann sie weiter begrenzen."
+   },
+   "cli": [
+    "--ask on|off",
+    "sandbox-ai approvals list",
+    "sandbox-ai approvals allow ID --scope once|run|always",
+    "sandbox-ai approvals remembered",
+    "sandbox-ai approvals forget PROJECT ENTRY"
+   ],
+   "see": [
+    "network",
+    "rulesets",
+    "security-modes"
+   ]
+  },
+  {
+   "id": "taint",
+   "title": {
+    "en": "The run's taint",
+    "de": "Der Taint des Laufs"
+   },
+   "body": {
+    "en": "Once untrusted content has entered the agent's context, any later action may follow instructions hidden in it. sandbox-ai cannot see how data flows inside the model, so it marks the whole run instead: the run is tainted.\n\n- A ruleset names sources of untrusted content under `\"untrusted\"`: responses of hosts, results of MCP tools, the agent's own tools. A rule with a `when` condition on `tainted` holds only after such content arrived.\n- In `high`, content from any host but the provider taints the run, and every MCP tool call then asks. In `paranoid`, MCP results and the agent's WebSearch and WebFetch taint it too, and its shell, file edits and fetches ask as well.\n- The agent's own provider is never a source.\n\nA question held by the taint says why and since when. The connection log, Activity and `sandbox-ai net show` show the taint. Only you take it back, with `sandbox-ai net untaint`; a new run starts untainted. The taint is coarse by design: every later write asks, however unrelated.",
+    "de": "Sobald nicht vertrauenswürdiger Inhalt in den Kontext des Agenten gelangt ist, kann jede spätere Aktion darin versteckten Anweisungen folgen. sandbox-ai sieht nicht, wie Daten im Modell fließen, und markiert deshalb den ganzen Lauf: Der Lauf bekommt einen Taint.\n\n- Ein Regelwerk nennt Quellen nicht vertrauenswürdigen Inhalts unter `\"untrusted\"`: Antworten von Hosts, Ergebnisse von MCP-Werkzeugen, die eigenen Werkzeuge des Agenten. Regeln mit der Bedingung `\"when\"` auf `tainted` gelten erst, wenn solcher Inhalt angekommen ist.\n- In `high` gibt Inhalt jedes Hosts außer dem Anbieter dem Lauf einen Taint, danach fragt jeder MCP-Aufruf. In `paranoid` tun das auch MCP-Ergebnisse und WebSearch und WebFetch des Agenten, und danach fragen auch seine Shell, Dateiänderungen und Abrufe.\n- Der eigene Anbieter des Agenten ist nie eine Quelle.\n\nEine Frage, die der Taint anhält, sagt warum und seit wann. Verbindungslog, Aktivität und `sandbox-ai net show` zeigen den Taint. Nur Sie nehmen ihn zurück, mit `sandbox-ai net untaint`; ein neuer Lauf beginnt ohne Taint. Der Taint ist absichtlich grob: Jedes spätere Schreiben fragt, wie unverwandt es auch ist."
+   },
+   "cli": [
+    "sandbox-ai net untaint RUN",
+    "sandbox-ai net show",
+    "--rules"
+   ],
+   "see": [
+    "rulesets",
+    "security-modes",
+    "approvals"
+   ]
+  },
+  {
+   "id": "canaries",
+   "title": {
+    "en": "Canary files",
+    "de": "Köderdateien (Canaries)"
+   },
+   "body": {
+    "en": "A canary is a decoy: a file that looks like a credential, planted in the sandbox for one run. Nothing legitimate needs it, so whoever opens it, and above all whoever sends its contents somewhere, is worth knowing about: a prompt injection, a malicious install script, a tool that uploads your HOME.\n\n- `credentials` (on by default): files such as `~/.aws/credentials`, SSH keys, `~/.netrc`, `~/.git-credentials` in the sandbox HOME.\n- `home` (on by default): `~/Documents/passwords.txt`, `~/.kube/config`.\n- `workspace` (off): a `.env` in each workspace, since it changes your project folder.\n\nEach run gets its own random tokens in the shape of real ones, which no service accepts. A read is reported (in `high` asked about, with the sandbox paused meanwhile); a token leaving through the proxy is refused and stops the run in the default mode. `sandbox-ai canaries resume RUN` continues a sandbox a canary paused. A token cut into pieces, encrypted or sent past the proxy is not found.",
+    "de": "Ein Köder ist eine Attrappe: eine Datei, die wie Anmeldedaten aussieht und für einen Lauf in die Sandbox gelegt wird. Nichts Legitimes braucht sie; wer sie öffnet und vor allem wer ihren Inhalt irgendwohin schickt, verdient Aufmerksamkeit: eine Prompt-Injection, ein bösartiges Installationsskript, ein Werkzeug, das Ihr HOME hochlädt.\n\n- `credentials` (standardmäßig an): Dateien wie `~/.aws/credentials`, SSH-Schlüssel, `~/.netrc`, `~/.git-credentials` im HOME der Sandbox.\n- `home` (standardmäßig an): `~/Documents/passwords.txt`, `~/.kube/config`.\n- `workspace` (aus): eine `.env` in jedem Workspace, da sie Ihren Projektordner ändert.\n\nJeder Lauf bekommt eigene zufällige Tokens in der Form echter, die kein Dienst annimmt. Ein Lesen wird gemeldet (in `high` erfragt, die Sandbox solange pausiert); ein Token, das durch den Proxy hinaus will, wird im Standardmodus abgewiesen und stoppt den Lauf. `sandbox-ai canaries resume RUN` setzt eine Sandbox fort, die ein Köder pausiert hat. Ein zerteiltes, verschlüsseltes oder am Proxy vorbei gesendetes Token wird nicht gefunden."
+   },
+   "cli": [
+    "--canaries credentials,home,workspace",
+    "--no-canaries",
+    "sandbox-ai canaries list",
+    "sandbox-ai canaries resume RUN",
+    "sandbox-ai canaries log [RUN] [--json]"
+   ],
+   "see": [
+    "security-modes",
+    "rulesets",
+    "policy",
+    "proxy"
+   ]
+  },
+  {
+   "id": "presets",
+   "title": {
+    "en": "Presets of sandbox-ai",
+    "de": "Presets von sandbox-ai"
+   },
+   "body": {
+    "en": "A preset of sandbox-ai is a ready setup to start an agent with: launcher options, MCP servers, an optional ruleset and a first task, with placeholders for what only you know (a folder, a port, a device, an LLM server).\n\n- `sandbox-ai presets list` shows the built-in presets and your own, `presets show NAME` what one sets and asks for, `presets check NAME` what is missing before it can start.\n- Start with `--preset NAME --preset-value KEY=VALUE`. The command line wins over the preset; the project file, your defaults, the security mode and the policy apply as always. A preset's `--mode` is a floor.\n- Your own presets are JSON files in `~/.config/sandbox-ai/presets/`, outside every workspace. One with the id of a built-in preset replaces it.\n\nThe app has presets of its own: ready boards and your saved boards in `~/.config/sandbox-ai/app/presets.json`. The gallery shows both kinds: sandbox-ai's presets in their own category, the app's in the others and under My presets. Neither kind ever holds a secret, and neither may copy a login in.",
+    "de": "Ein Preset von sandbox-ai ist eine fertige Einrichtung, um einen Agenten zu starten: Optionen des Launchers, MCP-Server, ein optionales Regelwerk und eine erste Aufgabe, mit Platzhaltern für das, was nur Sie wissen (ein Ordner, ein Port, ein Gerät, ein LLM-Server).\n\n- `sandbox-ai presets list` zeigt die eingebauten und Ihre eigenen Presets, `presets show NAME`, was eines setzt und erfragt, `presets check NAME`, was fehlt, bevor es starten kann.\n- Starten Sie mit `--preset NAME --preset-value SCHLÜSSEL=WERT`. Die Kommandozeile gewinnt über das Preset; Projektdatei, Ihre Vorgaben, Sicherheitsmodus und Richtlinie gelten wie immer. Das `--mode` eines Presets ist eine Untergrenze.\n- Eigene Presets sind JSON-Dateien in `~/.config/sandbox-ai/presets/`, außerhalb jedes Workspace. Eines mit der ID eines eingebauten ersetzt dieses.\n\nDie App hat eigene Vorlagen: fertige Tafeln und Ihre gespeicherten Tafeln in `~/.config/sandbox-ai/app/presets.json`. Die Galerie zeigt beide Arten: die Presets von sandbox-ai in einer eigenen Kategorie, die Vorlagen der App in den anderen und unter Meine Vorlagen. Keine der beiden enthält je ein Geheimnis, und keine darf eine Anmeldung hineinkopieren."
+   },
+   "cli": [
+    "sandbox-ai presets list",
+    "sandbox-ai presets show NAME",
+    "sandbox-ai presets check NAME",
+    "--preset",
+    "--preset-value"
+   ],
+   "see": [
+    "security-modes",
+    "mcp",
+    "rulesets"
+   ]
+  },
+  {
+   "id": "kits",
+   "title": {
+    "en": "Kits, memory, plugins and hooks",
+    "de": "Kits, Memory, Plugins und Hooks"
+   },
+   "body": {
+    "en": "Kits bring the agent's skills, agents, commands, prompts and a memory template into a sandbox, without exposing your own `~/.claude`, `~/.codex` or `~/.config/opencode`.\n\n- The default kit is part of every sandbox of an agent; `--kit NAME` adds named kits, `--no-default-kit` leaves the default out. sandbox-ai's built-in skill `sandbox-ai` explains the sandbox to the agent.\n- Entries are copied into a read-only snapshot: the agent can use, not change them. The same name in two kits stops the start.\n- Project memory: the agent's memory file is kept per project and taken back after the run; `--no-memory` starts without it.\n- Claude plugins are declared in a kit and installed into a plugin store with `sandbox-ai plugins claude`; a sandbox enables exactly the plugins its kits list.\n- Hooks in a kit run only after `sandbox-ai kits trust-hooks KIT` and only while nothing in them changes.\n\nA plugin or hook runs code in every sandbox that enables it; install and approve only what you trust.",
+    "de": "Kits bringen Skills, Agenten, Befehle, Prompts und eine Memory-Vorlage des Agenten in eine Sandbox, ohne Ihr eigenes `~/.claude`, `~/.codex` oder `~/.config/opencode` freizugeben.\n\n- Das Standard-Kit gehört zu jeder Sandbox eines Agenten; `--kit NAME` fügt benannte Kits hinzu, `--no-default-kit` lässt das Standard-Kit weg. Der eingebaute Skill `sandbox-ai` erklärt dem Agenten die Sandbox.\n- Einträge werden in einen schreibgeschützten Schnappschuss kopiert: Der Agent kann sie nutzen, nicht ändern. Derselbe Name in zwei Kits stoppt den Start.\n- Projekt-Memory: Die Memory-Datei des Agenten wird je Projekt aufbewahrt und nach dem Lauf zurückgenommen; `--no-memory` startet ohne.\n- Claude-Plugins werden in einem Kit erklärt und mit `sandbox-ai plugins claude` in einen Plugin-Speicher installiert; eine Sandbox aktiviert genau die Plugins, die ihre Kits nennen.\n- Hooks in einem Kit laufen erst nach `sandbox-ai kits trust-hooks KIT` und nur, solange sich nichts an ihnen ändert.\n\nEin Plugin oder Hook führt Code in jeder Sandbox aus, die es aktiviert; installieren und geben Sie nur frei, was Sie für vertrauenswürdig halten."
+   },
+   "cli": [
+    "--kit",
+    "--kit-dir",
+    "--no-default-kit",
+    "--no-memory",
+    "--no-plugins",
+    "sandbox-ai kits",
+    "sandbox-ai kits trust-hooks KIT",
+    "sandbox-ai plugins claude"
+   ],
+   "see": [
+    "rulesets"
+   ]
+  },
+  {
+   "id": "rulesets",
+   "title": {
+    "en": "Rulesets",
+    "de": "Regelwerke"
+   },
+   "body": {
+    "en": "The network options decide which hosts the agent reaches. Rulesets decide what it may do there: they allow, ask or deny each HTTP request (by host, method, path, query, headers and body), each MCP tool call (by tool and arguments), each device, and the agent's own tools.\n\nRulesets come from five places, each a JSON file of the same format:\n\n- the administrator's policy, key `rules`;\n- `~/.config/sandbox-ai/rules.json`, at every start;\n- `--rules FILE`, for one start (outside every workspace);\n- `--allow-http 'HOST METHODS PATH'`;\n- the trusted project file, key `rules`.\n\nEach ruleset decides on its own and the strictest decision wins: deny over ask over allow. No rule opens the firewall. Rules are enforced by the connection proxy and the relay in front of each MCP server, which the agent cannot reach; rules for the agent's own tools go through its hooks, a guard rail, not a boundary. `--dry-run` with `--rules` lists the rulesets and stops on errors. On the Board, rulesets are a part of their own.",
+    "de": "Die Netzwerkoptionen entscheiden, welche Hosts der Agent erreicht. Regelwerke entscheiden, was er dort darf: Sie erlauben, erfragen oder verbieten jede HTTP-Anfrage (nach Host, Methode, Pfad, Query, Headern und Body), jeden MCP-Aufruf (nach Werkzeug und Argumenten), jedes Gerät und die eigenen Werkzeuge des Agenten.\n\nRegelwerke kommen von fünf Stellen, jedes eine JSON-Datei im selben Format:\n\n- die Richtlinie des Administrators, Schlüssel `rules`;\n- `~/.config/sandbox-ai/rules.json`, bei jedem Start;\n- `--rules DATEI`, für einen Start (außerhalb jedes Workspace);\n- `--allow-http 'HOST METHODEN PFAD'`;\n- die vertraute Projektdatei, Schlüssel `rules`.\n\nJedes Regelwerk entscheidet für sich, und die strengste Entscheidung gewinnt: deny vor ask vor allow. Keine Regel öffnet die Firewall. Durchgesetzt werden die Regeln vom Verbindungs-Proxy und vom Relay vor jedem MCP-Server, die der Agent nicht erreicht; Regeln für die eigenen Werkzeuge des Agenten laufen über seine Hooks, eine Leitplanke, keine Grenze. `--dry-run` mit `--rules` listet die Regelwerke und stoppt bei Fehlern. Auf der Tafel sind Regelwerke ein eigenes Teil."
+   },
+   "cli": [
+    "--rules FILE",
+    "--allow-http",
+    "--dry-run"
+   ],
+   "see": [
+    "taint",
+    "approvals",
+    "proxy",
+    "mcp",
+    "policy"
+   ]
+  },
+  {
+   "id": "mcp",
+   "title": {
+    "en": "Local MCP servers",
+    "de": "Lokale MCP-Server"
+   },
+   "body": {
+    "en": "Local MCP servers run in a sandbox of their own, without credentials and, unless their definition says otherwise, without network. `--mcp NAME` starts the server sandbox if it is not running yet and connects the agent; the server keeps running for other agents.\n\n- There is no network path between the sandboxes: the agent talks to the server over a Unix socket through a small bridge.\n- Define servers in `~/.config/sandbox-ai/mcp.json` or under `mcp_servers` in a trusted project file. The built-in `demo` server shows that a server runs confined.\n- Catalogs: sandbox-ai-mcp (search and web) and axross-mcp-hub (security tools) offer audited servers pinned by digest. `sandbox-ai mcp add` takes an entry only from a signed catalog.\n- The relay in front of every server is a gateway: `mcp` rules in a ruleset allow, ask or deny each tool call, and every call is logged in `mcp-calls.jsonl`.\n\nThe agent decides what a server does: a fetch or browser server with network sends whatever the agent asks it to. A server with network can get a VPN of its own (`--vpn`).",
+    "de": "Lokale MCP-Server laufen in einer eigenen Sandbox, ohne Anmeldedaten und, wenn ihre Definition nichts anderes sagt, ohne Netzwerk. `--mcp NAME` startet die Server-Sandbox, falls sie noch nicht läuft, und verbindet den Agenten; der Server läuft für andere Agenten weiter.\n\n- Zwischen den Sandboxen gibt es keinen Netzwerkweg: Der Agent spricht über einen Unix-Socket und eine kleine Brücke mit dem Server.\n- Definieren Sie Server in `~/.config/sandbox-ai/mcp.json` oder unter `mcp_servers` einer vertrauten Projektdatei. Der eingebaute Server `demo` zeigt, dass ein Server eingesperrt läuft.\n- Kataloge: sandbox-ai-mcp (Suche und Web) und axross-mcp-hub (Sicherheitswerkzeuge) bieten geprüfte, per Digest festgelegte Server. `sandbox-ai mcp add` nimmt einen Eintrag nur aus einem signierten Katalog.\n- Das Relay vor jedem Server ist ein Gateway: `mcp`-Regeln eines Regelwerks erlauben, erfragen oder verbieten jeden Aufruf, und jeder Aufruf wird in `mcp-calls.jsonl` protokolliert.\n\nDer Agent bestimmt, was ein Server tut: Ein Fetch- oder Browser-Server mit Netzwerk schickt, was der Agent verlangt. Ein Server mit Netzwerk kann ein eigenes VPN bekommen (`--vpn`)."
+   },
+   "cli": [
+    "--mcp NAME",
+    "sandbox-ai mcp list",
+    "sandbox-ai mcp catalog",
+    "sandbox-ai mcp add NAME",
+    "sandbox-ai mcp start NAME",
+    "sandbox-ai mcp stop NAME"
+   ],
+   "see": [
+    "rulesets",
+    "vpn-tor",
+    "teams"
+   ]
+  },
+  {
+   "id": "devices",
+   "title": {
+    "en": "Devices and GPUs",
+    "de": "Geräte und GPUs"
+   },
+   "body": {
+    "en": "Out of the box a sandbox sees no host hardware. There are three ways to give the agent some, the safest first:\n\n- A service on the host: the device stays on the host, a program there offers it over TCP (ser2net, openocd, adb, a model server), and the sandbox reaches that port with `--allow-host-port PORT`.\n- `--device PATH`: the device file itself, such as a serial port, `/dev/kvm` or `usb:VID:PID`. Block devices, consoles and input devices are always refused.\n- `--gpu nvidia|dri|rocm`: all GPU devices in one option. NVIDIA needs CDI; Intel and AMD need GPU libraries in your own image.\n\n`sandbox-ai devices add` and `remove` change the devices of a running sandbox; the Sandboxes & sessions page does the same with Add device… and Remove device. Device rules in a ruleset can allow, ask or refuse each device by USB IDs, serial or class. Every device is kernel code on your host that the agent can call past both sandbox layers: pass only what the task needs. Bluetooth does not work through `--device`.",
+    "de": "Von sich aus sieht eine Sandbox keine Hardware des Hosts. Es gibt drei Wege, dem Agenten welche zu geben, der sicherste zuerst:\n\n- Ein Dienst auf dem Host: Das Gerät bleibt auf dem Host, ein Programm dort bietet es über TCP an (ser2net, openocd, adb, ein Modellserver), und die Sandbox erreicht diesen Port mit `--allow-host-port PORT`.\n- `--device PFAD`: die Gerätedatei selbst, etwa ein serieller Port, `/dev/kvm` oder `usb:VID:PID`. Blockgeräte, Konsolen und Eingabegeräte werden immer abgelehnt.\n- `--gpu nvidia|dri|rocm`: alle GPU-Geräte mit einer Option. NVIDIA braucht CDI; Intel und AMD brauchen GPU-Bibliotheken in einem eigenen Image.\n\n`sandbox-ai devices add` und `remove` ändern die Geräte einer laufenden Sandbox; die Seite Sandboxen & Sitzungen tut dasselbe mit Gerät hinzufügen… und Gerät entfernen. Geräteregeln eines Regelwerks können jedes Gerät nach USB-IDs, Seriennummer oder Klasse erlauben, erfragen oder ablehnen. Jedes Gerät ist Kernel-Code auf Ihrem Host, den der Agent an beiden Sandbox-Schichten vorbei aufrufen kann: Geben Sie nur, was die Aufgabe braucht. Bluetooth funktioniert nicht über `--device`."
+   },
+   "cli": [
+    "--device",
+    "--gpu",
+    "--allow-host-port",
+    "sandbox-ai devices list",
+    "sandbox-ai devices add",
+    "sandbox-ai devices remove"
+   ],
+   "see": [
+    "rulesets",
+    "security-modes",
+    "llm"
+   ]
+  },
+  {
+   "id": "display",
+   "title": {
+    "en": "GUI apps and displays",
+    "de": "GUI-Programme und Anzeigen"
+   },
+   "body": {
+    "en": "A sandbox has no display unless you give it one.\n\n- `--gui` starts a virtual X display (Xvfb) and sets `DISPLAY`; `--gui-screen WxHxD` sets its size.\n- `--gui-vnc DIR` adds VNC on the Unix socket `DIR/vnc.sock`, without TCP. View it with a client that speaks Unix sockets, such as TigerVNC's `vncviewer DIR/vnc.sock`.\n- `--gui-wayland` exposes your Wayland socket, so windows appear on your desktop. It gives the agent access to your compositor and prints a warning.\n- `--audio virtual` starts a sound server with a null sink inside the sandbox; nothing reaches your speakers or microphones.\n\nX11 passthrough is deliberately not offered: X11 exposes the keystrokes and screen of every host window. Browsers are not in the images; Playwright fetches them, which needs network. The VNC folder must lie outside the workspaces. The security mode `high` refuses `--gui-wayland`, `paranoid` also `--gui`.",
+    "de": "Eine Sandbox hat keine Anzeige, solange Sie ihr keine geben.\n\n- `--gui` startet eine virtuelle X-Anzeige (Xvfb) und setzt `DISPLAY`; `--gui-screen BxHxT` setzt ihre Größe.\n- `--gui-vnc DIR` fügt VNC auf dem Unix-Socket `DIR/vnc.sock` hinzu, ohne TCP. Sehen Sie sie mit einem Client an, der Unix-Sockets spricht, etwa `vncviewer DIR/vnc.sock` von TigerVNC.\n- `--gui-wayland` gibt Ihren Wayland-Socket frei, sodass Fenster auf Ihrem Desktop erscheinen. Das gibt dem Agenten Zugriff auf Ihren Compositor und erzeugt eine Warnung.\n- `--audio virtual` startet in der Sandbox einen Soundserver mit Null-Sink; nichts erreicht Ihre Lautsprecher oder Mikrofone.\n\nX11-Durchreichung gibt es absichtlich nicht: X11 gibt Tastendrücke und Bildschirm jedes Fensters des Hosts preis. Browser sind nicht in den Images; Playwright lädt sie, dafür braucht es Netzwerk. Der VNC-Ordner muss außerhalb der Workspaces liegen. Der Sicherheitsmodus `high` lehnt `--gui-wayland` ab, `paranoid` auch `--gui`."
+   },
+   "cli": [
+    "--gui",
+    "--gui-screen",
+    "--gui-vnc DIR",
+    "--gui-wayland",
+    "--audio virtual"
+   ],
+   "see": [
+    "security-modes"
+   ]
+  },
+  {
+   "id": "vpn-tor",
+   "title": {
+    "en": "VPN profiles and Tor",
+    "de": "VPN-Profile und Tor"
+   },
+   "body": {
+    "en": "A VPN can sit in front of a sandbox (Podman backend). The tunnel runs in a container of its own in the sandbox's network, a kill switch lets nothing else out (IPv4 and IPv6), and before the agent starts the addresses and DNS seen from outside are checked.\n\n- Profiles: WireGuard (any wg-quick file), OpenVPN, Mullvad, Tailscale or Headscale, and Tor. Add them with `sandbox-ai vpn add` or on the Credentials page (WireGuard, OpenVPN, Mullvad, Tailscale); Tor profiles with `sandbox-ai vpn add NAME --tor`.\n- Use one with `--vpn NAME`. `sandbox-ai vpn check NAME` brings it up alone, checks it and takes it down. A failed check stops the start; `--vpn-check warn` only warns.\n- Keys and passwords live in `sandbox-ai secrets`; only the VPN container gets them.\n\nTor sends every TCP connection through Tor, the agent's own API calls included; it is TCP and IPv4 only, slower, and many sites refuse Tor exits. Build the VPN image once with `sandbox-ai build vpn`. Bubblewrap is not supported. An MCP server has a network of its own and needs its own `--vpn`.",
+    "de": "Ein VPN kann vor einer Sandbox sitzen (Podman-Backend). Der Tunnel läuft in einem eigenen Container im Netzwerk der Sandbox, ein Kill-Switch lässt nichts anderes hinaus (IPv4 und IPv6), und bevor der Agent startet, werden die von außen gesehenen Adressen und das DNS geprüft.\n\n- Profile: WireGuard (jede wg-quick-Datei), OpenVPN, Mullvad, Tailscale oder Headscale und Tor. Legen Sie sie mit `sandbox-ai vpn add` oder auf der Seite Zugangsdaten an (WireGuard, OpenVPN, Mullvad, Tailscale); Tor-Profile mit `sandbox-ai vpn add NAME --tor`.\n- Nutzen Sie eines mit `--vpn NAME`. `sandbox-ai vpn check NAME` bringt es allein hoch, prüft es und baut es wieder ab. Eine fehlgeschlagene Prüfung stoppt den Start; `--vpn-check warn` warnt nur.\n- Schlüssel und Passwörter liegen in `sandbox-ai secrets`; nur der VPN-Container bekommt sie.\n\nTor leitet jede TCP-Verbindung durch Tor, auch die API-Aufrufe des Agenten; nur TCP und IPv4, langsamer, und viele Seiten weisen Tor-Ausgänge ab. Bauen Sie das VPN-Image einmal mit `sandbox-ai build vpn`. Bubblewrap wird nicht unterstützt. Ein MCP-Server hat ein eigenes Netzwerk und braucht ein eigenes `--vpn`."
+   },
+   "cli": [
+    "sandbox-ai build vpn",
+    "sandbox-ai vpn add",
+    "sandbox-ai vpn list",
+    "sandbox-ai vpn check NAME",
+    "sandbox-ai vpn remove NAME",
+    "--vpn",
+    "--vpn-check"
+   ],
+   "see": [
+    "network",
+    "secrets",
+    "mcp",
+    "llm"
+   ]
+  },
+  {
+   "id": "llm",
+   "title": {
+    "en": "LLM servers",
+    "de": "LLM-Server"
+   },
+   "body": {
+    "en": "Every agent can work with a model on your own server instead of the cloud: Ollama, LM Studio, the llama.cpp server, vLLM or any other OpenAI-compatible server, on this machine, in your LAN, behind a VPN or on the internet.\n\n- Register it once by name with `sandbox-ai llm add NAME --kind KIND --url URL`; its key stays in `sandbox-ai secrets`.\n- `sandbox-ai llm models NAME` lists what it serves, `sandbox-ai llm check NAME --agent AGENT` tests address, TLS, key, model and the API the agent needs.\n- Start with `--llm NAME[:MODEL]`: it opens exactly that server, configures the agent for it and hands the agent a placeholder instead of the key. Add `--no-provider-defaults` to reach nothing else.\n- A server registered with `--vpn PROFILE` brings its VPN along.\n\nClaude Code speaks only the Anthropic Messages API, so a generic OpenAI-compatible server works with Codex and OpenCode, not Claude. Plain `http` goes only to this host's loopback and to private networks; anything else needs `llm add --insecure-http` and is warned about at every start.",
+    "de": "Jeder Agent kann mit einem Modell auf Ihrem eigenen Server statt in der Cloud arbeiten: Ollama, LM Studio, der Server von llama.cpp, vLLM oder jeder andere OpenAI-kompatible Server, auf diesem Rechner, im LAN, hinter einem VPN oder im Internet.\n\n- Legen Sie ihn einmal unter einem Namen an mit `sandbox-ai llm add NAME --kind ART --url URL`; sein Schlüssel bleibt in `sandbox-ai secrets`.\n- `sandbox-ai llm models NAME` listet, was er anbietet, `sandbox-ai llm check NAME --agent AGENT` prüft Adresse, TLS, Schlüssel, Modell und die API, die der Agent braucht.\n- Starten Sie mit `--llm NAME[:MODELL]`: Das öffnet genau diesen Server, richtet den Agenten dafür ein und gibt ihm einen Platzhalter statt des Schlüssels. Mit `--no-provider-defaults` erreicht er sonst nichts.\n- Ein mit `--vpn PROFIL` angelegter Server bringt sein VPN mit.\n\nClaude Code spricht nur die Anthropic-Messages-API; ein allgemeiner OpenAI-kompatibler Server funktioniert daher mit Codex und OpenCode, nicht mit Claude. Reines `http` geht nur an das Loopback dieses Hosts und an private Netze; alles andere braucht `llm add --insecure-http` und wird bei jedem Start angemahnt."
+   },
+   "cli": [
+    "sandbox-ai llm add NAME",
+    "sandbox-ai llm list",
+    "sandbox-ai llm models NAME",
+    "sandbox-ai llm check NAME",
+    "sandbox-ai llm remove NAME",
+    "--llm",
+    "--no-provider-defaults"
+   ],
+   "see": [
+    "vpn-tor",
+    "network",
+    "secrets"
+   ]
+  },
+  {
+   "id": "web",
+   "title": {
+    "en": "Web interface",
+    "de": "Weboberfläche"
+   },
+   "body": {
+    "en": "`sandbox-ai web` is the desktop app's counterpart in the browser, with the same themes. One service on one machine manages it and every host of `sandbox-ai hosts` over SSH: starts and sessions with their terminals, approvals, the doctor, the logs, LLM servers and each host's defaults.\n\n- `sandbox-ai web user add NAME` creates a login with a password (12 or more characters) and a TOTP app.\n- `sandbox-ai web vendor` fetches xterm.js for the terminals, pinned and checked.\n- `sandbox-ai web serve` runs it on `https://localhost:8443/` and prints its certificate's fingerprint.\n\nIt serves HTTPS only, on `127.0.0.1` unless `--listen` says otherwise; to reach it from elsewhere, prefer an SSH tunnel. Every action is one sandbox-ai command, each argument quoted on its own. An audit log records logins, failures, changes and terminals. No sandbox can reach the service's port.",
+    "de": "`sandbox-ai web` ist das Gegenstück der Desktop-App im Browser, mit denselben Farbschemata. Ein Dienst auf einem Rechner verwaltet ihn und jeden Host von `sandbox-ai hosts` über SSH: Starts und Sitzungen mit ihren Terminals, Freigaben, den doctor, die Logs, LLM-Server und die Vorgaben jedes Hosts.\n\n- `sandbox-ai web user add NAME` legt eine Anmeldung mit Passwort (12 oder mehr Zeichen) und einer TOTP-App an.\n- `sandbox-ai web vendor` lädt xterm.js für die Terminals, festgelegt und geprüft.\n- `sandbox-ai web serve` startet ihn auf `https://localhost:8443/` und zeigt den Fingerabdruck seines Zertifikats.\n\nEr spricht nur HTTPS, auf `127.0.0.1`, solange `--listen` nichts anderes sagt; um ihn von anderswo zu erreichen, nehmen Sie besser einen SSH-Tunnel. Jede Aktion ist ein sandbox-ai-Befehl, jedes Argument einzeln gequotet. Ein Audit-Log hält Anmeldungen, Fehlschläge, Änderungen und Terminals fest. Keine Sandbox erreicht den Port des Dienstes."
+   },
+   "cli": [
+    "sandbox-ai web user add NAME",
+    "sandbox-ai web vendor",
+    "sandbox-ai web serve",
+    "sandbox-ai web serve --listen ADDRESS:PORT",
+    "sandbox-ai defaults show"
+   ],
+   "see": [
+    "hosts"
+   ]
+  },
+  {
+   "id": "hosts",
+   "title": {
+    "en": "Other hosts",
+    "de": "Andere Hosts"
+   },
+   "body": {
+    "en": "`sandbox-ai hosts` manages other machines, or Proxmox LXC containers, whose sandbox-ai this one controls over SSH. The desktop app's Hosts page and the web interface use the same list, kept in `~/.config/sandbox-ai/hosts.json` next to `local` (this machine).\n\n- `sandbox-ai hosts add NAME USER@HOST` adds one; `--identity FILE` picks a key, `--port N` a port.\n- `sandbox-ai hosts test NAME` checks SSH, the host's sandbox-ai version and its doctor.\n- `sandbox-ai hosts run NAME -- ARGS` runs a sandbox-ai command there, `-- attach NAME` a terminal into a session.\n\nSSH runs in batch mode, so it never hangs on a password prompt. The host key is learnt at the first contact and checked strictly after that. Nothing listens on the network on the hosts: they need sshd and sandbox-ai only. A non-interactive login reads no `~/.bashrc`, so the command falls back to `~/.local/bin/sandbox-ai`.",
+    "de": "`sandbox-ai hosts` verwaltet andere Rechner oder Proxmox-LXC-Container, deren sandbox-ai dieser über SSH steuert. Die Seite Hosts der Desktop-App und die Weboberfläche nutzen dieselbe Liste, abgelegt in `~/.config/sandbox-ai/hosts.json` neben `local` (diesem Rechner).\n\n- `sandbox-ai hosts add NAME BENUTZER@HOST` fügt einen hinzu; `--identity DATEI` wählt einen Schlüssel, `--port N` einen Port.\n- `sandbox-ai hosts test NAME` prüft SSH, die sandbox-ai-Version des Hosts und seinen doctor.\n- `sandbox-ai hosts run NAME -- ARGS` führt dort einen sandbox-ai-Befehl aus, `-- attach NAME` ein Terminal in eine Sitzung.\n\nSSH läuft im Batch-Modus und hängt daher nie an einer Passwortabfrage. Der Host-Schlüssel wird beim ersten Kontakt gelernt und danach streng geprüft. Auf den Hosts lauscht nichts im Netz: Sie brauchen nur sshd und sandbox-ai. Eine nicht interaktive Anmeldung liest keine `~/.bashrc`, daher greift der Befehl auf `~/.local/bin/sandbox-ai` zurück."
+   },
+   "cli": [
+    "sandbox-ai hosts list",
+    "sandbox-ai hosts add NAME USER@HOST",
+    "sandbox-ai hosts test NAME",
+    "sandbox-ai hosts run NAME -- ARGS",
+    "sandbox-ai hosts remove NAME"
+   ],
+   "see": [
+    "web"
+   ]
+  },
+  {
+   "id": "teams",
+   "title": {
+    "en": "Agent teams",
+    "de": "Agenten-Teams"
+   },
+   "body": {
+    "en": "`sandbox-ai team` starts one sandbox per agent on a shared workspace, and they work together through a task board.\n\n- `sandbox-ai team start NAME --agents claude,codex,opencode -w DIR` starts the team; options after `--` hold for every member. The first agent leads.\n- Each member is a named session (`NAME-claude`, `NAME-codex`, ...): attach, pause, resume or stop it like any start.\n- `team show` lists members, their state and the board; `team post NAME AGENT TASK` gives a member a task from you; `team stop` ends every member and the board, `team delete` also removes their HOMEs.\n\nThe board is an MCP server in a sandbox of its own, without network; every member reaches it through its relay, so `mcp` rules and questions hold. The members share the workspace: nothing stops two agents from changing the same file. For a single helper, `--helper AGENT` gives an agent another one to hand tasks to, and `--with AGENT` puts another agent into the same sandbox.",
+    "de": "`sandbox-ai team` startet eine Sandbox je Agent auf einem gemeinsamen Workspace, und sie arbeiten über eine Aufgabentafel zusammen.\n\n- `sandbox-ai team start NAME --agents claude,codex,opencode -w DIR` startet das Team; Optionen nach `--` gelten für jedes Mitglied. Der erste Agent leitet.\n- Jedes Mitglied ist eine benannte Sitzung (`NAME-claude`, `NAME-codex`, ...): Verbinden, pausieren, fortsetzen oder stoppen Sie es wie jeden Start.\n- `team show` listet Mitglieder, ihren Zustand und die Tafel; `team post NAME AGENT AUFGABE` gibt einem Mitglied eine Aufgabe von Ihnen; `team stop` beendet alle Mitglieder und die Tafel, `team delete` entfernt auch ihre HOMEs.\n\nDie Aufgabentafel ist ein MCP-Server in einer eigenen Sandbox, ohne Netzwerk; jedes Mitglied erreicht sie über sein Relay, daher gelten `mcp`-Regeln und Fragen. Die Mitglieder teilen den Workspace: Nichts hindert zwei Agenten daran, dieselbe Datei zu ändern. Für einen einzelnen Helfer gibt `--helper AGENT` einem Agenten einen weiteren, an den er Aufgaben abgibt, und `--with AGENT` holt einen weiteren Agenten in dieselbe Sandbox."
+   },
+   "cli": [
+    "sandbox-ai team start NAME --agents A,B",
+    "sandbox-ai team list",
+    "sandbox-ai team show NAME",
+    "sandbox-ai team post NAME AGENT TASK",
+    "sandbox-ai team stop NAME",
+    "sandbox-ai team delete NAME",
+    "--helper",
+    "--with"
+   ],
+   "see": [
+    "sessions",
+    "mcp",
+    "rulesets"
+   ]
+  },
+  {
+   "id": "memory-watch",
+   "title": {
+    "en": "Memory watch",
+    "de": "Speicherwächter"
+   },
+   "body": {
+    "en": "When a sandbox's memory limit is full, the kernel ends a process, and if that is the sandbox's supervisor the whole run ends. So the launcher watches the sandbox's memory from the host while it runs; the sandbox cannot see the watch.\n\n- At 85 % it tells you (a desktop notification, and `memory.jsonl` in the log directory) and the agent: `/sandbox/session/memory.json` gives used and limit, what the files in `/tmp` and HOME take, and advice.\n- At 95 % it ends the process with the most memory that is neither sandbox-ai's own nor the agent itself, typically a test run or a build: the agent sees its command fail and the run goes on.\n- After the run it says what it ended, and whether the kernel ended processes anyway.\n\nFiles in `/tmp` and `/var/tmp` live in memory and count against the limit; each holds at most half of it. If the watch had to step in, start with a larger `--memory` or run fewer things at once. The watch needs a local engine on Linux, not `--podman-url`.",
+    "de": "Ist das Speicherlimit einer Sandbox voll, beendet der Kernel einen Prozess, und ist das der Supervisor der Sandbox, endet der ganze Lauf. Deshalb beobachtet der Launcher den Speicher der Sandbox vom Host aus, solange sie läuft; die Sandbox sieht den Wächter nicht.\n\n- Bei 85 % sagt er es Ihnen (Desktop-Benachrichtigung und `memory.jsonl` im Log-Verzeichnis) und dem Agenten: `/sandbox/session/memory.json` nennt Verbrauch und Limit, was die Dateien in `/tmp` und HOME belegen, und einen Rat.\n- Bei 95 % beendet er den Prozess mit dem meisten Speicher, der weder zu sandbox-ai gehört noch der Agent selbst ist, meist einen Testlauf oder Build: Der Agent sieht seinen Befehl scheitern, und der Lauf geht weiter.\n- Nach dem Lauf sagt er, was er beendet hat und ob der Kernel trotzdem Prozesse beendet hat.\n\nDateien in `/tmp` und `/var/tmp` liegen im Speicher und zählen zum Limit; jedes fasst höchstens die Hälfte davon. Musste der Wächter eingreifen, starten Sie mit größerem `--memory` oder lassen Sie weniger gleichzeitig laufen. Der Wächter braucht eine lokale Engine unter Linux, nicht `--podman-url`."
+   },
+   "cli": [
+    "--memory",
+    "sandbox-ai limits RUN --memory SIZE"
+   ],
+   "see": [
+    "limits",
+    "logs"
+   ]
+  },
+  {
+   "id": "privacy-check",
+   "title": {
+    "en": "Privacy check before publishing",
+    "de": "Datenschutzprüfung vor dem Veröffentlichen"
+   },
+   "body": {
+    "en": "An agent that may push can publish what was never meant to leave your machine: your home path, the address of your LAN server, an account name, a token. sandbox-ai looks for these before they are published, in three places.\n\n- After every run, for each writable workspace that is a Git repository with a public remote, it shows what the next push would publish and should stay private.\n- In the sandbox, Git hooks warn at commit and refuse a push to a public remote with blocking findings; the connection proxy also holds every push over HTTP(S) until the check has seen it.\n- By hand: `sandbox-ai privacy-check PATH`, also for repositories you push from the host. The System page offers it as Privacy check of a repository….\n\nThe rules are built in (keys and tokens), derived from the run (your HOME path, private addresses, your tokens), and your own files in `~/.config/sandbox-ai/privacy`. `--privacy-check always` checks every writable workspace, `off` switches the check off. It stops accidents, not a determined agent: encoded data passes any pattern.",
+    "de": "Ein Agent, der pushen darf, kann veröffentlichen, was Ihren Rechner nie verlassen sollte: Ihren HOME-Pfad, die Adresse Ihres LAN-Servers, einen Kontonamen, ein Token. sandbox-ai sucht danach, bevor es veröffentlicht wird, an drei Stellen.\n\n- Nach jedem Lauf zeigt es für jeden beschreibbaren Workspace, der ein Git-Repository mit öffentlichem Remote ist, was der nächste Push veröffentlichen würde und privat bleiben sollte.\n- In der Sandbox warnen Git-Hooks beim Commit und weisen einen Push an ein öffentliches Remote mit blockierenden Funden ab; der Verbindungs-Proxy hält zudem jeden Push über HTTP(S) an, bis die Prüfung ihn gesehen hat.\n- Von Hand: `sandbox-ai privacy-check PFAD`, auch für Repositorys, aus denen Sie vom Host pushen. Die Seite System bietet das als Datenschutzprüfung eines Repositorys….\n\nDie Regeln sind eingebaut (Schlüssel und Tokens), aus dem Lauf abgeleitet (Ihr HOME-Pfad, private Adressen, Ihre Tokens) und Ihre eigenen Dateien in `~/.config/sandbox-ai/privacy`. `--privacy-check always` prüft jeden beschreibbaren Workspace, `off` schaltet die Prüfung ab. Sie verhindert Versehen, keinen entschlossenen Agenten: Kodierte Daten passieren jedes Muster."
+   },
+   "cli": [
+    "sandbox-ai privacy-check PATH",
+    "sandbox-ai privacy-check --all",
+    "--privacy-check public|always|off",
+    "--privacy-rules DIR"
+   ],
+   "see": [
+    "proxy",
+    "secrets",
+    "security-modes"
+   ]
+  },
+  {
+   "id": "secrets",
+   "title": {
+    "en": "Secrets, logins and identities",
+    "de": "Geheimnisse, Logins und Identitäten"
+   },
+   "body": {
+    "en": "`sandbox-ai secrets` keeps API keys and tokens in your system keyring, or in private files when there is none. A value is read from standard input, never from an argument, and never printed. A sandbox gets a secret only when a start names it:\n\n- `--secret-env NAME`: an environment variable the agent can read.\n- `--api-key HOST=NAME`: the agent gets a placeholder; the proxy puts the key in its place, only in a credential header of HTTPS requests to HOST.\n- `--git-token-secret URL=SECRET` gives Git a token; with `--token-proxy` it stays with the proxy.\n\nLogins that stay outside every sandbox: `sandbox-ai git-logins` adds a token to Git's requests to one server; `sandbox-ai publish-logins` does the same for npm, PyPI, crates.io, GitLab and GitHub, used only with `--publish`. `sandbox-ai identities` groups a commit name and address with Git and publish logins; `--identity NAME` chooses one. Agent logins are separate: `sandbox-ai login AGENT` gives sandboxes a login of their own, kept in a login store. A preset or project file only ever names a secret.",
+    "de": "`sandbox-ai secrets` bewahrt API-Schlüssel und Tokens in Ihrem Schlüsselbund auf, oder in privaten Dateien, wenn es keinen gibt. Ein Wert wird von der Standardeingabe gelesen, nie aus einem Argument, und nie ausgegeben. Eine Sandbox bekommt ein Geheimnis nur, wenn ein Start es nennt:\n\n- `--secret-env NAME`: eine Umgebungsvariable, die der Agent lesen kann.\n- `--api-key HOST=NAME`: Der Agent bekommt einen Platzhalter; der Proxy setzt den Schlüssel an seine Stelle, nur in einem Anmelde-Header von HTTPS-Anfragen an HOST.\n- `--git-token-secret URL=GEHEIMNIS` gibt Git ein Token; mit `--token-proxy` bleibt es beim Proxy.\n\nLogins, die außerhalb jeder Sandbox bleiben: `sandbox-ai git-logins` setzt ein Token in Gits Anfragen an einen Server ein; `sandbox-ai publish-logins` tut das für npm, PyPI, crates.io, GitLab und GitHub, nur mit `--publish` genutzt. `sandbox-ai identities` fasst Commit-Name und Adresse mit Git- und Publish-Logins zusammen; `--identity NAME` wählt eine. Logins der Agenten sind getrennt davon: `sandbox-ai login AGENT` gibt Sandboxen einen eigenen Login, im Login-Speicher aufbewahrt. Eine Vorlage oder Projektdatei nennt ein Geheimnis immer nur."
+   },
+   "cli": [
+    "sandbox-ai secrets list",
+    "sandbox-ai secrets set NAME",
+    "sandbox-ai secrets delete NAME",
+    "sandbox-ai git-logins add URL --secret NAME",
+    "sandbox-ai publish-logins add KIND --secret NAME",
+    "sandbox-ai identities add NAME",
+    "sandbox-ai login AGENT",
+    "--secret-env",
+    "--api-key",
+    "--git-token-secret",
+    "--token-proxy",
+    "--publish",
+    "--identity"
+   ],
+   "see": [
+    "proxy",
+    "privacy-check",
+    "vpn-tor"
+   ]
+  },
+  {
+   "id": "logs",
+   "title": {
+    "en": "Logs, activity and telemetry",
+    "de": "Logs, Aktivität und Telemetrie"
+   },
+   "body": {
+    "en": "Every run with the connection proxy writes logs into a log directory: `--log-dir DIR`, else `~/.local/state/sandbox-ai/logs/PROJECT-HASH`. The directory is hidden from the agent.\n\n- The connection log: every request, push and refusal, credentials redacted.\n- `egress-denied.jsonl`: each dropped destination and each lookup of a name that is not allowed.\n- `processes.jsonl`: every process with its command line, redacted.\n- `files.jsonl` (only with `--log-dir`): reads, writes, creates and deletes under the workspaces, HOME, `/tmp` and the mounts.\n- `activity.jsonl`: the timeline of what the agents did.\n\nEach refusal names the process behind it. `--log-debug` adds the bodies of refused requests and more detail; credentials stay redacted. `sandbox-ai logs` summarizes a directory and suggests the option for each blocked target; every suggestion widens the sandbox. Telemetry of the agents to their makers is off by default (`--telemetry off`); `strict` allows nothing but the model's calls, `on` keeps the agents' own settings.",
+    "de": "Jeder Lauf mit Verbindungs-Proxy schreibt Logs in ein Log-Verzeichnis: `--log-dir DIR`, sonst `~/.local/state/sandbox-ai/logs/PROJEKT-HASH`. Das Verzeichnis ist vor dem Agenten verborgen.\n\n- Das Verbindungslog: jede Anfrage, jeder Push und jede Abweisung, Anmeldedaten geschwärzt.\n- `egress-denied.jsonl`: jedes verworfene Ziel und jede Auflösung eines nicht erlaubten Namens.\n- `processes.jsonl`: jeder Prozess mit seiner Befehlszeile, geschwärzt.\n- `files.jsonl` (nur mit `--log-dir`): Lesen, Schreiben, Anlegen und Löschen unter den Workspaces, HOME, `/tmp` und den Mounts.\n- `activity.jsonl`: die Zeitleiste dessen, was die Agenten taten.\n\nJede Abweisung nennt den Prozess dahinter. `--log-debug` fügt die Bodies abgewiesener Anfragen und mehr Einzelheiten hinzu; Anmeldedaten bleiben geschwärzt. `sandbox-ai logs` fasst ein Verzeichnis zusammen und schlägt für jedes gesperrte Ziel die Option vor; jeder Vorschlag erweitert die Sandbox. Telemetrie der Agenten an ihre Hersteller ist standardmäßig aus (`--telemetry off`); `strict` erlaubt nur die Aufrufe des Modells, `on` behält die eigenen Einstellungen der Agenten."
+   },
+   "cli": [
+    "--log-dir DIR",
+    "--log-debug",
+    "sandbox-ai logs",
+    "sandbox-ai activity",
+    "--telemetry off|strict|on"
+   ],
+   "see": [
+    "proxy"
+   ]
+  },
+  {
+   "id": "limits",
+   "title": {
+    "en": "Resource limits",
+    "de": "Ressourcenlimits"
+   },
+   "body": {
+    "en": "Every sandbox runs with limits on memory, CPU and processes:\n\n- `--memory SIZE`, default `8g`;\n- `--cpus N`, default half of the host's CPUs;\n- `--pids N`, default 4096.\n\n`none` removes a limit. `sandbox-ai limits RUN --memory 16g --cpus 4` changes them while the sandbox runs; the Sandboxes & sessions page does the same with Limits…, and the Board's Limits part can be applied live. Podman passes the limits to the container, Bubblewrap runs in a systemd scope. Both need a systemd user session with delegated cgroup controllers, as on every desktop; without one the sandbox starts without limits and says so. The security modes `high` and `paranoid` set smaller limits, and a larger one widens them.",
+    "de": "Jede Sandbox läuft mit Limits für Speicher, CPU und Prozesse:\n\n- `--memory GRÖSSE`, Vorgabe `8g`;\n- `--cpus N`, Vorgabe die Hälfte der CPUs des Hosts;\n- `--pids N`, Vorgabe 4096.\n\n`none` hebt ein Limit auf. `sandbox-ai limits RUN --memory 16g --cpus 4` ändert sie, während die Sandbox läuft; die Seite Sandboxen & Sitzungen tut dasselbe mit Grenzen…, und das Teil Limits der Tafel lässt sich sofort anwenden. Podman gibt die Limits an den Container, Bubblewrap läuft in einem systemd-Scope. Beide brauchen eine systemd-Benutzersitzung mit delegierten cgroup-Controllern, wie auf jedem Desktop; ohne sie startet die Sandbox ohne Limits und sagt es. Die Sicherheitsmodi `high` und `paranoid` setzen kleinere Limits, und ein größeres erweitert sie."
+   },
+   "cli": [
+    "--memory",
+    "--cpus",
+    "--pids",
+    "sandbox-ai limits RUN"
+   ],
+   "see": [
+    "memory-watch",
+    "security-modes"
+   ]
+  },
+  {
+   "id": "policy",
+   "title": {
+    "en": "Administrator policy",
+    "de": "Richtlinie des Administrators"
+   },
+   "body": {
+    "en": "An administrator can fix what nobody on the machine may choose, in `/etc/sandbox-ai/policy.json`, owned and writable by root only. A broken or unsafe file stops every start.\n\n- `forbid`: options refused however they were chosen, also through a project file or a profile.\n- `backends`, `min_mode` (the laxest security mode), `max_approval_scope` (once, run or always).\n- `allow_within` and `allow_hosts`: a ceiling for addresses and named hosts.\n- `require_vpn`, `require_canaries`, `forbid_keep`, `require_signed_updates`, a default `subnet`, and `rules`, a ruleset that every run applies first.\n\nThe app greys out everything the policy forbids, on the Start page, on the Board and in the wizard. System > Administrator policy shows it, and the Settings dialog shows it in full; only root can change it. The policy binds sandbox-ai as installed: it guards against convenience, project files and mistakes, not against a user who runs a modified copy.",
+    "de": "Ein Administrator kann festlegen, was niemand auf dem Rechner wählen darf, in `/etc/sandbox-ai/policy.json`, das nur root gehört und nur root schreiben kann. Eine kaputte oder unsichere Datei stoppt jeden Start.\n\n- `forbid`: Optionen, die abgelehnt werden, wie auch immer sie gewählt wurden, auch über eine Projektdatei oder ein Profil.\n- `backends`, `min_mode` (der laxeste Sicherheitsmodus), `max_approval_scope` (once, run oder always).\n- `allow_within` und `allow_hosts`: eine Obergrenze für Adressen und benannte Hosts.\n- `require_vpn`, `require_canaries`, `forbid_keep`, `require_signed_updates`, ein vorgegebenes `subnet` und `rules`, ein Regelwerk, das jeder Lauf zuerst anwendet.\n\nDie App graut alles aus, was die Richtlinie verbietet, auf der Seite Start, auf der Tafel und im Assistenten. System > Richtlinie des Administrators zeigt sie, der Dialog Einstellungen zeigt sie ganz; nur root kann sie ändern. Die Richtlinie bindet das installierte sandbox-ai: Sie schützt vor Bequemlichkeit, Projektdateien und Fehlern, nicht vor einem Benutzer, der eine veränderte Kopie ausführt."
+   },
+   "cli": [
+    "sandbox-ai doctor"
+   ],
+   "see": [
+    "security-modes",
+    "rulesets",
+    "approvals"
+   ]
+  },
+  {
+   "id": "releases-update",
+   "title": {
+    "en": "Install and update",
+    "de": "Installation und Updates"
+   },
+   "body": {
+    "en": "sandbox-ai can be installed in four ways:\n\n- `install.sh`: the command line and the app, kept up to date (recommended). Update with `sandbox-ai update`.\n- `pip install sandbox-ai`: the command line in a Python environment; update with pip.\n- `sandbox-ai.pyz`: the command line in one file.\n- The AppImage (Linux) or `sandbox-ai.app` (macOS): the app with the command line inside.\n\nUpdates through `install.sh` are signed: a release signs its `SHA256SUMS` with an SSH key, and once the installation trusts a key, an update is installed only with a good signature. Older releases are refused unless `--allow-downgrade`; the previous version is kept for a rollback. `sandbox-ai version --verbose` shows the trusted keys' fingerprints. The `.pyz`, the AppImage and the macOS app do not update themselves: download the new file.\n\nIn the app, System > Check for updates runs `sandbox-ai update --check`, and Update sandbox-ai runs `sandbox-ai update`. Never install sandbox-ai into a project folder: an agent could rewrite it.",
+    "de": "sandbox-ai lässt sich auf vier Wegen installieren:\n\n- `install.sh`: Kommandozeile und App, aktuell gehalten (empfohlen). Aktualisieren mit `sandbox-ai update`.\n- `pip install sandbox-ai`: die Kommandozeile in einer Python-Umgebung; aktualisieren mit pip.\n- `sandbox-ai.pyz`: die Kommandozeile in einer Datei.\n- Das AppImage (Linux) oder `sandbox-ai.app` (macOS): die App mit der Kommandozeile darin.\n\nUpdates über `install.sh` sind signiert: Ein Release signiert seine `SHA256SUMS` mit einem SSH-Schlüssel, und sobald die Installation einem Schlüssel vertraut, wird ein Update nur mit gültiger Signatur installiert. Ältere Releases werden abgelehnt, außer mit `--allow-downgrade`; die vorige Version bleibt für ein Zurück. `sandbox-ai version --verbose` zeigt die Fingerabdrücke der vertrauten Schlüssel. `.pyz`, AppImage und macOS-App aktualisieren sich nicht selbst: Laden Sie die neue Datei.\n\nIn der App führt System > Auf Updates prüfen `sandbox-ai update --check` aus und sandbox-ai aktualisieren `sandbox-ai update`. Installieren Sie sandbox-ai nie in einen Projektordner: Ein Agent könnte es umschreiben."
+   },
+   "cli": [
+    "sandbox-ai update --check",
+    "sandbox-ai update",
+    "sandbox-ai update --version X.Y.Z",
+    "sandbox-ai version --verbose",
+    "sandbox-ai doctor"
+   ],
+   "see": [
+    "policy"
+   ]
+  }
+ ]
+}

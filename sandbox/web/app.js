@@ -12,18 +12,22 @@ const state = {
   toastQuestions: new Map(), questionToast: null, answered: new Map(), questions: [],
   boxes: null, terminalCount: 0, polling: false, pollAgain: false, policy: null, session: null, loginMessage: null,
   cards: [], shown: null,
+  renderToken: 0,  // counts the pages drawn: a drawing that awaited an answer goes on only while it is still the last
   installing: {},  // host -> when its install began (it may outlast the page that started it)
   startsEvery: (() => { try { return localStorage.getItem("sandbox-ai-starts-every") === "1"; } catch (e) { return false; } })(),
   review: null,  // {host, path}: a project configuration to review (a start refused it as untrusted)
+  help: null, helpFor: null,  // help.json's sections once loaded; the page whose (?) opened Help
+  formHost: null,  // the host of the new start's form, when another than the table's was chosen there
 };
 const AGENTS = ["claude", "codex", "opencode"];
 const PAGES = [
   ["starts", N_("Starts and sessions")], ["approvals", N_("Approvals")], ["terminals", N_("Terminals")],
   ["doctor", N_("Doctor")], ["logs", N_("Logs")], ["llm", N_("LLM servers")], ["vpn", N_("VPN profiles")], ["kits", N_("Kits")], ["canaries", N_("Canaries")], ["secrets", N_("Secrets")], ["logins", N_("Logins")], ["projects", N_("Projects")], ["mcp", N_("MCP servers")],
-  ["presets", N_("Presets")], ["images", N_("Images and tools")], ["activity", N_("Activity")], ["settings", N_("Defaults")], ["hosts", N_("Hosts")],
+  ["presets", N_("Presets")], ["teams", N_("Teams")], ["images", N_("Images and tools")], ["activity", N_("Activity")], ["settings", N_("Defaults")], ["hosts", N_("Hosts")],
+  ["help", N_("Help")],
 ];
 // The pages that show one host's things: the address names the host too (#doctor@ct101).
-const HOST_PAGES = ["starts", "doctor", "logs", "llm", "vpn", "kits", "canaries", "secrets", "logins", "projects", "mcp", "presets", "images", "activity", "settings"];
+const HOST_PAGES = ["starts", "doctor", "logs", "llm", "vpn", "kits", "canaries", "secrets", "logins", "projects", "mcp", "presets", "teams", "images", "activity", "settings"];
 
 // --- small helpers ---------------------------------------------------------------------------------------
 
@@ -45,9 +49,57 @@ function el(tag, attrs, ...children) {
 
 function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); return node; }
 
-// CONFIRM: the confirmation a refusal names (the service's NEEDS_CONFIRM action), else null.
+// CONFIRM: the confirmation a refusal names (the service's NEEDS_CONFIRM action), else null; CODE and PARAMS: which
+// common refusal it is (the service's ERROR_CODES), for the page's own words (errorText).
 class ApiError extends Error {
-  constructor(status, message, confirm) { super(message); this.status = status; this.confirm = confirm || null; }
+  constructor(status, message, confirm, code, params) {
+    super(message); this.status = status; this.confirm = confirm || null; this.code = code || null;
+    this.params = params && typeof params === "object" && !Array.isArray(params) ? params : {};
+  }
+}
+
+// The page's words for the service's common refusals (webui.ERROR_CODES), filled in with the refusal's params; the
+// service's own (English) message is shown below them. A code the page does not know: the message as it came.
+const ERROR_TEXTS = {
+  "no-host": N_("There is no host {host} (any more): choose another one, or add it on the page Hosts."),
+  "confirm-needed": N_("This needs your confirmation first."),
+  "bad-path": N_("{what}: an absolute path on that host is needed (no . or .. parts)."),
+  "bad-name": N_("That is no valid name."),
+  "host-unreachable": N_("{host} cannot be reached over SSH right now."),
+  "timeout": N_("{host} did not answer in time."),
+  "command-failed": N_("{command} failed on {host} (exit status {status})."),
+  "unknown-preset-value": N_("The preset {preset} has no value {value}."),
+  "no-preset": N_("There is no preset {preset}."),
+  "login-needed": N_("Log in again."),
+  "page-outdated": N_("The page is out of date: reload it."),
+  "too-many-logins": N_("Too many failed logins: try again in {seconds} seconds."),
+  "busy": N_("Something runs on {host} already: wait for its end."),
+  "changed-meanwhile": N_("{host} was changed meanwhile: nothing was done. Look again, then ask again."),
+  "nothing-checked": N_("Nothing was checked on {host}: there is no all-clear."),
+};
+
+// E's text in the page's language: the page's own words for a known code, else its message.
+function errorText(e) {
+  if (e instanceof ApiError && e.code && Object.prototype.hasOwnProperty.call(ERROR_TEXTS, e.code)) {
+    const values = {};
+    for (const [key, value] of Object.entries(e.params || {})) values[key] = String(value ?? "");
+    for (const name of (ERROR_TEXTS[e.code].match(/\{(\w+)\}/g) || [])) if (!(name.slice(1, -1) in values)) values[name.slice(1, -1)] = "?";
+    return t(ERROR_TEXTS[e.code], values);
+  }
+  return e && e.message ? e.message : String(e);
+}
+
+// The service's own words below the page's (for a known code), else nothing.
+function errorDetail(e) {
+  return e instanceof ApiError && e.code && Object.prototype.hasOwnProperty.call(ERROR_TEXTS, e.code) && e.message ? e.message : "";
+}
+
+// An error as a notice: the page's words, and below them what the service said (English, as it came).
+function errorNotice(e, prefix) {
+  const detail = errorDetail(e);
+  const box = notice(`${prefix ? `${prefix}: ` : ""}${errorText(e)}`, "error");
+  if (detail) box.append(el("div", { class: "hint mono error-detail", lang: "en" }, detail));
+  return box;
 }
 
 // OPTIONS.background: a request of the page's own polls (X-Background: 1), which does not count as the user's
@@ -67,7 +119,8 @@ async function api(method, path, body, options) {
   try { data = await response.json(); } catch (e) { data = null; }
   noteSession(response);
   if (response.status === 401 && path !== "/api/login" && state.me) sessionEnded();
-  if (!response.ok) throw new ApiError(response.status, (data && data.error) || response.statusText, data && typeof data.confirm === "string" ? data.confirm : null);
+  if (!response.ok) throw new ApiError(response.status, (data && data.error) || response.statusText, data && typeof data.confirm === "string" ? data.confirm : null,
+    data && typeof data.code === "string" ? data.code : null, data && data.params);
   return data;
 }
 
@@ -252,7 +305,24 @@ function readableSize(bytes) {
   return `${bytes} B`;
 }
 
-function notice(text, kind) { return el("div", { class: `notice ${kind || ""}`, role: kind === "error" ? "alert" : "status" }, text); }
+// A notice in the page: no live region of its own (the page has one: say()); an error or a result ("ok") is told to
+// screen readers there when it is shown, and the same one drawn again by a poll is not told again within a minute.
+const SAID = new Map();
+function notice(text, kind) {
+  if (kind === "error" || kind === "ok") {
+    const words = String(text ?? ""), now = Date.now();
+    if (!SAID.has(words) || now - SAID.get(words) > 60000) say(words);
+    SAID.set(words, now);
+    if (SAID.size > 50) SAID.delete(SAID.keys().next().value);
+  }
+  return el("div", { class: `notice ${kind || ""}` }, text);
+}
+
+// A row's button: LABEL, and for screen readers what it does to which thing on which host ("Check gpu on ct101").
+// ATTRS: its further attributes (onclick, class, title, disabled).
+function rowButton(label, name, host, attrs) {
+  return el("button", Object.assign({ "aria-label": t("{action} {name} on {host}", { action: label, name, host }) }, attrs || {}), label);
+}
 
 // --- notifications: toasts in the theme's colours, top right ---------------------------------------------
 // Errors stay until they are closed; the others close after TOAST_SECONDS, not while the pointer or the focus is on
@@ -295,8 +365,9 @@ function toast(level, title, text, options) {
   return item;
 }
 
-// What failed, as an error toast: catch (e) { failed(t("Could not …", values))(e); }
-function failed(title) { return (e) => toast("error", title, e && e.message ? e.message : String(e)); }
+// What failed, as an error toast: catch (e) { failed(t("Could not …", values))(e); }. A known code in the page's
+// words, the service's own below them.
+function failed(title) { return (e) => toast("error", title, [errorText(e), errorDetail(e)].filter(Boolean).join("\n")); }
 
 // The states and results the hosts name (list, doctor, devices), in the page's language; another one as it comes.
 const STATES = { ok: N_("state|ok"), warn: N_("state|warn"), fail: N_("state|fail"), skip: N_("state|skip"), running: N_("state|running"),
@@ -398,7 +469,7 @@ function loginView(message) {
         render();
       } catch (e) {
         password.value = ""; code.value = "";
-        status.append(notice(e.message, "error"));
+        status.append(errorNotice(e));
       }
     },
   },
@@ -436,7 +507,7 @@ async function render() {
   state.page = where.page || state.page;
   useAddressHost(where);
   if (state.startsHost !== "all" && !state.hosts.some(h => h.name === state.startsHost)) state.startsHost = state.host;
-  const hostSelect = el("select", { "aria-label": t("Host"), onchange: (e) => { state.host = e.target.value; state.startsHost = state.host; localStorage.setItem("sandbox-ai-host", state.host); show(state.page); } },
+  const hostSelect = el("select", { "aria-label": t("Host"), onchange: (e) => { state.host = e.target.value; state.startsHost = state.host; state.formHost = null; localStorage.setItem("sandbox-ai-host", state.host); show(state.page); } },
     state.hosts.map(h => el("option", { value: h.name, selected: h.name === state.host }, h.kind === "local" ? t("{name} (this machine)", { name: h.name }) : `${h.name} (${h.ssh})`)));
   // the themes' own names, as the desktop app shows them (light and dark in the page's language)
   const themeSelect = el("select", { "aria-label": t("Theme"), onchange: (e) => applyTheme(e.target.value) },
@@ -664,9 +735,19 @@ function show(page) {
   if (!main) return;
   for (const entry of state.terminals) entry.box.classList.add("hidden");
   if (page !== "terminals") clear(main);
-  pages[page](main).then(() => { if (moved && page !== "terminals" && state.page === page) focusHeading(main); },
-    e => { clear(main); main.append(notice(e.message, "error")); if (moved) focusHeading(main); });
+  // a drawing still waiting for an answer is out of date from now on: it never draws over this one (pageLive)
+  const token = ++state.renderToken;
+  pages[page](main).then(() => {
+    if (token !== state.renderToken) return;
+    addHelpLink(main, page);
+    if (moved && page !== "terminals" && state.page === page) focusHeading(main);
+  },
+    e => { if (token !== state.renderToken) return; clear(main); main.append(errorNotice(e)); if (moved) focusHeading(main); });
 }
+
+// Whether the page drawing that asks is still the one shown: false once another page (or this one again) is drawn.
+// A page's drawing checks it after each answer it waited for, before it touches the page.
+function pageLive() { const token = state.renderToken; return () => token === state.renderToken; }
 
 function focusHeading(main) {
   const heading = main && typeof main.querySelector === "function" ? main.querySelector("h1") : null;
@@ -728,8 +809,6 @@ const MCP_SERVER_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
 function startId(s) { return String(s.id || s.name); }
 function startKey(s) { return `${s.host} ${startId(s)}`; }
 
-// A row button's name for screen readers: what it does, to which start, on which host ("Stop web on ct101").
-function rowLabel(action, s) { return t("{action} {name} on {host}", { action, name: s.name, host: s.host }); }
 
 // Whether a question of the last poll comes from the run of start S.
 function startAsks(s) { return Boolean(s.run) && state.questions.some(q => q.host === s.host && q.run === s.run); }
@@ -752,32 +831,32 @@ function startRow(s, starts, main, all) {
       if (state.page === "starts") refreshStarts(main, true);
     } catch (e) { failed(t(RUN_FAILED[action], { name: s.name, host }))(e); }
   });
-  const act = (label, action, extra) => el("button", Object.assign({ onclick: (event) => run(event.target, action), "aria-label": rowLabel(label, s) }, extra || {}), label);
+  const act = (label, action, extra) => rowButton(label, s.name, host, Object.assign({ onclick: (event) => run(event.target, action) }, extra || {}));
   const mcp = s.kind === "mcp";
   const stopText = mcp ? t("Stop the MCP server {name} on {host}? The starts it serves lose it until it starts again.", { name: s.name, host })
     : t("Stop {name} on {host}? What runs in it ends; {home}", { name: s.name, host,
       home: s.keep ? t("its HOME is kept: Resume starts it again.") : s.home === "own" ? t("its HOME is a directory of its own, which stays.") : t("its HOME is not kept: it is discarded with the start.") });
-  const stop = el("button", { "aria-label": rowLabel(t("Stop"), s), onclick: () => confirmIn(actions, stopText, t("Yes, stop it"), () => run(stop, "stop", { confirm: true }), { trigger: stop }) }, t("Stop"));
-  if (s.attachable) actions.append(el("button", { class: "primary", "aria-label": rowLabel(t("Attach"), s), onclick: () => openTerminal({ kind: "attach", name: s.name, host }, `${s.name}`) }, t("Attach")));
+  const stop = rowButton(t("Stop"), s.name, host, { onclick: () => confirmIn(actions, stopText, t("Yes, stop it"), () => run(stop, "stop", { confirm: true }), { trigger: stop }) });
+  if (s.attachable) actions.append(rowButton(t("Attach"), s.name, host, { class: "primary", onclick: () => openTerminal({ kind: "attach", name: s.name, host }, `${s.name}`) }));
   if (s.state === "running" && !mcp) actions.append(act(t("Pause"), "pause"), stop,
-    el("button", { "aria-label": rowLabel(t("Network…"), s), onclick: () => networkCard(main, s) }, t("Network…")),
-    el("button", { "aria-label": rowLabel(t("Resources…"), s), title: t("workspaces, devices and resource limits while it runs"), onclick: () => resourcesCard(main, s) }, t("Resources…")));
+    rowButton(t("Network…"), s.name, host, { onclick: () => networkCard(main, s) }),
+    rowButton(t("Resources…"), s.name, host, { title: t("workspaces, devices and resource limits while it runs"), onclick: () => resourcesCard(main, s) }));
   else if (s.state === "running" || (s.state === "paused" && mcp)) actions.append(stop);
   if (s.state === "paused" && !mcp) actions.append(act(t("Resume"), "resume"), stop);
   if (s.state === "stopped" && s.keep) {
-    const resume = el("button", { "aria-label": rowLabel(t("Resume"), s), onclick: () => reviewThenResume(main, s, resume) }, t("Resume"));
-    const remove = el("button", { class: "danger", "aria-label": rowLabel(t("Delete"), s), onclick: () => confirmIn(actions, t("Delete {name} on {host} with its kept HOME? What is in that HOME is gone for good.", { name: s.name, host }),
-      t("Yes, delete it"), () => run(remove, "delete", { confirm: true }), { trigger: remove }) }, t("Delete"));
+    const resume = rowButton(t("Resume"), s.name, host, { onclick: () => reviewThenResume(main, s, resume) });
+    const remove = rowButton(t("Delete"), s.name, host, { class: "danger", onclick: () => confirmIn(actions, t("Delete {name} on {host} with its kept HOME? What is in that HOME is gone for good.", { name: s.name, host }),
+      t("Yes, delete it"), () => run(remove, "delete", { confirm: true }), { trigger: remove }) });
     actions.append(resume, remove);
   }
   if (mcp) actions.append(...attachControls(s, starts));
   if (!mcp && s.state !== "damaged") {
-    const rename = el("button", { "aria-label": rowLabel(t("Rename…"), s), onclick: () => askRename(actions, s, main, rename) }, t("Rename…"));
+    const rename = rowButton(t("Rename…"), s.name, host, { onclick: () => askRename(actions, s, main, rename) });
     actions.append(rename);
   }
   if (!mcp && ["running", "paused", "stopped"].includes(s.state) && (s.state !== "stopped" || s.keep))
-    actions.append(el("button", { "aria-label": rowLabel(t("More…"), s), title: t("resume with directories, mounts or MCP servers added, restart, stop with a longer wait"), onclick: () => moreCard(main, s) }, t("More…")));
-  actions.append(el("button", { "aria-label": rowLabel(t("History"), s), onclick: () => historyCard(main, s) }, t("History")));
+    actions.append(rowButton(t("More…"), s.name, host, { title: t("resume with directories, mounts or MCP servers added, restart, stop with a longer wait"), onclick: () => moreCard(main, s) }));
+  actions.append(rowButton(t("History"), s.name, host, { onclick: () => historyCard(main, s) }));
   // which MCP servers a start reaches (or will at its next start), and whom a server serves
   const mcpNote = mcp ? ((s.serves || []).length ? t("serves {starts}", { starts: s.serves.join(", ") }) : t("serves no start yet"))
     : (s.mcp || []).length ? `MCP: ${s.mcp.join(", ")}` : "";
@@ -804,16 +883,49 @@ function askRename(actions, s, main, trigger) {
   if (typeof input.focus === "function") input.focus();
 }
 
+// A card about one start (its history, More, network, resources, the review of its HOME) opens where the user is:
+// right below the start's row, as a row of its own across the table (with what belongs to the start below it);
+// a card about the host (Clean up) below the page's tools. It is scrolled into view and its heading gets the focus.
+// One card of each kind (its id) at a time. Without its row (the start gone, another page): at the end of MAIN.
+function openCard(main, card, s) {
+  const old = document.getElementById(card.id);
+  if (old && old !== card) dropCard(old);
+  const view = startsView;
+  const entry = s && view.main === main && view.rows ? view.rows.get(startKey({ ...s, host: s.host || state.host })) : null;
+  if (entry && entry.row.isConnected) {
+    const key = startKey(entry.start);
+    card.holder = el("tr", { class: "card-row", "data-card-for": key }, el("td", { colspan: COLUMNS }, card));
+    view.cardRows = (view.cardRows || []).filter(c => c.card !== card).concat([{ key, row: card.holder, card }]);
+    layoutStarts(view, main);
+  } else if (!s && view.main === main && view.slot && view.slot.isConnected) view.slot.append(card);
+  else main.append(card);
+  revealCard(card);
+  return card;
+}
+
+// A card taken away: its row in the table with it.
+function dropCard(card) {
+  if (card.holder && card.keepHolder) card.holder.hidden = true;  // a row of its own in that table (a canary event's)
+  else if (card.holder) card.holder.remove();
+  card.remove();
+}
+
+function revealCard(card) {
+  if (typeof card.scrollIntoView === "function") card.scrollIntoView({ block: "nearest" });
+  const heading = typeof card.querySelector === "function" ? card.querySelector("h2") : null;
+  if (heading && typeof heading.focus === "function") { heading.setAttribute("tabindex", "-1"); heading.focus(); }
+}
+
 // What happened to a start (sandbox-ai list --history NAME on its host).
 async function historyCard(main, s) {
   const old = document.getElementById("history-card");
-  if (old) old.remove();
+  if (old) dropCard(old);
   const body = el("div", {}, el("p", { class: "hint" }, t("Loading…")));
   const card = el("div", { class: "card", id: "history-card" }, el("h2", {}, t("History of {name} on {host}", { name: s.name, host: s.host })), body,
-    el("button", { onclick: () => card.remove() }, t("Close")));
-  main.append(card);
+    el("button", { onclick: () => dropCard(card) }, t("Close")));
+  openCard(main, card, s);
   let found;
-  try { found = await api("GET", hostPath(`/starts/${encodeURIComponent(s.name)}/history`, s.host)); } catch (e) { clear(body).append(notice(e.message, "error")); return; }
+  try { found = await api("GET", hostPath(`/starts/${encodeURIComponent(s.name)}/history`, s.host)); } catch (e) { clear(body).append(errorNotice(e)); return; }
   const details = (e) => {
     if (e.event === "exit") return typeof e.status === "number" ? t("status {status}", { status: e.status }) : t("status unknown");
     if (e.event === "rename") return e.to ? t("renamed to {name}", { name: e.to }) : t("renamed from {name}", { name: e.from || "?" });
@@ -829,7 +941,7 @@ async function historyCard(main, s) {
 function moreCard(main, s) {
   const host = s.host;
   const old = document.getElementById("more-card");
-  if (old) old.remove();
+  if (old) dropCard(old);
   const workspaces = el("textarea", { id: "more-workspaces", rows: 2, class: "mono", placeholder: "/home/you/src/lib" });
   const mounts = el("textarea", { id: "more-mounts", rows: 2, class: "mono", placeholder: "/home/you/data:/mnt/data:ro" });
   const servers = el("input", { id: "more-mcp", class: "mono", placeholder: "files" });
@@ -850,23 +962,27 @@ function moreCard(main, s) {
   const resume = (event) => {
     clear(status);
     let body;
-    try { body = request(); } catch (e) { status.append(notice(e.message, "error")); return; }
+    try { body = request(); } catch (e) { status.append(errorNotice(e)); return; }
     const what = [body.restart ? t("it is restarted now (what runs in it ends; the agent continues its conversation)") : null,
       body.workspaces.length ? t("the directories {dirs}, writable", { dirs: body.workspaces.join(", ") }) : null,
       body.mounts.length ? t("the mounts {mounts}", { mounts: body.mounts.map(m => `${m.source}:${m.destination}:${m.mode}`).join(", ") }) : null,
       body.mcp.length ? t("the MCP servers {servers}", { servers: body.mcp.join(", ") }) : null].filter(Boolean);
     if (!what.length) { toast("warning", t("Nothing to add"), t("Name directories, mounts or MCP servers, or restart it.")); return; }
     confirmIn(row, t("Resume {name} on {host} with {what}? What is added is kept for its later starts.", { name: s.name, host, what: what.join(t(" and ")) }), t("Yes, resume it"), async () => {
-      try { const r = await api("POST", hostPath(`/starts/${encodeURIComponent(s.name)}/resume`, host), Object.assign(body, { confirm: true })); toast("success", t("{name} on {host} resumed", { name: s.name, host }), (r && r.output) || ""); card.remove(); if (state.page === "starts") refreshStarts(main, true); }
-      catch (e) { status.append(notice(e.message, "error")); }
+      try { const r = await api("POST", hostPath(`/starts/${encodeURIComponent(s.name)}/resume`, host), Object.assign(body, { confirm: true })); toast("success", t("{name} on {host} resumed", { name: s.name, host }), (r && r.output) || ""); dropCard(card); if (state.page === "starts") refreshStarts(main, true); }
+      catch (e) { status.append(errorNotice(e)); }
     }, { kind: "primary", trigger: event.target });
   };
-  const stop = (event) => confirmIn(row, t("Stop {name} on {host}, waiting up to {seconds} seconds for it to end? What runs in it ends.", { name: s.name, host, seconds: wait.value }), t("Yes, stop it"), async () => {
-    try { const r = await api("POST", hostPath(`/starts/${encodeURIComponent(s.name)}/stop`, host), { wait: Number(wait.value), confirm: true }); toast("success", t("{name} on {host} stopped", { name: s.name, host }), (r && r.output) || ""); card.remove(); if (state.page === "starts") refreshStarts(main, true); }
-    catch (e) { status.append(notice(e.message, "error")); }
-  }, { trigger: event.target });
+  const stop = (event) => {
+    const seconds = Number(wait.value);  // what the question names is what is sent, whatever the field says by then
+    if (!Number.isInteger(seconds) || seconds < 1 || seconds > 600) { clear(status).append(notice(t("Wait 1 to 600 seconds."), "error")); return; }
+    confirmIn(row, t("Stop {name} on {host}, waiting up to {seconds} seconds for it to end? What runs in it ends.", { name: s.name, host, seconds }), t("Yes, stop it"), async () => {
+      try { const r = await api("POST", hostPath(`/starts/${encodeURIComponent(s.name)}/stop`, host), { wait: seconds, confirm: true }); toast("success", t("{name} on {host} stopped", { name: s.name, host }), (r && r.output) || ""); dropCard(card); if (state.page === "starts") refreshStarts(main, true); }
+      catch (e) { status.append(errorNotice(e)); }
+    }, { trigger: event.target });
+  };
   row.append(el("button", { class: "primary", onclick: resume }, s.state === "running" ? t("Restart with these…") : t("Resume with these…")),
-    s.state !== "stopped" ? el("button", { onclick: stop }, t("Stop and wait…")) : null, el("button", { onclick: () => card.remove() }, t("Close")));
+    s.state !== "stopped" ? el("button", { onclick: stop }, t("Stop and wait…")) : null, el("button", { onclick: () => dropCard(card) }, t("Close")));
   const card = el("div", { class: "card", id: "more-card" }, el("h2", {}, t("More for {name} on {host}", { name: s.name, host })),
     el("div", { class: "form" },
       el("label", { for: "more-workspaces" }, t("Directories (one per line)")), workspaces,
@@ -875,7 +991,7 @@ function moreCard(main, s) {
       s.state === "running" ? el("label", { for: "more-restart" }, t("Restart it now")) : null, s.state === "running" ? restart : null,
       s.state !== "stopped" ? el("label", { for: "more-wait" }, t("Stop: wait up to (seconds)")) : null, s.state !== "stopped" ? wait : null,
       status, el("span"), row));
-  main.append(card);
+  openCard(main, card, s);
 }
 
 // A stopped start with a kept HOME: first what changed in the files of that HOME that decide what runs at a start
@@ -883,13 +999,13 @@ function moreCard(main, s) {
 async function reviewThenResume(main, s, button) {
   const host = s.host;
   const old = document.getElementById("review-card");
-  if (old) old.remove();
+  if (old) dropCard(old);
   const resume = async () => {
     try {
       const r = await api("POST", hostPath(`/starts/${encodeURIComponent(s.name)}/resume`, host), {});
       toast("success", t("{name} on {host} resumed", { name: s.name, host }), (r && r.output) || "");
       const card = document.getElementById("review-card");
-      if (card) card.remove();
+      if (card) dropCard(card);
       if (state.page === "starts") refreshStarts(main, true);
     } catch (e) { failed(t("Could not resume {name} on {host}", { name: s.name, host }))(e); }
   };
@@ -898,9 +1014,9 @@ async function reviewThenResume(main, s, button) {
   catch (e) { found = e; }
   if (found instanceof Error) {
     const row = el("div", { class: "row" });
-    main.append(el("div", { class: "card", id: "review-card" }, el("h2", {}, t("Resume {name} on {host}?", { name: s.name, host })),
-      notice(t("What changed in its HOME could not be checked: {error}", { error: found.message }), "warn"), row));
-    confirmIn(row, t("Resume it without that check?"), t("Resume anyway"), resume, { kind: "primary", trigger: button, onCancel: () => { const c = document.getElementById("review-card"); if (c) c.remove(); } });
+    openCard(main, el("div", { class: "card", id: "review-card" }, el("h2", {}, t("Resume {name} on {host}?", { name: s.name, host })),
+      notice(t("What changed in its HOME could not be checked: {error}", { error: errorText(found) }), "warn"), row), s);
+    confirmIn(row, t("Resume it without that check?"), t("Resume anyway"), resume, { kind: "primary", trigger: button, onCancel: () => { const c = document.getElementById("review-card"); if (c) dropCard(c); } });
     return;
   }
   const review = found && found.review && typeof found.review === "object" ? found.review : null;
@@ -909,12 +1025,12 @@ async function reviewThenResume(main, s, button) {
   const rows = changes.map(c => el("tr", {}, el("td", {}, String(c.change || "")), el("td", { class: "mono" }, String(c.path || "")),
     el("td", {}, c.note ? String(c.note) : "", c.diff ? el("details", {}, el("summary", {}, t("Differences")), el("pre", {}, String(c.diff))) : null)));
   const row = el("div", { class: "row" });
-  main.append(el("div", { class: "card", id: "review-card" }, el("h2", {}, t("The HOME of {name} on {host} changed", { name: s.name, host })),
+  openCard(main, el("div", { class: "card", id: "review-card" }, el("h2", {}, t("The HOME of {name} on {host} changed", { name: s.name, host })),
     el("p", {}, t("Since its last start ({since}), in files that decide what runs at a start (shell, git, ssh, the agent's settings, hooks, plugins, skills). If you did not make these changes, check them before you resume it.", { since: review.since || "?" })),
     review.complete === false ? notice(t("Its HOME has more files than were checked: not every change is named."), "warn") : null,
-    rows.length ? table([t("Change"), t("File"), ""], rows) : null, row));
+    rows.length ? table([t("Change"), t("File"), ""], rows) : null, row), s);
   confirmIn(row, t("Resume {name} on {host} with these changes?", { name: s.name, host }), t("Resume anyway"), resume,
-    { kind: "primary", trigger: button, onCancel: () => { const c = document.getElementById("review-card"); if (c) c.remove(); } });
+    { kind: "primary", trigger: button, onCancel: () => { const c = document.getElementById("review-card"); if (c) dropCard(c); } });
 }
 
 // A row whose host could not be asked: as last seen, greyed, its buttons off.
@@ -1054,9 +1170,11 @@ function startTree(starts) {
       else if (s.backend === "podman" && s.run && (s.state === "running" || s.state === "paused")) lines.push(t("Podman: its run {run}", { run: s.run }));
       const companions = (Array.isArray(s.companions) ? s.companions : []).filter(c => typeof c === "string" && c);
       if (companions.length) lines.push(t("With: {companions}", { companions: companions.join(", ") }));
-      if (typeof s.team === "string" && s.team) {
-        const members = (Array.isArray(s.members) ? s.members : []).filter(m => typeof m === "string" && m);
-        lines.push(members.length ? t("Team {team}: {members}", { team: s.team, members: members.join(", ") }) : t("Team {team}", { team: s.team }));
+      // list --json's "teams": the teams it belongs to (the names of their team-NAME boards); its fellow members are
+      // the other starts of the listing in the same team
+      for (const team of (Array.isArray(s.teams) ? s.teams : []).filter(x => typeof x === "string" && x)) {
+        const members = starts.filter(o => o !== s && o.kind !== "mcp" && Array.isArray(o.teams) && o.teams.includes(team)).map(o => o.name);
+        lines.push(members.length ? t("Team {team}: {members}", { team, members: members.join(", ") }) : t("Team {team}", { team }));
       }
     }
     if (lines.length) notes.set(startKey(s), lines);
@@ -1132,6 +1250,16 @@ function layoutStarts(view, main, entries) {
   hosts.sort((a, b) => (known.includes(a) ? known.indexOf(a) : known.length) - (known.includes(b) ? known.indexOf(b) : known.length) || a.localeCompare(b));
   const order = [];
   const notes = new Map();
+  // the cards opened below a start (openCard): right after its row, hidden with it; a closed one's row goes
+  view.cardRows = (view.cardRows || []).filter(c => {
+    const open = c.card.holder === c.row && c.card.parentNode && c.card.parentNode.parentNode === c.row;  // still in its row
+    if (!open) c.row.remove();
+    return open;
+  });
+  const placed = new Set();
+  const cardsBelow = (row, key) => {
+    for (const c of view.cardRows) if (c.key === key) { c.row.hidden = row.hidden; order.push(c.row); placed.add(c); }
+  };
   for (const host of hosts) {
     const here = list.filter(entry => entry.start.host === host);
     const byKey = new Map(here.map(entry => [startKey(entry.start), entry]));
@@ -1156,6 +1284,7 @@ function layoutStarts(view, main, entries) {
         }
       }
       order.push(entry.row);
+      cardsBelow(entry.row, startKey(root));
       for (const kid of kids) {
         const child = byKey.get(startKey(kid));
         child.row.hidden = !hostOpen || !open;
@@ -1163,6 +1292,7 @@ function layoutStarts(view, main, entries) {
         const kidSlot = child.row.querySelector(".tree-slot");
         if (kidSlot && !kidSlot.querySelector(".tree-branch")) clear(kidSlot).append(el("span", { class: "tree-branch", "aria-hidden": "true" }, "↳ "));
         order.push(child.row);
+        cardsBelow(child.row, startKey(kid));
       }
       if (lines.length) {
         const key = startKey(root);
@@ -1176,11 +1306,12 @@ function layoutStarts(view, main, entries) {
       }
     }
   }
+  for (const c of view.cardRows) if (!placed.has(c)) { c.row.hidden = false; order.push(c.row); }  // its start is gone: the card stays, last
   for (const [host, group] of view.groups) if (!hosts.includes(host)) { group.row.remove(); view.groups.delete(host); }
   for (const [key, kept] of view.notes || new Map()) if (!notes.has(key) || notes.get(key).row !== kept.row) kept.row.remove();
   view.notes = notes;
   if (order.some((row, i) => view.body.children[i] !== row) || view.body.children.length !== order.length) view.body.append(...order);
-  view.table.hidden = !view.rows.size; view.empty.hidden = Boolean(view.rows.size);
+  view.table.hidden = !view.rows.size && !view.cardRows.length; view.empty.hidden = Boolean(view.rows.size);
   if (view.folds) for (const button of view.folds) button.disabled = !view.rows.size;
 }
 
@@ -1268,11 +1399,13 @@ pages.starts = async (main) => {
   const title = () => (all ? t("Starts and sessions on every host") : t("Starts and sessions on {host}", { host }));
   main.append(el("h1", {}, title()), el("p", { class: "hint" }, t("Loading…")));
   let found;
+  const live = pageLive();
   try { found = await api("GET", startsPath(host)); } catch (e) { found = e; }
-  if (state.page !== "starts" || state.startsHost !== host) return;
+  if (state.page !== "starts" || state.startsHost !== host || !live()) return;
   const view = startsView;
   view.main = main; view.host = host; view.rows = new Map(); view.loading = false; view.again = false; view.seen = {};
-  view.groups = new Map(); view.notes = new Map(); view.order = []; view.errors = {};
+  view.groups = new Map(); view.notes = new Map(); view.order = []; view.errors = {}; view.cardRows = [];
+  view.slot = el("div", { class: "card-slot" });
   view.status = el("div"); view.body = el("tbody");
   view.table = el("table", { class: "starts" }, el("caption", { class: "sr-only" }, all ? t("Starts on every host") : t("Starts on {host}", { host })),
     el("thead", {}, el("tr", {}, [t("Host"), t("Name"), t("Agent"), t("State"), t("Workspace"), "HOME", t("Started"), ""].map(c => el("th", {}, c)))), view.body);
@@ -1282,7 +1415,7 @@ pages.starts = async (main) => {
   view.empty = !listed.length && state.hosts.length <= 1 && (all || host === "local") ? firstRunCard()
     : el("p", { class: "hint" }, all ? t("Nothing runs or is kept on any host.") : t("Nothing runs or is kept on this host."));
   const chooser = el("select", { id: "starts-host", onchange: (event) => {
-    state.startsHost = event.target.value;
+    state.startsHost = event.target.value; state.formHost = null;
     if (state.startsHost !== "all") { state.host = state.startsHost; try { localStorage.setItem("sandbox-ai-host", state.host); } catch (e) { /* this page only */ } }
     show("starts");
   } }, el("option", { value: "all", selected: all }, t("all hosts")), state.hosts.map(h => el("option", { value: h.name, selected: h.name === host }, h.name)));
@@ -1294,82 +1427,214 @@ pages.starts = async (main) => {
   const tools = el("div", { class: "row" }, el("label", { for: "starts-host" }, t("Host")), chooser,
     el("label", {}, every, " ", t("MCP servers that do not run too")),
     all ? null : el("button", { onclick: () => gcCard(main, host) }, t("Clean up…")), ...view.folds);
-  clear(main).append(el("h1", {}, title()), tools, view.status, el("div", { class: "table-scroll" }, view.table), view.empty);
+  clear(main).append(el("h1", {}, title()), tools, view.slot, view.status, el("div", { class: "table-scroll" }, view.table), view.empty);
   applyStarts(view, found, main);
-  // a new start: in a terminal of the page, detachable like every start (Ctrl-b d)
-  const target = all ? state.host : host;
+  // a new start: in a terminal of the page, detachable like every start (Ctrl-b d), on the host chosen in its form
+  const target = state.formHost && state.hosts.some(h => h.name === state.formHost) ? state.formHost : all ? state.host : host;
+  const heading = el("h2", {}, t("New start on {host}", { host: target }));
+  const form = el("div", { class: "card", id: "new-start" });
+  main.append(heading, form);
+  await drawStartForm(form, heading, target);
+};
+
+// The preset categories in the order sandbox-ai lists them (presets.CATEGORIES), in the page's words.
+const PRESET_CATEGORIES = [["simple", N_("Simple")], ["development", N_("Development")], ["llm", N_("Local models")], ["analysis", N_("Analysis")],
+  ["research", N_("Research")], ["media", N_("Media")], ["privacy", N_("Privacy")], ["testing", N_("Testing")], ["fun", N_("Fun")]];
+
+// Whether a preset's VPN value must name a Tor profile (the tor preset's: its name or label says Tor).
+function torValue(key, spec) { return key === "tor" || /\bTor\b/.test(String((spec && spec.label) || "")); }
+
+// What `presets check` says is missing ({ok, output}: one "missing: ..." line each), as a list of texts.
+function presetProblems(r) {
+  const lines = String((r && r.output) || "").split("\n").map(x => x.trim()).filter(Boolean);
+  const missing = lines.filter(x => x.startsWith("missing: ")).map(x => x.slice("missing: ".length));
+  return missing.length ? missing : lines;
+}
+
+// The form of a new start on HOST, into CARD (HEADING says the host): its own host selector; the agent; the model
+// (the agent's provider, or an LLM server of that host as --llm NAME or NAME:MODEL; "only this server" adds
+// --no-provider-defaults and is off for the cloud); a preset of that host, by category, only those for the agent,
+// with one field per value it takes (a folder, a port, an LLM server or a VPN profile of that host: a Tor value only
+// Tor profiles) and its MCP servers as that host has them; the free options for the rest. Start checks the preset
+// there first (presets check) and shows what is missing instead of starting.
+async function drawStartForm(card, heading, host) {
+  const live = pageLive();
+  clear(card);
+  heading.textContent = t("New start on {host}", { host });
+  const hostChoice = el("select", { id: "start-host" }, state.hosts.map(h => el("option", { value: h.name, selected: h.name === host }, h.kind === "local" ? t("{name} (this machine)", { name: h.name }) : h.name)));
+  hostChoice.addEventListener("change", () => { state.formHost = hostChoice.value; drawStartForm(card, heading, hostChoice.value); });
   const agent = el("select", { id: "agent" }, AGENTS.map(a => el("option", { value: a }, a)));
-  // the model: the agent's provider, or an LLM server of that host (llm list), as NAME or NAME:MODEL (--llm)
+  const agentOf = () => (AGENTS.includes(agent.value) ? agent.value : AGENTS[0]);  // a select shows its first until chosen
   const model = el("select", { id: "start-model" });
-  const onlyServer = el("input", { type: "checkbox", id: "start-only-server" });
-  const servers = [];
+  // as the app's wizard has it: a server chosen, nothing else (no cloud provider) unless unticked
+  const onlyServer = el("input", { type: "checkbox", id: "start-only-server", checked: true });
+  const modelHint = el("span", { class: "hint" });
+  const servers = [], profiles = [], mcpNames = new Set();
+  let presets = [], chosen = null, fields = [];
+  const presetsLoaded = { done: false, error: null };
+  const syncOnly = () => { onlyServer.disabled = !model.value || model.disabled; if (onlyServer.disabled && !model.value) onlyServer.title = t("only with a server of its own: the cloud is the agent's provider"); else onlyServer.removeAttribute("title"); };
   const drawModels = () => {
-    const chosen = model.value;
+    const was = model.value;
     clear(model).append(el("option", { value: "" }, t("the agent's provider (cloud)")));
     for (const server of servers) {
-      const why = modelProblem(server, agent.value);
+      const why = modelProblem(server, agentOf());
       const label = `${server.name}${server.model ? ` (${server.model})` : ""}${why ? ` — ${why}` : ""}`;
       model.append(el("option", { value: server.name, disabled: Boolean(why), title: why || null }, label));
       for (const m of server.models || []) model.append(el("option", { value: `${server.name}:${m}`, disabled: Boolean(why), title: why || null }, `${server.name}:${m}`));
     }
-    const still = [...model.children].find(o => o.value === chosen && !o.disabled);
-    model.value = still ? chosen : "";
+    const still = [...model.children].find(o => o.value === was && !o.disabled);
+    model.value = still ? was : "";
+    // a preset that names the LLM server itself: the model is its value
+    const byPreset = fields.some(f => f.spec.kind === "llm");
+    model.disabled = byPreset;
+    if (byPreset) model.value = "";
+    modelHint.textContent = byPreset ? t("the preset chooses the LLM server (below)") : "";
+    syncOnly();
+    for (const f of fields) if (f.spec.kind === "llm") f.redraw();
   };
-  agent.addEventListener("change", drawModels);
-  drawModels();
-  api("GET", hostPath("/llm", target)).then((list) => {
-    for (const server of (Array.isArray(list) ? list : []).filter(x => x && typeof x.name === "string")) {
-      servers.push(server);
-      api("GET", hostPath(`/llm/${encodeURIComponent(server.name)}/models`, target)).then((models) => {
-        server.models = (Array.isArray(models) ? models : []).map(m => m && m.name).filter(n => typeof n === "string" && n);
-        drawModels();
-      }).catch(() => {});
+  model.addEventListener("change", syncOnly);
+  const preset = el("select", { id: "preset" });
+  const presetHint = el("span", { class: "hint" }, "");
+  const presetValues = el("div", { class: "form preset-values wide" });
+  const presetMcp = el("div", { class: "preset-mcp wide" });
+  // the presets of that host for the chosen agent, by category
+  const drawPresets = () => {
+    const was = preset.value;
+    clear(preset).append(el("option", { value: "" }, t("none")));
+    const usable = presets.filter(p => !Array.isArray(p.agents) || p.agents.includes(agentOf()));
+    const known = new Set(PRESET_CATEGORIES.map(([key]) => key));
+    for (const [key, label] of [...PRESET_CATEGORIES, ...[...new Set(usable.map(p => p.category || "simple"))].filter(c => !known.has(c)).map(c => [c, c])]) {
+      const group = usable.filter(p => (p.category || "simple") === key).sort((a, b) => String(a.id).localeCompare(String(b.id)));
+      if (group.length) preset.append(el("optgroup", { label: known.has(key) ? t(label) : label }, group.map(p => el("option", { value: p.id }, `${p.id}: ${p.title || ""}`))));
     }
+    const still = usable.some(p => p.id === was);
+    preset.value = still ? was : "";
+    if (!still && was) choosePreset();
+    if (presetsLoaded.error) presetHint.textContent = t("this host's sandbox-ai has no presets yet");
+  };
+  // one field per value of the chosen preset (presets show NAME --json of that host), and its MCP servers
+  const valueField = (key, spec) => {
+    const id = `preset-value-${key}`, kind = spec.kind || "text";
+    const label = el("label", { for: id }, String(spec.label || key), spec.optional ? ` ${t("(optional)")}` : "");
+    let input;
+    const f = { key, spec, label, redraw: () => {} };
+    if (kind === "llm" || kind === "vpn") {
+      input = el("select", { id });
+      f.redraw = () => {
+        const was = input.value || (spec.default !== undefined ? String(spec.default) : "");
+        clear(input).append(el("option", { value: "" }, spec.optional ? t("none") : t("choose…")));
+        if (kind === "llm") for (const server of servers) {
+          const why = modelProblem(server, agentOf());
+          input.append(el("option", { value: server.name, disabled: Boolean(why), title: why || null }, `${server.name}${why ? ` — ${why}` : ""}`));
+          for (const m of server.models || []) input.append(el("option", { value: `${server.name}:${m}`, disabled: Boolean(why) }, `${server.name}:${m}`));
+        } else for (const p of profiles.filter(x => !torValue(key, spec) || x.type === "tor")) input.append(el("option", { value: p.profile }, `${p.profile} (${p.type || "?"})`));
+        const still = [...input.children].find(o => o.value === was && !o.disabled);
+        input.value = still ? was : "";
+        if (input.children.length === 1) input.append(el("option", { value: "", disabled: true }, kind === "llm" ? t("no LLM server on {host} yet: add one on the page LLM servers", { host })
+          : torValue(key, spec) ? t("no Tor profile on {host} yet: add one on the page VPN profiles", { host }) : t("no VPN profile on {host} yet: add one on the page VPN profiles", { host })));
+      };
+      f.redraw();
+    } else if (kind === "port" || kind === "number") {
+      input = el("input", { id, type: "number", min: kind === "port" ? 1 : 0, max: kind === "port" ? 65535 : null, placeholder: spec.default !== undefined ? String(spec.default) : "" });
+    } else {
+      input = el("input", { id, class: ["folder", "file", "device", "host", "secret"].includes(kind) ? "mono" : null,
+        placeholder: spec.default !== undefined ? String(spec.default) : kind === "folder" ? t("{path} (on that host)", { path: "/home/you/samples" }) : kind === "device" ? "/dev/ttyUSB0" : "" });
+    }
+    f.input = input;
+    f.value = () => String(input.value || "").trim();
+    return f;
+  };
+  const specHint = (spec) => el("span", { class: "hint" }, spec.hint ? String(spec.hint) : "");
+  const choosePreset = async () => {
+    clear(presetValues); clear(presetMcp); fields = []; chosen = null; presetHint.textContent = "";
+    const id = preset.value;
+    if (!id) { drawModels(); return; }
+    const listed = presets.find(p => p.id === id) || {};
+    presetHint.textContent = t("Loading…");
+    let found;
+    try { found = await api("GET", hostPath(`/presets/${encodeURIComponent(id)}`, host)); }
+    catch (e) { if (preset.value === id) { presetHint.textContent = ""; presetValues.append(errorNotice(e)); } return; }
+    if (preset.value !== id || !card.isConnected) return;
+    chosen = found && typeof found === "object" ? found : listed;
+    presetHint.textContent = `${chosen.description || listed.description || ""}`;
+    const values = chosen.values && typeof chosen.values === "object" ? chosen.values : {};
+    fields = Object.entries(values).filter(([, spec]) => spec && typeof spec === "object").map(([key, spec]) => valueField(key, spec));
+    for (const f of fields) presetValues.append(f.label, el("div", {}, f.input, " ", specHint(f.spec)));
+    const servers_ = (Array.isArray(chosen.mcp) ? chosen.mcp : []).filter(x => typeof x === "string" && !x.includes("{"));
+    if (servers_.length) presetMcp.append(el("span", {}, t("MCP servers")), el("ul", {}, servers_.map(server => {
+      const name = server.split(":").pop(), there = mcpNames.has(name) || mcpNames.has(server);
+      return el("li", { class: there ? "status-ok" : "status-warn" }, el("span", { class: "mono" }, server), " ",
+        there ? t("added on {host}", { host }) : t("not added on {host} yet: {command}", { host, command: `sandbox-ai mcp add ${server}` }),
+        there ? null : el("button", { class: "small", onclick: () => { state.host = host; show("mcp"); } }, t("Open MCP servers")));
+    })));
+    for (const note of (Array.isArray(chosen.notes) ? chosen.notes : []).slice(0, 3)) presetMcp.append(el("p", { class: "hint" }, String(note)));
     drawModels();
-  }).catch(() => {});
+  };
+  preset.addEventListener("change", choosePreset);
+  agent.addEventListener("change", () => { drawModels(); drawPresets(); });
+  drawModels(); drawPresets();
+  // what that host has: its LLM servers (and their models), presets, VPN profiles and MCP servers, asked at once
+  const asked = [
+    api("GET", hostPath("/llm", host)).then((list) => {
+      for (const server of (Array.isArray(list) ? list : []).filter(x => x && typeof x.name === "string")) {
+        servers.push(server);
+        api("GET", hostPath(`/llm/${encodeURIComponent(server.name)}/models`, host)).then((models) => {
+          server.models = (Array.isArray(models) ? models : []).map(m => m && m.name).filter(n => typeof n === "string" && n);
+          if (card.isConnected) drawModels();
+        }).catch(() => {});
+      }
+    }).catch(() => {}),
+    api("GET", hostPath("/presets", host)).then((list) => { presets = (Array.isArray(list) ? list : []).filter(p => p && typeof p.id === "string"); })
+      .catch((e) => { presetsLoaded.error = e; }),
+    api("GET", hostPath("/vpn", host)).then((list) => { for (const p of (Array.isArray(list) ? list : []).filter(x => x && typeof x.profile === "string")) profiles.push(p); }).catch(() => {}),
+    api("GET", hostPath("/mcp", host)).then((list) => { for (const x of (Array.isArray(list) ? list : []).filter(x => x && typeof x.name === "string")) mcpNames.add(x.name); }).catch(() => {}),
+  ];
   const name = el("input", { id: "name", placeholder: t("automatic"), pattern: "[A-Za-z0-9][A-Za-z0-9_.-]{0,47}" });
   const workspace = el("input", { id: "workspace", placeholder: "/home/you/src/project", class: "mono" });
-  const options = el("textarea", { id: "options", rows: 3, class: "mono", placeholder: "--mode high\n--allow-pypi\n-m sonnet\n--preset-value repo='my repo'", "aria-describedby": "options-hint" });
-  // a preset to start from (sandbox-ai presets on that host; an older sandbox-ai has none)
-  const preset = el("select", { id: "preset" }, el("option", { value: "" }, t("none")));
-  const presetHint = el("span", { class: "hint" }, "");
-  let presets = [];
-  try { presets = await api("GET", hostPath("/presets", target)); } catch (e) { presetHint.textContent = t("this host's sandbox-ai has no presets yet"); }
-  if (!Array.isArray(presets)) presets = [];
-  for (const p of presets) preset.append(el("option", { value: p.id }, `${p.id}: ${p.title}`));
-  preset.addEventListener("change", () => {
-    const chosen = presets.find(p => p.id === preset.value);
-    const lines = options.value.split("\n").filter(line => line.trim() && !line.trim().startsWith("--preset"));
-    if (chosen) {
-      lines.unshift(`--preset ${chosen.id}`);
-      for (const [key, spec] of Object.entries(chosen.values || {}))
-        if (!spec.optional && spec.default === undefined) lines.push(`--preset-value ${key}=`);
-      presetHint.textContent = `${chosen.description}${(chosen.notes || []).length ? " " + chosen.notes.join(" ") : ""}`;
-    } else presetHint.textContent = "";
-    options.value = lines.join("\n");
-  });
-  const startStatus = el("div", { class: "wide" });
-  main.append(el("h2", {}, t("New start on {host}", { host: target })), el("div", { class: "card" }, el("div", { class: "form" },
+  const options = el("textarea", { id: "options", rows: 3, class: "mono", placeholder: "--mode high\n--allow-pypi\n-mm sonnet", "aria-describedby": "options-hint" });
+  const startStatus = el("div", { class: "wide", id: "start-status" });
+  const start = el("button", { class: "primary", onclick: () => busy(start, async () => {
+    clear(startStatus);
+    let list;
+    try { list = shellWords(options.value); }
+    catch (e) { startStatus.append(notice(t("Options: {error}", { error: e.message }), "error")); return; }
+    // what is started is what the form says now: the preset checked on that host first, with these values
+    const id = preset.value, values = {};
+    for (const f of fields) if (f.value()) values[f.key] = f.value();
+    let presetArgs = [];
+    if (id) {
+      let r;
+      try { r = await api("POST", hostPath(`/presets/${encodeURIComponent(id)}/check`, host), { values, agent: agentOf() }); }
+      catch (e) { startStatus.append(errorNotice(e, t("The preset {preset} could not be checked on {host}", { preset: id, host }))); return; }
+      if (!r || !r.ok) {
+        startStatus.append(notice(t("The preset {preset} is not ready on {host}: nothing was started.", { preset: id, host }), "error"),
+          el("ul", { class: "preset-problems" }, presetProblems(r).map(line => el("li", {}, line))));
+        return;
+      }
+      presetArgs = ["--preset", id, ...Object.entries(values).flatMap(([key, value]) => ["--preset-value", `${key}=${value}`])];
+    }
+    const server = model.disabled ? "" : model.value;  // "only this server" means nothing for the cloud
+    list = withModel([...presetArgs, ...list], server, onlyServer.checked && Boolean(server));
+    openTerminal({ kind: "start", host, agent: agentOf(), name: textOf(name), workspace: textOf(workspace), options: JSON.stringify(list) }, textOf(name) || t("new {agent}", { agent: agentOf() }));
+  }) }, t("Start in a terminal"));
+  card.append(el("div", { class: "form" },
+    el("label", { for: "start-host" }, t("Host")), hostChoice,
     el("label", { for: "agent" }, t("Agent")), agent,
     el("label", { for: "start-model" }, t("Model")), el("div", { class: "row" }, model,
-      el("label", {}, onlyServer, " ", t("only this server")), el("button", { class: "small", onclick: () => show("llm") }, t("Add a model server…"))),
+      el("label", {}, onlyServer, " ", t("only this server")), el("button", { class: "small", onclick: () => { state.host = host; show("llm"); } }, t("Add a model server…")), modelHint),
     el("label", { for: "name" }, t("Name")), name,
     el("label", { for: "workspace" }, t("Workspace")), workspace,
     el("label", { for: "preset" }, t("Preset")), el("div", {}, preset, " ", presetHint),
+    presetValues, presetMcp,
     el("label", { for: "options" }, t("Options")), el("div", {}, options,
-      el("div", { class: "hint", id: "options-hint" }, t("As on a command line (one or more per line): {examples}; quotes keep spaces together.", { examples: "-m sonnet, --mode high" }))),
+      el("div", { class: "hint", id: "options-hint" }, t("Further options, as on a command line (one or more per line): {examples}; quotes keep spaces together.", { examples: "-mm sonnet, --mode high" }))),
     startStatus,
-    el("span"), el("div", { class: "row" },
-      el("button", { class: "primary", onclick: () => {
-        clear(startStatus);
-        let list;
-        try { list = shellWords(options.value); }
-        catch (e) { startStatus.append(notice(t("Options: {error}", { error: e.message }), "error")); return; }
-        list = withModel(list, model.value, onlyServer.checked);
-        openTerminal({ kind: "start", host: target, agent: agent.value, name: name.value.trim(), workspace: workspace.value.trim(), options: JSON.stringify(list) }, name.value.trim() || t("new {agent}", { agent: agent.value }));
-      } }, t("Start in a terminal")),
-      el("span", { class: "hint" }, t("Detach with Ctrl-b d: the start runs on."))))));
-};
+    el("span"), el("div", { class: "row" }, start,
+      el("span", { class: "hint" }, t("Detach with Ctrl-b d: the start runs on.")))));
+  await Promise.all(asked);
+  if (!live() || !card.isConnected) return;
+  drawModels(); drawPresets();
+}
 
 // Why AGENT cannot use the LLM server SERVER (llm list --json: "agents" are those that can; llm.agent_problem), or "".
 function modelProblem(server, agent) {
@@ -1399,7 +1664,7 @@ function withModel(list, choice, only) {
 // sandbox-ai gc on a host: first what it would remove (--dry-run), then that, asked first.
 function gcCard(main, host) {
   const old = document.getElementById("gc-card");
-  if (old) old.remove();
+  if (old) dropCard(old);
   const days = el("input", { id: "gc-days", type: "number", min: 0, max: 36500, size: 6, placeholder: t("keep_days there") });
   const result = el("div"), actions = el("div", { class: "row" });
   const older = () => (days.value.trim() === "" ? null : Number(days.value));
@@ -1418,7 +1683,7 @@ function gcCard(main, host) {
     const asked = days.value.trim(), previewed = older();
     let r;
     try { r = previewed === null ? await api("GET", hostPath("/gc", host)) : await api("GET", hostPath(`/gc/${encodeURIComponent(asked)}`, host)); }
-    catch (e) { result.append(notice(e.message, "error")); return; }
+    catch (e) { result.append(errorNotice(e)); return; }
     r = r && typeof r === "object" ? r : {};
     const found = lines(r);
     const removing = (r.leftovers || []).length + (r.removed || []).length + (r.histories || []).length;
@@ -1446,9 +1711,9 @@ function gcCard(main, host) {
   const card = el("div", { class: "card", id: "gc-card" }, el("h2", {}, t("Clean up {host}", { host })),
     el("p", { class: "hint" }, t("Leftovers of ended starts, and kept starts unused for the given days with their HOME (empty: the host's keep_days). First a preview; nothing goes before you confirm.")),
     el("div", { class: "form" }, el("label", { for: "gc-days" }, t("Unused for days")), days,
-      el("span"), el("div", { class: "row" }, el("button", { class: "primary", onclick: preview }, t("Preview")), el("button", { onclick: () => card.remove() }, t("Close")))),
+      el("span"), el("div", { class: "row" }, el("button", { class: "primary", onclick: preview }, t("Preview")), el("button", { onclick: () => dropCard(card) }, t("Close")))),
     result, actions);
-  main.append(card);
+  openCard(main, card, null);
 }
 
 // A card about one running start (its network, its resources): switched off once the start stops or goes (a later
@@ -1464,7 +1729,7 @@ function registerCard(card, notes, ref) {
     for (const control of controlsIn(card)) control.disabled = true;
     clear(notes).append(notice(now ? t("{name} on {host} is {state} now: nothing here changes it any more.", { name: ref.name, host: ref.host, state: stateText(now) })
       : t("{name} on {host} is gone: nothing here changes it any more.", { name: ref.name, host: ref.host }), "warn"),
-      el("button", { onclick: () => card.remove() }, t("Close")));
+      el("button", { onclick: () => dropCard(card) }, t("Close")));
   };
   state.cards.push(entry);
   return entry;
@@ -1495,7 +1760,7 @@ function networkCard(main, s) {
   const host = s.host || state.host;
   let name = s.name;  // a rename of the start changes it (cardRef): every request below names it as it is then
   const old = document.getElementById("network-card");
-  if (old) old.remove();
+  if (old) dropCard(old);
   const field = (id, placeholder) => el("input", { id, placeholder, class: "mono" });
   const hosts = field("net-hosts", "pypi.org api.example.org"), tcp = field("net-tcp", "192.0.2.10:5432");
   const ports = field("net-ports", "3000 11434"), dns = el("input", { id: "net-dns", type: "checkbox" });
@@ -1554,13 +1819,13 @@ function networkCard(main, s) {
         } catch (e) { failed(t("Could not untaint {name} on {host}", { name, host }))(e); }
       }, { trigger: untaint }) }, t("Untaint…"));
       holder.append(untaint);
-      taint = el("div", { class: "notice warn", role: "status" }, t("Untrusted content: tainted since {since}", { since: d.taint.since || "?" }), " ", holder);
+      taint = el("div", { class: "notice warn" }, t("Untrusted content: tainted since {since}", { since: d.taint.since || "?" }), " ", holder);
     }
     clear(shown).append(taint || "", table([t("Kind"), t("What"), "", ""], rows, t("Nothing was allowed during this run."), t("Allowed during this run")));
   };
   const refresh = async () => {
     try { draw(await api("GET", hostPath(`/net/${encodeURIComponent(name)}`, host))); }
-    catch (e) { clear(shown).append(notice(e.message, "error")); }
+    catch (e) { clear(shown).append(errorNotice(e)); }
   };
   const send = async (op, request, confirm) => {
     try {
@@ -1618,8 +1883,8 @@ function networkCard(main, s) {
       el("label", { for: "net-nameservers" }, t("Resolvers (real DNS)")), nameservers,
       el("label", { for: "net-keep" }, t("Also for later starts")), keep,
       el("span"), actions),
-    el("h3", {}, t("Keep for the project")), keepRow);
-  main.append(card);
+    el("h3", {}, t("Keep for the project")), keepRow, el("div", { class: "row" }, el("button", { onclick: () => dropCard(card) }, t("Close"))));
+  openCard(main, card, s);
   registerCard(card, notes, cardRef(s, () => name, (fresh) => { name = fresh; }, heading, title));
   refresh();
 }
@@ -1649,7 +1914,7 @@ function resourcesCard(main, s) {
   const host = s.host || state.host;
   let name = s.name;  // a rename of the start changes it, and WHERE with it (cardRef)
   const old = document.getElementById("resources-card");
-  if (old) old.remove();
+  if (old) dropCard(old);
   let where = t("{name} on {host}", { name, host });
   const head = (columns) => el("thead", {}, el("tr", {}, columns.map(c => el("th", {}, c))));
   const notes = el("div");
@@ -1694,7 +1959,7 @@ function resourcesCard(main, s) {
   const loadWorkspaces = async () => {
     let list;
     try { list = await api("GET", hostPath(`/workspaces/${encodeURIComponent(name)}`, host)); }
-    catch (e) { clear(wsStatus).append(notice(e.message, "error")); wsTable.hidden = true; return; }
+    catch (e) { clear(wsStatus).append(errorNotice(e)); wsTable.hidden = true; return; }
     list = (Array.isArray(list) ? list : []).filter(w => w && typeof w === "object");
     clear(wsStatus).append(list.length ? "" : el("p", { class: "hint" }, t("No workspaces listed.")));
     clear(wsBody).append(...list.map(workspaceRow));
@@ -1772,11 +2037,11 @@ function resourcesCard(main, s) {
       const names = me ? (Array.isArray(me.mcp_running) ? me.mcp_running : !me.directory && Array.isArray(me.mcp) ? me.mcp : []) : [];
       live = names.filter(n => typeof n === "string" && n);
       clear(mcpStatus).append(live.length ? "" : el("p", { class: "hint" }, t("No MCP server reaches it now.")));
-    } catch (e) { clear(mcpStatus).append(notice(e.message, "error")); }
+    } catch (e) { clear(mcpStatus).append(errorNotice(e)); }
     try {
       const servers = await api("GET", hostPath("/mcp", host));
       defined = (Array.isArray(servers) ? servers : []).map(d => d && typeof d === "object" ? d.name : null).filter(n => typeof n === "string" && MCP_SERVER_NAME.test(n));
-    } catch (e) { mcpStatus.append(notice(e.message, "error")); }
+    } catch (e) { mcpStatus.append(errorNotice(e)); }
     clear(mcpBody).append(...live.map(mcpRow));
     mcpTable.hidden = !live.length;
     const chosen = mcpChoice.value;
@@ -1824,7 +2089,7 @@ function resourcesCard(main, s) {
   const loadDevices = async () => {
     let list;
     try { list = await api("GET", hostPath(`/devices/${encodeURIComponent(name)}`, host)); }
-    catch (e) { clear(devStatus).append(notice(e.message, "error")); devTable.hidden = true; return; }
+    catch (e) { clear(devStatus).append(errorNotice(e)); devTable.hidden = true; return; }
     list = (Array.isArray(list) ? list : []).filter(d => d && typeof d === "object");
     clear(devStatus).append(list.length ? "" : el("p", { class: "hint" }, t("No devices given to it.")));
     clear(devBody).append(...list.map(deviceRow));
@@ -1921,8 +2186,9 @@ function resourcesCard(main, s) {
       el("label", { for: "lim-memory" }, t("Memory")), memory,
       el("label", { for: "lim-cpus" }, "CPUs"), cpus,
       el("label", { for: "lim-pids" }, t("Processes")), pids,
-      el("span"), limActions));
-  main.append(card);
+      el("span"), limActions),
+    el("div", { class: "row" }, el("button", { onclick: () => dropCard(card) }, t("Close"))));
+  openCard(main, card, s);
   registerCard(card, notes, cardRef(s, () => name, (fresh) => { name = fresh; where = t("{name} on {host}", { name, host }); }, heading, title));
   loadWorkspaces();
   loadMcp();
@@ -2094,13 +2360,13 @@ function approvalsRecords() {
     try {
       const r = await api("GET", hostPath("/approvals-history", host));
       output.append(el("h3", {}, t("Answered questions on {host}", { host })), el("pre", {}, (r && r.output) || ""));
-    } catch (e) { output.append(notice(e.message, "error")); }
+    } catch (e) { output.append(errorNotice(e)); }
   });
   const showRemembered = (event) => busy(event.target, async () => {
     const host = hostChoice.value;
     clear(output);
     let found;
-    try { found = await api("GET", hostPath("/remembered", host)); } catch (e) { output.append(notice(e.message, "error")); return; }
+    try { found = await api("GET", hostPath("/remembered", host)); } catch (e) { output.append(errorNotice(e)); return; }
     const rows = [];
     for (const [project, entry] of Object.entries(found && typeof found === "object" ? found : {})) {
       if (!entry || typeof entry !== "object") continue;
@@ -2290,7 +2556,7 @@ function doctorView(results, options) {
   const problems = count("fail"), warnings = count("warn"), fine = count("ok"), skipped = count("skip");
   const view = el("div", { class: "doctor" });
   if (!checks.length) { view.append(notice(t("The doctor found nothing to check."), "")); return view; }
-  view.append(el("p", { class: `doctor-summary notice ${problems ? "error" : warnings ? "warn" : "ok"}`, role: "status" },
+  view.append(el("p", { class: `doctor-summary notice ${problems ? "error" : warnings ? "warn" : "ok"}` },
     problems || warnings ? t("{problems} problem(s), {warnings} warning(s), {fine} fine: each says how to fix it.", { problems, warnings, fine })
       : t("Everything needed is in place: {fine} checks are fine.", { fine }),
     skipped ? ` ${t("{count} not checked.", { count: skipped })}` : ""));
@@ -2320,7 +2586,9 @@ pages.doctor = async (main) => {
   const host = state.host;
   const backend = state.doctorBackend || "";
   main.append(el("h1", {}, t("Doctor on {host}", { host })), el("p", { class: "hint" }, t("Checking…")));
+  const live = pageLive();
   const results = await api("GET", backend ? hostPath(`/doctor/${encodeURIComponent(backend)}`) : hostPath("/doctor"));
+  if (!live()) return;
   const choice = el("select", { id: "doctor-backend", onchange: (event) => { state.doctorBackend = event.target.value; show("doctor"); } },
     [["", N_("as the host has it")], ["podman", "Podman"], ["bwrap", "Bubblewrap"], ["both", N_("both")]].map(([v, label]) => el("option", { value: v, selected: v === backend }, v === "podman" || v === "bwrap" ? label : t(label))));
   clear(main).append(el("h1", {}, t("Doctor on {host}", { host })),
@@ -2332,7 +2600,9 @@ pages.doctor = async (main) => {
 pages.logs = async (main) => {
   const host = state.host, where = state.logsOf && state.logsOf.host === host ? state.logsOf : null;
   main.append(el("h1", {}, t("Logs on {host}", { host: state.host })), el("p", { class: "hint" }, t("Loading…")));
+  const live = pageLive();
   const data = where ? await api("POST", hostPath("/logs"), { directory: where.directory, project: where.project }) : await api("GET", hostPath("/logs"));
+  if (!live()) return;
   const directory = el("input", { id: "logs-directory", class: "mono", placeholder: "/home/you/.local/state/sandbox-ai/logs/web", value: where ? where.directory : "" });
   const project = el("input", { id: "logs-project", class: "mono", placeholder: "/home/you/src/project", value: where ? where.project : "" });
   clear(main).append(el("h1", {}, t("Logs on {host}", { host: state.host })),
@@ -2351,6 +2621,25 @@ pages.logs = async (main) => {
   }
 };
 
+// What a privacy check found ([{repository, checked, refused, scanned, findings, notes}]): a refused repository
+// ("checked": false, why in "refused") is "not checked: why", never clean; the all-clear only when every
+// repository was checked and nothing was found, never for a list that names none.
+function privacyResult(found, host) {
+  const list = (Array.isArray(found) ? found : []).filter(r => r && typeof r === "object");
+  if (!list.length) return [notice(t("Nothing was checked on {host}: there is no all-clear.", { host }), "error")];
+  const refused = list.filter(r => r.checked === false || r.refused);
+  const findings = list.reduce((n, r) => n + (Array.isArray(r.findings) ? r.findings.length : 0), 0);
+  const nodes = refused.map(r => notice(t("{repository}: not checked: {why}", { repository: String(r.repository || "?"), why: String(r.refused || t("refused")) }), "error"));
+  if (findings) nodes.push(notice(t("{count} finding(s) that should stay private: see below.", { count: findings }), "error"));
+  else if (!refused.length) nodes.push(notice(t("Nothing that should stay private."), "ok"));
+  nodes.push(dataView(list.map(r => ({ repository: r.repository, checked: r.checked !== false && !r.refused, findings: Array.isArray(r.findings) ? r.findings.length : 0,
+    scanned: r.scanned, notes: (Array.isArray(r.notes) ? r.notes : []).join("; ") }))));
+  for (const r of list.filter(x => Array.isArray(x.findings) && x.findings.length)) {
+    nodes.push(el("h3", {}, String(r.repository || "?")), dataView(r.findings.filter(f => f && typeof f === "object")));
+  }
+  return nodes;
+}
+
 // sandbox-ai privacy-check --json on a host: what the next push of each repository would publish that should stay
 // private (nothing is pushed).
 function privacyCard(main, host) {
@@ -2362,28 +2651,35 @@ function privacyCard(main, host) {
     el("label", { for: "privacy-project" }, t("Project rule file")), project, el("label", { for: "privacy-all" }, t("Every file, also unchanged ones")), every,
     el("span"), el("button", { class: "primary", onclick: (event) => busy(event.target, async () => {
       clear(result).append(el("p", { class: "hint" }, t("Checking…")));
-      try { clear(result).append(dataView(await api("POST", hostPath("/privacy-check", host), { paths: linesOf(paths.value), rules_dir: rules.value.trim(), project: project.value.trim(), all: every.checked }), t("Nothing that should stay private."))); }
-      catch (e) { clear(result).append(notice(e.message, "error")); }
+      let found;
+      try { found = await api("POST", hostPath("/privacy-check", host), { paths: linesOf(paths.value), rules_dir: rules.value.trim(), project: project.value.trim(), all: every.checked }); }
+      catch (e) { clear(result).append(errorNotice(e)); return; }
+      clear(result).append(...privacyResult(found, host));
     }) }, t("Check")), result)));
 }
 
 pages.vpn = async (main) => {
+  const live = pageLive();
   const profiles = await api("GET", hostPath("/vpn"));
+  if (!live()) return;
   clear(main).append(el("h1", {}, t("VPN profiles on {host}", { host: state.host })),
     el("p", { class: "hint" }, t("A profile names the secret that holds its key or password (kept on the page Secrets of that host): no key passes through this page."), " ",
       el("button", { onclick: () => show("secrets") }, t("Open Secrets"))));
   const host = state.host;
   const shownProfile = el("div");
-  const rows = profiles.map(p => {
-    const actions = el("td", { class: "actions" },
-      el("button", { onclick: async (event) => busy(event.target, async () => {
-        try { clear(shownProfile).append(el("h3", {}, p.profile), dataView(await api("GET", hostPath(`/vpn/${encodeURIComponent(p.profile)}`, host)))); } catch (e) { clear(shownProfile).append(notice(e.message, "error")); } }) }, t("Show")),
-      el("button", { onclick: async (event) => busy(event.target, async () => {
-        try { toast("success", t("{profile} works", { profile: p.profile }), (await api("POST", hostPath(`/vpn/${encodeURIComponent(p.profile)}/check`), {})).output || "ok"); }
-        catch (e) { failed(t("The check of {profile} failed", { profile: p.profile }))(e); } }) }, t("Check")),
-      el("button", { class: "danger", onclick: () => confirmIn(actions, t("Remove the VPN profile {profile} from {host}? Starts that use it ({option}) cannot start until it is added again.", { profile: p.profile, host, option: `--vpn ${p.profile}` }), t("Yes, remove it"), async () => {
-        try { await api("DELETE", hostPath(`/vpn/${encodeURIComponent(p.profile)}`, host), { confirm: true }); show("vpn"); } catch (e) { failed(t("Could not remove {what} from {where}", { what: p.profile, where: host }))(e); }
-      }) }, t("Remove")));
+  // every request of a row goes to the row's host (the page's, as it was when it was drawn)
+  const rows = (Array.isArray(profiles) ? profiles : []).filter(p => p && typeof p.profile === "string").map(p => {
+    const actions = el("td", { class: "actions" });
+    const remove = rowButton(t("Remove"), p.profile, host, { class: "danger", onclick: () => confirmIn(actions, t("Remove the VPN profile {profile} from {host}? Starts that use it ({option}) cannot start until it is added again.", { profile: p.profile, host, option: `--vpn ${p.profile}` }), t("Yes, remove it"), async () => {
+      try { await api("DELETE", hostPath(`/vpn/${encodeURIComponent(p.profile)}`, host), { confirm: true }); show("vpn"); } catch (e) { failed(t("Could not remove {what} from {where}", { what: p.profile, where: host }))(e); }
+    }, { trigger: remove }) });
+    actions.append(
+      rowButton(t("Show"), p.profile, host, { onclick: async (event) => busy(event.target, async () => {
+        try { clear(shownProfile).append(el("h3", {}, p.profile), dataView(await api("GET", hostPath(`/vpn/${encodeURIComponent(p.profile)}`, host)))); } catch (e) { clear(shownProfile).append(errorNotice(e)); } }) }),
+      rowButton(t("Check"), p.profile, host, { onclick: async (event) => busy(event.target, async () => {
+        try { toast("success", t("{profile} works on {host}", { profile: p.profile, host }), (await api("POST", hostPath(`/vpn/${encodeURIComponent(p.profile)}/check`, host), {})).output || "ok"); }
+        catch (e) { failed(t("The check of {profile} on {host} failed", { profile: p.profile, host }))(e); } }) }),
+      remove);
     return el("tr", {}, el("td", { class: "mono" }, p.profile), el("td", {}, p.type || ""), el("td", {}, p.provider || ""), actions);
   });
   main.append(table([t("Profile"), t("Kind"), t("Provider"), ""], rows, t("No VPN profiles on this host.")), shownProfile);
@@ -2414,9 +2710,10 @@ pages.vpn = async (main) => {
   const form = el("div", { class: "form" }, el("label", { for: "vpn-name" }, t("Name")), name, el("label", { for: "vpn-kind" }, t("Kind")), kind);
   const labels = {};
   for (const [key, [input, text]] of Object.entries(rows2)) { labels[key] = el("label", { for: input.id }, t(text)); form.append(labels[key], input); }
+  const kindOf = () => (Object.prototype.hasOwnProperty.call(wanted, kind.value) ? kind.value : "wireguard");  // the select's first
   const update = () => {
-    for (const key of Object.keys(rows2)) { const on = wanted[kind.value].includes(key); rows2[key][0].hidden = !on; labels[key].hidden = !on; }
-    for (const [key, , kinds] of SWITCHES) switchLabels[key].hidden = Boolean(kinds.length) && !kinds.includes(kind.value);
+    for (const key of Object.keys(rows2)) { const on = wanted[kindOf()].includes(key); rows2[key][0].hidden = !on; labels[key].hidden = !on; }
+    for (const [key, , kinds] of SWITCHES) switchLabels[key].hidden = Boolean(kinds.length) && !kinds.includes(kindOf());
   };
   form.append(el("label", { for: "vpn-dns" }, t("Resolvers")), dnsServers, el("label", { for: "vpn-check-urls" }, t("Check URLs")), checkUrls,
     el("label", { for: "vpn-provider" }, t("Provider")), provider, el("span", {}, t("Options")), el("div", { class: "row" }, Object.values(switchLabels)));
@@ -2425,14 +2722,16 @@ pages.vpn = async (main) => {
   update();
   form.append(el("span"), addRow);
   addRow.append(el("button", { class: "primary", onclick: (event) => {
-    const body = { name: name.value.trim(), kind: kind.value };
+    const body = { name: textOf(name), kind: kindOf() };
     const more = { dns: wordsOf(dnsServers.value), check_urls: wordsOf(checkUrls.value), provider: textOf(provider) };
     for (const [key, value] of Object.entries(more)) if (value.length) body[key] = value;
-    for (const key of wanted[kind.value]) { const value = rows2[key][0].value.trim(); if (value) body[key] = key === "tailnet_allow" ? wordsOf(value) : value; }
-    for (const [key, , kinds] of SWITCHES) if (switches[key].checked && (!kinds.length || kinds.includes(kind.value))) body[key] = true;
+    for (const key of wanted[body.kind]) { const value = textOf(rows2[key][0]); if (value) body[key] = key === "tailnet_allow" ? wordsOf(value) : value; }
+    for (const [key, , kinds] of SWITCHES) if (switches[key].checked && (!kinds.length || kinds.includes(body.kind))) body[key] = true;
     const send = (confirm) => busy(event.target, async () => { try { await api("POST", hostPath("/vpn", host), Object.assign({}, body, confirm ? { confirm: true } : {})); show("vpn"); } catch (e) { failed(t("Could not add the VPN profile"))(e); } });
-    if (!body.socks) { send(false); return; }
-    confirmIn(addRow, t("Give the sandboxes of {profile} on {host} a SOCKS port? What goes through it passes the connection proxy by: no inspection, no approvals.", { profile: body.name, host }), t("Yes, add it"), () => send(true), { kind: "primary", trigger: event.target });
+    const asks = [body.socks ? t("Give the sandboxes of {profile} on {host} a SOCKS port? What goes through it passes the connection proxy by: no inspection, no approvals.", { profile: body.name, host }) : null,
+      body.force ? t("Replace the VPN profile {profile} on {host}? Every start that uses it gets the new tunnel.", { profile: body.name, host }) : null].filter(Boolean);
+    if (!asks.length) { send(false); return; }
+    confirmIn(addRow, asks.join(" "), body.force ? t("Yes, replace it") : t("Yes, add it"), () => send(true), { kind: "primary", trigger: event.target });
   } }, t("Add profile")));
   main.append(el("h2", {}, t("New profile")), el("div", { class: "card" }, form));
 };
@@ -2449,32 +2748,36 @@ function modelsTable(server, models) {
 
 pages.llm = async (main) => {
   main.append(el("h1", {}, t("LLM servers on {host}", { host: state.host })));
+  const live = pageLive();
   const list = await api("GET", hostPath("/llm"));
+  if (!live()) return;
   const output = el("div");
   const host = state.host;
-  const rows = (Array.isArray(list) ? list : []).map(e => {
-    const agent = el("select", { "aria-label": t("Agent") }, el("option", { value: "" }, t("every agent")), AGENTS.map(a => el("option", { value: a }, a)));
+  // every request of a row goes to the row's host (the page's, as it was when it was drawn), never the host chosen since
+  const rows = (Array.isArray(list) ? list : []).filter(e => e && typeof e.name === "string").map(e => {
+    const agent = el("select", { "aria-label": t("Agent for the check of {name} on {host}", { name: e.name, host }) }, el("option", { value: "" }, t("every agent")), AGENTS.map(a => el("option", { value: a }, a)));
     const actions = el("td", { class: "actions" });
     const row = el("tr", {}, el("td", { class: "mono" }, e.name), el("td", {}, e.kind), el("td", { class: "mono" }, e.url), el("td", { class: "mono" }, e.model || ""), actions);
+    const remove = rowButton(t("Remove"), e.name, host, { class: "danger", onclick: () => confirmIn(actions, t("Remove the LLM server {name} on {host}? Starts with {option} cannot start until it is added again.", { name: e.name, host, option: `--llm ${e.name}` }), t("Yes, remove it"), async () => {
+      try { await api("DELETE", hostPath(`/llm/${encodeURIComponent(e.name)}`, host), { confirm: true }); show("llm"); } catch (err) { failed(t("Could not remove {name} on {host}", { name: e.name, host }))(err); }
+    }, { trigger: remove }) });
     actions.append(agent,
-        el("button", { onclick: (ev) => busy(ev.target, async () => {
-          clear(output);
-          try { const r = await api("POST", hostPath(`/llm/${encodeURIComponent(e.name)}/check`), agent.value ? { agent: agent.value } : {}); output.append(notice(r.ok ? t("the server works for it") : t("the check found problems"), r.ok ? "ok" : "error"), el("pre", {}, r.output)); }
-          catch (err) { output.append(notice(err.message, "error")); }
-        }) }, t("Check")),
-        el("button", { onclick: (ev) => busy(ev.target, async () => {
-          clear(output);
-          try { output.append(modelsTable(e.name, await api("GET", hostPath(`/llm/${encodeURIComponent(e.name)}/models`)))); }
-          catch (err) { output.append(notice(err.message, "error")); }
-        }) }, t("Models")),
-        el("button", { onclick: (ev) => busy(ev.target, async () => {
-          clear(output);
-          try { output.append(el("h3", {}, e.name), dataView(await api("GET", hostPath(`/llm/${encodeURIComponent(e.name)}`)))); }
-          catch (err) { output.append(notice(err.message, "error")); }
-        }) }, t("Show")),
-        el("button", { class: "danger", onclick: () => confirmIn(actions, t("Forget the LLM server {name} on {host}? Starts with {option} cannot start until it is added again.", { name: e.name, host, option: `--llm ${e.name}` }), t("Yes, forget it"), async () => {
-          try { await api("DELETE", hostPath(`/llm/${encodeURIComponent(e.name)}`, host), { confirm: true }); show("llm"); } catch (err) { failed(t("Could not forget {name} on {host}", { name: e.name, host }))(err); }
-        }) }, t("Remove")));
+      rowButton(t("Check"), e.name, host, { onclick: (ev) => busy(ev.target, async () => {
+        clear(output);
+        try { const r = await api("POST", hostPath(`/llm/${encodeURIComponent(e.name)}/check`, host), agent.value ? { agent: agent.value } : {}); output.append(notice(r.ok ? t("the server works for it") : t("the check found problems"), r.ok ? "ok" : "error"), el("pre", {}, r.output)); }
+        catch (err) { output.append(errorNotice(err)); }
+      }) }),
+      rowButton(t("Models"), e.name, host, { onclick: (ev) => busy(ev.target, async () => {
+        clear(output);
+        try { output.append(modelsTable(e.name, await api("GET", hostPath(`/llm/${encodeURIComponent(e.name)}/models`, host)))); }
+        catch (err) { output.append(errorNotice(err)); }
+      }) }),
+      rowButton(t("Show"), e.name, host, { onclick: (ev) => busy(ev.target, async () => {
+        clear(output);
+        try { output.append(el("h3", {}, e.name), dataView(await api("GET", hostPath(`/llm/${encodeURIComponent(e.name)}`, host)))); }
+        catch (err) { output.append(errorNotice(err)); }
+      }) }),
+      remove);
     return row;
   });
   main.append(table([t("Name"), t("Kind"), "URL", t("Model"), ""], rows, t("No LLM server yet.")), output);
@@ -2497,9 +2800,12 @@ pages.llm = async (main) => {
     const body = Object.assign({ name: name.value.trim(), kind: kind.value, url: url.value.trim(), model: model.value.trim() }, secret ? { api_key_secret: secret } : {});
     const more = { header_secrets: headers.length ? headers : null, ca: textOf(ca), vpn: textOf(vpn), anthropic: anthropic.checked, replace: replace.checked, insecure_http: insecure.checked };
     for (const [key, value] of Object.entries(more)) if (value) body[key] = value;
-    const send = (confirm) => busy(ev.target, async () => { try { await api("POST", hostPath("/llm", host), Object.assign({}, body, confirm ? { confirm: true } : {})); show("llm"); } catch (e) { status.append(notice(e.message, "error")); } });
-    if (!body.insecure_http) { send(false); return; }
-    confirmIn(addRow, t("Send the prompts to {url} over plain http, unencrypted, from {host}? Whoever is on the way can read them, the answers and the key.", { url: body.url, host }), t("Yes, add it"), () => send(true), { kind: "primary", trigger: ev.target });
+    const send = (confirm) => busy(ev.target, async () => { try { await api("POST", hostPath("/llm", host), Object.assign({}, body, confirm ? { confirm: true } : {})); show("llm"); } catch (e) { status.append(errorNotice(e)); } });
+    // what is asked first: plain http outside the local networks, a server of that name replaced (asked together)
+    const asks = [body.insecure_http ? t("Send the prompts to {url} over plain http, unencrypted, from {host}? Whoever is on the way can read them, the answers and the key.", { url: body.url, host }) : null,
+      body.replace ? t("Replace the LLM server {name} on {host}? Every start that uses it sends its prompts (and its key) to {url} from then on.", { name: body.name, host, url: body.url }) : null].filter(Boolean);
+    if (!asks.length) { send(false); return; }
+    confirmIn(addRow, asks.join(" "), body.replace ? t("Yes, replace it") : t("Yes, add it"), () => send(true), { kind: "primary", trigger: ev.target });
   } }, t("Add")));
   main.append(el("h2", {}, t("Add a server")), el("div", { class: "card" }, el("div", { class: "form" },
     el("label", { for: "llm-name" }, t("Name")), name, el("label", { for: "llm-kind" }, t("Kind")), kind,
@@ -2520,7 +2826,9 @@ const KIT_KINDS = { always: N_("always (sandbox-ai)"), default: N_("always (defa
 
 pages.kits = async (main) => {
   main.append(el("h1", {}, t("Kits on {host}", { host: state.host })), el("p", { class: "hint" }, t("Loading…")));
+  const live = pageLive();
   const data = await api("GET", hostPath("/kits"));
+  if (!live()) return;
   const host = state.host;
   const kits = (Array.isArray(data.kits) ? data.kits : []).filter(k => k && typeof k.name === "string");
   const mine = kits.filter(k => k.kind === "user").map(k => k.name).sort();
@@ -2555,16 +2863,16 @@ pages.kits = async (main) => {
       brings.append(line);
     }
     const kitActions = el("td", { class: "actions" });
-    kitActions.append(el("button", { onclick: (ev) => busy(ev.target, async () => {
-      try { clear(output).append(el("h3", {}, k.name), dataView(await api("GET", hostPath(`/kits/${encodeURIComponent(k.name)}`, host)))); } catch (e) { clear(output).append(notice(e.message, "error")); }
-    }) }, t("Show")));
-    const trust = el("button", { title: t("the command shows the kit's hooks and asks again"), onclick: () => confirmIn(kitActions, t("Trust the hooks of the kit {kit} on {host}? They run in every later start with that kit; the terminal shows them first.", { kit: k.name, host }), t("Yes, show and trust them"),
-      () => openTerminal({ kind: "trust-hooks", host, kit: k.name, confirm: "1" }, t("hooks of {kit}", { kit: k.name })), { kind: "primary", trigger: trust }) }, t("Trust hooks…"));
-    kitActions.append(trust, el("button", { onclick: () => openTerminal({ kind: "trust-hooks", host, kit: k.name, revoke: "1" }, t("hooks of {kit}", { kit: k.name })) }, t("Revoke hooks")));
-    if (own) kitActions.append(el("button", { class: "danger", onclick: () => confirmIn(kitActions, t("Delete the kit {kit} on {host} with everything in it? Projects that use it cannot start until {option} is removed.", { kit: k.name, host, option: `--kit ${k.name}` }), t("Yes, delete it"), async () => {
+    kitActions.append(rowButton(t("Show"), k.name, host, { onclick: (ev) => busy(ev.target, async () => {
+      try { clear(output).append(el("h3", {}, k.name), dataView(await api("GET", hostPath(`/kits/${encodeURIComponent(k.name)}`, host)))); } catch (e) { clear(output).append(errorNotice(e)); }
+    }) }));
+    const trust = rowButton(t("Trust hooks…"), k.name, host, { title: t("the command shows the kit's hooks and asks again"), onclick: () => confirmIn(kitActions, t("Trust the hooks of the kit {kit} on {host}? They run in every later start with that kit; the terminal shows them first.", { kit: k.name, host }), t("Yes, show and trust them"),
+      () => openTerminal({ kind: "trust-hooks", host, kit: k.name, confirm: "1" }, t("hooks of {kit}", { kit: k.name })), { kind: "primary", trigger: trust }) });
+    kitActions.append(trust, rowButton(t("Revoke hooks"), k.name, host, { onclick: () => openTerminal({ kind: "trust-hooks", host, kit: k.name, revoke: "1" }, t("hooks of {kit}", { kit: k.name })) }));
+    if (own) kitActions.append(rowButton(t("Delete kit"), k.name, host, { class: "danger", onclick: () => confirmIn(kitActions, t("Delete the kit {kit} on {host} with everything in it? Projects that use it cannot start until {option} is removed.", { kit: k.name, host, option: `--kit ${k.name}` }), t("Yes, delete it"), async () => {
       try { result(t("{kit} deleted", { kit: k.name }), await api("DELETE", hostPath(`/kits/${encodeURIComponent(k.name)}`, host), { confirm: true })); show("kits"); }
       catch (e) { failed(t("Could not delete {kit}", { kit: k.name }))(e); }
-    }) }, t("Delete kit")));
+    }) }));
     return el("tr", {}, el("td", { class: "mono" }, k.name), el("td", {}, KIT_KINDS[k.kind] ? t(KIT_KINDS[k.kind]) : String(k.kind || "")), brings, kitActions);
   });
   main.append(table([t("Kit"), t("Kind"), t("Brings"), ""], rows, t("No kits on this host.")), output);
@@ -2580,7 +2888,7 @@ pages.kits = async (main) => {
     el("span"), el("button", { class: "primary", onclick: (ev) => busy(ev.target, async () => {
       clear(newStatus);
       try { result(t("Kit {kit} created", { kit: newName.value.trim() }), await api("POST", hostPath("/kits"), { name: newName.value.trim(), agents: chosenAgents(newAgents) })); show("kits"); }
-      catch (e) { newStatus.append(notice(e.message, "error")); }
+      catch (e) { newStatus.append(errorNotice(e)); }
     }) }, t("Create")), newStatus)));
 
   // adding to a kit of yours (or a new one)
@@ -2602,7 +2910,7 @@ pages.kits = async (main) => {
     const request = Object.assign(body(), { create: fresh });
     const go = () => busy(ev.target, async () => {
       try { result(title(name), await api("POST", hostPath(`/kits/${encodeURIComponent(name)}/${action}`, host), Object.assign({}, request, WIDENS[action] ? { confirm: true } : {}))); show("kits"); }
-      catch (e) { addStatus.append(notice(e.message, "error")); }
+      catch (e) { addStatus.append(errorNotice(e)); }
     });
     if (!WIDENS[action] || !needsConfirm("kit-add")) { go(); return; }
     confirmIn(addAsk, t("Add {what} to the kit {kit} on {host}? Every later start with that kit gets it.", { what: WIDENS[action](request) || "?", kit: name, host }), t("Yes, add it"), go, { kind: "primary", trigger: ev.target });
@@ -2615,6 +2923,9 @@ pages.kits = async (main) => {
   const plugin = el("input", { id: "kit-plugin", class: "mono", placeholder: t("{plugin}, or an npm package for OpenCode", { plugin: "sandcastle@sandbox-ai" }) });
   const pluginAgent = el("select", { id: "kit-plugin-agent" }, ["claude", "opencode"].map(a => el("option", { value: a }, a)));
   const pluginSource = el("input", { id: "kit-plugin-source", class: "mono", placeholder: t("OWNER/REPO or https://… (only for a marketplace the kit does not declare yet)") });
+  const marketName = el("input", { id: "kit-market-name", class: "mono", placeholder: "my-plugins", pattern: "[A-Za-z0-9][A-Za-z0-9_.-]{0,63}" });
+  const marketSource = el("input", { id: "kit-market-source", class: "mono", placeholder: t("OWNER/REPO, a Git URL or a folder on that host") });
+  const marketAgent = el("select", { id: "kit-market-agent" }, ["claude", "opencode"].map(a => el("option", { value: a }, a)));
   const hookFile = el("input", { id: "kit-hook-file", class: "mono", placeholder: t("{path} (on that host: a script, hooks.json or a plugin module)", { path: "/home/you/hooks/guard.sh" }) });
   const hookAs = el("input", { id: "kit-hook-as", class: "mono", placeholder: t("the file's name") }), hookEvent = el("input", { id: "kit-hook-event", class: "mono", placeholder: "PreToolUse" });
   const hookMatcher = el("input", { id: "kit-hook-matcher", class: "mono", placeholder: "Bash|Write" }), hookTimeout = el("input", { id: "kit-hook-timeout", type: "number", min: 1, max: 3600 });
@@ -2632,6 +2943,11 @@ pages.kits = async (main) => {
     el("label", { for: "kit-plugin" }, t("Plugin")), plugin, el("label", { for: "kit-plugin-agent" }, t("Agent")), pluginAgent,
     el("label", { for: "kit-plugin-source" }, t("Marketplace source")), pluginSource,
     el("span"), el("button", { class: "primary", onclick: send("add-plugin", () => ({ plugin: plugin.value.trim(), agent: pluginAgent.value, source: pluginSource.value.trim() }), n => t("Plugin added to {kit}", { kit: n })) }, t("Add plugin")),
+    el("h3", { class: "wide" }, t("A marketplace")),
+    el("label", { for: "kit-market-name" }, t("Marketplace")), marketName, el("label", { for: "kit-market-source" }, t("Source")), marketSource,
+    el("label", { for: "kit-market-agent" }, t("Agent")), marketAgent,
+    el("span"), el("button", { class: "primary", onclick: send("add-marketplace", () => ({ marketplace: marketName.value.trim(), source: marketSource.value.trim(), agent: marketAgent.value }), n => t("Marketplace added to {kit}", { kit: n })) }, t("Add marketplace")),
+    el("p", { class: "hint wide" }, t("A marketplace the kit declares: its plugins can then be added by NAME@MARKETPLACE.")),
     el("h3", { class: "wide" }, t("A hook")),
     el("label", { for: "kit-hook-file" }, t("Hook file")), hookFile, el("label", { for: "kit-hook-as" }, t("Name in the kit")), hookAs,
     el("label", { for: "kit-hook-event" }, t("Event")), hookEvent, el("label", { for: "kit-hook-matcher" }, t("Tools")), hookMatcher,
@@ -2642,7 +2958,7 @@ pages.kits = async (main) => {
         if (!name || !file) { toast("warning", t("Which hook?"), t("Choose a kit of yours and name the hook's file.")); return; }
         confirmIn(addAsk, t("Remove the hook {file} from the kit {kit} on {host}?", { file, kit: name, host }), t("Yes, remove it"), async () => {
           try { result(t("{kit}: removed {value}", { kit: name, value: file }), await api("POST", hostPath(`/kits/${encodeURIComponent(name)}/remove-hook`, host), { file, agents: chosenAgents(skillAgents), confirm: true })); show("kits"); }
-          catch (e) { addStatus.append(notice(e.message, "error")); }
+          catch (e) { addStatus.append(errorNotice(e)); }
         }, { trigger: ev.target });
       } }, t("Remove hook…"))),
     addAsk, addStatus),
@@ -2674,28 +2990,37 @@ function canaryLinks(e) {
 
 // One run's canaries (sandbox-ai canaries list RUN --json): its decoy files and what happened; the tokens in full only
 // after a question; a sandbox a canary paused resumed after one too.
-async function canaryRun(main, run) {
+// SLOT: the row below the event (a table row of its own, hidden until a card is in it), else the end of MAIN.
+async function canaryRun(main, run, slot) {
   const host = state.host;
   const old = document.getElementById("canary-run");
-  if (old) old.remove();
+  if (old) dropCard(old);
   const body = el("div", {}, el("p", { class: "hint" }, t("Loading…"))), row = el("div", { class: "row" });
   const card = el("div", { class: "card", id: "canary-run" }, el("h2", {}, t("Canaries of {run} on {host}", { run, host })), body, row);
-  main.append(card);
+  if (slot) { clear(slot.children[0]).append(card); slot.hidden = false; card.holder = slot; card.keepHolder = true; }
+  else main.append(card);
+  revealCard(card);
   const tokens = el("button", { onclick: () => confirmIn(row, t("Show the canary tokens of {run} on {host} in full? They are decoys, but whoever sees them here can copy them.", { run, host }), t("Yes, show them"), async () => {
-    try { clear(body).append(dataView(await api("POST", hostPath(`/canaries/${encodeURIComponent(run)}/tokens`, host), { confirm: true }))); } catch (e) { clear(body).append(notice(e.message, "error")); }
+    try { clear(body).append(dataView(await api("POST", hostPath(`/canaries/${encodeURIComponent(run)}/tokens`, host), { confirm: true }))); } catch (e) { clear(body).append(errorNotice(e)); }
   }, { trigger: tokens }) }, t("Show the tokens…"));
   const resume = el("button", { class: "danger", onclick: () => confirmIn(row, t("Let {run} on {host} go on? A canary paused it: something opened a decoy or sent a token away.", { run, host }), t("Yes, resume it"), async () => {
     try { const r = await api("POST", hostPath(`/canaries/${encodeURIComponent(run)}/resume`, host), { confirm: true }); toast("success", t("{name} on {host} resumed", { name: run, host }), (r && r.output) || ""); } catch (e) { failed(t("Could not resume {name} on {host}", { name: run, host }))(e); }
   }, { trigger: resume }) }, t("Resume the sandbox…"));
-  row.append(tokens, resume, el("button", { onclick: () => card.remove() }, t("Close")));
-  try { clear(body).append(dataView(await api("GET", hostPath(`/canaries/${encodeURIComponent(run)}/list`, host)))); } catch (e) { clear(body).append(notice(e.message, "error")); }
+  row.append(tokens, resume, el("button", { onclick: () => dropCard(card) }, t("Close")));
+  try { clear(body).append(dataView(await api("GET", hostPath(`/canaries/${encodeURIComponent(run)}/list`, host)))); } catch (e) { clear(body).append(errorNotice(e)); }
 }
 
 pages.canaries = async (main) => {
   main.append(el("h1", {}, t("Canaries on {host}", { host: state.host })), el("p", { class: "hint" }, t("Loading…")));
   let logs;
+  const live = pageLive();
   try { logs = await api("GET", hostPath("/canaries")); }
-  catch (e) { clear(main).append(el("h1", {}, t("Canaries on {host}", { host: state.host })), notice(e.status === 502 ? t("{error} (an older sandbox-ai there has no canaries log: {command})", { error: e.message, command: "sandbox-ai update" }) : e.message, "error")); return; }
+  catch (e) {
+    if (!live()) return;
+    clear(main).append(el("h1", {}, t("Canaries on {host}", { host: state.host })), e.status === 502 && (!e.code || e.code === "command-failed") ? notice(t("{error} (an older sandbox-ai there has no canaries log: {command})", { error: e.message, command: "sandbox-ai update" }), "error") : errorNotice(e));
+    return;
+  }
+  if (!live()) return;
   clear(main).append(el("h1", {}, t("Canaries on {host}", { host: state.host })),
     el("p", { class: "hint" }, t("Every decoy file opened and every canary token that left a sandbox: by which process (for a file, the one the supervisor found holding it open; inotify itself names nobody), with the agent's tool call, its prompt turn and the model requests around it.")));
   const events = (Array.isArray(logs) ? logs : []).flatMap(log => (log.events || []).map(e => Object.assign({ agent: log.agent, activity: log.activity }, e)));
@@ -2706,13 +3031,14 @@ pages.canaries = async (main) => {
     const detail = el("tr", { class: "canary-links hidden" }, el("td", { colspan: 7 },
       links.length ? el("ul", {}, links) : el("p", { class: "hint" }, e.activity ? t("Nothing of the agent's in that time window.") : t("No activity timeline for this run: nothing to link.")),
       (e.processes || []).length > 1 ? el("p", { class: "hint" }, t("also open in: {processes}", { processes: e.processes.slice(1).map(canaryProcess).join("; ") })) : null));
-    const toggle = el("button", { "aria-expanded": "false", onclick: () => { const open = detail.classList.toggle("hidden"); toggle.setAttribute("aria-expanded", String(!open)); toggle.textContent = open ? t("Show links") : t("Hide links"); } }, t("Show links"));
+    const toggle = el("button", { "aria-expanded": "false", "aria-label": t("Show links of {run} on {host}", { run: e.run || "?", host: state.host }), onclick: () => { const open = detail.classList.toggle("hidden"); toggle.setAttribute("aria-expanded", String(!open)); toggle.textContent = open ? t("Show links") : t("Hide links"); } }, t("Show links"));
+    const slot = el("tr", { class: "card-row", hidden: true }, el("td", { colspan: 7 }));
     rows.push(el("tr", { class: "canary-event" },
       el("td", {}, (e.time || "").replace("T", " ").replace("Z", "")), el("td", { class: "mono" }, e.run || ""),
       el("td", { class: "status-bad" }, `${e.event || "?"}${e.action ? ` (${e.action})` : ""}`),
       el("td", { class: "mono" }, `${e.canary || "-"} ${e.path || ""}`),
       el("td", {}, e.summary || e.error || ""), el("td", { class: "mono" }, canaryProcess(e.process)),
-      el("td", { class: "actions" }, toggle, e.run ? el("button", { onclick: () => canaryRun(main, e.run) }, t("Run…")) : null)), detail);
+      el("td", { class: "actions" }, toggle, e.run ? rowButton(t("Run…"), e.run, state.host, { onclick: () => canaryRun(main, e.run, slot) }) : null)), detail, slot);
   }
   main.append(table([t("Time"), t("Run"), t("Event"), t("Canary"), t("What"), t("Process"), ""], rows));
 };
@@ -2732,14 +3058,16 @@ function lowers(key, before, after) {
 pages.settings = async (main) => {
   const host = state.host;
   main.append(el("h1", {}, t("Defaults on {host}", { host })));
+  const live = pageLive();
   const data = await api("GET", hostPath("/defaults"));
+  if (!live()) return;
   const values = data.values || {};
   const status = el("div");
   // true, or the error (shown, unless it is a refusal that asks for a confirmation: that is asked)
   const save = async (key, value, confirmed) => {
     clear(status);
     try { await api("POST", hostPath("/defaults", host), Object.assign({ key, value }, confirmed ? { confirm: true } : {})); status.append(notice(t("{key} saved on {host}", { key, host }), "ok")); return true; }
-    catch (e) { if (confirmed || !confirmable(e)) status.append(notice(e.message, "error")); return e; }
+    catch (e) { if (confirmed || !confirmable(e)) status.append(errorNotice(e)); return e; }
   };
   // CONTROL changed: saved at once, or asked first (WEAKER) with ASKING in the place next to it; the service may
   // still ask (the host's value changed since the page read it): then that is asked there
@@ -2828,16 +3156,18 @@ pages.settings = async (main) => {
 pages.secrets = async (main) => {
   const host = state.host;
   main.append(el("h1", {}, t("Secrets on {host}", { host })), el("p", { class: "hint" }, t("Loading…")));
+  const live = pageLive();
   const list = await api("GET", hostPath("/secrets", host));
+  if (!live()) return;
   const names = (Array.isArray(list) ? list : []).filter(x => x && typeof x.name === "string");
   clear(main).append(el("h1", {}, t("Secrets on {host}", { host })),
     el("p", { class: "hint" }, t("API keys and tokens in that host's keyring, for {options}: their names, never their values.", { options: "--secret-env, --git-token-secret, VPN, LLM" })));
   const rows = names.map(x => {
     const actions = el("td", { class: "actions" });
-    const remove = el("button", { class: "danger", onclick: () => confirmIn(actions, t("Delete the secret {name} on {host}? Starts, VPN profiles and Git logins that name it no longer get it.", { name: x.name, host }), t("Yes, delete it"), async () => {
+    const remove = rowButton(t("Delete"), x.name, host, { class: "danger", onclick: () => confirmIn(actions, t("Delete the secret {name} on {host}? Starts, VPN profiles and Git logins that name it no longer get it.", { name: x.name, host }), t("Yes, delete it"), async () => {
       try { await api("DELETE", hostPath(`/secrets/${encodeURIComponent(x.name)}`, host), { confirm: true }); toast("success", t("{name} deleted on {host}", { name: x.name, host }), ""); show("secrets"); }
       catch (e) { failed(t("Could not delete {name} on {host}", { name: x.name, host }))(e); }
-    }, { trigger: remove }) }, t("Delete"));
+    }, { trigger: remove }) });
     actions.append(remove);
     return el("tr", {}, el("td", { class: "mono" }, x.name), el("td", {}, x.store || ""), actions);
   });
@@ -2857,7 +3187,7 @@ pages.secrets = async (main) => {
     } catch (e) {
       // a secret of that name came meanwhile (another tab, the command line): asked now, the value kept for the Yes
       if (!confirm && confirmable(e)) { askReplace(wanted, t("A secret {name} exists on {host} now: replace its value? The old one is gone.", { name: wanted, host })); return; }
-      value.value = ""; status.append(notice(e.message, "error"));
+      value.value = ""; status.append(errorNotice(e));
     }
   };
   const askReplace = (wanted, text) => confirmIn(actions, text, t("Yes, replace it"), () => {
@@ -2917,7 +3247,8 @@ async function updateHost(name, output, sudo, version) {
   output.append(...keyNotices(r));
   if (r.changed) output.append(notice(`${name}: ${r.before || "?"} → ${r.after}${r.sudo ? " (sudo)" : ""}`, "ok"));
   else if (r.error && !r.after) {
-    output.append(el("div", { class: "notice error", role: "alert" }, t("{host}: not updated: {error}", { host: name, error: r.error }),
+    say(t("{host}: not updated: {error}", { host: name, error: r.error }));
+    output.append(el("div", { class: "notice error" }, t("{host}: not updated: {error}", { host: name, error: r.error }),
       r.needs_password && terminalsHere() ? el("button", { onclick: () => openTerminal({ host: name, kind: "update" }, t("update {host}", { host: name })) }, t("Update in a terminal (sudo asks there)")) : null,
       r.needs_sudo ? el("button", { onclick: (ev) => busy(ev.target, () => updateHost(name, output, true).catch(failed(t("Could not update {host}", { host: name })))) }, t("Update with sudo")) : null));
     if (r.needs_password) output.append(passwordHelp(name, ["sandbox-ai", "hosts", "update", name, "--sudo"]));
@@ -2997,7 +3328,7 @@ function installCard(main, h, onDone) {
     howNote.textContent = system ? "" : t("for the SSH user: no sudo, nothing outside its HOME");
   };
   form.mode.addEventListener("change", sync); form.source.addEventListener("change", sync);
-  const status = el("div", { class: "wide", id: "install-status", "aria-live": "polite" });
+  const status = el("div", { class: "wide", id: "install-status" });
   const buttons = el("div", { class: "row" });
   const install = el("button", { class: "primary", disabled: Boolean(state.installing[h.name]), onclick: () => {
     clear(status);
@@ -3005,13 +3336,15 @@ function installCard(main, h, onDone) {
     if (body.prefix && (!/^\/[A-Za-z0-9._/-]{0,200}$/.test(body.prefix) || body.prefix.split("/").some(part => part === "." || part === ".."))) { status.append(notice(t("The prefix is an absolute path of letters, digits, . _ - and / (no . or .. parts)."), "error")); return; }
     if (body.version && !/^[0-9]+\.[0-9]+\.[0-9]+$/.test(body.version)) { status.append(notice(t("The version is X.Y.Z (empty: the newest)."), "error")); return; }
     const words = installWords(body, root);
-    confirmIn(buttons, t("Install sandbox-ai on {host} ({ssh}) {who}, {how}; {from}?", { host: h.name, ssh: h.ssh, who: words.who, how: words.how, from: words.from }), t("Yes, install it"),
-      () => runInstall(h, body, status, install, onDone), { kind: "primary", trigger: install });
+    // the SSH target the question names is the one the service installs to (it refuses one changed meanwhile)
+    const ssh = `${h.ssh}${h.port && h.port !== 22 ? ":" + h.port : ""}`;
+    confirmIn(buttons, t("Install sandbox-ai on {host} ({ssh}) {who}, {how}; {from}?", { host: h.name, ssh, who: words.who, how: words.how, from: words.from }), t("Yes, install it"),
+      () => runInstall(h, Object.assign({}, body, { expected: { ssh: h.ssh, port: h.port || 22 } }), status, install, onDone), { kind: "primary", trigger: install });
   } }, state.installing[h.name] ? t("Installing…") : t("Install"));
   buttons.append(install, el("button", { onclick: () => card.remove() }, t("Close")));
   const card = el("div", { class: "card", id: "host-install-card" }, el("h2", {}, t("Install sandbox-ai on {host}", { host: h.name })),
     el("p", { class: "hint" }, root ? t("The SSH user of {host} is root: an installation for every user needs no sudo.", { host: h.name })
-      : t("The SSH user of {host} is {user}: an installation for every user needs sudo there.", { host: h.name, user })),
+      : t("An installation for every user on {host} needs sudo there, unless its SSH user is root (an ssh_config User root too): the install says which it was.", { host: h.name })),
     el("div", { class: "form" },
       el("label", { for: "install-mode" }, t("For whom")), form.mode, ...rows.sudo, ...rows.prefix,
       el("label", { for: "install-source" }, t("From")), form.source, ...rows.version, status,
@@ -3038,16 +3371,18 @@ function installCard(main, h, onDone) {
 // and a toast (STATUS may be gone by then: another page).
 async function runInstall(h, body, status, button, onDone) {
   const name = h.name, root = String(h.ssh || "").startsWith("root@");
-  state.installing[name] = Date.now();
+  const started = Date.now();
+  state.installing[name] = started;
   if (button) { button.disabled = true; button.textContent = t("Installing…"); }
-  clear(status).append(el("div", { class: "notice", role: "status" }, t("Installing sandbox-ai on {host}… This can take several minutes (up to 15 for a step); you can use the page meanwhile.", { host: name }), " ",
+  say(t("Installing on {host}", { host: name }));
+  clear(status).append(el("div", { class: "notice" }, t("Installing sandbox-ai on {host}… This can take several minutes (up to 15 for a step); you can use the page meanwhile.", { host: name }), " ",
     el("progress", { "aria-label": t("Installing on {host}", { host: name }) })));
   let r = null;
   try { r = await api("POST", `/api/hosts/${encodeURIComponent(name)}/install`, Object.assign({}, body, { confirm: true })); }
   catch (e) {
     // the answer was cut off (a browser gives up on one after some minutes; the network): the install goes on
     // there, and the service keeps how it ended
-    if (!(e instanceof ApiError)) r = await waitForInstall(name, status, e);
+    if (!(e instanceof ApiError)) r = await waitForInstall(name, status, e, started);
     else {
       clear(status).append(notice(t("{host}: not installed: {error}", { host: name, error: e.message }), "error"));
       toast("error", t("Could not install on {host}", { host: name }), e.message);
@@ -3065,17 +3400,19 @@ async function runInstall(h, body, status, button, onDone) {
 }
 
 // The install on NAME whose answer did not come (WHY): asked of the service until it ended there (GET …/install
-// every 10 s, for at most 40 minutes), its result then, or null.
-async function waitForInstall(name, status, why) {
-  clear(status).append(el("div", { class: "notice warn", role: "status" }, t("The answer of the install on {host} did not come ({error}); it may still run there: asking the service how it goes…", { host: name, error: why && why.message ? why.message : String(why) })));
+// every 10 s, for at most 40 minutes), its result then, or null. Only an install that ended after STARTED (when this
+// one was sent) is this one's: an older one's result is never shown as it.
+async function waitForInstall(name, status, why, started) {
+  clear(status).append(el("div", { class: "notice warn" }, t("The answer of the install on {host} did not come ({error}); it may still run there: asking the service how it goes…", { host: name, error: why && why.message ? why.message : String(why) })));
   for (let tries = 0; tries < 240; tries++) {
     await new Promise(resolve => setTimeout(resolve, 10000));
     let found = null;
     try { found = await api("GET", `/api/hosts/${encodeURIComponent(name)}/install`, undefined, { background: true }); } catch (e) { continue; }
     if (found && found.running) continue;
     const last = found && found.last;
-    if (last && last.result && typeof last.result === "object") return last.result;
-    const error = last && last.error ? last.error : t("the service knows of no install there (it was restarted?)");
+    const ours = last && (started === undefined || Date.now() - Number(last.ago) * 1000 >= started - 2000);
+    if (ours && last.result && typeof last.result === "object") return last.result;
+    const error = ours && last.error ? last.error : t("the service knows of no install there (it was restarted?)");
     clear(status).append(notice(t("{host}: not installed: {error}", { host: name, error }), "error"));
     toast("error", t("Could not install on {host}", { host: name }), error);
     return null;
@@ -3131,7 +3468,7 @@ function hostEditCard(main, h) {
       render();
     } catch (e) {
       if (!confirm && confirmable(e)) { askRefused(buttons, e, () => saveHost(body, true), { trigger: save }); return; }
-      status.append(notice(e.message, "error"));
+      status.append(errorNotice(e));
     }
   };
   // where and how this service's commands run there: a change is asked first, naming it (what was typed then is sent)
@@ -3157,7 +3494,7 @@ function hostEditCard(main, h) {
 
 pages.hosts = async (main) => {
   main.append(el("h1", {}, t("Hosts")), el("p", { class: "hint" }, t("Machines (or LXC containers) whose sandbox-ai this service manages over SSH, with your keys; nothing listens on them but sshd.")));
-  const output = el("div", { "aria-live": "polite" });
+  const output = el("div");
   const versions = {};
   const versionCells = {};
   const byName = Object.fromEntries(state.hosts.map(h => [h.name, h]));
@@ -3214,11 +3551,11 @@ pages.hosts = async (main) => {
             output.append(...keyNotices(r));
             output.append(notice(r.error ? `${h.name}: ${r.error}` : `${h.name}: ${r.version}${(r.fixed || []).length ? t(" (tried again after making the key private)") : ""}`, r.error ? "error" : "ok"));
             if (r.doctor) output.append(el("h2", {}, t("Doctor on {host}", { host: h.name })), doctorView(r.doctor, { level: 3, host: h.name }));
-          } catch (e) { output.append(notice(e.message, "error")); }
+          } catch (e) { output.append(errorNotice(e)); }
         }) }, t("Test")),
         el("button", { title: t("version --verbose: where it is installed, its release keys"), onclick: (ev) => busy(ev.target, async () => {
           clear(output);
-          try { output.append(el("h2", {}, t("sandbox-ai on {host}", { host: h.name })), outputBlock(await api("GET", hostPath("/version", h.name)))); } catch (e) { output.append(notice(e.message, "error")); }
+          try { output.append(el("h2", {}, t("sandbox-ai on {host}", { host: h.name })), outputBlock(await api("GET", hostPath("/version", h.name)))); } catch (e) { output.append(errorNotice(e)); }
         }) }, t("Version")),
         h.kind === "local" ? null : updateSudo[h.name],
         h.kind === "local" ? null : updateVersion[h.name],
@@ -3278,7 +3615,7 @@ pages.hosts = async (main) => {
         for (const f of r.fixed || []) toast("success", t("Key of {host} made private", { host: r.name }), t("{path} could be read by others (mode {was}), which ssh refuses: now {now}.", { path: f.path, was: f.was, now: f.now }));
         for (const w of r.warnings || []) toast("warning", t("Keys of {host}", { host: r.name }), w);
         if (r.connection) toast(r.connection.ok ? "success" : "error", t("{host}: tried again", { host: r.name }), r.connection.ok ? t("The connection works: {version}", { version: r.connection.version }) : r.connection.error);
-      } catch (e) { status.append(notice(e.message, "error")); }
+      } catch (e) { status.append(errorNotice(e)); }
     }) }, t("Add")), status),
     el("p", { class: "hint" }, t("The service's user needs SSH access with a key (ssh-copy-id), and sandbox-ai installed there. The host key is learnt at the first contact and checked from then on. A key file others can read (ssh refuses it) is made private when the host is added or tested."))));
 };
@@ -3315,7 +3652,7 @@ async function refreshTerminalStarts(main, background) {
   finally { delete box.dataset.loading; }
   if (state.page !== "terminals" || state.host !== host || !box.isConnected) return;
   const list = box.querySelector(".terminal-starts-list");
-  if (starts instanceof Error) { delete box.dataset.shown; clear(list).append(notice(starts.message, "error")); return; }
+  if (starts instanceof Error) { delete box.dataset.shown; clear(list).append(errorNotice(starts)); return; }
   const running = starts.filter(s => s.state === "running" || s.state === "paused");
   box.querySelector("summary").textContent = t("Running on {host} ({count})", { host, count: running.length });
   // Unchanged since the last read: the table stays (no flicker under the pointer).
@@ -3327,7 +3664,7 @@ async function refreshTerminalStarts(main, background) {
   const rows = running.map(s => {
     const open = state.terminals.find(entry => entry.key === terminalKey(host, s.name) && !entry.closed);
     const action = s.attachable
-      ? el("td", { class: "actions" }, el("button", { class: open ? "" : "primary", onclick: () => openTerminal({ kind: "attach", name: s.name }, s.name) }, open ? t("Show") : t("Open terminal")))
+      ? el("td", { class: "actions" }, rowButton(open ? t("Show") : t("Open terminal"), s.name, host, { class: open ? "" : "primary", onclick: () => openTerminal({ kind: "attach", name: s.name, host }, s.name) }))
       : el("td", { class: "hint" }, attachWhy(s));
     return el("tr", {}, el("td", { class: "mono" }, s.name), el("td", {}, s.agent || s.kind || ""), statusCell(s.state),
       el("td", { class: "mono" }, s.workspace || ""), action);
@@ -3508,7 +3845,9 @@ pages.projects = async (main) => {
   const host = state.host;
   main.append(el("h1", {}, t("Project configurations on {host}", { host })), el("p", { class: "hint" }, t("Loading…")));
   let list;
+  const live = pageLive();
   try { list = await api("GET", hostPath("/projects", host)); } catch (e) { list = e; }
+  if (!live()) return;
   clear(main).append(el("h1", {}, t("Project configurations on {host}", { host })),
     el("p", { class: "hint" }, t("A project's {file} gives its starts their options: it is used only while it is exactly what you trusted.", { file: ".sandbox-ai.json" })));
   const reviewBox = el("div");
@@ -3517,13 +3856,14 @@ pages.projects = async (main) => {
     clear(reviewBox).append(el("p", { class: "hint" }, t("Loading…")));
     let r;
     try { r = await api("POST", hostPath("/projects/review", host), { path: wanted }); }
-    catch (e) { clear(reviewBox).append(notice(e.message, "error")); return; }
+    catch (e) { clear(reviewBox).append(errorNotice(e)); return; }
     const row = el("div", { class: "row" });
     const now = r.trusted ? t("trusted as it is") : r.trusted_digest ? t("changed since it was trusted") : t("not trusted");
     clear(reviewBox).append(el("div", { class: "card", id: "project-review" }, el("h2", {}, t("{path} on {host}", { path: r.path, host })),
-      el("p", {}, now), r.problem ? notice(r.problem, "error") : el("pre", {}, JSON.stringify(r.document, null, 2)),
+      // wizard trust --show --json says what keeps it from being trusted in "problem" (and "error"): nothing to trust then
+      el("p", {}, now), r.problem || r.error ? notice(String(r.problem || r.error), "error") : el("pre", {}, JSON.stringify(r.document, null, 2)),
       el("p", { class: "hint mono" }, t("SHA-256 {digest}", { digest: r.digest })), row));
-    if (!r.problem && !r.trusted) {
+    if (!r.problem && !r.error && !r.trusted && r.digest) {
       const trust = el("button", { class: "primary", onclick: () => confirmIn(row, t("Trust exactly this configuration of {path} on {host}? Every later start of that project gets its options; if the file changes, it is no longer trusted.", { path: r.path, host }), t("Yes, trust it"), async () => {
         try { const out = await api("POST", hostPath("/projects/trust", host), { path: r.path, digest: r.digest, confirm: true }); toast("success", t("{path} trusted on {host}", { path: r.path, host }), (out && out.output) || ""); show("projects"); }
         catch (e) { failed(t("Could not trust {path} on {host}", { path: r.path, host }))(e); }
@@ -3534,13 +3874,13 @@ pages.projects = async (main) => {
   main.append(el("div", { class: "card" }, el("div", { class: "form" }, el("label", { for: "project-path" }, t("Configuration file")), path,
     el("span"), el("button", { class: "primary", onclick: () => { if (path.value.trim()) review(path.value.trim()); } }, t("Review")))), reviewBox);
   const STATES_OF = { trusted: N_("trusted as it is"), changed: N_("changed since it was trusted"), missing: N_("missing"), unreadable: N_("unreadable") };
-  if (list instanceof Error) main.append(notice(list.message, "error"));
+  if (list instanceof Error) main.append(errorNotice(list));
   else main.append(el("h2", {}, t("Trusted")), table([t("Configuration file"), t("State"), ""], (Array.isArray(list) ? list : []).filter(x => x && typeof x.path === "string").map(x => {
     const actions = el("td", { class: "actions" });
-    const forget = el("button", { class: "danger", onclick: () => confirmIn(actions, t("Forget the trust in {path} on {host}? Starts of that project refuse to start until it is trusted again.", { path: x.path, host }), t("Yes, forget it"), async () => {
+    const forget = rowButton(t("Forget…"), x.path, host, { class: "danger", onclick: () => confirmIn(actions, t("Forget the trust in {path} on {host}? Starts of that project refuse to start until it is trusted again.", { path: x.path, host }), t("Yes, forget it"), async () => {
       try { await api("POST", hostPath("/projects/forget", host), { path: x.path, confirm: true }); show("projects"); } catch (e) { failed(t("Could not forget {path} on {host}", { path: x.path, host }))(e); }
-    }, { trigger: forget }) }, t("Forget…"));
-    actions.append(el("button", { onclick: () => { path.value = x.path; review(x.path); } }, t("Review")), forget);
+    }, { trigger: forget }) });
+    actions.append(rowButton(t("Review"), x.path, host, { onclick: () => { path.value = x.path; review(x.path); } }), forget);
     return el("tr", {}, el("td", { class: "mono" }, x.path), el("td", {}, STATES_OF[x.state] ? t(STATES_OF[x.state]) : String(x.state || "")), actions);
   }), t("No trusted project configurations on this host.")));
   if (state.review && state.review.host === host) { const wanted = state.review.path; state.review = null; path.value = wanted; review(wanted); }
@@ -3551,7 +3891,9 @@ pages.projects = async (main) => {
 pages.mcp = async (main) => {
   const host = state.host;
   main.append(el("h1", {}, t("MCP servers on {host}", { host })), el("p", { class: "hint" }, t("Loading…")));
+  const live = pageLive();
   const list = await api("GET", hostPath("/mcp", host));
+  if (!live()) return;
   clear(main).append(el("h1", {}, t("MCP servers on {host}", { host })), el("p", { class: "hint" }, t("Each runs in a sandbox of its own; an agent reaches it with {option}.", { option: "--mcp NAME" })));
   const servers = (Array.isArray(list) ? list : []).filter(x => x && typeof x.name === "string");
   const startBox = el("div");
@@ -3578,10 +3920,10 @@ pages.mcp = async (main) => {
   };
   main.append(table([t("Name"), t("State"), t("Serves"), t("Command"), ""], servers.map(x => {
     const actions = el("td", { class: "actions" });
-    const stop = el("button", { class: "danger", onclick: () => confirmIn(actions, t("Stop the MCP server {name} on {host}? The starts it serves lose it until it starts again.", { name: x.name, host }), t("Yes, stop it"), async () => {
+    const stop = rowButton(t("Stop"), x.name, host, { class: "danger", onclick: () => confirmIn(actions, t("Stop the MCP server {name} on {host}? The starts it serves lose it until it starts again.", { name: x.name, host }), t("Yes, stop it"), async () => {
       try { await api("POST", hostPath(`/mcp/${encodeURIComponent(x.name)}/stop`, host), { confirm: true }); show("mcp"); } catch (e) { failed(t("Could not stop {name} on {host}", { name: x.name, host }))(e); }
-    }, { trigger: stop }) }, t("Stop"));
-    actions.append(el("button", { onclick: () => startForm(x.name) }, t("Start…")), stop);
+    }, { trigger: stop }) });
+    actions.append(rowButton(t("Start…"), x.name, host, { onclick: () => startForm(x.name) }), stop);
     return el("tr", {}, el("td", { class: "mono" }, x.name), statusCell(x.status), el("td", {}, (x.serves || []).join(", ")), el("td", { class: "mono" }, String(x.command || "")), actions);
   }), t("No MCP servers on this host yet: add one from a catalog below.")), startBox);
 
@@ -3601,7 +3943,7 @@ pages.mcp = async (main) => {
   const showCatalog = (event) => busy(event.target, async () => {
     clear(catalogBox).append(el("p", { class: "hint" }, t("Loading…")));
     let r;
-    try { r = await api("POST", hostPath("/mcp-catalog", host), { catalogs: wordsOf(catalogs.value) }); } catch (e) { clear(catalogBox).append(notice(e.message, "error")); return; }
+    try { r = await api("POST", hostPath("/mcp-catalog", host), { catalogs: wordsOf(catalogs.value) }); } catch (e) { clear(catalogBox).append(errorNotice(e)); return; }
     const SIGNED = { good: N_("signed"), bad: N_("signature bad"), none: N_("unsigned") };
     clear(catalogBox).append(...(r.problems || []).map(x => notice(x, "warn")), table([t("Entry"), t("Network"), t("Title"), t("Signature"), ""], (r.entries || []).map(x =>
       el("tr", {}, el("td", { class: "mono" }, x.entry), el("td", { class: "mono" }, x.network), el("td", {}, x.title, x.published ? "" : ` (${t("not published yet")})`),
@@ -3619,7 +3961,7 @@ pages.mcp = async (main) => {
     }
     const send = async (confirm) => {
       try { const r = await api("POST", hostPath("/mcp", host), Object.assign({}, body, confirm ? { confirm: true } : {})); toast("success", t("{name} added on {host}", { name: body.entry, host }), (r && r.output) || ""); show("mcp"); }
-      catch (e) { addStatus.append(notice(e.message, "error")); }
+      catch (e) { addStatus.append(errorNotice(e)); }
     };
     const writable = body.mounts.filter(m => m.mode === "rw").map(m => m.host);
     const what = [body.unsigned ? t("from a catalog no trusted key signed") : null, writable.length ? t("with {dirs} writable", { dirs: writable.join(", ") }) : null].filter(Boolean);
@@ -3647,8 +3989,8 @@ pages.logins = async (main) => {
   // the agents' own logins and Claude's plugins: interactive, in a terminal
   const agentRows = AGENTS.map(agent => {
     const actions = el("td", { class: "actions" });
-    const logout = el("button", { class: "danger", onclick: () => confirmIn(actions, t("Log {agent} out on {host}? Its sandboxes need a new login.", { agent, host }), t("Yes, log out"), () => openTerminal({ kind: "login", host, agent, logout: "1", confirm: "1" }, t("logout {agent}", { agent })), { trigger: logout }) }, t("Log out…"));
-    actions.append(el("button", { class: "primary", onclick: () => openTerminal({ kind: "login", host, agent }, t("login {agent}", { agent })) }, t("Log in (terminal)")), logout);
+    const logout = rowButton(t("Log out…"), agent, host, { class: "danger", onclick: () => confirmIn(actions, t("Log {agent} out on {host}? Its sandboxes need a new login.", { agent, host }), t("Yes, log out"), () => openTerminal({ kind: "login", host, agent, logout: "1", confirm: "1" }, t("logout {agent}", { agent })), { trigger: logout }) });
+    actions.append(rowButton(t("Log in (terminal)"), agent, host, { class: "primary", onclick: () => openTerminal({ kind: "login", host, agent }, t("login {agent}", { agent })) }), logout);
     return el("tr", {}, el("td", { class: "mono" }, agent), actions);
   });
   const update = el("input", { id: "plugins-update", type: "checkbox" }), pluginKits = el("input", { id: "plugins-kits", class: "mono", placeholder: "egm" });
@@ -3657,23 +3999,28 @@ pages.logins = async (main) => {
       el("label", { for: "plugins-update" }, t("Also update them")), update, el("label", { for: "plugins-kits" }, t("Plugins of built-in kits")), pluginKits,
       el("span"), el("button", { onclick: () => openTerminal({ kind: "plugins", host, agent: "claude", update: update.checked ? "1" : "", kits: wordsOf(pluginKits.value.replace(/,/g, " ")).join(",") }, t("plugins on {host}", { host })) }, t("Install in a terminal")))));
 
+  const live = pageLive();
   const section = async (title, path, draw) => {
+    if (!live()) return;  // another page was drawn meanwhile: nothing more of this one
     const box = el("div", {}, el("p", { class: "hint" }, t("Loading…")));
     main.append(el("h2", {}, title), box);
-    try { draw(box, await api("GET", hostPath(path, host))); } catch (e) { clear(box).append(notice(e.message, "error")); }
+    let found;
+    try { found = await api("GET", hostPath(path, host)); } catch (e) { clear(box).append(errorNotice(e)); return; }
+    if (live()) draw(box, found);
   };
-  const removeButton = (holder, text, path, body) => {
-    const button = el("button", { class: "danger", onclick: () => confirmIn(holder, text, t("Yes, remove it"), async () => {
+  // WHAT: what the row is about (its server, kind or name), for the button's name
+  const removeButton = (holder, text, path, body, what) => {
+    const button = rowButton(t("Remove…"), what, host, { class: "danger", onclick: () => confirmIn(holder, text, t("Yes, remove it"), async () => {
       try { await api("POST", hostPath(path, host), Object.assign({}, body, { confirm: true })); show("logins"); } catch (e) { failed(t("Could not remove it"))(e); }
-    }, { trigger: button }) }, t("Remove…"));
+    }, { trigger: button }) });
     return button;
   };
-  const check = (path, body) => async (event) => { const box = event.target.parentNode.parentNode.querySelector(".check-result") || event.target.parentNode; await busy(event.target, async () => { try { checkResult(box, await api("POST", hostPath(path, host), body())); } catch (e) { clear(box).append(notice(e.message, "error")); } }); };
+  const check = (path, body) => async (event) => { const box = event.target.parentNode.parentNode.querySelector(".check-result") || event.target.parentNode; await busy(event.target, async () => { try { checkResult(box, await api("POST", hostPath(path, host), body())); } catch (e) { clear(box).append(errorNotice(e)); } }); };
 
   await section(t("Git logins (every sandbox's proxy)"), "/git-logins", (box, list) => {
     const rows = (Array.isArray(list) ? list : []).filter(x => x && x.url).map(x => {
       const actions = el("td", { class: "actions" });
-      actions.append(removeButton(actions, t("Remove the Git login for {url} on {host}? Sandboxes no longer push there with it.", { url: x.url, host }), "/git-logins/remove", { url: x.url }));
+      actions.append(removeButton(actions, t("Remove the Git login for {url} on {host}? Sandboxes no longer push there with it.", { url: x.url, host }), "/git-logins/remove", { url: x.url }, x.url));
       return el("tr", {}, el("td", { class: "mono" }, x.url), el("td", { class: "mono" }, x.user || ""), el("td", { class: "mono" }, x.secret || ""), actions);
     });
     const url = el("input", { id: "git-url", class: "mono", placeholder: "https://git.example.org" }), user = el("input", { id: "git-user", class: "mono", placeholder: "x-access-token" });
@@ -3691,7 +4038,7 @@ pages.logins = async (main) => {
   await section(t("Publish logins (with --publish only)"), "/publish-logins", (box, list) => {
     const rows = (Array.isArray(list) ? list : []).filter(x => x && x.kind).map(x => {
       const actions = el("td", { class: "actions" });
-      actions.append(removeButton(actions, t("Remove the publish login {kind} on {host}?", { kind: x.kind, host }), `/publish-logins/${encodeURIComponent(x.kind)}/remove`, {}));
+      actions.append(removeButton(actions, t("Remove the publish login {kind} on {host}?", { kind: x.kind, host }), `/publish-logins/${encodeURIComponent(x.kind)}/remove`, {}, x.kind));
       return el("tr", {}, el("td", { class: "mono" }, x.kind), el("td", { class: "mono" }, x.host || ""), el("td", { class: "mono" }, x.secret || ""), actions);
     });
     const kind = el("select", { id: "publish-kind" }, PUBLISH_KINDS.map(k => el("option", { value: k }, k)));
@@ -3699,7 +4046,7 @@ pages.logins = async (main) => {
     const row = el("div", { class: "row" }), result = el("div", { class: "wide check-result" });
     row.append(el("button", { class: "primary", onclick: (event) => busy(event.target, () => sendAsking(row, "POST", hostPath("/publish-logins", host), { kind: kind.value, secret: secret.value.trim(), url: url.value.trim() }, () => show("logins"), event.target)) }, t("Add")),
       el("button", { onclick: check("/publish-logins/check", () => ({ kind: kind.value })) }, t("Check")),
-      el("button", { onclick: (event) => busy(event.target, async () => { try { clear(result).append(outputBlock(await api("GET", hostPath("/publish-logins/kinds", host)))); } catch (e) { clear(result).append(notice(e.message, "error")); } }) }, t("What each kind opens")));
+      el("button", { onclick: (event) => busy(event.target, async () => { try { clear(result).append(outputBlock(await api("GET", hostPath("/publish-logins/kinds", host)))); } catch (e) { clear(result).append(errorNotice(e)); } }) }, t("What each kind opens")));
     clear(box).append(table([t("Kind"), t("Host"), t("Secret"), ""], rows, t("No publish logins on this host.")), el("div", { class: "card" }, el("div", { class: "form" },
       el("label", { for: "publish-kind" }, t("Kind")), kind, el("label", { for: "publish-secret" }, t("Secret (its name)")), secret, el("label", { for: "publish-url" }, t("Another server (optional)")), url, el("span"), row, result)));
   });
@@ -3709,13 +4056,13 @@ pages.logins = async (main) => {
     const shown = el("div");
     const rows = Object.entries(all).filter(([, x]) => x && typeof x === "object").map(([name, x]) => {
       const actions = el("td", { class: "actions" });
-      actions.append(el("button", { onclick: async (event) => busy(event.target, async () => { try { clear(shown).append(el("h3", {}, name), dataView(await api("GET", hostPath(`/identities/${encodeURIComponent(name)}`, host)))); } catch (e) { clear(shown).append(notice(e.message, "error")); } }) }, t("Show")));
-      const remove = el("button", { class: "danger", onclick: () => confirmIn(actions, t("Remove the identity {name} on {host} with its logins? Starts with {option} cannot start.", { name, host, option: `--identity ${name}` }), t("Yes, remove it"), async () => {
+      actions.append(rowButton(t("Show"), name, host, { onclick: async (event) => busy(event.target, async () => { try { clear(shown).append(el("h3", {}, name), dataView(await api("GET", hostPath(`/identities/${encodeURIComponent(name)}`, host)))); } catch (e) { clear(shown).append(errorNotice(e)); } }) }));
+      const remove = rowButton(t("Remove…"), name, host, { class: "danger", onclick: () => confirmIn(actions, t("Remove the identity {name} on {host} with its logins? Starts with {option} cannot start.", { name, host, option: `--identity ${name}` }), t("Yes, remove it"), async () => {
         try { await api("DELETE", hostPath(`/identities/${encodeURIComponent(name)}`, host), { confirm: true }); show("logins"); } catch (e) { failed(t("Could not remove it"))(e); }
-      }, { trigger: remove }) }, t("Remove…"));
+      }, { trigger: remove }) });
       actions.append(remove);
-      for (const g of Array.isArray(x.git) ? x.git : []) actions.append(removeButton(actions, t("Remove the Git login {url} of {name} on {host}?", { url: g.url, name, host }), `/identities/${encodeURIComponent(name)}/logout`, { url: g.url }));
-      for (const p of Array.isArray(x.publish) ? x.publish : []) actions.append(removeButton(actions, t("Remove the publish login {kind} of {name} on {host}?", { kind: p.kind, name, host }), `/identities/${encodeURIComponent(name)}/unpublish`, { kind: p.kind }));
+      for (const g of Array.isArray(x.git) ? x.git : []) actions.append(removeButton(actions, t("Remove the Git login {url} of {name} on {host}?", { url: g.url, name, host }), `/identities/${encodeURIComponent(name)}/logout`, { url: g.url }, `${name} ${g.url}`));
+      for (const p of Array.isArray(x.publish) ? x.publish : []) actions.append(removeButton(actions, t("Remove the publish login {kind} of {name} on {host}?", { kind: p.kind, name, host }), `/identities/${encodeURIComponent(name)}/unpublish`, { kind: p.kind }, `${name} ${p.kind}`));
       const logins = [...(Array.isArray(x.git) ? x.git.map(g => g.url) : []), ...(Array.isArray(x.publish) ? x.publish.map(p => p.kind) : [])].join(", ");
       return el("tr", {}, el("td", { class: "mono" }, name), el("td", {}, [x.name, x.email].filter(Boolean).join(" ")), el("td", {}, x.description || ""), el("td", { class: "mono" }, logins), actions);
     });
@@ -3750,13 +4097,15 @@ pages.presets = async (main) => {
   const host = state.host;
   main.append(el("h1", {}, t("Presets on {host}", { host })), el("p", { class: "hint" }, t("Loading…")));
   let list;
+  const live = pageLive();
   try { list = await api("GET", hostPath("/presets", host)); } catch (e) { list = e; }
+  if (!live()) return;
   clear(main).append(el("h1", {}, t("Presets on {host}", { host })));
   const detail = el("div");
   const open = async (p) => {
     clear(detail).append(el("p", { class: "hint" }, t("Loading…")));
     let found;
-    try { found = await api("GET", hostPath(`/presets/${encodeURIComponent(p.id)}`, host)); } catch (e) { clear(detail).append(notice(e.message, "error")); return; }
+    try { found = await api("GET", hostPath(`/presets/${encodeURIComponent(p.id)}`, host)); } catch (e) { clear(detail).append(errorNotice(e)); return; }
     const values = found && typeof found.values === "object" && found.values ? found.values : {};
     const inputs = Object.entries(values).map(([key, spec]) => [key, el("input", { id: `preset-value-${key}`, class: "mono", placeholder: spec && spec.default !== undefined ? String(spec.default) : "" }), spec]);
     const agent = el("select", { id: "preset-agent" }, el("option", { value: "" }, t("any agent")), AGENTS.map(a => el("option", { value: a }, a)));
@@ -3767,17 +4116,18 @@ pages.presets = async (main) => {
         el("label", { for: "preset-agent" }, t("Agent")), agent,
         el("span"), el("button", { class: "primary", onclick: (event) => busy(event.target, async () => {
           const body = { values: Object.fromEntries(inputs.map(([key, input]) => [key, input.value.trim()])), agent: agent.value };
-          try { checkResult(result, await api("POST", hostPath(`/presets/${encodeURIComponent(p.id)}/check`, host), body)); } catch (e) { clear(result).append(notice(e.message, "error")); }
+          try { checkResult(result, await api("POST", hostPath(`/presets/${encodeURIComponent(p.id)}/check`, host), body)); } catch (e) { clear(result).append(errorNotice(e)); }
         }) }, t("Check what is missing")), result)));
   };
-  if (list instanceof Error) main.append(notice(list.message, "error"));
+  if (list instanceof Error) main.append(errorNotice(list));
   else main.append(table([t("Preset"), t("Title"), t("Origin"), ""], (Array.isArray(list) ? list : []).filter(p => p && p.id).map(p =>
-    el("tr", {}, el("td", { class: "mono" }, p.id), el("td", {}, p.title || ""), el("td", {}, p.origin || ""), el("td", { class: "actions" }, el("button", { onclick: () => open(p) }, t("Show"))))), t("No presets on this host.")), detail);
+    el("tr", {}, el("td", { class: "mono" }, p.id), el("td", {}, p.title || ""), el("td", {}, p.origin || ""), el("td", { class: "actions" }, rowButton(t("Show"), p.id, host, { onclick: () => open(p) })))), t("No presets on this host.")), detail);
   // the extra preset directories (defaults.json preset_dirs)
   const dirsBox = el("div");
   main.append(el("h2", {}, t("Preset directories")), dirsBox);
   let dirs;
-  try { dirs = await api("GET", hostPath("/preset-dirs", host)); } catch (e) { dirsBox.append(notice(e.message, "error")); return; }
+  try { dirs = await api("GET", hostPath("/preset-dirs", host)); } catch (e) { if (live()) dirsBox.append(errorNotice(e)); return; }
+  if (!live()) return;
   const listed = Array.isArray(dirs && dirs.dirs) ? dirs.dirs : [];
   const directory = el("input", { id: "preset-dir", class: "mono", placeholder: "/home/you/presets" });
   const row = el("div", { class: "row" });
@@ -3785,33 +4135,287 @@ pages.presets = async (main) => {
     table([t("Directory"), t("State"), ""], listed.map(d => {
       const path = typeof d === "string" ? d : String(d.path || d.directory || "");
       return el("tr", {}, el("td", { class: "mono" }, path), el("td", {}, typeof d === "object" ? String(d.state || d.used || "") : ""),
-        el("td", { class: "actions" }, el("button", { onclick: (event) => busy(event.target, async () => { try { await api("POST", hostPath("/preset-dirs/remove", host), { directory: path }); show("presets"); } catch (e) { failed(t("Could not remove it"))(e); } }) }, t("Remove"))));
+        el("td", { class: "actions" }, rowButton(t("Remove"), path, host, { onclick: (event) => busy(event.target, async () => { try { await api("POST", hostPath("/preset-dirs/remove", host), { directory: path }); show("presets"); } catch (e) { failed(t("Could not remove it"))(e); } }) })));
     }), t("No extra preset directories.")),
     el("div", { class: "card" }, el("div", { class: "form" }, el("label", { for: "preset-dir" }, t("Directory")), directory, el("span"), row)));
-  row.append(el("button", { class: "primary", onclick: (event) => confirmIn(row, t("Read presets from {dir} on {host} too, for every later start?", { dir: directory.value.trim(), host }), t("Yes, add it"), async () => {
-    try { await api("POST", hostPath("/preset-dirs", host), { directory: directory.value.trim(), confirm: true }); show("presets"); } catch (e) { failed(t("Could not add it"))(e); }
-  }, { kind: "primary", trigger: event.target }) }, t("Add…")));
+  row.append(el("button", { class: "primary", onclick: (event) => {
+    const dir = directory.value.trim();  // the directory the question names is the one sent
+    if (!dir.startsWith("/")) { toast("warning", t("Which directory?"), t("An absolute path on {host}.", { host })); return; }
+    confirmIn(row, t("Read presets from {dir} on {host} too, for every later start?", { dir, host }), t("Yes, add it"), async () => {
+      try { await api("POST", hostPath("/preset-dirs", host), { directory: dir, confirm: true }); show("presets"); } catch (e) { failed(t("Could not add it"))(e); }
+    }, { kind: "primary", trigger: event.target });
+  } }, t("Add…")));
 };
 
-// Images and tools: the images (sandbox-ai images), a build in a terminal, the demo device.
+// Teams of agents (sandbox-ai team on that host): one sandbox per agent on a shared workspace, the first leads, a task
+// board (an MCP server without network) between them. A team starts in a terminal of the page, where team start says
+// how each member started; each member is a start of its own (NAME-AGENT on Starts and sessions). Show opens its
+// members and board right below its row; Stop and Delete are asked first, naming the team and the host.
+const TEAM_NAME = /^[a-z0-9][a-z0-9_-]{0,19}$/;
+
+async function teamCard(team, slot, host, posting) {
+  const old = document.getElementById("team-card");
+  if (old) dropCard(old);
+  const body = el("div", {}, el("p", { class: "hint" }, t("Loading…")));
+  const agent = el("select", { id: "team-post-agent" }, (team.members || []).map(a => el("option", { value: a }, a)));
+  const task = el("textarea", { id: "team-post-task", rows: 3, placeholder: t("What the member should do (it reports back on the board)") });
+  const postRow = el("div", { class: "row" });
+  const card = el("div", { class: "card", id: "team-card" }, el("h2", {}, t("Team {team} on {host}", { team: team.name, host })), body,
+    el("h3", {}, t("Post a task")), el("div", { class: "form" }, el("label", { for: "team-post-agent" }, t("For")), agent,
+      el("label", { for: "team-post-task" }, t("Task")), task, el("span"), postRow),
+    el("div", { class: "row" }, el("button", { onclick: () => dropCard(card) }, t("Close"))));
+  clear(slot.children[0]).append(card); slot.hidden = false; card.holder = slot; card.keepHolder = true;
+  revealCard(card);
+  if (posting && typeof task.focus === "function") task.focus();
+  const load = async () => {
+    let found;
+    try { found = await api("GET", hostPath(`/teams/${encodeURIComponent(team.name)}`, host)); } catch (e) { clear(body).append(errorNotice(e)); return; }
+    if (!card.isConnected) return;
+    const states = found && found.states && typeof found.states === "object" ? found.states : {};
+    const board = found && found.board && typeof found.board === "object" ? found.board : {};
+    const members = (Array.isArray(found && found.members) ? found.members : team.members || []).filter(a => typeof a === "string");
+    const memberRows = members.map(a => {
+      const member = `${team.name}-${a}`;
+      return el("tr", {}, el("td", { class: "mono" }, member), el("td", {}, a === found.lead ? t("leads") : t("member")), statusCell(states[a]),
+        el("td", { class: "actions" }, states[a] === "running" ? rowButton(t("Attach"), member, host, { class: "primary", onclick: () => openTerminal({ kind: "attach", name: member, host }, member) }) : null));
+    });
+    const tasks = (Array.isArray(board.tasks) ? board.tasks : []).filter(x => x && typeof x === "object").slice(-50).reverse();
+    clear(body).append(...[el("p", { class: "hint mono" }, String((found && found.workspace) || team.workspace || "")),
+      table([t("Member"), t("Role"), t("State"), ""], memberRows, t("No members."), t("Members of {team} on {host}", { team: team.name, host })),
+      board.error ? notice(t("The board could not be read: {error}", { error: String(board.error) }), "warn") : null,
+      el("h3", {}, t("Board")),
+      table(["#", t("From"), t("To"), t("State"), t("Task")], tasks.map(x => el("tr", {}, el("td", {}, String(x.id ?? "")), el("td", { class: "mono" }, String(x.from || "?")),
+        el("td", { class: "mono" }, String(x.to || "")), el("td", {}, String(x.state || "")), el("td", {}, String(x.task || "").slice(0, 500)))), t("No tasks on the board yet."), t("Board of {team} on {host}", { team: team.name, host }))].filter(Boolean));
+  };
+  const post = el("button", { class: "primary", onclick: (ev) => busy(ev.target, async () => {
+    const text = task.value.trim(), to = agent.value;
+    if (!text) { toast("warning", t("Which task?"), t("Write what the member should do.")); return; }
+    try {
+      const r = await api("POST", hostPath(`/teams/${encodeURIComponent(team.name)}/post`, host), { agent: to, task: text });
+      toast("success", t("Task posted for {agent} in {team} on {host}", { agent: to, team: team.name, host }), (r && r.output) || "");
+      task.value = "";
+      await load();
+    } catch (e) { failed(t("Could not post the task in {team} on {host}", { team: team.name, host }))(e); }
+  }) }, t("Post"));
+  postRow.append(post, el("button", { onclick: (ev) => busy(ev.target, load) }, t("Reload")));
+  await load();
+}
+
+pages.teams = async (main) => {
+  const host = state.host;
+  main.append(el("h1", {}, t("Teams on {host}", { host })), el("p", { class: "hint" }, t("Loading…")));
+  const live = pageLive();
+  let list;
+  try { list = await api("GET", hostPath("/teams", host)); } catch (e) { list = e; }
+  if (!live()) return;
+  clear(main).append(el("h1", {}, t("Teams on {host}", { host })),
+    el("p", { class: "hint" }, t("One sandbox per agent on a shared workspace; the first agent leads, and a task board between them (an MCP server of its own, without network) carries the tasks. Each member is a start of its own: NAME-AGENT.")));
+  if (list instanceof Error) main.append(errorNotice(list));
+  const teams = (Array.isArray(list) ? list : []).filter(x => x && typeof x.name === "string" && Array.isArray(x.members));
+  const rows = [];
+  for (const team of teams) {
+    const actions = el("td", { class: "actions" });
+    const slot = el("tr", { class: "card-row", hidden: true }, el("td", { colspan: 4 }));
+    const members = team.members.map(a => `${team.name}-${a}`).join(", ");
+    const stop = rowButton(t("Stop…"), team.name, host, { onclick: () => confirmIn(actions, t("Stop the team {team} on {host}? What runs in its members ({members}) ends, and its board stops.", { team: team.name, host, members }), t("Yes, stop it"), async () => {
+      try { const r = await api("POST", hostPath(`/teams/${encodeURIComponent(team.name)}/stop`, host), { confirm: true }); toast("success", t("Team {team} on {host} stopped", { team: team.name, host }), (r && r.output) || ""); show("teams"); }
+      catch (e) { failed(t("Could not stop the team {team} on {host}", { team: team.name, host }))(e); }
+    }, { trigger: stop }) });
+    const remove = rowButton(t("Delete…"), team.name, host, { class: "danger", onclick: () => confirmIn(actions, t("Delete the team {team} on {host} with its members ({members}), their HOMEs and its board? What is in those HOMEs is gone for good.", { team: team.name, host, members }), t("Yes, delete it"), async () => {
+      try { const r = await api("DELETE", hostPath(`/teams/${encodeURIComponent(team.name)}`, host), { confirm: true }); toast("success", t("Team {team} on {host} deleted", { team: team.name, host }), (r && r.output) || ""); show("teams"); }
+      catch (e) { failed(t("Could not delete the team {team} on {host}", { team: team.name, host }))(e); }
+    }, { trigger: remove }) });
+    actions.append(rowButton(t("Show"), team.name, host, { onclick: () => teamCard(team, slot, host, false) }),
+      rowButton(t("Post a task…"), team.name, host, { onclick: () => teamCard(team, slot, host, true) }), stop, remove);
+    rows.push(el("tr", { "data-team": team.name }, el("td", { class: "mono" }, team.name), el("td", {}, team.members.join(", ")), el("td", { class: "mono" }, team.workspace || ""), actions), slot);
+  }
+  main.append(table([t("Team"), t("Members"), t("Workspace"), ""], rows, t("No teams on this host."), t("Teams on {host}", { host })));
+  // a new team, started in a terminal of the page
+  const name = el("input", { id: "team-name", class: "mono", placeholder: "review", pattern: TEAM_NAME.source.slice(1, -1) });
+  const lead = el("select", { id: "team-lead" }, AGENTS.map(a => el("option", { value: a }, a)));
+  const others = AGENTS.map(a => el("input", { type: "checkbox", id: `team-agent-${a}`, value: a, checked: a === "codex" }));
+  const workspace = el("input", { id: "team-workspace", class: "mono", placeholder: "/home/you/src/project" });
+  const options = el("textarea", { id: "team-options", rows: 2, class: "mono", placeholder: "--mode high\n--allow-pypi" });
+  const status = el("div", { class: "wide" });
+  const start = el("button", { class: "primary", onclick: () => {
+    clear(status);
+    const team = name.value.trim(), path = workspace.value.trim();
+    const agents = [lead.value, ...others.filter(b => b.checked && b.value !== lead.value).map(b => b.value)];
+    if (!TEAM_NAME.test(team)) { status.append(notice(t("A team's name: 1-20 of a-z, 0-9, '_' and '-', starting with a letter or digit."), "error")); return; }
+    if (agents.length < 2) { status.append(notice(t("A team has two or three agents: the lead and at least one more."), "error")); return; }
+    if (!path.startsWith("/") && !path.startsWith("~")) { status.append(notice(t("The shared workspace: an absolute path on {host}.", { host }), "error")); return; }
+    let list;
+    try { list = shellWords(options.value); } catch (e) { status.append(notice(t("Options: {error}", { error: e.message }), "error")); return; }
+    openTerminal({ kind: "team-start", host, team, agents: agents.join(","), workspace: path, options: JSON.stringify(list) }, t("team {team}", { team }));
+  } }, t("Start the team in a terminal"));
+  main.append(el("h2", {}, t("New team on {host}", { host })), el("div", { class: "card" }, el("div", { class: "form" },
+    el("label", { for: "team-name" }, t("Name")), name,
+    el("label", { for: "team-lead" }, t("Lead")), lead,
+    el("span", {}, t("Members")), el("div", { class: "row" }, others.map((b, i) => el("label", {}, b, " ", AGENTS[i]))),
+    el("label", { for: "team-workspace" }, t("Shared workspace")), workspace,
+    el("label", { for: "team-options" }, t("Options for every member")), options,
+    status, el("span"), el("div", { class: "row" }, start, el("span", { class: "hint" }, t("The members start one after another; the terminal says how each went.")))),
+  el("p", { class: "hint" }, t("The members share the workspace: nothing keeps two agents from changing the same file."))));
+};
+
+// Images and tools: the images (sandbox-ai images) with their extensions and variants (packages, files, a
+// Containerfile fragment; checked, changed, removed), a build in a terminal, the demo device.
 const BUILD_TARGETS = ["claude", "codex", "opencode", "all", "team", "vpn"];
+const IMAGE_STATES = { current: N_("current"), outdated: N_("extension changed: rebuild"), "base-changed": N_("base rebuilt: rebuild"),
+  invalid: N_("extension has errors"), "not-built": N_("not built") };
+const IMAGE_TARGET = /^[a-z0-9][a-z0-9_.-]{0,29}$/;
+
+// A file of an extension as the form takes it: SOURCE:TARGET[:MODE], SOURCE on that host.
+function imageFile(line) {
+  const parts = line.split(":");
+  if (parts.length < 2 || parts.length > 3 || !parts[0].startsWith("/") || !parts[1].startsWith("/") || (parts[2] && !/^0?[0-7]{3}$/.test(parts[2]))) throw new Error(t("A file is SOURCE:TARGET or SOURCE:TARGET:MODE (absolute paths, MODE like 0755): {line}", { line }));
+  return Object.assign({ source: parts[0], target: parts[1] }, parts[2] ? { mode: parts[2] } : {});
+}
+
+// An extension's findings and final Containerfile (images check --json), into BOX.
+function imageCheckView(box, r) {
+  const findings = (Array.isArray(r && r.findings) ? r.findings : []).filter(f => f && typeof f === "object");
+  const errorsFound = findings.filter(f => f.severity === "error").length;
+  clear(box).append(...[notice(errorsFound ? t("{count} error(s): it cannot be built like this.", { count: errorsFound }) : findings.length ? t("No errors, {count} warning(s).", { count: findings.length }) : t("No findings."), errorsFound ? "error" : "ok"),
+    findings.length ? el("ul", {}, findings.map(f => el("li", { class: f.severity === "error" ? "status-bad" : "" }, `${f.severity || ""}: ${f.line ? t("line {line}", { line: f.line }) : String(f.where || "")}${f.text ? ` (${f.text})` : ""}: ${f.message || ""}`))) : null,
+    r && r.containerfile ? el("details", {}, el("summary", {}, t("The final Containerfile")), el("pre", {}, String(r.containerfile))) : null].filter(Boolean));
+}
+
 pages.images = async (main) => {
   const host = state.host;
   main.append(el("h1", {}, t("Images and tools on {host}", { host })), el("p", { class: "hint" }, t("Loading…")));
+  const live = pageLive();
   let images;
   try { images = await api("GET", hostPath("/images", host)); } catch (e) { images = e; }
+  if (!live()) return;
   clear(main).append(el("h1", {}, t("Images and tools on {host}", { host })));
-  main.append(el("h2", {}, t("Images")), images instanceof Error ? notice(images.message, "error") : dataView(Array.isArray(images) ? images : (images && images.images) || images, t("No images yet: build one below.")));
-  const variants = Array.isArray(images) ? images.map(x => x && (x.variant || x.name)).filter(v => typeof v === "string" && /^[a-z0-9][a-z0-9_.-]{0,29}$/.test(v) && !BUILD_TARGETS.includes(v)) : [];
-  const target = el("select", { id: "build-target" }, [...BUILD_TARGETS, ...new Set(variants)].map(v => el("option", { value: v }, v)));
+  const listed = (Array.isArray(images) ? images : []).filter(x => x && typeof x === "object" && typeof x.target === "string" && IMAGE_TARGET.test(x.target));
+  const output = el("div");
+  const shown = (title, node) => { clear(output).append(el("div", { class: "card", id: "image-detail" }, el("h2", {}, title), node, el("button", { onclick: () => clear(output) }, t("Close")))); revealCard(output.children[0]); };
+  const rows = listed.map(x => {
+    const actions = el("td", { class: "actions" });
+    const look = (label, title, path, draw) => rowButton(label, x.target, host, { onclick: (ev) => busy(ev.target, async () => {
+      try { shown(title, draw(await api("GET", hostPath(path, host)))); } catch (e) { shown(title, errorNotice(e)); }
+    }) });
+    actions.append(
+      look(t("Packages"), t("Packages in {image} on {host}", { image: x.target, host }), `/images/${encodeURIComponent(x.target)}/packages`, (r) => dataView(r, t("No packages listed (is it built?)."))),
+      look(t("Extension"), t("Extension of {image} on {host}", { image: x.target, host }), `/images/${encodeURIComponent(x.target)}`, (r) => {
+        const box = el("div");
+        imageCheckView(box, r);
+        const list = (key) => (Array.isArray(r && r[key]) ? r[key] : []);
+        const rows = [...["apt", "npm", "pip"].map(k => [k, list(k).join(" ")]), ["files", list("files").map(f => `${f.source} → ${f.target} (${f.mode})`).join(", ")]];
+        return el("div", {}, table([t("Kind"), t("What")], rows.map(([k, v]) => el("tr", {}, el("td", { class: "mono" }, k), el("td", { class: "mono" }, v || "-")))), box);
+      }),
+      look(t("History"), t("History of {image} on {host}", { image: x.target, host }), `/images/${encodeURIComponent(x.target)}/history`, (r) => dataView(r, t("No changes or builds yet."))));
+    if (x.extended || x.variant) {
+      const remove = rowButton(t("Remove…"), x.target, host, { class: "danger", onclick: () => {
+        const keep = el("input", { type: "checkbox", id: `image-keep-${x.target}` });
+        confirmIn(actions, el("span", {}, x.variant ? t("Remove the variant {image} on {host} with its extension? Its image goes too, unless kept.", { image: x.target, host })
+          : t("Remove the extension of {image} on {host}? The next build is the agent's image without it.", { image: x.target, host }),
+        x.variant ? el("label", {}, " ", keep, " ", t("keep its image")) : null), t("Yes, remove it"), async () => {
+          try { const r = await api("POST", hostPath(`/images/${encodeURIComponent(x.target)}/remove`, host), { keep_image: Boolean(keep.checked), confirm: true }); toast("success", t("{image} on {host} removed", { image: x.target, host }), (r && r.output) || ""); show("images"); }
+          catch (e) { failed(t("Could not remove {image} on {host}", { image: x.target, host }))(e); }
+        }, { trigger: remove });
+      } });
+      actions.append(remove);
+    }
+    const size = typeof x.size === "number" && x.size > 0 ? readableSize(x.size) : "";
+    return el("tr", {}, el("td", { class: "mono" }, x.target), el("td", {}, x.variant ? t("variant of {agent}", { agent: x.agent || "?" }) : x.extended ? t("extended") : t("as built")),
+      el("td", { class: x.status === "current" ? "status-ok" : x.status === "invalid" ? "status-fail" : "status-warn" }, IMAGE_STATES[x.status] ? t(IMAGE_STATES[x.status]) : String(x.status || "")),
+      el("td", { class: "mono" }, String(x.agent_version || "")), el("td", {}, String(x.created || "").replace("T", " ")), el("td", {}, size), actions);
+  });
+  main.append(el("h2", {}, t("Images")), images instanceof Error ? errorNotice(images)
+    : el("div", { class: "table-scroll" }, table([t("Image"), t("Kind"), t("State"), t("Agent version"), t("Built"), t("Size"), ""], rows, t("No images yet: build one below."), t("Images on {host}", { host }))), output);
+  // the extension of an agent's image or a variant: what it adds (packages, host files, a Containerfile fragment)
+  const targets = [...new Set([...AGENTS, ...listed.map(x => x.target)])];
+  const target = el("select", { id: "image-target" }, targets.map(v => el("option", { value: v }, v)));
+  const field = (id, placeholder) => el("input", { id, class: "mono", placeholder });
+  const adds = { apt: field("image-add-apt", "ffmpeg jq"), npm: field("image-add-npm", "typescript"), pip: field("image-add-pip", "ruff") };
+  const drops = { apt: field("image-remove-apt", ""), npm: field("image-remove-npm", ""), pip: field("image-remove-pip", "") };
+  const files = el("textarea", { id: "image-add-files", rows: 2, class: "mono", placeholder: "/home/you/tool.sh:/usr/local/bin/tool:0755" });
+  const dropFiles = field("image-remove-files", "/usr/local/bin/tool");
+  const fragment = el("textarea", { id: "image-fragment", rows: 4, class: "mono", placeholder: "RUN apt-get update && apt-get install -y --no-install-recommends tree" });
+  const clearFragment = el("input", { id: "image-clear-fragment", type: "checkbox" });
+  const extendStatus = el("div", { class: "wide" }), extendRow = el("div", { class: "row" });
+  const changes = () => {
+    const body = {};
+    for (const kind of ["apt", "npm", "pip"]) {
+      if (wordsOf(adds[kind].value).length) body[`add_${kind}`] = wordsOf(adds[kind].value);
+      if (wordsOf(drops[kind].value).length) body[`remove_${kind}`] = wordsOf(drops[kind].value);
+    }
+    const added = linesOf(files.value).map(imageFile);
+    if (added.length) body.add_files = added;
+    if (wordsOf(dropFiles.value).length) body.remove_files = wordsOf(dropFiles.value);
+    if (clearFragment.checked) body.clear_fragment = true;
+    else if (textOf(fragment)) body.fragment = fragment.value;
+    return body;
+  };
+  const check = el("button", { onclick: (ev) => busy(ev.target, async () => {
+    clear(extendStatus);
+    try { imageCheckView(extendStatus, await api("POST", hostPath(`/images/${encodeURIComponent(target.value)}/check`, host), textOf(fragment) && !clearFragment.checked ? { fragment: fragment.value } : {})); }
+    catch (e) { extendStatus.append(errorNotice(e)); }
+  }) }, t("Check"));
+  const save = el("button", { class: "primary", onclick: () => {
+    clear(extendStatus);
+    let body;
+    try { body = changes(); } catch (e) { extendStatus.append(notice(e.message, "error")); return; }
+    if (!Object.keys(body).length) { toast("warning", t("Nothing to change"), t("Name packages, files or a fragment.")); return; }
+    const image = target.value;  // the image the question names is the one changed
+    const send = (confirm) => busy(save, async () => {
+      try {
+        const r = await api("POST", hostPath(`/images/${encodeURIComponent(image)}/extend`, host), Object.assign({}, body, confirm ? { confirm: true } : {}));
+        imageCheckView(extendStatus, r);
+        extendStatus.prepend(notice(t("{image} on {host} changed: {changes}. Build it to use it.", { image, host, changes: (Array.isArray(r && r.changes) ? r.changes : []).join(", ") || t("nothing") }), "ok"));
+      } catch (e) { extendStatus.append(errorNotice(e)); }
+    });
+    if (!body.add_files) { send(false); return; }
+    confirmIn(extendRow, t("Build {files} of {host} into {image}? Every later start of that image can read them.", { files: body.add_files.map(f => f.source).join(", "), host, image }), t("Yes, add them"), () => send(true), { kind: "primary", trigger: save });
+  } }, t("Save the changes…"));
+  extendRow.append(save, check);
+  main.append(el("h2", {}, t("Change an extension")), el("div", { class: "card" }, el("div", { class: "form" },
+    el("label", { for: "image-target" }, t("Image")), target,
+    el("label", { for: "image-add-apt" }, t("Add Debian packages")), adds.apt, el("label", { for: "image-remove-apt" }, t("Remove Debian packages")), drops.apt,
+    el("label", { for: "image-add-npm" }, t("Add npm packages")), adds.npm, el("label", { for: "image-remove-npm" }, t("Remove npm packages")), drops.npm,
+    el("label", { for: "image-add-pip" }, t("Add Python tools")), adds.pip, el("label", { for: "image-remove-pip" }, t("Remove Python tools")), drops.pip,
+    el("label", { for: "image-add-files" }, t("Add files of that host (one per line)")), files, el("label", { for: "image-remove-files" }, t("Remove files")), dropFiles,
+    el("label", { for: "image-fragment" }, t("Containerfile fragment (replaces the saved one)")), fragment, el("label", { for: "image-clear-fragment" }, t("Clear the fragment")), clearFragment,
+    extendStatus, el("span"), extendRow),
+  el("p", { class: "hint" }, t("Each change is checked on that host (no FROM, no setuid, nothing the sandbox's setup relies on); then build the image."))));
+  // a new variant, empty or from the agent's extension, or from a recipe
+  const variantName = el("input", { id: "image-new-name", class: "mono", placeholder: "data", pattern: "[a-z0-9][a-z0-9_.-]{0,29}" });
+  const variantFrom = el("select", { id: "image-new-from" }, AGENTS.map(a => el("option", { value: a }, a)));
+  const empty = el("input", { id: "image-new-empty", type: "checkbox" });
+  const recipe = el("select", { id: "image-recipe" }, [["media", N_("media: ffmpeg, PulseAudio, espeak-ng, Piper …")], ["tor", N_("tor: torsocks, torbrowser-launcher")]].map(([v, label]) => el("option", { value: v }, t(label))));
+  const recipeAs = el("input", { id: "image-recipe-as", class: "mono", placeholder: t("the recipe's name") });
+  const variantStatus = el("div", { class: "wide" });
+  const variant = (path, body, done) => async (ev) => busy(ev.target, async () => {
+    clear(variantStatus);
+    try { const r = await api("POST", hostPath(path, host), body()); toast("success", done(), (r && (r.output || r.image)) || ""); show("images"); }
+    catch (e) { variantStatus.append(errorNotice(e)); }
+  });
+  main.append(el("h2", {}, t("New variant")), el("div", { class: "card" }, el("div", { class: "form" },
+    el("label", { for: "image-new-name" }, t("Name")), variantName, el("label", { for: "image-new-from" }, t("From")), variantFrom,
+    el("label", { for: "image-new-empty" }, t("Empty (not from the agent's extension)")), empty,
+    el("span"), el("button", { class: "primary", onclick: variant("/images-new", () => ({ name: variantName.value.trim(), from: variantFrom.value, empty: empty.checked }), () => t("Variant {image} made on {host}", { image: variantName.value.trim(), host })) }, t("Make the variant")),
+    el("label", { for: "image-recipe" }, t("Or from a recipe")), recipe, el("label", { for: "image-recipe-as" }, t("Its name")), recipeAs,
+    variantStatus, el("span"), el("button", { onclick: variant("/images-recipe", () => ({ recipe: recipe.value, from: variantFrom.value, as: recipeAs.value.trim() }), () => t("Variant {image} made on {host}", { image: recipeAs.value.trim() || recipe.value, host })) }, t("Make it from the recipe"))),
+  el("p", { class: "hint" }, t("A variant is started with {option}.", { option: "--image-variant NAME" }))));
+  // what was changed and built, on that host
+  const historyBox = el("div");
+  main.append(el("h2", {}, t("Changes and builds")), el("div", { class: "row" }, el("button", { onclick: (ev) => busy(ev.target, async () => {
+    try { clear(historyBox).append(dataView(await api("GET", hostPath("/images-history", host)), t("No changes or builds yet."))); } catch (e) { clear(historyBox).append(errorNotice(e)); }
+  }) }, t("Show the history"))), historyBox);
+  // a build in a terminal: the agents, all, team, vpn, and the variants (images --json: "target", "variant": true)
+  const variants = listed.filter(x => x.variant && !BUILD_TARGETS.includes(x.target)).map(x => x.target);
+  const buildTarget = el("select", { id: "build-target" }, [...BUILD_TARGETS, ...new Set(variants)].map(v => el("option", { value: v }, v)));
   const only = el("input", { id: "build-only", type: "checkbox" });
   main.append(el("h2", {}, t("Build")), el("div", { class: "card" }, el("div", { class: "form" },
-    el("label", { for: "build-target" }, t("Image")), target, el("label", { for: "build-only" }, t("Only the extension layers")), only,
-    el("span"), el("button", { class: "primary", onclick: () => openTerminal({ kind: "build", host, target: target.value, extension_only: only.checked ? "1" : "" }, t("build {target}", { target: target.value })) }, t("Build in a terminal"))),
+    el("label", { for: "build-target" }, t("Image")), buildTarget, el("label", { for: "build-only" }, t("Only the extension layers")), only,
+    el("span"), el("button", { class: "primary", onclick: () => openTerminal({ kind: "build", host, target: buildTarget.value, extension_only: only.checked ? "1" : "" }, t("build {target}", { target: buildTarget.value })) }, t("Build in a terminal"))),
   el("p", { class: "hint" }, t("Each build takes the newest releases of the agent and its base images."))));
-  // the demo device: an emulated serial device to practise hardware analysis on
-  const status = el("div"), port = el("input", { id: "demo-port", type: "number", min: 1024, max: 65535, placeholder: "5555" });
-  const refresh = async () => { try { const r = await api("GET", hostPath("/demo-device", host)); clear(status).append(notice(r.output || "", r.ok ? "ok" : "")); } catch (e) { clear(status).append(notice(e.message, "error")); } };
+  // the demo device: an emulated serial device to practise hardware analysis on (demo_device.DEFAULT_PORT: 4000)
+  const status = el("div"), port = el("input", { id: "demo-port", type: "number", min: 1024, max: 65535, placeholder: "4000" });
+  const refresh = async () => { try { const r = await api("GET", hostPath("/demo-device", host)); clear(status).append(notice(r.output || "", r.ok ? "ok" : "")); } catch (e) { clear(status).append(errorNotice(e)); } };
   const act = (path, body) => (event) => busy(event.target, async () => { try { const r = await api("POST", hostPath(path, host), body()); toast("success", t("Demo device"), (r && r.output) || ""); } catch (e) { failed(t("Demo device"))(e); } await refresh(); });
   main.append(el("h2", {}, t("Demo device")), el("div", { class: "card" }, status, el("div", { class: "form" }, el("label", { for: "demo-port" }, t("Port")), port,
     el("span"), el("div", { class: "row" }, el("button", { class: "primary", onclick: act("/demo-device/start", () => (port.value ? { port: Number(port.value) } : {})) }, t("Start")),
@@ -3831,7 +4435,7 @@ pages.activity = async (main) => {
   const load = async () => {
     let r;
     try { r = await api("POST", hostPath("/activity", host), { run: run.value.trim(), tail: Number(tail.value) || 100, kinds: kinds.filter(k => k.checked).map(k => k.value), grep: grep.value.trim(), since: since.value.trim() }, { background: follow.checked }); }
-    catch (e) { clear(box).append(notice(e.message, "error")); return; }
+    catch (e) { clear(box).append(errorNotice(e)); return; }
     const events = Array.isArray(r.events) ? r.events : [];
     clear(box).append(table([t("Time"), t("Run"), t("Kind"), t("What")], events.slice().reverse().map(e => el("tr", {}, el("td", {}, String(e.time || "").replace("T", " ").replace("Z", "")),
       el("td", { class: "mono" }, String(e.run || "")), el("td", {}, String(e.kind || "")), el("td", { class: "mono" }, String(e.summary || e.text || e.command || e.path || JSON.stringify(e))))), t("No activity found.")));
@@ -3845,6 +4449,80 @@ pages.activity = async (main) => {
     el("span"), el("button", { class: "primary", onclick: (event) => busy(event.target, load) }, t("Show")))), box);
   await load();
   setTimeout(tick, 5000);
+};
+
+// --- help: the desktop app's help about sandbox-ai itself (help.json, exported from the app's help_content.py by
+// scripts/export_web_help.py; a test keeps it current), in the page's language. Each page's heading has a (?) that
+// opens the sections about what that page does; the Help page shows all of them.
+const HELP_FOR = {
+  starts: ["sessions", "sandbox", "security-modes", "workspaces-mounts", "network", "presets", "limits", "devices"],
+  approvals: ["approvals", "taint", "network", "proxy"], terminals: ["sessions"], doctor: ["sandbox", "releases-update"],
+  logs: ["logs", "privacy-check"], llm: ["llm"], vpn: ["vpn-tor"], kits: ["kits"], canaries: ["canaries"], secrets: ["secrets"],
+  logins: ["secrets", "proxy"], projects: ["workspaces-mounts", "rulesets", "policy"], mcp: ["mcp"], presets: ["presets"], teams: ["teams", "mcp"],
+  images: ["display", "devices", "releases-update"], activity: ["logs", "memory-watch"], settings: ["security-modes", "canaries", "policy", "logs"],
+  hosts: ["hosts", "web", "releases-update"],
+};
+
+async function helpSections() {
+  if (!state.help) {
+    const data = await (await fetch("/static/help.json", { cache: "no-cache" })).json();
+    state.help = (Array.isArray(data && data.sections) ? data.sections : []).filter(x => x && typeof x.id === "string");
+  }
+  return state.help;
+}
+
+function inLanguage(text) { return text && typeof text === "object" ? String(text[LANGUAGE] || text.en || "") : String(text || ""); }
+
+// A help text as nodes: paragraphs (a blank line between), "- " lines as a list, `code` as code; all of it text.
+function helpBody(text) {
+  const inline = (line) => String(line).split("`").map((part, i) => (i % 2 ? el("code", {}, part) : part));
+  return String(text).split("\n\n").map(paragraph => {
+    const lines = paragraph.split("\n"), nodes = [];
+    let list = null;
+    for (const line of lines) {
+      if (line.startsWith("- ")) { if (!list) { list = el("ul"); nodes.push(list); } list.append(el("li", {}, inline(line.slice(2)))); }
+      else { list = null; nodes.push(el("p", {}, inline(line))); }
+    }
+    return nodes;
+  }).flat();
+}
+
+// The (?) beside a page's heading (after it, not in it: the heading stays the page's name): Help with that page's
+// sections first and open.
+function addHelpLink(main, page) {
+  const heading = main && typeof main.querySelector === "function" ? main.querySelector("h1") : null;
+  if (!heading || !HELP_FOR[page] || typeof heading.after !== "function") return;
+  const next = heading.nextElementSibling;
+  if (next && next.classList && next.classList.contains("help-link")) return;
+  heading.classList.add("with-help");
+  heading.after(el("button", { class: "small help-link", title: t("Help for this page"), "aria-label": t("Help for this page"), onclick: () => { state.helpFor = page; show("help"); } }, "?"));
+}
+
+pages.help = async (main) => {
+  const from = state.helpFor && HELP_FOR[state.helpFor] ? state.helpFor : null;
+  const label = from ? (PAGES.find(([key]) => key === from) || [null, from])[1] : null;
+  main.append(el("h1", {}, t("Help")), el("p", { class: "hint" }, t("Loading…")));
+  const live = pageLive();
+  let sections;
+  try { sections = await helpSections(); } catch (e) { if (live()) clear(main).append(el("h1", {}, t("Help")), notice(t("The help could not be loaded: {error}", { error: e.message }), "error")); return; }
+  if (!live()) return;
+  const wanted = from ? HELP_FOR[from] : [];
+  const byId = new Map(sections.map(x => [x.id, x]));
+  const ordered = [...wanted.map(id => byId.get(id)).filter(Boolean), ...sections.filter(x => !wanted.includes(x.id))];
+  const boxes = new Map();
+  const open = (id) => { const box = boxes.get(id); if (!box) return; box.setAttribute("open", ""); revealCard(box); };
+  clear(main).append(el("h1", {}, t("Help")),
+    el("p", { class: "hint" }, from ? t("What the page {page} is about first; below it, everything else about sandbox-ai.", { page: t(label) }) : t("What sandbox-ai does, and what each option and command means. The same help as in the desktop app.")),
+    from ? el("div", { class: "row" }, el("button", { onclick: () => show(from) }, t("Back to {page}", { page: t(label) })), el("button", { onclick: () => { state.helpFor = null; show("help"); } }, t("All sections"))) : null);
+  for (const x of ordered) {
+    const box = el("details", { class: "card help-section", id: `help-${x.id}`, open: wanted.includes(x.id) },
+      el("summary", {}, el("h2", { class: "help-title" }, inLanguage(x.title))),
+      helpBody(inLanguage(x.body)),
+      (x.cli || []).length ? el("p", { class: "hint" }, t("Commands and options:"), " ", (x.cli || []).map((c, i) => [i ? ", " : "", el("code", {}, String(c))])) : null,
+      (x.see || []).filter(id => byId.has(id)).length ? el("p", { class: "hint" }, t("See also:"), " ", x.see.filter(id => byId.has(id)).map(id => el("button", { class: "small", onclick: () => open(id) }, inLanguage(byId.get(id).title)))) : null);
+    boxes.set(x.id, box);
+    main.append(box);
+  }
 };
 
 loadThemes().then(render);

@@ -66,7 +66,7 @@ STATIC = HERE / "web"
 STATIC_FILES = {"index.html": "text/html; charset=utf-8", "app.js": "text/javascript; charset=utf-8",
                 "i18n.js": "text/javascript; charset=utf-8",
                 "app.css": "text/css; charset=utf-8", "themes.json": "application/json",
-                "icon.svg": "image/svg+xml"}
+                "help.json": "application/json", "icon.svg": "image/svg+xml"}
 VENDOR_FILES = {"xterm.js": "text/javascript; charset=utf-8", "xterm.css": "text/css; charset=utf-8",
                 "addon-fit.js": "text/javascript; charset=utf-8"}
 DEFAULT_LISTEN = "127.0.0.1:8443"
@@ -368,19 +368,32 @@ class Sessions:
 
 # --- what the browser may ask for ---------------------------------------------------------------------------
 
+# The codes of the common refusals (Refused's CODE, the answer's "code" with its "params"): the page shows its own
+# text for a code it knows (German too), with the service's English message below it; any other refusal is shown as
+# its message. A code is never a reason to pass anything: it only says which of these it is.
+ERROR_CODES = ("no-host", "confirm-needed", "bad-path", "bad-name", "host-unreachable", "timeout", "command-failed",
+               "unknown-preset-value", "no-preset", "login-needed", "page-outdated", "too-many-logins", "busy",
+               "changed-meanwhile", "nothing-checked")
+
+
 class Refused(Exception):
     """STATUS and MESSAGE for the browser; CONFIRM: the NEEDS_CONFIRM action the request lacks the confirmation of
-    (the answer names it, so a page whose view was out of date asks for exactly that)."""
+    (the answer names it, so a page whose view was out of date asks for exactly that); CODE (one of ERROR_CODES) and
+    PARAMS ({name: text}): which common refusal it is, for the page's own words."""
 
-    def __init__(self, status, message, confirm=None):
+    def __init__(self, status, message, confirm=None, code=None, params=None):
         super().__init__(message)
-        self.status, self.confirm = status, confirm
+        if code is not None and code not in ERROR_CODES:
+            raise KeyError(code)  # a refusal naming a code the page cannot know: a bug, never a pass
+        self.status, self.confirm, self.code = status, confirm, code
+        self.params = {key: printable(str(value))[:300] for key, value in (params or {}).items()}
 
 
 def host_name(value):
     hosts = module("hosts")
     if value != hosts.LOCAL and not (isinstance(value, str) and hosts.NAME.fullmatch(value)):
-        raise Refused(400, "no such host name")
+        raise Refused(400, "no such host name", code="no-host",
+                      params={"host": value if isinstance(value, str) else ""})
     return value
 
 
@@ -465,12 +478,14 @@ def install_argv(name, choice, as_json=True):
 
 
 def install_words(choice, entry):
-    """How CHOICE installs, in words for its confirmation (for whom, where, as root or with sudo, from where)."""
-    root = str((entry or {}).get("ssh", "")).startswith("root@")
-    mode = choice["mode"] or ("system" if root else "user")
-    who = f"for every user in {choice['prefix'] or '/usr/local'}" if mode == "system" else "for the SSH user"
-    how = ("as root (the SSH user)" if root else "without sudo" if choice["sudo"] is False else "with sudo") \
-        if mode == "system" else "without sudo"
+    """How CHOICE installs, in words for its confirmation (for whom, where, with sudo or not, from where). Whether
+    the SSH user is root is the host's to say (an ssh_config "User root" has no root@ in the entry): never guessed
+    here, so a question never says "as root" for what may need sudo, or the other way round."""
+    mode = choice["mode"]
+    who = f"for every user in {choice['prefix'] or '/usr/local'}" if mode == "system" else "for the SSH user" \
+        if mode == "user" else "for every user when the SSH user is root, else for the SSH user (the host decides)"
+    how = "without sudo" if mode == "user" or choice["sudo"] is False else "with sudo" if choice["sudo"] is True \
+        else "with sudo unless the SSH user is root"
     where = (f"the signed release {choice['version']}" if choice["version"] else "the signed release") \
         if choice["source"] == "download" else "this machine's copy"
     return f"{who}, {how}, from {where}"
@@ -511,7 +526,8 @@ def secret_name(value):
 
 def start_name(value):
     if not (isinstance(value, str) and START_NAME.fullmatch(value)):
-        raise Refused(400, "a start's name is 1-48 letters, digits, '_', '.' or '-'")
+        raise Refused(400, "a start's name is 1-48 letters, digits, '_', '.' or '-'", code="bad-name",
+                      params={"what": "start"})
     return value
 
 
@@ -540,14 +556,15 @@ def kit_agents(body, many=True):
 
 def host_path(value, what):
     if not (isinstance(value, str) and value.startswith("/") and "\0" not in value and len(value) < 4096):
-        raise Refused(400, f"{what} is an absolute path on that host")
+        raise Refused(400, f"{what} is an absolute path on that host", code="bad-path", params={"what": what})
     return value
 
 
 def no_dots(value, what):
     """VALUE (an absolute path) without a "." or ".." part, printable."""
     if not value.isprintable() or any(part in (".", "..") for part in value.split("/")):
-        raise Refused(400, f"{what}: a printable absolute path without . or .. parts")
+        raise Refused(400, f"{what}: a printable absolute path without . or .. parts", code="bad-path",
+                      params={"what": what})
     return value
 
 
@@ -585,6 +602,15 @@ TOR_COUNTRIES = re.compile(r"[a-z]{2}(?:,[a-z]{2}){0,15}")
 TS_HOSTNAME = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 PROVIDER = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 DOCTOR_BACKENDS = ("podman", "bwrap", "both")
+TEAM_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,19}")  # team.TEAM_NAME
+# a line of team list: NAME  MEMBERS  WORKSPACE
+TEAM_LINE = re.compile(r"(?P<name>[a-z0-9][a-z0-9_-]{0,19})\s+"
+                       r"(?P<members>(?:claude|codex|opencode)(?:, (?:claude|codex|opencode))*)\s+(?P<workspace>/.*)")
+IMAGE_KINDS = ("apt", "npm", "pip")  # images extend --add-KIND / --remove-KIND
+IMAGE_PACKAGE = re.compile(r"[A-Za-z0-9@][A-Za-z0-9@/._+~=<>!*^:\[\],-]{0,200}")  # images.py checks each kind's own
+IMAGE_MODE = re.compile(r"0?[0-7]{3}")
+IMAGE_RECIPES = ("media", "tor")
+FRAGMENT_LIMIT = 64 << 10  # images.FRAGMENT_LIMIT
 
 
 def identity_name(value):
@@ -707,6 +733,15 @@ NEEDS_CONFIRM = {
     "llm-insecure": "plain http to an address outside your local networks is unencrypted: prompts, answers and the "
                     "key can be read on the way",
     "vpn-socks": "a SOCKS port in the sandbox lets what goes through it pass the connection proxy by",
+    "vpn-replace": "replacing a VPN profile of that name changes the tunnel of every start that uses it",
+    "llm-replace": "replacing an LLM server of that name changes where every start that uses it sends its prompts "
+                   "and its key",
+    "team-stop": "stopping a team ends what runs in every member and its board",
+    "team-delete": "deleting a team removes its members with their HOMEs and its board",
+    "image-file": "a host file added to an image's extension is built into the image: every later start of it can "
+                  "read it",
+    "image-remove": "removing an extension drops what it adds from the next build (a variant's image goes with it, "
+                    "unless kept)",
     "login-logout": "logging out forgets the stored login of that agent: its sandboxes need a new login",
     "kit-hooks-trust": "trusted hooks of a kit run in every later start with that kit",
 }
@@ -728,7 +763,8 @@ def confirmed(body, action, detail=None):
         raise KeyError(action)  # a route asking for an action the table does not have: a bug, never a pass
     if body.get("confirm") is not True:
         why = f"{detail}: {NEEDS_CONFIRM[action]}" if detail else NEEDS_CONFIRM[action]
-        raise Refused(400, f"{why}: send {{\"confirm\": true}}", confirm=action)
+        raise Refused(400, f"{why}: send {{\"confirm\": true}}", confirm=action, code="confirm-needed",
+                      params={"action": action, "detail": detail or ""})
 
 
 def one_line(value, what, limit=1024):
@@ -931,13 +967,13 @@ class Api:
             ("GET", H + r"/logs", self.logs, ()),
             ("GET", H + r"/llm", self.llm, ()),
             ("GET", H + r"/llm/(?P<name>[^/]+)/models", self.llm_models, ()),
-            ("POST", H + r"/llm", self.add_llm, ("llm-insecure",)),
+            ("POST", H + r"/llm", self.add_llm, ("llm-insecure", "llm-replace")),
             ("POST", H + r"/llm/(?P<name>[^/]+)/check", self.check_llm, ()),
             ("DELETE", H + r"/llm/(?P<name>[^/]+)", self.remove_llm, ("llm-remove",)),
             ("GET", H + r"/defaults", self.defaults, ()),
             ("POST", H + r"/defaults", self.set_default, ("defaults-lower",)),
             ("GET", H + r"/net/(?P<name>[^/]+)", self.net_show, ()),
-            ("POST", H + r"/net/(?P<name>[^/]+)", self.net_change, ("net-allow",)),
+            ("POST", H + r"/net/(?P<name>[^/]+)", self.net_change, ("net-allow", "net-keep")),
             ("POST", H + r"/net/(?P<name>[^/]+)/untaint", self.net_untaint, ("net-untaint",)),
             ("GET", H + r"/workspaces/(?P<name>[^/]+)", self.workspaces, ()),
             ("POST", H + r"/workspaces/(?P<name>[^/]+)", self.workspace_add, ("workspace-writable",)),
@@ -949,7 +985,7 @@ class Api:
             ("POST", H + r"/limits/(?P<name>[^/]+)", self.set_limits, ("limits-raise",)),
             ("GET", H + r"/presets", self.presets, ()),
             ("GET", H + r"/vpn", self.vpn_list, ()),
-            ("POST", H + r"/vpn", self.vpn_add, ("vpn-socks",)),
+            ("POST", H + r"/vpn", self.vpn_add, ("vpn-socks", "vpn-replace")),
             ("POST", H + r"/vpn/(?P<name>[^/]+)/check", self.vpn_check, ()),
             ("DELETE", H + r"/vpn/(?P<name>[^/]+)", self.vpn_remove, ("vpn-remove",)),
             ("GET", H + r"/kits", self.kits, ()),
@@ -1020,6 +1056,22 @@ class Api:
             ("GET", H + r"/demo-device", self.demo_status, ()),
             ("POST", H + r"/demo-device/start", self.demo_start, ()),
             ("POST", H + r"/demo-device/stop", self.demo_stop, ()),
+            # teams of agents (sandbox-ai team; a team starts in a terminal: kind=team-start)
+            ("GET", H + r"/teams", self.teams, ()),
+            ("GET", H + r"/teams/(?P<name>[^/]+)", self.team_show, ()),
+            ("POST", H + r"/teams/(?P<name>[^/]+)/post", self.team_post, ()),
+            ("POST", H + r"/teams/(?P<name>[^/]+)/stop", self.team_stop, ("team-stop",)),
+            ("DELETE", H + r"/teams/(?P<name>[^/]+)", self.team_delete, ("team-delete",)),
+            # the images' extensions and variants (sandbox-ai images; a build runs in a terminal: kind=build)
+            ("GET", H + r"/images-history", self.image_history, ()),
+            ("POST", H + r"/images-new", self.image_new, ()),
+            ("POST", H + r"/images-recipe", self.image_recipe, ()),
+            ("GET", H + r"/images/(?P<target>[^/]+)", self.image_show, ()),
+            ("GET", H + r"/images/(?P<target>[^/]+)/packages", self.image_packages, ()),
+            ("GET", H + r"/images/(?P<target>[^/]+)/history", self.image_history, ()),
+            ("POST", H + r"/images/(?P<target>[^/]+)/extend", self.image_extend, ("image-file",)),
+            ("POST", H + r"/images/(?P<target>[^/]+)/check", self.image_check, ()),
+            ("POST", H + r"/images/(?P<target>[^/]+)/remove", self.image_remove, ("image-remove",)),
         ]
 
     def dispatch(self, method, path, body):
@@ -1044,22 +1096,38 @@ class Api:
             status, out, err = self.runner(host_name(host), list(args), timeout=timeout, input=input)
         except ValueError as exc:  # hosts.run: no such host, or hosts.json cannot be read
             hosts_file()
-            raise Refused(404 if "no host" in str(exc) else 400, printable(exc)[:600]) from None
+            missing = "no host" in str(exc)
+            raise Refused(404 if missing else 400, printable(exc)[:600], code="no-host" if missing else None,
+                          params={"host": host} if missing else None) from None
         return status, out, err
 
-    def json_of(self, host, args, timeout=120):
-        status, out, err = self.run(host, args, timeout)
+    @staticmethod
+    def failed(host, args, status, out, err):
+        """The refusal of a sandbox-ai command that failed on HOST: its words, and the code of why (SSH itself
+        failed: unreachable; no answer in time; else the command's own failure)."""
+        hosts = module("hosts")
+        code = "host-unreachable" if status == 255 and host != hosts.LOCAL else "timeout" if status == 124 \
+            else "command-failed"
+        return Refused(502, f"sandbox-ai {args[0]} on {host}: exit status {status}: "
+                            f"{printable((err or out).strip()[-600:])}", code=code,
+                       params={"host": host, "command": f"sandbox-ai {args[0]}", "status": status})
+
+    def json_of(self, host, args, timeout=120, ok=None, input=None):
+        """The JSON the command printed. OK: the exit statuses that count as an answer (None: any status whose
+        output is JSON, as most commands print their JSON whatever the outcome); another one is a failure, with what
+        it said on stderr, even when it printed JSON (an empty list that would read as "nothing found")."""
+        status, out, err = self.run(host, args, timeout, input)
+        if ok is not None and status not in ok:
+            raise self.failed(host, args, status, out, err)
         try:
             return json.loads(out)
         except ValueError:
-            raise Refused(502, f"sandbox-ai {args[0]} on {host}: exit status {status}: "
-                               f"{printable((err or out).strip()[-600:])}") from None
+            raise self.failed(host, args, status, out, err) from None
 
     def done(self, host, args, timeout=120, input=None):
         status, out, err = self.run(host, args, timeout, input)
         if status != 0:
-            raise Refused(502, f"sandbox-ai {args[0]} on {host}: exit status {status}: "
-                               f"{printable((err or out).strip()[-600:])}")
+            raise self.failed(host, args, status, out, err)
         return {"output": printable(out.strip()[-4000:])}
 
     # hosts (the list lives on the machine of the service)
@@ -1110,7 +1178,7 @@ class Api:
         with hosts_locked():
             current = hosts_file()
             if params["host"] not in current:
-                raise Refused(404, "no such host")
+                raise Refused(404, "no such host", code="no-host", params={"host": params["host"]})
             confirmed(body, "host-remove", f"{params['host']} ({current[params['host']]['ssh']})")
             removed = current.pop(params["host"])
             hosts.save(current)
@@ -1139,7 +1207,7 @@ class Api:
         with hosts_locked():
             current = hosts_file()
             if name not in current:
-                raise Refused(404, "no such host")
+                raise Refused(404, "no such host", code="no-host", params={"host": name})
             before = current[name]
             changed = dict(before)
             for key in fields:
@@ -1227,15 +1295,26 @@ class Api:
         name = host_name(params["host"])
         if name == hosts.LOCAL:
             raise Refused(400, "this machine installs with install.sh itself (and updates with: sandbox-ai update)")
-        choice = install_choice(body)
+        expected = body.get("expected")
+        choice = install_choice({key: value for key, value in body.items() if key != "expected"})
         entry = hosts_file().get(name)
         if entry is None:
-            raise Refused(404, "no such host")
-        confirmed(body, "host-install", f"{name} ({entry.get('ssh')}): {install_words(choice, entry)}")
+            raise Refused(404, "no such host", code="no-host", params={"host": name})
+        # where it goes, as the question named it: an entry changed meanwhile (another page, the command line) is not
+        # what was confirmed
+        target = f"{entry.get('ssh')}{':' + str(entry['port']) if entry.get('port') not in (None, 22) else ''}"
+        if expected is not None:
+            if not (isinstance(expected, dict) and set(expected) <= {"ssh", "port"}):
+                raise Refused(400, "expected is {ssh, port}: the host's SSH target as the question named it")
+            if expected.get("ssh") != entry.get("ssh") or (expected.get("port") or 22) != (entry.get("port") or 22):
+                raise Refused(409, f"{name} is reached at {target} now, not as the question said: nothing was "
+                                   "installed; ask again", code="changed-meanwhile", params={"host": name})
+        confirmed(body, "host-install", f"{name} ({target}): {install_words(choice, entry)}")
         with self.install_lock:
             if name in self.installing:
                 since = round(time.monotonic() - self.installing[name])
-                raise Refused(409, f"sandbox-ai is being installed on {name} (for {since} s): wait for its end")
+                raise Refused(409, f"sandbox-ai is being installed on {name} (for {since} s): wait for its end",
+                              code="busy", params={"host": name})
             self.installing[name] = time.monotonic()
         result, error = None, None
         try:
@@ -1547,6 +1626,8 @@ class Api:
             args.append("--keep")
         if op == "allow":
             confirmed(body, "net-allow", f"{' '.join(args[3:])} for {args[2]}")
+        if "--keep" in args:  # and written into the project's .sandbox-ai.json for every later start of it
+            confirmed(body, "net-keep", f"{' '.join(a for a in args[3:] if a != '--keep')} for {args[2]}")
         return self.done(params["host"], args, 60)
 
     def net_untaint(self, params, body):
@@ -1728,6 +1809,8 @@ class Api:
                     raise Refused(400, f"{key} is for {only}")
                 if key == "socks":
                     confirmed(body, "vpn-socks", str(body.get("name")))
+                if key == "force":
+                    confirmed(body, "vpn-replace", str(body.get("name")))
                 args.append(option)
         if body.get("hostname") not in (None, ""):
             if kind != "tailscale" or not (isinstance(body["hostname"], str) and TS_HOSTNAME.fullmatch(body["hostname"])):
@@ -1779,8 +1862,7 @@ class Api:
     def secret_names(self, host):
         status, out, err = self.run(host, ["secrets", "list"], 30)
         if status != 0:
-            raise Refused(502, f"sandbox-ai secrets on {host}: exit status {status}: "
-                               f"{printable((err or out).strip()[-600:])}")
+            raise self.failed(host, ["secrets", "list"], status, out, err)
         found, lines = [], out.splitlines()
         if not lines or lines[0].split() != ["NAME", "STORE"]:
             return found  # "no secrets" (the command's table has its header first)
@@ -1958,8 +2040,7 @@ class Api:
         args = ["approvals", "history", *([run] if run else [])]
         status, out, err = self.run(params["host"], args, 60)
         if status != 0:
-            raise Refused(502, f"sandbox-ai approvals on {params['host']}: exit status {status}: "
-                               f"{printable((err or out).strip()[-600:])}")
+            raise self.failed(params["host"], args, status, out, err)
         return {"output": printable(out.strip()[-20000:])}  # the newest answers last: those are kept
 
     def remembered(self, params, body):
@@ -1999,8 +2080,7 @@ class Api:
             status, out, err = self.run(host, ["doctor", *extra], timeout)
         text = printable(out.rstrip()[-20000:]) if out.strip() and status in (0, 1) else ""
         if not text:
-            raise Refused(502, f"sandbox-ai doctor on {host}: exit status {status}: "
-                               f"{printable((err or out).strip()[-600:])}")
+            raise self.failed(host, ["doctor"], status, out, err)
         return text
 
     def logs(self, params, body):
@@ -2037,6 +2117,7 @@ class Api:
         if flag(body, "anthropic"):
             args.append("--anthropic")
         if flag(body, "replace"):
+            confirmed(body, "llm-replace", printable(name)[:64])
             args.append("--replace")
         if flag(body, "insecure_http"):
             confirmed(body, "llm-insecure", f"{name} at {printable(url)[:200]}")
@@ -2231,8 +2312,7 @@ class Api:
         could not read (its stderr), "output": what it printed."""
         status, out, err = self.run(params["host"], ["mcp", "catalog", *catalog_sources(body)], 120)
         if status != 0:
-            raise Refused(502, f"sandbox-ai mcp on {params['host']}: exit status {status}: "
-                               f"{printable((err or out).strip()[-600:])}")
+            raise self.failed(params["host"], ["mcp", "catalog"], status, out, err)
         entries = []
         for line in out.splitlines():
             match = MCP_CATALOG_LINE.fullmatch(line.rstrip())
@@ -2427,21 +2507,22 @@ class Api:
     def preset_show(self, params, body):
         name = params["name"]
         if not KIT_NAME.fullmatch(name):
-            raise Refused(400, "no such preset")
+            raise Refused(400, "no such preset", code="no-preset", params={"preset": name})
         return self.json_of(params["host"], ["presets", "show", "--json", name], 30)
 
     def preset_check(self, params, body):
         """sandbox-ai presets check NAME [--value KEY=VALUE]... [--agent AGENT]: what is missing before it starts."""
         name = params["name"]
         if not KIT_NAME.fullmatch(name):
-            raise Refused(400, "no such preset")
+            raise Refused(400, "no such preset", code="no-preset", params={"preset": name})
         values = body.get("values", {})
         if not isinstance(values, dict) or len(values) > 32:
             raise Refused(400, "values is {KEY: VALUE}")
         args = ["presets", "check"]
         for key, value in values.items():
             if not PRESET_KEY.fullmatch(key):
-                raise Refused(400, f"no such value: {printable(key)[:64]}")
+                raise Refused(400, f"no such value: {printable(key)[:64]}", code="unknown-preset-value",
+                              params={"preset": name, "value": key})
             if value in (None, ""):
                 continue
             args.append(f"--value={key}={one_line(value, key)}")
@@ -2525,7 +2606,26 @@ class Api:
             args.append(f"--project={body['project']}")
         if flag(body, "all"):
             args.append("--all")
-        return self.json_of(params["host"], [*args, *paths], 300)
+        # 0: nothing to keep private, 1: findings, 2: a repository was refused (no rules to check it with: its entry
+        # says "checked": false and why in "refused"); any other status is a failure. A list that names no
+        # repository checked nothing, whatever the status: never an all-clear (the page says "not checked" for a
+        # refused one, and for an entry of an older sandbox-ai that says nothing of it when the status was 2).
+        status, out, err = self.run(params["host"], [*args, *paths], 300)
+        try:
+            found = json.loads(out) if status in (0, 1, 2) else None
+        except ValueError:
+            found = None
+        if not (isinstance(found, list) and found and all(isinstance(entry, dict) for entry in found)):
+            if status not in (0, 1, 2) or found is None and status != 2:
+                raise self.failed(params["host"], args, status, out, err)
+            raise Refused(502, f"sandbox-ai privacy-check on {params['host']}: nothing was checked: "
+                               f"{printable((err or out).strip()[-600:])}", code="nothing-checked",
+                          params={"host": params["host"]})
+        if status == 2 and not any(entry.get("refused") for entry in found):
+            for entry in found:  # an older sandbox-ai: the refused ones are not named, so none is an all-clear
+                entry.setdefault("checked", False)
+                entry.setdefault("refused", printable((err or "refused").strip()[-300:]))
+        return found
 
     def activity(self, params, body):
         """sandbox-ai activity --json --tail N [--kind K]... [--grep TEXT] [--since TIME] [RUN]: the last events
@@ -2545,8 +2645,7 @@ class Api:
             args.append(self.canary_run(body["run"]) if isinstance(body["run"], str) else self.canary_run(""))
         status, out, err = self.run(params["host"], args, 60)
         if status != 0:
-            raise Refused(502, f"sandbox-ai activity on {params['host']}: exit status {status}: "
-                               f"{printable((err or out).strip()[-600:])}")
+            raise self.failed(params["host"], args, status, out, err)
         events = []
         for line in out.splitlines():
             with contextlib.suppress(ValueError):
@@ -2573,6 +2672,156 @@ class Api:
 
     def demo_stop(self, params, body):
         return self.done(params["host"], ["demo-device", "stop"], 30)
+
+    # teams (sandbox-ai team): one sandbox per agent on a shared workspace, with a task board between them
+    @staticmethod
+    def team_name(value):
+        if not (isinstance(value, str) and TEAM_NAME.fullmatch(value)):
+            raise Refused(400, "a team's name is 1-20 of a-z, 0-9, '_' and '-', starting with a letter or digit",
+                          code="bad-name", params={"what": "team"})
+        return value
+
+    def teams(self, params, body):
+        """team list (it has no --json): [{"name", "members", "workspace"}] from its lines, in its order."""
+        status, out, err = self.run(params["host"], ["team", "list"], 30)
+        if status != 0:
+            raise self.failed(params["host"], ["team", "list"], status, out, err)
+        found = []
+        for line in out.splitlines():
+            match = TEAM_LINE.fullmatch(line.rstrip())
+            if match:
+                found.append({"name": match["name"], "members": match["members"].split(", "),
+                              "workspace": printable(match["workspace"].strip())[:4096]})
+        return found
+
+    def team_show(self, params, body):
+        """team show NAME --json: its record, each member's state and the board's tasks."""
+        return self.json_of(params["host"], ["team", "show", self.team_name(params["name"]), "--json"], 60, ok=(0,))
+
+    def team_post(self, params, body):
+        """team post NAME AGENT TASK: a task for a member, from you (after "--": a task is never an option)."""
+        name, agent, task = self.team_name(params["name"]), body.get("agent"), body.get("task")
+        if agent not in AGENTS:
+            raise Refused(400, "agent is claude, codex or opencode")
+        if not (isinstance(task, str) and task.strip() and len(task) <= 8000
+                and all(c in "\n\t" or c.isprintable() for c in task)):
+            raise Refused(400, "the task is text of at most 8000 characters (lines and tabs, no other control "
+                               "characters)")
+        return self.done(params["host"], ["team", "post", "--", name, agent, task.strip()], 60)
+
+    def team_stop(self, params, body):
+        name = self.team_name(params["name"])
+        confirmed(body, "team-stop", name)
+        return self.done(params["host"], ["team", "stop", name], 300)
+
+    def team_delete(self, params, body):
+        name = self.team_name(params["name"])
+        confirmed(body, "team-delete", name)
+        return self.done(params["host"], ["team", "delete", name, "--yes"], 300)
+
+    # the images' extensions and variants (sandbox-ai images): every value checked here as a word of its kind and
+    # passed as --flag=VALUE (never read as an option); images.py checks each package, file and fragment again
+    @staticmethod
+    def image_target(value):
+        if not (isinstance(value, str) and BUILD_TARGET.fullmatch(value)):
+            raise Refused(400, "an image is an agent (claude, codex, opencode) or a variant's name (1-30 of a-z, "
+                               "0-9, '_', '.' and '-')", code="bad-name", params={"what": "image"})
+        return value
+
+    @staticmethod
+    def fragment_of(body):
+        """BODY's Containerfile fragment (for standard input: --fragment=-), or None."""
+        fragment = body.get("fragment")
+        if fragment is None:
+            return None
+        if not (isinstance(fragment, str) and len(fragment.encode()) <= FRAGMENT_LIMIT and "\0" not in fragment):
+            raise Refused(400, f"the fragment is text of at most {FRAGMENT_LIMIT >> 10} KiB")
+        return fragment
+
+    def image_show(self, params, body):
+        """images extend TARGET --json without a change: its extension as it is (packages, files, fragment,
+        findings)."""
+        return self.json_of(params["host"], ["images", "extend", self.image_target(params["target"]), "--json"], 60,
+                            ok=(0,))
+
+    def image_packages(self, params, body):
+        return self.json_of(params["host"], ["images", "packages", self.image_target(params["target"]), "--json"],
+                            180, ok=(0,))
+
+    def image_history(self, params, body):
+        target = [self.image_target(params["target"])] if params.get("target") else []
+        return self.json_of(params["host"], ["images", "history", *target, "--json"], 60, ok=(0,))
+
+    def image_extend(self, params, body):
+        """images extend TARGET --add-KIND=PKG --remove-KIND=PKG (apt, npm, pip) --add-file=SRC:TARGET[:MODE]
+        --remove-file=TARGET --fragment=- (on standard input) | --clear-fragment --json. A host file built into the
+        image is read by every later start of it: asked first (image-file), naming it."""
+        target = self.image_target(params["target"])
+        args = ["images", "extend", target]
+        for kind in IMAGE_KINDS:
+            for change in ("add", "remove"):
+                for value in strings(body.get(f"{change}_{kind}", []), f"{change}_{kind}", 64):
+                    if not IMAGE_PACKAGE.fullmatch(value):
+                        raise Refused(400, f"{change}_{kind}: not a package name: {printable(value)[:80]}")
+                    args.append(f"--{change}-{kind}={value}")
+        files = body.get("add_files", [])
+        if not isinstance(files, list) or len(files) > 32:
+            raise Refused(400, "add_files is a list of {source, target, mode}")
+        shown = []
+        for entry in files:
+            if not isinstance(entry, dict) or set(entry) - {"source", "target", "mode"}:
+                raise Refused(400, "a file is {source: its path on that host, target: its path in the image, mode}")
+            source, where = clean_path(entry.get("source"), "a file's source"), clean_path(entry.get("target"),
+                                                                                            "a file's target")
+            mode = entry.get("mode") or ""
+            if ":" in source + where or mode and not (isinstance(mode, str) and IMAGE_MODE.fullmatch(mode)):
+                raise Refused(400, "a file is SOURCE:TARGET[:MODE] (no ':' in the paths; MODE like 0644 or 0755)")
+            args.append(f"--add-file={source}:{where}{':' + mode if mode else ''}")
+            shown.append(f"{source} at {where}")
+        for value in strings(body.get("remove_files", []), "remove_files", 32):
+            args.append(f"--remove-file={clean_path(value, 'a file in the image')}")
+        fragment, clear = self.fragment_of(body), flag(body, "clear_fragment")
+        if fragment is not None and clear:
+            raise Refused(400, "a fragment or clear_fragment, not both")
+        if fragment is not None:
+            args.append("--fragment=-")
+        if clear:
+            args.append("--clear-fragment")
+        if len(args) == 3:
+            raise Refused(400, "nothing to change")
+        if shown:
+            confirmed(body, "image-file", f"{', '.join(shown)} into {target}")
+        return self.json_of(params["host"], [*args, "--json"], 120, ok=(0,), input=fragment)
+
+    def image_check(self, params, body):
+        """images check TARGET [--fragment=-] --json: its findings and the final Containerfile (exit status 1:
+        errors found, which is its answer)."""
+        target, fragment = self.image_target(params["target"]), self.fragment_of(body)
+        return self.json_of(params["host"], ["images", "check", target, *(["--fragment=-"] if fragment is not None
+                                                                          else []), "--json"], 120, ok=(0, 1),
+                            input=fragment)
+
+    def image_new(self, params, body):
+        """images new NAME --from AGENT [--empty] --json: a variant (localhost/AGENT-sandbox-NAME)."""
+        name, agent = self.image_target(body.get("name")), body.get("from")
+        if agent not in AGENTS or name in AGENTS:
+            raise Refused(400, "a variant has a name of its own and comes from claude, codex or opencode")
+        return self.json_of(params["host"], ["images", "new", name, f"--from={agent}",
+                                             *(["--empty"] if flag(body, "empty") else []), "--json"], 60, ok=(0,))
+
+    def image_recipe(self, params, body):
+        """images recipe media|tor --from AGENT [--as VARIANT]: a variant with a ready extension."""
+        recipe, agent, variant = body.get("recipe"), body.get("from"), body.get("as")
+        if recipe not in IMAGE_RECIPES or agent not in AGENTS:
+            raise Refused(400, f"recipe is {' or '.join(IMAGE_RECIPES)}, from claude, codex or opencode")
+        extra = [] if variant in (None, "") else [f"--as={self.image_target(variant)}"]
+        return self.done(params["host"], ["images", "recipe", recipe, f"--from={agent}", *extra], 60)
+
+    def image_remove(self, params, body):
+        """images remove TARGET [--keep-image]: its extension dropped (a variant's image too, unless kept)."""
+        target, keep = self.image_target(params["target"]), flag(body, "keep_image")
+        confirmed(body, "image-remove", f"{target}{' (its image is kept)' if keep else ''}")
+        return self.done(params["host"], ["images", "remove", target, *(["--keep-image"] if keep else [])], 120)
 
 
 def no_canaries(value):
@@ -2647,7 +2896,7 @@ def terminal_command(query):
         if host == hosts.LOCAL:
             raise Refused(400, "this machine installs with install.sh itself")
         if host not in hosts_file():
-            raise Refused(404, "no such host")
+            raise Refused(404, "no such host", code="no-host", params={"host": host})
         if query.get("confirm") != "1":  # asked in the page first, as the install route asks (host-install)
             raise Refused(400, f"{NEEDS_CONFIRM['host-install']}: confirm=1", confirm="host-install")
         sudo = {"1": True, "0": False, None: None, "": None}.get(query.get("sudo"), "bad")
@@ -2658,7 +2907,8 @@ def terminal_command(query):
         return host, hosts.argv(hosts.LOCAL, install_argv(host, choice, as_json=False), tty=True)
     args = tool_command(kind, query)
     if args is None:
-        raise Refused(400, "kind is attach, start, update, install, login, plugins, build, trust-hooks or demo-device")
+        raise Refused(400, "kind is attach, start, update, install, login, plugins, build, trust-hooks, team-start or "
+                           "demo-device")
     return host, hosts.argv(host, args, tty=True)
 
 
@@ -2713,6 +2963,25 @@ def tool_command(kind, query):
             terminal_confirmed(query, "kit-hooks-trust", kit)
         return ["kits", "trust-hooks", *[f"--agent={a}" for a in dict.fromkeys(agents)],
                 *(["--revoke"] if revoke else []), "--", kit]
+    if kind == "team-start":
+        # sandbox-ai team start NAME --agents A,B[,C] [--workspace DIR] -- OPTIONS: the first agent leads; the
+        # options (as a start's: strings, never a shell line) hold for every member
+        name = query.get("team")
+        if not (isinstance(name, str) and TEAM_NAME.fullmatch(name)):
+            raise Refused(400, "a team's name is 1-20 of a-z, 0-9, '_' and '-', starting with a letter or digit",
+                          code="bad-name", params={"what": "team"})
+        agents = (query.get("agents") or "").split(",")
+        if not 2 <= len(agents) <= 3 or len(set(agents)) != len(agents) or not set(agents) <= set(AGENTS):
+            raise Refused(400, "agents: two or three of claude, codex and opencode, comma-separated; the first leads")
+        workspace = query.get("workspace") or ""
+        if workspace and (not workspace.startswith(("/", "~")) or "\0" in workspace):
+            raise Refused(400, "the workspace is an absolute path (or ~/...)")
+        try:
+            options = strings(json.loads(query.get("options") or "[]"), "options")
+        except ValueError:
+            raise Refused(400, "options is a JSON list of strings") from None
+        return ["team", "start", name, f"--agents={','.join(agents)}",
+                *([f"--workspace={workspace}"] if workspace else []), "--", *options]
     if kind == "demo-device":
         port = query.get("port")
         if port not in (None, ""):
@@ -2975,10 +3244,10 @@ class Service:
             if path == "/api/login" and method == "POST":
                 return self.login(data or {}, address)
             if session is None:
-                raise Refused(401, "log in")
+                raise Refused(401, "log in", code="login-needed")
             seen.append(session)
             if method != "GET" and not hmac.compare_digest(headers.get("X-CSRF-Token") or "", session["csrf"]):
-                raise Refused(403, "the page is out of date: reload it")
+                raise Refused(403, "the page is out of date: reload it", code="page-outdated")
             if path == "/api/me":
                 return self.json(200, {"user": session["user"], "csrf": session["csrf"],
                                        "version": self.version(), "terminals": vendored()})
@@ -2994,7 +3263,7 @@ class Service:
         except Refused as exc:
             if method != "GET" and session is not None:
                 audit("refused", user=session["user"], address=address, method=method, path=path, why=str(exc))
-            return self.error(exc.status, str(exc), confirm=exc.confirm)
+            return self.error(exc.status, str(exc), confirm=exc.confirm, code=exc.code, params=exc.params)
         except (OSError, ValueError) as exc:  # what no route turned into a Refused: an answer all the same
             why = printable(f"{type(exc).__name__}: {exc}")[:600]
             with contextlib.suppress(OSError):
@@ -3022,7 +3291,8 @@ class Service:
         if wait:
             audit("login-throttled", user=printable(user)[:64], address=address)
             return self.error(429, f"too many failed logins: try again in {int(wait) + 1} seconds",
-                              [("Retry-After", str(int(wait) + 1))])
+                              [("Retry-After", str(int(wait) + 1))], code="too-many-logins",
+                              params={"seconds": str(int(wait) + 1)})
         user_waits = self.limiter.wait(user_key) > 0
         try:
             with users_locked() as users:
@@ -3070,19 +3340,25 @@ class Service:
             host, argv = self.terminal(query)
         except ValueError as exc:
             raise Refused(400, printable(exc)) from None
+        installing = getattr(self.api, "installing", {})
+        if query.get("kind") == "install" and host in installing:  # one install per host: the route's runs now
+            since = round(time.monotonic() - installing[host])
+            raise Refused(409, f"sandbox-ai is being installed on {host} (for {since} s): wait for its end",
+                          code="busy", params={"host": host})
         if session["terminals"] >= TERMINALS_PER_SESSION:
             raise Refused(429, f"at most {TERMINALS_PER_SESSION} terminals at once")
         # What runs: a start's agent, workspace and options too (terminal_command checked them; strings only).
         started = {}
-        if query.get("kind") == "start":
+        if query.get("kind") in ("start", "team-start"):
             try:
                 options = redacted(json.loads(query.get("options") or "[]"))
             except ValueError:
                 options = printable(query.get("options"))[:500]
-            started = {"agent": query.get("agent"), "workspace": query.get("workspace"), "options": options}
+            started = {"agent": query.get("agent") or query.get("agents"), "workspace": query.get("workspace"),
+                       "options": options}
         audit("terminal", user=session["user"], address=address, host=host,
-              kind=query.get("kind"), name=query.get("name") or query.get("agent") or query.get("target")
-              or query.get("kit"), **started)
+              kind=query.get("kind"), name=query.get("name") or query.get("team") or query.get("agent")
+              or query.get("target") or query.get("kit"), **started)
         return argv, session
 
     @staticmethod
@@ -3116,9 +3392,11 @@ class Service:
         return status, [("Content-Type", "application/json"), ("Cache-Control", "no-store"), *extra], \
             json.dumps(data).encode()
 
-    def error(self, status, message, extra=(), confirm=None):
-        """{"error": MESSAGE}, and "confirm": the NEEDS_CONFIRM action a refusal names (the page asks for it)."""
-        return self.json(status, {"error": message, **({"confirm": confirm} if confirm else {})}, extra)
+    def error(self, status, message, extra=(), confirm=None, code=None, params=None):
+        """{"error": MESSAGE}, "confirm": the NEEDS_CONFIRM action a refusal names (the page asks for it), and "code"
+        with its "params": which common refusal it is (ERROR_CODES), for the page's own words."""
+        return self.json(status, {"error": message, **({"confirm": confirm} if confirm else {}),
+                                  **({"code": code, "params": params or {}} if code else {})}, extra)
 
 
 # Fields whose values the audit log leaves out, by their exact name (lower case, "-" as "_"), and names ending in

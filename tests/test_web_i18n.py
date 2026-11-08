@@ -206,6 +206,8 @@ NOT_WORDS = {
     "files", "Podman", "Bubblewrap", "sandbox-ai-home", "TOR_BRIDGES", "de,nl", "proton", "X-Gateway-Key=GW_KEY",
     "PreToolUse", "Bash|Write", "hub:binwalk", "VT_API_KEY", "egm", "x-access-token", "PYPI_TOKEN", "work", "Ann Example",
     "GH_WORK",
+    # examples of the start form, the teams, the kits' marketplaces and the images (names, a Containerfile line)
+    "my-plugins", "review", "ffmpeg jq", "RUN apt-get update && apt-get install -y --no-install-recommends tree", "data",
 }
 # Where a literal is read by people even when it is one lowercase word: (callee, argument) of the page's helpers.
 TEXT_POSITIONS = {("toast", 1), ("toast", 2), ("notice", 0), ("failed", 0), ("ask", 0), ("ask", 1), ("say", 0),
@@ -398,8 +400,8 @@ def test_the_page_in_german_and_back_to_english(tmp_path):
     assert result["asked"] == ("web auf local stoppen? Was darin läuft, endet; sein HOME bleibt erhalten: Fortsetzen "
                                "startet ihn wieder.Ja, stoppenAbbrechen")
     assert "automatisch" in result["placeholders"]
-    assert "--mode high\n--allow-pypi\n-m sonnet\n--preset-value repo='my repo'" in result["placeholders"], \
-        "options stay as typed"
+    assert "--mode high\n--allow-pypi\n-mm sonnet" in result["placeholders"], \
+        "options stay as typed (the model's flag is -mm: -m is --mount)"
     assert result["toast"] == "!Warnung: Fertig<b>x</b>×", "the level in German, the text as it is"
     assert result["filled"] == "<img src=x> auf {host}", "values are put in as text, once"
     approvals = result["approvals"]
@@ -428,3 +430,39 @@ def test_an_english_browser_gets_english(tmp_path):
     result = json.loads(run.stdout)
     assert result["lang"] == ["en", "en"] and "Starts and sessions" in result["frame"]
     assert result["asked"].startswith("Stop web on local? What runs in it ends; its HOME is kept")
+
+
+# --- the German texts address the user as "Sie", never "du" (the desktop app's wording) -----------------------------
+
+DU_WORDS = re.compile(r"\b(du|dich|dir|dein|deine|deinen|deinem|deiner|deines|euch|euer|eure|euren|hast|bist|kannst|"
+                      r"musst|willst|möchtest|solltest|wirst|darfst|brauchst|siehst|findest|weißt)\b", re.IGNORECASE)
+# an informal imperative at the start of a sentence (Wähle ..., Gib ...), not followed by "Sie" (Wählen Sie ...)
+DU_IMPERATIVE = re.compile(r"(?:^|[.:;!?]\s+|\(\s*)(Wähle|Gib|Klicke|Drücke|Öffne|Füge|Starte|Prüfe|Melde|Lade|Nimm|"
+                           r"Schreibe|Lies|Sieh|Trage|Nutze|Verwende|Benenne|Lösche|Entferne|Speichere|Halte|Achte|"
+                           r"Versuche|Warte|Bestätige|Kopiere|Führe|Lege|Setze|Stelle|Gehe|Schau|Vertraue|Erlaube|"
+                           r"Aktiviere|Installiere|Aktualisiere|Behalte|Mach|Mache|Hole|Antworte|Schließe|Wechsle|"
+                           r"Ändere|Baue|Gestatte|Sende|Schicke)\s+(?!Sie\b)")
+
+
+def du_forms(text):
+    """The du-forms of a German TEXT (its {placeholders} left out: {dir} is no "dir")."""
+    plain = PLACEHOLDER.sub(" ", text)
+    return [m.group(0) for m in DU_WORDS.finditer(plain)] + [m.group(1) for m in DU_IMPERATIVE.finditer(plain)]
+
+
+def test_the_german_texts_say_sie_never_du():
+    found = {key: du_forms(entry["de"]) for key, entry in catalog().items()}
+    assert not {key: forms for key, forms in found.items() if forms}, "German texts with du-forms (Sie, please)"
+    assert du_forms("Wähle einen Host. Gib dein Passwort ein.") == ["dein", "Wähle", "Gib"]
+    assert du_forms("Wählen Sie einen Host aus {dir}. Geben Sie Ihr Passwort ein.") == []
+    assert du_forms("Hast du das gesehen?") == ["Hast", "du"]
+
+
+def test_the_german_texts_keep_their_words():
+    """One German word for one thing, as the desktop app has it: Sitzung (never Session), Sandboxen (never
+    Sandboxes); Neu laden reads a list again, Aktualisieren updates sandbox-ai."""
+    texts = catalog()
+    for key, entry in texts.items():
+        assert not re.search(r"\b(Session|Sessions|Sandboxes|Sandboxs)\b", entry["de"]), (key, entry["de"])
+    assert texts["Refresh"]["de"] == "Neu laden" and texts["Reload"]["de"] == "Neu laden"
+    assert texts["Update"]["de"] == "Aktualisieren" and texts["Update all"]["de"] == "Alle aktualisieren"

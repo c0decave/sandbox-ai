@@ -343,6 +343,34 @@ ACTIONS = [
     ("GET", "/demo-device", None, [["demo-device", "status"]]),
     ("POST", "/demo-device/start", {}, [["demo-device", "start"]]),
     ("POST", "/demo-device/stop", {}, [["demo-device", "stop"]]),
+    # round 4: teams, the images' extensions and variants, replacements asked first, a kept allow
+    ("GET", "/teams", None, [["team", "list"]]),
+    ("GET", "/teams/mv", None, [["team", "show", "mv", "--json"]]),
+    ("POST", "/teams/mv/post", {"agent": "codex", "task": "-rf the tests"}, [["team", "post", "--", "mv", "codex",
+                                                                              "-rf the tests"]]),
+    ("POST", "/teams/mv/stop", {"confirm": True}, [["team", "stop", "mv"]]),
+    ("DELETE", "/teams/mv", {"confirm": True}, [["team", "delete", "mv", "--yes"]]),
+    ("GET", "/images-history", None, [["images", "history", "--json"]]),
+    ("POST", "/images-new", {"name": "mv", "from": "codex", "empty": True}, [["images", "new", "mv", "--from=codex",
+                                                                              "--empty", "--json"]]),
+    ("POST", "/images-recipe", {"recipe": "tor", "from": "claude", "as": "mv"},
+     [["images", "recipe", "tor", "--from=claude", "--as=mv"]]),
+    ("GET", "/images/mv", None, [["images", "extend", "mv", "--json"]]),
+    ("GET", "/images/mv/packages", None, [["images", "packages", "mv", "--json"]]),
+    ("GET", "/images/mv/history", None, [["images", "history", "mv", "--json"]]),
+    ("POST", "/images/mv/extend", {"add_apt": ["jq"], "remove_npm": ["typescript"], "remove_files": ["/usr/bin/t"]},
+     [["images", "extend", "mv", "--add-apt=jq", "--remove-npm=typescript", "--remove-file=/usr/bin/t", "--json"]]),
+    ("POST", "/images/mv/extend", {"add_files": [{"source": "/srv/t.sh", "target": "/usr/local/bin/t"}],
+                                   "confirm": True},
+     [["images", "extend", "mv", "--add-file=/srv/t.sh:/usr/local/bin/t", "--json"]]),
+    ("POST", "/images/mv/check", {}, [["images", "check", "mv", "--json"]]),
+    ("POST", "/images/mv/remove", {"keep_image": True, "confirm": True}, [["images", "remove", "mv", "--keep-image"]]),
+    ("POST", "/llm", {"name": "gpu", "kind": "vllm", "url": "https://gpu.example.org", "replace": True, "confirm": True},
+     [["llm", "add", "gpu", "--kind", "vllm", "--url", "https://gpu.example.org", "--replace"]]),
+    ("POST", "/vpn", {"name": "mv", "kind": "mullvad", "force": True, "confirm": True},
+     [["vpn", "add", "mv", "--mullvad", "--force"]]),
+    ("POST", "/net/web", {"op": "allow", "dns": True, "keep": True, "confirm": True},
+     [["net", "allow", "web", "--dns", "--keep"]]),
 ]
 
 
@@ -367,6 +395,9 @@ def expected_status(state, method):
 def test_every_action_in_every_login_state_on_every_host(web, state, host, method, path, body, commands):
     headers = web.headers(state)
     web.processes.answers[("--version",)] = (0, "sandbox-ai 0.1.52\n", "")
+    # privacy-check names each repository it was asked for, checked or not (an echo would be no answer)
+    web.processes.answers[("privacy-check",)] = (0, json.dumps([{"repository": "/srv/project", "checked": True,
+                                                                 "refused": None, "scanned": 2, "findings": []}]), "")
     status, out_headers, data = web.request(method, f"/api/hosts/{host}{path}", body, headers)
     assert status == expected_status(state, method), data
     assert out_headers["Content-Type"] == "application/json" and out_headers["Cache-Control"] == "no-store"
@@ -622,6 +653,11 @@ TOOL_TERMINALS = [
      ["kits", "trust-hooks", "--agent=claude", "--", "team"]),
     ({"kind": "trust-hooks", "kit": "team", "revoke": "1"}, ["kits", "trust-hooks", "--revoke", "--", "team"]),
     ({"kind": "demo-device", "port": "5555"}, ["demo-device", "start", "--port=5555"]),
+    ({"kind": "team-start", "team": "review", "agents": "claude,codex", "workspace": "/srv/project",
+      "options": json.dumps(["--mode", "high"])},
+     ["team", "start", "review", "--agents=claude,codex", "--workspace=/srv/project", "--", "--mode", "high"]),
+    ({"kind": "team-start", "team": "duo", "agents": "opencode,claude,codex"},
+     ["team", "start", "duo", "--agents=opencode,claude,codex", "--"]),
 ]
 
 
@@ -660,7 +696,15 @@ def test_a_tool_terminal_that_is_not_one_or_not_confirmed_is_refused(web, host):
                            ({"kind": "trust-hooks", "kit": "--yes", "confirm": "1"}, None),
                            ({"kind": "trust-hooks", "kit": "team", "agents": "bash", "confirm": "1"}, None),
                            ({"kind": "demo-device", "port": "80"}, None), ({"kind": "demo-device", "port": "-1"}, None),
-                           ({"kind": "images"}, None)):
+                           ({"kind": "images"}, None),
+                           ({"kind": "team-start", "team": "--all", "agents": "claude,codex"}, None),
+                           ({"kind": "team-start", "team": "Review", "agents": "claude,codex"}, None),
+                           ({"kind": "team-start", "team": "r", "agents": "claude"}, None),
+                           ({"kind": "team-start", "team": "r", "agents": "claude,claude"}, None),
+                           ({"kind": "team-start", "team": "r", "agents": "claude,bash"}, None),
+                           ({"kind": "team-start", "team": "r", "agents": "claude,codex", "workspace": "rel"}, None),
+                           ({"kind": "team-start", "team": "r", "agents": "claude,codex", "options": "[1]"}, None),
+                           ({"kind": "team-start", "team": "r", "agents": "claude,codex", "options": "{"}, None)):
         with pytest.raises(w.Refused) as refused:
             web.svc.websocket("/api/terminal?" + urllib.parse.urlencode({"host": host, "csrf": web.csrf, **query}),
                               sent, "192.0.2.1")

@@ -256,7 +256,9 @@ def test_changes_need_the_csrf_token_same_origin_json_and_a_known_host_name():
 @pytest.fixture
 def logged_in():
     secret = add_user()
-    runner = FakeRunner({("list",): (0, "[]", ""), ("approvals", "list"): (0, "[]", "")})
+    runner = FakeRunner({("list",): (0, "[]", ""), ("approvals", "list"): (0, "[]", ""),
+                         ("privacy-check",): (0, json.dumps([{"repository": "/home/u/src/web", "checked": True,
+                                                              "refused": None, "scanned": 3, "findings": []}]), "")})
     svc = service(runner)
     _, headers, body = login(svc, secret)
     ok = {**HEADERS, "Cookie": cookie_of(headers), "X-CSRF-Token": body["csrf"]}
@@ -524,7 +526,8 @@ def logged_in():
     ("GET", "/api/hosts/ct1/llm/gpu", None, ["llm", "show", "gpu", "--json"]),
     ("POST", "/api/hosts/ct1/llm", {"name": "gw", "kind": "openai-compatible", "url": "https://gw.example.org",
                                     "header_secrets": [{"header": "X-Gateway-Key", "secret": "GW_KEY"}],
-                                    "ca": "/home/u/ca.pem", "vpn": "home", "anthropic": True, "replace": True},
+                                    "ca": "/home/u/ca.pem", "vpn": "home", "anthropic": True, "replace": True,
+                                    "confirm": True},
      ["llm", "add", "gw", "--kind", "openai-compatible", "--url", "https://gw.example.org",
       "--header-secret=X-Gateway-Key=GW_KEY", "--ca=/home/u/ca.pem", "--vpn=home", "--anthropic", "--replace"]),
     ("GET", "/api/hosts/ct1/vpn/home", None, ["vpn", "show", "home", "--json"]),
@@ -533,7 +536,7 @@ def logged_in():
     ("POST", "/api/hosts/ct1/vpn", {"name": "ts", "kind": "tailscale", "hostname": "box-1", "ephemeral": True,
                                     "tailnet_allow": ["100.64.0.0/10"], "dns": ["100.100.100.100"],
                                     "check_urls": ["https://ip.example.org"], "provider": "mine", "force": True,
-                                    "no_dns_probe": True},
+                                    "no_dns_probe": True, "confirm": True},
      ["vpn", "add", "ts", "--tailscale", "--dns=100.100.100.100", "--check-url=https://ip.example.org",
       "--provider=mine", "--no-dns-probe", "--force", "--ephemeral", "--hostname=box-1",
       "--tailnet-allow=100.64.0.0/10"]),
@@ -1322,8 +1325,8 @@ def test_the_terminals_page_lists_every_running_start():
 
 def test_the_page_offers_the_network_of_a_start_and_the_presets():
     script = (Path(w.__file__).parent / "web" / "app.js").read_text()
-    assert "/net/${encodeURIComponent(name)}" in script and 'hostPath("/presets", target)' in script
-    assert "--preset ${chosen.id}" in script and "git_login" in script and "host_ports" in script
+    assert "/net/${encodeURIComponent(name)}" in script and 'hostPath("/presets", host)' in script
+    assert '["--preset", id, ' in script and "git_login" in script and "host_ports" in script
 
 
 def test_the_page_has_a_vpn_page_that_sends_only_names_of_secrets():
@@ -1802,6 +1805,18 @@ CONFIRM_CASES = {
                      ["llm", "add", "gw", "--kind", "vllm", "--url", "http://203.0.113.5:8000", "--insecure-http"]),
     "vpn-socks": ("POST", "/api/hosts/ct1/vpn", {"name": "tor", "kind": "tor", "socks": True},
                   ["vpn", "add", "tor", "--tor", "--socks"]),
+    # round 4: a replacement of an LLM server or a VPN profile, teams, images
+    "llm-replace": ("POST", "/api/hosts/ct1/llm", {"name": "gw", "kind": "vllm", "url": "https://gw.example.org",
+                                                   "replace": True},
+                    ["llm", "add", "gw", "--kind", "vllm", "--url", "https://gw.example.org", "--replace"]),
+    "vpn-replace": ("POST", "/api/hosts/ct1/vpn", {"name": "mv", "kind": "mullvad", "force": True},
+                    ["vpn", "add", "mv", "--mullvad", "--force"]),
+    "team-stop": ("POST", "/api/hosts/ct1/teams/review/stop", {}, ["team", "stop", "review"]),
+    "team-delete": ("DELETE", "/api/hosts/ct1/teams/review", {}, ["team", "delete", "review", "--yes"]),
+    "image-file": ("POST", "/api/hosts/ct1/images/data/extend", {"add_files": [
+        {"source": "/home/u/tool.sh", "target": "/usr/local/bin/tool", "mode": "0755"}]},
+                   ["images", "extend", "data", "--add-file=/home/u/tool.sh:/usr/local/bin/tool:0755", "--json"]),
+    "image-remove": ("POST", "/api/hosts/ct1/images/data/remove", {}, ["images", "remove", "data"]),
 }
 # The actions whose command runs on this machine, not on the host they are about.
 RUN_HERE = {"host-install"}
@@ -1817,7 +1832,8 @@ SAFE_POSTS = {r"/api/hosts", r"/api/hosts-status", r"/api/hosts/(?P<host>[^/]+)/
         "/projects/review", "/mcp-catalog", "/git-logins/check", "/publish-logins", "/publish-logins/check",
         "/identities", "/identities-check", "/identities/(?P<name>[^/]+)",
         "/identities/(?P<name>[^/]+)/(?P<action>login|publish)", "/presets/(?P<name>[^/]+)/check",
-        "/preset-dirs/remove", "/logs", "/privacy-check", "/activity", "/demo-device/start", "/demo-device/stop")}
+        "/preset-dirs/remove", "/logs", "/privacy-check", "/activity", "/demo-device/start", "/demo-device/stop",
+        "/teams/(?P<name>[^/]+)/post", "/images-new", "/images-recipe", "/images/(?P<target>[^/]+)/check")}
 
 
 @pytest.fixture
@@ -2455,7 +2471,8 @@ def test_a_host_install_runs_once_at_a_time_and_says_how_it_ended(home):
     # unconfirmed: refused, naming why and how
     status, out = call("POST", "/api/hosts/ct1/install", {"mode": "system"})
     assert status == 400 and out["confirm"] == "host-install" and "ct1 (admin@192.0.2.10): for every user in " \
-        "/usr/local, with sudo, from this machine's copy" in out["error"] and runner.calls == []
+        "/usr/local, with sudo unless the SSH user is root, from this machine's copy" in out["error"] \
+        and runner.calls == [], "whether the SSH user is root is the host's to say, never guessed from the entry"
     status, out = call("POST", "/api/hosts/ct1/install", {"mode": "system", "confirm": True})
     assert status == 200 and out == wanted and out["needs_password"]
     assert runner.calls == [("local", ["hosts", "install", "ct1", "--system", "--from-here", "--json"])]
@@ -3776,14 +3793,16 @@ def test_a_hosts_install_is_chosen_asked_and_sent_as_chosen(tmp_path):
     assert ask == "Install sandbox-ai on ct1 (admin@ct1) for every user in /opt/sai, with sudo; from this machine's copy?"
     assert before == 0
     assert result["post"] == [["/api/hosts/ct1/install", {"mode": "system", "source": "here", "prefix": "/opt/sai",
-                                                          "sudo": True, "confirm": True}]]
+                                                          "sudo": True, "expected": {"ssh": "admin@ct1", "port": 22},
+                                                          "confirm": True}]], "the SSH target the question named"
     assert result["done"] == [True, True, True, True]
     assert "for every user in /opt/sai, without sudo" in result["askNoSudo"]
     assert result["postNoSudo"] == {"mode": "system", "source": "here", "prefix": "/opt/sai", "sudo": False,
-                                    "confirm": True}
+                                    "expected": {"ssh": "admin@ct1", "port": 22}, "confirm": True}
     assert result["versionShown"]
     assert result["postDownload"] == {"mode": "system", "source": "download", "prefix": "/opt/sai", "sudo": True,
-                                      "version": "0.1.79", "confirm": True}
+                                      "version": "0.1.79", "expected": {"ssh": "admin@ct1", "port": 22},
+                                      "confirm": True}
     assert result["password"] == ["sandbox-ai hosts install ct1 --system --prefix=/opt/sai --download --version=0.1.79",
                                   False], "no terminals in this page: the command to run, no terminal button"
     assert result["query"] == {"mode": "system", "source": "download", "prefix": "/opt/sai", "version": "0.1.79",
@@ -3791,6 +3810,7 @@ def test_a_hosts_install_is_chosen_asked_and_sent_as_chosen(tmp_path):
     assert result["rootForm"][1:] == [True, True]
     assert "as root (the SSH user is root)" in result["rootAsk"] and "ct2 (root@ct2)" in result["rootAsk"]
     assert result["rootPost"] == ["/api/hosts/ct2/install", {"mode": "system", "source": "here", "prefix": "/usr/local",
+                                                            "expected": {"ssh": "root@ct2", "port": 22},
                                                             "confirm": True}], "as root: no sudo sent"
     assert result["updates"] == [{"sudo": True}, {"sudo": False}, {}]
     assert result["updatePassword"] == "sandbox-ai hosts update ct1 --sudo"
@@ -4192,3 +4212,496 @@ def test_a_running_starts_mcp_servers_and_workspaces_in_its_resources_card(tmp_p
     assert result["removePosts"] == [["/api/hosts/ct1/starts/web/mcp-live/remove", {"helper": "codex", "confirm": True}],
                                      ["/api/hosts/ct1/starts/web/mcp-live/remove", {"server": "files", "confirm": True}]]
     assert result["german"] == ["Einen MCP-Server hinzufügen", "codex als Helfer", "Datei"]
+
+
+# --- round 4: error codes, teams, images, the privacy check's answer, a bound install, a kept allow ---------------
+
+def test_the_common_refusals_say_their_code_for_the_pages_own_words(logged_in, monkeypatch):
+    """{"error", "code", "params"}: the page shows its own (German) text for a known code with the English message
+    below it. A refusal naming a code the page cannot know is a bug, never a pass."""
+    hosts = w.module("hosts")
+    hosts.save({"ct1": hosts.check("ct1", {"ssh": "root@192.0.2.10"})})
+    status, out = logged_in("GET", "/api/hosts/Bad;id/starts")
+    assert status == 400 and out["code"] == "no-host" and out["params"] == {"host": "Bad;id"}
+    status, out = logged_in("DELETE", "/api/hosts/ct9", {"confirm": True})
+    assert status == 404 and out["code"] == "no-host" and out["params"] == {"host": "ct9"}
+    status, out = logged_in("POST", "/api/hosts/ct1/starts/web/stop", {})
+    assert status == 400 and out["code"] == "confirm-needed" and out["confirm"] == "start-stop"
+    assert out["params"] == {"action": "start-stop", "detail": ""}
+    status, out = logged_in("POST", "/api/hosts/ct1/workspaces/web", {"path": "relative", "read_only": True})
+    assert status == 400 and out["code"] == "bad-path" and out["params"] == {"what": "path"}
+    status, out = logged_in("POST", "/api/hosts/ct1/starts/-x/pause", {})
+    assert status == 400 and out["code"] == "bad-name"
+    status, out = logged_in("POST", "/api/hosts/ct1/presets/tor/check", {"values": {"Bad key": "x"}})
+    assert status == 400 and out["code"] == "unknown-preset-value"
+    assert out["params"] == {"preset": "tor", "value": "Bad key"}
+    status, out = logged_in("GET", "/api/hosts/ct1/presets/-x")
+    assert status == 400 and out["code"] == "no-preset"
+    logged_in.runner.answers[("doctor",)] = (255, "", "ssh: connect to host 192.0.2.10 port 22: No route to host")
+    status, out = logged_in("GET", "/api/hosts/ct1/doctor")
+    assert status == 502 and out["code"] == "host-unreachable" and out["params"]["host"] == "ct1"
+    logged_in.runner.answers[("logs",)] = (3, "", "no logs here")
+    status, out = logged_in("GET", "/api/hosts/ct1/logs")
+    assert status == 502 and out["code"] == "command-failed"
+    assert out["params"] == {"host": "ct1", "command": "sandbox-ai logs", "status": "3"}
+    assert "no logs here" in out["error"]
+    logged_in.runner.answers[("vpn", "check")] = (124, "", "")
+    status, out = logged_in("POST", "/api/hosts/ct1/vpn/home/check", {})
+    assert status == 502 and out["code"] == "timeout"
+    svc = logged_in.svc
+    status, _, body = svc.handle("GET", "/api/hosts/ct1/starts", HEADERS, b"", "192.0.2.1")
+    assert status == 401 and json.loads(body)["code"] == "login-needed"
+    with pytest.raises(KeyError):
+        w.Refused(400, "x", code="no-such-code")
+    script = (WEB / "app.js").read_text()
+    table = script.split("const ERROR_TEXTS = {", 1)[1].split("\n};", 1)[0]
+    assert set(re.findall(r'^  "([a-z-]+)":', table, re.M)) == set(w.ERROR_CODES), "the page knows every code"
+
+
+def test_an_allow_kept_for_later_starts_is_also_asked_as_keeping(logged_in, monkeypatch):
+    """net allow --keep widens the run now (net-allow) and writes the project's file for every later start
+    (net-keep): both are checked."""
+    asked, real = [], w.confirmed
+    monkeypatch.setattr(w, "confirmed", lambda body, action, detail=None: (asked.append(action),
+                                                                          real(body, action, detail)))
+    status, out = logged_in("POST", "/api/hosts/ct1/net/web", {"op": "allow", "dns": True, "keep": True,
+                                                               "confirm": True})
+    assert status == 200 and asked == ["net-allow", "net-keep"]
+    assert logged_in.runner.calls[-1] == ("ct1", ["net", "allow", "web", "--dns", "--keep"])
+    asked.clear()
+    status, out = logged_in("POST", "/api/hosts/ct1/net/web", {"op": "allow", "dns": True, "confirm": True})
+    assert status == 200 and asked == ["net-allow"]
+    routes = {pattern: actions for _, pattern, _, actions in w.Api(FakeRunner()).routes}
+    assert routes[r"/api/hosts/(?P<host>[^/]+)/net/(?P<name>[^/]+)"] == ("net-allow", "net-keep")
+
+
+def test_teams_are_listed_shown_posted_to_stopped_and_deleted(logged_in):
+    """team list has no --json: its lines are read; a task goes after "--" (never an option); a team's name as
+    team.py takes it; stop and delete are confirmed (CONFIRM_CASES)."""
+    logged_in.runner.answers[("team", "list")] = (0, "review               claude, codex            /srv/project\n"
+                                                     "trio                 opencode, claude, codex  /home/u/my src\n"
+                                                     "garbage\n", "")
+    status, out = logged_in("GET", "/api/hosts/ct1/teams")
+    assert status == 200 and out == [{"name": "review", "members": ["claude", "codex"], "workspace": "/srv/project"},
+                                     {"name": "trio", "members": ["opencode", "claude", "codex"],
+                                      "workspace": "/home/u/my src"}]
+    status, out = logged_in("GET", "/api/hosts/ct1/teams/review")
+    assert status == 200 and logged_in.runner.calls[-1] == ("ct1", ["team", "show", "review", "--json"])
+    status, out = logged_in("POST", "/api/hosts/ct1/teams/review/post", {"agent": "codex",
+                                                                         "task": "--help me\n  please"})
+    assert status == 200 and logged_in.runner.calls[-1] == ("ct1", ["team", "post", "--", "review", "codex",
+                                                                    "--help me\n  please"])
+    for path, body in (("/api/hosts/ct1/teams/Review/post", {"agent": "codex", "task": "x"}),
+                       ("/api/hosts/ct1/teams/-x/post", {"agent": "codex", "task": "x"}),
+                       ("/api/hosts/ct1/teams/review/post", {"agent": "bash", "task": "x"}),
+                       ("/api/hosts/ct1/teams/review/post", {"agent": "codex", "task": "  "}),
+                       ("/api/hosts/ct1/teams/review/post", {"agent": "codex", "task": "a\x1b[2Jb"})):
+        calls = len(logged_in.runner.calls)
+        status, out = logged_in("POST", path, body)
+        assert status == 400 and len(logged_in.runner.calls) == calls, (path, body)
+    logged_in.runner.answers[("team", "show")] = (1, "", "sandbox-ai team: no team nope")
+    status, out = logged_in("GET", "/api/hosts/ct1/teams/nope")
+    assert status == 502 and "no team nope" in out["error"]
+
+
+def test_an_images_extension_is_changed_checked_and_removed_as_the_command_takes_it(logged_in):
+    """images extend: each package as --add-KIND=PKG, a host file as --add-file=SRC:TARGET[:MODE] (asked first:
+    image-file), a fragment on standard input (--fragment=-); images check answers with its findings even when they
+    are errors (exit status 1); remove keeps the image when asked."""
+    status, out = logged_in("POST", "/api/hosts/ct1/images/data/extend", {
+        "add_apt": ["ffmpeg", "jq=1.7"], "remove_pip": ["ruff"], "add_npm": ["@scope/tool@1.2"],
+        "fragment": "RUN echo hi\n", "remove_files": ["/usr/local/bin/old"]})
+    assert status == 200, out
+    assert logged_in.runner.calls[-1] == ("ct1", ["images", "extend", "data", "--add-apt=ffmpeg", "--add-apt=jq=1.7",
+                                                  "--add-npm=@scope/tool@1.2", "--remove-pip=ruff",
+                                                  "--remove-file=/usr/local/bin/old", "--fragment=-", "--json"])
+    inputs = []
+    logged_in.svc.api.runner = lambda host, args, timeout=120, input=None: (inputs.append(input), (0, "{}", ""))[1]
+    logged_in("POST", "/api/hosts/ct1/images/data/extend", {"fragment": "RUN echo hi\n"})
+    logged_in("POST", "/api/hosts/ct1/images/data/check", {"fragment": "FROM x\n"})
+    assert inputs == ["RUN echo hi\n", "FROM x\n"], "a fragment only ever on standard input"
+    logged_in.svc.api.runner = logged_in.runner
+    findings = {"findings": [{"severity": "error", "message": "FROM"}], "containerfile": "FROM x"}
+    logged_in.runner.answers[("images", "check")] = (1, json.dumps(findings), "")
+    status, out = logged_in("POST", "/api/hosts/ct1/images/data/check", {})
+    assert status == 200 and out["findings"][0]["message"] == "FROM", "errors found are its answer"
+    logged_in.runner.answers[("images", "extend")] = (1, "", "sandbox-ai images: error: line 1: FROM is not allowed")
+    status, out = logged_in("POST", "/api/hosts/ct1/images/data/extend", {"add_apt": ["jq"]})
+    assert status == 502 and "FROM is not allowed" in out["error"], "a refused change is no answer"
+    for body in ({"add_apt": ["--privileged"]}, {"add_apt": ["a b"]},
+                 {"add_files": [{"source": "rel", "target": "/t"}]},
+                 {"add_files": [{"source": "/a:b", "target": "/t"}], "confirm": True},
+                 {"add_files": [{"source": "/a", "target": "/t", "mode": "4755"}], "confirm": True},
+                 {"add_files": [{"source": "/a/../etc/shadow", "target": "/t"}], "confirm": True},
+                 {"fragment": "x", "clear_fragment": True}, {}, {"fragment": "x" * (65 << 10)}):
+        calls = len(logged_in.runner.calls)
+        status, out = logged_in("POST", "/api/hosts/ct1/images/data/extend", body)
+        assert status == 400 and len(logged_in.runner.calls) == calls, body
+    for path in ("/api/hosts/ct1/images/--all/extend", "/api/hosts/ct1/images/Data/remove"):
+        assert logged_in("POST", path, {"add_apt": ["jq"], "confirm": True})[0] == 400
+    assert logged_in("POST", "/api/hosts/ct1/images-new", {"name": "codex", "from": "codex"})[0] == 400
+    assert logged_in("POST", "/api/hosts/ct1/images-recipe", {"recipe": "evil", "from": "codex"})[0] == 400
+    status, out = logged_in("POST", "/api/hosts/ct1/images/data/remove", {"keep_image": True, "confirm": True})
+    assert status == 200 and logged_in.runner.calls[-1] == ("ct1", ["images", "remove", "data", "--keep-image"])
+
+
+def test_the_privacy_check_is_an_all_clear_only_for_what_it_checked(logged_in):
+    """privacy-check --json names each repository, checked or refused ("checked": false, why in "refused"; exit
+    status 2): passed on as it is; a list that names none, or a failure, is never an empty all-clear."""
+    path = "/api/hosts/ct1/privacy-check"
+    refused = [{"repository": "/r", "checked": False, "refused": "no rules", "findings": []}]
+    logged_in.runner.answers[("privacy-check",)] = (2, json.dumps(refused),
+                                                    "sandbox-ai privacy-check: REFUSED: no rules")
+    assert logged_in("POST", path, {"paths": ["/r"]}) == (200, refused)
+    logged_in.runner.answers[("privacy-check",)] = (2, "[]", "sandbox-ai privacy-check: REFUSED: no rules")
+    status, out = logged_in("POST", path, {"paths": ["/r"]})
+    assert status == 502 and out["code"] == "nothing-checked" and "REFUSED" in out["error"]
+    logged_in.runner.answers[("privacy-check",)] = (0, "[]", "")
+    assert logged_in("POST", path, {"paths": ["/r"]})[1]["code"] == "nothing-checked"
+    logged_in.runner.answers[("privacy-check",)] = (3, json.dumps(refused), "Traceback ...")
+    assert logged_in("POST", path, {"paths": ["/r"]})[1]["code"] == "command-failed"
+    # an older sandbox-ai: exit status 2 with the checked ones only: none of them is an all-clear
+    logged_in.runner.answers[("privacy-check",)] = (2, json.dumps([{"repository": "/a", "scanned": 3, "findings": []}]),
+                                                    "sandbox-ai privacy-check: REFUSED: /b: no rules")
+    status, out = logged_in("POST", path, {"paths": ["/a", "/b"]})
+    assert status == 200 and out[0]["checked"] is False and "REFUSED" in out[0]["refused"]
+    found = [{"repository": "/a", "checked": True, "refused": None, "scanned": 3,
+              "findings": [{"path": "k", "id": "key", "severity": "block", "reason": "a key"}]}]
+    logged_in.runner.answers[("privacy-check",)] = (1, json.dumps(found), "")
+    assert logged_in("POST", path, {"paths": ["/a"]}) == (200, found)
+
+
+def test_a_host_install_goes_where_the_question_said_and_one_at_a_time(home):
+    """The confirmation names the SSH target with its port; "expected" binds it: a host whose entry changed since
+    (another page, the command line) is not installed (409). The terminal install waits for the route's."""
+    hosts = w.module("hosts")
+    hosts.save({"ct1": hosts.check("ct1", {"ssh": "admin@192.0.2.10", "port": 2222})})
+    runner = FakeRunner({("hosts", "install"): (0, json.dumps({"name": "ct1", "after": "0.1.80"}), "")})
+    api = w.Api(runner)
+    with pytest.raises(w.Refused) as refused:
+        api.dispatch("POST", "/api/hosts/ct1/install", {"mode": "user"})
+    assert "ct1 (admin@192.0.2.10:2222): for the SSH user, without sudo" in str(refused.value)
+    with pytest.raises(w.Refused) as refused:
+        api.dispatch("POST", "/api/hosts/ct1/install", {"mode": "user", "confirm": True,
+                                                        "expected": {"ssh": "admin@192.0.2.10", "port": 22}})
+    assert refused.value.status == 409 and refused.value.code == "changed-meanwhile" and runner.calls == []
+    with pytest.raises(w.Refused):
+        api.dispatch("POST", "/api/hosts/ct1/install", {"mode": "user", "confirm": True, "expected": "admin@x"})
+    assert api.dispatch("POST", "/api/hosts/ct1/install", {"mode": "user", "confirm": True, "expected": {
+        "ssh": "admin@192.0.2.10", "port": 2222}})["after"] == "0.1.80"
+    assert runner.calls == [("local", ["hosts", "install", "ct1", "--user", "--from-here", "--json"])]
+    # the terminal where sudo asks: refused while the route's install runs there
+    secret = add_user()
+    svc = w.Service({"localhost:8443"}, api=api)
+    _, headers, body = login(svc, secret)
+    api.installing["ct1"] = time.monotonic() - 3
+    query = "kind=install&host=ct1&mode=system&confirm=1&csrf=" + body["csrf"]
+    with pytest.raises(w.Refused) as refused:
+        svc.websocket("/api/terminal?" + query, {**HEADERS, "Cookie": cookie_of(headers)}, "192.0.2.1")
+    assert refused.value.status == 409 and refused.value.code == "busy"
+    del api.installing["ct1"]
+    argv, _ = svc.websocket("/api/terminal?" + query, {**HEADERS, "Cookie": cookie_of(headers)}, "192.0.2.1")
+    assert "install" in argv
+
+
+def test_the_help_is_the_apps_exported_and_current():
+    """sandbox/web/help.json is what scripts/export_web_help.py makes of the app's help_content.py now (its
+    sections about sandbox-ai itself, both languages); every section a page's (?) names is in it; it is served."""
+    spec_ = importlib.util.spec_from_file_location("export_web_help", ROOT / "scripts" / "export_web_help.py")
+    script = importlib.util.module_from_spec(spec_)
+    spec_.loader.exec_module(script)
+    shipped = (WEB / "help.json").read_text(encoding="utf-8")
+    assert shipped == script.text(), "help.json is out of date: run python3 scripts/export_web_help.py"
+    sections = json.loads(shipped)["sections"]
+    ids = {s["id"] for s in sections}
+    assert {"sessions", "approvals", "presets", "teams", "llm", "vpn-tor", "hosts"} <= ids
+    for s in sections:
+        assert s["title"]["en"] and s["title"]["de"] and s["body"]["en"] and s["body"]["de"], s["id"]
+        assert set(s["see"]) <= ids
+    app = (WEB / "app.js").read_text()
+    named = set(re.findall(r'"([a-z-]+)"', app.split("const HELP_FOR = {", 1)[1].split("\n};", 1)[0]))
+    assert named and named <= ids, sorted(named - ids)
+    assert w.STATIC_FILES["help.json"] == "application/json"
+
+
+def test_the_demo_devices_port_is_its_default():
+    spec_ = importlib.util.spec_from_file_location("demo_for_web", ROOT / "sandbox" / "demo_device.py")
+    demo = importlib.util.module_from_spec(spec_)
+    spec_.loader.exec_module(demo)
+    app = (WEB / "app.js").read_text()
+    assert f'id: "demo-port", type: "number", min: 1024, max: 65535, placeholder: "{demo.DEFAULT_PORT}"' in app
+    assert "-mm sonnet" in app and "-m sonnet" not in app, "the model's flag is -mm (-m is --mount)"
+
+
+ROUND4_DRIVER = FAKE_DOM + r"""
+const buttonIn = (node, text) => node.all().find(n => n.tagName === "button" && n.textContent === text);
+const byId = (id) => body.all().find(n => n.id === id);
+const confirmText = (node) => { const c = node.all().find(n => n.className === "confirm"); return c ? c.textContent : null; };
+const posts = () => calls.filter(c => c.method !== "GET").map(c => [c.method, c.path, JSON.parse(c.body)]);
+const reset = () => { vm.runInContext("clear(__main); terminalsOpened.length = 0", context); calls.length = 0; };
+(async () => {
+  const result = {};
+  vm.runInContext('state.me = { user: "admin", csrf: "c", terminals: true }; state.host = "ct1"; state.hosts = [{ name: "local", kind: "local" }, { name: "ct1", kind: "ssh", ssh: "root@ct1" }]; var terminalsOpened = []; openTerminal = (params, title) => { terminalsOpened.push(params); };', context);
+  // 1. the start form: its host, presets by category for the agent, one field per value, checked before it starts
+  let checkAnswer = { ok: false, output: "missing: tor: no VPN profile anon\nmissing: preset tor is for claude" };
+  const presets = [{ id: "tor", title: "Everything through Tor", category: "privacy", agents: ["claude", "codex", "opencode"] },
+    { id: "ollama", title: "Ollama", category: "llm", agents: ["claude", "codex", "opencode"] },
+    { id: "sand-chess", title: "Sand chess", category: "fun", agents: ["claude", "opencode"] },
+    { id: "software-analysis", title: "Software analysis", category: "analysis", agents: ["claude", "codex", "opencode"] }];
+  answer = (method, path, sent) => {
+    if (path.endsWith("/starts")) return [{ name: "web", agent: "claude", kind: "session", state: "running", keep: true, home: "kept", directory: "/d", attachable: true }];
+    if (path.endsWith("/presets")) return presets;
+    if (path.endsWith("/presets/tor")) return { id: "tor", description: "Every connection through Tor", values: { tor: { label: "Tor profile (sandbox-ai vpn list)", kind: "vpn" } }, notes: ["a note"] };
+    if (path.endsWith("/presets/ollama")) return { id: "ollama", values: { llm: { label: "Ollama server", kind: "llm", default: "ollama" } } };
+    if (path.endsWith("/presets/software-analysis")) return { id: "software-analysis", values: { samples: { label: "Folder with the samples", kind: "folder" } }, mcp: ["hub:capa", "hub:yara"] };
+    if (path.endsWith("/check")) return checkAnswer;
+    if (path.endsWith("/vpn")) return [{ profile: "anon", type: "tor" }, { profile: "home", type: "wireguard" }];
+    if (path.endsWith("/mcp")) return [{ name: "capa" }];
+    if (path.endsWith("/llm")) return [{ name: "ollama", kind: "ollama", agents: ["claude", "codex", "opencode"] }, { name: "gpu", kind: "vllm", agents: ["codex", "opencode"] }];
+    if (path.includes("/models")) return [];
+    return { output: "ok" };
+  };
+  vm.runInContext('state.page = "starts"; state.startsHost = "ct1";', context);
+  await vm.runInContext("pages.starts(__main)", context); await settle();
+  result.formHosts = byId("start-host").children.map(o => o.value);
+  const ticked = (box) => (box.checked === undefined ? "checked" in box.attributes : box.checked);  // as a browser has it
+  result.only = [ticked(byId("start-only-server")), byId("start-only-server").disabled];
+  result.example = byId("options").getAttribute("placeholder");
+  const groups = () => byId("preset").children.filter(n => n.tagName === "optgroup").map(g => [g.getAttribute("label"), g.children.map(o => o.value)]);
+  result.groupsClaude = groups();
+  byId("agent").value = "codex"; byId("agent").fire("change");
+  result.groupsCodex = groups();
+  byId("preset").value = "tor"; byId("preset").fire("change"); await settle();
+  result.torChoices = byId("preset-value-tor").children.map(o => o.value);
+  byId("preset-value-tor").value = "anon";
+  byId("options").value = "--mode high";
+  buttonIn(main, "Start in a terminal").fire("click"); await settle();
+  result.notReady = [vm.runInContext("terminalsOpened.length", context), byId("start-status").textContent];
+  checkAnswer = { ok: true, output: "tor: ready" };
+  buttonIn(main, "Start in a terminal").fire("click"); await settle();
+  result.checked = posts().filter(p => p[1].endsWith("/check")).map(p => [p[1], p[2]]);
+  result.started = vm.runInContext("terminalsOpened.map(p => [p.host, p.agent, JSON.parse(p.options)])", context);
+  byId("preset").value = "software-analysis"; byId("preset").fire("change"); await settle();
+  result.mcp = main.all().filter(n => n.tagName === "li").map(n => [n.className, n.textContent]);
+  result.samples = Boolean(byId("preset-value-samples"));
+  byId("preset").value = "ollama"; byId("preset").fire("change"); await settle();
+  result.ollama = [byId("preset-value-llm").value, byId("start-model").disabled];
+  byId("preset").value = ""; byId("preset").fire("change"); await settle();
+  byId("start-model").value = "gpu"; byId("start-model").fire("change");
+  result.onlyWithServer = [ticked(byId("start-only-server")), byId("start-only-server").disabled];
+  calls.length = 0;
+  byId("start-host").value = "local"; byId("start-host").fire("change"); await settle();
+  result.otherHost = [main.all().find(n => n.tagName === "h2" && n.textContent.startsWith("New start")).textContent,
+    [...new Set(calls.map(c => c.path.split("/")[3]))]];
+  // 2. a start's card opens right below its row, its heading focused
+  const rowOf = (name) => body.all().find(n => n.attributes["data-name"] === name);
+  buttonIn(rowOf("web"), "History").fire("click"); await settle();
+  const tbody = rowOf("web").parent;
+  const at = tbody.children.indexOf(rowOf("web"));
+  result.card = [tbody.children[at + 1].className, tbody.children[at + 1].textContent.startsWith("History of web on ct1"), globalThis.focused && globalThis.focused.tagName];
+  result.rowLabels = rowOf("web").all().filter(n => n.tagName === "button").map(b => b.getAttribute("aria-label"));
+  buttonIn(tbody.children[at + 1], "Close").fire("click");
+  result.closed = tbody.children.some(r => r.className === "card-row");
+  // 3. LLM and VPN rows: the row's host, named for screen readers; Remove says remove
+  reset();
+  answer = (method, path) => (path.endsWith("/llm") && method === "GET" ? [{ name: "gw", kind: "vllm", url: "https://gw.example.org" }] : path.endsWith("/vpn") && method === "GET" ? [{ profile: "anon", type: "tor" }] : { ok: true, output: "fine" });
+  vm.runInContext('state.page = "llm"; state.host = "ct1";', context);
+  await vm.runInContext("pages.llm(__main)", context); await settle();
+  vm.runInContext('state.host = "local";', context);  // the header's host changed, this page not drawn anew
+  for (const label of ["Check", "Models", "Show"]) { buttonIn(main, label).fire("click"); await settle(); }
+  result.llmPaths = calls.filter(c => c.path.includes("/llm/gw")).map(c => c.path);
+  result.llmLabels = main.all().filter(n => n.tagName === "button" && (n.getAttribute("aria-label") || "").includes("gw")).map(b => b.getAttribute("aria-label"));
+  buttonIn(main, "Remove").fire("click");
+  result.llmRemove = confirmText(main) + "|" + main.all().filter(n => n.tagName === "button").map(b => b.textContent).join(",");
+  reset();
+  vm.runInContext('state.page = "vpn"; state.host = "ct1";', context);
+  await vm.runInContext("pages.vpn(__main)", context); await settle();
+  vm.runInContext('state.host = "local";', context);
+  buttonIn(main, "Check").fire("click"); await settle();
+  result.vpnPaths = calls.filter(c => c.method === "POST").map(c => c.path);
+  // a replacement is asked first, naming it
+  byId("vpn-name").value = "anon"; byId("vpn-kind").value = "tor"; byId("vpn-kind").fire("change"); byId("vpn-force").checked = true;
+  calls.length = 0;
+  buttonIn(main, "Add profile").fire("click");
+  result.vpnForce = [confirmText(main), posts().length];
+  // 4. the one live region: a notice has no role; an error is said there; a known code in the page's words
+  result.notice = vm.runInContext('(() => { const n = notice("it failed", "error"); return [n.getAttribute("role") || null, document.getElementById("live").textContent]; })()', context);
+  result.codes = vm.runInContext('(() => { const e = new ApiError(404, "no such host", null, "no-host", { host: "ct9" }); setLanguage("de"); const de = errorNotice(e).textContent; setLanguage("en"); return [errorNotice(e).textContent, de, errorText(new ApiError(500, "boom")), errorText(new ApiError(400, "x", null, "unknown-code"))]; })()', context);
+  // 5. a slow page never draws over the page shown since
+  reset();
+  let release = null;
+  answer = (method, path) => (path.endsWith("/doctor") ? new Promise(resolve => { release = () => resolve([]); }) : path.endsWith("/llm") ? [] : {});
+  vm.runInContext('state.host = "ct1"; show("doctor"); show("llm");', context); await settle();
+  release(); await settle();
+  result.guard = main.children.filter(n => n.tagName === "h1").map(n => n.textContent);
+  // 6. teams: listed, shown below their row, posted to, stopped after a question, started in a terminal
+  reset();
+  answer = (method, path, sent) => {
+    if (path.endsWith("/teams")) return [{ name: "review", members: ["claude", "codex"], workspace: "/srv/p" }];
+    if (path.endsWith("/teams/review") && method === "GET") return { name: "review", members: ["claude", "codex"], lead: "claude", workspace: "/srv/p",
+      states: { claude: "running", codex: "stopped" }, board: { tasks: [{ id: 1, from: "claude", to: "codex", state: "open", task: "write the tests" }] } };
+    return { output: "sandbox-ai team: done" };
+  };
+  vm.runInContext('state.page = "teams"; state.host = "ct1";', context);
+  await vm.runInContext("pages.teams(__main)", context); await settle();
+  const teamRow = main.all().find(n => n.attributes["data-team"] === "review");
+  buttonIn(teamRow, "Show").fire("click"); await settle();
+  const teamBody = teamRow.parent, teamAt = teamBody.children.indexOf(teamRow);
+  const teamCard = byId("team-card");
+  result.teamCard = [teamBody.children[teamAt + 1].children[0].children[0] === teamCard, teamCard.textContent.includes("write the tests"),
+    teamCard.all().filter(n => n.tagName === "button").map(b => b.getAttribute("aria-label") || b.textContent).filter(x => x.startsWith("Attach"))];
+  byId("team-post-agent").value = "codex"; byId("team-post-task").value = "  review the docs  ";
+  buttonIn(teamCard, "Post").fire("click"); await settle();
+  buttonIn(teamRow, "Stop…").fire("click");
+  result.teamStop = [confirmText(teamRow), posts().filter(p => p[1].endsWith("/stop")).length];
+  buttonIn(teamRow, "Yes, stop it").fire("click"); await settle();
+  result.teamPosts = posts();
+  byId("team-name").value = "duo"; byId("team-lead").value = "opencode"; byId("team-agent-codex").checked = true;
+  byId("team-workspace").value = "/srv/x"; byId("team-options").value = "--mode high";
+  buttonIn(main, "Start the team in a terminal").fire("click");
+  result.teamStart = vm.runInContext("terminalsOpened.slice()", context);
+  // 7. images: the variants in the build list (their "target"), a host file asked first, a removal asked first
+  reset();
+  answer = (method, path) => (path.endsWith("/images") ? [{ agent: "claude", target: "claude", variant: false, extended: true, status: "current" },
+    { agent: "codex", target: "data", variant: true, extended: true, status: "not-built" }] : path.endsWith("/extend") ? { changes: ["added file /usr/local/bin/t"], findings: [] } : { output: "removed" });
+  vm.runInContext('state.page = "images"; state.host = "ct1";', context);
+  await vm.runInContext("pages.images(__main)", context); await settle();
+  result.buildTargets = byId("build-target").children.map(o => o.value);
+  byId("image-target").value = "data"; byId("image-add-files").value = "/home/u/t.sh:/usr/local/bin/t:0755"; byId("image-add-apt").value = "jq";
+  buttonIn(main, "Save the changes…").fire("click");
+  result.imageAsk = [confirmText(main), posts().length];
+  byId("image-target").value = "claude";  // changed while asked: the question's image is the one changed
+  buttonIn(main, "Yes, add them").fire("click"); await settle();
+  const dataRow = main.all().find(n => n.tagName === "tr" && n.children[0] && n.children[0].textContent === "data");
+  buttonIn(dataRow, "Remove…").fire("click");
+  result.imageRemoveAsk = confirmText(dataRow);
+  buttonIn(dataRow, "Yes, remove it").fire("click"); await settle();
+  result.imagePosts = posts();
+  // 8. the privacy check: a refused repository is "not checked", never clean; the all-clear only for all checked
+  result.privacy = vm.runInContext(`[privacyResult([{ repository: "/a", checked: false, refused: "no rules", findings: [] }, { repository: "/b", checked: true, scanned: 3, findings: [] }], "ct1"),
+    privacyResult([{ repository: "/b", checked: true, scanned: 3, findings: [] }], "ct1"), privacyResult([], "ct1")].map(nodes => nodes.filter(n => (n.className || "").includes("notice")).map(n => n.textContent))`, context);
+  // 9. bound values: Stop and wait, a preset directory
+  reset();
+  answer = () => ({ output: "ok" });
+  vm.runInContext('moreCard(__main, { name: "web", host: "ct1", state: "running", keep: true })', context);
+  byId("more-wait").value = "45";
+  buttonIn(main, "Stop and wait…").fire("click");
+  byId("more-wait").value = "99";
+  buttonIn(main, "Yes, stop it").fire("click"); await settle();
+  const stopped = posts();
+  reset();
+  answer = (method, path) => (path.endsWith("/preset-dirs") ? { dirs: [] } : path.endsWith("/presets") ? [] : { output: "ok" });
+  vm.runInContext('state.page = "presets";', context);
+  await vm.runInContext("pages.presets(__main)", context); await settle();
+  byId("preset-dir").value = "/srv/a";
+  buttonIn(main, "Add…").fire("click");
+  byId("preset-dir").value = "/srv/b";
+  buttonIn(main, "Yes, add it").fire("click"); await settle();
+  result.bound = [...stopped, ...posts()];
+  // 10. kits: a marketplace added, asked first; an LLM server replaced, asked first
+  reset();
+  answer = (method, path) => (path.endsWith("/kits") && method === "GET" ? { kits: [{ name: "mine", kind: "user", agents: {} }] } : { output: "ok" });
+  vm.runInContext('state.page = "kits";', context);
+  await vm.runInContext("pages.kits(__main)", context); await settle();
+  byId("kit-target").value = "mine";  // a browser's select: its first option
+  byId("kit-market-name").value = "mp"; byId("kit-market-source").value = "owner/repo"; byId("kit-market-agent").value = "claude";
+  buttonIn(main, "Add marketplace").fire("click");
+  result.marketAsk = confirmText(main);
+  buttonIn(main, "Yes, add it").fire("click"); await settle();
+  result.market = posts();
+  reset();
+  answer = (method, path) => (path.endsWith("/llm") && method === "GET" ? [] : { output: "ok" });
+  vm.runInContext('state.page = "llm";', context);
+  await vm.runInContext("pages.llm(__main)", context); await settle();
+  for (const id of ["llm-model", "llm-key-secret", "llm-headers", "llm-ca", "llm-vpn"]) byId(id).value = "";
+  byId("llm-name").value = "gw"; byId("llm-kind").value = "vllm"; byId("llm-url").value = "https://gw.example.org"; byId("llm-replace").checked = true;
+  buttonIn(main, "Add").fire("click");
+  result.llmReplace = [confirmText(main), posts().length];
+  buttonIn(main, "Yes, replace it").fire("click"); await settle();
+  result.llmReplacePost = posts().map(p => [p[2].replace, p[2].confirm]);
+  // 10b. a start's teams (list --json "teams"): named below it, with the other members listed
+  result.teams = vm.runInContext(`[...startTree([{ name: "review-claude", host: "ct1", kind: "session", teams: ["review"] },
+    { name: "review-codex", host: "ct1", kind: "session", teams: ["review"] }, { name: "solo", host: "ct1", kind: "session", teams: [] }]).notes.values()]`, context);
+  // 11. an install whose answer was cut off: an older install's result is never shown as this one's
+  answer = () => ({ running: false, last: { result: { name: "ct1", after: "0.1.70" }, ago: 3600, error: null } });
+  vm.runInContext("setTimeout = (f) => { f(); return 0; }", context);
+  const status = new Node("div"); context.__status = status;
+  result.waited = [await vm.runInContext('waitForInstall("ct1", __status, new Error("cut off"), Date.now())', context), status.textContent.includes("knows of no install")];
+  answer = () => ({ running: false, last: { result: { name: "ct1", after: "0.1.80" }, ago: 1, error: null } });
+  result.waitedOurs = await vm.runInContext('waitForInstall("ct1", __status, new Error("cut off"), Date.now() - 60000)', context);
+  console.log(JSON.stringify(result));
+})().catch(e => { console.error(e.stack); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_round_four_of_the_page(tmp_path):
+    """In node: the structured start form (its own host, presets by category for the agent, a field per value with
+    that host's profiles, the MCP servers there, presets check before Start, -mm for the model, "only this server"
+    off for the cloud and on by default); cards below their row with the focus on them; LLM and VPN rows asking
+    their own host, named for screen readers; one live region; error codes in the page's words; a slow page never
+    drawing over a newer one; teams; images; the privacy check's all-clear; values bound to their question."""
+    result = run_driver(tmp_path, ROUND4_DRIVER, "round4")
+    assert result["formHosts"] == ["local", "ct1"]
+    assert result["only"] == [True, True], "on by default (as the app's wizard), off while the cloud is chosen"
+    assert result["example"] == "--mode high\n--allow-pypi\n-mm sonnet"
+    assert result["groupsClaude"] == [["Local models", ["ollama"]], ["Analysis", ["software-analysis"]], ["Privacy", ["tor"]],
+                                      ["Fun", ["sand-chess"]]]
+    assert result["groupsCodex"] == [["Local models", ["ollama"]], ["Analysis", ["software-analysis"]], ["Privacy", ["tor"]]]
+    assert result["torChoices"][:2] == ["", "anon"] and "home" not in result["torChoices"], "a Tor value: Tor profiles only"
+    opened, text = result["notReady"]
+    assert opened == 0 and "not ready on ct1: nothing was started" in text and "no VPN profile anon" in text
+    assert result["checked"] == [["/api/hosts/ct1/presets/tor/check", {"values": {"tor": "anon"}, "agent": "codex"}]] * 2
+    assert result["started"] == [["ct1", "codex", ["--preset", "tor", "--preset-value", "tor=anon", "--mode", "high"]]]
+    assert result["mcp"] == [["status-ok", "hub:capa added on ct1"],
+                             ["status-warn", "hub:yara not added on ct1 yet: sandbox-ai mcp add hub:yaraOpen MCP servers"]]
+    assert result["samples"] and result["ollama"] == ["ollama", True], "the preset names the LLM server: no model"
+    assert result["onlyWithServer"] == [True, False]
+    heading, asked = result["otherHost"]
+    assert heading == "New start on local" and asked == ["local"], "the form asks the host it names"
+    row, below, focused = result["card"]
+    assert row == "card-row" and below and focused == "h2", "the card right below its start, its heading focused"
+    assert "History web on ct1" in result["rowLabels"] and "Stop web on ct1" in result["rowLabels"]
+    assert result["closed"] is False
+    assert result["llmPaths"] == ["/api/hosts/ct1/llm/gw/check", "/api/hosts/ct1/llm/gw/models", "/api/hosts/ct1/llm/gw"]
+    assert {"Check gw on ct1", "Models gw on ct1", "Show gw on ct1", "Remove gw on ct1"} <= set(result["llmLabels"])
+    assert result["llmRemove"].startswith("Remove the LLM server gw on ct1?") and "Yes, remove it" in result["llmRemove"]
+    assert "forget" not in result["llmRemove"]
+    assert result["vpnPaths"] == ["/api/hosts/ct1/vpn/anon/check"]
+    ask, before = result["vpnForce"]
+    assert "Replace the VPN profile anon on ct1?" in ask and before == 0
+    assert result["notice"] == [None, "it failed"]
+    english, german, plain, unknown = result["codes"]
+    assert english == "There is no host ct9 (any more): choose another one, or add it on the page Hosts.no such host"
+    assert german.startswith("Es gibt (nicht mehr) den Host ct9") and german.endswith("no such host")
+    assert plain == "boom" and unknown == "x"
+    assert result["guard"] == ["LLM servers on ct1"], "the doctor's late answer drew nothing"
+    in_slot, board, attach = result["teamCard"]
+    assert in_slot and board and attach == ["Attach review-claude on ct1"]
+    ask, before = result["teamStop"]
+    assert "Stop the team review on ct1?" in ask and "review-claude, review-codex" in ask and before == 0
+    assert result["teamPosts"] == [["POST", "/api/hosts/ct1/teams/review/post", {"agent": "codex", "task": "review the docs"}],
+                                   ["POST", "/api/hosts/ct1/teams/review/stop", {"confirm": True}]]
+    assert result["teamStart"] == [{"kind": "team-start", "host": "ct1", "team": "duo", "agents": "opencode,codex",
+                                    "workspace": "/srv/x", "options": '["--mode","high"]'}]
+    assert result["buildTargets"] == ["claude", "codex", "opencode", "all", "team", "vpn", "data"]
+    ask, before = result["imageAsk"]
+    assert ask.startswith("Build /home/u/t.sh of ct1 into data?") and before == 0
+    assert "Remove the variant data on ct1" in result["imageRemoveAsk"]
+    assert result["imagePosts"] == [
+        ["POST", "/api/hosts/ct1/images/data/extend", {"add_apt": ["jq"], "add_files": [
+            {"source": "/home/u/t.sh", "target": "/usr/local/bin/t", "mode": "0755"}], "confirm": True}],
+        ["POST", "/api/hosts/ct1/images/data/remove", {"keep_image": False, "confirm": True}]]
+    refused, clean, empty = result["privacy"]
+    assert refused == ["/a: not checked: no rules"], "no all-clear while one was refused"
+    assert clean == ["Nothing that should stay private."] and empty == ["Nothing was checked on ct1: there is no all-clear."]
+    assert result["bound"] == [["POST", "/api/hosts/ct1/starts/web/stop", {"wait": 45, "confirm": True}],
+                               ["POST", "/api/hosts/ct1/preset-dirs", {"directory": "/srv/a", "confirm": True}]]
+    assert result["marketAsk"].startswith("Add mp to the kit mine on ct1?")
+    assert result["market"] == [["POST", "/api/hosts/ct1/kits/mine/add-marketplace",
+                                 {"marketplace": "mp", "source": "owner/repo", "agent": "claude", "create": False,
+                                  "confirm": True}]]
+    ask, before = result["llmReplace"]
+    assert "Replace the LLM server gw on ct1?" in ask and before == 0 and result["llmReplacePost"] == [[True, True]]
+    assert result["waited"] == [None, True] and result["waitedOurs"] == {"name": "ct1", "after": "0.1.80"}
+    assert result["teams"] == [["Team review: review-codex"], ["Team review: review-claude"]], "list --json's teams"
