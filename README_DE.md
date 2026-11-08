@@ -807,9 +807,10 @@ Session hinzugefügt, bleibt der Workspace in ihren Optionen, sodass `sandbox-ai
 resume NAME --restart` ihn am selben Ort wieder hat; einer, der mit `--ro`
 hinzukam, bleibt nicht (er käme beschreibbar zurück), außer der Lauf hält alle
 weiteren Workspaces ohnehin schreibgeschützt. Das Datei-Log (`--log-dir`)
-beobachtet ihn ab dann; Push-Prüfung und Privacy-Prüfung nach dem Lauf kennen nur
-die Workspaces des Starts, ein Push seiner Commits zu einem öffentlichen Remote
-wird also abgelehnt (vom Host aus pushen oder mit ihm neu starten). Läufe, die
+beobachtet ihn ab dann, und seit 0.1.78 nimmt die Push-Prüfung seine Commits mit den
+Regeln des Laufs und denen seines Projekts an (der Befehl sagt es; wo sie es nicht kann,
+bleiben seine Pushes zu einem öffentlichen Remote abgelehnt), und die Privacy-Prüfung
+nach dem Lauf sieht ihn auch an. Läufe, die
 0.1.75 oder älter gestartet hat, haben dafür keinen Platz: mit `resume NAME
 --restart --workspace VERZ` neu starten.
 

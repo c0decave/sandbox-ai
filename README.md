@@ -773,9 +773,10 @@ sure. Added to a session,
 the workspace is kept in its options, so `sandbox-ai resume NAME --restart`
 starts with it at the same place; one added with `--ro` is not kept (it would
 come back writable), unless the run keeps every further workspace read-only.
-The file log (`--log-dir`) watches it from then on; the push check and the
-privacy check after the run know only the start's workspaces, so a push of its
-commits to a public remote is refused (push from the host, or restart with it).
+The file log (`--log-dir`) watches it from then on, and since 0.1.78 the push
+check takes its commits with the run's rules and its project's own (the
+command says so; where it cannot, its pushes to a public remote stay refused),
+and the privacy check after the run looks at it too.
 Runs started by 0.1.75 or older have no place for it: restart them with
 `resume NAME --restart --workspace DIR`.
 

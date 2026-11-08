@@ -356,3 +356,22 @@ def test_one_line_run_values_are_plain_yaml():
             match = re.match(r"\s*(?:- )?(run|name|if): (.*)$", line)
             if match and match[2] and match[2][0] not in "|>\"'":
                 assert ": " not in match[2] and " #" not in match[2].split("#")[0][:-1], f"{workflow.name}:{number}"
+
+
+@pytest.mark.parametrize("launcher", ["macos-app", "macos-cli"])
+def test_the_macos_launchers_run_with_set_u_and_name_the_package(tmp_path, launcher):
+    """Both launchers under `sh -eu` in a fake bundle (python3 a script printing what it was given): no variable is
+    used before it is set (0.1.77's app launcher read $resources one line too early and never started)."""
+    contents = tmp_path / "sandbox-ai.app" / "Contents"
+    (contents / "MacOS").mkdir(parents=True)
+    python = contents / "Resources" / "python" / "bin" / "python3"
+    python.parent.mkdir(parents=True)
+    python.write_text('#!/bin/sh\necho "COPY=$SANDBOX_AI_PACKAGE_COPY PACKAGE=$SANDBOX_AI_PACKAGE"\n')
+    python.chmod(0o755)
+    shutil.copy(ROOT / "packaging" / launcher, contents / "MacOS" / launcher)
+    env = {key: value for key, value in os.environ.items() if not key.startswith("SANDBOX_AI")}
+    result = subprocess.run(["sh", str(contents / "MacOS" / launcher), "--version"], capture_output=True, text=True,
+                            timeout=30, env=env)
+    assert result.returncode == 0, result.stderr
+    real = contents.resolve()
+    assert f"COPY={real}/Resources/sandbox-ai PACKAGE={real.parent}" in result.stdout

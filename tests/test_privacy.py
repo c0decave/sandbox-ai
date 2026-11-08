@@ -380,6 +380,49 @@ def test_push_verdict_checks_only_what_the_remote_lacks(tmp_path):
                                                             "commands": [[zero, second, "refs/heads/main"]]})["ok"]
 
 
+def test_the_checker_takes_workspaces_added_during_the_run(tmp_path, monkeypatch):
+    """push-added.json (written on the host by `sandbox-ai workspace add`) is read for every push; only
+    /workspaces/NAME entries count, the start's own are never replaced, anything unreadable adds nothing."""
+    config = tmp_path / "push.json"
+    config.write_text(json.dumps(config_for("/work")))
+    added = tmp_path / p.ADDED_PUSH
+    seen = []
+    monkeypatch.setattr(p, "push_verdict", lambda c, request: seen.append([w["path"] for w in c["workspaces"]])
+                        or {"ok": True})
+    requests = [json.dumps({"url": "https://github.com/a/b.git", "commands": []})] * 4
+    rules = p.rules_document(p.Rules())
+    out = []
+    feed = iter(requests)
+
+    class Lines:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            line = next(feed)
+            stage = len(seen)
+            if stage == 1:
+                added.write_text(json.dumps({"workspaces": [{"path": "/workspaces/docs", "rules": rules},
+                                                            {"path": "/etc", "rules": rules},
+                                                            {"path": "/work", "rules": rules},
+                                                            {"path": "/workspaces/x/../../etc", "rules": rules}]}))
+            elif stage == 2:
+                added.write_text("{broken")
+            elif stage == 3:
+                added.unlink()
+            return line
+
+    class Out:
+        def write(self, text):
+            out.append(text)
+
+        def flush(self):
+            pass
+    p.serve(str(config), stdin=Lines(), stdout=Out())
+    assert seen == [["/work"], ["/work", "/workspaces/docs"], ["/work"], ["/work"]]
+    assert len(out) == 4
+
+
 @needs_git
 def test_push_verdict_refuses_what_it_cannot_check(tmp_path):
     repo, (first,) = repo_with_commits(tmp_path, ("a.txt", "a\n"))

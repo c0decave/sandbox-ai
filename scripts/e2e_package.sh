@@ -31,6 +31,7 @@ package=$(cd -- "$(dirname -- "$package")" && pwd)/$(basename -- "$package")
 
 work=${WORK:-$(mktemp -d "${TMPDIR:-/tmp}/sandbox-ai-e2e.XXXXXX")}
 mkdir -p -- "$work"
+work=$(cd -- "$work" && pwd -P)  # macOS: TMPDIR is below /var, a link to /private/var (the launcher resolves it)
 export XDG_CACHE_HOME="$work/cache" XDG_CONFIG_HOME="$work/config" XDG_STATE_HOME="$work/state" \
   XDG_DATA_HOME="$work/data" SANDBOX_AI_NO_DEPRECATION=1
 unset SANDBOX_AI_HOME

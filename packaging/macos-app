@@ -15,10 +15,10 @@ if [ "${1:-}" = cli ]; then
 fi
 PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:/opt/podman/bin"
 export PATH
+resources="$contents/Resources"
 # The package and the copy sandbox-ai runs in: no workspace, rw mount or --state-dir may hold them.
 SANDBOX_AI_PACKAGE=$(dirname -- "$contents") SANDBOX_AI_PACKAGE_COPY="$resources/sandbox-ai"
 export SANDBOX_AI_PACKAGE SANDBOX_AI_PACKAGE_COPY
-resources="$contents/Resources"
 # The sandbox-ai inside (yours, if SANDBOX_AI_HOME names one); a start at login runs this file.
 SANDBOX_AI_HOME=${SANDBOX_AI_HOME:-$resources/sandbox-ai}
 SANDBOX_AI_APP_PACKAGE_LAUNCHER="$macos/sandbox-ai-app"

@@ -251,7 +251,6 @@ def test_add_list_remove(run):
     assert sandbox == "/workspaces/lib-2" and calls[0][:4] == ("add", "lib-2", path, [os.stat(path).st_dev,
                                                                                      os.stat(path).st_ino])
     assert calls[0][4] == "rw" and remembered == [Path(path)]
-    assert "push" in lines[-1]
     entries = w.listing(record)
     assert [(e["sandbox"], e["source"]) for e in entries] == [("/work", "start"), ("/workspaces/lib", "start"),
                                                               ("/workspaces/lib-2", "added")]
@@ -268,6 +267,51 @@ def test_add_list_remove(run):
         w.remove(record, "lib-2", runner=runner, finder=fake_found)
     log = [json.loads(line) for line in (tmp / "logs" / "workspaces.jsonl").read_text().splitlines()]
     assert [entry["event"] for entry in log] == ["add", "remove"] and log[0]["sandbox"] == "/workspaces/lib-2"
+
+
+def test_the_push_check_takes_an_added_workspace_with_its_projects_rules(run):
+    record, tmp = run
+    push_dir, rules_dir = tmp / "proxy", tmp / "rules"
+    push_dir.mkdir()
+    rules_dir.mkdir()
+    privacy = w.module("privacy")
+    derived = privacy.Rules()
+    derived.patterns.append(privacy.Pattern("derived-name", __import__("re").compile("ada-lovelace"), privacy.BLOCK,
+                                            "your account name"))
+    (push_dir / "push.json").write_text(json.dumps({"mode": "public", "workspaces": [],
+                                                    "derived": privacy.rules_document(derived)}))
+    (rules_dir / "lib.rules.json").write_text(json.dumps({"pattern": [{"id": "codename", "regex": "project-x",
+                                                                        "severity": "block", "reason": "codename"}]}))
+    record["push_check"] = {"dir": str(push_dir), "rules_dir": str(rules_dir)}
+    runner = lambda op, found, name, *rest, **kw: (0, "")  # noqa: E731
+    lines = []
+    path = make(tmp / "elsewhere" / "lib")
+    w.add(record, path, out=lines.append, runner=runner, finder=fake_found, remember=lambda trees: None)
+    assert "the push check takes its commits" in lines[-1]
+    added = json.loads((push_dir / privacy.ADDED_PUSH).read_text())["workspaces"]
+    assert [e["path"] for e in added] == ["/workspaces/lib-2"]
+    ids = {pattern["id"] for pattern in added[0]["rules"]["pattern"]}
+    assert {"derived-name", "codename"} <= ids, "the run's derived rules and the project's own"
+    assert oct((push_dir / privacy.ADDED_PUSH).stat().st_mode & 0o777) == "0o600"
+    assert [e["path"] for e in privacy.added_workspaces(str(push_dir / "push.json"))] == ["/workspaces/lib-2"]
+    w.remove(record, path, out=lines.append, runner=runner, finder=fake_found, using=lambda found, p: [])
+    assert json.loads((push_dir / privacy.ADDED_PUSH).read_text())["workspaces"] == []
+    # Without a push.json to read the derived rules from, the add says to push from the host.
+    (push_dir / "push.json").unlink()
+    w.add(record, path, out=lines.append, runner=runner, finder=fake_found, remember=lambda trees: None)
+    assert "push them from the host" in lines[-1]
+
+
+def test_the_after_run_check_covers_the_writable_workspaces_added_during_the_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(L, "runs_dir", lambda: tmp_path)
+    (tmp_path / "r1").mkdir()
+    (tmp_path / "r1" / "workspaces.json").write_text(json.dumps({"workspaces": [
+        {"host": "/home/me/docs", "sandbox": "/workspaces/docs", "mode": "rw", "state": "removed"},
+        {"host": "/home/me/ref", "sandbox": "/workspaces/ref", "mode": "ro", "state": "attached"},
+        {"host": "relative", "sandbox": "/workspaces/x", "mode": "rw", "state": "attached"}]}))
+    a = type("A", (), {"run_id": "r1"})()
+    assert L.added_workspaces_of_run(a) == [Path("/home/me/docs")]
+    assert L.added_workspaces_of_run(type("A", (), {"run_id": "gone"})()) == []
 
 
 def test_force_removes_a_busy_workspace_and_says_what_stays_open(run):

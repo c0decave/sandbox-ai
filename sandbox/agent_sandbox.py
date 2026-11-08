@@ -4792,9 +4792,40 @@ def prepare_privacy(a, session):
     # file of them is one more copy); your own rule files never enter the sandbox.
     hook_rules = privacy.derived_rules(dict(context, tokens=[]))
     privacy.write_hooks(session / "privacy", f"{PRIVACY_DIR}/privacy.py", hook_rules, own_hosts)
-    return lambda: privacy.check_after_run(
-        privacy_workspaces(a), rules.get, own_hosts, a.privacy_check,
-        lambda line: print(f"agent-sandbox: privacy: {printable(line)}", file=sys.stderr))
+    def rules_for(project):
+        if project not in rules:
+            rules[project] = privacy.builtin_rules().add(derived).add(privacy.user_rules(rules_dir, project))
+        return rules[project]
+
+    def check():
+        workspaces = privacy_workspaces(a)
+        for path in added_workspaces_of_run(a):
+            if path not in [p for p, _ in workspaces]:
+                workspaces.append((path, path.name))
+        try:
+            privacy.check_after_run(workspaces, rules_for, own_hosts, a.privacy_check,
+                                    lambda line: print(f"agent-sandbox: privacy: {printable(line)}", file=sys.stderr))
+        except privacy.RulesUnavailable as exc:
+            print(f"agent-sandbox: privacy: not checked: {printable(exc)}", file=sys.stderr)
+    return check
+
+
+def added_workspaces_of_run(a):
+    """The writable host directories `sandbox-ai workspace add` gave this run (also those removed again: what was
+    committed there during the run is checked after it)."""
+    try:
+        data = json.loads((runs_dir() / a.run_id / "workspaces.json").read_text())
+    except (OSError, ValueError, AttributeError, TypeError):
+        return []
+    entries = data.get("workspaces") if isinstance(data, dict) else None
+    found = []
+    for entry in entries if isinstance(entries, list) else []:
+        if isinstance(entry, dict) and entry.get("mode") == "rw" and isinstance(entry.get("host"), str) \
+                and entry["host"].startswith("/"):
+            path = Path(entry["host"])
+            if path not in found:
+                found.append(path)
+    return found
 
 
 CGROUP_CONTROLLERS = {"memory": "memory", "cpus": "cpu", "pids": "pids"}
@@ -5641,16 +5672,19 @@ def write_proxy_files(a, directory, hosts, log_name):
         derived = privacy.derived_rules(context)
         workspaces = []
         try:
-            for (src, dest), (_, project) in zip(workspace_targets(a), privacy_workspaces(a) or
-                                                  [(None, None)] * len(workspace_targets(a))):
-                rules = privacy.builtin_rules().add(derived).add(privacy.user_rules(privacy_rules_dir(a), project
-                                                                                    or Path(src).name))
+            for src, dest in workspace_targets(a):
+                # Each workspace with its own project's rules (read-only ones too: their commits can be pushed).
+                project = Path(src).expanduser().resolve().name
+                rules = privacy.builtin_rules().add(derived).add(privacy.user_rules(privacy_rules_dir(a), project))
                 workspaces.append({"path": dest, "rules": privacy.rules_document(rules)})
         except privacy.RulesUnavailable as exc:
             raise ValueError(f"--privacy-rules: {exc}") from None
+        # `sandbox-ai workspace add` writes push-added.json beside it: these rules plus the new project's own.
+        a.push_check_dir = directory
         canaries = getattr(a, "canary_plan", None)
         files["push.json"] = json.dumps({"mode": a.privacy_check, "own_hosts": privacy.private_hosts(context),
                                          "workspaces": workspaces,
+                                         "derived": privacy.rules_document(privacy.Rules().add(derived)),
                                          **({"canaries": canaries.push_entry(),
                                              "canary_block": canaries.decisions["on_send"] != "report"}
                                             if canaries else {})})
@@ -5779,6 +5813,9 @@ def register_run(a, run, session):
         # The sandbox's cgroup is its own (the pod's; Bubblewrap's systemd scope), not the launcher's shared one:
         # only then may `workspace remove` freeze it and count its processes.
         "own_cgroup": a.backend == "podman" or bool(limits_prefix(a)),
+        # `sandbox-ai workspace add` gives the push check a workspace added during the run (push-added.json there).
+        **({"push_check": {"dir": str(a.push_check_dir), "rules_dir": str(privacy_rules_dir(a) or "") or None}}
+           if getattr(a, "push_check_dir", None) else {}),
         # `sandbox-ai workspace add` holds a workspace added during the run to the checks of a start (workspaces.py).
         **({} if a.mcp_socket_dir else {"workspace_checks": workspace_checks(a, session)})}))
     return directory

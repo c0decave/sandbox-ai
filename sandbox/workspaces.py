@@ -505,6 +505,35 @@ def added_workspaces(record):
     return [entry for entry in load(record) if entry.get("state") == "attached"]
 
 
+def publish_push_rules(record, entries=None):
+    """push-added.json in the run's push check directory (run.json "push_check"): every attached workspace with the
+    run's derived rules and its project's own, so the push check takes pushes of its commits. True if written, None
+    if the run has no push check, False (and why) if it could not: then its pushes stay refused."""
+    push = record.get("push_check") if isinstance(record.get("push_check"), dict) else None
+    if not push or not push.get("dir"):
+        return None, None
+    privacy = module("privacy")
+    directory = Path(push["dir"])
+    try:
+        config = json.loads((directory / "push.json").read_text())
+        derived = privacy.parse_rules(config.get("derived") or {}, "derived")
+        workspaces = []
+        for entry in added_workspaces(record) if entries is None else entries:
+            rules = privacy.builtin_rules().add(derived).add(privacy.user_rules(push.get("rules_dir"),
+                                                                               Path(entry["host"]).name))
+            workspaces.append({"path": entry["sandbox"], "rules": privacy.rules_document(rules)})
+        temporary = directory / f".{privacy.ADDED_PUSH}.{os.getpid()}"
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        with open(fd, "w") as stream:
+            json.dump({"workspaces": workspaces}, stream)
+        os.replace(temporary, directory / privacy.ADDED_PUSH)
+        return True, None
+    except (OSError, ValueError, AttributeError) as exc:
+        with contextlib.suppress(OSError, UnboundLocalError):
+            temporary.unlink()
+        return False, exc
+
+
 def log(record, event, entry, **fields):
     """One line of workspaces.jsonl in the run's log directory (none without one)."""
     directory = record.get("log_dir")
@@ -596,6 +625,7 @@ def add(record, value, read_only=False, out=print, runner=run_helper, finder=fin
                      "since": time.time(), "identity": identity, "kept": False}
             entries.append(entry)
             save(record, entries)
+            pushed, why = publish_push_rules(record)
     finally:
         os.close(fd)
     checks = record.get("workspace_checks") or {}
@@ -619,9 +649,11 @@ def add(record, value, read_only=False, out=print, runner=run_helper, finder=fin
             save(record, entries)
     watched = (watcher or watch_file_log)(record, entry["sandbox"], out)
     log(record, "add", entry, kept=entry["kept"], watched=watched)
+    push_note = ("; the push check takes its commits" if pushed else
+                 "; its commits cannot be pushed from the sandbox (the push check could not take it: "
+                 f"{shown(why, 300)}): push them from the host" if pushed is False else "")
     out(f"added {shown(real)} to {shown(record.get('run'))} at {entry['sandbox']} ({mode}"
-        f"{', kept for the session' if entry['kept'] else ''}); push its commits from the host or after "
-        "a restart: the push check knows only the start's workspaces")
+        f"{', kept for the session' if entry['kept'] else ''}){push_note}")
     return entry["sandbox"]
 
 
@@ -701,6 +733,7 @@ def remove(record, value, force=False, out=print, runner=run_helper, finder=find
             if other.get("sandbox") == entry["sandbox"] and other.get("state") == "attached":
                 other.update(state="removed", removed=time.time())
         save(record, entries)
+        publish_push_rules(record)
     kept = False
     if entry.get("kept"):
         try:

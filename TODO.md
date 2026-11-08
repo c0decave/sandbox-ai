@@ -132,9 +132,9 @@ Open:
   (pidfds from the scan would close it); the file log keeps its watches on a removed workspace's host inodes.
 - `net.alive` compares start times from this PID namespace: a CLI run in another one would take a live run for
   ended (not reachable by the agent).
-- The push check and the after-run privacy check know only the start's workspaces (a push from an added one to a
-  public remote is refused, fail-closed): push.json would need to be re-read by the checker, with the rules for
-  the new project.
+- Done in 0.1.78: the push check takes an added workspace (push-added.json beside push.json, written by `workspace
+  add/remove` on the host with the run's derived rules and the project's own; the checker reads it for every push),
+  and the after-run privacy check covers the writable ones added during the run.
 - macOS: inside the podman machine VM (stage 4 of macOS support).
 - The app and the web interface: a button for it.
 

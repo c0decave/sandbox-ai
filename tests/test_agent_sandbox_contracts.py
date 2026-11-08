@@ -4420,6 +4420,26 @@ def test_privacy_workspaces(scenario, tmp_path):
             [(first.resolve(), "first")]
 
 
+def test_added_workspaces_of_run(scenario, tmp_path, monkeypatch):
+    monkeypatch.setattr(s, "runs_dir", lambda: tmp_path)
+    run = tmp_path / "r1"
+    run.mkdir()
+    args = type("A", (), {"run_id": "r1"})()
+    if scenario == "happy":
+        (run / "workspaces.json").write_text(json.dumps({"workspaces": [
+            {"host": "/home/me/docs", "mode": "rw", "state": "removed"},
+            {"host": "/home/me/docs", "mode": "rw", "state": "attached"}]}))
+        assert s.added_workspaces_of_run(args) == [Path("/home/me/docs")]
+    elif scenario == "sad":
+        (run / "workspaces.json").write_text("{broken")
+        assert s.added_workspaces_of_run(args) == []
+    else:
+        # Read-only ones cannot have changed; a path that is not absolute is never trusted.
+        (run / "workspaces.json").write_text(json.dumps({"workspaces": [{"host": "/x", "mode": "ro"},
+                                                                         {"host": "x", "mode": "rw"}, "junk"]}))
+        assert s.added_workspaces_of_run(args) == []
+
+
 def test_prepare_privacy(scenario, tmp_path, monkeypatch):
     workspace, session = tmp_path / "proj", tmp_path / "session"
     workspace.mkdir()

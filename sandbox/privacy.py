@@ -1088,12 +1088,32 @@ def present(git, oids):
     return {oid: line.split()[0] for oid, line in zip(oids, answer) if line.endswith(" commit")}
 
 
+ADDED_PUSH = "push-added.json"  # beside push.json: workspaces added during the run (sandbox-ai workspace add)
+ADDED_PATH = re.compile(r"/workspaces/[^/\0]{1,255}")
+
+
+def added_workspaces(config_path):
+    """[{"path", "rules"}] of the workspaces added during the run, read for every push (written on the host by
+    `sandbox-ai workspace add` and `remove`, never by the agent: the directory is mounted read-only and hidden).
+    Anything unreadable adds nothing: their commits are then in no workspace, and the push is refused."""
+    try:
+        data = json.loads((Path(config_path).parent / ADDED_PUSH).read_text())
+    except (OSError, ValueError):
+        return []
+    entries = data.get("workspaces") if isinstance(data, dict) else None
+    return [{"path": e["path"], "rules": e["rules"]} for e in entries if isinstance(e, dict)
+            and isinstance(e.get("path"), str) and ADDED_PATH.fullmatch(e["path"]) and isinstance(e.get("rules"), dict)
+            ] if isinstance(entries, list) else []
+
+
 def serve(config_path, stdin=sys.stdin, stdout=sys.stdout):
     """Answer push checks, one JSON request per line, until stdin closes."""
     config = json.loads(Path(config_path).read_text())
+    started = [w.get("path") for w in config.get("workspaces", [])]
     for line in stdin:
         try:
-            answer = push_verdict(config, json.loads(line))
+            added = [w for w in added_workspaces(config_path) if w["path"] not in started]
+            answer = push_verdict(dict(config, workspaces=[*config.get("workspaces", []), *added]), json.loads(line))
         except Exception as exc:  # noqa: BLE001 - a check that cannot run refuses the push
             answer = {"ok": False, "message": f"the privacy check failed: {exc}"}
         stdout.write(json.dumps(answer) + "\n")

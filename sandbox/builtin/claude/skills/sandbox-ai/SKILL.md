@@ -125,9 +125,8 @@ and the system bundle point at it. Each request is logged on the host with heade
   matter.
 - When a push is refused: remove what was found from the commits (amend, rebase, or rewrite them)
   or ask the human whether it is meant to be public. Push only from `/work` or `/workspaces/NAME`;
-  pushes of commits from anywhere else are refused because they cannot be checked. That includes a
-  workspace the human added during the run (`sandbox-ai workspace add`): its pushes to a public remote
-  are refused until a restart with it, so ask the human to push those from the host.
+  pushes of commits from anywhere else are refused because they cannot be checked. A workspace the
+  human added during the run (`sandbox-ai workspace add`) is checked like the others.
 - Git may need no credentials at all: the human's `sandbox-ai git-logins` (or those of the identity
   they started with, `--identity NAME`) are added by the connection proxy to Git's requests to their
   servers. A push refused with 401/403 means there is none for that server.
@@ -212,7 +211,7 @@ and the system bundle point at it. Each request is logged on the host with heade
 | Publishing to npm, PyPI, crates.io, GitLab, GitHub | `--publish KIND` (after `sandbox-ai publish-logins add KIND --secret NAME`) | restart needed |
 | An API key | `--api-key HOST=NAME` (the key stays out of the sandbox) or `--secret-env NAME` (after `sandbox-ai secrets set NAME`) | restart needed |
 | More memory, CPUs, processes | `--memory SIZE`, `--cpus N`, `--pids N` | `sandbox-ai limits $SANDBOX_AI_RUN --memory 16g` (and `--cpus`, `--pids`) |
-| Another folder of the host | `--workspace DIR` (at `/workspaces/<name>`) or `--mount SRC:DEST:ro` | `sandbox-ai workspace add $SANDBOX_AI_RUN DIR` (at `/workspaces/<name>`, no restart; `--ro` read-only; push its commits from the host), or `sandbox-ai resume NAME --restart --workspace DIR` |
+| Another folder of the host | `--workspace DIR` (at `/workspaces/<name>`) or `--mount SRC:DEST:ro` | `sandbox-ai workspace add $SANDBOX_AI_RUN DIR` (at `/workspaces/<name>`, no restart; `--ro` read-only), or `sandbox-ai resume NAME --restart --workspace DIR` |
 | Files kept in HOME | kept by default (`sandbox-ai resume NAME`); `--state-dir DIR` for one HOME across starts | restart needed |
 | A system package | extend the image: `sandbox-ai images extend AGENT --add-apt PKG`, then `sandbox-ai build AGENT` | restart needed |
 
