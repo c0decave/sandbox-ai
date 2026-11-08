@@ -901,6 +901,7 @@ def test_install_refuses_a_prefix_of_another_user(remote, tmp_path):
     (prefix / "bin").mkdir(parents=True)
     fake = remote["home"] / "rbin/ls"
     fake.write_text('#!/bin/sh\ncase "$2" in */bin) echo "drwxr-xr-x 2 4321 4321 0 Jan 1 00:00 $2" ;; '
+                    f'{prefix}) echo "drwxr-xr-x 2 1000 1000 0 Jan 1 00:00 $2" ;; '  # not the runner's own uid
                     '*) /bin/ls "$@" ;; esac\n')
     fake.chmod(0o755)
     result = h.install("ct1", mode="system", prefix=str(prefix), dry_run=True)
