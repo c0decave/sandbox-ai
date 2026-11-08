@@ -331,7 +331,8 @@ def ask_socket(directory, request, timeout, fds=()):
         data = json.dumps(request).encode() + b"\n"
         if fds:  # the descriptors go with the first byte; the rest as usual
             sent = socket.send_fds(client, [data], list(fds))
-            client.sendall(data[sent:])
+            if sent < len(data):  # never an empty send: the supervisor may have answered and closed already
+                client.sendall(data[sent:])
         else:
             client.sendall(data)
         answer = b""

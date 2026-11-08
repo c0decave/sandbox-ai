@@ -820,3 +820,117 @@ def test_install_bundle_and_arguments(tmp_path):
             h.install_args(*bad)
     with pytest.raises(ValueError, match="no sandbox-ai tree"):
         h.install_bundle("here", tmp_path)
+
+
+# --- review round 4 ------------------------------------------------------------------------------------------
+
+
+def test_bundle_from_a_checkout_sends_what_install_sh_would_copy(tmp_path):
+    """Finding M7: from a git checkout only tracked and new not-ignored files (git ls-files --cached --others
+    --exclude-standard), deleted ones gone; never .claude/, logins, keys or tokens; without git the tree as is."""
+    import io
+    import tarfile
+    root = tmp_path / "tree"
+    (root / "sandbox").mkdir(parents=True)
+    (root / "install.sh").write_text("#!/bin/sh\n")
+    (root / "sandbox/agent_sandbox.py").write_text("")
+    (root / "gone.txt").write_text("")
+    (root / ".gitignore").write_text("*.log\n.sandbox-ai.json\n")
+    git = ["git", "-C", str(root), "-c", "user.email=t@example.org", "-c", "user.name=t"]
+    subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-qm", "x"], check=True)
+    (root / "gone.txt").unlink()  # deleted, not committed
+    (root / ".claude").mkdir()
+    (root / ".claude/settings.local.json").write_text("{}")
+    (root / "run.log").write_text("ignored")
+    (root / ".sandbox-ai.json").write_text("{}")
+    (root / "new.py").write_text("")  # new, not ignored: install.sh copies it too
+    for name in (".credentials.json", "id_ed25519", "github-token", ".env", "server.pem", "auth.json"):
+        (root / name).write_text("secret")
+    names = h.bundle_files(root)
+    assert names == [".gitignore", "install.sh", "new.py", "sandbox/agent_sandbox.py"], names
+    archive = tarfile.open(fileobj=io.BytesIO(h.install_bundle("here", root)), mode="r:gz").getnames()
+    assert sorted(archive) == names
+    # Not a checkout (an installed version): the tree as it is, but still never a login or .claude/.
+    import shutil
+    shutil.rmtree(root / ".git")
+    names = h.bundle_files(root)
+    assert "run.log" in names and ".sandbox-ai.json" in names and "new.py" in names
+    assert not any(n.startswith(".claude/") or n in (".credentials.json", "id_ed25519", "github-token", ".env",
+                                                      "server.pem", "auth.json") for n in names)
+
+
+def test_mux_refused_is_only_sshs_own_line_at_the_start():
+    """Finding L4: a remote command's own "Control socket" error is no refusal of the shared connection (the
+    command may have run: never run twice); only ssh's own mux lines first in stderr, with nothing on stdout."""
+    assert h.mux_refused("", "mux_client_request_session: session request failed: Session open refused by peer\n")
+    assert h.mux_refused("", "Warning: Permanently added 'ct1' (ED25519) to the list of known hosts.\n"
+                             "Control socket connect(/run/user/1/sandbox-ai/ssh/x): Connection refused\n")
+    assert h.mux_refused("", "muxclient: master hello exchange failed\n")
+    for out, err in (("", "error: Control socket connect failed in my tool: Connection refused\n"),
+                     ("", "make: *** mux_client_ broken\nControl socket connect(x): Connection refused\n"),
+                     ("partial output", "mux_client_request_session: session request failed\n"),
+                     ("", "the master is not running, says my program\n"), ("", "")):
+        assert not h.mux_refused(out, err), (out, err)
+
+
+def test_install_dry_run_says_what_would_be_done(remote):
+    """Finding L5: the mode, root and sudo are decided by the host's id -u, and --dry-run reports them before
+    anything is copied."""
+    h.save({"ct1": h.check("ct1", {"ssh": "user@ct1"})})
+    not_root(remote)
+    lines = []
+    assert h.cli(["install", "ct1", "--system", "--dry-run", "--json"], lines.append) == 0
+    result = json.loads(lines[0])
+    assert result["planned"] and result["mode"] == "system" and result["sudo"] and not result["root"]
+    assert result["prefix"] == "/usr/local" and "would install for every user in /usr/local with sudo" in \
+        result["notes"][0]
+    sent = [json.loads(line) for line in remote["log"].read_text().splitlines()]
+    assert not any("tar -xzf" in args[-1] for args in sent), "nothing copied"
+    assert all(args[-1].startswith("sh -c ") for args in sent), "run by sh, whatever the login shell"
+    lines = []
+    assert h.cli(["install", "ct1", "--dry-run"], lines.append) == 0 and "nothing done" in lines[0]
+
+
+def test_install_refuses_a_prefix_of_another_user(remote, tmp_path):
+    """Finding L5: a --system prefix that belongs to a user other than root or the SSH user is refused."""
+    h.save({"ct1": h.check("ct1", {"ssh": "user@ct1"})})
+    not_root(remote)
+    prefix = tmp_path / "prefix"
+    (prefix / "bin").mkdir(parents=True)
+    fake = remote["home"] / "rbin/ls"
+    fake.write_text('#!/bin/sh\ncase "$2" in */bin) echo "drwxr-xr-x 2 4321 4321 0 Jan 1 00:00 $2" ;; '
+                    '*) /bin/ls "$@" ;; esac\n')
+    fake.chmod(0o755)
+    result = h.install("ct1", mode="system", prefix=str(prefix), dry_run=True)
+    assert "belongs to the user 4321" in (result["error"] or "") and not result["planned"]
+    fake.write_text('#!/bin/sh\necho "drwxr-xr-x 2 1000 1000 0 Jan 1 00:00 $2"\n')  # the SSH user's own: fine
+    assert h.install("ct1", mode="system", prefix=str(prefix), dry_run=True)["planned"]
+
+
+def test_install_probes_the_prefixs_copy(remote, tmp_path):
+    h.save({"ct1": h.check("ct1", {"ssh": "user@ct1"})})
+    not_root(remote)
+    prefix = tmp_path / "prefix"
+    (prefix / "bin").mkdir(parents=True)
+    (prefix / "bin/sandbox-ai").write_text("#!/bin/sh\necho sandbox-ai 0.1.11\n")
+    (prefix / "bin/sandbox-ai").chmod(0o755)
+    result = h.install("ct1", mode="system", prefix=str(prefix), dry_run=True)
+    assert result["before"] == "0.1.11", "the copy in the prefix, not the one on PATH (0.1.30)"
+
+
+def test_install_removes_the_copy_also_when_sudo_fails(remote):
+    """Finding L5: the host's temporary copy goes also when sudo fails (here: sudo may not be used)."""
+    assert "sudo -n rm -rf" in h.cleanup_script("/tmp/sandbox-ai-install.x", True)
+    assert "sudo" not in h.cleanup_script("/tmp/sandbox-ai-install.x", False)
+    h.save({"ct1": h.check("ct1", {"ssh": "user@ct1"})})
+    not_root(remote)
+    (remote["home"] / "sudo").write_text("refused")
+    before = set(Path("/tmp").glob("sandbox-ai-install.*"))
+    result = h.install("ct1", mode="system")
+    assert result["error"] and "sudo" in result["error"]
+    sent = [json.loads(line)[-1] for line in remote["log"].read_text().splitlines()]
+    assert any(command.startswith("sh -c ") and "rm -rf --" in command and "case $d in" in command
+               for command in sent), "cleaned up after"
+    assert set(Path("/tmp").glob("sandbox-ai-install.*")) <= before

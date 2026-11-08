@@ -1254,27 +1254,96 @@ def private_locations():
     return resolved(fixed), resolved(path)
 
 
-def own_home(path):
-    """PATH (resolved) is or lies in a HOME or work folder sandbox-ai itself keeps for a sandbox, inside ~/.local
-    but private to that sandbox: a session's or MCP server's home, a login's staging home and work folder, an MCP
-    server's default work folder, a team's board, the plugin installer's store, the wizard's persistent HOME of a
-    project. Their siblings (session.json, logs, the registry) are not."""
-    state = (Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "sandbox-ai").expanduser()
-    data = (Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "sandbox-ai").expanduser()
-    # The work folders are the workspaces of sandbox-ai's own sandboxes: a login's (empty), an MCP server's
-    # without one of its own, a team board's (team.py). Refusing them refused every login and those servers.
-    patterns = [(state.resolve() / "sessions", ("*", "home")), (state.resolve() / "mcp", ("*", "home")),
-                (state.resolve() / "mcp", ("*", "work")), (state.resolve() / "teams", ("*", "board")),
-                (state.resolve() / "home", ("*",)), (data.resolve() / "auth", ("*", "home")),
-                (data.resolve() / "auth", ("*", "work")), (data.resolve() / "plugins", ("*",))]
-    for base, shape in patterns:
+# Files directly in HOME by what they are (any other file there: settings read or run as you).
+HOME_FILES = {**dict.fromkeys((".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile", ".zshrc",
+                               ".zshenv", ".zprofile", ".zlogin", ".zlogout", ".kshrc", ".cshrc", ".tcshrc", ".login",
+                               ".xprofile", ".xinitrc", ".xsession"),
+                              "a shell or session start file: what is written there runs as you at your next login"),
+              **dict.fromkeys((".gitconfig",), "your Git configuration: its hooks, aliases and credential helpers "
+                                               "run as you"),
+              **dict.fromkeys((".netrc", ".git-credentials", ".pgpass", ".npmrc", ".pypirc", ".my.cnf", ".s3cfg"),
+                              "a credentials file: the agent reads the passwords and tokens in it"),
+              **dict.fromkeys((".claude.json",), "Claude Code's settings: its MCP servers are commands that run as "
+                                                 "you, its projects your history")}
+
+
+def login_locations():
+    """[(path, label)]: the agents' login and configuration folders on the host (~/.claude, ~/.codex, OpenCode's,
+    and where CLAUDE_CONFIG_DIR and CODEX_HOME point), and other folders of credentials (~/.aws, ~/.kube, ~/.docker):
+    given with a warning that names them (check_private_location)."""
+    home = Path.home()
+    data = Path(os.environ.get("XDG_DATA_HOME") or home / ".local/share")
+    config = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")
+    found = [(home / ".claude", "Claude Code's folder (its login, settings and hooks)"),
+             (home / ".codex", "Codex's folder (its login and settings)"),
+             (data / "opencode", "OpenCode's folder (its login)"), (config / "opencode", "OpenCode's settings"),
+             (home / ".aws", "your AWS credentials"), (home / ".kube", "your Kubernetes credentials"),
+             (home / ".docker", "your container registry logins"), (config / "gh", "the GitHub CLI's login")]
+    for variable, label in (("CLAUDE_CONFIG_DIR", "Claude Code's folder (CLAUDE_CONFIG_DIR: its login and settings)"),
+                            ("CODEX_HOME", "Codex's folder (CODEX_HOME: its login and settings)")):
+        if os.path.isabs(os.environ.get(variable) or ""):
+            found.insert(0, (Path(os.environ[variable]), label))
+    result = []
+    for path, label in found:
         try:
-            parts = path.relative_to(base).parts
-        except ValueError:
+            result.append((Path(os.path.normpath(path.expanduser().absolute())).resolve(), label))
+        except (OSError, RuntimeError):
             continue
-        if len(parts) >= len(shape) and all(want == "*" or want == got for want, got in zip(shape, parts)):
-            return True
-    return False
+    return [(path, label) for path, label in result if path != Path("/")]
+
+
+def own_folders(a):
+    """[path] (resolved): the folders inside sandbox-ai's own (sandbox_ai_folders) that this start A is sandbox-ai's
+    own internal start of, and so may be given: a session's or a kept start's own HOME (its --state-dir is its
+    start directory's home/), an MCP server's (or helper's) own home/ and work/ beside the socket directory it serves
+    on (--mcp-socket-dir), a team board's board/ for that server, a login's staging home/ and work/ (sandbox-ai login
+    gives both, of one staging folder), the plugin installer's store and its work folder (sandbox-ai plugins), and
+    the wizard's persistent HOME of this start's project. Every other start gets none: another session's HOME, an
+    MCP server's or a login's are sandbox-ai's own folders like the rest."""
+    def real(path):
+        try:
+            return Path(os.path.normpath(Path(path).expanduser().absolute())).resolve()
+        except (OSError, RuntimeError, TypeError):
+            return None
+    state = real(Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "sandbox-ai")
+    data = real(Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "sandbox-ai")
+    home = real(a.state_dir) if getattr(a, "state_dir", None) else None
+    workspaces = [real(w) for w in getattr(a, "workspaces", None) or []]
+    work = workspaces[0] if workspaces else None
+    found = []
+    with contextlib.suppress(OSError, ValueError, RuntimeError):
+        kept = kept_start_dir(a)
+        if kept is not None:
+            found.append(real(kept / "home"))
+    if getattr(a, "mcp_socket_dir", None) and state is not None:
+        server = real(a.mcp_socket_dir).parent
+        if server.parent == state / "mcp" and real(a.mcp_socket_dir).name == "sock":
+            found += [server / "home", server / "work"]
+            if server.name.startswith("team-"):
+                found.append(real(Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
+                                  / "sandbox-ai" / "teams" / server.name[len("team-"):] / "board"))
+    if home is not None and work is not None and data is not None and home.parent == work.parent and \
+            home.name == "home" and work.name == "work" and home.parent.parent == data / "auth" and \
+            home.parent.name.startswith(".login-"):
+        found += [home, work]
+    if home is not None and data is not None and getattr(a, "agent", None) == "claude" and \
+            getattr(a, "no_plugins", False) and home == data / "plugins" / "claude":
+        found.append(home)
+        if work is not None and work.parent == data / "plugins" and work.name.startswith(".work-"):
+            found.append(work)
+    if home is not None and state is not None and home.parent == state / "home":
+        given = {str(w) for w in getattr(a, "workspaces", None) or []} | {str(w) for w in workspaces if w}
+        digests = {hashlib.sha256(os.fsencode(value)).hexdigest()[:12] for value in given}
+        if any(home.name.endswith(f"-{digest}") for digest in digests):
+            found.append(home)
+    return list(dict.fromkeys(path for path in found if path is not None))
+
+
+def own_home(path, folders=()):
+    """PATH (resolved) is or lies in one of FOLDERS (own_folders of the start): a HOME or work folder sandbox-ai
+    keeps inside its own folders for exactly that start. Nothing is one for any other start: their siblings
+    (session.json, logs, the registry) never are."""
+    return any(path == Path(folder) or Path(folder) in path.parents for folder in folders)
 
 
 def package_paths(environ=None):
@@ -1319,30 +1388,53 @@ def check_package_location(path, option, packages=None):
 
 def sandbox_ai_folders():
     """sandbox-ai's own folders (its configuration and trust store, its state, sessions and approvals, its logins
-    and installed versions, its packages' copies): a sandbox given one of them could change sandbox-ai itself."""
+    and installed versions, its packages' copies): a sandbox given one of them could change sandbox-ai itself. Both
+    where this environment's XDG_* variables put them and the default places below HOME (~/.config/sandbox-ai,
+    ~/.local/share/sandbox-ai, ~/.local/state/sandbox-ai, ~/.cache/sandbox-ai): another start, the app or the web UI
+    may run with other XDG_* values, or none."""
     home = Path.home()
     found = []
     for variable, default in (("XDG_CONFIG_HOME", ".config"), ("XDG_DATA_HOME", ".local/share"),
                               ("XDG_STATE_HOME", ".local/state"), ("XDG_CACHE_HOME", ".cache")):
-        try:
-            found.append((Path(os.environ.get(variable) or home / default).expanduser() / "sandbox-ai").resolve())
-        except OSError:
-            continue
-    return found
+        for base in dict.fromkeys([os.environ.get(variable) or str(home / default), str(home / default)]):
+            try:
+                found.append((Path(base).expanduser() / "sandbox-ai").resolve())
+            except (OSError, RuntimeError):
+                continue
+    return list(dict.fromkeys(found))
 
 
-def check_private_location(path, option, warn=None):
+def check_private_location(path, option, warn=None, own=(), refused=()):
     """A host tree PATH (resolved) in or over a private location (settings, keys, autostart entries, programs on your
-    PATH): you decide what a sandbox gets, so it is given, with a warning (WARN(text), default: stderr) that names
-    what is there. Refused only in or over sandbox-ai's own folders (sandbox_ai_folders): there a sandbox could
-    change sandbox-ai itself - its trust store, its approvals, its policy. The warning, or None."""
-    if own_home(path):
+    PATH, the agents' login folders, files directly in your HOME): you decide what a sandbox gets, so it is given,
+    read-only or not, with a warning (WARN(text), default: stderr) that names what is there. Refused only in or over
+    sandbox-ai's own folders (sandbox_ai_folders, and REFUSED: those a start recorded for a later workspace add):
+    there a sandbox could change sandbox-ai itself - its trust store, its approvals, its policy. OWN: the folders of
+    sandbox-ai's own internal start this is (own_folders), which it may be given. The warning, or None."""
+    path = Path(path)
+    if own_home(path, own):
         return None
-    for own in sandbox_ai_folders():
-        if path == own or own in path.parents or path in own.parents:
-            raise ValueError(f"{option} {path} {'lies in' if own in path.parents or path == own else 'contains'} "
-                             f"{own}, sandbox-ai's own folder: a sandbox given it could change sandbox-ai itself "
-                             "(its trust store, approvals and policy). Give a folder beside it.")
+    for own_folder in list(dict.fromkeys([*sandbox_ai_folders(), *map(Path, refused)])):
+        if path == own_folder or own_folder in path.parents or path in own_folder.parents:
+            inside = own_folder in path.parents or path == own_folder
+            raise ValueError(f"{option} {path} {'lies in' if inside else 'contains'} {own_folder}, sandbox-ai's own "
+                             "folder: a sandbox given it could change sandbox-ai itself (its trust store, approvals "
+                             "and policy). Give a folder beside it.")
+    say = warn or (lambda line: print(f"agent-sandbox: warning: {printable(line)}", file=sys.stderr))
+    home = Path.home().resolve()
+    if path.parent == home and path.name and path.exists() and not path.is_dir():
+        label = HOME_FILES.get(path.name, "a file of your HOME directory: settings that programs of yours read or "
+                                          "run as you")
+        text = f"{option} {path} is {label}; where the agent may write, what it puts there acts on this host"
+        say(text)
+        return text
+    for location, label in login_locations():
+        inside = path == location or location in path.parents
+        if inside or path in location.parents:
+            text = (f"{option} {path} {'lies in' if inside else 'contains'} {location}, {label}: the agent sees the "
+                    "logins and settings there, and where it may write, what it puts there acts as you")
+            say(text)
+            return text
     fixed, program_dirs = private_locations()
     for private in fixed + program_dirs:
         inside = path == private or private in path.parents
@@ -1350,9 +1442,121 @@ def check_private_location(path, option, warn=None):
             text = (f"{option} {path} {'lies in' if inside else 'contains'} {private}: the agent sees what is there "
                     "(settings, keys), and where it may write, what it puts there (autostart entries, programs on your "
                     "PATH) runs on this host")
-            (warn or (lambda line: print(f"agent-sandbox: warning: {printable(line)}", file=sys.stderr)))(text)
+            say(text)
             return text
     return None
+
+
+def launcher_trees():
+    """[path]: sandbox-ai's own launcher (HERE, the sandbox/ folder) and, when it runs from a sandbox-ai tree (a
+    checkout or an installed version: install.sh beside sandbox/), that whole tree (the app in projects/, install.sh,
+    scripts/): an agent given any of it could rewrite what runs on the host at the next start."""
+    trees = [HERE]
+    root = HERE.parent
+    if (root / "install.sh").is_file() and (root / "sandbox" / "agent_sandbox.py").is_file():
+        trees.append(root)
+    return trees
+
+
+def in_launcher_tree(path):
+    """PATH (resolved) is or lies in a launcher tree (launcher_trees)."""
+    return any(path == tree or tree in path.parents for tree in launcher_trees())
+
+
+# How far sockets_below looks into a tree: entries in all, and folders deep.
+SOCKET_SCAN_ENTRIES = 20000
+SOCKET_SCAN_DEPTH = 12
+
+
+def live_socket(path):
+    """Something listens on the Unix socket file PATH (a connection is taken or waits, or it is no stream socket),
+    or cannot be told; False for a stale one (refused: nothing listens there any longer)."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+        probe.setblocking(False)
+        try:
+            probe.connect(str(path))
+        except (ConnectionRefusedError, FileNotFoundError):
+            return False
+        except OSError:
+            return True  # waiting (backlog), a datagram socket (EPROTOTYPE), not allowed: someone is there
+        return True
+
+
+def sockets_below(path, entries=None, depth=None):
+    """(socket, complete): the first Unix socket file at or below the host tree PATH whose listener lives
+    (live_socket; a stale one left by a process that ended is no way to anything), and whether the whole tree was
+    looked at (at most ENTRIES entries, DEPTH folders deep; links are not followed). A socket a sandbox is given
+    reaches what listens on it (gpg-agent's, an SSH ControlMaster's, a desktop's), even through a read-only mount."""
+    entries = SOCKET_SCAN_ENTRIES if entries is None else entries
+    depth = SOCKET_SCAN_DEPTH if depth is None else depth
+    path = Path(path)
+    try:
+        info = path.lstat()
+    except OSError:
+        return None, True
+    if stat.S_ISSOCK(info.st_mode):
+        return (path, True) if live_socket(path) else (None, True)
+    if not stat.S_ISDIR(info.st_mode):
+        return None, True
+    budget, pending = entries, [(path, 0)]
+    while pending:
+        folder, level = pending.pop()
+        try:
+            listing = os.scandir(folder)
+        except OSError:
+            continue
+        with listing:
+            for item in listing:
+                budget -= 1
+                if budget < 0:
+                    return None, False
+                try:
+                    mode = item.stat(follow_symlinks=False).st_mode
+                except OSError:
+                    continue
+                if stat.S_ISSOCK(mode) and live_socket(item.path):
+                    return Path(item.path), True
+                if stat.S_ISDIR(mode):
+                    if level + 1 >= depth:
+                        return None, False
+                    pending.append((Path(item.path), level + 1))
+    return None, True
+
+
+def check_sockets_below(path, option, warn=None):
+    """Refuse a host tree PATH (resolved) given to a sandbox that holds a Unix socket something listens on
+    (sockets_below); warn (WARN, default stderr) when the tree is too large to look at all of it."""
+    found, complete = sockets_below(path)
+    if found is not None:
+        raise ValueError(f"{option} {path} holds the socket {found}, where a program of yours listens: whoever "
+                         "connects to it gets what runs behind it (an agent of your keys, a shared SSH connection), "
+                         "even through a read-only mount. Stop it, or give a folder beside it.")
+    if not complete:
+        text = (f"{option} {path} is too large to look through for sockets (more than {SOCKET_SCAN_ENTRIES} entries "
+                f"or {SOCKET_SCAN_DEPTH} folders deep): sockets in it could not be ruled out")
+        (warn or (lambda line: print(f"agent-sandbox: warning: {printable(line)}", file=sys.stderr)))(text)
+        return text
+    return None
+
+
+def check_given_path(path, option, writable, own=(), warn=None, refused=()):
+    """Every host PATH (resolved) a sandbox is given, read-only or not (a workspace, --mount, --state-dir, an MCP
+    image server's folder, a workspace added during the run): never a folder of the user's sockets, a file system of
+    the kernel's own, a tree with a live socket in it, or sandbox-ai's own folders (OWN: the folders of the internal
+    start this is; REFUSED: further own folders a start recorded); a private location is given with a warning
+    (check_private_location). Read-only, a file or folder of the launcher itself is given as it is (an MCP helper's
+    script); WRITABLE never the launcher's tree nor the package it runs from."""
+    path = Path(path)
+    check_socket_location(path, option)
+    check_kernel_mounts(path, option)
+    if writable:
+        check_package_location(path, option)  # the package's own message first: it says where to move it
+    if writable and in_launcher_tree(path):
+        raise ValueError(f"{option} {path} lies in sandbox-ai's own launcher ({launcher_trees()[-1]}); the agent could "
+                         "rewrite it and run code on the host at the next start. Mount it read-only, or use a copy.")
+    if not (not writable and in_launcher_tree(path)):
+        check_private_location(path, option, warn, own, refused)
+    check_sockets_below(path, option, warn)
 
 
 def parse_args(argv):
@@ -2141,11 +2345,29 @@ def config_store():
     return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "sandbox-ai" / "trusted.json"
 
 
-def trusted_configs():
+def trusted_configs(note=None):
+    """{path: sha256 hex digest} of the trusted project files (config_store). A damaged store (no JSON object, an
+    entry that is no path with a 64-hex digest: edited by hand, cut short) trusts nothing it cannot read: such
+    entries are left out, each told to NOTE(text) (default: stderr); never a crash in a caller."""
+    note = note or (lambda line: print(f"agent-sandbox: {line}", file=sys.stderr))
     try:
-        return json.loads(config_store().read_text())
-    except (OSError, ValueError):
+        store = json.loads(config_store().read_text())
+    except FileNotFoundError:
         return {}
+    except (OSError, ValueError, RecursionError):
+        note(f"the trusted list {config_store()} cannot be read; nothing in it is trusted")
+        return {}
+    if not isinstance(store, dict):
+        note(f"the trusted list {config_store()} is damaged (no JSON object); nothing in it is trusted")
+        return {}
+    found = {}
+    for key, digest in store.items():
+        if isinstance(key, str) and os.path.isabs(key) and isinstance(digest, str) and \
+                re.fullmatch(r"[0-9a-f]{64}", digest):
+            found[key] = digest
+        else:
+            note(f"skipped a damaged entry of the trusted list: {printable(key)[:200]}")
+    return found
 
 
 def printable(text):
@@ -3129,7 +3351,7 @@ def validate(a):
             if first == second or first in second.parents or second in first.parents:
                 raise ValueError(f"Workspaces must not overlap: {first} and {second}")
     for workspace in resolved:
-        check_workspace_scope(workspace)
+        check_workspace_scope(workspace, own_folders(argparse.Namespace(**{**vars(a), "workspaces": resolved})))
     a.workspaces = [str(path) for path in resolved]
     a.workspace = a.workspaces[0]
     workspace = resolved[0]
@@ -3199,15 +3421,49 @@ KERNEL_FILESYSTEMS = frozenset({"proc", "sysfs", "cgroup", "cgroup2", "devtmpfs"
                                 "binfmt_misc", "hugetlbfs"})
 
 
+_GNUPG_SOCKETS = {}
+
+
+def gnupg_socket_dir():
+    """The folder of GnuPG's sockets (gpg-agent's, its SSH agent's: `gpgconf --list-dirs socketdir`), or None (no
+    gpgconf, no answer within 5 s). Asked once per HOME and GNUPGHOME."""
+    key = (os.environ.get("HOME"), os.environ.get("GNUPGHOME"))
+    if key not in _GNUPG_SOCKETS:
+        found = None
+        if shutil.which("gpgconf"):
+            with contextlib.suppress(OSError, subprocess.SubprocessError, ValueError):
+                result = subprocess.run(["gpgconf", "--list-dirs", "socketdir"], capture_output=True, text=True,
+                                        timeout=5, stdin=subprocess.DEVNULL)
+                line = result.stdout.strip().splitlines()[0] if result.returncode == 0 and result.stdout.strip() \
+                    else ""
+                # gpgconf escapes a few characters (%3a for ':' ...).
+                line = urllib.parse.unquote(line)
+                found = Path(line) if os.path.isabs(line) else None
+        _GNUPG_SOCKETS[key] = found
+    return _GNUPG_SOCKETS[key]
+
+
 def socket_locations():
     """[(path, label)]: the folders that hold the user's sockets (XDG_RUNTIME_DIR, /run/user/UID: the session's bus,
-    Podman's and systemd's sockets, GnuPG's agent; sandbox-ai's own: the runs' control sockets and the shared SSH
-    connections to your hosts, also where hosts.py keeps them without XDG_RUNTIME_DIR). A socket can be connected
-    through a read-only mount too, so nothing given to a sandbox may be, hold or lie in one."""
+    Podman's and systemd's sockets, GnuPG's agent there or in ~/.gnupg and GNUPGHOME; sandbox-ai's own: the runs'
+    control sockets, wherever a run registers (runs_dir: also XDG_STATE_HOME's without XDG_RUNTIME_DIR, and the
+    default place), and the shared SSH connections to your hosts, also where hosts.py keeps them without
+    XDG_RUNTIME_DIR). A socket can be connected through a read-only mount too, so nothing given to a sandbox may be,
+    hold or lie in one."""
     found = []
     if os.environ.get("XDG_RUNTIME_DIR"):
         found.append((Path(os.environ["XDG_RUNTIME_DIR"]), "XDG_RUNTIME_DIR (the user's sockets)"))
     found.append((Path(f"/run/user/{os.getuid()}"), "/run/user/UID (the user's sockets)"))
+    # Where runs register their control sockets (net.run_dirs looks there too).
+    found.append((runs_dir(), "sandbox-ai's runs (their control sockets)"))
+    for state in dict.fromkeys([os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local/state"),
+                                str(Path.home() / ".local/state")]):
+        found.append((Path(state) / "sandbox-ai" / "runs", "sandbox-ai's runs (their control sockets)"))
+    found.append((Path.home() / ".gnupg", "GnuPG's folder (gpg-agent's sockets, also its SSH agent)"))
+    if os.path.isabs(os.environ.get("GNUPGHOME") or ""):
+        found.append((Path(os.environ["GNUPGHOME"]), "GNUPGHOME (gpg-agent's sockets)"))
+    if gnupg_socket_dir() is not None:
+        found.append((gnupg_socket_dir(), "GnuPG's socket folder (gpgconf --list-dirs socketdir)"))
     found.append((Path.home() / "Library" / "Caches" / "sandbox-ai", "sandbox-ai's SSH connections (macOS)"))
     for temporary in {os.environ.get("TMPDIR") or "/tmp", "/tmp"}:
         found.append((Path(temporary) / f"sandbox-ai-{os.getuid()}", "sandbox-ai's SSH connections"))
@@ -3217,7 +3473,7 @@ def socket_locations():
             result.append((Path(os.path.normpath(path.expanduser().absolute())).resolve(), label))
         except (OSError, RuntimeError):
             continue
-    return result
+    return list(dict.fromkeys(result))
 
 
 def check_socket_location(path, option):
@@ -3298,13 +3554,17 @@ def check_kernel_mounts(path, option, mountinfo=Path("/proc/self/mountinfo")):
                          "them with it (its mounts are recursive). Unmount them, or give a directory beside them.")
 
 
-def check_workspace_scope(workspace):
-    """Refuse workspaces that would hand the agent the launcher itself or the host user's world."""
+def check_workspace_scope(workspace, own=(), warn=None, refused=()):
+    """Refuse workspaces (a folder, or a single file added during the run) that would hand the agent the launcher
+    itself or the host user's world: the launcher's tree (launcher_trees: anything at, below or above it), HOME, /,
+    the temporary directory, the kernel's trees, a folder of sockets and sandbox-ai's own folders (OWN: those of the
+    internal start this is; REFUSED: further ones a start recorded); a private location is given with a warning."""
     workspace = Path(workspace)
-    if workspace == HERE or workspace in HERE.parents:
-        raise ValueError(f"Workspace {workspace} contains sandbox-ai's own launcher ({HERE}); the agent could "
-                         "rewrite it and run code on the host at the next start. Install sandbox-ai "
-                         "(./install.sh --from .) and start it from there.")
+    for tree in launcher_trees():
+        if workspace == tree or workspace in tree.parents or tree in workspace.parents:
+            raise ValueError(f"Workspace {workspace} {'lies in' if tree in workspace.parents else 'is or contains'} "
+                             f"sandbox-ai's own launcher ({tree}); the agent could rewrite it and run code on the host "
+                             "at the next start. Install sandbox-ai (./install.sh --from .) and start it from there.")
     risky = {Path("/"): "the root directory", Path.home().resolve(): "your HOME directory",
              Path(tempfile.gettempdir()).resolve(): "the temporary directory"}
     if os.environ.get("XDG_RUNTIME_DIR"):
@@ -3319,10 +3579,7 @@ def check_workspace_scope(workspace):
             raise ValueError(f"Workspace {workspace} {'lies in' if tree in workspace.parents else 'is or holds'} "
                              f"{tree}: the kernel's and the devices' trees are never a workspace; use --device for "
                              "devices.")
-    check_socket_location(workspace, "Workspace")
-    check_kernel_mounts(workspace, "Workspace")
-    check_private_location(workspace, "Workspace")
-    check_package_location(workspace, "Workspace")
+    check_given_path(workspace, "Workspace", True, own, warn, refused)
 
 
 def host_sources(a):
@@ -3366,6 +3623,8 @@ def host_sources(a):
         kits = load_kits_module()
         for label, path in kits.sources(a):
             found.append((path, f"Kit ({label})"))
+        for value in dict.fromkeys(a.kit_dir):  # the folder given, also beside its AGENT/ (held both ways)
+            found.append((Path(os.path.normpath(Path(value).expanduser().absolute())), "--kit-dir"))
         # Approvals the agent could write would be no approvals.
         found.append((kits.trust_file(), "Approved kit hooks (XDG_CONFIG_HOME)"))
         if not a.no_default_kit:
@@ -3378,15 +3637,21 @@ def host_sources(a):
 
 
 def host_stores(a):
-    """[(path, label)] of the stores no agent-writable tree may lie in either (every sandbox reads them)."""
-    if not kits_apply(a):
-        return []
+    """[(path, label)] of the stores no agent-writable tree may lie in either, whatever this start's agent and
+    options (every sandbox reads them, or the next start of another agent does): the default kits of every agent,
+    the kits directory, the project memory and the plugin store. The plugin installer's own start (own_folders: its
+    HOME is the plugin store) is the store's only writer."""
     kits = load_kits_module()
-    return [(path, label) for path, label, used in [
-        (kits.default_home(a.agent), "the default kit", not a.no_default_kit),
-        (kits.kits_dir(), "the kits directory", bool(a.kit)),
-        (kits.state_root() / "memory", "the project memory", not a.no_memory),
-        (kits.plugin_store("claude"), "the plugin store", a.agent == "claude" and not a.no_plugins)] if used]
+    own = own_folders(a)
+    stores = [(kits.default_home(agent), f"the default kit of {agent}") for agent in kits.AGENTS]
+    stores += [(kits.kits_dir(), "the kits directory"), (kits.state_root() / "memory", "the project memory")]
+    for agent in kits.AGENTS:
+        store = kits.plugin_store(agent)
+        with contextlib.suppress(OSError, RuntimeError):
+            if store.expanduser().resolve() in own:
+                continue
+        stores.append((store, "the plugin store"))
+    return stores
 
 
 def check_stores(trees, stores):
@@ -3400,10 +3665,24 @@ def check_stores(trees, stores):
                                  "for other sandboxes; choose another directory")
 
 
+def check_held_both_ways(trees, path, label):
+    """Refuse an agent-writable tree of TREES that lies inside the host path PATH the launcher reads (LABEL: what it
+    is; --privacy-rules, a kit's folder): the agent could change what it holds (check_host_source refuses the other
+    way round, PATH inside a tree)."""
+    literal = Path(os.path.normpath(Path(path).expanduser().absolute()))
+    for held in dict.fromkeys([literal, literal.resolve()]):
+        for tree in trees:
+            if held in Path(tree).parents:
+                raise ValueError(f"{tree} lies inside {path} ({label}), which the launcher reads; the agent could "
+                                 "change it there. Choose a directory beside it.")
+
+
 def check_host_sources(a):
     """Every host path the launcher reads, mounts or writes back to lies outside agent-writable trees."""
     for path, label in host_sources(a):
         check_host_source(a, path, label)
+        if label != "--copy":  # a copy goes into the sandbox only; what the launcher reads for itself is held both ways
+            check_held_both_ways(exposed_trees(a), path, label)
     check_stores(exposed_trees(a), host_stores(a))
     workspaces = [Path(w).expanduser().resolve() for w in a.workspaces]
     state = [a.state_dir.expanduser().resolve()] if a.state_dir else []
@@ -3423,20 +3702,15 @@ def check_host_sources(a):
     # The same for every other host path: a symlink planted in an earlier run, or a private location.
     before = exposed_before()
     check_host_source(a, exposed_registry(), "The registry of exposed directories (XDG_STATE_HOME)")
+    own = own_folders(a)
     for value, src, _, mode in mounts:
         check_planted(value.rsplit(":", 2)[0], "--mount", before)
-        # Read-only too: a socket can be connected through it, a kernel file system read.
-        check_socket_location(Path(src).resolve(), "--mount")
-        check_kernel_mounts(Path(src).resolve(), "--mount")
-        if mode == "rw":
-            check_private_location(Path(src), "--mount")
-            check_package_location(Path(src).resolve(), "--mount")
+        # Read-only too: a socket can be connected through it, a kernel file system read, sandbox-ai's own folders
+        # read (its logins, the approvals) and a private location's keys.
+        check_given_path(Path(src).resolve(), "--mount", mode == "rw", own)
     if a.state_dir:
         check_planted(a.state_dir, "--state-dir", before)
-        check_private_location(a.state_dir.expanduser().resolve(), "--state-dir")
-        check_socket_location(a.state_dir.expanduser().resolve(), "--state-dir")
-        check_kernel_mounts(a.state_dir.expanduser().resolve(), "--state-dir")
-        check_package_location(a.state_dir.expanduser().resolve(), "--state-dir")
+        check_given_path(a.state_dir.expanduser().resolve(), "--state-dir", True, own)
     for path, option in [(a.log_dir, "--log-dir"), (a.gui_vnc, "--gui-vnc")]:
         if path:
             check_planted(path, option, before)
@@ -4130,6 +4404,12 @@ def prepare_home(a, home):
         claude_default_settings(home, skip_danger_prompt=a.dangerously_skip_permissions)
         claude_default_state(home)
         claude_trusted_workspaces(a, home)
+        if a.state_dir and not a.mcp_socket_dir:
+            # A kept HOME: servers an attach --live of a run killed on the way left in ~/.claude.json.
+            with contextlib.suppress(Exception):
+                for name in load_mcp_module().forget_live_entries(home):
+                    print(f"agent-sandbox: took the MCP server {printable(name)} an earlier run attached while it "
+                          "ran out of ~/.claude.json (this start names its servers itself)", file=sys.stderr)
     if "codex" in team(a) and not getattr(a, "helper_of", None):
         codex_trusted_workspaces(a, home)  # a helper's /work is the lead's too: never trusted for its settings
     if "codex" in companions(a):
@@ -4230,14 +4510,19 @@ def state_dir_lock(home):
         os.close(fd)
 
 
-def update_json_defaults(home, relative, apply, limit=CONFIG_LIMIT):
+def update_json_defaults(home, relative, apply, limit=CONFIG_LIMIT, keep_mode=False):
     """Let apply() add missing keys to a sandbox-HOME JSON object; existing values always win.
 
     apply(document) returns whether it changed anything; an unchanged file is
     never rewritten, so a Claude already running on a shared HOME keeps its
-    writes. Returns None when done, else why the file was left untouched."""
+    writes. KEEP_MODE: a file replaced keeps its permission bits (else 0600). Returns None when done, else why the
+    file was left untouched."""
     path = check_home_path(home, home / relative)
     exists = path.exists()
+    mode = 0o600
+    if keep_mode and exists:
+        with contextlib.suppress(OSError):
+            mode = stat.S_IMODE(path.stat().st_mode) & 0o666 or 0o600
     try:
         document = json.loads(read_config_bytes(path, limit)) if exists else {}
     except (OSError, ValueError, RecursionError) as exc:
@@ -4250,7 +4535,7 @@ def update_json_defaults(home, relative, apply, limit=CONFIG_LIMIT):
     fd, temporary = tempfile.mkstemp(prefix=".defaults-", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            os.fchmod(stream.fileno(), 0o600)
+            os.fchmod(stream.fileno(), mode)
             json.dump(document, stream, indent=2, ensure_ascii=False)
         os.replace(temporary, path)
     except BaseException:
@@ -6027,7 +6312,8 @@ def workspace_checks(a, session):
     """What `sandbox-ai workspace add` checks a workspace added during the run against, as the start checked its
     own: the workspaces (host, sandbox path, ro|rw), whether further ones are read-only, the trees no workspace may
     overlap, the host paths none may hold (host_sources and the private directories) and the stores none may lie
-    in. Paths as given and resolved, so that a later lookup needs nothing of A."""
+    in, and sandbox-ai's own folders (sandbox_ai_folders). Paths as given and resolved, so that a later lookup needs
+    nothing of A."""
     def both(path):
         literal = Path(os.path.normpath(Path(path).expanduser().absolute()))
         return list(dict.fromkeys([str(literal), str(literal.resolve())]))
@@ -6052,7 +6338,10 @@ def workspace_checks(a, session):
             "trees": [p for tree in trees for p in both(tree)],
             "held": [[p, label] for path, label in held for p in both(path)],
             "private": [[p, label] for path, label in private for p in both(path)],
-            "stores": [[str(path), label] for path, label in host_stores(a)]}
+            "stores": [[str(path), label] for path, label in host_stores(a)],
+            # sandbox-ai's own folders as this start saw them (its XDG_* values): a later add from another
+            # environment (the app, the web UI) refuses them too.
+            "own_folders": [str(path) for path in sandbox_ai_folders()]}
 
 
 def run_name(a):

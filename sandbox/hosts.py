@@ -502,16 +502,34 @@ def run(name, args, input=None, timeout=120, path=None, runner=subprocess.run, s
         # runs once more on a connection of its own only when it never reached the host (the master refused the
         # session): a command that may have run (a timeout, a connection lost on the way) is never run twice.
         stop_master(entry, control, how="stop")
-        if status == 255 and not out and MUX_REFUSED.search(err or ""):
+        if status == 255 and mux_refused(out, err):
             status, out, err, _ = run_once(name, args, input, max(deadline - time.monotonic(),
                                                                   min(timeout, CONNECT_TIMEOUT + 5)),
                                            timeout, path, runner, sudo, None)
     return status, out, err
 
 
-# What ssh says when the shared connection could not even open a session (nothing reached the remote host).
-MUX_REFUSED = re.compile(r"mux_client_\w+|Control ?[Ss]ocket|control socket|master (?:refused|is not running)|"
-                         r"Session open refused|muxclient|mux_master")
+# What ssh itself says when the shared connection could not even open a session (nothing reached the remote host):
+# a line of its own at the start of stderr, never what the remote command printed (mux_refused).
+MUX_REFUSED = re.compile(r"(?:mux_client_\w+|muxclient|mux_master\w*): .*|"
+                         r"Control socket connect\(.*\): (?:Connection refused|No such file or directory)|"
+                         r"ControlSocket .* already exists, disabling multiplexing|"
+                         r"Session open refused by peer|master (?:refused|is not running).*")
+
+
+def mux_refused(out, err):
+    """ssh's shared connection refused the session (MUX_REFUSED), so the command never reached the host: stdout is
+    empty and the first line of stderr (after ssh's own "Warning: Permanently added" notes) is one of ssh's mux
+    errors. Anything the remote command wrote first (a word like "Control socket" in its own errors) is no refusal:
+    a command that may have run is never run twice."""
+    if out:
+        return False
+    for line in (err or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("Warning: Permanently added"):
+            continue
+        return bool(MUX_REFUSED.fullmatch(line))
+    return False
 
 
 def run_once(name, args, input, seconds, timeout, path, runner, sudo, control):
@@ -923,9 +941,69 @@ def tree_root():
     return Path(__file__).resolve().parent.parent
 
 
-def install_bundle(source="here", root=None):
-    """The gzipped tar sent to the host: the whole tree (SOURCE "here"; no caches, VCS data or build output), or only
-    install.sh and the release keys (SOURCE "download")."""
+# Never sent to a host, whatever lists them: logins, keys and tokens a checkout may hold beside its files.
+CREDENTIAL_FILES = re.compile(r"(?:^|/)(?:\.credentials\.json|credentials(?:\.\w+)?|auth\.json|\.netrc|\.git-credentials|"
+                              r"\.env(?:\.[\w.-]+)?|\.pypirc|\.npmrc|id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?(?:\.pub)?|"
+                              r"[^/]*\.(?:pem|key|p12|pfx|kdbx|age|gpg|asc)|"
+                              r"[^/]*(?:secret|token|password)s?(?:\.(?:json|txt|env|ya?ml|toml|ini))?)$",
+                              re.IGNORECASE)
+NEVER_SENT = (".claude/", ".git/", ".sandbox-ai/")
+
+
+def git_files(folder, runner=subprocess.run):
+    """The files of the git checkout FOLDER as install.sh's cmd_copy takes them (tracked and new ones that are not
+    ignored: git ls-files --cached --others --exclude-standard; deleted ones are gone), relative; None when FOLDER is
+    no checkout (or git is missing)."""
+    try:
+        done = runner(["git", "-C", str(folder), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                      capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    return [name for name in done.stdout.split("\0") if name]
+
+
+def bundle_files(root, runner=subprocess.run):
+    """[relative path] of the files of the sandbox-ai tree ROOT a host gets (hosts install --from here). A git
+    checkout: what install.sh's cmd_copy copies (git_files; the app in projects/sandbox-ai-app, a repository of its
+    own, likewise; the MCP catalog with its signatures), never .claude/ or .git/; else the tree as it is installed,
+    without caches, VCS data and build output (SKIPPED). Never a file that looks like a login, key or token
+    (CREDENTIAL_FILES), nor a link or anything else that is no regular file."""
+    root = Path(root)
+    names = git_files(root, runner) if (root / ".git").exists() else None
+    if names is None:
+        names = []
+        for folder, dirs, files in os.walk(root):
+            dirs[:] = sorted(d for d in dirs if d not in SKIPPED and d != ".claude" and not d.endswith(".egg-info"))
+            names += [os.path.relpath(os.path.join(folder, f), root) for f in files]
+    app = Path("projects") / "sandbox-ai-app"
+    if (root / app / ".git").exists():
+        listed = git_files(root / app, runner)
+        if listed is not None:
+            names = [n for n in names if not n.startswith(f"{app}/")] + [f"{app}/{n}" for n in listed]
+    catalog = Path("projects") / "sandbox-ai-mcp"
+    names += [str(catalog / n) for n in ("catalog.json", "catalog.json.sig", "rootfs.json", "rootfs.json.sig")]
+    kept = set()
+    for name in names:
+        parts = Path(name).parts
+        if not parts or ".." in parts or name.startswith(NEVER_SENT) or any(f"/{d}" in f"/{name}" for d in NEVER_SENT):
+            continue
+        if any(part in SKIPPED for part in parts) or parts[-1] in SKIPPED_FILES or parts[-1].endswith(".pyc"):
+            continue
+        if CREDENTIAL_FILES.search(name):
+            continue
+        path = root / name
+        if path.is_symlink() or not path.is_file():
+            continue  # deleted, a link (cmd_copy skips those too) or no regular file
+        kept.add(name)
+    return sorted(kept)
+
+
+def install_bundle(source="here", root=None, runner=subprocess.run):
+    """The gzipped tar sent to the host: the tree's files (SOURCE "here": bundle_files, so that a checkout sends
+    what install.sh would install from it and never untracked logins, logs or settings), or only install.sh and the
+    release keys (SOURCE "download")."""
     import io
     import tarfile
     root = Path(root or tree_root())
@@ -934,10 +1012,7 @@ def install_bundle(source="here", root=None):
                          "on that host instead (--download)")
 
     def keep(info):
-        parts = Path(info.name).parts
-        if any(part in SKIPPED for part in parts) or parts[-1] in SKIPPED_FILES or parts[-1].endswith(".pyc"):
-            return None
-        if not (info.isfile() or info.isdir() or info.issym()):
+        if not (info.isfile() or info.isdir()):
             return None
         info.uid = info.gid = 0
         info.uname = info.gname = ""
@@ -945,8 +1020,8 @@ def install_bundle(source="here", root=None):
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
         if source == "here":
-            for entry in sorted(root.iterdir()):
-                archive.add(entry, arcname=entry.name, filter=keep)
+            for name in bundle_files(root, runner):
+                archive.add(root / name, arcname=name, filter=keep, recursive=False)
         else:
             archive.add(root / "install.sh", arcname="install.sh", filter=keep)
             if (root / "sandbox" / "release-signers").is_file():
@@ -961,10 +1036,28 @@ PROBE = ('printf "uid=%s\\n" "$(id -u)"; for tool in bash tar gzip python3; do c
          '"$HOME/.local/bin/sandbox-ai" --version 2>/dev/null); printf "installed=%s\\n" "$v"')
 
 
+def probe_script(mode=None, prefix=None):
+    """PROBE for an installation in MODE (system: under PREFIX, default /usr/local; None: not decided yet, system
+    when the SSH user is root): the owners of PREFIX, PREFIX/bin and PREFIX/lib are reported (prefix_uid=, bin_uid=,
+    lib_uid=; nothing for one that does not exist), and for system the version is asked of PREFIX/bin/sandbox-ai
+    first (the copy that installation replaces, not another one on PATH)."""
+    if mode == "user":
+        return PROBE
+    if prefix is not None and (not re.fullmatch(r"/[A-Za-z0-9._/-]{0,200}", prefix) or ".." in prefix):
+        raise ValueError("--prefix is an absolute path of letters, digits, . _ - and /")
+    base = shlex.quote(prefix or "/usr/local")
+    owners = "; ".join(f'if [ -e {base}{tail} ]; then printf "{key}=%s\\n" "$(ls -nd {base}{tail} | '
+                       "awk '{print $3}')\"; fi" for key, tail in (("prefix_uid", ""), ("bin_uid", "/bin"),
+                                                                    ("lib_uid", "/lib")))
+    first = (f'w=$({base}/bin/sandbox-ai --version 2>/dev/null); if [ -n "$w" ]; then printf "installed=%s\\n" '
+             '"$w"; fi')
+    return f"{owners}; {first + '; ' if mode == 'system' else ''}{PROBE}"
+
+
 def remote_shell(entry, script, input=None, timeout=60, runner=subprocess.run, tty=False):
-    """(status, stdout bytes, stderr text) of SCRIPT run by the login shell of host ENTRY (no sandbox-ai needed);
-    INPUT: bytes on its standard input."""
-    command = [*ssh_base(entry, tty), script]
+    """(status, stdout bytes, stderr text) of SCRIPT run by sh on host ENTRY (`sh -c SCRIPT`: whatever the user's
+    login shell is, fish or csh too; no sandbox-ai needed); INPUT: bytes on its standard input."""
+    command = [*ssh_base(entry, tty), f"sh -c {shlex.quote(script)}"]
     if tty:
         return runner(command).returncode, b"", ""
     try:
@@ -1000,12 +1093,23 @@ def installer_script(folder, args, sudo=None):
             f"trap 'rm -rf -- \"$d\"' EXIT; {prefix}bash \"$d/install.sh\" {args}")
 
 
+def cleanup_script(folder, sudo=False):
+    """The script that removes the bundle's FOLDER on the host (only a sandbox-ai-install.* folder), as the SSH user,
+    and with SUDO by `sudo -n` too for what is left (root's files)."""
+    return (f"d={shlex.quote(folder)}; case $d in /*/sandbox-ai-install.*) ;; *) exit 2 ;; esac; "
+            f"rm -rf -- \"$d\" 2>/dev/null" + ("; [ -e \"$d\" ] && sudo -n rm -rf -- \"$d\" 2>/dev/null; true"
+                                              if sudo else "; true"))
+
+
 def install(name, mode=None, prefix=None, sudo=None, source="here", version=None, path=None,
-            runner=subprocess.run, terminal=False):
-    """Install sandbox-ai on host NAME (see above). MODE None: "system" when the SSH user is root, else "user".
-    SUDO None: with sudo when a system installation needs it; False: never (refused when it would be needed).
-    TERMINAL: when sudo wants a password, ask for it in this terminal. {"name", "before", "after", "changed",
-    "mode", "prefix", "sudo", "root", "source", "error", "needs_password", "output", "notes"}."""
+            runner=subprocess.run, terminal=False, dry_run=False):
+    """Install sandbox-ai on host NAME (see above). MODE None: "system" when the SSH user is root, else "user" (the
+    host's `id -u` decides, never the name in USER@HOST). SUDO None: with sudo when a system installation needs it;
+    False: never (refused when it would be needed). A system PREFIX (or its bin/, lib/) that belongs to a user other
+    than root and the SSH user is refused: that user could change what root installs there. TERMINAL: when sudo
+    wants a password, ask for it in this terminal. DRY_RUN: only decide, and say what would be done ("planned":
+    True; nothing is copied or installed). {"name", "before", "after", "changed", "mode", "prefix", "sudo",
+    "root", "source", "planned", "error", "needs_password", "output", "notes"}."""
     if name == LOCAL:
         raise ValueError("this machine installs with install.sh itself (see sandbox-ai update)")
     if source not in ("here", "download"):
@@ -1014,13 +1118,21 @@ def install(name, mode=None, prefix=None, sudo=None, source="here", version=None
     if entry is None:
         raise ValueError(f"no host {printable(name)}; see: sandbox-ai hosts list")
     result = {"name": name, "before": None, "after": None, "changed": False, "mode": mode, "prefix": prefix,
-              "sudo": False, "root": False, "source": source, "error": None, "needs_password": False, "output": "",
-              "notes": []}
-    status, out, err = remote_shell(entry, PROBE, timeout=CONNECT_TIMEOUT + 30, runner=runner)
+              "sudo": False, "root": False, "source": source, "planned": False, "error": None,
+              "needs_password": False, "output": "", "notes": []}
+    try:
+        probe = probe_script(mode, prefix)
+    except ValueError as exc:
+        result["error"] = str(exc)
+        return result
+    status, out, err = remote_shell(entry, probe, timeout=CONNECT_TIMEOUT + 30, runner=runner)
     if status != 0:
         result["error"] = failure(status, "", err)
         return result
-    facts = dict(line.split("=", 1) for line in out.decode("utf-8", "replace").splitlines() if "=" in line)
+    facts = {}
+    for line in out.decode("utf-8", "replace").splitlines():  # the first of a key wins (installed= of the prefix)
+        if "=" in line:
+            facts.setdefault(*line.split("=", 1))
     missing = [line.split("=", 1)[1] for line in out.decode("utf-8", "replace").splitlines()
                if line.startswith("missing=")]
     if missing:
@@ -1041,7 +1153,22 @@ def install(name, mode=None, prefix=None, sudo=None, source="here", version=None
     if use_sudo and facts.get("sudo") == "none":
         result["error"] = f"{name} has no sudo, and the SSH user is no root: install for the user (--user)"
         return result
+    if mode == "system":
+        for key, what in (("prefix_uid", ""), ("bin_uid", "/bin"), ("lib_uid", "/lib")):
+            owner = facts.get(key)
+            if owner is not None and owner not in ("0", facts.get("uid")):
+                result["error"] = (f"{printable(result['prefix'] + what)} on {name} belongs to the user {printable(owner)}, "
+                                   "neither root nor the SSH user: that user could change what is installed there for "
+                                   "every user; choose another --prefix, or install for the user (--user)")
+                return result
     result["sudo"] = use_sudo
+    if dry_run:
+        result["planned"] = True
+        how = ("for every user in " + result["prefix"] if mode == "system" else "for the SSH user") + \
+            (" with sudo" + (" (it asks for a password)" if facts.get("sudo") == "password" else "")
+             if use_sudo else " as root" if result["root"] else "")
+        result["notes"].append(f"would install {how}; nothing was copied")
+        return result
     try:
         bundle = install_bundle(source)
     except (OSError, ValueError) as exc:
@@ -1060,7 +1187,7 @@ def install(name, mode=None, prefix=None, sudo=None, source="here", version=None
             result["needs_password"] = True
             result["error"] = (f"sudo on {name} wants a password: install it in a terminal (sandbox-ai hosts install "
                                f"{name} --system there), or allow sudo without one")
-            remote_shell(entry, f"rm -rf -- {shlex.quote(folder[0])}", timeout=30, runner=runner)
+            remote_shell(entry, cleanup_script(folder[0], False), timeout=30, runner=runner)
             return result
         status, _, _ = remote_shell(entry, installer_script(folder[0], args, "prompt"), runner=runner, tty=True)
         out, err = b"", ""
@@ -1070,14 +1197,22 @@ def install(name, mode=None, prefix=None, sudo=None, source="here", version=None
     said = f"{err}\n{out.decode('utf-8', 'replace')}"
     result["output"] = printable(said.strip()[-3000:])
     if status != 0:
+        # The script's trap removes the folder; not when sudo or the connection failed on the way, or root left
+        # files in it: once more, as the SSH user (and with sudo -n for what root made there).
+        remote_shell(entry, cleanup_script(folder[0], use_sudo), timeout=30, runner=runner)
         if use_sudo and any(text in said for text in SUDO_REFUSED):
             result["error"] = f"{name}: this user may not use sudo there: {printable(said.strip()[-300:])}"
         else:
             result["error"] = f"install.sh on {name} ended with exit status {status}: {printable(said.strip()[-400:])}"
         return result
     forget_status(name)
-    status, out, err = run(name, ["--version"], timeout=30, path=path, runner=runner) if runner is subprocess.run \
-        else (0, "", "")
+    if mode == "system":  # the copy just installed, not another one on PATH
+        status, raw, err = remote_shell(entry, f"{shlex.quote(result['prefix'])}/bin/sandbox-ai --version", timeout=30,
+                                        runner=runner)
+        out = raw.decode("utf-8", "replace")
+    else:
+        status, out, err = run(name, ["--version"], timeout=30, path=path, runner=runner) \
+            if runner is subprocess.run else (0, "", "")
     found = VERSION.search(out) if status == 0 else None
     result["after"] = found.group(0) if found else None
     result["changed"] = bool(result["after"]) and result["after"] != result["before"]
@@ -1091,6 +1226,8 @@ def install_lines(result):
     name = result["name"]
     if result.get("error"):
         lines = [f"{name}: not installed: {printable(result['error'])}"]
+    elif result.get("planned"):
+        lines = [f"{name}: nothing done (--dry-run)"]
     else:
         how = ("for every user in " + printable(result.get("prefix") or "/usr/local") if result.get("mode") == "system"
                else "for the user") + (" with sudo" if result.get("sudo") else " as root" if result.get("root") else "")
@@ -1192,6 +1329,8 @@ def cli(argv_, out=print):
     origin.add_argument("--download", dest="source", action="store_const", const="download",
                         help="the host downloads the signed release itself")
     installing.add_argument("--version", dest="release", metavar="X.Y.Z", help="with --download: this release")
+    installing.add_argument("--dry-run", action="store_true",
+                            help="only say what would be done (user or system, as root or with sudo)")
     installing.add_argument("--json", action="store_true")
     running = commands.add_parser("run", help="sandbox-ai ARGS on a host")
     running.add_argument("name")
@@ -1225,7 +1364,7 @@ def cli(argv_, out=print):
         if a.release and a.source != "download":
             raise ValueError("--version is for --download (--from-here installs this machine's version)")
         result = install(a.name, a.mode, a.prefix, a.sudo, a.source or "here", a.release,
-                         terminal=not a.json and sys.stdin.isatty())
+                         terminal=not a.json and sys.stdin.isatty(), dry_run=a.dry_run)
         out(json.dumps(result, indent=2) if a.json else "\n".join(install_lines(result)))
         return 0 if not result.get("error") else 1
     if a.command == "update":

@@ -218,9 +218,13 @@ def problems(document, where="preset"):
     for name, spec in values.items():
         if not VALUE_NAME.fullmatch(name) or not isinstance(spec, dict) or spec.get("kind", "text") not in KINDS \
                 or not isinstance(spec.get("label", ""), str) or set(spec) - {"label", "kind", "default", "optional",
-                                                                             "hint"}:
+                                                                             "hint", "vpn_type"}:
             found.append(f"{where}: value {name!r} needs a label, a kind ({', '.join(KINDS)}) and may have a "
-                         "default, optional and hint")
+                         "default, optional, hint and (kind vpn) vpn_type")
+        elif "vpn_type" in spec and (spec.get("kind") != "vpn" or not isinstance(spec["vpn_type"], str)
+                                     or not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", spec["vpn_type"])):
+            found.append(f"{where}: value {name!r}: vpn_type (the type its VPN profile must have, e.g. tor) is for a "
+                         "value of kind vpn")
     for option in document.get("options", []) if isinstance(document.get("options"), list) else []:
         if not isinstance(option, str):
             continue
@@ -423,6 +427,23 @@ def missing(preset, given=None, agent=None, mcp_names=None):
     return found
 
 
+def check_vpn_types(preset, values):
+    """ValueError when a value of PRESET with a vpn_type (the tor preset's: tor) names a VPN profile of another type:
+    "Everything through Tor" must never start behind any VPN. A profile that does not exist is left to the start's
+    own check of --vpn (it names the profiles there are)."""
+    for name, spec in preset.get("values", {}).items():
+        wanted, value = spec.get("vpn_type"), values.get(name)
+        if spec.get("kind") != "vpn" or not wanted or not value:
+            continue
+        try:
+            profile = _module("vpn").load_profile(value)
+        except ValueError:
+            continue
+        if profile.get("type") != wanted:
+            raise ValueError(f"preset {preset['id']}: {name} must name a {wanted} VPN profile; {value} is of type "
+                             f"{profile.get('type')} (sandbox-ai vpn list)")
+
+
 def registered_values(preset, given, agent=None):
     """What keeps the VPN profiles and LLM servers PRESET's values name from a start: [text] (a profile or server
     that is not registered, a server AGENT cannot use); empty when nothing does."""
@@ -438,7 +459,12 @@ def registered_values(preset, given, agent=None):
         hint = f"; for this preset: {spec['hint']}" if spec.get("hint") else ""
         try:
             if kind == "vpn":
-                _module("vpn").load_profile(value)
+                profile = _module("vpn").load_profile(value)
+                wanted = spec.get("vpn_type")
+                if wanted and profile.get("type") != wanted:
+                    # A per-value constraint: the tor preset's value must be a Tor profile, never any VPN.
+                    found.append(f"{name}: the VPN profile {value} is of type {profile.get('type')}, this preset "
+                                 f"needs a {wanted} profile{hint}")
             else:
                 llm = _module("llm")
                 endpoint, _ = llm.selection(SimpleNamespace(llm=value))  # the server, and a model it can name
@@ -530,6 +556,7 @@ def apply(argv, canonical=None, with_mode=False):
     # line, the project file and your defaults choose (it never lowers a stricter one).
     options, mode = split_mode(options)
     options += extras_of(preset, resolved_values(preset, given))
+    check_vpn_types(preset, resolved_values(preset, given))
     agent_args = tail if tail else prompt_args(preset, agent, resolved_values(preset, given))
     result = [agent, *options, *rest, *(["--", *agent_args] if agent_args or "--" in argv else [])]
     return (result, mode) if with_mode else result

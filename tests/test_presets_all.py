@@ -302,3 +302,23 @@ def test_the_network_check_catches_what_a_preset_does_not_name(host, capsys):
     assert network_of(without, {"llm": "ollama"}, "codex")["https_hosts"] == sorted(s.PROVIDERS["codex"])
     with pytest.raises(AssertionError, match="does not know what --egress-all-allow opens"):
         network_of({**PRESETS["development"], "options": ["--egress-all-allow"]}, {}, "codex")
+
+
+def test_the_tor_preset_takes_only_a_tor_profile(host, capsys):
+    """Finding L8: "Everything through Tor" with a WireGuard (or any other) profile is refused, in presets check and
+    at the start (its dry run); with a Tor profile it starts as before."""
+    _, _, work = host
+    found = P.missing(PRESETS["tor"], {"tor": "home"}, "codex")
+    assert len(found) == 1 and "of type wireguard" in found[0] and "needs a tor profile" in found[0]
+    assert P.missing(PRESETS["tor"], {"tor": "anon"}, "codex") == []
+    capsys.readouterr()
+    argv = ["codex", "--backend", "podman", "--workspace", str(work), "--no-tmux", "--preset", "tor",
+            "--preset-value", "tor=home", "--dry-run"]
+    with pytest.raises(ValueError, match="must name a tor VPN profile; home is of type wireguard"):
+        s.launch(argv)  # as the preset's other refusals (the launcher's main says it)
+    assert not capsys.readouterr().out.strip(), "no plan"
+    plan = dry_run(capsys, work, "codex", "tor", {"tor": "anon"})
+    assert plan["vpn"]["type"] == "tor"
+    # The value's constraint is a preset's own field: kind vpn only.
+    assert any("vpn_type" in problem for problem in P.problems(
+        {**PRESETS["tor"], "values": {"tor": {"label": "x", "kind": "text", "vpn_type": "tor"}}}))

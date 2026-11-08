@@ -21,11 +21,12 @@
     "tor": {
       "label": "Tor profile (sandbox-ai vpn list)",
       "kind": "vpn",
+      "vpn_type": "tor",
       "hint": "once: sandbox-ai build vpn; sandbox-ai vpn add anon --tor --socks (--bridges FILE for obfs4 bridges, --exit-country CC)"
     }
   },
   "notes": [
-    "Make the profile once: sandbox-ai build vpn, then sandbox-ai vpn add anon --tor --socks (--bridges FILE for obfs4 bridges, --exit-country de); sandbox-ai vpn check anon tries it alone. The value must name a Tor profile: another VPN profile works too, but is no Tor.",
+    "Make the profile once: sandbox-ai build vpn, then sandbox-ai vpn add anon --tor --socks (--bridges FILE for obfs4 bridges, --exit-country de); sandbox-ai vpn check anon tries it alone. The value must name a Tor profile (another type of VPN profile is refused).",
     "Before the agent starts tor must bootstrap, check.torproject.org must see a Tor exit, and tor's resolver must answer and map an .onion name; a failed check stops the start.",
     "TCP over IPv4 only: no UDP (no QUIC, ping or NTP) and no IPv6; slower than without, and many sites, the agent's provider among them, may refuse or challenge Tor exits.",
     ".onion names resolve into 10.192.0.0/10 and connect through Tor; with --dns (set here) every .onion the agent looks up, not only those of its allow-list.",

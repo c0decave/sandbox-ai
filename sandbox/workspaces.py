@@ -54,6 +54,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import socket
 import stat
 import subprocess
 import sys
@@ -482,8 +483,71 @@ def run_helper(op, found, name, source=None, identity=None, mode="rw", force=Fal
     return result.returncode, result.stderr.strip()[-500:]
 
 
+def clone_helper(user_pid, source, identity, starts, channel, proc=PROC, c=None):
+    """In this (fresh, single-threaded) process: enter the user namespace of USER_PID (the sandbox's), make a mount
+    namespace of its own, take a detached read-only clone (open_tree) of the host directory SOURCE (still IDENTITY:
+    device, inode) and send its descriptor over the Unix socket CHANNEL (a descriptor number). STARTS: the start
+    times of the processes when they were found (a PID that names another process now is refused)."""
+    c = c or libc()
+    user = os.open(proc / str(user_pid) / "ns" / "user", os.O_RDONLY | os.O_CLOEXEC)
+    if start_time(user_pid, proc) is None or start_time(user_pid, proc) != (starts or {}).get(str(user_pid)):
+        raise OSError(errno.ESRCH, f"process {user_pid} of the sandbox is gone (its PID may name another process "
+                                   "now): try again")
+    check(c.setns(user, CLONE_NEWUSER), "enter the sandbox's user namespace")
+    check(c.unshare(CLONE_NEWNS), "a private mount namespace")
+    tree = clone(c, source, identity, "ro")
+    with socket.socket(fileno=channel) as stream:
+        socket.send_fds(stream, [b"t"], [tree])
+    os.close(tree)
+    return 0
+
+
+def detached_copy(record, source, identity, finder=None, proc=PROC, runner=None):
+    """The descriptor of a detached, read-only clone (open_tree, OPEN_TREE_CLONE) of the host directory SOURCE (still
+    IDENTITY: device, inode), made by a helper in the user namespace of the running sandbox RECORD: '..' from it
+    leads nowhere, so whoever holds it (the run's supervisor, `sandbox-ai mcp attach --live`) reaches that folder and
+    nothing else of the host. ValueError when it cannot be made (Linux 5.12 or later; the sandbox ended)."""
+    found = (finder or finder_default)(record)
+    if not found or not found.get("user"):
+        raise ValueError("the sandbox's processes were not found (has it ended?)")
+    user = found["user"]
+    starts = {str(user): start_time(user, proc)}
+    if starts[str(user)] is None:
+        raise ValueError(f"process {user} of the sandbox is gone (has it ended?)")
+    ours, theirs = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        request = {"op": "clone", "user": user, "source": str(source), "identity": list(identity), "starts": starts,
+                   "channel": theirs.fileno()}
+        command = [sys.executable, "-I", str(Path(__file__)), "--internal-helper", json.dumps(request)]
+        try:
+            result = (runner or subprocess.run)(command, capture_output=True, text=True, timeout=30,
+                                                stdin=subprocess.DEVNULL, pass_fds=(theirs.fileno(),))
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ValueError(f"the helper did not run: {exc}") from None
+        theirs.close()
+        if result.returncode:
+            raise ValueError(result.stderr.strip()[-500:] or "the helper failed")
+        ours.settimeout(5)
+        try:
+            _, fds, _, _ = socket.recv_fds(ours, 16, 4)
+        except OSError as exc:
+            raise ValueError(f"the helper sent no descriptor: {exc}") from None
+        if len(fds) != 1:
+            for fd in fds:
+                os.close(fd)
+            raise ValueError("the helper sent no descriptor")
+        os.set_inheritable(fds[0], False)
+        return fds[0]
+    finally:
+        ours.close()
+        theirs.close()
+
+
 def helper_main(argument):
     request = json.loads(argument)
+    if request.get("op") == "clone":
+        return clone_helper(int(request["user"]), request["source"], request.get("identity"), request.get("starts"),
+                            int(request["channel"]))
     starts = request.get("starts")
     kind = request.get("kind", "dir")
     if kind not in KINDS:
@@ -663,7 +727,9 @@ def judged(record, real, read_only=False, kind="dir"):
         if overlaps(real, tree):
             raise ValueError(f"{shown(real)} {'lies in' if tree in real.parents else 'is or holds'} {tree}: the "
                              "kernel's and the devices' trees are never a workspace (use --device for a device)")
-    l.check_workspace_scope(real)
+    # sandbox-ai's own folders as the start saw them too (another XDG_* environment than this command's).
+    l.check_workspace_scope(real, refused=[Path(value) for value in checks.get("own_folders", [])
+                                          if isinstance(value, str) and os.path.isabs(value)])
     # A start lets a workspace hold the project's own .venv/bin or node_modules/.bin on your PATH, and checks what
     # the agent changed there after the run (tool_dirs_state); for a workspace added later nothing would.
     for directory in l.private_locations()[1]:
@@ -677,6 +743,8 @@ def judged(record, real, read_only=False, kind="dir"):
             break
     for entry in checks.get("workspaces", []) + present_workspaces(record):
         other = Path(entry["host"])
+        if entry.get("kind") == "file" and replaced(entry) and other != real:
+            continue  # its host path names another file now: no overlap with what is there now
         if overlaps(real, other):
             raise ValueError(f"workspaces must not overlap: {shown(real)} and {shown(other)} "
                              f"({shown(entry['sandbox'])})")
@@ -688,6 +756,11 @@ def judged(record, real, read_only=False, kind="dir"):
         if path == real or real in path.parents:
             raise ValueError(f"{shown(real)} holds {shown(value)} ({label}), which the agent could then change; "
                              "keep it outside workspaces")
+        # And the other way: a file or folder inside what the launcher reads (--privacy-rules, a --kit-dir) would
+        # let the agent change it as well (a --copy goes into the sandbox only).
+        if path in real.parents and label != "--copy":
+            raise ValueError(f"{shown(real)} lies in {shown(value)} ({label}), which the launcher reads: the agent "
+                             "could change it there; keep workspaces outside it")
     for value, label in checks.get("private", []):
         if overlaps(real, Path(value)):
             raise ValueError(f"{shown(real)} overlaps {shown(value)} ({label}), which the agent must not reach")
@@ -806,6 +879,19 @@ def present_workspaces(record):
     return [entry for entry in load(record) if entry.get("state") in PRESENT]
 
 
+def replaced(entry):
+    """An added file whose host path names another file now (its device and inode changed, or it is gone): an
+    editor that saves by writing a new file and renaming it over the old one. The sandbox still sees the file it
+    was given; `workspace list` says "replaced", `add` of the path takes the old one out and adds the new one."""
+    if entry.get("kind") != "file" or entry.get("state") != "attached" or not isinstance(entry.get("identity"), list):
+        return False
+    try:
+        info = os.stat(entry["host"], follow_symlinks=False)
+    except (OSError, KeyError, TypeError):
+        return True
+    return [info.st_dev, info.st_ino] != list(entry["identity"])
+
+
 def publish_push_rules(record, entries=None):
     """push-added.json in the run's push check directory (run.json "push_check"): every attached workspace with the
     run's derived rules and its project's own, so the push check takes pushes of its commits. True if written, None
@@ -917,6 +1003,12 @@ def add(record, value, read_only=False, out=print, runner=run_helper, finder=fin
     l = module("agent_sandbox")
     fd, real, identity, kind = opened(value)
     try:
+        # The same file added before and replaced on the host since (an editor's save): the old one goes first.
+        for old in [entry for entry in present_workspaces(record) if entry.get("host") == str(real) and
+                    replaced(entry)]:
+            out(f"  {shown(real)} was replaced on the host since it was added at {old['sandbox']}: taking that out "
+                "first")
+            remove(record, old["sandbox"], out=out, runner=runner, finder=finder)
         with locked(record):
             mode = judged(record, real, read_only, kind)
             checks = record.get("workspace_checks") or {}
@@ -1159,6 +1251,10 @@ def listing(record):
                "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(entry.get("since") or 0))}
         if entry["state"] == "partial":
             row["gone_in"] = [pid for pid in entry.get("gone_in", []) if isinstance(pid, int)]
+        if replaced(entry):
+            # The sandbox keeps the file it was given; add the path again for the new one (add takes the old out).
+            row["state"] = "replaced"
+            row["note"] = "the host path names another file now (saved by an editor?): add it again"
         if isinstance(entry.get("note"), str):
             row["note"] = entry["note"]
         result.append(row)

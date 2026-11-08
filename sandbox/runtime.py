@@ -200,6 +200,7 @@ MCP_LINE_LIMIT = 64 << 20  # one JSON-RPC message from the client
 MCP_INSTANCE_LIMIT = 16  # server instances (connections) at once
 MCP_EOF_GRACE = 10  # seconds an instance has to exit once its input ended, before it is terminated
 MCP_PENDING_LIMIT = 1000  # requests of one connection the server has not answered yet
+MCP_CONNECT_SECONDS = 5  # how long a relay waits for a running server to take a connection (its backlog full)
 
 
 def relay_server_stderr(stream, out=None):
@@ -520,16 +521,19 @@ MCP_RUN_DIR = Path("/run/sandbox-mcp")              # agent side: the supervisor
 MCP_UPSTREAM_DIR = Path("/sandbox/mcp-upstream")    # supervisor side: the servers' sockets, hidden from the agent
 
 
-def connect_socket_file(sock, name, dir_fd=None):
+def connect_socket_file(sock, name, dir_fd=None, timeout=MCP_CONNECT_SECONDS):
     """Connect SOCK to the Unix socket NAME (in the directory DIR_FD if given) without following a link: the
     socket's directory is the MCP server sandbox's to write, and a link it put there would resolve in the
     supervisor's own file system (its control socket, say). The socket file is opened (O_PATH, O_NOFOLLOW), checked
-    to be a socket, and connected through its descriptor."""
+    to be a socket, and connected through its descriptor, waiting at most TIMEOUT seconds (a server that takes no
+    more connections, its backlog full, is a refusal: socket.timeout); SOCK blocks again afterwards."""
     fd = os.open(name, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
     try:
         if not stat.S_ISSOCK(os.fstat(fd).st_mode):
             raise OSError(errno.ENOTSOCK, f"{name} is no socket (a link or file the server put there?)")
+        sock.settimeout(timeout)
         sock.connect(f"/proc/self/fd/{fd}")
+        sock.settimeout(None)
     finally:
         os.close(fd)
 
@@ -621,11 +625,17 @@ class McpRelay:
 
     def connect(self):
         """The server's socket (McpSocket) through the directory descriptor; never once the relay is closed (its
-        descriptor's number may name another file then)."""
+        descriptor's number may name another file then). The lock is held only to take a copy of the descriptor
+        (dup): the connection, which waits for the server (MCP_CONNECT_SECONDS at most), is made without it, so that
+        a server that takes no connections never holds up close() or add() (nor the control socket with them)."""
         with self.lock:
             if self.closed or self.dir_fd is None:
                 raise OSError(errno.ECONNREFUSED, "the MCP server was detached from this sandbox")
-            return McpSocket("server.sock", self.dir_fd)
+            fd = os.dup(self.dir_fd)
+        try:
+            return McpSocket("server.sock", fd)
+        finally:
+            os.close(fd)
 
     def close(self):
         """Stop accepting, cut the connections (the agent's end sees the server go), give the descriptor back."""
@@ -634,7 +644,8 @@ class McpRelay:
                 return False
             self.closed = True
             listener, connections, fd, self.dir_fd = self.listener, list(self.connections), self.dir_fd, None
-            if fd is not None:
+        if fd is not None:
+            with contextlib.suppress(OSError):
                 os.close(fd)
         for connection in connections:
             with contextlib.suppress(OSError):
@@ -688,7 +699,7 @@ class McpRelays:
             self.relays[name] = relay
         thread.start()
         self.threads.append(thread)
-        relay.ready.wait(wait)
+        relay.ready.wait(wait)  # attach() checks that it listens (relay.listener), a start's relay goes on as before
         return relay
 
     def attach(self, name, config, dir_fd):
@@ -705,6 +716,8 @@ class McpRelays:
             return False
         try:
             relay = self.open(name, config, dir_fd)
+            if relay.listener is None:  # not listening within the wait: never reported opened
+                raise OSError(errno.ETIMEDOUT, f"the relay of {name} did not open its socket in the sandbox")
         except BaseException:
             with self.lock:
                 failed = self.relays.pop(name, None)
@@ -799,6 +812,8 @@ def mcp_serve(socket_path, command, cwd="/work", out=None, gateway=None, spawn=N
                 except OSError as exc:
                     print(f"agent-sandbox: MCP server failed: {exc}", file=sys.stderr)
                     slots.release()
+                    if relay is not None:  # never kept until the detach: the agent's end is closed here
+                        relay.discard(connection)
                     return
                 session = McpConnection(gate, connection, process)
                 pump = threading.Thread(target=session.pump, daemon=True)
@@ -968,7 +983,7 @@ def inner_bootstrap():
             control = threading.Event()
             threading.Thread(target=control_server, daemon=True,
                              args=(CONTROL_DIR / "control.sock", network, control, policy.get("forbid", []),
-                                   mode, taint, relays)).start()
+                                   mode, taint, relays, True)).start()
         start_mcp_relays(cfg.get("mcp_relay") or {}, broker, taint, who, registry=relays)
         problem = hook_problem(cfg)
         if problem:
@@ -5899,6 +5914,17 @@ MCP_OPS = ("mcp-open", "mcp-close", "mcp-list")
 CONTROL_FDS = 4  # descriptors a request may carry (SCM_RIGHTS): mcp-open hands over one
 
 
+def detached_root(fd):
+    """The directory descriptor FD is the root of a tree of its own: '..' from it is itself (a detached clone,
+    open_tree(OPEN_TREE_CLONE), as `sandbox-ai mcp attach --live` hands over the server's socket directory), so that
+    nothing outside it can be reached through it. A host directory's descriptor leads to its parent: False."""
+    try:
+        here, parent = os.fstat(fd), os.stat("..", dir_fd=fd, follow_symlinks=False)
+    except OSError:
+        return False
+    return (here.st_dev, here.st_ino) == (parent.st_dev, parent.st_ino) and stat.S_ISDIR(here.st_mode)
+
+
 def mcp_control(request, relays, fds, forbid=(), mode=None):
     """The answer to an MCP request on the control socket (`sandbox-ai mcp attach|detach NAME START --live`):
     mcp-open {"name", "relay": gateway configuration} with the server's socket directory as the one descriptor in
@@ -5923,6 +5949,9 @@ def mcp_control(request, relays, fds, forbid=(), mode=None):
     info = os.fstat(fds[0])
     if not stat.S_ISDIR(info.st_mode):
         raise ValueError("mcp-open: the descriptor is no directory")
+    if not detached_root(fds[0]):
+        raise ValueError("mcp-open: the descriptor is no detached copy of the server's socket directory (its '..' "
+                         "leads out of it); nothing outside that folder is taken (sandbox-ai 0.1.76 or later)")
     config = request.get("relay")
     if not isinstance(config, dict) or config.get("server") != name or not isinstance(config.get("rules", []), list):
         raise ValueError("mcp-open: the relay's configuration is {\"server\": NAME, \"rules\": [...]}")
@@ -5933,14 +5962,36 @@ def mcp_control(request, relays, fds, forbid=(), mode=None):
             "servers": relays.names()}
 
 
-def control_server(path, network, stop=None, forbid=(), mode=None, taint=None, relays=None):
+def control_peer_refused(connection, sandboxed=None):
+    """Why the peer of CONNECTION on the control socket is refused, or None. Only the human reaches the socket (the
+    run's directory on the host, never mounted for the agent): its `sandbox-ai net`, `mcp --live` and `workspace`
+    run outside the sandbox's PID namespace, where SO_PEERCRED reports pid 0. A peer whose pid shows in this
+    namespace is a process of the sandbox (one that got hold of the socket somehow): refused. The supervisor itself
+    (its own pid) is no such peer; no other process inside connects to this socket. SANDBOXED: this supervisor is the
+    first process of the sandbox's PID namespace (PID 1, as inner_bootstrap is); elsewhere (tests, a probe) every
+    pid shows and nothing is refused."""
+    if not (os.getpid() == 1 if sandboxed is None else sandboxed):
+        return None
+    try:
+        pid, _, _ = Attribution.peer(connection)
+    except (OSError, struct.error):
+        return "the peer of this connection cannot be told"
+    if pid in (0, os.getpid()):
+        return None
+    return f"process {pid} of the sandbox may not use the control socket"
+
+
+def control_server(path, network, stop=None, forbid=(), mode=None, taint=None, relays=None, sandboxed=None):
     """Serve `sandbox-ai net` requests (allow, revoke, show, untaint; watch: a workspace added during the run, for
     the file log) and `sandbox-ai mcp ... --live` requests (MCP_OPS, see mcp_control; RELAYS: the run's McpRelays)
     on the Unix socket PATH until STOP is set.
     FORBID: the options the administrator's policy forbids, MODE: the run's strict security mode (or None); a
     run-time change must not do what they would. Checked here, not only by `sandbox-ai net`: a request written by
     hand reaches this socket too. TAINT: the run's taint, shown and taken back (untaint) here: only the human
-    reaches this socket. Descriptors a request carries are taken with close-on-exec, and closed unless taken over."""
+    reaches this socket, and a peer inside the sandbox is refused (control_peer_refused; SANDBOXED as there).
+    Descriptors a request carries are taken with close-on-exec, and closed unless taken over. Whatever fails for one
+    request (a thread that cannot be started at the sandbox's pids limit, say) refuses that one; the socket keeps
+    serving."""
     listener = listen_unix(path)
     listener.settimeout(0.5)
     while stop is None or not stop.is_set():
@@ -5954,6 +6005,9 @@ def control_server(path, network, stop=None, forbid=(), mode=None, taint=None, r
         with connection:
             try:
                 connection.settimeout(10)
+                refused = control_peer_refused(connection, sandboxed)
+                if refused:
+                    raise PermissionError(refused)
                 data = b""
                 while not data.endswith(b"\n") and len(data) < 65536:
                     chunk, received, _, _ = socket.recv_fds(connection, 4096, CONTROL_FDS,
@@ -5995,9 +6049,8 @@ def control_server(path, network, stop=None, forbid=(), mode=None, taint=None, r
                 else:
                     answer = {"ok": True, **(network.shown() if request.get("op") == "show" else network.change(request)),
                               **({"taint": taint.shown()} if taint is not None and request.get("op") == "show" else {})}
-            except (ValueError, TypeError, KeyError, AttributeError, OSError,
-                    subprocess.CalledProcessError) as exc:
-                answer = {"ok": False, "error": str(exc)[:500]}
+            except Exception as exc:  # noqa: BLE001 - one request's failure never ends the control socket
+                answer = {"ok": False, "error": str(exc)[:500] or type(exc).__name__}
             finally:
                 for fd in fds:  # not taken over
                     with contextlib.suppress(OSError):

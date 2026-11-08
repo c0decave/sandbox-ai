@@ -53,6 +53,7 @@ from pathlib import Path
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -248,9 +249,11 @@ def check_image_policy(name, definition):
 
 
 def check_image_mounts(name, definition):
-    """The host folders of an image server pass the launcher's host-path policy: no symlink a sandbox may have
-    planted on the way, no private location for rw, and not inside a tree an agent can write (it could swap
-    the folder for a link before the next connection mounts it). Their rw folders join the registry."""
+    """The host folders of an image server pass the launcher's host-path policy, read-only or not, as a --mount
+    does (agent_sandbox.check_given_path): no symlink a sandbox may have planted on the way, no folder of the user's
+    sockets or tree with a live socket, no file system of the kernel's own, none of sandbox-ai's own folders, a
+    private location with a warning, and not inside a tree an agent can write (it could swap the folder for a link
+    before the next connection mounts it). Their rw folders join the registry."""
     l = launcher()
     before = l.exposed_before()
     writable = []
@@ -265,8 +268,11 @@ def check_image_mounts(name, definition):
             if tree in resolved.parents:
                 raise ValueError(f"{option}: {resolved} lies inside {tree}, which a sandbox can write; it could "
                                  "replace the folder with a link before a connection mounts it. Use a folder of its own.")
+        # As a --mount gets, whatever its mode (the container runs as root, you): no folder of sockets, no file
+        # system of the kernel's own, no tree with a live socket, never sandbox-ai's own folders; a private
+        # location with a warning.
+        l.check_given_path(resolved, option, mount.get("mode", "ro") == "rw")
         if mount.get("mode", "ro") == "rw":
-            l.check_private_location(resolved, option)
             writable.append(resolved)
     if writable:
         l.remember_exposed(None, writable)
@@ -1200,6 +1206,73 @@ def live_state(record):
     return data if isinstance(data, dict) else {"claude": [], "created": False}
 
 
+CLAUDE_LOCK_STALE = 10.0  # seconds: proper-lockfile's default; Claude refreshes its lock's mtime meanwhile
+CLAUDE_LOCK_WAIT = 15.0  # seconds to wait for Claude to give the lock back
+
+
+@contextlib.contextmanager
+def claude_config_lock(home, wait=CLAUDE_LOCK_WAIT, stale=CLAUDE_LOCK_STALE, clock=time.monotonic, sleep=time.sleep):
+    """Hold Claude Code's lock on HOME/.claude.json as Claude takes it (proper-lockfile: the directory
+    .claude.json.lock made with mkdir, its mtime refreshed while held, stale once older than STALE seconds, then
+    taken over). ValueError when it is not given back within WAIT seconds (the agent may hold it: the file is left
+    as it is). Made and removed through HOME's descriptor, never through a link the agent put there."""
+    base = os.open(home, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    name = ".claude.json.lock"
+    deadline = clock() + wait
+    try:
+        while True:
+            try:
+                os.mkdir(name, 0o700, dir_fd=base)
+                break
+            except FileExistsError:
+                try:
+                    info = os.stat(name, dir_fd=base, follow_symlinks=False)
+                    if stat.S_ISDIR(info.st_mode) and time.time() - info.st_mtime > stale:
+                        os.rmdir(name, dir_fd=base)  # stale: its holder is gone (as proper-lockfile takes it over)
+                        continue
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    pass
+            if clock() >= deadline:
+                raise ValueError("Claude Code holds ~/.claude.json's lock (~/.claude.json.lock) for longer than "
+                                 f"{int(wait)} s; left as it is")
+            sleep(0.1)
+        try:
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                os.rmdir(name, dir_fd=base)
+    finally:
+        os.close(base)
+
+
+def forget_live_entries(home):
+    """At a start: take out of HOME's ~/.claude.json the MCP servers an attach --live of an earlier run wrote there
+    (a bridge to the run's relay, exactly as agent_config writes it) and a launcher killed on the way left behind; a
+    start names its servers with --mcp-config. The names taken out ([] when nothing was)."""
+    l = launcher()
+    path = Path(home) / ".claude.json"
+    if not path.is_file() or path.is_symlink():
+        return []
+    removed = []
+
+    def apply(document):
+        servers = document.get("mcpServers")
+        if not isinstance(servers, dict):
+            return False
+        for name, value in list(servers.items()):
+            if isinstance(name, str) and re.fullmatch(l.MCP_NAME, name) and value == {
+                    "type": "stdio", "command": "python3", "args": l.mcp_bridge_args(name), "env": {}}:
+                del servers[name]
+                removed.append(name)
+        return bool(removed)
+    with contextlib.suppress(OSError, ValueError):
+        with claude_config_lock(Path(home), wait=2.0):
+            l.update_json_defaults(Path(home), ".claude.json", apply, l.CLAUDE_STATE_LIMIT, keep_mode=True)
+    return removed
+
+
 def agent_config(record, name, add=True):
     """Claude: mcpServers[NAME] (the bridge to the run's relay, as --mcp-config names it at a start) added to, or
     taken out of, the sandbox HOME's ~/.claude.json (user scope); a server of that name of its own stays as it is.
@@ -1236,7 +1309,12 @@ def agent_config(record, name, add=True):
         return True
     if not add and not (home / ".claude.json").exists():
         return None
-    problem = l.update_json_defaults(home, ".claude.json", apply, l.CLAUDE_STATE_LIMIT)
+    # Claude Code saves ~/.claude.json under a lock of its own (proper-lockfile: the folder ~/.claude.json.lock):
+    # taken here too, so that neither overwrites what the other just wrote; read, changed and replaced (atomically,
+    # its mode kept) within it. A Claude that writes without the lock (older versions) can still lose a change
+    # made in the moment between the read and the replace.
+    with claude_config_lock(home):
+        problem = l.update_json_defaults(home, ".claude.json", apply, l.CLAUDE_STATE_LIMIT, keep_mode=True)
     if problem:
         raise ValueError(f"~/.claude.json in the sandbox was left as it is ({problem})")
     names = [n for n in state.get("claude", []) if n != name] + ([name] if add else [])
@@ -1280,6 +1358,20 @@ def keep_server(key, name=None, helper=None, add=True):
     return True
 
 
+def socket_dir_handle(record, directory, identity):
+    """The descriptor handed to the supervisor of the running sandbox RECORD for the server's socket DIRECTORY (still
+    IDENTITY: device, inode): a detached read-only clone of that folder alone (workspaces.detached_copy), through
+    which nothing else of the host is reached. ValueError when it cannot be made."""
+    spec = importlib.util.spec_from_file_location("sandbox_workspaces_for_mcp", HERE / "workspaces.py")
+    workspaces = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(workspaces)
+    try:
+        return workspaces.detached_copy(record, directory, identity)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"the server's socket folder could not be handed over on its own ({exc}): restart the start "
+                         "with the server instead (sandbox-ai mcp attach NAME START --restart)") from None
+
+
 def attach_live(name, start, helper=None, out=print):
     """`sandbox-ai mcp attach NAME START --live` (HELPER: --helper AGENT instead of NAME): the server into the
     running sandbox of START now, without a restart. {"server", "start", "run", "state", "attached": "live" |
@@ -1302,18 +1394,27 @@ def attach_live(name, start, helper=None, out=print):
               "agent_restart": LIVE_AGENTS[agent]["restart"], "relay": f"{launcher().MCP_AGENT_DIR}/{name}/server.sock"}
     result["server_started"] = ensure_running(name, a) == "started"  # its own checks, as at a start
     with run_lock(record):
+        # Read under the run's lock: another attach or detach may have changed it since the look above.
+        listed = net.ask(record["directory"], {"op": "mcp-list"})
         if name in listed.get("servers", []):
             result["attached"] = "already"
         else:
             directory = launcher().mcp_socket_dir(name)
             fd = os.open(directory, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            tree = None
             try:
-                if os.fstat(fd).st_uid != os.getuid():
+                info = os.fstat(fd)
+                if info.st_uid != os.getuid():
                     raise ValueError(f"{directory} is not yours: not handed to the sandbox")
+                # Never the host directory itself: '..' from its descriptor would reach the host's file system. A
+                # detached clone of the folder alone (socket_dir_handle) is all the supervisor gets.
+                tree = socket_dir_handle(record, directory, (info.st_dev, info.st_ino))
                 answer = net.ask(record["directory"], {"op": "mcp-open", "name": name,
-                                                       "relay": launcher().mcp_relay_config(a, name)}, fds=[fd])
+                                                       "relay": launcher().mcp_relay_config(a, name)}, fds=[tree])
             finally:
                 os.close(fd)
+                if tree is not None:
+                    os.close(tree)
             result["attached"] = "live" if answer.get("opened") else "already"
         record_server(record, name)
         try:
@@ -1341,7 +1442,9 @@ def detach(name, start, helper=None, live=False, out=print):
     """`sandbox-ai mcp detach NAME START [--live]`: the server out of the start's options (its later starts); with
     LIVE (a running start) its relay in the sandbox closed now. The server's own sandbox keeps running (other starts
     may use it; sandbox-ai mcp stop NAME ends it). {"server", "start", "run", "state", "detached": "live" |
-    "next start" | "not attached", "relay_closed", "kept", "agent", "agent_config", "message"}."""
+    "next start" | "not attached", "relay_closed", "removed_from_options" (out of the start's options now), "agent",
+    "agent_config", "agent_restart" (as attach_live says it: whether the agent must restart to drop the server from
+    its list; None without --live), "message"}."""
     printable = launcher().printable
     starts = starts_module()
     if live:
@@ -1365,7 +1468,8 @@ def detach(name, start, helper=None, live=False, out=print):
         raise ValueError(f"Invalid MCP server name: {name!r}")
     agent = (record or {}).get("agent") if (record or {}).get("agent") in LIVE_AGENTS else entry.get("agent")
     result = {"server": name, "start": entry["name"], "run": (record or {}).get("run") or entry.get("run"),
-              "state": entry["state"], "relay_closed": False, "agent": agent, "agent_config": None}
+              "state": entry["state"], "relay_closed": False, "agent": agent, "agent_config": None,
+              "agent_restart": LIVE_AGENTS.get(agent, LIVE_AGENTS["codex"])["restart"] if live else None}
     if live:
         with run_lock(record):
             answer = net_module().ask(record["directory"], {"op": "mcp-close", "name": name})

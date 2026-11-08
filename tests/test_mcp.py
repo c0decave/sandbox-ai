@@ -1031,9 +1031,18 @@ def live(tmp_path, monkeypatch):
         started.append((name, a.backend, list(a.mcp), sorted(getattr(a, "helper_definitions", None) or {})))
         return "started"
     monkeypatch.setattr(m, "ensure_running", ensure_running)
+    # The detached clone of the socket folder needs the sandbox's user namespace (open_tree): here a descriptor of
+    # the folder stands in for it, and the supervisor takes it as one (detached_root).
+    handed = []
+
+    def handle(record, directory, identity):
+        handed.append((str(directory), tuple(identity)))
+        return os.open(directory, os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
+    monkeypatch.setattr(m, "socket_dir_handle", handle)
+    monkeypatch.setattr(rt, "detached_root", lambda fd: True)
     said = []
     yield SimpleNamespace(make=make, said=said, out=said.append, home=home, started=started, sessions=sessions,
-                          folder=folder)
+                          folder=folder, handed=handed)
     for stop, thread, relays in supervisors:
         for name in relays.names():
             relays.detach(name)
@@ -1208,3 +1217,148 @@ def test_the_supervisor_takes_the_descriptor_over_its_control_socket(live):
     finally:
         stop.set()
         thread.join(5)
+
+
+# --- security and correctness review round 4 -----------------------------------------------------------------
+
+
+def test_image_mounts_get_every_check_a_mount_gets(tmp_path, monkeypatch):
+    """Finding M1: read-only too, an image server's folder is no folder of sockets, no kernel file system and none
+    of sandbox-ai's own folders (the container runs as root, you); a private location warns."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
+    (tmp_path / "run" / "bus").mkdir(parents=True)
+    (tmp_path / "cfg" / "sandbox-ai").mkdir(parents=True)
+    for host, why in ((tmp_path / "run" / "bus", "a socket there"), (Path("/proc/self"), "kernel's own"),
+                      (tmp_path / "cfg" / "sandbox-ai", "sandbox-ai's own folder"),
+                      (tmp_path / "cfg", "sandbox-ai's own folder")):
+        with pytest.raises(ValueError, match=why):
+            m.check_image_mounts("bw", {"image": "x", "mounts": [{"host": str(host), "target": "/in", "mode": "ro"}]})
+    said = []
+    monkeypatch.setattr(m.launcher(), "check_private_location",
+                        lambda path, option, warn=None, own=(), refused=(): said.append(str(path)))
+    (Path.home() / ".ssh").mkdir(parents=True, exist_ok=True)
+    m.check_image_mounts("bw", {"image": "x", "mounts": [{"host": str(Path.home() / ".ssh"), "target": "/k"}]})
+    assert said == [str((Path.home() / ".ssh").resolve())], "read-only too: checked (a warning there)"
+
+
+def test_attach_live_hands_over_a_detached_clone_after_taking_the_lock(live, monkeypatch):
+    """Finding M4: the supervisor gets the clone socket_dir_handle makes, never the host folder's descriptor; and
+    (round 4) whether the server is attached already is read under the run's lock."""
+    live.make()
+    order = []
+    real_lock, net = m.run_lock, m.net_module()
+    real_ask = net.ask
+
+    @m.contextlib.contextmanager
+    def lock(record):
+        order.append("lock")
+        with real_lock(record):
+            yield
+    monkeypatch.setattr(m, "run_lock", lock)
+    monkeypatch.setattr(net, "ask", lambda directory, request, *a, **k: order.append(request["op"]) or
+                        real_ask(directory, request, *a, **k))
+    assert m.attach_live("demo", "web", out=live.out)["attached"] == "live"
+    assert order[:4] == ["mcp-list", "lock", "mcp-list", "mcp-open"]
+    assert live.handed and live.handed[0][0] == str(s.mcp_socket_dir("demo"))
+
+
+def test_socket_dir_handle_refuses_without_a_clone(monkeypatch, tmp_path):
+    """No clone (an old kernel, the sandbox gone): refused, never the host folder's own descriptor instead."""
+    (tmp_path / "workspaces.py").write_text("def detached_copy(record, directory, identity):\n"
+                                            "    raise OSError(1, 'clone: Operation not permitted')\n")
+    monkeypatch.setattr(m, "HERE", tmp_path)
+    with pytest.raises(ValueError, match="could not be handed over on its own.*--restart"):
+        m.socket_dir_handle({"run": "x"}, tmp_path, (1, 2))
+
+
+def test_claude_config_lock_is_claudes_own(tmp_path):
+    """Round 4: ~/.claude.json is changed under Claude Code's own lock (proper-lockfile's ~/.claude.json.lock)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    with m.claude_config_lock(home):
+        assert (home / ".claude.json.lock").is_dir()
+        with pytest.raises(ValueError, match="holds ~/.claude.json's lock"):
+            with m.claude_config_lock(home, wait=0.2):
+                pass
+    assert not (home / ".claude.json.lock").exists()
+    (home / ".claude.json.lock").mkdir()
+    old = time.time() - 60
+    os.utime(home / ".claude.json.lock", (old, old))  # stale: its holder is gone
+    with m.claude_config_lock(home, wait=1):
+        pass
+    assert not (home / ".claude.json.lock").exists()
+
+
+def test_forget_live_entries_cleans_a_kept_home(tmp_path):
+    """Round 4: a launcher killed during a live attach left the bridge in a kept HOME's ~/.claude.json; the next
+    start takes it out (and nothing of the user's own)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    bridge = {"type": "stdio", "command": "python3", "args": s.mcp_bridge_args("demo"), "env": {}}
+    (home / ".claude.json").write_text(json.dumps({"mcpServers": {"demo": bridge, "mine": {"command": "x"}},
+                                                    "theme": "dark"}))
+    (home / ".claude.json").chmod(0o644)
+    assert m.forget_live_entries(home) == ["demo"]
+    document = json.loads((home / ".claude.json").read_text())
+    assert document == {"mcpServers": {"mine": {"command": "x"}}, "theme": "dark"}
+    assert (home / ".claude.json").stat().st_mode & 0o777 == 0o644, "its mode kept"
+    assert m.forget_live_entries(home) == [] and m.forget_live_entries(tmp_path / "none") == []
+
+
+def test_detach_live_says_whether_the_agent_must_restart(live):
+    live.make()
+    m.attach_live("demo", "web", out=live.out)
+    result = m.detach("demo", "web", live=True, out=live.out)
+    assert result["agent_restart"] == "maybe" and "removed_from_options" in result
+    assert m.detach("demo", "web", out=live.out)["agent_restart"] is None
+
+
+def test_a_relay_that_never_listens_is_not_reported_opened(monkeypatch):
+    """Round 4: ready.wait's timeout counts: a relay whose socket never opened is refused (and its descriptor
+    given back), never reported opened."""
+    base = Path(tempfile.mkdtemp(prefix="nl-", dir="/tmp"))
+    try:
+        monkeypatch.setattr(rt, "mcp_serve", lambda *a, **k: None)  # never listens
+        relays = rt.McpRelays(run_dir=base / "run", log=base / "calls.jsonl", live=True)
+        monkeypatch.setattr(relays, "open", lambda name, config, dir_fd=None, wait=5, real=relays.open:
+                            real(name, config, dir_fd, wait=0.2))
+        fd = os.open(base, os.O_PATH | os.O_DIRECTORY)
+        with pytest.raises(OSError, match="did not open its socket"):
+            relays.attach("web", {"server": "web", "rules": []}, fd)
+        assert relays.names() == []
+        with pytest.raises(OSError):
+            os.fstat(fd)  # closed with the relay
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_agent_connections_do_not_pile_up_while_the_server_is_down():
+    """Round 4: a connection whose server cannot be reached is dropped from the relay at once, not kept until the
+    detach."""
+    base = Path(tempfile.mkdtemp(prefix="cd-", dir="/tmp"))
+    try:
+        (base / "server").mkdir()
+        relay = rt.McpRelay(rt.McpGateway({"server": "web", "rules": []}, io.StringIO(), plain=True),
+                            os.open(base / "server", os.O_PATH | os.O_DIRECTORY))
+        thread = threading.Thread(target=rt.mcp_serve, args=(str(base / "relay.sock"), None),
+                                  kwargs={"gateway": relay.gateway, "spawn": relay.connect, "relay": relay},
+                                  daemon=True)
+        thread.start()
+        relay.ready.wait(5)
+        for _ in range(3):
+            with socket.socket(socket.AF_UNIX) as client:
+                client.connect(str(base / "relay.sock"))
+                client.settimeout(5)
+                assert client.recv(10) == b""  # the server is down: closed
+        deadline = time.monotonic() + 5
+        while relay.connections and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert relay.connections == set()
+        relay.close()
+        thread.join(5)
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)

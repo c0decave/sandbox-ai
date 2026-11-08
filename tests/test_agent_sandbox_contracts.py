@@ -2327,10 +2327,19 @@ def test_config_store(scenario, tmp_path, monkeypatch):
 def test_trusted_configs(scenario, tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     store = tmp_path / "sandbox-ai/trusted.json"
+    digest = "a" * 64
     if scenario != "sad":
         store.parent.mkdir(parents=True)
-        store.write_text('{"/p/.sandbox-ai.json": "abc"}' if scenario == "happy" else "not json")
-    assert s.trusted_configs() == ({"/p/.sandbox-ai.json": "abc"} if scenario == "happy" else {})
+        store.write_text(json.dumps({"/p/.sandbox-ai.json": digest}) if scenario == "happy" else "not json")
+    assert s.trusted_configs() == ({"/p/.sandbox-ai.json": digest} if scenario == "happy" else {})
+    if scenario == "edge":  # a damaged store: no object, or damaged entries, is never a crash in a caller
+        said = []
+        store.write_text(json.dumps(["/p/.sandbox-ai.json"]))
+        assert s.trusted_configs(said.append) == {} and "damaged" in said[-1]
+        store.write_text(json.dumps({"/p/.sandbox-ai.json": digest, "/q/x.json": "short", "relative": digest,
+                                     "/r/y.json": None}))
+        assert s.trusted_configs(said.append) == {"/p/.sandbox-ai.json": digest}
+        assert sum("damaged entry" in line for line in said) == 3
 
 
 def test_trust_config(scenario, tmp_path, monkeypatch):
@@ -2639,8 +2648,11 @@ def test_check_host_sources(scenario, tmp_path):
         # --log-dir and --gui-vnc (bound rw) never in sandbox-ai's own folders; a private location of yours (~/.ssh)
         # is your choice: given, with a warning.
         for option in ("--log-dir", "--gui-vnc"):
-            with pytest.raises(ValueError, match=f"{option} .*sandbox-ai's own folder"):
+            # (the runs' folder holds their control sockets: refused as a folder of sockets first)
+            with pytest.raises(ValueError, match=f"{option} .*(sandbox-ai's own folder|sandbox-ai's runs)"):
                 s.validate(exposure_args(tmp_path, option, str(Path.home() / ".local/state/sandbox-ai/runs/x")))
+            with pytest.raises(ValueError, match=f"{option} .*sandbox-ai's own folder"):
+                s.validate(exposure_args(tmp_path, option, str(Path.home() / ".local/state/sandbox-ai/sessions")))
         return
     # The persistent HOME must not lie in a workspace, where it could be committed or swapped.
     (tmp_path / "work").mkdir()
@@ -2687,19 +2699,25 @@ def test_host_sources(scenario, tmp_path):
         assert "--local-config" in labels
 
 
-def test_host_stores(scenario, tmp_path):
-    options = {"happy": [], "sad": ["--no-default-kit", "--no-memory"], "edge": []}[scenario]
+def test_host_stores(scenario, tmp_path, monkeypatch):
+    """Security finding M2: the stores are protected whatever the start's agent and kit options (every sandbox, or
+    the next start of another agent, reads them); only the plugin installer's own start may hold the plugin store."""
+    options = {"happy": [], "sad": ["--no-default-kit", "--no-memory", "--no-plugins"], "edge": []}[scenario]
     args = exposure_args(tmp_path, *options)
-    if scenario == "edge":
-        args.kit = ["review"]  # a chosen kit: the kits directory is a store too
     stores = [label for _, label in s.host_stores(args)]
-    if scenario == "happy":
-        assert "the default kit" in stores and "the project memory" in stores and "the kits directory" not in stores
-    elif scenario == "sad":
-        assert "the default kit" not in stores and "the project memory" not in stores
-    else:
-        assert "the kits directory" in stores
-    assert "the plugin store" not in stores  # Claude's alone
+    for label in ("the default kit of claude", "the default kit of opencode", "the kits directory",
+                  "the project memory", "the plugin store"):
+        assert label in stores, label
+    if scenario == "edge":
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+        store = tmp_path / "data" / "sandbox-ai" / "plugins" / "claude"
+        store.mkdir(parents=True)
+        installer = s.parse_args(["claude", "--no-plugins", "--state-dir", str(store), "--workspace",
+                                  str(tmp_path / "work")])
+        held = [str(path) for path, _ in s.host_stores(installer)]
+        assert str(store) not in held, "the installer's own start writes its store"
+        other = s.parse_args(["claude", "--state-dir", str(store), "--workspace", str(tmp_path / "work")])
+        assert str(store) in [str(path) for path, _ in s.host_stores(other)], "with plugins on it is no installer"
 
 
 def test_check_stores(scenario, tmp_path):
@@ -3220,7 +3238,7 @@ def test_check_home_path(scenario, tmp_path):
 
 def test_save_trusted(scenario, tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
-    data = {"happy": {"/p/.sandbox-ai.json": "ab"}, "sad": {}, "edge": {"/ü ñ/x": "cd"}}[scenario]
+    data = {"happy": {"/p/.sandbox-ai.json": "ab" * 32}, "sad": {}, "edge": {"/ü ñ/x": "cd" * 32}}[scenario]
     s.save_trusted(data)
     assert s.trusted_configs() == data
     assert (tmp_path / "cfg/sandbox-ai").stat().st_mode & 0o777 == 0o700
@@ -3460,7 +3478,7 @@ def test_check_output_dir(scenario, tmp_path, monkeypatch):
         with pytest.raises(ValueError, match="--gui-vnc .*a socket there"):
             s.check_output_dir(run / "bus", "--gui-vnc")
         for private in (state, state / "sandbox-ai" / "logs", state / "sandbox-ai" / "runs"):
-            with pytest.raises(ValueError, match="--log-dir .*(lies in|contains)"):
+            with pytest.raises(ValueError, match="--log-dir .*(lies in|contains|is or holds)"):
                 s.check_output_dir(private, "--log-dir")
         s.check_output_dir(Path.home() / ".ssh", "--log-dir")  # yours to give: a warning, not a refusal
     else:
@@ -3509,7 +3527,7 @@ def test_auth_source_candidates(scenario, tmp_path, monkeypatch):
                                                       tmp_path / ".claude/.claude.json", tmp_path / ".claude.json"]
         # The login store feeds every sandbox: a workspace that contains it is refused.
         (tmp_path / ".local/share").mkdir(parents=True)
-        with pytest.raises(ValueError, match="agent can change|lies in |sandbox-ai's own folder"):
+        with pytest.raises(ValueError, match="agent can change|lies in |sandbox-ai's own folder|is or holds"):
             s.validate(s.parse_args(["claude", "--workspace", str(tmp_path / ".local")]))
     elif scenario == "sad":
         monkeypatch.setenv("CODEX_HOME", str(tmp_path / "work/.codex"))
@@ -7128,9 +7146,13 @@ def test_sandbox_ai_folders(scenario, tmp_path, monkeypatch):
         assert set(s.sandbox_ai_folders()) == {tmp_path / ".config/sandbox-ai", tmp_path / ".local/share/sandbox-ai",
                                                 tmp_path / ".local/state/sandbox-ai", tmp_path / ".cache/sandbox-ai"}
     elif scenario == "sad":
+        # Security finding L2: both where XDG_* point and the default places (the app, the web UI, another start
+        # may run with other values).
         monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
         assert tmp_path / "cfg/sandbox-ai" in s.sandbox_ai_folders()
-        assert tmp_path / ".config/sandbox-ai" not in s.sandbox_ai_folders()
+        assert tmp_path / ".config/sandbox-ai" in s.sandbox_ai_folders()
+        with pytest.raises(ValueError, match="sandbox-ai's own folder"):
+            s.check_private_location(tmp_path / ".config/sandbox-ai/x", "--mount")
     else:
         (tmp_path / "real").mkdir()
         (tmp_path / "link").symlink_to(tmp_path / "real")
@@ -7187,39 +7209,63 @@ def test_own_home(scenario, tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.setattr(s.Path, "home", classmethod(lambda cls: tmp_path))
     state = tmp_path / "state" / "sandbox-ai"
-    if scenario == "happy":  # a session's HOME and the wizard's persistent HOME are no private locations
-        assert s.own_home(state / "sessions" / "web" / "home")
-        s.check_private_location(state / "home" / "app-0123456789ab", "--state-dir")
-    elif scenario == "sad":  # their siblings stay private: session.json, logs, the registry
-        assert not s.own_home(state / "sessions" / "web")
+    own = [state / "sessions" / "web" / "home"]
+    if scenario == "happy":  # the start's own folders (own_folders) are no private locations for it
+        assert s.own_home(state / "sessions" / "web" / "home", own)
+        assert s.own_home(state / "sessions" / "web" / "home" / ".claude", own)
+        assert s.check_private_location(state / "sessions" / "web" / "home", "--state-dir", own=own) is None
+    elif scenario == "sad":  # their siblings stay sandbox-ai's own: session.json, logs, the registry
+        assert not s.own_home(state / "sessions" / "web", own)
         with pytest.raises(ValueError, match="lies in"):
-            s.check_private_location(state / "logs", "--state-dir")
-    else:  # the installed launcher's versions are not among them
-        assert not s.own_home(tmp_path / "data" / "sandbox-ai" / "versions" / "0.1.21")
+            s.check_private_location(state / "logs", "--state-dir", own=own)
+        # Security finding M2: no other start gets the exception, not even for a session's HOME.
+        assert not s.own_home(state / "sessions" / "web" / "home")
+        with pytest.raises(ValueError, match="sandbox-ai's own folder"):
+            s.check_private_location(state / "sessions" / "web" / "home", "--mount")
+    else:  # the installed launcher's versions are never among them
+        assert not s.own_home(tmp_path / "data" / "sandbox-ai" / "versions" / "0.1.21", own)
 
 
 def test_sandbox_ais_own_work_folders_are_workspaces_under_dot_local(tmp_path, monkeypatch):
     """The default layout (no XDG_* set): everything below ~/.local. The work folders of sandbox-ai's own
     sandboxes are their workspaces: a login's (sandbox-ai login refused every login on a new host), an MCP
-    server's without one of its own (the demo server), a team's board. Their siblings stay refused."""
+    server's without one of its own (the demo server), a team's board. Their siblings stay refused, and (security
+    finding M2) so do they for any start but that one."""
     for name in ("XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(s.Path, "home", classmethod(lambda cls: tmp_path))
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     local = tmp_path / ".local"
-    allowed = [local / "share/sandbox-ai/auth/.login-claude-abc/work", local / "share/sandbox-ai/auth/.login-claude-abc/home",
-               local / "state/sandbox-ai/mcp/demo/work", local / "state/sandbox-ai/mcp/demo/home",
-               local / "state/sandbox-ai/teams/app/board"]
+    login = local / "share/sandbox-ai/auth/.login-claude-abc"
+    mcp = local / "state/sandbox-ai/mcp"
+    starts = [  # (the start's options, the folders it may be given)
+        (["claude", "--no-auth", "--state-dir", str(login / "home"), "--workspace", str(login / "work")],
+         [login / "work", login / "home"]),
+        (["codex", "--mcp-socket-dir", str(mcp / "demo/sock"), "--state-dir", str(mcp / "demo/home"),
+          "--workspace", str(mcp / "demo/work")], [mcp / "demo/work", mcp / "demo/home"]),
+        (["codex", "--mcp-socket-dir", str(mcp / "team-app/sock"), "--workspace",
+          str(local / "state/sandbox-ai/teams/app/board")], [local / "state/sandbox-ai/teams/app/board"])]
     refused = [local / "share/sandbox-ai/auth", local / "share/sandbox-ai/auth/claude",
                local / "state/sandbox-ai/mcp/demo", local / "state/sandbox-ai/mcp/demo/sock",
                local / "state/sandbox-ai/teams/app", local / "state/sandbox-ai/teams", local / "share/sandbox-ai"]
-    for path in allowed + refused:
-        path.mkdir(parents=True, exist_ok=True)
-    for path in allowed:
-        s.check_workspace_scope(path.resolve())
+    for _, allowed in starts:
+        for path in allowed:
+            path.mkdir(parents=True, exist_ok=True)
     for path in refused:
-        with pytest.raises(ValueError, match="lies in"):
-            s.check_workspace_scope(path.resolve())
+        path.mkdir(parents=True, exist_ok=True)
+    for options, allowed in starts:
+        own = s.own_folders(s.parse_args(options))
+        for path in allowed:
+            s.check_workspace_scope(path.resolve(), own)
+            with pytest.raises(ValueError, match="sandbox-ai's own folder"):
+                s.check_workspace_scope(path.resolve())  # any other start
+        for path in refused:
+            with pytest.raises(ValueError, match="lies in|contains"):
+                s.check_workspace_scope(path.resolve(), own)
+    # Another login's or server's folders are not this start's own.
+    other = s.own_folders(s.parse_args(["claude", "--state-dir", str(login / "home"), "--workspace",
+                                        str(tmp_path / "project")]))
+    assert other == []
 
 
 def test_project_tool_dir(scenario, tmp_path, monkeypatch):
@@ -8646,9 +8692,20 @@ def mcp_request(path, message, timeout=10):
         return json.loads(line) if line else None
 
 
-def test_mcp_control(scenario, tmp_path):
+def test_mcp_control(scenario, tmp_path, monkeypatch):
     """mcp-open hands the relay a descriptor of the server's socket directory: the agent reaches the server through
-    the run's relay at once (and mcp-calls.jsonl says so); mcp-close cuts it; policy, mode and odd requests refuse."""
+    the run's relay at once (and mcp-calls.jsonl says so); mcp-close cuts it; policy, mode and odd requests refuse.
+    The descriptor must be a detached clone (detached_root): a host directory's own is refused (finding M4)."""
+    if scenario == "sad":
+        with pytest.raises(ValueError, match="no detached copy"):
+            plain = os.open(tmp_path, os.O_PATH | os.O_DIRECTORY)
+            try:
+                rt.mcp_control({"op": "mcp-open", "name": "web", "relay": {"server": "web"}},
+                               rt.McpRelays(run_dir=tmp_path / "r", live=True), [plain])
+            finally:
+                os.close(plain)
+    # Here the test's own folders stand in for the clone (open_tree needs the sandbox's namespaces).
+    monkeypatch.setattr(rt, "detached_root", lambda fd: True)
     base = Path(tempfile.mkdtemp(prefix="mcpc-", dir="/tmp"))
     upstream = base / "up"
     upstream.mkdir()
@@ -10105,3 +10162,439 @@ def test_check_package_location(scenario, tmp_path, monkeypatch):
         monkeypatch.delenv("SANDBOX_AI_PACKAGE")
         monkeypatch.delenv("SANDBOX_AI_PACKAGE_COPY")
         s.check_package_location(package.parent, "Workspace")
+
+
+# --- security review round 4: every way a host path enters a sandbox ------------------------------------------
+
+
+def short_dir(prefix):
+    """A folder short enough for Unix socket paths (107 bytes)."""
+    return Path(tempfile.mkdtemp(prefix=prefix, dir="/tmp"))
+
+
+def listening_socket(path):
+    listener = socket.socket(socket.AF_UNIX)
+    listener.bind(str(path))
+    listener.listen(1)
+    return listener
+
+
+def test_login_locations(scenario, tmp_path, monkeypatch):
+    monkeypatch.setattr(s.Path, "home", classmethod(lambda cls: tmp_path))
+    for name in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME"):
+        monkeypatch.delenv(name, raising=False)
+    found = dict(s.login_locations())
+    if scenario == "happy":
+        assert "Claude Code" in found[tmp_path / ".claude"] and "Codex" in found[tmp_path / ".codex"]
+        assert "OpenCode" in found[tmp_path / ".local/share/opencode"] and tmp_path / ".aws" in found
+    elif scenario == "sad":  # a relative variable is no folder
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", "relative/dir")
+        assert all("CLAUDE_CONFIG_DIR" not in label for label in dict(s.login_locations()).values())
+    else:
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "elsewhere"))
+        assert "CODEX_HOME" in dict(s.login_locations())[tmp_path / "elsewhere"]
+
+
+def test_own_folders(scenario, tmp_path, monkeypatch):
+    """Security finding M2: only sandbox-ai's own internal start of a folder gets it."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    state, data = tmp_path / "state/sandbox-ai", tmp_path / "data/sandbox-ai"
+    if scenario == "happy":
+        # The plugin installer's own start: the store and its work folder beside it.
+        a = s.parse_args(["claude", "--no-plugins", "--state-dir", str(data / "plugins/claude"),
+                          "--workspace", str(data / "plugins/.work-abc")])
+        assert s.own_folders(a) == [data / "plugins/claude", data / "plugins/.work-abc"]
+        # The wizard's persistent HOME of this project (its digest), and a session's own HOME.
+        project = tmp_path / "app"
+        digest = hashlib.sha256(os.fsencode(str(project))).hexdigest()[:12]
+        a = s.parse_args(["codex", "--state-dir", str(state / f"home/app-{digest}"), "--workspace", str(project)])
+        assert s.own_folders(a) == [state / f"home/app-{digest}"]
+        monkeypatch.setattr(s, "kept_start_dir", lambda a: state / "sessions/web")
+        assert state / "sessions/web/home" in s.own_folders(s.parse_args(["codex"]))
+    elif scenario == "sad":
+        # The same folders for a start that is not theirs: none.
+        assert s.own_folders(s.parse_args(["claude", "--state-dir", str(data / "plugins/claude")])) == []
+        assert s.own_folders(s.parse_args(["codex", "--state-dir", str(state / "home/app-000000000000"),
+                                           "--workspace", str(tmp_path / "app")])) == []
+        assert s.own_folders(s.parse_args(["codex", "--mcp-socket-dir", str(tmp_path / "elsewhere/sock")])) == []
+    else:  # an MCP server: home/ and work/ beside its socket folder; a team's board for team-NAME
+        a = s.parse_args(["codex", "--mcp-socket-dir", str(state / "mcp/team-app/sock")])
+        assert s.own_folders(a) == [state / "mcp/team-app/home", state / "mcp/team-app/work",
+                                    state / "teams/app/board"]
+
+
+def test_launcher_trees(scenario, monkeypatch, tmp_path):
+    if scenario == "happy":  # run from this checkout: the whole tree (install.sh beside sandbox/)
+        assert s.launcher_trees() == [s.HERE, s.HERE.parent]
+    elif scenario == "sad":  # a sandbox/ folder elsewhere (a Python package): itself only
+        (tmp_path / "sandbox").mkdir()
+        monkeypatch.setattr(s, "HERE", tmp_path / "sandbox")
+        assert s.launcher_trees() == [tmp_path / "sandbox"]
+    else:
+        (tmp_path / "sandbox").mkdir()
+        (tmp_path / "install.sh").write_text("")
+        (tmp_path / "sandbox/agent_sandbox.py").write_text("")
+        monkeypatch.setattr(s, "HERE", tmp_path / "sandbox")
+        assert s.launcher_trees() == [tmp_path / "sandbox", tmp_path]
+
+
+def test_in_launcher_tree(scenario):
+    if scenario == "happy":
+        assert s.in_launcher_tree(s.HERE / "agent_mcp.py") and s.in_launcher_tree(s.HERE.parent / "install.sh")
+    elif scenario == "sad":
+        assert not s.in_launcher_tree(Path("/usr/bin"))
+    else:  # a folder holding it is not in it
+        assert not s.in_launcher_tree(s.HERE.parent.parent)
+
+
+def test_live_socket(scenario):
+    directory = short_dir("ls-")
+    try:
+        if scenario == "happy":
+            with listening_socket(directory / "s"):
+                assert s.live_socket(directory / "s")
+        elif scenario == "sad":  # nothing listens any longer: a stale file
+            listening_socket(directory / "s").close()
+            assert not s.live_socket(directory / "s")
+            assert not s.live_socket(directory / "gone")
+        else:  # a datagram socket answers no connect: someone is there
+            with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as datagram:
+                datagram.bind(str(directory / "d"))
+                assert s.live_socket(directory / "d")
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def test_sockets_below(scenario):
+    directory = short_dir("sb-")
+    try:
+        (directory / "a/b").mkdir(parents=True)
+        if scenario == "happy":
+            assert s.sockets_below(directory) == (None, True)
+            with listening_socket(directory / "a/b/S.gpg-agent"):
+                assert s.sockets_below(directory) == (directory / "a/b/S.gpg-agent", True)
+                assert s.sockets_below(directory / "a/b/S.gpg-agent")[0] is not None  # the socket itself
+        elif scenario == "sad":  # links are not followed, stale sockets are no way anywhere
+            listening_socket(directory / "stale").close()
+            (directory / "link").symlink_to("/run")
+            assert s.sockets_below(directory) == (None, True)
+        else:  # past its budget: not looked at in full
+            for index in range(5):
+                (directory / f"f{index}").write_text("")
+            assert s.sockets_below(directory, entries=3) == (None, False)
+            assert s.sockets_below(directory, depth=1) == (None, False)
+            assert s.sockets_below(directory / "missing") == (None, True)
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def test_check_sockets_below(scenario, monkeypatch):
+    """Finding H6: a tree with a live socket in it (gpg-agent's, an SSH ControlMaster's ~/.ssh/cm-*) is refused."""
+    directory = short_dir("csb-")
+    try:
+        if scenario == "happy":
+            assert s.check_sockets_below(directory, "--mount") is None
+        elif scenario == "sad":
+            with listening_socket(directory / "cm-host"):
+                with pytest.raises(ValueError, match="holds the socket .*cm-host"):
+                    s.check_sockets_below(directory, "--mount")
+        else:
+            monkeypatch.setattr(s, "SOCKET_SCAN_ENTRIES", 1)
+            (directory / "x").write_text("")
+            (directory / "y").write_text("")
+            said = []
+            assert "could not be ruled out" in s.check_sockets_below(directory, "Workspace", said.append)
+            assert said
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def test_check_given_path(scenario, tmp_path, monkeypatch):
+    """Findings H1/M1: read-only too, a host path never reaches sandbox-ai's own folders; private ones warn."""
+    home = tmp_path / "home"
+    monkeypatch.setattr(s.Path, "home", classmethod(lambda cls: home))
+    for name in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("PATH", "/usr/bin")
+    if scenario == "happy":
+        said = []
+        s.check_given_path(tmp_path / "project", "--mount", False, warn=said.append)
+        assert said == []
+        s.check_given_path(home / ".ssh", "--mount", False, warn=said.append)
+        assert said and ".ssh" in said[0]
+        # The launcher's own files read-only (an MCP helper's script): given as they are, without a warning.
+        s.check_given_path(s.HERE / "agent_mcp.py", "--mount", False, warn=said.append)
+        assert len(said) == 1
+    elif scenario == "sad":
+        for path in (home / ".local/share/sandbox-ai", home / ".local", home / ".local/state/sandbox-ai/sessions"):
+            with pytest.raises(ValueError, match="sandbox-ai's own folder|sandbox-ai's runs"):
+                s.check_given_path(path, "--mount", False)
+        with pytest.raises(ValueError, match="sandbox-ai's own launcher"):
+            s.check_given_path(s.HERE / "agent_mcp.py", "--mount", True)
+    else:  # further own folders a start recorded (another XDG_* environment)
+        with pytest.raises(ValueError, match="sandbox-ai's own folder"):
+            s.check_given_path(tmp_path / "elsewhere/sandbox-ai/x", "Workspace", True,
+                               refused=[tmp_path / "elsewhere/sandbox-ai"])
+
+
+def test_check_held_both_ways(scenario, tmp_path):
+    """Finding L3: a tree inside what the launcher reads (--privacy-rules, a --kit-dir) is refused."""
+    rules = tmp_path / "rules"
+    if scenario == "happy":
+        s.check_held_both_ways([tmp_path / "work"], rules, "--privacy-rules")
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="lies inside .*--privacy-rules"):
+            s.check_held_both_ways([rules / "sub"], rules, "--privacy-rules")
+    else:  # through a link: by where it leads
+        rules.mkdir()
+        (tmp_path / "link").symlink_to(rules)
+        with pytest.raises(ValueError, match="--kit-dir"):
+            s.check_held_both_ways([rules / "claude"], tmp_path / "link", "--kit-dir")
+
+
+def test_gnupg_socket_dir(scenario, monkeypatch, tmp_path):
+    monkeypatch.setattr(s, "_GNUPG_SOCKETS", {})
+    if scenario == "happy":
+        monkeypatch.setattr(s.shutil, "which", lambda name: "/usr/bin/gpgconf")
+        monkeypatch.setattr(s.subprocess, "run", lambda *a, **k: SimpleNamespace(
+            returncode=0, stdout="/run/user/1000/gnupg\n"))
+        assert s.gnupg_socket_dir() == Path("/run/user/1000/gnupg")
+    elif scenario == "sad":  # no gpgconf: nothing, no failure
+        monkeypatch.setattr(s.shutil, "which", lambda name: None)
+        assert s.gnupg_socket_dir() is None
+    else:  # it fails or answers nonsense
+        monkeypatch.setattr(s.shutil, "which", lambda name: "/usr/bin/gpgconf")
+        monkeypatch.setattr(s.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout="relative\n"))
+        assert s.gnupg_socket_dir() is None
+
+
+def test_read_only_mounts_get_every_check(tmp_path, monkeypatch):
+    """Finding H1: --mount ~/.local/share/sandbox-ai:/mnt/x:ro and ~/.local:/mnt/l:ro were accepted silently."""
+    home = Path.home()
+    for path in (home / ".local/share/sandbox-ai", home / ".ssh", tmp_path / "work"):
+        path.mkdir(parents=True, exist_ok=True)
+    for source in (home / ".local/share/sandbox-ai", home / ".local"):
+        with pytest.raises(ValueError, match="sandbox-ai's own folder|sandbox-ai's runs"):
+            s.validate(s.parse_args(["codex", "--workspace", str(tmp_path / "work"), "--mount",
+                                     f"{source}:/mnt/x:ro"]))
+
+
+def test_runs_without_xdg_runtime_dir_are_a_socket_location(tmp_path, monkeypatch):
+    """Finding H1: without XDG_RUNTIME_DIR the runs register in XDG_STATE_HOME/sandbox-ai/runs."""
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    folders = [path for path, _ in s.socket_locations()]
+    assert s.runs_dir().resolve() in folders and (tmp_path / "state/sandbox-ai/runs").resolve() in folders
+    assert (Path.home() / ".local/state/sandbox-ai/runs").resolve() in folders  # the default place too
+    assert (Path.home() / ".gnupg").resolve() in folders  # finding H6
+    with pytest.raises(ValueError, match="sandbox-ai's runs"):
+        s.check_socket_location((tmp_path / "state/sandbox-ai/runs/codex-1").resolve(), "--mount")
+
+
+def test_workspace_below_the_launcher_tree_is_refused():
+    """Finding M3: at or below sandbox/ and, from a checkout, below the tree (the app, install.sh, scripts)."""
+    for path in (s.HERE / "builtin", s.HERE.parent / "projects/sandbox-ai-app", s.HERE.parent / "scripts",
+                 s.HERE.parent / "install.sh"):
+        with pytest.raises(ValueError, match="sandbox-ai's own launcher"):
+            s.check_workspace_scope(path)
+
+
+def test_private_files_and_login_folders_warn(tmp_path, monkeypatch):
+    """Findings L1/H5: files directly in HOME and the agents' login folders are given with a warning that says what
+    they are (the owner's decision: given, not refused)."""
+    home = Path.home()
+    home.mkdir(exist_ok=True)
+    for name in (".bashrc", ".gitconfig", ".netrc", ".claude.json", ".other"):
+        (home / name).write_text("")
+    (home / ".claude").mkdir()
+    said = []
+    for name, words in ((".bashrc", "shell"), (".gitconfig", "Git"), (".netrc", "credentials"),
+                        (".claude.json", "Claude Code"), (".other", "a file of your HOME")):
+        text = s.check_private_location(home / name, "Workspace", said.append)
+        assert text and words in text, (name, text)
+    assert "Claude Code's folder" in s.check_private_location(home / ".claude", "--mount", said.append)
+    assert s.check_private_location(home / "project", "Workspace", said.append) is None
+
+
+def test_workspace_checks_record_own_folders(tmp_path):
+    """Finding L2: a later workspace add refuses sandbox-ai's own folders as this start saw them."""
+    checks = s.workspace_checks(exposure_args(tmp_path), tmp_path / "session")
+    assert str((Path.home() / ".config/sandbox-ai").resolve()) in checks["own_folders"]
+
+
+def test_control_peer_refused(scenario):
+    """Finding H1 (defence in depth): a peer whose pid shows in the sandbox's PID namespace is refused."""
+    left, right = socket.socketpair(socket.AF_UNIX)
+    with left, right:
+        if scenario == "happy":  # outside a sandbox's namespace (tests): nothing refused; its own pid neither
+            assert rt.control_peer_refused(left) is None
+            assert rt.control_peer_refused(left, sandboxed=True) is None
+        elif scenario == "sad":  # another process of the sandbox
+            child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE,
+                                     pass_fds=(right.fileno(),))
+            try:
+                # The peer of the pair is this process; a peer of another pid stands in through a fake.
+                fake = SimpleNamespace(getsockopt=lambda *a: struct.pack("3i", child.pid, 0, 0))
+                assert "may not use the control socket" in rt.control_peer_refused(fake, sandboxed=True)
+            finally:
+                child.stdin.close()
+                child.wait(5)
+        else:  # outside the namespace: pid 0, the human's CLI
+            fake = SimpleNamespace(getsockopt=lambda *a: struct.pack("3i", 0, 1000, 1000))
+            assert rt.control_peer_refused(fake, sandboxed=True) is None
+            broken = SimpleNamespace(getsockopt=Mock(side_effect=OSError("gone")))
+            assert "cannot be told" in rt.control_peer_refused(broken, sandboxed=True)
+
+
+def test_detached_root(scenario, tmp_path):
+    if scenario == "happy":  # '..' of a tree's root is itself (as a detached clone's is)
+        fd = os.open("/", os.O_PATH | os.O_DIRECTORY)
+        try:
+            assert rt.detached_root(fd)
+        finally:
+            os.close(fd)
+    elif scenario == "sad":  # a host directory leads to its parent
+        fd = os.open(tmp_path, os.O_PATH | os.O_DIRECTORY)
+        try:
+            assert not rt.detached_root(fd)
+        finally:
+            os.close(fd)
+    else:
+        assert not rt.detached_root(987654)
+
+
+def test_control_server_survives_a_failing_request_and_refuses_sandbox_peers(tmp_path, monkeypatch):
+    """Round 4: a thread that cannot be started (the pids limit) refuses that request; the socket keeps serving. And
+    a peer inside the sandbox's PID namespace is refused (sandboxed)."""
+    directory = short_dir("cs-")
+    stop = threading.Event()
+    relays = rt.McpRelays(run_dir=directory / "relays", live=True)
+
+    def no_thread(*args, **kwargs):
+        raise RuntimeError("can't start new thread")
+    monkeypatch.setattr(relays, "attach", no_thread)
+    monkeypatch.setattr(rt, "detached_root", lambda fd: True)
+    network = rt.RuntimeNetwork({}, None, lambda script: None)
+    thread = threading.Thread(target=rt.control_server, args=(directory / "c.sock", network, stop, [], None, None,
+                                                              relays), daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 5
+    while not (directory / "c.sock").exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    def ask(request, fds=()):
+        with socket.socket(socket.AF_UNIX) as client:
+            client.settimeout(10)
+            client.connect(str(directory / "c.sock"))
+            data = json.dumps(request).encode() + b"\n"
+            if fds:
+                socket.send_fds(client, [data], list(fds))
+            else:
+                client.sendall(data)
+            return json.loads(client.makefile().readline())
+    try:
+        fd = os.open(directory, os.O_PATH | os.O_DIRECTORY)
+        try:
+            answer = ask({"op": "mcp-open", "name": "web", "relay": {"server": "web"}}, [fd])
+        finally:
+            os.close(fd)
+        assert not answer["ok"] and "thread" in answer["error"]
+        assert ask({"op": "show"})["ok"], "still serving"
+    finally:
+        stop.set()
+        thread.join(5)
+        shutil.rmtree(directory, ignore_errors=True)
+    # The same socket in a sandbox: this process's own pid passes, another's would not (test_control_peer_refused).
+    directory = short_dir("cs-")
+    stop = threading.Event()
+    monkeypatch.setattr(rt, "control_peer_refused", lambda connection, sandboxed=None: "process 7 of the sandbox "
+                        "may not use the control socket" if sandboxed else None)
+    thread = threading.Thread(target=rt.control_server, args=(directory / "c.sock", network, stop),
+                              kwargs={"sandboxed": True}, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 5
+    while not (directory / "c.sock").exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    try:
+        with socket.socket(socket.AF_UNIX) as client:  # refused before it reads anything
+            client.settimeout(10)
+            client.connect(str(directory / "c.sock"))
+            answer = json.loads(client.makefile().readline())
+        assert not answer["ok"] and "may not use the control socket" in answer["error"]
+    finally:
+        stop.set()
+        thread.join(5)
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def test_relay_connect_never_holds_the_lock(tmp_path):
+    """Round 4 (HIGH): a server that takes no connections (its backlog full) must not hold up close() or add():
+    the relay connects with a timeout, without its lock."""
+    directory = short_dir("rc-")
+    listener = socket.socket(socket.AF_UNIX)
+    listener.bind(str(directory / "server.sock"))
+    listener.listen(0)
+    fillers = []
+    try:
+        for _ in range(8):  # fill the backlog: the next connect waits
+            filler = socket.socket(socket.AF_UNIX)
+            filler.setblocking(False)
+            try:
+                filler.connect(str(directory / "server.sock"))
+            except BlockingIOError:
+                pass
+            fillers.append(filler)
+        relay = rt.McpRelay(None, os.open(directory, os.O_PATH | os.O_DIRECTORY))
+        errors = []
+
+        def connect():
+            try:
+                relay.connect()
+            except OSError as exc:
+                errors.append(exc)
+        worker = threading.Thread(target=connect, daemon=True)
+        started = time.monotonic()
+        worker.start()
+        time.sleep(0.3)
+        pair = socket.socketpair()
+        fillers += pair
+        assert relay.add(pair[0]) is True and time.monotonic() - started < 2, "add() was not held up"
+        assert relay.close() is True
+        worker.join(rt.MCP_CONNECT_SECONDS + 5)
+        assert not worker.is_alive()
+    finally:
+        for filler in fillers:
+            filler.close()
+        listener.close()
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def test_update_json_defaults_keeps_the_mode(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "c.json").write_text("{}")
+    (home / "c.json").chmod(0o640)
+    s.update_json_defaults(home, "c.json", lambda d: d.setdefault("k", 1) == 1, keep_mode=True)
+    assert stat.S_IMODE((home / "c.json").stat().st_mode) == 0o640
+    s.update_json_defaults(home, "c.json", lambda d: d.setdefault("j", 1) == 1)
+    assert stat.S_IMODE((home / "c.json").stat().st_mode) == 0o600
+
+
+def test_stores_and_other_starts_folders_are_refused_for_any_start(tmp_path, monkeypatch):
+    """Finding M2: the plugin store is protected also for a codex start or one with --no-plugins, and another
+    session's HOME, an MCP server's HOME or a login's staging folder is no start's but its own."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    state, data = tmp_path / "state/sandbox-ai", tmp_path / "data/sandbox-ai"
+    for path in (data / "plugins/claude/x", state / "sessions/other/home", state / "mcp/demo/home",
+                 data / "auth/.login-claude-a/home", tmp_path / "work"):
+        path.mkdir(parents=True, exist_ok=True)
+    for options in (["codex", "--workspace", str(data / "plugins/claude/x")],
+                    ["claude", "--no-plugins", "--workspace", str(data / "plugins/claude/x")],
+                    ["codex", "--workspace", str(tmp_path / "work"), "--state-dir", str(state / "sessions/other/home")],
+                    ["codex", "--workspace", str(tmp_path / "work"), "--mount", f"{state / 'mcp/demo/home'}:/mnt/h:ro"],
+                    ["codex", "--workspace", str(tmp_path / "work"), "--state-dir",
+                     str(data / "auth/.login-claude-a/home")]):
+        with pytest.raises(ValueError, match="sandbox-ai's own folder|plugin store"):
+            s.validate(s.parse_args(options))

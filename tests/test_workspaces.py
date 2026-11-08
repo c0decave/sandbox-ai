@@ -171,7 +171,7 @@ def run(tmp_path, monkeypatch):
                                    "private": [[str(logs), "--log-dir"]],
                                    "stores": [[str(store), "the kits directory"]]}}
     monkeypatch.setattr(L, "load_policy", lambda path=None: {})
-    monkeypatch.setattr(L, "check_workspace_scope", lambda path: None)
+    monkeypatch.setattr(L, "check_workspace_scope", lambda path, *a, **k: None)
     monkeypatch.setattr(L, "exposed_before", lambda: [])
     return record, tmp_path
 
@@ -210,7 +210,7 @@ def test_a_workspace_gets_the_checks_of_a_start(run, monkeypatch):
 def test_the_scope_checks_of_a_start_hold(run, monkeypatch):
     record, tmp = run
     calls = []
-    monkeypatch.setattr(L, "check_workspace_scope", lambda path: calls.append(path) or (_ for _ in ()).throw(
+    monkeypatch.setattr(L, "check_workspace_scope", lambda path, *a, **k: calls.append(path) or (_ for _ in ()).throw(
         ValueError("is or contains your HOME directory")))
     with pytest.raises(ValueError, match="HOME directory"):
         w.judged(record, Path(make(tmp / "fresh")))
@@ -407,7 +407,7 @@ def test_the_start_records_what_a_later_workspace_is_checked_against(tmp_path, m
     workspace, other, state = tmp_path / "w", tmp_path / "x" / "lib", tmp_path / "state"
     for directory in (workspace, other, state, tmp_path / "data"):
         directory.mkdir(parents=True)
-    monkeypatch.setattr(L, "check_workspace_scope", lambda path: None)
+    monkeypatch.setattr(L, "check_workspace_scope", lambda path, *a, **k: None)
     a = L.parse_args(["claude", "--workspace", f"{workspace},{other}", "--state-dir", str(state),
                       "--mount", f"{tmp_path}/data:/mnt/data:ro", "--workspace-ro"])
     a.sandbox_home = tmp_path / "home"
@@ -1103,3 +1103,118 @@ def test_the_start_takes_workspace_names_as_kept(scenario, tmp_path):
                                      "--no-config"]))
         assert "--workspace-name" not in L.build_parser().format_help()
         assert L.WORKSPACE_NAME == w.NAME.pattern
+
+
+# --- security review round 4 ---------------------------------------------------------------------------------
+
+
+def test_held_paths_are_checked_both_ways(run):
+    """Finding L3: a file or folder inside --privacy-rules or a --kit-dir is refused, not only one holding them; a
+    --copy source is only copied in (both ways is not needed there)."""
+    record, tmp = run
+    rules, kit = tmp / "privacy", tmp / "kitdir"
+    record["workspace_checks"]["held"] += [[str(rules), "--privacy-rules"], [str(kit), "--kit-dir"],
+                                           [str(tmp / "copied"), "--copy"]]
+    for inside, why in ((rules / "sub", "--privacy-rules"), (kit / "claude", "--kit-dir")):
+        with pytest.raises(ValueError, match=f"lies in .*{why}.*which the launcher reads"):
+            w.judged(record, Path(make(inside)).resolve())
+    (rules / "rules.json").write_text("{}")
+    with pytest.raises(ValueError, match="--privacy-rules"):
+        w.judged(record, (rules / "rules.json").resolve(), kind="file")
+    assert w.judged(record, Path(make(tmp / "copied" / "x")).resolve()) == "rw"
+
+
+def test_the_starts_own_folders_are_refused_later_too(run, monkeypatch):
+    """Finding L2: the start recorded sandbox-ai's own folders as it saw them (its XDG_*): a later add from another
+    environment refuses them too."""
+    record, tmp = run
+    monkeypatch.undo()  # the real check_workspace_scope
+    monkeypatch.setattr(L, "load_policy", lambda path=None: {})
+    monkeypatch.setattr(L, "exposed_before", lambda: [])
+    own = tmp / "other-xdg" / "sandbox-ai"
+    record["workspace_checks"]["own_folders"] = [str(own)]
+    with pytest.raises(ValueError, match="sandbox-ai's own folder"):
+        w.judged(record, Path(make(own / "sessions" / "x")).resolve())
+    assert w.judged(record, Path(make(tmp / "project")).resolve()) == "rw"
+
+
+def test_a_replaced_file_is_listed_so_and_added_again(run, monkeypatch):
+    """Round 4: an editor's atomic save replaces the host file; the list says "replaced" and an add of the path takes
+    the old one out first instead of refusing it as an overlap."""
+    record, tmp = run
+    calls, lines = [], []
+    monkeypatch.setattr(w, "session_of", lambda r: None)
+    runner = lambda op, found, name, *rest, **kw: calls.append((op, name)) or (0, "")  # noqa: E731
+    path = tmp / "elsewhere" / "notes.txt"
+    path.parent.mkdir()
+    path.write_text("x")
+    w.add(record, str(path), out=lines.append, runner=runner, finder=fake_found, remember=lambda t: None)
+    assert w.listing(record)[-1]["state"] == "attached"
+    replacement = path.with_name(".notes.txt.swp")
+    replacement.write_text("y")
+    os.replace(replacement, path)  # as an editor saves
+    row = w.listing(record)[-1]
+    assert row["state"] == "replaced" and "add it again" in row["note"]
+    assert "replaced" in w.list_lines(record, w.listing(record))[-1]
+    w.add(record, str(path), out=lines.append, runner=runner, finder=fake_found, remember=lambda t: None)
+    assert [op for op, _ in calls] == ["add", "remove", "add"]
+    assert any("was replaced on the host" in line for line in lines)
+    present = w.present_workspaces(record)
+    assert len(present) == 1 and present[0]["identity"] == [path.stat().st_dev, path.stat().st_ino]
+
+
+def test_detached_copy_hands_over_the_helpers_descriptor(run, tmp_path):
+    """Finding M4: the socket folder goes to the supervisor as a detached clone, made by a helper in the sandbox's
+    user namespace (its descriptor comes back over a socket); a helper that fails is a ValueError."""
+    record, tmp = run
+    proc = tmp_path / "proc"
+    (proc / "100").mkdir(parents=True)
+    (proc / "100" / "stat").write_text("100 (python3) S " + " ".join(["0"] * 18) + " 4242 0\n")
+    folder = tmp_path / "sock"
+    folder.mkdir()
+    seen = []
+
+    def runner(command, **kwargs):
+        request = json.loads(command[-1])
+        seen.append(request)
+        import socket
+        with socket.socket(fileno=os.dup(request["channel"])) as channel:
+            fd = os.open(folder, os.O_PATH | os.O_DIRECTORY)
+            socket.send_fds(channel, [b"t"], [fd])
+            os.close(fd)
+        return subprocess.CompletedProcess(command, 0, "", "")
+    fd = w.detached_copy(record, folder, (1, 2), finder=fake_found, proc=proc, runner=runner)
+    try:
+        assert os.path.samestat(os.fstat(fd), folder.stat())
+        assert seen[0]["op"] == "clone" and seen[0]["user"] == 100 and seen[0]["identity"] == [1, 2]
+        assert seen[0]["starts"] == {"100": 4242} and seen[0]["source"] == str(folder)
+    finally:
+        os.close(fd)
+    with pytest.raises(ValueError, match="mount API"):
+        w.detached_copy(record, folder, (1, 2), finder=fake_found, proc=proc, runner=lambda c, **k:
+                        subprocess.CompletedProcess(c, 1, "", "clone: this kernel lacks the new mount API"))
+    with pytest.raises(ValueError, match="has it ended"):
+        w.detached_copy(record, folder, (1, 2), finder=lambda r: None, proc=proc, runner=runner)
+
+
+def test_the_clone_helper_enters_the_sandbox_and_sends_a_read_only_clone(tmp_path):
+    proc = tmp_path / "proc"
+    (proc / "100" / "ns").mkdir(parents=True)
+    (proc / "100" / "ns" / "user").write_text("")
+    (proc / "100" / "stat").write_text("100 (python3) S " + " ".join(["0"] * 18) + " 4242 0\n")
+    folder = tmp_path / "sock"
+    folder.mkdir()
+    info = folder.stat()
+    import socket
+    ours, theirs = socket.socketpair()
+    c = FakeLibc()
+    with ours:
+        assert w.clone_helper(100, str(folder), [info.st_dev, info.st_ino], {"100": 4242}, theirs.detach(), proc, c) == 0
+        _, fds, _, _ = socket.recv_fds(ours, 16, 1)
+    for fd in fds:
+        os.close(fd)
+    assert len(fds) == 1
+    assert ("setns", w.CLONE_NEWUSER) in c.calls and ("unshare", w.CLONE_NEWNS) in c.calls
+    assert ("syscall", w.SYS_MOUNT_SETATTR) in c.calls
+    with pytest.raises(OSError, match="gone"):
+        w.clone_helper(100, str(folder), [info.st_dev, info.st_ino], {"100": 1}, -1, proc, FakeLibc())

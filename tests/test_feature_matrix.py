@@ -2275,7 +2275,9 @@ def vpn_keys_never_reach_a_sandbox_through_a_mount(m):
     for options in (["--mount", f"{host}/.config:/mnt/cfg:ro"], ["--mount", f"{host}/.local/share/sandbox-ai:/opt/x:ro"],
                     ["--copy", f"{host}/.local/share/sandbox-ai/secrets/VPN_CORP_KEY:.key"],
                     ["--git-token-file", f"https://git.example.org={host}/.local/share/sandbox-ai/secrets/VPN_CORP_KEY"]):
-        m.refused(*options, match="where the VPN profiles keep their keys")
+        # A read-only mount of sandbox-ai's own folders is refused as such first (security finding H1); the VPN
+        # check refuses the rest (and those too, behind it).
+        m.refused(*options, match="where the VPN profiles keep their keys|sandbox-ai's own folder")
     assert key not in json.dumps(m.plan())  # the profile alone changes nothing for a start without --vpn
 
 
