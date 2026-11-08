@@ -1,6 +1,7 @@
 """Identities (sandbox-ai identities): who a sandbox works as - a commit name and address, Git logins and publish
 logins under one name, chosen at a start with --identity NAME. A section of the Credentials page; every change goes
-through the command line (identities add/set/login/logout/publish/unpublish), names of secrets only, never tokens."""
+through the command line (identities add/set/login/logout/publish/unpublish), names of secrets only, never tokens.
+On this machine or on the host the Credentials page has chosen (over SSH); Check runs `sandbox-ai identities check`."""
 from __future__ import annotations
 
 import re
@@ -14,7 +15,9 @@ from PySide6.QtWidgets import (
 from .backend import SandboxAI
 from .files import printable
 from .i18n import tr
-from .widgets import ask_first, background, fill, plain_label, selected, table
+from .widgets import ask_first, background, fill, outcome, plain_label, selected, show_text, table
+
+LOCAL = "local"
 
 PUBLISH_KINDS = tuple(SandboxAI.PUBLISH_HOSTS)
 
@@ -31,7 +34,7 @@ class IdentitiesBox(QGroupBox):
 
     def __init__(self, sai):
         super().__init__(tr("Identities (sandbox-ai identities)"))
-        self.sai, self.known, self.secret_names = sai, {}, []
+        self.sai, self.known, self.secret_names, self.host, self.token = sai, {}, [], LOCAL, 0
         self.on_change = None  # the Credentials page's overview
         layout = QVBoxLayout(self)
         layout.addWidget(plain_label(tr("Who a sandbox works as: commit name and address, Git and publish logins under "
@@ -42,10 +45,14 @@ class IdentitiesBox(QGroupBox):
         row = QHBoxLayout()
         self.add_button, self.edit_button, self.remove_button = \
             QPushButton(tr("Add…")), QPushButton(tr("Edit…")), QPushButton(tr("Remove…"))
+        self.check_button = QPushButton(tr("Check"))
+        self.check_button.setToolTip(tr("sandbox-ai identities check: whether the secrets each identity names are "
+                                        "kept (the selected one, or every identity)"))
         self.add_button.clicked.connect(lambda: self.edit(None))
         self.edit_button.clicked.connect(lambda: self.edit(selected(self.list)))
         self.remove_button.clicked.connect(self.remove)
-        for widget in (self.add_button, self.edit_button, self.remove_button):
+        self.check_button.clicked.connect(lambda _=False: self.check())
+        for widget in (self.add_button, self.edit_button, self.remove_button, self.check_button):
             row.addWidget(widget)
         row.addStretch()
         layout.addLayout(row)
@@ -53,16 +60,33 @@ class IdentitiesBox(QGroupBox):
         self.message.setWordWrap(True)
         layout.addWidget(self.message)
 
+    def set_host(self, host):
+        """HOST's identities from now on (the Credentials page's host chooser)."""
+        if host != self.host:
+            self.host, self.known = host, {}
+            fill(self.list, [])
+            self.refresh()
+
+    def buttons(self):
+        return [self.add_button, self.edit_button, self.remove_button, self.check_button]
+
     def refresh(self):
+        host = self.host
+        self.token += 1
+        token = self.token
+
         def read():
             try:
-                names = [name for name, _ in self.sai.secrets()[1]]
+                names = [name for name, _ in (self.sai.secrets() if host == LOCAL else self.sai.host_secrets(host))[1]]
             except Exception:  # noqa: BLE001 - only an offer while typing
                 names = []
-            return self.sai.identities(), names
-        background(read, owner=self, timeout=90, done=self.shown)
+            return (self.sai.identities() if host == LOCAL else self.sai.host_identities(host)), names
+        background(read, owner=self, timeout=150,
+                   done=lambda result, error: self.shown(result, error, host, token))
 
-    def shown(self, result, error):
+    def shown(self, result, error, host=LOCAL, token=None):
+        if (token is not None and token != self.token) or host != self.host:
+            return
         if error is not None:
             self.message.setText(printable(error))
             return
@@ -86,8 +110,13 @@ class IdentitiesBox(QGroupBox):
                 name=printable(target), list=", ".join(printable(value) for value in gone)), tr("Remove")):
             return
         self.message.setText(tr("Saving {name}…", name=target))
-        background(lambda: self.sai.save_identity(target, old, new), owner=self, timeout=120,
-                   source=[self.add_button, self.edit_button, self.remove_button],
+        host = self.host
+
+        def work():
+            if host == LOCAL:
+                return self.sai.save_identity(target, old, new)
+            return self.sai.host_save_identity(host, target, old, new)
+        background(work, owner=self, timeout=300, source=self.buttons(),
                    done=lambda result, error: self.saved(target, result, error))
 
     def saved(self, name, result, error):
@@ -101,9 +130,32 @@ class IdentitiesBox(QGroupBox):
                                      tr("Remove the identity {name}? Its secrets stay in sandbox-ai secrets.",
                                         name=name), tr("Remove")):
             return
-        background(lambda: self.sai.call("identities", "remove", name, timeout=60), owner=self, timeout=90,
+        host = self.host
+
+        def work():
+            if host == LOCAL:
+                return self.sai.call("identities", "remove", name, timeout=60)
+            return self.sai.host_run(host, "identities", "remove", name, timeout=90)
+        background(work, owner=self, timeout=120,
                    done=lambda result, error: self.saved(name, (result[0], result[1] + result[2]) if error is None
                                                          else (1, str(error)), None))
+
+    def check(self):
+        """`sandbox-ai identities check [NAME]` on the host chosen: whether the secrets they name are there."""
+        name, host = selected(self.list), self.host
+        if name is not None and not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", name):
+            return
+        background(lambda: self.sai.host_run(host, "identities", "check", *([name] if name else []), timeout=90),
+                   owner=self, source=self.buttons(), timeout=120,
+                   done=lambda result, error: self.checked(name, result, error))
+
+    def checked(self, name, result, error):
+        status, out, err = outcome(result, error)
+        text = "\n".join(printable(line) for line in (out + err).strip()[-6000:].splitlines())
+        verdict = tr("every secret is there") if status == 0 else tr("the check found problems")
+        self.message.setText(f"{name or tr('every identity')}: {verdict}")
+        show_text(self, tr("Check of {name}", name=name or tr("every identity")), verdict + "\n\n" + text,
+                  modal=False)
 
 
 class IdentityDialog(QDialog):

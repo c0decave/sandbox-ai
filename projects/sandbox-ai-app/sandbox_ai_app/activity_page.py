@@ -2,7 +2,12 @@
 changes, network, approvals, MCP calls, the session's start and end, tokens.
 
 The timeline comes from `sandbox-ai activity --json --follow` (a QProcess whose output is read as it comes);
-everything in it may quote the agent, so it is shown as plain text with control characters escaped."""
+everything in it may quote the agent, so it is shown as plain text with control characters escaped.
+
+On a host of `sandbox-ai hosts` (the host chooser at the top) the timeline is `sandbox-ai activity ... --json --tail N`
+there, over SSH (host_run, in the background): ssh hands no stream, so "follow" asks again every few seconds and adds
+what is new (by each record's id). Its sources are that host's running starts and sessions, or a project or log folder
+there, typed; since, kinds and the filter text go to the command as --since, --kind and --grep."""
 from __future__ import annotations
 
 import json
@@ -11,10 +16,11 @@ from pathlib import Path
 import re
 import time
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, QProcess, QSortFilterProxyModel, Qt, Signal
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QProcess, QSortFilterProxyModel, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu,
+    QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
+    QMenu,
     QPlainTextEdit, QPushButton, QSplitter, QTableView, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
@@ -31,6 +37,11 @@ RECORD_ROLE = Qt.ItemDataRole.UserRole + 20
 TAIL = 5000           # events read when a timeline is opened
 KEEP = 20000          # events kept in the page; the oldest go first
 LINE_LIMIT = 1 << 20  # one line of the command's output
+LOCAL = "local"
+REMOTE_TAIL = 2000    # events read from another host at each look
+REMOTE_POLL = 5000    # ms between two looks at another host's timeline while "follow" is on
+REMOTE_SECONDS = 120  # one look may take that long (SSH)
+SINCE = re.compile(r"[0-9]{1,6}[smhd]|[0-9]{1,2}:[0-9]{2}|[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[T ][0-9:.+Z-]{0,20})?")
 
 
 def kind_color(record):
@@ -233,8 +244,20 @@ class ActivityPage(QWidget):
         super().__init__()
         self.sai, self.window = sai, window
         self.process, self.buffer, self.errors, self.starts = None, b"", "", {}
+        self.seen, self.remote_token, self.remote_busy = set(), 0, False
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
+        from .host_choice import HostChooser
+        self.hosts = HostChooser(sai, tr("The activity of this machine's sandboxes, or of a host's (over SSH)"))
+        self.hosts.changed.connect(self.host_changed)
+        outer.addWidget(self.hosts)
+        self.poll = QTimer(self)
+        self.poll.setInterval(REMOTE_POLL)
+        self.poll.timeout.connect(self.look_again)
+        self.refilter = QTimer(self)  # a host's timeline is filtered by the command: asked again once typing stops
+        self.refilter.setSingleShot(True)
+        self.refilter.setInterval(700)
+        self.refilter.timeout.connect(self.restart)
         self.tabs = QTabWidget()
         timeline = QWidget()
         layout = QVBoxLayout(timeline)
@@ -266,6 +289,11 @@ class ActivityPage(QWidget):
         self.filter.setPlaceholderText(tr("filter (text, path, host, command)"))
         self.filter.setMinimumWidth(220)
         self.filter.textChanged.connect(lambda _="": self.apply_filter())
+        self.since = QLineEdit()
+        self.since.setPlaceholderText(tr("since (10m, 2h, 3d, 14:30)"))
+        self.since.setToolTip(tr("Only events from then on (sandbox-ai activity --since)"))
+        self.since.setMaximumWidth(150)
+        self.since.editingFinished.connect(self.restart)
         self.follow = QCheckBox(tr("follow"))
         self.follow.setChecked(True)
         self.follow.toggled.connect(lambda _=False: self.restart())
@@ -274,7 +302,8 @@ class ActivityPage(QWidget):
         export_menu.addAction(tr("As JSON lines…")).triggered.connect(lambda: self.export("json"))
         export_menu.addAction(tr("As text…")).triggered.connect(lambda: self.export("text"))
         export.setMenu(export_menu)
-        for widget in (QLabel(tr("Show")), self.source, refresh, other, self.kinds_button, self.filter, self.follow, export):
+        for widget in (QLabel(tr("Show")), self.source, refresh, other, self.kinds_button, self.filter, self.since,
+                       self.follow, export):
             top.addWidget(widget)
         layout.addLayout(top)
         split = QSplitter(Qt.Orientation.Vertical)
@@ -334,8 +363,23 @@ class ActivityPage(QWidget):
 
     # -- what to show --
 
+    def host(self):
+        return self.hosts.host() or LOCAL
+
+    def host_changed(self, host):
+        """Another host chosen: its sources and timeline, and its canary log."""
+        self.remote_sources = []
+        self.canaries.set_host(host)
+        if self.started:
+            self.refresh_sources()
+
+    remote_sources = ()
+
     def sources(self):
-        """[(title, arguments of sandbox-ai activity)]: running sandboxes, sessions, project log folders."""
+        """[(title, arguments of sandbox-ai activity)]: running sandboxes, sessions, project log folders (another
+        host's: what its listing said, see refresh_sources)."""
+        if self.host() != LOCAL:
+            return list(self.remote_sources)
         found = []
         try:
             runs = self.sai.runs()
@@ -360,12 +404,41 @@ class ActivityPage(QWidget):
         return found
 
     def refresh_sources(self, select=None):
+        host = self.host()
+        if host != LOCAL and select is None:
+            # That host's running starts and sessions (`sandbox-ai list --json` there, in the background).
+            self.remote_token += 1
+            token = self.remote_token
+            self.status.setText(tr("Asking {host}…", host=self.hosts.label(host)))
+            widgets.background(lambda: self.sai.host_instances(host), owner=self, timeout=90,
+                               done=lambda result, error: self.remote_listed(host, token, result, error))
+            return
+        self.fill_sources(select)
+
+    def remote_listed(self, host, token, result, error):
+        if token != self.remote_token or host != self.host():
+            return
+        found = []
+        for instance in result if error is None else []:
+            if instance.kind == "session":
+                found.append((tr("Session: {name} ({status})", name=printable(instance.name),
+                                 status=printable(instance.state)), ["--session", instance.name]))
+            elif instance.kind == "run":
+                found.append((tr("Running: {run} ({workspace})", run=printable(instance.name),
+                                 workspace=printable(instance.project)), [instance.name]))
+        self.remote_sources = found
+        if error is not None:
+            self.status.setText(tr("{host}: no answer", host=self.hosts.label(host)) + f" ({printable(error)[:300]})")
+        self.fill_sources(None)
+
+    def fill_sources(self, select=None):
         current = select or self.source.currentData()
         self.source.blockSignals(True)
         self.source.clear()
         for title, arguments in self.sources():
             self.source.addItem(title, arguments)
-        if current and self.source.findData(current) < 0:
+        if current and self.source.findData(current) < 0 and (self.host() == LOCAL or select is not None or
+                                                               current[0] in ("--project", "--log-dir")):
             self.source.addItem(tr("Folder: {path}", path=printable(current[-1])), current)
         index = self.source.findData(current) if current else -1
         self.source.setCurrentIndex(index if index >= 0 else 0)
@@ -373,6 +446,17 @@ class ActivityPage(QWidget):
         self.restart()
 
     def browse(self):
+        if self.host() != LOCAL:
+            # A folder on that host: typed (this machine's file dialog cannot see it).
+            path, ok = QInputDialog.getText(self, tr("Log folder"), tr(
+                "A project folder or a log folder on {host} (absolute path):", host=self.hosts.label()))
+            path = path.strip()
+            if ok and backend.valid_directory(path):
+                kind = "--log-dir" if "/sandbox-ai/logs/" in path or path.rstrip("/").endswith("/logs") else "--project"
+                self.refresh_sources(select=[kind, path])
+            elif ok and path:
+                self.status.setText(tr("Not an absolute path: {path}", path=printable(path)))
+            return
         path = QFileDialog.getExistingDirectory(self, tr("Log folder"))
         if path:
             self.refresh_sources(select=["--log-dir", path])
@@ -386,18 +470,30 @@ class ActivityPage(QWidget):
 
     # -- the command --
 
+    def since_value(self):
+        text = self.since.text().strip()
+        return text if SINCE.fullmatch(text) else None
+
     def arguments(self):
         chosen = self.source.currentData()
         if not chosen:
             return None
-        return ["activity", *chosen, "--json", "--tail", str(TAIL), *(["--follow"] if self.follow.isChecked() else [])]
+        since = self.since_value()
+        return ["activity", *chosen, "--json", "--tail", str(TAIL), *([f"--since={since}"] if since else []),
+                *(["--follow"] if self.follow.isChecked() else [])]
 
     def restart(self):
         """Read the timeline chosen again from the start (the newest TAIL events, then what comes)."""
         self.stop()
         self.model.clear()
-        self.starts, self.errors = {}, ""
+        self.starts, self.errors, self.seen = {}, "", set()
         self.detail.clear()
+        if self.since.text().strip() and self.since_value() is None:
+            self.status.setText(tr("Since: 10m, 2h, 3d, 14:30 or a date such as 2026-11-04."))
+            return
+        if self.host() != LOCAL:
+            self.start_remote()
+            return
         arguments = self.arguments()
         if not (Path(self.sai.directory) / "activity.py").is_file():
             self.status.setText(tr("This sandbox-ai has no activity timeline yet; update it with: sandbox-ai update"))
@@ -418,9 +514,63 @@ class ActivityPage(QWidget):
         process.start()
         self.status.setText(tr("Reading…"))
 
+    # -- another host: asked again while "follow" is on --
+
+    def remote_query(self):
+        """(source arguments, kinds or (), grep or None) of the timeline chosen on another host."""
+        kinds = self.chosen_kinds()
+        grep = self.filter.text().strip()[:200] or None
+        return list(self.source.currentData() or []), (kinds if len(kinds) < len(KINDS) else ()), grep
+
+    def start_remote(self):
+        self.remote_token += 1
+        if not self.source.currentData():
+            self.status.setText(tr("No running sandbox on {host}: choose a project or log folder there (Other "
+                                   "folder…).", host=self.hosts.label()))
+            return
+        self.look_again()
+        if self.follow.isChecked():
+            self.poll.start()
+
+    def look_again(self):
+        """One look at the host's timeline (one at a time); what is new is added."""
+        if self.remote_busy or self.host() == LOCAL:
+            return
+        host, token = self.host(), self.remote_token
+        source, kinds, grep = self.remote_query()
+        since = self.since_value()
+        self.remote_busy = True
+        if not self.model.rowCount():
+            self.status.setText(tr("Asking {host}…", host=self.hosts.label(host)))
+        widgets.background(lambda: self.sai.host_activity(host, source, REMOTE_TAIL, since, kinds, grep,
+                                                          timeout=REMOTE_SECONDS), owner=self,
+                           timeout=REMOTE_SECONDS + 15,
+                           done=lambda result, error: self.remote_read(host, token, result, error))
+
+    def remote_read(self, host, token, result, error):
+        self.remote_busy = False
+        if token != self.remote_token or host != self.host():
+            return
+        if error is not None:
+            self.status.setText(printable(str(error).removeprefix("sandbox-ai activity: "))[:500])
+            return
+        new = []
+        for record in result:
+            key = record.get("id") if isinstance(record.get("id"), str) else json.dumps(record, sort_keys=True)[:4000]
+            if key not in self.seen:
+                self.seen.add(key)
+                new.append(record)
+        if new:
+            self.add_lines([json.dumps(record).encode() for record in new])
+        else:
+            self.update_status()
+
     def stop(self):
         """Kill the command, without waiting for it (the GUI thread): deleted once it has ended (deleting a
-        running QProcess would wait for it)."""
+        running QProcess would wait for it). Another host's looks stop too."""
+        self.poll.stop()
+        self.remote_token += 1
+        self.remote_busy = False
         process, self.process = self.process, None
         if process is None:
             return
@@ -511,6 +661,8 @@ class ActivityPage(QWidget):
                                   tr("Kinds ({count})", count=len(kinds)))
         self.proxy.set_filter(kinds, self.filter.text())
         self.update_status()
+        if self.host() != LOCAL and getattr(self, "started", False):
+            self.refilter.start()  # the host's command filters too (--kind, --grep): asked again
 
     def current(self):
         """The record of the selected row, or None."""
@@ -524,6 +676,11 @@ class ActivityPage(QWidget):
 
     def update_buttons(self):
         record = self.current()
+        if self.host() != LOCAL:
+            why = tr("Only for this machine's sandboxes")
+            widgets.set_enabled(self.connections_button, False, why)
+            widgets.set_enabled(self.files_button, False, why)
+            return
         widgets.set_enabled(self.connections_button, record is not None and record.get("kind") == "network",
                             tr("Choose a network event"))
         widgets.set_enabled(self.files_button, record is not None and self.host_path(record) is not None,

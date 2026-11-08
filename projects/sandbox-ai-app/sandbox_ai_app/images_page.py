@@ -3,8 +3,12 @@ editor for their extensions - package lists, files and a Containerfile fragment 
 line numbers and the validator's findings inline, and a preview of the final Containerfile.
 
 Reading and validating use sandbox-ai's own images module (loaded from its installation); every change goes
-through `sandbox-ai images extend|new|remove`, every build through `sandbox-ai build` in a terminal. The app
-never writes an extension itself."""
+through `sandbox-ai images extend|new|remove|recipe`, every build through `sandbox-ai build` in a terminal. The app
+never writes an extension itself.
+
+The host chooser at the top shows and changes the images of this machine or of a host of `sandbox-ai hosts` (over
+SSH: `sandbox-ai hosts run HOST -- images ...`, the fragment on standard input there too; a build in a terminal tab
+with ssh -tt). A file added to an extension is then a path on that host."""
 from __future__ import annotations
 
 import json
@@ -23,12 +27,16 @@ from . import theme
 from .files import printable
 from .i18n import tr
 from .widgets import (
-    MONO, AsyncCommand, Task, button, confirm, fill, plain_label, safe_tooltip, select_keys, selected_keys,
-    table, warn,
+    MONO, AsyncCommand, Task, button, confirm, fill, inform, plain_label, safe_tooltip, select_keys,
+    selected_keys, show_text, table, warn,
 )
 
 KINDS = ("apt", "npm", "pip")
 # Every Containerfile instruction (the validator decides which an extension may use).
+LOCAL = "local"
+PIN_EXAMPLE = "2.1.0"  # the same in every language
+UV_EXAMPLE = "0.9.5"
+MEDIA, TOR = "media", "tor"  # the recipes of sandbox-ai images recipe
 INSTRUCTIONS = ("ADD", "ARG", "CMD", "COPY", "ENTRYPOINT", "ENV", "EXPOSE", "FROM", "HEALTHCHECK", "LABEL",
                 "MAINTAINER", "ONBUILD", "RUN", "SHELL", "STOPSIGNAL", "USER", "VOLUME", "WORKDIR")
 
@@ -388,6 +396,65 @@ class FileTargetDialog(QDialog):
         layout.addRow(buttons)
 
 
+class BuildDialog(QDialog):
+    """`sandbox-ai build` with its options: only the extension layer, a pinned agent version, uv and Node.js."""
+
+    def __init__(self, parent, target):
+        super().__init__(parent)
+        self.setWindowTitle(tr("Build {name}", name=printable(target)))
+        layout = QFormLayout(self)
+        self.extension_only = QCheckBox(tr("Only the extension layers, on the base image there is"))
+        self.pin = QLineEdit()
+        self.pin.setPlaceholderText(tr("newest; e.g. {example}", example=PIN_EXAMPLE))
+        self.pin.setToolTip(tr("Install exactly this agent version (one agent only)"))
+        self.uv = QLineEdit()
+        self.uv.setPlaceholderText(tr("newest; e.g. {example}", example=UV_EXAMPLE))
+        self.node = QLineEdit()
+        self.node.setPlaceholderText(tr("the current LTS; a tag or an @sha256 digest"))
+        layout.addRow("", self.extension_only)
+        layout.addRow(tr("Agent version"), self.pin)
+        layout.addRow(tr("uv image tag"), self.uv)
+        layout.addRow(tr("Node.js image"), self.node)
+        buttons = QDialogButtonBox()
+        buttons.addButton(tr("Build"), QDialogButtonBox.ButtonRole.AcceptRole)
+        buttons.addButton(tr("Cancel"), QDialogButtonBox.ButtonRole.RejectRole)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+    def options(self):
+        return {"extension_only": self.extension_only.isChecked(), "pin": self.pin.text().strip() or None,
+                "uv": self.uv.text().strip() or None, "node": self.node.text().strip() or None}
+
+
+class RecipeDialog(QDialog):
+    """`sandbox-ai images recipe media|tor --from AGENT [--as NAME]`: a variant with a ready extension."""
+
+    def __init__(self, parent, agents, agent):
+        super().__init__(parent)
+        self.setWindowTitle(tr("Variant from a recipe"))
+        layout = QFormLayout(self)
+        self.recipe = QComboBox()
+        for key, label in ((MEDIA, tr("media: sound, video and speech (ffmpeg, PulseAudio, SoX, espeak-ng, Piper)")),
+                           (TOR, tr("tor: torsocks and torbrowser-launcher, for a sandbox behind a Tor VPN profile"))):
+            self.recipe.addItem(label, key)
+        self.agent = QComboBox()
+        for name in agents:
+            self.agent.addItem(name, name)
+        self.agent.setCurrentIndex(max(0, self.agent.findData(agent)))
+        self.name = QLineEdit()
+        self.name.setPlaceholderText(tr("the recipe's name"))
+        layout.addRow(tr("Recipe"), self.recipe)
+        layout.addRow(tr("Agent"), self.agent)
+        layout.addRow(tr("Variant's name"), self.name)
+        buttons = QDialogButtonBox()
+        buttons.addButton(tr("Create"), QDialogButtonBox.ButtonRole.AcceptRole)
+        buttons.addButton(tr("Cancel"), QDialogButtonBox.ButtonRole.RejectRole)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+
 class NewVariantDialog(QDialog):
     def __init__(self, parent, agents, agent, valid):
         super().__init__(parent)
@@ -433,6 +500,9 @@ class ImagesPage(QWidget):
     def __init__(self, sai, terminal):
         super().__init__()
         self.sai, self.terminal, self.loaded = sai, terminal, False
+        from .host_choice import HostChooser
+        self.hosts = HostChooser(sai, tr("The images of this machine, or of a host (over SSH)"))
+        self.hosts.changed.connect(lambda _host: self.host_changed())
         self.entries, self.rows, self.package_list, self.packages_for = [], [], [], None
         self.description, self.target, self.agent_name, self.pending_files, self.files_shown = None, None, None, [], []
         self._module, self.document, self.restyle_queued = False, None, False
@@ -442,6 +512,7 @@ class ImagesPage(QWidget):
         self.check_timer.setSingleShot(True)
         self.check_timer.setInterval(200)
         layout = QVBoxLayout(self)
+        layout.addWidget(self.hosts)
         splitter = QSplitter(Qt.Orientation.Vertical)
         layout.addWidget(splitter)
 
@@ -463,15 +534,26 @@ class ImagesPage(QWidget):
         menu.addAction(tr("Build in the app's terminal"), lambda: self.build(embedded=True))
         menu.addAction(tr("Build in a terminal window"), lambda: self.build(embedded=False))
         menu.addAction(tr("Build only the extension layer"), lambda: self.build(extension_only=True))
-        menu.addAction(tr("Build all"), lambda: self.terminal(self.sai.command("build", "all"), "sandbox-ai build all"))
+        menu.addAction(tr("Build with options…"), self.build_with_options)
+        menu.addAction(tr("Build all"), self.build_all)
         self.more_builds.setMenu(menu)
         self.new_button = button(tr("New variant…"), tr("A variant of an agent's image with its own extension: "
                                                          "sandbox-ai images new"), self.new_variant)
         self.delete_button = button(tr("Delete variant…"), tr("Remove the selected variant and its image: "
                                                                "sandbox-ai images remove"), self.delete_variant,
                                     role="danger")
+        self.more_button = QPushButton(tr("More"))
+        self.more_button.setToolTip(safe_tooltip(tr("A variant from a recipe, the history, a check by sandbox-ai, "
+                                                    "dropping an extension")))
+        more = QMenu(self.more_button)
+        more.addAction(tr("Variant from a recipe…"), self.new_from_recipe)
+        more.addAction(tr("History of the extensions"), self.show_history)
+        more.addAction(tr("Check the extension with sandbox-ai"), self.check_with_sandbox_ai)
+        more.addAction(tr("Delete the variant, keep its image…"), lambda: self.delete_variant(keep_image=True))
+        more.addAction(tr("Drop the extension of the agent's image…"), self.drop_extension)
+        self.more_button.setMenu(more)
         for widget in (self.refresh_button, self.build_button, self.more_builds, self.new_button,
-                       self.delete_button):
+                       self.delete_button, self.more_button):
             row.addWidget(widget)
         row.addStretch()
         images_layout.addLayout(row)
@@ -591,9 +673,30 @@ class ImagesPage(QWidget):
             self.loaded = True
             self.refresh()
 
+    def host(self):
+        return self.hosts.host() or LOCAL
+
+    def run_argv(self, *args):
+        """argv of `sandbox-ai ARGS` on the host chosen (without a terminal)."""
+        return self.sai.host_command(self.host(), *args)
+
+    def host_changed(self):
+        """Another host: nothing of the last one stays (its lists, its extension in the editor)."""
+        for command in (self.list_command, self.package_command, self.show_command):
+            command.stop()
+        self.entries, self.rows, self.package_list, self.packages_for, self.document = [], [], [], None, None
+        self.description, self.target = None, None
+        fill(self.images, [])
+        self.show_packages()
+        self.set_editing(False, tr("Select an image or a variant to edit its extension."))
+        self.update_buttons()
+        if self.loaded:
+            self.refresh()
+
     def refresh(self):
-        if self.list_command.start(self.sai.command("images", "--json")):
-            self.status.setText(tr("Asking Podman…"))
+        if self.list_command.start(self.run_argv("images", "--json")):
+            self.status.setText(tr("Asking Podman…") if self.host() == LOCAL else
+                                tr("Asking {host}…", host=self.hosts.label()))
 
     def images_listed(self, status, out, err):
         try:
@@ -673,14 +776,43 @@ class ImagesPage(QWidget):
         if self.dirty() and target == self.target:
             warn(self, tr("Images"), tr("Save the extension first: a build uses what is saved."))
             return
-        argv = self.sai.command("build", *(["--extension-only"] if extension_only else []), target)
-        title = "sandbox-ai build " + ("--extension-only " if extension_only else "") + target
+        self.start_build(target, {"extension_only": extension_only}, embedded)
+
+    rebuild = build
+
+    def start_build(self, target, options, embedded=None):
+        """`sandbox-ai build [OPTIONS] TARGET` in a terminal on the host chosen (ssh -tt for another host)."""
+        host = self.host()
+        try:
+            argv = self.sai.command("build", *(["--extension-only"] if options.get("extension_only") else []),
+                                    target) if host == LOCAL and not any(
+                options.get(k) for k in ("pin", "uv", "node")) else self.sai.image_build_argv(host, target, **options)
+        except ValueError as exc:
+            warn(self, tr("Images"), printable(exc))
+            return
+        title = "sandbox-ai build " + ("--extension-only " if options.get("extension_only") else "") + target
+        title += "" if host == LOCAL else f" ({host})"
         if embedded is None:
             self.terminal(argv, title)
         else:
             self.terminal(argv, title, embedded=embedded)
 
-    rebuild = build
+    def build_with_options(self):
+        target = self.agent()
+        if not target:
+            warn(self, tr("Images"), tr("Select an image first."))
+            return
+        if self.dirty() and target == self.target:
+            warn(self, tr("Images"), tr("Save the extension first: a build uses what is saved."))
+            return
+        dialog = BuildDialog(self, target)
+        if dialog.exec():
+            self.start_build(target, dialog.options())
+
+    def build_all(self):
+        host = self.host()
+        argv = self.sai.command("build", "all") if host == LOCAL else self.sai.host_terminal(host, "build", "all")
+        self.terminal(argv, "sandbox-ai build all" + ("" if host == LOCAL else f" ({host})"))
 
     # -- installed packages --
 
@@ -695,7 +827,7 @@ class ImagesPage(QWidget):
             self.status.setText(tr("The {agent} image is not built.", agent=target))
             return
         self.package_command.stop()
-        if self.package_command.start(self.sai.command("images", "packages", target, "--json")):
+        if self.package_command.start(self.run_argv("images", "packages", target, "--json")):
             self.status.setText(tr("Reading the packages of {agent}…", agent=target))
 
     def packages_listed(self, status, out, err):
@@ -731,7 +863,7 @@ class ImagesPage(QWidget):
         self.show_command.stop()
         self.target, self.description = target, None
         self.set_editing(False, tr("Reading the extension of {name}…", name=target))
-        self.show_command.start(self.sai.command("images", "extend", target, "--show", "--json"))
+        self.show_command.start(self.run_argv("images", "extend", target, "--show", "--json"))
 
     def extension_shown(self, status, out, err):
         try:
@@ -769,7 +901,17 @@ class ImagesPage(QWidget):
     def add_file(self):
         if self.description is None:
             return
-        source, _ = QFileDialog.getOpenFileName(self, tr("File to copy into the image"))
+        if self.host() != LOCAL:
+            # A file of that host: its path there, typed (this machine's file dialog cannot see it).
+            from PySide6.QtWidgets import QInputDialog
+            source, ok = QInputDialog.getText(self, tr("File to copy into the image"), tr(
+                "The file's absolute path on {host}:", host=self.hosts.label()))
+            source = source.strip() if ok else ""
+            if source and (not source.startswith("/") or ":" in source or not source.isprintable()):
+                warn(self, tr("Images"), tr("Not an absolute path without ':': {path}", path=printable(source)))
+                return
+        else:
+            source, _ = QFileDialog.getOpenFileName(self, tr("File to copy into the image"))
         if not source:
             return
         dialog = FileTargetDialog(self, source)
@@ -873,7 +1015,7 @@ class ImagesPage(QWidget):
         if fragment != (d.get("fragment") or ""):
             args += ["--fragment", "-"] if fragment.strip() else ["--clear-fragment"]
             stdin = fragment.encode() if fragment.strip() else None
-        return self.sai.command("images", "extend", self.target, *args, "--json"), stdin
+        return self.run_argv("images", "extend", self.target, *args, "--json"), stdin
 
     def save(self):
         if self.description is None or not self.dirty():
@@ -918,7 +1060,7 @@ class ImagesPage(QWidget):
             self.create_variant(dialog.name.text().strip(), dialog.agent.currentData(), not dialog.copy.isChecked())
 
     def create_variant(self, name, agent, empty=False):
-        argv = self.sai.command("images", "new", name, "--from", agent, *(["--empty"] if empty else []), "--json")
+        argv = self.run_argv("images", "new", name, "--from", agent, *(["--empty"] if empty else []), "--json")
         self.task.run(argv, lambda status, out, err: self.variant_done(status, out, err, name),
                       tr("Creating the variant {name}…", name=name), self.new_button)
 
@@ -935,16 +1077,19 @@ class ImagesPage(QWidget):
         except (ValueError, TypeError, AttributeError):
             pass
 
-    def delete_variant(self):
+    def delete_variant(self, keep_image=False):
         entry = self.entry()
         if not entry or not entry["variant"]:
+            if keep_image:
+                warn(self, tr("Images"), tr("Select a variant first."))
             return
-        if not confirm(self, tr("Delete variant"), tr("Delete the variant {name} and its image {image}? Projects "
-                                                      "that start it with --image-variant stop working.",
-                                                      name=entry["target"], image=entry["image"]),
-                       tr("Delete"), destructive=True):
+        text = tr("Delete the variant {name}? Its image {image} stays; projects that start it with --image-variant "
+                  "stop working.", name=entry["target"], image=entry["image"]) if keep_image else \
+            tr("Delete the variant {name} and its image {image}? Projects that start it with --image-variant stop "
+               "working.", name=entry["target"], image=entry["image"])
+        if not confirm(self, tr("Delete variant"), text, tr("Delete"), destructive=True):
             return
-        self.task.run(self.sai.command("images", "remove", entry["target"]),
+        self.task.run(self.run_argv("images", "remove", entry["target"], *(["--keep-image"] if keep_image else [])),
                       lambda status, out, err: self.deleted(status, out, err, entry["target"]),
                       tr("Deleting the variant {name}…", name=entry["target"]), self.delete_button)
 
@@ -956,3 +1101,89 @@ class ImagesPage(QWidget):
             self.description, self.target = None, None
             self.set_editing(False, tr("Select an image or a variant to edit its extension."))
         self.refresh()
+
+    # -- more: recipes, history, sandbox-ai's own check, dropping an extension --
+
+    def new_from_recipe(self):
+        entry = self.entry()
+        dialog = RecipeDialog(self, self.sai.agents, entry["agent"] if entry else self.sai.agents[0])
+        if not dialog.exec():
+            return
+        name = dialog.name.text().strip()
+        module = self.module()
+        if name and module is not None and not module.valid_name(name):
+            warn(self, tr("Images"), tr("Lower-case letters, digits, '.', '_' and '-', up to 30 characters; not an "
+                                        "agent's name."))
+            return
+        recipe, agent = dialog.recipe.currentData(), dialog.agent.currentData()
+        argv = self.run_argv("images", "recipe", recipe, "--from", agent, *([f"--as={name}"] if name else []))
+        self.task.run(argv, lambda status, out, err: self.recipe_done(status, out, err, recipe),
+                      tr("Creating the variant {name}…", name=name or recipe), self.more_button)
+
+    def recipe_done(self, status, out, err, recipe):
+        if status == -2:
+            return
+        if status != 0:
+            warn(self, tr("Images"), tr("sandbox-ai did not create the variant {name}.", name=recipe),
+                 details=printable((err or out).strip()[-3000:]))
+            return
+        inform(self, tr("Images"), printable(out.strip()[-3000:]) or tr("Created."), modal=False)
+        self.refresh()
+
+    def show_history(self):
+        """`sandbox-ai images history [TARGET]`: changes and builds of the extensions (the selected one's, or all)."""
+        target = self.agent()
+        self.task.run(self.run_argv("images", "history", *([target] if target else [])),
+                      lambda status, out, err: self.history_shown(status, out, err, target),
+                      tr("Reading the history…"), self.more_button)
+
+    def history_shown(self, status, out, err, target):
+        if status == -2:
+            return
+        text = "\n".join(printable(line) for line in (out if status == 0 else err or out).strip()[-20000:]
+                         .splitlines())
+        show_text(self, tr("History of {name}", name=target) if target else tr("History of the extensions"),
+                  text or tr("Nothing recorded yet."), modal=False)
+
+    def check_with_sandbox_ai(self):
+        """`sandbox-ai images check TARGET [--fragment -] --json` on the host chosen: its own verdict and final
+        Containerfile (the fragment in the editor on standard input)."""
+        if self.description is None or not self.target:
+            warn(self, tr("Images"), tr("Select an image first."))
+            return
+        fragment = self.fragment.toPlainText()
+        stdin = fragment.encode() if fragment.strip() else None
+        argv = self.run_argv("images", "check", self.target, *(["--fragment", "-"] if stdin else []), "--json")
+        self.task.run(argv, self.checked, tr("Checking the extension of {name}…", name=self.target),
+                      self.more_button, input=stdin)
+
+    def checked(self, status, out, err):
+        if status == -2:
+            return
+        try:
+            document = json.loads(out) if out.strip() else None
+        except ValueError:
+            document = None
+        if not isinstance(document, dict):
+            warn(self, tr("Images"), tr("sandbox-ai did not check the extension."),
+                 details=printable((err or out).strip()[-3000:]))
+            return
+        findings = [f for f in document.get("findings") or [] if isinstance(f, dict)]
+        lines = [finding_text(f) for f in findings] or [tr("No findings.")]
+        if isinstance(document.get("containerfile"), str):
+            lines += ["", printable(document["containerfile"])]
+        show_text(self, tr("Check of {name}", name=self.target), "\n".join(lines), modal=False)
+
+    def drop_extension(self):
+        """`sandbox-ai images remove AGENT`: the agent's image goes back to its base at the next build."""
+        entry = self.entry()
+        if not entry or entry["variant"] or not entry.get("extended"):
+            warn(self, tr("Images"), tr("Select an agent's image with an extension first."))
+            return
+        if not confirm(self, tr("Drop the extension"), tr("Drop the extension of {name}? Its packages, files and "
+                                                         "fragment are removed; the next build is the base image.",
+                                                         name=entry["target"]), tr("Drop"), destructive=True):
+            return
+        self.task.run(self.run_argv("images", "remove", entry["target"]),
+                      lambda status, out, err: self.deleted(status, out, err, entry["target"]),
+                      tr("Dropping the extension of {name}…", name=entry["target"]), self.more_button)

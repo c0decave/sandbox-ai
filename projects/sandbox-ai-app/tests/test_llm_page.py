@@ -244,7 +244,7 @@ def test_check_and_models_show_what_the_host_says(qapp, sai):
     check = ("llm", "check", "lm", "--agent", "claude")
     sai.answers[("local", check)] = (1, "lm: LM Studio at http://192.168.1.20:1234\n  ok    address 192.168.1.20\n"
                                         "  FAIL  the server refused the key\x07", "")
-    models = ("llm", "models", "lm", "--json")
+    models = ("llm", "models", "lm", "--sort", "name", "--json")
     sai.answers[("local", models)] = (0, json.dumps(MODELS), "")
     page.servers.selectRow(0)
     page.agent.setCurrentIndex(page.agent.findData("claude"))
@@ -264,7 +264,7 @@ def test_check_and_models_show_what_the_host_says(qapp, sai):
     args = parsed(sai, list(check))
     assert (args.command, args.name, args.agent) == ("check", "lm", "claude")
     args = parsed(sai, list(models))
-    assert (args.command, args.name, args.json) == ("models", "lm", True)
+    assert (args.command, args.name, args.json, args.sort) == ("models", "lm", True, "name")
     page.close()
     page.deleteLater()
 

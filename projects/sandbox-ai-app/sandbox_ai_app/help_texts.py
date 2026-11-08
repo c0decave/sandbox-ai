@@ -49,14 +49,15 @@ PAGE_SECTIONS = {"launch": "page-launch", "board": "page-board", "sandboxes": "p
                  "approvals": "page-approvals", "terminals": "page-terminals", "connections": "page-connections",
                  "activity": "page-activity", "statistics": "page-statistics", "files": "page-files",
                  "kits": "page-kits", "mcp": "page-mcp", "llm": "page-llm", "images": "page-images",
-                 "credentials": "page-credentials", "system": "page-system", "hosts": "page-hosts", "help": "page-help"}
+                 "credentials": "page-credentials", "team": "page-team", "system": "page-system",
+                 "hosts": "page-hosts", "help": "page-help"}
 PAGE_CLI = {"launch": "sandbox-ai AGENT [options]", "board": ".sandbox-ai.json",
             "sandboxes": "sandbox-ai list",
             "approvals": "--ask", "terminals": "tmux", "connections": "sandbox-ai logs, --log-dir",
             "activity": "sandbox-ai activity",
             "statistics": "sandbox-ai activity", "files": "", "kits": "sandbox-ai kits, --kit",
             "mcp": "sandbox-ai mcp, --mcp", "llm": "sandbox-ai llm, --llm NAME", "images": "sandbox-ai build",
-            "credentials": "sandbox-ai secrets",
+            "credentials": "sandbox-ai secrets", "team": "sandbox-ai team",
             "system": "sandbox-ai doctor", "hosts": "sandbox-ai hosts", "help": ""}
 
 
@@ -586,6 +587,34 @@ AREA_TIPS = (
          ("A start uses one with --vpn NAME, or connect a VPN part on the board.",
           "Ein Start nutzt eines mit --vpn NAME, oder verbinden Sie ein VPN-Teil auf der Tafel."),
          "sandbox-ai vpn add | list, --vpn NAME", "vpn-tor"),
+    # Teams
+    _tip("team.host", ("Whose teams", "Wessen Teams"),
+         ("This machine or a host of sandbox-ai hosts: the list, Start, Post, Stop and Delete act there (on a host "
+          "over SSH).",
+          "Dieser Rechner oder ein Host von sandbox-ai hosts: Liste, Starten, Aufgabe, Stoppen und Löschen wirken "
+          "dort (auf einem Host über SSH)."),
+         None, "sandbox-ai hosts run HOST -- team list", "page-team"),
+    _tip("team.teams", ("The teams", "Die Teams"),
+         ("Each team with its members and its shared workspace; every member is a session of its own "
+          "(NAME-AGENT).",
+          "Jedes Team mit seinen Mitgliedern und seinem gemeinsamen Arbeitsbereich; jedes Mitglied ist eine eigene "
+          "Sitzung (NAME-AGENT)."),
+         None, "sandbox-ai team list", "teams"),
+    _tip("team.board", ("The board", "Die Tafel"),
+         ("The tasks between the members: who posted each, for whom, its state and what it asks. The board is an "
+          "MCP server of the team, in a sandbox without network.",
+          "Die Aufgaben zwischen den Mitgliedern: wer sie gestellt hat, für wen, ihr Stand und was sie verlangt. "
+          "Die Tafel ist ein MCP-Server des Teams, in einer Sandbox ohne Netzwerk."),
+         ("Post a task… puts one there from you.", "Aufgabe stellen… legt eine von Ihnen dort ab."),
+         "sandbox-ai team show NAME, team post NAME AGENT TASK", "teams"),
+    _tip("team.start", ("Start a team", "Ein Team starten"),
+         ("Two or three agents on one workspace; the first leads. The members start in a terminal, one after "
+          "the other.",
+          "Zwei oder drei Agenten auf einem Arbeitsbereich; der erste leitet. Die Mitglieder starten in einem "
+          "Terminal, einer nach dem anderen."),
+         ("Talk to the lead afterwards: it hands the others their tasks.",
+          "Sprechen Sie danach mit der Leitung: Sie verteilt die Aufgaben an die anderen."),
+         "sandbox-ai team start NAME --agents claude,codex -w DIR", "page-team"),
     # System
     _tip("system.checks", ("Host check", "Host-Prüfung"),
          ("What sandbox-ai needs on this computer, checked by sandbox-ai doctor: Podman or Bubblewrap, images, "
@@ -767,6 +796,8 @@ PLACES = {
                ("new_button", "images.variant", "after"), ("editor_tabs", "images.editor", "corner")),
     "credentials": (("overview", "credentials.overview", "group"), ("logins", "credentials.logins", "group"),
                     ("secrets", "credentials.secrets", "group"), ("vpn", "credentials.vpn", "group")),
+    "team": (("hosts", "team.host", "after"), ("table", "team.teams", "corner"),
+             ("board", "team.board", "corner"), ("start_button", "team.start", "after")),
     "system": (("checks", "system.checks", "group"), ("theme", "system.settings", "group"),
                ("update_button", "system.update", "after"), ("policy_text", "system.policy", "group")),
     "hosts": (("table", "hosts.table", "corner"), ("starts_button", "hosts.show", "after"),

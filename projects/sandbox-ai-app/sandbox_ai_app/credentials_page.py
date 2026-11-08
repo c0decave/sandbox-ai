@@ -4,12 +4,15 @@ secret is ever shown, read back or passed as an argument (sandbox-ai secrets set
 
 A click on a row of the overview opens its tab with the row selected. Every change goes through sandbox-ai's own
 commands (login, secrets, git-logins, publish-logins, identities, vpn).
-"""
+
+The host chooser at the top shows and changes all of it on this machine or on a host of `sandbox-ai hosts` (over SSH:
+`sandbox-ai hosts run HOST -- ...`, a secret's value on standard input there too; a login in a terminal tab with
+ssh -tt)."""
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox, QCompleter, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+    QComboBox, QCompleter, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QLineEdit,
     QMessageBox, QPushButton, QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -17,7 +20,7 @@ from . import theme
 from .backend import SandboxAI
 from .files import printable
 from .i18n import N_, tr
-from .widgets import ask_first, background, fill, outcome, plain_label, selected, table
+from .widgets import ask_first, background, fill, outcome, plain_label, selected, show_text, table
 
 LOCAL = "local"  # the host of this machine's own secrets (sandbox-ai hosts' name for it)
 # The overview's kinds, in the order of the tabs.
@@ -33,7 +36,7 @@ class LoginsBox(QGroupBox):
 
     def __init__(self, sai, changed):
         super().__init__(tr(self.title))
-        self.sai, self.changed, self.entries, self.secret_names = sai, changed, [], []
+        self.sai, self.changed, self.entries, self.secret_names, self.host = sai, changed, [], [], LOCAL
         layout = QVBoxLayout(self)
         layout.addWidget(plain_label(self.about(), role="secondary"))
         self.list = table([tr(h) for h in self.headers])
@@ -44,15 +47,18 @@ class LoginsBox(QGroupBox):
         self.add_button.clicked.connect(lambda _=False: self.add())
         self.remove_button.clicked.connect(lambda _=False: self.remove())
         self.check_button.clicked.connect(lambda _=False: self.check())
-        for widget in (self.add_button, self.remove_button, self.check_button):
+        for widget in (self.add_button, self.remove_button, self.check_button, *self.more_buttons()):
             row.addWidget(widget)
         row.addStretch()
         layout.addLayout(row)
         self.message = plain_label()
         layout.addWidget(self.message)
 
+    def more_buttons(self):
+        return []
+
     def buttons(self):
-        return [self.add_button, self.remove_button, self.check_button]
+        return [self.add_button, self.remove_button, self.check_button, *self.more_buttons()]
 
     def show_entries(self, entries, secret_names):
         self.entries, self.secret_names = entries, secret_names
@@ -64,13 +70,24 @@ class LoginsBox(QGroupBox):
             tr("secret {name} missing", name=printable(entry.get("secret", "")))
 
     def run(self, *args, what):
+        """`sandbox-ai COMMAND ARGS` on the host chosen, in the background."""
         self.message.setText(tr("Working…"))
-        background(lambda: self.sai.call(self.command, *args, timeout=60), owner=self, timeout=90,
-                   source=self.buttons(), done=lambda result, error: self.ran(what, result, error))
+        host = self.host
+
+        def work():
+            if host == LOCAL:
+                return self.sai.call(self.command, *args, timeout=60)
+            return self.sai.host_run(host, self.command, *args, timeout=90)
+        background(work, owner=self, timeout=120, source=self.buttons(),
+                   done=lambda result, error: self.ran(what, result, error))
 
     def ran(self, what, result, error):
         status, out, err = outcome(result, error)
         said = printable((out + err).strip())[-1500:]
+        if what == "kinds":
+            show_text(self, tr("Publish login kinds"), "\n".join(printable(line) for line in out.strip().splitlines())
+                      if status == 0 else said, modal=False)
+            return
         self.message.setText(said if status == 0 or what == "check" else tr("Not done: {error}", error=said))
         if what != "check":
             self.changed()
@@ -123,6 +140,14 @@ class PublishLoginsBox(LoginsBox):
     def about(self):
         return tr("Package registries and forges a start may publish to with --publish KIND; the proxy adds the token "
                   "on the wire and asks before every upload.")
+
+    def more_buttons(self):
+        if not hasattr(self, "kinds_button"):
+            self.kinds_button = QPushButton(tr("Kinds"))
+            self.kinds_button.setToolTip(tr("sandbox-ai publish-logins kinds: what each kind opens, sets and asks "
+                                            "about"))
+            self.kinds_button.clicked.connect(lambda _=False: self.run("kinds", what="kinds"))
+        return [self.kinds_button]
 
     def row(self, entry):
         return [entry.get("kind", ""), entry.get("host", ""), entry.get("secret", ""), self.state(entry)]
@@ -204,6 +229,13 @@ class CredentialsPage(QWidget):
         self.sai, self.terminal, self.loaded = sai, terminal, False
         self.state = {"logins": [], "secrets": [], "store": "?", "git": [], "publish": []}
         layout = QVBoxLayout(self)
+        # Whose credentials: this machine's, or a host's of `sandbox-ai hosts` (over SSH; a value goes on standard
+        # input there too, never as an argument). One choice for every tab.
+        from .host_choice import HostChooser
+        self.hosts = HostChooser(sai, tr("This machine's credentials, or a host's (over SSH)"))
+        self.hosts.changed.connect(self.host_changed)
+        self.secret_host = self.hosts.box  # (the Secrets tab had a chooser of its own: the page's now)
+        layout.addWidget(self.hosts)
         self.summary = plain_label(role="secondary")
         layout.addWidget(self.summary)
         self.tabs = QTabWidget()
@@ -242,18 +274,6 @@ class CredentialsPage(QWidget):
         # secrets
         secrets = QGroupBox(tr("Secrets (API keys and tokens for --secret-env and MCP servers)"))
         secrets_layout = QVBoxLayout(secrets)
-        # Whose secrets: this machine's, or a host's of `sandbox-ai hosts` (secrets list, set and delete there, over
-        # SSH; a value goes on standard input there too, never as an argument).
-        host_row = QHBoxLayout()
-        self.secret_host = QComboBox()
-        self.secret_host.setAccessibleName(tr("Secrets on"))
-        self.secret_host.setToolTip(tr("This machine's secrets, or a host's (over SSH)"))
-        self.secret_host.addItem(tr("This machine"), LOCAL)
-        self.secret_host.activated.connect(lambda _=0: self.load_secrets())
-        host_row.addWidget(QLabel(tr("Secrets on")))
-        host_row.addWidget(self.secret_host)
-        host_row.addStretch()
-        secrets_layout.addLayout(host_row)
         self.remote_secrets, self.secrets_token = {}, 0  # {host: [(name, where)]} as last read there
         self.backend_label = plain_label()
         secrets_layout.addWidget(self.backend_label)
@@ -324,11 +344,49 @@ class CredentialsPage(QWidget):
             if self.identities is not None:
                 self.identities.refresh()
 
+    def host(self):
+        return self.hosts.host() or LOCAL
+
+    def host_changed(self, host):
+        """Every tab shows HOST's from now on."""
+        for box in (self.git, self.publish):
+            box.host = host
+            box.show_entries([], [])
+        self.state.update(logins=[], secrets=[], store="?", git=[], publish=[])
+        fill(self.logins, [])
+        self.vpn.set_host(host)
+        if self.identities is not None:
+            self.identities.set_host(host)
+        self.refresh()
+        self.load_secrets()
+
     def refresh(self):
         """Read the logins, the secrets' names and the Git and publish logins in a thread (asking the keyring may
-        take seconds)."""
+        take seconds); on another host over SSH."""
         self.generation += 1
         token = self.generation
+        host = self.host()
+
+        def read_remote():
+            found, problems = [], []
+            for function in (self.sai.host_login_status, self.sai.host_git_logins, self.sai.host_publish_logins):
+                try:
+                    found.append(function(host))
+                except Exception as exc:  # noqa: BLE001 - shown on the page; the other tabs still fill
+                    found.append([])
+                    problems.append(printable(exc)[:300])
+            try:
+                store, names = self.sai.host_secrets(host)
+            except Exception as exc:  # noqa: BLE001
+                store, names = "?", []
+                problems.append(printable(exc)[:300])
+            rows, git, publish = found
+            return rows, (store, names), "; ".join(problems) or None, git, publish, None
+        if host != LOCAL:
+            self.summary.setText(tr("Asking {host}…", host=self.hosts.label(host)))
+            background(read_remote, owner=self, timeout=300,
+                       done=lambda result, error: self.refreshed(token, result, error, host))
+            return
 
         def read():
             rows = self.sai.login_status()
@@ -346,17 +404,21 @@ class CredentialsPage(QWidget):
             except Exception as exc:  # noqa: BLE001 - shown on the page
                 return rows, ("?", []), exc, git, publish, hosts
         # The keyring is asked with timeouts of its own (secret-tool: 10 s and 30 s); this one is the last word.
-        background(read, owner=self, timeout=90, done=lambda result, error: self.refreshed(token, result, error))
+        background(read, owner=self, timeout=90,
+                   done=lambda result, error: self.refreshed(token, result, error, LOCAL))
 
-    def refreshed(self, token, result, error):
-        if token != self.generation:
+    def refreshed(self, token, result, error, host=LOCAL):
+        if token != self.generation or host != self.host():
             return
         if error is not None:
             self.message.setText(printable(error))
             return
         rows, (store, names), problem, git, publish, hosts = result
         self.state.update(logins=rows, secrets=names, store=store, git=git, publish=publish)
-        self.fill_secret_hosts(hosts)
+        if host != LOCAL:
+            self.remote_secrets[host] = list(names)
+        if hosts is not None:
+            self.fill_secret_hosts(hosts)
         states = {None: tr("logged in"), "missing": tr("no login"), "expired": tr("expired, log in again"),
                   "error": tr("cannot be read")}
         fill(self.logins, [[agent, self.login_source(where), states.get(problem_, problem_), source]
@@ -364,37 +426,31 @@ class CredentialsPage(QWidget):
              ["ok" if problem_ is None else "warn" for _, _, problem_, _ in rows])
         if problem is not None:
             self.message.setText(printable(problem))
-        if self.secret_host.currentData() in (None, "local"):
-            self.show_secrets("local", store, names)
+        self.show_secrets(host, store, names)
         secret_names = [name for name, _ in names]
         self.git.show_entries(git, secret_names)
         self.publish.show_entries(publish, secret_names)
         self.show_overview()
 
     def fill_secret_hosts(self, hosts):
-        """This machine and each host of `sandbox-ai hosts`; the choice stays while its host does."""
-        chosen = self.secret_host.currentData()
+        """Each host of `sandbox-ai hosts` the chooser does not list yet (its file is read when it is built); the
+        choice stays."""
         self.secret_host.blockSignals(True)
-        self.secret_host.clear()
-        self.secret_host.addItem(tr("This machine"), LOCAL)
         for host in hosts:
-            if isinstance(host, str) and host != "local":
+            from .host_choice import valid_host
+            if isinstance(host, str) and host != LOCAL and valid_host(host) and self.secret_host.findData(host) < 0:
                 self.secret_host.addItem(printable(host), host)
-        index = self.secret_host.findData(chosen)
-        self.secret_host.setCurrentIndex(max(0, index))
         self.secret_host.blockSignals(False)
-        if index < 0 and chosen not in (None, "local"):
-            self.load_secrets()  # its host is gone: this machine's, not that host's rows under another name
 
     def secret_host_of(self):
-        return self.secret_host.currentData() or "local"
+        return self.host()
 
     def show_secrets(self, host, store, names):
         stores = {"keyring": tr("your system keyring (Secret Service)"), "file": tr("private files (mode 0600)")}
         text = tr("Kept in: {store}", store=stores.get(store, printable(store)))
         self.backend_label.setText(text if host == "local" else tr("On {host}: {text}", host=printable(host),
                                                                     text=text))
-        uses = self.secret_uses() if host == "local" else {}  # what uses them: this machine's logins
+        uses = self.secret_uses() if host == self.host() else {}  # what uses them: that host's logins
         fill(self.secrets, [[name, where, ", ".join(uses.get(name, [])) or "—"] for name, where in names])
 
     def load_secrets(self):
@@ -512,18 +568,23 @@ class CredentialsPage(QWidget):
         return kind
 
     def login(self, logout):
-        agent = selected(self.logins)
+        """`sandbox-ai login AGENT [--logout]` in a terminal tab on the host chosen (ssh -tt for another host)."""
+        agent, host = selected(self.logins), self.host()
         if agent not in self.sai.agents:
             QMessageBox.information(self, tr("Logins"), tr("Select an agent first."))
             return
+        where = "" if host == LOCAL else f" ({host})"
         if logout:
-            if not ask_first(self, "login-logout", tr("Log out"), tr("Forget the stored {agent} login? Sandboxes then "
-                                                                     "use the host's login again.", agent=agent),
-                             tr("Log out")):
+            text = tr("Forget the stored {agent} login? Sandboxes then use the host's login again.", agent=agent)
+            if not ask_first(self, "login-logout", tr("Log out"), text if host == LOCAL else
+                             tr("On {host}: {text}", host=printable(host), text=text), tr("Log out")):
                 return
-            self.terminal(self.sai.command("login", agent, "--logout"), f"sandbox-ai login {agent} --logout")
+            argv = self.sai.command("login", agent, "--logout") if host == LOCAL else \
+                self.sai.login_argv(host, agent, logout=True)
+            self.terminal(argv, f"sandbox-ai login {agent} --logout{where}")
         else:
-            self.terminal(self.sai.command("login", agent), f"sandbox-ai login {agent}")
+            argv = self.sai.command("login", agent) if host == LOCAL else self.sai.login_argv(host, agent)
+            self.terminal(argv, f"sandbox-ai login {agent}{where}")
 
     def set_secret(self):
         name, value, host = self.name.text().strip(), self.value.text(), self.secret_host_of()
@@ -561,10 +622,7 @@ class CredentialsPage(QWidget):
         self.secrets_changed()
 
     def secrets_changed(self):
-        if self.secret_host_of() == "local":
-            self.refresh()
-        else:
-            self.load_secrets()
+        self.refresh()
 
     def delete_secret(self):
         name, host = self.name.text().strip() or selected(self.secrets), self.secret_host_of()

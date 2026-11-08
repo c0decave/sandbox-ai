@@ -119,7 +119,7 @@ def test_pages_and_preview(window):
     assert [window.nav.item(i).text() for i in range(window.nav.count())] == [
         "PROJECT", "Start", "Board", "RUNNING", "Sandboxes & sessions", "Approvals", "Terminals", "INSIGHT",
         "Connections", "Activity", "Statistics", "Files", "MANAGE", "Kits & plugins", "MCP servers", "LLM servers", "Images",
-        "Credentials",
+        "Credentials", "Teams",
         "SYSTEM", "System", "Hosts", "Help"]
     launch = window.launch
     launch.agent.setCurrentText("codex")
@@ -1037,6 +1037,9 @@ def test_slow_commands_do_not_block_the_window(window, env, monkeypatch, wait):
     monkeypatch.setattr(window.sai, "dry_run", lambda agent, argv: release.wait(30) and ({"plan": 1}, ""))
     monkeypatch.setattr(window.sai, "mcp_catalog", lambda: release.wait(30) and ([], []))
     monkeypatch.setattr(QtWidgets.QFileDialog, "getExistingDirectory", lambda *a, **k: str(env))
+    from sandbox_ai_app import ui
+    monkeypatch.setattr(ui.PrivacyDialog, "exec", lambda dialog: (dialog.paths.set_value([str(env)]),
+                                                                  QtWidgets.QDialog.DialogCode.Accepted)[-1])
     run = fake_run(env)
     began = time.monotonic()
     window.system.privacy()
@@ -1322,7 +1325,9 @@ def test_quitting_stops_running_commands_with_their_children(window, env, monkey
     widgets.ThreadCall.wait_all(120)
     pid_file = env / "child"
     monkeypatch.setattr(window.sai, "command", lambda *args: [sys.executable, "-c", SPAWNER, str(pid_file)])
-    monkeypatch.setattr(QtWidgets.QFileDialog, "getExistingDirectory", lambda *a, **k: str(env))
+    from sandbox_ai_app import ui
+    monkeypatch.setattr(ui.PrivacyDialog, "exec", lambda dialog: (dialog.paths.set_value([str(env)]),
+                                                                  QtWidgets.QDialog.DialogCode.Accepted)[-1])
     window.system.privacy()  # sandbox-ai privacy-check, up to 600 s
     assert wait(lambda: pid_file.exists() and pid_file.read_text(), 20)
     child = int(pid_file.read_text())
@@ -2105,6 +2110,9 @@ def test_a_running_start_on_another_host_is_changed_there(window, monkeypatch, w
 
         def arguments(self):
             return ["--allow-host", "pypi.org"]
+
+        def kept(self):  # "keep for later starts" (net allow --keep): not chosen here
+            return False
 
     class FakeWorkspace:
         def __init__(self, parent, run, host="local"):

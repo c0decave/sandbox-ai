@@ -389,6 +389,28 @@ AREA_TOURS = {
               "hier."),
              ("Add a profile from a WireGuard file.", "Legen Sie ein Profil aus einer WireGuard-Datei an.")),
     ),
+    "team": (
+        step("hosts", ("Whose teams", "Wessen Teams"),
+             ("This machine or a host of sandbox-ai hosts: the list and every button act there.",
+              "Dieser Rechner oder ein Host von sandbox-ai hosts: die Liste und jeder Knopf wirken dort."),
+             ("Keep this machine for now.", "Bleiben Sie vorerst bei diesem Rechner.")),
+        step("table", ("The teams", "Die Teams"),
+             ("Each team with its members and its workspace; select one to see its board.",
+              "Jedes Team mit seinen Mitgliedern und seinem Arbeitsbereich; wählen Sie eines, um seine Tafel zu "
+              "sehen."),
+             ("Select a team.", "Wählen Sie ein Team.")),
+        step("start_button", ("Start one", "Eines starten"),
+             ("Two or three agents on one workspace, the first leads; each member starts in a sandbox of its own.",
+              "Zwei oder drei Agenten auf einem Arbeitsbereich, der erste leitet; jedes Mitglied startet in einer "
+              "eigenen Sandbox."),
+             ("Start Claude Code with Codex on the current project.", "Starten Sie Claude Code mit Codex auf dem "
+              "aktuellen Projekt.")),
+        step("board", ("The board", "Die Tafel"),
+             ("The tasks between the members, and those you post: who for, their state, what they ask.",
+              "Die Aufgaben zwischen den Mitgliedern und die, die Sie stellen: für wen, ihr Stand, was sie verlangen."),
+             ("Post a task for a member and watch it change to done.", "Stellen Sie einem Mitglied eine Aufgabe und "
+              "sehen Sie zu, wie sie erledigt wird.")),
+    ),
     "system": (
         step("checks", ("What sandbox-ai needs", "Was sandbox-ai braucht"),
              ("Podman or Bubblewrap, the images, the network, the keyring: each check with what fixes it.",

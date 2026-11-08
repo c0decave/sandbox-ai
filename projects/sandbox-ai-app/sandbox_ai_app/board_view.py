@@ -36,6 +36,8 @@ from .state import choose_file, choose_folder
 from .i18n import tr
 from .widgets import MONO, ask_first, background, confirm, flow, inform, plain_label, safe_tooltip, warn
 
+LOCAL = "local"  # this machine, as `sandbox-ai hosts` names it
+
 
 def scrub_board(state):
     """A board's state to keep in the state file: agent arguments that may be secrets left out."""
@@ -653,17 +655,21 @@ class PathEdit(QWidget):
     """A line edit with a folder (or file) chooser."""
     changed = Signal(str)
 
-    def __init__(self, value="", directory=True):
+    def __init__(self, value="", directory=True, host=LOCAL):
         super().__init__()
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.edit = QLineEdit(str(value or ""))
         self.edit.editingFinished.connect(lambda: self.changed.emit(self.edit.text()))
-        browse = QToolButton()
+        browse = self.browse_button = QToolButton()
         browse.setText("…")
         browse.clicked.connect(lambda: self.browse(directory))
         layout.addWidget(self.edit, 1)
         layout.addWidget(browse)
+        if host != LOCAL:  # a path of that host: typed in, never chosen from this computer's folders
+            browse.setEnabled(False)
+            self.edit.setToolTip(tr("A path on {host}: type it in (this computer's folders are not {host}'s)",
+                                    host=printable(host)))
 
     def browse(self, directory):
         path = (choose_folder(self, tr("Choose a folder"), "folder") if directory
@@ -741,6 +747,52 @@ class RulesEdit(QWidget):
             if any(cells):
                 found.append(" ".join(cells))
         return found
+
+
+class HostCombo(QComboBox):
+    """Where a start runs: this machine, or a host of `sandbox-ai hosts` (over SSH). The list is read from the hosts
+    file (no SSH) and again by reload() (a page shown: a host may have been added meanwhile); hidden while there is
+    no other host. The host chosen stays while it is in the list; one that left it falls back to this machine."""
+    chosen = Signal(str)
+
+    def __init__(self, sai, parent=None):
+        super().__init__(parent)
+        self.sai = sai
+        self.setAccessibleName(tr("Host"))
+        self.setToolTip(tr("Where it runs: this machine, or a host of sandbox-ai hosts (over SSH)"))
+        self.currentIndexChanged.connect(lambda _index: self.chosen.emit(self.current()))
+        self.reload()
+
+    def reload(self):
+        current = self.current() if self.count() else LOCAL
+        try:
+            others = [e for e in self.sai.host_entries() if e.get("kind") != LOCAL and e.get("name") != LOCAL] \
+                if self.sai.hosts_supported() else []
+        except Exception:  # noqa: BLE001 - a damaged hosts file: this machine still counts
+            others = []
+        self.blockSignals(True)
+        self.clear()
+        self.addItem(tr("This machine"), LOCAL)
+        for entry in others:
+            if isinstance(entry.get("name"), str):
+                self.addItem(printable(f"{entry['name']}  {entry.get('ssh', '')}".strip()), entry["name"])
+        index = self.findData(current)
+        self.setCurrentIndex(max(0, index))
+        self.blockSignals(False)
+        self.setVisible(self.count() > 1)
+        if index < 0 and current != LOCAL:
+            self.chosen.emit(LOCAL)  # the host chosen left the list: this machine instead
+
+    def current(self):
+        return self.currentData() or LOCAL
+
+    def choose(self, host):
+        """Choose HOST if it is in the list; False otherwise (the choice stays)."""
+        index = self.findData(host or LOCAL)
+        if index < 0:
+            return False
+        self.setCurrentIndex(index)
+        return True
 
 
 class BoardPage(QWidget):
@@ -899,7 +951,15 @@ class BoardPage(QWidget):
         self.session.setMaximumWidth(160)
         start_session = QPushButton(tr("Start as session"))
         start_session.clicked.connect(lambda: self.start(session=self.session.text().strip()))
-        layout.addWidget(flow(self.apply_button, self.dry_button, start_app, start_window, self.session, start_session))
+        # Where it starts: this machine or a host (its own launcher checks and starts it; paths are that host's).
+        self.host_choice = HostCombo(sai)
+        self.host_choice.chosen.connect(lambda _host: self.host_changed())
+        self.host_known = {}  # {(host, agent): the option strings of that host's launcher, or None: not known}
+        self.host_note = plain_label(role="secondary")
+        self.host_note.hide()
+        layout.addWidget(self.host_note)
+        layout.addWidget(flow(self.host_choice, self.apply_button, self.dry_button, start_app, start_window,
+                              self.session, start_session))
         self.check_timer = QTimer(self)
         self.check_timer.setSingleShot(True)
         self.check_timer.timeout.connect(self.check)
@@ -1334,7 +1394,9 @@ class BoardPage(QWidget):
         self.fit()
 
     def showEvent(self, event):  # noqa: N802
-        """Shown the first time: the whole board in view (it is laid out before the view has a size)."""
+        """Shown the first time: the whole board in view (it is laid out before the view has a size). The hosts are
+        read again (one added on the Hosts page meanwhile)."""
+        self.host_choice.reload()
         super().showEvent(event)
         if getattr(self, "restyle_pending", False):
             self.restyle()
@@ -1396,7 +1458,12 @@ class BoardPage(QWidget):
         self.check_token += 1
         token = self.check_token
         agent, _, _ = B.values(self.board)
-        background(self.sai.dry_run, agent, B.launcher_argv(self.sai, self.board), timeout=90,
+        host = self.host()
+        if host != LOCAL and (host, agent) not in self.host_known:  # another agent: its options there
+            self.host_known[(host, agent)] = None
+            background(self.sai.host_launch_options, host, agent, timeout=90,
+                       done=lambda found, error: self.host_options_read(host, agent, found, error))
+        background(self.sai.host_dry_run, host, agent, B.launcher_argv(self.sai, self.board), timeout=120,
                    done=lambda result, error: self.checked(token, result, error))
 
     def checked(self, token, result, error):
@@ -1463,7 +1530,7 @@ class BoardPage(QWidget):
             self.model_row(node)
             self.text_row(node, "arguments", tr("Agent arguments"), tr("e.g. --verbose"))
         elif kind == "workspace":
-            path = PathEdit(node.props.get("path", ""))
+            path = PathEdit(node.props.get("path", ""), host=self.host())
             path.changed.connect(lambda text: self.set_prop(node_id, "path", text.strip()))
             self.inspector.addRow(tr("Folder"), path)
             readonly = QCheckBox(tr("every workspace read-only (--workspace-ro)"))
@@ -1472,7 +1539,7 @@ class BoardPage(QWidget):
             self.disable_if_forbidden(readonly, "--workspace-ro")
             self.inspector.addRow("", readonly)
         elif kind == "mount":
-            source = PathEdit(node.props.get("source", ""))
+            source = PathEdit(node.props.get("source", ""), host=self.host())
             source.changed.connect(lambda text: self.set_prop(node_id, "source", text.strip()))
             self.inspector.addRow(tr("Host folder or file"), source)
             self.text_row(node, "dest", tr("In the sandbox"), "/mnt/data")
@@ -1930,6 +1997,9 @@ class BoardPage(QWidget):
         saved = state.get("boards", {})
         self.saved_boards = {k: v for k, v in saved.items() if isinstance(k, str) and isinstance(v, dict)}
         state.collect(self.keep_boards)
+        if isinstance(state.get("board_host"), str):
+            self.host_choice.choose(state.get("board_host"))
+        self.host_choice.chosen.connect(lambda _host: state.schedule())
         self.undo_group.cleanChanged.connect(lambda _clean: state.schedule())
         self.undo_group.indexChanged.connect(lambda _index: state.schedule())
 
@@ -1952,6 +2022,7 @@ class BoardPage(QWidget):
             if key not in boards and key not in self.restored:
                 boards[key] = entry
         self.state.data["boards"] = boards
+        self.state.data["board_host"] = self.host()
 
     def restore_saved(self, entry):
         """The draft kept for this project (as an undo step: Undo goes back to the file; Discard drops it),
@@ -1993,7 +2064,7 @@ class BoardPage(QWidget):
         board, after asking whether unapplied changes may go."""
         from .preset_gallery import PresetGallery
         gallery = PresetGallery(self.sai, self.project_folder(), self.default_agent(), self.policy(), self.board,
-                                self, self.settings().get("default_backend"))
+                                self, self.settings().get("default_backend"), host=self.host())
         self.gallery = gallery
         if gallery.exec() != gallery.DialogCode.Accepted or gallery.result_ is None:
             return None
@@ -2041,6 +2112,35 @@ class BoardPage(QWidget):
     def show_board(self, board, directory):
         """Open BOARD (e.g. from the wizard) for the project DIRECTORY."""
         self.load(board, directory)
+
+    # -- the host it starts on --
+
+    def host(self):
+        return self.host_choice.current()
+
+    def host_changed(self):
+        """Another host: Apply (it writes this machine's project file) only here; the launcher's verdict, the dry
+        run and the start from that host's launcher, whose options are read in the background."""
+        host = self.host()
+        remote = host != LOCAL
+        self.apply_button.setEnabled(not remote)
+        self.apply_button.setToolTip(tr("Apply writes the project file on this machine; on {host} the board starts "
+                                        "as it is (--no-config)", host=printable(host)) if remote else
+                                     tr("Write .sandbox-ai.json into the first workspace and trust it, after showing "
+                                        "it and what changes"))
+        self.host_note.setVisible(remote)
+        if remote:
+            self.host_note.setText(tr("Starts on {host}: folders and files are {host}'s (typed in; nothing of this "
+                                      "computer is chosen), and its sandbox-ai checks the board.",
+                                      host=printable(host)))
+        self.inspect_timer.start()  # the path fields: a chooser only for this machine's
+        self.check_timer.start(0)
+
+    def host_options_read(self, host, agent, found, error):
+        self.host_known[(host, agent)] = set(found) if error is None and found else None
+        if error is not None and host == self.host():
+            self.host_note.setText(self.host_note.text() + " " + tr("Its options could not be read: {error}",
+                                                                    error=printable(str(error))[-200:]))
 
     # -- actions --
 
@@ -2096,8 +2196,8 @@ class BoardPage(QWidget):
 
     def dry_run(self):
         agent, _, _ = B.values(self.board)
-        background(self.sai.dry_run, agent, B.launcher_argv(self.sai, self.board), owner=self, source=self.dry_button,
-                   timeout=90, done=self.dry_run_done)
+        background(self.sai.host_dry_run, self.host(), agent, B.launcher_argv(self.sai, self.board), owner=self,
+                   source=self.dry_button, timeout=120, done=self.dry_run_done)
 
     def dry_run_done(self, result, error):
         from .widgets import show_text
@@ -2122,6 +2222,14 @@ class BoardPage(QWidget):
             inform(self, tr("Session"), tr("Give the session a name first."))
             return False
         servers = B.project_servers(self.board)
+        host = self.host()
+        if servers and host != LOCAL:
+            warn(self, tr("Not started"), tr("The board uses MCP servers the project defines ({names}): the launcher "
+                                             "knows them only from the project's trusted .sandbox-ai.json, which "
+                                             "Apply writes on this machine. On {host}, use MCP servers registered "
+                                             "there (sandbox-ai mcp list).", names=", ".join(servers),
+                                             host=printable(host)))
+            return False
         if servers:
             return self.start_from_project_file(servers, embedded, session)
         return self.run_start(B.launcher_argv(self.sai, self.board), embedded, session)
@@ -2130,6 +2238,19 @@ class BoardPage(QWidget):
         """Run the start in a terminal; a failure to start it is a message, never an exception in a slot."""
         try:
             agent, _, agent_args = B.values(self.board, self.sai)
+            host = self.host()
+            if host != LOCAL:
+                known = self.host_known.get((host, agent))
+                unknown = backend.unknown_options(self.sai.options(), options, known) if known else []
+                if unknown:
+                    warn(self, tr("Not started"), tr("The sandbox-ai on {host} does not know these options: {list}. "
+                                                     "Take them off the board, or update sandbox-ai there.",
+                                                     host=printable(host), list=" ".join(unknown)))
+                    return False
+                argv = self.sai.host_launch_argv(host, agent, options, agent_args, session or None)
+                title = f"{printable(host)}: {agent}" + (f" ({session})" if session else "")
+                self.terminal(argv, title, embedded=None if session else embedded, cwd=None)
+                return True
             argv = self.sai.launch_argv(agent, options, agent_args, session or None)
             workspaces = self.board.of_kind("workspace")
             cwd = workspaces[0].props.get("path") if workspaces else None

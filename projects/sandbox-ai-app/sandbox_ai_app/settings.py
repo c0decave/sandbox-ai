@@ -6,6 +6,10 @@ window applies what can change at once (theme, polling intervals, notifications)
 sandbox-ai location apply at the next start. The policy tab shows /etc/sandbox-ai/policy.json as it is, why
 it stops every start if it does, and what it forbids; the app greys those options out everywhere (the Start
 page's form, the board, the wizard).
+
+The sandbox-ai tab also lists the extra preset directories (sandbox-ai presets dirs) and the trusted project
+configurations (sandbox-ai wizard trust --list; Forget… runs `sandbox-ai wizard forget PATH`, asked first:
+project-forget), each of this machine or of a host of `sandbox-ai hosts` (over SSH).
 """
 from __future__ import annotations
 
@@ -21,7 +25,25 @@ from . import backend, notifications, presets as PR, theme
 from .board_view import PathEdit
 from .files import printable
 from .i18n import tr
-from .widgets import MONO, background, inform, outcome, plain_label, warn
+from .widgets import MONO, ask_first, background, inform, outcome, plain_label, warn
+
+LOCAL = "local"
+
+
+def host_row(sai, owner):
+    """A host chooser for a box of the dialog (this machine, or a host of sandbox-ai hosts); OWNER.refresh() when
+    another is chosen."""
+    from .host_choice import HostChooser
+    chooser = HostChooser(sai)
+    chooser.changed.connect(lambda _host: owner.refresh())
+    return chooser
+
+
+def typed_path(parent, title, host_label):
+    """A folder of another host, typed (this machine's file dialog cannot see it); None when cancelled."""
+    from PySide6.QtWidgets import QInputDialog
+    path, ok = QInputDialog.getText(parent, title, tr("The absolute path on {host}:", host=host_label))
+    return path.strip() if ok and path.strip() else None
 
 
 class PresetDirs(QWidget):
@@ -32,9 +54,11 @@ class PresetDirs(QWidget):
 
     def __init__(self, sai, parent=None):
         super().__init__(parent)
-        self.sai, self.entries = sai, []
+        self.sai, self.entries, self.token = sai, [], 0
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        self.hosts = host_row(sai, self)
+        layout.addWidget(self.hosts)
         self.list = QListWidget()
         self.list.setMaximumHeight(120)
         self.list.itemSelectionChanged.connect(self.update_buttons)
@@ -58,11 +82,26 @@ class PresetDirs(QWidget):
         else:
             self.refresh()
 
-    def refresh(self):
-        background(self.sai.preset_dirs, owner=self, source=[self.add_button, self.remove_button], timeout=90,
-                   done=self.loaded)
+    def host(self):
+        return self.hosts.host() or LOCAL
 
-    def loaded(self, result, error):
+    def refresh(self):
+        host = self.host()
+        self.token += 1
+        token = self.token
+        self.list.clear()
+        if host == LOCAL:
+            background(self.sai.preset_dirs, owner=self, source=[self.add_button, self.remove_button], timeout=90,
+                       done=lambda result, error: self.loaded(result, error, token))
+        else:
+            self.status.setText(tr("Asking {host}…", host=self.hosts.label(host)))
+            background(lambda: self.sai.host_preset_dirs(host), owner=self, source=[self.add_button,
+                                                                                   self.remove_button],
+                       timeout=120, done=lambda result, error: self.loaded(result, error, token))
+
+    def loaded(self, result, error, token=None):
+        if token is not None and token != self.token:
+            return
         self.list.clear()
         if error is not None:
             self.status.setText(tr("Cannot list the preset directories: {error}", error=printable(str(error))))
@@ -89,8 +128,11 @@ class PresetDirs(QWidget):
         self.remove_button.setEnabled(bool(self.list.selectedItems()))
 
     def add(self):
-        from .state import choose_folder
-        path = choose_folder(self, tr("Folder with presets (*.json)"), "presets")
+        if self.host() != LOCAL:
+            path = typed_path(self, tr("Folder with presets (*.json)"), self.hosts.label())
+        else:
+            from .state import choose_folder
+            path = choose_folder(self, tr("Folder with presets (*.json)"), "presets")
         if path:
             self.run("add", path)
 
@@ -100,9 +142,15 @@ class PresetDirs(QWidget):
             self.run("remove", items[0].data(256))
 
     def run(self, action, path):
-        background(lambda: self.sai.preset_dir_command(action, path), owner=self,
-                   source=[self.add_button, self.remove_button], timeout=90,
-                   done=lambda result, error: self.done(result, error))
+        host = self.host()
+        if host == LOCAL:
+            background(lambda: self.sai.preset_dir_command(action, path), owner=self,
+                       source=[self.add_button, self.remove_button], timeout=90,
+                       done=lambda result, error: self.done(result, error))
+        else:
+            background(lambda: self.sai.host_preset_dir_command(host, action, path), owner=self,
+                       source=[self.add_button, self.remove_button], timeout=120,
+                       done=lambda result, error: self.done(result, error))
 
     def done(self, result, error):
         status, out, err = outcome(result, error)
@@ -111,6 +159,110 @@ class PresetDirs(QWidget):
             warn(self, tr("Preset directories"), text or tr("Failed (exit status {status}).", status=status))
         elif text:
             inform(self, tr("Preset directories"), text, modal=False)
+        self.changed.emit()
+        self.refresh()
+
+
+class TrustedProjects(QWidget):
+    """The trusted project configurations of this machine or a host (`sandbox-ai wizard trust --list --json`):
+    each with its state (trusted, changed since, missing, unreadable); Forget… takes one off the list (`sandbox-ai
+    wizard forget PATH`, asked first: its project's starts stop until it is trusted again)."""
+    changed = Signal()
+    STATES = {"trusted": "ok", "changed": "warn", "missing": "muted", "unreadable": "bad"}
+
+    def __init__(self, sai, parent=None):
+        super().__init__(parent)
+        self.sai, self.entries, self.token = sai, [], 0
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.hosts = host_row(sai, self)
+        layout.addWidget(self.hosts)
+        self.list = QListWidget()
+        self.list.setMaximumHeight(140)
+        self.list.setAccessibleName(tr("Trusted project configurations"))
+        self.list.itemSelectionChanged.connect(self.update_buttons)
+        layout.addWidget(self.list)
+        row = QHBoxLayout()
+        self.refresh_button = QPushButton(tr("Refresh"))
+        self.refresh_button.clicked.connect(lambda _=False: self.refresh())
+        self.forget_button = QPushButton(tr("Forget…"))
+        self.forget_button.setToolTip(tr("sandbox-ai wizard forget: the configuration is no longer trusted; its "
+                                         "project's starts stop until it is trusted again"))
+        self.forget_button.clicked.connect(lambda _=False: self.forget())
+        row.addWidget(self.refresh_button)
+        row.addWidget(self.forget_button)
+        row.addStretch()
+        layout.addLayout(row)
+        self.status = plain_label(role="secondary")
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        self.update_buttons()
+        self.refresh()
+
+    def host(self):
+        return self.hosts.host() or LOCAL
+
+    def refresh(self):
+        host = self.host()
+        self.token += 1
+        token = self.token
+        self.list.clear()
+        self.entries = []
+        self.status.setText(tr("Asking {host}…", host=self.hosts.label(host)))
+        background(lambda: self.sai.trusted_projects(host), owner=self, source=[self.refresh_button,
+                                                                                self.forget_button],
+                   timeout=90, done=lambda result, error: self.loaded(token, host, result, error))
+
+    def loaded(self, token, host, result, error):
+        if token != self.token:
+            return
+        self.list.clear()
+        if error is not None:
+            self.status.setText(tr("Cannot list the trusted configurations: {error}", error=printable(str(error))[:400]))
+            self.entries = []
+            self.update_buttons()
+            return
+        self.entries = [e for e in result if backend.valid_directory(e.get("path"))]
+        states = {"trusted": tr("trusted"), "changed": tr("changed since it was trusted"), "missing": tr("missing"),
+                  "unreadable": tr("unreadable")}
+        for entry in self.entries:
+            state = entry.get("state")
+            item = QListWidgetItem(f"{printable(entry['path'])}  ({states.get(state, printable(state or '?'))})")
+            item.setData(256, entry["path"])
+            item.setIcon(theme.dot(self.STATES.get(state, "muted")))
+            self.list.addItem(item)
+        self.status.setText(tr("{count} trusted on {host}: a start of such a project gets the options of its "
+                               ".sandbox-ai.json.", count=len(self.entries), host=self.hosts.label(host))
+                            if self.entries else tr("No trusted project configuration on {host}.",
+                                                    host=self.hosts.label(host)))
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.forget_button.setEnabled(bool(self.list.selectedItems()))
+
+    def forget(self):
+        items, host = self.list.selectedItems(), self.host()
+        if not items:
+            return
+        path = items[0].data(256)
+        if not backend.valid_directory(path):
+            return
+        if not ask_first(self, "project-forget", tr("Forget…").rstrip("…"), tr(
+                "No longer trust {path} on {host}? Starts of that project stop until its configuration is trusted "
+                "again.", path=printable(path), host=self.hosts.label(host)), tr("Forget")):
+            return
+        background(lambda: self.sai.forget_trusted(host, path), owner=self,
+                   source=[self.refresh_button, self.forget_button], timeout=90,
+                   done=lambda result, error: self.forgotten(result, error))
+
+    def forgotten(self, result, error):
+        status, out, err = outcome(result, error)
+        text = printable((out + err).strip())[-1500:]
+        if status != 0:
+            warn(self, tr("Trusted project configurations"), text or tr("Failed (exit status {status}).",
+                                                                      status=status))
+        else:
+            self.status.setText(text)
         self.changed.emit()
         self.refresh()
 
@@ -198,6 +350,8 @@ class SettingsDialog(QDialog):
                                 role="secondary"))
         self.preset_dirs = PresetDirs(sai)
         form.addRow(tr("Preset directories"), self.preset_dirs)
+        self.trusted = TrustedProjects(sai)
+        form.addRow(tr("Trusted projects"), self.trusted)
 
         # new projects and the board
         page, form = self.tab(tr("New projects"))

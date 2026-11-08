@@ -10,7 +10,10 @@ command line, in a file of the app or in sandbox-ai's llm.json. For another host
 to that host's secrets without a command line, so the dialog asks for the name of a secret kept there already.
 
 What the CLI or a host answers is shown through printable(); names that go back as arguments are checked first
-(never one that reads as an option)."""
+(never one that reads as an option). The dialog also offers the further options of `llm add`: headers the proxy adds
+from secrets (--header-secret), a CA (--ca, a file of that host), plain http to a public address (--insecure-http,
+asked first: llm-insecure) and replacing an endpoint of the same name (--replace); Show runs `llm show`, Models
+`llm models --sort`."""
 from __future__ import annotations
 
 import json
@@ -32,6 +35,10 @@ NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
 SECRET = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 MODEL = re.compile(r"[\w.:/@+-]{1,200}", re.ASCII)
 VPN = NAME
+HEADER = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,63}")  # llm.py's HEADER
+RESERVED_HEADERS = {"host", "content-length", "transfer-encoding", "connection", "upgrade", "te", "trailer"}
+SORTS = (("name", N_("by name")), ("size", N_("by size")), ("loaded", N_("loaded first")))
+HEADER_EXAMPLE = "X-Gateway-Key=GATEWAY_KEY"
 URL = re.compile(r"https?://(\[[0-9A-Fa-f:.]{2,45}\]|[A-Za-z0-9.-]{1,253})(?::[0-9]{1,5})?(/[A-Za-z0-9._~/-]{0,200})?")
 LOCAL = "local"  # this machine, as sandbox-ai hosts names it
 HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
@@ -44,6 +51,7 @@ MODEL_EXAMPLE = "qwen2.5-coder:7b"
 SECRET_EXAMPLE = "LLM_KEY"
 VPN_EXAMPLE = "home"
 LIST_SECONDS, ADD_SECONDS, CHECK_SECONDS, MODELS_SECONDS, REMOVE_SECONDS = 60, 90, 150, 120, 60
+SHOW_SECONDS = 60
 
 
 def valid_name(name):
@@ -151,6 +159,15 @@ class LlmDialog(QDialog):
         self.value = QLineEdit()
         self.value.setEchoMode(QLineEdit.EchoMode.Password)
         self.value.setPlaceholderText(tr("typed here: kept as that secret (or leave it empty if it is kept already)"))
+        self.headers = QLineEdit()
+        self.headers.setPlaceholderText(HEADER_EXAMPLE)
+        self.headers.setToolTip(tr("Headers the proxy adds with the value of a secret (HEADER=SECRET, several "
+                                   "separated by spaces), e.g. for a gateway"))
+        self.ca = QLineEdit()
+        self.ca.setPlaceholderText(tr("a PEM file on that host (optional)"))
+        self.ca.setToolTip(tr("The CA that signed the server's certificate (copied)"))
+        self.insecure = QCheckBox(tr("Allow plain http to an address outside the local networks (unencrypted)"))
+        self.replace = QCheckBox(tr("Replace an LLM server of that name"))
         self.form.addRow(tr("Name"), self.name)
         self.form.addRow(tr("Kind"), self.kind)
         self.form.addRow(tr("URL"), self.url)
@@ -159,6 +176,10 @@ class LlmDialog(QDialog):
         self.form.addRow("", self.anthropic)
         self.form.addRow(tr("Secret for the API key (optional)"), self.secret)
         self.form.addRow(tr("Its value"), self.value)
+        self.form.addRow(tr("Headers from secrets"), self.headers)
+        self.form.addRow(tr("CA certificate"), self.ca)
+        self.form.addRow("", self.insecure)
+        self.form.addRow("", self.replace)
         layout.addLayout(self.form)
         if remote:
             note = tr("On another host the key is a secret of sandbox-ai there: keep it on that host first "
@@ -184,7 +205,9 @@ class LlmDialog(QDialog):
         fields = {"name": self.name.text().strip(), "kind": self.kind.currentData(), "url": self.url.text().strip(),
                   "model": self.model.text().strip(), "vpn": self.vpn.text().strip(),
                   "anthropic": self.anthropic.isChecked() and self.kind.currentData() == "openai-compatible",
-                  "secret": self.secret.text().strip()}
+                  "secret": self.secret.text().strip(), "headers": self.headers.text().strip(),
+                  "ca": self.ca.text().strip(), "insecure": self.insecure.isChecked(),
+                  "replace": self.replace.isChecked()}
         value = None if self.remote else (self.value.text() or None)
         return fields, value
 
@@ -219,6 +242,21 @@ def add_argv(fields):
         args += ["--api-key-secret", secret]
     if fields.get("anthropic") and kind == "openai-compatible":
         args.append("--anthropic")
+    for pair in (fields.get("headers") or "").replace(",", " ").split():
+        header, sep, secret = pair.partition("=")
+        if not sep or not HEADER.fullmatch(header) or header.lower() in RESERVED_HEADERS or not SECRET.fullmatch(secret):
+            raise ValueError(tr("A header from a secret is HEADER=SECRET (a header name, a secret's name): {value}",
+                                value=printable(pair)))
+        args.append(f"--header-secret={header}={secret}")
+    ca = fields.get("ca")
+    if ca:
+        if not ca.startswith("/") or "\0" in ca or not ca.isprintable():
+            raise ValueError(tr("The CA is a file with its absolute path."))
+        args.append(f"--ca={ca}")
+    if fields.get("insecure"):
+        args.append("--insecure-http")
+    if fields.get("replace"):
+        args.append("--replace")
     return args
 
 
@@ -255,6 +293,15 @@ class LlmPage(QWidget):
         self.agent.setAccessibleName(tr("Agent"))
         self.agent.setToolTip(tr("Check the API this agent needs (or every agent's)"))
         self.models_button = QPushButton(tr("Models"))
+        self.sort = QComboBox()
+        for key, label in SORTS:
+            self.sort.addItem(tr(label), key)
+        self.sort.setAccessibleName(tr("Sort the models"))
+        self.sort.setToolTip(tr("How Models sorts the list (sandbox-ai llm models --sort)"))
+        self.show_button = QPushButton(tr("Show"))
+        self.show_button.setAccessibleName(tr("Show"))
+        self.show_button.setToolTip(tr("sandbox-ai llm show: the endpoint with what the agents get (no key)"))
+        self.show_button.clicked.connect(lambda _=False: self.show_server())
         self.remove_button = QPushButton(tr("Remove…"))
         self.refresh_button = QPushButton(tr("Refresh"))
         for button, name, tip in (
@@ -270,7 +317,8 @@ class LlmPage(QWidget):
         self.models_button.clicked.connect(self.models)
         self.remove_button.clicked.connect(self.remove)
         self.refresh_button.clicked.connect(self.refresh)
-        for widget in (self.add_button, self.check_button, self.agent, self.models_button, self.remove_button):
+        for widget in (self.add_button, self.check_button, self.agent, self.models_button, self.sort,
+                       self.show_button, self.remove_button):
             row.addWidget(widget)
         row.addStretch(1)
         row.addWidget(self.refresh_button)
@@ -370,7 +418,7 @@ class LlmPage(QWidget):
 
     def update_buttons(self):
         chosen = bool(selected_keys(self.servers))
-        for button in (self.check_button, self.models_button, self.remove_button):
+        for button in (self.check_button, self.models_button, self.show_button, self.remove_button):
             set_enabled(button, chosen, tr("Select a server first."))
 
     # -- actions --
@@ -394,6 +442,12 @@ class LlmPage(QWidget):
                 raise ValueError(tr("A typed key needs the name of the secret to keep it as."))
         except ValueError as exc:
             warn(self, tr("New LLM server"), printable(exc))
+            return
+        # Plain http to a public address: prompts, answers and the key unencrypted on the way - asked first.
+        if fields.get("insecure") and not ask_first(self, "llm-insecure", tr("New LLM server"), tr(
+                "Allow plain http to {url} even outside your local networks? Prompts, answers, code and the key "
+                "cross the network unencrypted.", url=printable(fields["url"])), tr("Allow")):
+            self.status.setText(tr("Not added."))
             return
         if not value or host != "local":
             self.start_add(host, fields, args, None)
@@ -470,7 +524,9 @@ class LlmPage(QWidget):
         if host is None or name is None:
             return
         self.status.setText(tr("Asking {host}…", host=self.host_label(host)))
-        background(lambda: self.sai.host_run(host, "llm", "models", name, "--json", timeout=MODELS_SECONDS),
+        sort = self.sort.currentData() if self.sort.currentData() in dict(SORTS) else "name"
+        background(lambda: self.sai.host_run(host, "llm", "models", name, "--sort", sort, "--json",
+                                             timeout=MODELS_SECONDS),
                    owner=self, source=self.models_button, timeout=MODELS_SECONDS + 30,
                    done=lambda result, error: self.listed_models(host, name, result, error))
 
@@ -486,6 +542,23 @@ class LlmPage(QWidget):
             return
         self.status.setText(tr("Models listed: {count}", count=len(models)))
         show_text(self, tr("Models of {server}", server=f"{name} ({self.host_label(host)})"), models_text(models),
+                  modal=False)
+
+    def show_server(self):
+        """`sandbox-ai llm show NAME` on the host chosen, as it says it."""
+        host, name = valid_host(self.host()), self.chosen()
+        if host is None or name is None:
+            return
+        background(lambda: self.sai.host_run(host, "llm", "show", name, timeout=SHOW_SECONDS), owner=self,
+                   source=self.show_button, timeout=SHOW_SECONDS + 15,
+                   done=lambda result, error: self.server_shown(host, name, result, error))
+
+    def server_shown(self, host, name, result, error):
+        status, out, err = outcome(result, error)
+        if status != 0:
+            self.status.setText(tr("Could not show {name}: {error}", name=name, error=failure(result, error)))
+            return
+        show_text(self, tr("LLM server {name} on {host}", name=name, host=self.host_label(host)), lines_of(out, 12000),
                   modal=False)
 
     def remove(self):

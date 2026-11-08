@@ -29,6 +29,13 @@ from .widgets import MONO, FlowLayout, background, confirm, inform, plain_label,
 THUMB = QSize(248, 124)
 
 
+def needs_demo_device(preset):
+    """Whether PRESET practises on sandbox-ai's emulated device (its notes or placeholders name demo-device start):
+    hardware-analysis does."""
+    words = [*(preset.text(note) for note in preset.notes), *(str(p.hint) for p in preset.placeholders)]
+    return any("demo-device start" in str(word) for word in words)
+
+
 def thumbnail(board, size=THUMB, ratio=1.0):
     """A small picture of BOARD in the current theme's colours: the canvas, the nodes as cards with their
     title band (a part with a placeholder outlined in the warning colour), the edges."""
@@ -143,9 +150,11 @@ class PresetCard(QFrame):
 class PresetGallery(QDialog):
     """Choose a preset; created() gives (preset, values or None: fill in later on the board)."""
 
-    def __init__(self, sai, directory=None, agent=None, policy=None, board=None, parent=None, backend_name=None):
+    def __init__(self, sai, directory=None, agent=None, policy=None, board=None, parent=None, backend_name=None,
+                 host="local"):
         super().__init__(parent)
         self.sai, self.directory, self.agent, self.policy = sai, directory, agent, policy or {}
+        self.host = host or "local"  # where the board starts (the Board's host): the demo device starts there
         self.current_board, self.backend_name = board, backend_name
         self.result_ = None  # (preset, values) once created
         self.setWindowTitle(tr("New from preset"))
@@ -178,6 +187,17 @@ class PresetGallery(QDialog):
         self.command.setMaximumHeight(110)
         for widget in (self.title, self.description, self.meta, self.fill_in, self.notes):
             side.addWidget(widget)
+        # A preset that practises on the emulated serial device (hardware-analysis): it starts here, on the host the
+        # board starts on (sandbox-ai demo-device start there).
+        self.demo_button = QPushButton(tr("Start the emulated device"))
+        self.demo_button.setToolTip(tr("sandbox-ai demo-device start: the emulated serial device this preset "
+                                       "practises on (port 4000), on the host the board starts on"))
+        self.demo_button.clicked.connect(lambda _=False: self.start_demo_device())
+        self.demo_button.hide()
+        self.demo_status = plain_label(role="secondary")
+        self.demo_status.hide()
+        side.addWidget(self.demo_button)
+        side.addWidget(self.demo_status)
         side.addWidget(plain_label(tr("Command line"), role="section"))
         side.addWidget(self.command)
         side.addStretch()
@@ -311,6 +331,8 @@ class PresetGallery(QDialog):
                  for p in preset.placeholders]
         self.fill_in.setText(tr("To fill in:") + "\n" + "\n".join(lines) if lines else tr("Nothing to fill in."))
         self.notes.setText("\n\n".join(preset.text(n) for n in preset.notes))
+        self.demo_button.setVisible(needs_demo_device(preset))
+        self.demo_status.setVisible(False)
         self.command.setPlainText(B.command_line(self.sai, board))
         self.scroll.ensureWidgetVisible(card_)
 
@@ -328,6 +350,31 @@ class PresetGallery(QDialog):
             event.accept()
             return
         super().keyPressEvent(event)
+
+    # -- the emulated device a preset practises on --
+
+    def start_demo_device(self):
+        """`sandbox-ai demo-device start` on the board's host, in the background; what it says is shown below."""
+        host = self.host
+        self.demo_status.setText(tr("Starting the emulated device on {host}…", host=printable(host)) if host != "local"
+                                 else tr("Starting the emulated device…"))
+        self.demo_status.show()
+        background(self.sai.demo_device, host, "start", owner=self, source=self.demo_button, timeout=90,
+                   done=lambda result, error: self.demo_started(host, result, error))
+
+    def demo_started(self, host, result, error):
+        status, out, err = widgets.outcome(result, error)
+        said = printable((out + err).strip())[-400:]
+        if host != "local":
+            text = tr("The emulated device runs on {host}: {said}", host=printable(host), said=said) if status == 0 \
+                else tr("The emulated device did not start on {host}: {said}", host=printable(host), said=said)
+        else:
+            text = tr("The emulated device runs: {said}", said=said) if status == 0 else \
+                tr("The emulated device did not start: {said}", said=said)
+        self.demo_status.setText(text)
+        self.demo_status.setProperty("role", "notice-ok" if status == 0 else "notice-error")
+        self.demo_status.style().unpolish(self.demo_status)
+        self.demo_status.style().polish(self.demo_status)
 
     # -- creating --
 

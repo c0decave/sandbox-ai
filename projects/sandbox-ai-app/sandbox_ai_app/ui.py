@@ -24,7 +24,7 @@ from .files import printable
 from .state import choose_file, choose_folder
 from .i18n import N_, tr
 from .activity_page import ActivityPage
-from .board_view import BoardPage
+from .board_view import BoardPage, HostCombo
 from . import help_view
 from .hosts_page import HostsPage
 from .kits_page import KitsPage
@@ -75,11 +75,15 @@ class PathField(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         self.edit = QLineEdit()
         self.edit.textChanged.connect(self.changed)
-        browse = QToolButton()
+        browse = self.browse_button = QToolButton()
         browse.setText("…")
         browse.clicked.connect(self.browse)
         layout.addWidget(self.edit)
         layout.addWidget(browse)
+
+    def set_local(self, local):
+        """LOCAL False: the path is another host's, typed in (this computer's chooser is off)."""
+        self.browse_button.setEnabled(local)
 
     def browse(self):
         path = (choose_folder(self, tr("Choose a folder"), "folder") if self.directory
@@ -121,6 +125,10 @@ class DeviceField(QWidget):
         self.pick.setToolTip(tr("Add a device this computer has"))
         layout.addWidget(self.pick, alignment=Qt.AlignmentFlag.AlignTop)
 
+    def set_local(self, local):
+        """LOCAL False: the devices are another host's, typed in (this computer's are not offered)."""
+        self.pick.setEnabled(local)
+
     def add(self, path):
         if path not in self.value():
             self.edit.appendPlainText(path)
@@ -144,12 +152,18 @@ class ListField(QWidget):
         self.edit.setFixedHeight(52)
         self.edit.textChanged.connect(self.changed)
         layout.addWidget(self.edit)
+        self.add_button = None
         if path:
-            add = QToolButton()
+            add = self.add_button = QToolButton()
             add.setText("+")
             add.setToolTip(tr("Add a folder"))
             add.clicked.connect(self.add_folder)
             layout.addWidget(add, alignment=Qt.AlignmentFlag.AlignTop)
+
+    def set_local(self, local):
+        """LOCAL False: the paths are another host's, typed in (this computer's chooser is off)."""
+        if self.add_button is not None:
+            self.add_button.setEnabled(local)
 
     def add_folder(self):
         path = choose_folder(self, tr("Choose a folder"), "folder")
@@ -362,13 +376,22 @@ class LaunchPage(QWidget):
         self.model_only = QCheckBox(tr("only this server"))
         self.model_only.setToolTip(tr("--no-provider-defaults: the agent reaches the model server and nothing else"))
         self.llm_servers, self.llm_loading, self.llm_read_at, self.model_seen = [], False, 0.0, None
-        layout.addWidget(flow(QLabel(tr("Agent")), self.agent, QLabel(tr("Model")), self.model_choice,
+        # Where it starts: this machine, or a host of sandbox-ai hosts (its launcher there checks and starts it).
+        self.host_choice = HostCombo(sai)
+        self.host_known = {}  # {(host, agent): that host's launcher options, or None: could not be read}
+        layout.addWidget(flow(self.host_choice, QLabel(tr("Agent")), self.agent, QLabel(tr("Model")), self.model_choice,
                               self.model_only, QLabel(tr("Profile")), self.profile, load, save, project))
+        self.host_note = plain_label(role="secondary")
+        self.host_note.hide()
+        layout.addWidget(self.host_note)
         self.form = OptionsForm(self.options)
         try:
             self.form.apply_policy(sai.forbidden())
         except Exception:  # noqa: BLE001 - a broken policy is shown on the System page
             pass
+        # {option: (enabled, tooltip) before} of the options greyed out because the chosen host does not know them:
+        # given back as they were (the policy's greying, a GPU this computer lacks) when a host knows them again.
+        self.host_greyed = {}
         default = backend.setting("default_agent")
         if default in sai.agents:
             self.agent.setCurrentText(default)
@@ -400,10 +423,12 @@ class LaunchPage(QWidget):
         session = QPushButton(tr("Start as session"))
         session.setToolTip(tr("A detachable session: attach and detach from the Sandboxes page"))
         session.clicked.connect(self.start_session)
-        write = QPushButton(tr("Save as project configuration…"))
+        write = self.write_button = QPushButton(tr("Save as project configuration…"))
         write.setToolTip(tr("Write .sandbox-ai.json into the first workspace and trust it"))
         write.clicked.connect(self.write_project)
         layout.addWidget(flow(dry, in_app, start, self.session, session, write))
+        self.host_choice.chosen.connect(lambda _host: self.host_changed())
+        self.agent.currentTextChanged.connect(lambda _agent: self.read_host_options())
         self.form.changed.connect(self.update_preview)
         self.agent.currentTextChanged.connect(self.update_preview)
         self.agent_args.textChanged.connect(self.update_preview)
@@ -434,9 +459,86 @@ class LaunchPage(QWidget):
         self.show_model(force=True)
 
     def showEvent(self, event):  # noqa: N802
+        self.host_choice.reload()  # a host added on the Hosts page meanwhile
         super().showEvent(event)
         if time.monotonic() - self.llm_read_at > 30:
             self.read_llm_servers()
+
+    # -- the host it starts on --
+
+    def host(self):
+        return self.host_choice.current()
+
+    def known_options(self):
+        """The options the chosen host's launcher takes (None: this machine, or not known: every option)."""
+        host = self.host()
+        return None if host == LOCAL else self.host_known.get((host, self.agent.currentText()))
+
+    def host_changed(self):
+        """Another host: its launcher's options (read in the background) decide what is offered; paths are that
+        host's, typed in; the project's file of this machine is not that host's."""
+        host = self.host()
+        remote = host != LOCAL
+        workspace = self.form.widgets.get("--workspace")
+        if workspace is not None and self.project:
+            if remote and workspace.value() == [self.project]:
+                workspace.set_value([])  # this machine's folder is not a folder there
+            elif not remote and not workspace.value():
+                workspace.set_value([self.project])
+        for widget in self.form.widgets.values():
+            if hasattr(widget, "set_local"):
+                widget.set_local(not remote)
+        set_enabled(self.write_button, not remote, tr("It writes the project file on this machine; on {host} a "
+                                                      "project's file is written there (sandbox-ai wizard).",
+                                                      host=printable(host)))
+        self.host_note.setVisible(remote)
+        self.show_host_note()
+        self.read_host_options()
+        self.apply_host_options()
+        self.show_project_note()
+        self.update_preview()
+
+    def show_host_note(self, problem=None):
+        host = self.host()
+        text = tr("Starts on {host} (over SSH): workspace and mount paths are {host}'s - type them in, nothing of this "
+                  "computer is chosen. What its sandbox-ai does not know is greyed out and left out.",
+                  host=printable(host))
+        if problem:
+            text += " " + tr("Its options could not be read: {error}", error=printable(problem)[-200:])
+        self.host_note.setText(text)
+
+    def read_host_options(self):
+        host, agent = self.host(), self.agent.currentText()
+        if host == LOCAL or (host, agent) in self.host_known:
+            self.apply_host_options()
+            return
+        self.host_known[(host, agent)] = None  # asked once; until it answers every option is offered
+        background(self.sai.host_launch_options, host, agent, timeout=90,
+                   done=lambda found, error: alive(self) and self.host_options_read(host, agent, found, error))
+
+    def host_options_read(self, host, agent, found, error):
+        self.host_known[(host, agent)] = set(found) if error is None and found else None
+        if (host, agent) == (self.host(), self.agent.currentText()):
+            if error is not None:
+                self.show_host_note(str(error))
+            self.apply_host_options()
+            self.update_preview()
+
+    def apply_host_options(self):
+        """Grey out the options the chosen host's launcher does not know; the others are as they were (what the
+        policy greyed out stays so)."""
+        known, host = self.known_options(), self.host()
+        for long, widget in self.form.widgets.items():
+            missing = known is not None and long not in known
+            if missing:
+                self.host_greyed.setdefault(long, (widget.isEnabled(), widget.toolTip()))
+                widget.setEnabled(False)
+                widget.setToolTip(tr("The sandbox-ai on {host} does not know {option}", host=printable(host),
+                                     option=long))
+            elif long in self.host_greyed:
+                enabled, tip = self.host_greyed.pop(long)
+                widget.setEnabled(enabled)
+                widget.setToolTip(tip)
 
     def show_model(self, force=False):
         """The Model choice as the options say (--llm, --no-provider-defaults): after a change of the options, the
@@ -484,12 +586,15 @@ class LaunchPage(QWidget):
             self.agent.setCurrentText(saved["agent"])
         if isinstance(saved.get("profile"), str) and self.profile.findText(saved["profile"]) >= 0:
             self.profile.setCurrentText(saved["profile"])
+        if isinstance(saved.get("host"), str):
+            self.host_choice.choose(saved["host"])
         self.current_agent = self.agent.currentText()
         self.load_agent_form(self.current_agent)
         self.agent.currentTextChanged.connect(self.agent_switched)
         self.form.changed.connect(state.schedule)
         self.agent_args.textChanged.connect(state.schedule)
         self.profile.currentTextChanged.connect(state.schedule)
+        self.host_choice.chosen.connect(lambda _host: state.schedule())
         state.collect(self.keep_form)
 
     def forms(self):
@@ -507,6 +612,7 @@ class LaunchPage(QWidget):
     def keep_form(self):
         saved = self.state.section("launch")
         saved["agent"], saved["profile"] = self.agent.currentText(), self.profile.currentText()
+        saved["host"] = self.host()
         self.forms()[self.agent.currentText()] = self.form_state()
 
     def agent_switched(self, agent):
@@ -533,7 +639,7 @@ class LaunchPage(QWidget):
         never copied into the form: the launcher applies a trusted one itself."""
         self.project = path
         widget = self.form.widgets.get("--workspace")
-        if widget is not None:
+        if widget is not None and self.host() == LOCAL:  # on another host the workspace is a folder there
             widget.set_value([path])
         self.show_project_note()
 
@@ -541,6 +647,10 @@ class LaunchPage(QWidget):
         """The note on the project's .sandbox-ai.json; its state is read in a thread (a slow disk)."""
         self.note_token = getattr(self, "note_token", 0) + 1
         if not self.project:
+            self.project_note.setText("")
+            self.review_button.hide()
+            return
+        if self.host() != LOCAL:  # this machine's project file does not apply there
             self.project_note.setText("")
             self.review_button.hide()
             return
@@ -568,7 +678,8 @@ class LaunchPage(QWidget):
         self.review_button.setVisible(state in ("changed", "untrusted"))
 
     def argv(self):
-        return backend.argv_from_values(self.options, self.form.values())
+        """The launcher's options of the form; for another host without the ones its launcher does not know."""
+        return backend.argv_for_host(self.options, self.form.values(), self.known_options())
 
     def workspace(self):
         """The first workspace of the form, or None."""
@@ -584,7 +695,9 @@ class LaunchPage(QWidget):
 
     def update_preview(self):
         args = self.agent_arguments()
-        line = ["sandbox-ai", self.agent.currentText(), *self.argv(), *(["--", *args] if args else [])]
+        host = self.host()
+        where = ["hosts", "run", host, "--"] if host != LOCAL else []  # the same start from this machine's shell
+        line = ["sandbox-ai", *where, self.agent.currentText(), *self.argv(), *(["--", *args] if args else [])]
         self.preview.setPlainText(shlex.join(line))
 
     def refresh_profiles(self):
@@ -604,6 +717,11 @@ class LaunchPage(QWidget):
         name = self.profile.currentText()
         profile = self.sai.profiles().get(name)
         if profile:
+            host = profile.get("host") if isinstance(profile.get("host"), str) else LOCAL
+            if not self.host_choice.choose(host):
+                warn(self, tr("Profile"), tr("The profile {name} starts on {host}, which is not a host of sandbox-ai "
+                                             "hosts (any more): the host stays as chosen.", name=printable(name),
+                                             host=printable(host)))
             # A profile without a workspace keeps the project's: else the start would run in whatever folder the
             # terminal opens in (the launcher's default workspace is the current directory).
             kept = self.form.values().get("--workspace") or []
@@ -615,7 +733,8 @@ class LaunchPage(QWidget):
         name, ok = QInputDialog.getText(self, tr("Save profile"), tr("Name of the profile:"),
                                         text=self.profile.currentText())
         if ok and name.strip():
-            self.sai.save_profile(name.strip(), self.agent.currentText(), self.argv(), self.agent_arguments())
+            self.sai.save_profile(name.strip(), self.agent.currentText(), self.argv(), self.agent_arguments(),
+                                  host=self.host())
             self.refresh_profiles()
             self.profile.setCurrentText(name.strip())
 
@@ -669,8 +788,9 @@ class LaunchPage(QWidget):
         return True
 
     def dry_run(self):
-        background(self.sai.dry_run, self.agent.currentText(), self.argv(), owner=self, source=self.dry_button,
-                   timeout=90, done=self.dry_run_done)
+        """The launcher's plan, nothing started: on the chosen host by its own launcher."""
+        background(self.sai.host_dry_run, self.host(), self.agent.currentText(), self.argv(), owner=self,
+                   source=self.dry_button, timeout=120, done=self.dry_run_done)
 
     def dry_run_done(self, result, error):
         plan, message = result if error is None else (None, str(error))
@@ -681,6 +801,13 @@ class LaunchPage(QWidget):
 
     def start(self, session=None, embedded=False):
         try:
+            host = self.host()
+            if host != LOCAL:  # ssh -tt there: its tmux keeps an interactive start when the tab closes
+                argv = self.sai.host_launch_argv(host, self.agent.currentText(), self.argv(), self.agent_arguments(),
+                                                 session)
+                title = f"{printable(host)}: {self.agent.currentText()}" + (f" ({session})" if session else "")
+                self.terminal(argv, title, embedded=embedded, cwd=None)
+                return True
             argv = self.sai.launch_argv(self.agent.currentText(), self.argv(), self.agent_arguments(), session)
             title = f"{self.agent.currentText()}" + (f" ({session})" if session else "")
             self.terminal(argv, title, embedded=embedded, cwd=self.workspace())
@@ -700,6 +827,8 @@ class LaunchPage(QWidget):
         self.start(session=name, embedded=None)
 
     def write_project(self):
+        if self.host() != LOCAL:
+            return
         document, main = self.sai.project_document(self.agent.currentText(), self.options, self.form.values(),
                                                    self.agent_arguments())
         if not main:
@@ -747,6 +876,14 @@ class NetworkDialog(QDialog):
         self.host_ports.setToolTip(safe_tooltip(tr("Ports on this computer's loopback (a local Git server, an LLM "
                                                    "server), reached through a relay that only you start")))
         self.dns = QCheckBox(tr("Real DNS lookups (each one logged; addresses stay closed)"))
+        self.nameservers = QLineEdit()
+        self.nameservers.setPlaceholderText("192.0.2.53 192.0.2.54")
+        self.nameservers.setToolTip(safe_tooltip(tr("Resolvers instead of the defaults (--nameserver; implies real "
+                                                    "DNS), separated by spaces")))
+        self.keep = QCheckBox(tr("Keep it for later starts (into the project's .sandbox-ai.json)"))
+        self.keep.setToolTip(safe_tooltip(tr("net allow --keep: the options go into the project's .sandbox-ai.json, "
+                                             "only while that file is exactly what you trusted (the new file is "
+                                             "trusted at once); logins are kept as references, never as tokens")))
         self.git_url = QLineEdit()
         self.git_url.setPlaceholderText(GIT_URL_EXAMPLE)
         self.git_kind = QComboBox()
@@ -761,6 +898,8 @@ class NetworkDialog(QDialog):
             form.addRow(tr("Ports on this computer"), self.host_ports)
         if "--dns" in self.supported:
             form.addRow(tr("DNS"), self.dns)
+        if "--nameserver" in self.supported:
+            form.addRow(tr("Nameservers"), self.nameservers)
         if "--git-token-env" in self.supported:
             form.addRow(tr("Git login (the token, never shown)"), git_row)
         self.presets = {}
@@ -768,6 +907,8 @@ class NetworkDialog(QDialog):
             box = QCheckBox(", ".join(hosts)[:80])
             form.addRow(f"--allow-{name}", box)
             self.presets[name] = box
+        if "--keep" in self.supported:  # net allow only (a revoke keeps nothing)
+            form.addRow(tr("Later starts"), self.keep)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -783,16 +924,24 @@ class NetworkDialog(QDialog):
             args += [t for port in self.host_ports.text().split() for t in ("--allow-host-port", port)]
         if "--dns" in self.supported and self.dns.isChecked():
             args.append("--dns")
+        if "--nameserver" in self.supported:
+            args += [t for server in self.nameservers.text().split() for t in ("--nameserver", server)]
         url, ref = self.git_url.text().strip(), self.git_ref.text().strip()
         if "--git-token-env" in self.supported and url and ref:
             args += [f"--git-token-{self.git_kind.currentData()}", f"{url}={ref}"]
         return args
 
+    def kept(self):
+        """Whether what is allowed is also kept for later starts (net allow --keep)."""
+        return "--keep" in self.supported and self.keep.isChecked()
+
 
 class AllowedDialog(QDialog):
-    """What a running sandbox was given since its start (sandbox-ai net show), and Untaint… for its taint."""
+    """What a running sandbox was given since its start (sandbox-ai net show), Untaint… for its taint, and - where
+    its sandbox-ai can (net show --keep) - Keep for later starts… and Keep everything for later starts…: what it was
+    given, into its project's .sandbox-ai.json (KEEP(every) does it, asked first)."""
 
-    def __init__(self, parent, title, text, untaint):
+    def __init__(self, parent, title, text, untaint, keep=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         layout = QVBoxLayout(self)
@@ -807,9 +956,21 @@ class AllowedDialog(QDialog):
         self.untaint_button.setToolTip(tr("Take back the run's taint (sandbox-ai net untaint): only once you checked "
                                           "the untrusted content that entered it"))
         self.untaint_button.clicked.connect(lambda _=False: untaint())
+        self.keep_button = QPushButton(tr("Keep for later starts…"))
+        self.keep_button.setToolTip(tr("sandbox-ai net show --keep: the names and addresses you allowed (or approved "
+                                       "always), wildcards, networks, DNS, host ports, devices and workspaces added go "
+                                       "into the project's trusted .sandbox-ai.json; no Git logins"))
+        self.keep_all_button = QPushButton(tr("Keep everything for later starts…"))
+        self.keep_all_button.setToolTip(tr("sandbox-ai net show --keep-all: also what approvals opened once or for "
+                                           "the run"))
+        for button, every in ((self.keep_button, False), (self.keep_all_button, True)):
+            button.clicked.connect(lambda _=False, e=every: keep(e))
+            button.setVisible(keep is not None)
         close = QPushButton(tr("Close"))
         close.clicked.connect(self.reject)
         row.addWidget(self.untaint_button)
+        row.addWidget(self.keep_button)
+        row.addWidget(self.keep_all_button)
         row.addStretch()
         row.addWidget(close)
         layout.addLayout(row)
@@ -966,6 +1127,8 @@ class LimitsDialog(QDialog):
 KIND_TITLES = {"run": N_("Run"), "session": N_("Session"), "mcp": N_("MCP server"), "unregistered": N_("Not registered")}
 STATE_TITLES = {"running": N_("running"), "paused": N_("paused"), "stopped": N_("stopped"), "damaged": N_("damaged"),
                 "starting": N_("starting")}
+DEMO_PORT = 4000  # the emulated device's port unless --port says otherwise (sandbox-ai demo-device)
+STOP_WAIT = 30  # seconds sandbox-ai stop waits for a start to end unless --wait says otherwise
 REMOTE_SECONDS = 60  # between two looks at the other hosts' starts (over SSH) while the page is hidden
 REMOTE_SHOWN_SECONDS = 10  # the same while the page is shown: the fleet at a glance
 START_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}"  # a start's name as sandbox-ai takes it (rename NEW)
@@ -1026,6 +1189,58 @@ def same_folder(a, b):
     if not a or not b:
         return False
     return os.path.realpath(os.path.expanduser(str(a))) == os.path.realpath(os.path.expanduser(str(b)))
+
+
+class ResumeDialog(QDialog):
+    """Resume with…: a kept start started again with workspaces, mounts and MCP servers added (kept for its later
+    starts), a running one restarted (`sandbox-ai resume --workspace … --mount … --mcp … [--restart] NAME`). The paths
+    are those of the start's HOST: typed in there, chosen from this computer's only for this machine."""
+
+    def __init__(self, parent, name, host=LOCAL, running=False, servers=()):
+        super().__init__(parent)
+        self.setWindowTitle(tr("Resume {name} with…", name=printable(name)) if host == LOCAL else
+                            tr("Resume {name} on {host} with…", name=printable(name), host=printable(host)))
+        form = QFormLayout(self)
+        if host != LOCAL:
+            form.addRow(plain_label(tr("Paths on {host}: type them in (this computer's folders are not {host}'s).",
+                                       host=printable(host)), role="secondary"))
+        self.workspaces = ListField(path=True)
+        self.workspaces.set_local(host == LOCAL)
+        self.workspaces.setToolTip(tr("Folders added at /workspaces/<name>, one per line (--workspace)"))
+        form.addRow(tr("Workspaces"), self.workspaces)
+        self.mounts = QPlainTextEdit()
+        self.mounts.setFixedHeight(52)
+        self.mounts.setPlaceholderText(tr("SOURCE:DESTINATION[:ro|rw], one per line (read-only unless :rw)"))
+        form.addRow(tr("Mounts"), self.mounts)
+        self.servers = QLineEdit()
+        self.servers.setPlaceholderText(tr("names, separated by spaces (sandbox-ai mcp list)"))
+        form.addRow(tr("MCP servers"), self.servers)
+        if servers:
+            form.addRow("", plain_label(tr("Defined: {list}", list=printable(", ".join(servers))), role="secondary"))
+        self.restart = QCheckBox(tr("Restart it now if it runs (the agent continues its conversation)"))
+        self.restart.setChecked(running)
+        form.addRow(self.restart)
+        form.addRow(plain_label(tr("What is added here is kept for its later starts."), role="secondary"))
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def values(self):
+        """(workspaces, [(source, destination, mode)], servers, restart). ValueError: a mount that is not
+        SOURCE:DESTINATION[:ro|rw]."""
+        mounts = []
+        for line in self.mounts.toPlainText().splitlines():
+            parts = line.strip().split(":")
+            if not line.strip():
+                continue
+            if len(parts) == 2:
+                parts.append("ro")
+            if len(parts) != 3 or parts[2] not in ("ro", "rw"):
+                raise ValueError(tr("A mount is SOURCE:DESTINATION or SOURCE:DESTINATION:ro|rw: {line}",
+                                    line=printable(line.strip())))
+            mounts.append(tuple(parts))
+        return self.workspaces.value(), mounts, self.servers.text().split(), self.restart.isChecked()
 
 
 class SandboxesPage(QWidget):
@@ -1095,6 +1310,13 @@ class SandboxesPage(QWidget):
         self.stop_button.setAccessibleName(tr("Stop"))
         self.stop_button.setProperty("role", "danger")
         self.stop_button.clicked.connect(lambda _=False: self.stop())
+        # sandbox-ai stop --wait: how long it waits for a session or kept start to end (30 s unless said otherwise).
+        self.stop_wait = QSpinBox()
+        self.stop_wait.setRange(1, 600)
+        self.stop_wait.setValue(STOP_WAIT)
+        self.stop_wait.setSuffix(" s")
+        self.stop_wait.setAccessibleName(tr("Wait for it to end"))
+        self.stop_wait.setToolTip(tr("How long Stop waits for a session or kept start to end (sandbox-ai stop --wait)"))
         # A start's name and history, and what is left over (sandbox-ai rename, list --history, gc): on its host.
         self.manage_buttons = {}
         for key, text, tip, slot in (
@@ -1116,6 +1338,7 @@ class SandboxesPage(QWidget):
         below.addWidget(self.detail, 1)
         for button in self.manage_buttons.values():
             below.addWidget(button)
+        below.addWidget(self.stop_wait)
         below.addWidget(self.stop_button)
         layout.addLayout(below)
         # The sessions' own actions (sandbox-ai session ...).
@@ -1127,7 +1350,13 @@ class SandboxesPage(QWidget):
             button.setAccessibleName(tr(text))
             button.clicked.connect(lambda _=False, a=action: self.session(a))
             self.session_buttons[action] = button
-        session_row.addWidget(flow(*self.session_buttons.values()))
+        self.resume_with_button = QPushButton(tr("Resume with…"))
+        self.resume_with_button.setAccessibleName(tr("Resume with"))
+        self.resume_with_button.setToolTip(tr("Start the selected kept start again with workspaces, mounts or MCP "
+                                              "servers added (kept for its later starts), or restart it now "
+                                              "(sandbox-ai resume)"))
+        self.resume_with_button.clicked.connect(lambda _=False: self.resume_with())
+        session_row.addWidget(flow(*self.session_buttons.values(), self.resume_with_button))
         # What a running sandbox may reach (sandbox-ai net), its devices and limits (until it ends).
         run_box = QGroupBox(tr("While it runs"))
         run_layout = QVBoxLayout(run_box)
@@ -1728,19 +1957,26 @@ class SandboxesPage(QWidget):
         why = gone or (None if stoppable else tr("It does not run."))
         set_enabled(self.stop_button, why is None, why,
                     tooltip=tr("End the selected start on {host} (sandbox-ai stop there)", host=host))
+        why = gone or (None if instance.kind == "session" and state in ("running", "paused", "stopped") else
+                       tr("Only for kept starts (sessions)."))
+        set_enabled(self.resume_with_button, why is None, why)
         self.update_manage_buttons(instance, gone)
 
-    def remote_action(self, instance, action):
+    def remote_action(self, instance, action, wait=None):
         """ACTION (pause, resume, stop, delete) on the start INSTANCE of another host, as `sandbox-ai ACTION NAME`
-        there; the hosts' starts are read again after it."""
+        there (a stop with --wait WAIT when it is not sandbox-ai's own 30 s); the hosts' starts are read again after
+        it."""
         args = [action, instance.name] + (["--yes"] if action == "delete" else [])
+        if action == "stop" and wait not in (None, STOP_WAIT):
+            args = backend.stop_args(instance.name, wait)
         title = tr("{action} on {host}", action=tr(ACTION_TITLES.get(action, action)), host=printable(instance.host))
 
         def done(result, error):
             self.command_done(title, result, error)
             self.refresh_remote([instance.host])  # a fresh read of that host, also when one runs already
-        background(lambda: self.sai.host_run(instance.host, *args, timeout=180), owner=self,
-                   source=[self.stop_button, *self.session_buttons.values()], timeout=210, done=done)
+        seconds = 180 + (wait or 0)
+        background(lambda: self.sai.host_run(instance.host, *args, timeout=seconds), owner=self,
+                   source=[self.stop_button, *self.session_buttons.values()], timeout=seconds + 30, done=done)
 
     def update_buttons(self):
         instance = self.current()
@@ -1749,7 +1985,8 @@ class SandboxesPage(QWidget):
             # the buttons of the row chosen before (they would act on this machine). Rename, History and Clean up
             # follow the row chosen, so they wait too (they would act on a row the running command may change).
             if instance is not None and getattr(instance, "host", "local") != "local":
-                for button in [*self.run_buttons, *self.session_buttons.values(), self.stop_button]:
+                for button in [*self.run_buttons, *self.session_buttons.values(), self.stop_button,
+                               self.resume_with_button]:
                     set_enabled(button, False, tr("A command runs."))
             for button in self.manage_buttons.values():
                 set_enabled(button, False, tr("A command runs."))
@@ -1760,7 +1997,8 @@ class SandboxesPage(QWidget):
             return
         if instance is not None and instance.key.startswith("ended:"):
             why = tr("It ended: History… shows what happened to it.")
-            for button in [*self.run_buttons, *self.session_buttons.values(), self.stop_button]:
+            for button in [*self.run_buttons, *self.session_buttons.values(), self.stop_button,
+                           self.resume_with_button]:
                 set_enabled(button, False, why)
             self.update_manage_buttons(instance, why)
             return
@@ -1782,6 +2020,10 @@ class SandboxesPage(QWidget):
                       "there is nothing to attach to.") if foreground and action in ("attach", "attach-app") else
                    None if rules[action] else tr("Not while the session is {state}.", state=tr(STATE_TITLES.get(state, state))))
             set_enabled(button, why is None, why)
+        why = (none if instance is None else tr("Only for kept starts (sessions).") if kind != "session" else
+               None if state in ("running", "paused", "stopped") else
+               tr("Not while the session is {state}.", state=tr(STATE_TITLES.get(state, state))))
+        set_enabled(self.resume_with_button, why is None, why)
         if instance is None:
             why = none
         elif kind == "unregistered":
@@ -1929,8 +2171,15 @@ class SandboxesPage(QWidget):
         if not (ask_first(self, "mcp-stop", tr("Stop"), text, tr("Stop")) if instance.kind == "mcp" else
                 ask_first(self, "start-stop", tr("Stop"), text, tr("Stop"))):
             return
+        wait = self.stop_wait.value()
         if remote:
-            self.remote_action(instance, "stop")
+            self.remote_action(instance, "stop", wait if instance.kind == "session" else None)
+            return
+        sources = [self.stop_button, *self.session_buttons.values(), *self.run_buttons]
+        if instance.kind == "session" and wait != STOP_WAIT:  # sandbox-ai stop NAME --wait SECONDS
+            stop = backend.stop_args(instance.name, wait)
+            background(lambda: self.sai.call(*stop, timeout=wait + 60), owner=self, source=sources, timeout=wait + 90,
+                       done=lambda result, error: self.command_done(tr("Stop"), result, error))
             return
         if instance.kind == "session":
             call = (self.sai.call, "session", "stop", instance.name)
@@ -1938,8 +2187,8 @@ class SandboxesPage(QWidget):
             call = (self.sai.stop_mcp, instance.mcp)
         else:
             call = (self.sai.stop_run, instance.run)
-        background(*call, owner=self, source=[self.stop_button, *self.session_buttons.values(), *self.run_buttons],
-                   timeout=330, done=lambda result, error: self.command_done(tr("Stop"), result, error))
+        background(*call, owner=self, source=sources, timeout=330,
+                   done=lambda result, error: self.command_done(tr("Stop"), result, error))
 
     def command_done(self, title, result, error, quiet_success=True):
         status, out, err = outcome(result, error)
@@ -2261,42 +2510,76 @@ class SandboxesPage(QWidget):
             supported = set(supported or ()) if error is None else set(backend.BASE_NET_OPTIONS)
             supported -= {"--allow-host-port"}
             presets = {name: hosts for name, hosts in presets.items() if f"--allow-{name}" in supported}
+        if op != "allow":
+            supported = set(supported or ()) - {"--keep"}
         dialog = NetworkDialog(self, presets, title, supported)
         if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.arguments():
             return
         arguments = dialog.arguments()
+        keep = dialog.kept()
         done = lambda result, error_: self.reported(title, result, error_)  # noqa: E731
         if op != "allow":  # a revoke narrows: sent at once
             background(self.sai.host_run, host, "net", "revoke", run, *arguments, owner=self,
                        source=self.run_buttons, timeout=150, done=done)
             return
         where = tr("on {host}", host=printable(host)) if host != LOCAL else tr("on this machine")
-        if not ask_first(self, "net-allow", title, tr("Let {run} ({where}) reach this until it ends, at once?\n\n{what}",
-                                                      run=printable(run), where=where,
-                                                      what=printable(" ".join(arguments))), tr("Allow")):
+        question = tr("Let {run} ({where}) reach this until it ends, at once?\n\n{what}", run=printable(run),
+                      where=where, what=printable(" ".join(arguments)))
+        if keep:  # and into the project's file: every later start of that project gets it
+            question += "\n\n" + tr("It is also kept for the later starts of its project: written into its trusted "
+                                     ".sandbox-ai.json.")
+        if not ask_first(self, "net-allow", title, question, tr("Allow")):
             return
-        background(self.sai.host_run, host, "net", "allow", run, *arguments, owner=self, source=self.run_buttons,
-                   timeout=150, done=done)
+        background(self.sai.host_run, host, "net", "allow", run, *arguments, *(["--keep"] if keep else []),
+                   owner=self, source=self.run_buttons, timeout=150, done=done)
 
     def show_allowed(self):
         target = self.target()
-        if target:
-            host, run = target
-            background(self.sai.host_run, host, "net", "show", run, owner=self, source=self.run_buttons, timeout=150,
-                       done=lambda result, error: self.allowed_shown(run, result, error, host))
+        if not target:
+            return
+        host, run = target
 
-    def allowed_shown(self, run, result, error, host="local"):
-        """What the run was given since its start, with Untaint… (sandbox-ai net untaint RUN): not modal, so the
-        Approvals page stays usable while it is open."""
+        def read():  # what it was given, and whether its sandbox-ai keeps it for later starts (net show --keep)
+            shown = self.sai.host_run(host, "net", "show", run, timeout=120)
+            try:
+                keeps = "--keep" in (self.sai.net_options("show") if host == LOCAL else
+                                     self.sai.host_net_options(host, "show"))
+            except ValueError:  # its --help not answered: not offered
+                keeps = False
+            return shown, keeps
+        background(read, owner=self, source=self.run_buttons, timeout=200,
+                   done=lambda result, error: self.allowed_shown(run, result[0] if error is None else None, error,
+                                                                 host, keeps=error is None and result[1]))
+
+    def allowed_shown(self, run, result, error, host="local", keeps=False):
+        """What the run was given since its start, with Untaint… (sandbox-ai net untaint RUN) and Keep…: not modal,
+        so the Approvals page stays usable while it is open."""
         from . import widgets
         title = tr("{run} on {host}", run=printable(run), host=printable(host)) if host != "local" else printable(run)
         text = "\n".join(printable(line) for line in "\n".join(outcome(result, error)[1:]).strip().splitlines())
         self.update_buttons()
-        self.allowed_dialog = AllowedDialog(self, title, text, lambda: self.untaint(host, run))
+        self.allowed_dialog = AllowedDialog(self, title, text, lambda: self.untaint(host, run),
+                                            keep=(lambda every: self.keep_network(host, run, every)) if keeps else None)
         if widgets.AUTO_ANSWER is not None:  # tests: what would be shown is collected
             widgets.SHOWN.append((title, text, None))
             return
         widgets.show_modeless(self.allowed_dialog)
+
+    def keep_network(self, host, run, every=False):
+        """`sandbox-ai net show RUN --keep` (EVERY: --keep-all) on HOST: what the run was given goes into its project's
+        .sandbox-ai.json, for every later start of that project - asked first."""
+        title = tr("Keep for later starts: {run} on {host}", run=printable(run), host=printable(host)) \
+            if host != LOCAL else tr("Keep for later starts: {run}", run=printable(run))
+        text = tr("Keep what you gave {run} (allowed names and addresses, networks, DNS, ports, devices, workspaces) "
+                  "in its project's .sandbox-ai.json? Every later start of that project gets it.", run=printable(run))
+        if every:
+            text += " " + tr("Also what approvals opened once or for the run.")
+        if host != LOCAL:
+            text = tr("On {host}: {text}", host=printable(host), text=text)
+        if not backend.valid_run(run) or not ask_first(self, "net-keep", title, text, tr("Keep")):
+            return
+        background(self.sai.net_keep, host, run, every, owner=self, source=self.run_buttons, timeout=120,
+                   done=lambda result, error: self.reported(title, result, error))
 
     def untaint(self, host, run):
         """`sandbox-ai net untaint RUN` (on HOST): the rules for tainted runs no longer hold - asked first."""
@@ -2359,6 +2642,60 @@ class SandboxesPage(QWidget):
                        source=[self.stop_button, *self.session_buttons.values()], timeout=150,
                        done=lambda result, error: self.command_done(title, result, error))
         if action == "resume" and instance.state == "stopped":
+            self.resume_checked(instance, go)
+            return
+        go()
+
+    def resume_with(self, instance=None):
+        """Resume with…: the selected kept start (of this machine or a host) started again with what the dialog adds,
+        or restarted - each widening asked first: a restart (start-restart), workspaces and writable mounts
+        (workspace-writable), MCP servers (mcp-attach). A stopped one's HOME is reviewed first (resume_checked)."""
+        instance = instance or self.current()
+        if instance is None or instance.kind != "session":
+            QMessageBox.information(self, tr("Sessions"), tr("Select a session first."))
+            return
+        host, name = self.start_host(instance)
+        servers = []
+        if host == LOCAL:
+            try:
+                servers = sorted(self.sai.mcp_definitions())
+            except Exception:  # noqa: BLE001 - a damaged mcp.json: typed in then
+                servers = []
+        dialog = ResumeDialog(self, name, host, instance.state in ("running", "paused"), servers)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        title = tr("Resume {name} on {host}", name=printable(name), host=printable(host)) if host != LOCAL else \
+            tr("Resume {name}", name=printable(name))
+        try:
+            workspaces, mounts, mcp, restart = dialog.values()
+            args = backend.resume_args(name, restart, workspaces, mounts, mcp)
+        except ValueError as exc:
+            warn(self, title, printable(exc))
+            return
+        where = tr("On {host}: ", host=printable(host)) if host != LOCAL else ""
+        if restart and not ask_first(self, "start-restart", title, where + tr(
+                "Restart {name} now? What runs in it ends; the agent continues its conversation.", name=printable(name)),
+                tr("Restart")):
+            return
+        widening = [*workspaces, *(f"{source} -> {destination}" for source, destination, mode in mounts if mode == "rw")]
+        if widening and not ask_first(self, "workspace-writable", title, where + tr(
+                "Let {name} change these on its host, from now on at every start: {list}?", name=printable(name),
+                list=printable(", ".join(widening))), tr("Add")):
+            return
+        if mcp and not ask_first(self, "mcp-attach", title, where + tr(
+                "Give {name} the tools of these MCP servers, from now on at every start: {list}?", name=printable(name),
+                list=printable(", ".join(mcp))), tr("Attach")):
+            return
+
+        def go():
+            def done(result, error):
+                self.command_done(title, result, error, quiet_success=False)
+                if host != LOCAL:
+                    self.refresh_remote([host])
+            background(lambda: self.sai.host_run(host, *args, timeout=300), owner=self,
+                       source=[self.stop_button, *self.session_buttons.values(), self.resume_with_button],
+                       timeout=330, done=done)
+        if instance.state == "stopped":
             self.resume_checked(instance, go)
             return
         go()
@@ -2619,17 +2956,33 @@ class ConnectionsPage(QWidget):
 
 
 class AddServerDialog(QDialog):
-    def __init__(self, parent, entry):
+    """Add a catalog entry (sandbox-ai mcp add): its name for --mcp, folders, variables, network, limits, and how it
+    is taken - an extra catalog, without pulling, its backend, unsigned, behind a VPN. An entry this machine's catalog
+    module read names its mounts and variables; one listed by another host's `mcp catalog` gets them typed in (paths
+    of that HOST)."""
+
+    def __init__(self, parent, entry, host=LOCAL, catalog=""):
         super().__init__(parent)
-        self.setWindowTitle(tr("Add {name}", name=entry.get("name")))
+        self.entry, self.host, self.catalog = entry, host, catalog
+        self.setWindowTitle(tr("Add {name}", name=entry.get("name")) if host == LOCAL else
+                            tr("Add {name} on {host}", name=entry.get("name"), host=printable(host)))
         form = QFormLayout(self)
-        description = plain_label(entry.get("description", ""))
+        description = plain_label(entry.get("description", "") or entry.get("title", ""))
         form.addRow(description)
         self.local = QLineEdit(entry.get("name", ""))
         form.addRow(tr("Name for --mcp"), self.local)
-        self.mounts = {}
-        for mount in entry.get("mounts", []):
+        self.mounts, self.mount_lines, self.env_line = {}, None, None
+        if entry.get("_listed"):  # only its line is known (another host's catalog): folders typed in
+            self.mount_lines = QPlainTextEdit()
+            self.mount_lines.setFixedHeight(52)
+            self.mount_lines.setPlaceholderText(tr("TARGET=HOST_FOLDER[:ro|rw], one per line (read-only unless :rw)"))
+            form.addRow(tr("Folders"), self.mount_lines)
+            self.env_line = QLineEdit()
+            self.env_line.setPlaceholderText(tr("variables of the environment there, separated by spaces"))
+            form.addRow(tr("Variables"), self.env_line)
+        for mount in entry.get("mounts", []) if not entry.get("_listed") else []:
             field = PathField()
+            field.set_local(host == LOCAL)
             writable = QCheckBox(tr("writable"))
             row = QHBoxLayout()
             row.addWidget(field)
@@ -2652,22 +3005,105 @@ class AddServerDialog(QDialog):
         self.pids.setRange(16, 4096)
         self.pids.setValue(128)
         form.addRow(tr("Processes"), self.pids)
+        self.engine = QComboBox()
+        for text, key in ((tr("default (Podman when it is there)"), ""), ("podman", "podman"), ("bwrap", "bwrap"),
+                          ("both", "both")):
+            self.engine.addItem(text, key)
+        self.engine.setToolTip(tr("Podman (the image), Bubblewrap (the image's rootfs, checked and unpacked) or both"))
+        form.addRow(tr("Backend"), self.engine)
+        self.vpn = QLineEdit()
+        self.vpn.setPlaceholderText(tr("a VPN profile (sandbox-ai vpn list); needs the full network"))
+        form.addRow(tr("VPN"), self.vpn)
+        self.no_pull = QCheckBox(tr("Do not pull the image (it is there already)"))
+        form.addRow(self.no_pull)
+        signature = (entry.get("_signature") or {}).get("state", "unsigned")
+        self.unsigned = QCheckBox(tr("Take it although its catalog is not signed by a trusted key (--unsigned)"))
+        self.unsigned.setVisible(signature != "good")
+        if signature == "bad":
+            set_enabled(self.unsigned, False, tr("Its catalog's signature does not verify: sandbox-ai refuses it "
+                                                 "anyway."))
+        if signature != "good":
+            form.addRow(plain_label(tr("Its catalog is not signed by a trusted key (sandbox/mcp-signers): sandbox-ai "
+                                       "adds it only with --unsigned.") if signature != "bad" else
+                                    tr("Its catalog's signature does not verify: sandbox-ai refuses it."),
+                                    role="notice-warn"))
+        form.addRow(self.unsigned)
+        if catalog:
+            form.addRow(tr("Catalog"), plain_label(printable(catalog)))
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
         self.prefix_name = None
 
+    def mount_values(self):
+        """[(target, host folder, "ro"|"rw")]. ValueError: a line that is not TARGET=HOST_FOLDER[:ro|rw]."""
+        found = [(target, field.value(), "rw" if writable.isChecked() else "ro")
+                 for target, (field, writable) in self.mounts.items() if field.value()]
+        for line in (self.mount_lines.toPlainText().splitlines() if self.mount_lines is not None else []):
+            if not line.strip():
+                continue
+            target, equals, rest = line.strip().partition("=")
+            source, _, mode = rest.partition(":")
+            if not equals or mode not in ("", "ro", "rw"):
+                raise ValueError(tr("A folder is TARGET=HOST_FOLDER or TARGET=HOST_FOLDER:ro|rw: {line}",
+                                    line=printable(line.strip())))
+            found.append((target, source, mode or "ro"))
+        return found
+
+    def values(self, name):
+        """The keywords of backend.mcp_add_args for the catalog entry NAME."""
+        env = list(self.env) + (self.env_line.text().split() if self.env_line is not None else [])
+        return {"entry": name, "name_as": self.local.text().strip() or name.split(":")[-1],
+                "mounts": self.mount_values(), "env": env, "network": self.network.currentText(),
+                "memory": self.memory.text().strip() or "512m", "pids": self.pids.value(),
+                "catalogs": [self.catalog] if self.catalog else [], "no_pull": self.no_pull.isChecked(),
+                "engine": self.engine.currentData() or None, "unsigned": self.unsigned.isChecked(),
+                "vpn": self.vpn.text().strip() or None}
+
     def arguments(self, name):
-        args = [name, "--as", self.local.text().strip() or name.split(":")[-1], "--network",
-                self.network.currentText(), "--memory", self.memory.text().strip() or "512m",
-                "--pids", str(self.pids.value())]
-        for target, (field, writable) in self.mounts.items():
-            if field.value():
-                args += ["--mount", f"{target}={field.value()}:{'rw' if writable.isChecked() else 'ro'}"]
-        for variable in self.env:
-            args += ["--env", variable]
-        return args
+        """The words after `sandbox-ai mcp add` (checked: backend.mcp_add_args)."""
+        return backend.mcp_add_args(**self.values(name))[0][2:]
+
+
+class McpStartDialog(QDialog):
+    """Start an MCP server (sandbox-ai mcp start): its backend, a VPN in front, and for an agent start - started as
+    that start starts it and attached to it, a running one restarted now if wanted."""
+
+    def __init__(self, parent, name, targets, host=LOCAL):
+        super().__init__(parent)
+        self.setWindowTitle(tr("Start {name}", name=printable(name)) if host == LOCAL else
+                            tr("Start {name} on {host}", name=printable(name), host=printable(host)))
+        form = QFormLayout(self)
+        self.engine = QComboBox()
+        for text, key in ((tr("as defined"), ""), ("podman", "podman"), ("bwrap", "bwrap")):
+            self.engine.addItem(text, key)
+        form.addRow(tr("Backend"), self.engine)
+        self.vpn = QLineEdit()
+        self.vpn.setPlaceholderText(tr("a VPN profile in front (sandbox-ai vpn list)"))
+        form.addRow(tr("VPN"), self.vpn)
+        self.start = QComboBox()
+        self.start.addItem(tr("no start: only the server"), "")
+        for entry in targets:
+            self.start.addItem(printable(f"{entry['name']} ({entry.get('agent') or '?'}, {entry.get('state')})"),
+                               entry["name"])
+        self.start.setToolTip(tr("For this agent start: started as it starts it (its backend and rules) and attached "
+                                 "to it (--for)"))
+        form.addRow(tr("For the start"), self.start)
+        self.restart = QCheckBox(tr("Restart it now if it runs (the agent continues its conversation)"))
+        self.start.currentIndexChanged.connect(lambda _i: self.restart.setEnabled(bool(self.start.currentData())))
+        self.restart.setEnabled(False)
+        form.addRow(self.restart)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def values(self):
+        """The keywords of backend.mcp_start_args (without the server's name)."""
+        start = self.start.currentData() or None
+        return {"engine": self.engine.currentData() or None, "vpn": self.vpn.text().strip() or None,
+                "for_start": start, "restart": bool(start) and self.restart.isChecked()}
 
 
 class AttachServerDialog(QDialog):
@@ -2700,21 +3136,30 @@ class AttachServerDialog(QDialog):
 
 
 class McpPage(QWidget):
+    """The MCP servers of this machine or a host of `sandbox-ai hosts` (chosen above): list, start (with a backend, a
+    VPN, for an agent start), stop, attach to a start, and the catalogs to add from (sandbox-ai mcp there)."""
+
     def __init__(self, sai):
         super().__init__()
         self.sai = sai
         layout = QVBoxLayout(self)
+        self.host_choice = HostCombo(sai)
+        self.host_choice.chosen.connect(lambda _host: self.host_changed())
+        self.host_note = plain_label(role="secondary")
+        layout.addWidget(flow(self.host_choice, self.host_note))
         servers = QGroupBox(tr("Your MCP servers (use them with --mcp NAME)"))
         servers_layout = QVBoxLayout(servers)
         self.servers = table([tr("Name"), tr("Status"), tr("Serves"), tr("Runs")])
         servers_layout.addWidget(self.servers)
         row = QHBoxLayout()
         self.server_buttons = []
-        for action, text in (("start", tr("Start")), ("stop", tr("Stop"))):
+        for action, text in (("start", tr("Start…")), ("stop", tr("Stop"))):
             button = QPushButton(text)
             button.clicked.connect(lambda _=False, a=action: self.server(a))
             row.addWidget(button)
             self.server_buttons.append(button)
+        self.server_buttons[0].setToolTip(tr("Start the server sandbox: its backend, a VPN in front, or for an agent "
+                                             "start (sandbox-ai mcp start)"))
         self.attach_button = QPushButton(tr("Attach to…"))
         self.attach_button.setToolTip(tr("Connect the server to an agent start (sandbox-ai mcp attach)"))
         self.attach_button.clicked.connect(self.attach)
@@ -2728,6 +3173,10 @@ class McpPage(QWidget):
         catalog_layout = QVBoxLayout(catalog)
         self.catalog = table([tr("Entry"), tr("Network"), tr("Title"), tr("Published")])
         catalog_layout.addWidget(self.catalog)
+        self.catalog_source = QLineEdit()
+        self.catalog_source.setPlaceholderText(tr("another catalog instead: https://… or a file on the host "
+                                                  "(--catalog)"))
+        self.catalog_source.setAccessibleName(tr("Catalog"))
         row = QHBoxLayout()
         load = QPushButton(tr("Reload catalogs"))
         load.setToolTip(tr("The catalogs load by themselves when the page is first shown; this fetches them again"))
@@ -2735,36 +3184,45 @@ class McpPage(QWidget):
         add = QPushButton(tr("Add…"))
         add.clicked.connect(self.add)
         self.load_button, self.add_button = load, add
+        row.addWidget(self.catalog_source, 1)
         row.addWidget(load)
         row.addWidget(add)
-        row.addStretch()
         catalog_layout.addLayout(row)
         self.catalog_status = plain_label(role="secondary")
         self.catalog_status.setWordWrap(True)
         catalog_layout.addWidget(self.catalog_status)
         layout.addWidget(catalog)
-        self.entries, self.catalog_requested = {}, False
+        self.entries, self.catalog_requested, self.catalog_of = {}, False, None
         self.refresh()
 
     def showEvent(self, event):  # noqa: N802
-        """The catalogs load by themselves the first time the page is shown (in the background)."""
+        """The catalogs load by themselves the first time the page is shown (in the background); the hosts are read
+        again (one added on the Hosts page meanwhile)."""
+        self.host_choice.reload()
         super().showEvent(event)
         if not self.catalog_requested:
             self.load_catalog(auto=True)
 
+    def host(self):
+        return self.host_choice.current()
+
+    def host_changed(self):
+        host = self.host()
+        self.host_note.setText(tr("The MCP servers of {host} (sandbox-ai mcp there); paths are {host}'s.",
+                                  host=printable(host)) if host != LOCAL else "")
+        fill(self.servers, [])
+        fill(self.catalog, [])
+        self.entries = {}
+        self.refresh()
+        if self.catalog_requested:
+            self.load_catalog(auto=True)
+
     def refresh(self):
         """The servers, read in the background (the window is not held up by it)."""
+        host = self.host()
         # A read, not work: no owner, so it never holds up closing the window (busy()).
-        background(self.servers_and_starts, timeout=60,
-                   done=lambda rows, error: alive(self) and self.servers_read(rows, error))
-
-    def servers_and_starts(self):
-        """[(name, status, the starts it serves, what runs)] of the defined MCP servers."""
-        try:
-            served = self.sai.mcp_serving()
-        except Exception:  # noqa: BLE001 - the starts could not be read: the servers are listed anyway
-            served = {}
-        return [(name, state, ", ".join(served.get(name, [])), what) for name, state, what in self.sai.mcp_servers()]
+        background(self.sai.host_mcp_servers, host, timeout=90,
+                   done=lambda rows, error: alive(self) and host == self.host() and self.servers_read(rows, error))
 
     def servers_read(self, rows, error):
         if error is not None:
@@ -2776,10 +3234,13 @@ class McpPage(QWidget):
         if not name:
             inform(self, tr("Attach to…"), tr("Select a server first."))
             return
-        try:
-            targets = self.sai.mcp_attach_targets()
-        except (OSError, ValueError) as exc:
-            warn(self, tr("Attach to…"), printable(str(exc)))
+        host = self.host()
+        background(self.sai.host_mcp_targets, host, owner=self, source=self.server_buttons, timeout=90,
+                   done=lambda targets, error: self.attach_targets_read(host, name, targets, error))
+
+    def attach_targets_read(self, host, name, targets, error):
+        if error is not None:
+            warn(self, tr("Attach to…"), printable(str(error)))
             return
         if not targets:
             inform(self, tr("Attach to…"), tr("No kept agent start to attach it to: start one (a run "
@@ -2793,10 +3254,12 @@ class McpPage(QWidget):
         if restart:
             text += " " + tr("A running {start} is stopped and started again for it: what runs in it now ends.",
                              start=printable(start))
+        if host != LOCAL:
+            text = tr("On {host}: {text}", host=printable(host), text=text)
         if not ask_first(self, "mcp-restart" if restart else "mcp-attach", tr("Attach to…").rstrip("…"), text,
                          tr("Attach")):
             return
-        background(lambda: self.sai.mcp_attach(name, start, restart), owner=self, source=self.server_buttons,
+        background(lambda: self.sai.host_mcp_attach(host, name, start, restart), owner=self, source=self.server_buttons,
                    timeout=630, done=lambda result, error: self.attached(name, result, error))
 
     def attached(self, name, result, error):
@@ -2810,28 +3273,76 @@ class McpPage(QWidget):
         name = selected(self.servers)
         if not name:
             return
-        if action == "stop" and not ask_first(self, "start-stop", tr("Stop"), tr(
-                "Stop {what}? Agents that use it lose it until it is started again.",
-                what=tr("MCP server {name}", name=printable(name))), tr("Stop")):
+        host = self.host()
+        if action == "start":  # its options first: the starts it may be for are read in the background
+            background(self.sai.host_mcp_targets, host, owner=self, source=self.server_buttons, timeout=90,
+                       done=lambda targets, error: self.start_server(host, name, targets if error is None else []))
             return
-        background(lambda: self.sai.call("mcp", action, name, timeout=300), owner=self, source=self.server_buttons,
-                   timeout=330, done=lambda result, error: self.server_done(action, result, error))
+        text = tr("Stop {what}? Agents that use it lose it until it is started again.",
+                  what=tr("MCP server {name}", name=printable(name)))
+        if host != LOCAL:
+            text = tr("On {host}: {text}", host=printable(host), text=text)
+        if action == "stop" and not ask_first(self, "start-stop", tr("Stop"), text, tr("Stop")):
+            return
+        background(lambda: self.sai.host_run(host, "mcp", action, name, timeout=300), owner=self,
+                   source=self.server_buttons, timeout=330, done=lambda result, error: self.server_done(action, result,
+                                                                                                       error))
 
-    def server_done(self, action, result, error):
+    def start_server(self, host, name, targets):
+        """`sandbox-ai mcp start` with the dialog's options; for a start it is attached to it too (asked first:
+        mcp-attach, and start-restart where that start is restarted now)."""
+        dialog = McpStartDialog(self, name, targets, host)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        values = dialog.values()
+        try:
+            args = backend.mcp_start_args(name, **values)
+        except ValueError as exc:
+            warn(self, tr("Start {name}", name=printable(name)), printable(exc))
+            return
+        where = tr("On {host}: ", host=printable(host)) if host != LOCAL else ""
+        start = values["for_start"]
+        if values["restart"] and not ask_first(self, "start-restart", tr("Start {name}", name=printable(name)), where + tr(
+                "Start {name} for {start} and restart {start} now? What runs in it ends; the agent continues its "
+                "conversation.", name=printable(name), start=printable(start)), tr("Restart")):
+            return
+        if start and not values["restart"] and not ask_first(
+                self, "mcp-attach", tr("Start {name}", name=printable(name)), where + tr(
+                    "Give {start} the tools of the MCP server {name}?", start=printable(start), name=printable(name)),
+                tr("Attach")):
+            return
+        background(lambda: self.sai.host_run(host, *args, timeout=300), owner=self, source=self.server_buttons,
+                   timeout=330, done=lambda result, error: self.server_done("start", result, error, quiet=not start))
+
+    def server_done(self, action, result, error, quiet=True):
         status, out, err = outcome(result, error)
         if status != 0:
             warn(self, f"mcp {action}", (out + err).strip())
+        elif not quiet:  # for a start: what it says (JSON: its message)
+            try:
+                said = json.loads(out).get("message") or out
+            except (ValueError, AttributeError):
+                said = out
+            inform(self, f"mcp {action}", printable(str(said)).strip(), modal=False)
         self.refresh()
 
     def load_catalog(self, auto=False):
-        """The catalogs come over the network: fetched in a thread."""
+        """The catalogs come over the network: fetched in a thread (this machine's catalog module, or `sandbox-ai mcp
+        catalog [--catalog SOURCE]` on the host chosen)."""
         self.catalog_requested = True
+        host, source = self.host(), self.catalog_source.text().strip()
+        try:
+            backend.catalog_options([source] if source else [])
+        except ValueError as exc:
+            self.catalog_status.setText(printable(exc))
+            return
         self.catalog_status.setText(tr("Loading the catalogs…"))
-        background(self.sai.mcp_catalog, owner=self, source=self.load_button, timeout=120,
-                   done=lambda result, error: self.catalog_loaded(result, error, auto))
+        background(self.sai.host_mcp_catalog, host, [source] if source else [], owner=self, source=self.load_button,
+                   timeout=180, done=lambda result, error: self.catalog_loaded(result, error, auto, (host, source)))
 
-    def catalog_loaded(self, result, error, auto=False):
+    def catalog_loaded(self, result, error, auto=False, of=(LOCAL, "")):
         entries, problems = result if error is None else ([], [str(error)])
+        self.catalog_of = of
         self.catalog_status.setText(tr("{count} entries", count=len(entries)) if not problems else
                                     "\n".join(printable(problem) for problem in problems))
         if auto:
@@ -2849,16 +3360,121 @@ class McpPage(QWidget):
         if not entry:
             QMessageBox.information(self, tr("Add"), tr("Load the catalogs and select an entry first."))
             return
-        dialog = AddServerDialog(self, entry)
+        host, catalog = self.catalog_of or (self.host(), "")
+        dialog = AddServerDialog(self, entry, host, catalog)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        arguments = dialog.arguments(key)
-        background(lambda: self.sai.call("mcp", "add", *arguments, timeout=900), owner=self, source=self.add_button,
+        title = tr("Add {name}", name=printable(key)) if host == LOCAL else \
+            tr("Add {name} on {host}", name=printable(key), host=printable(host))
+        try:
+            values = dialog.values(key)
+            args, writable = backend.mcp_add_args(**values)
+        except ValueError as exc:
+            warn(self, title, printable(exc))
+            return
+        where = tr("On {host}: ", host=printable(host)) if host != LOCAL else ""
+        if values["unsigned"] and not ask_first(self, "mcp-unsigned", title, where + tr(
+                "Add {name} although its catalog is not signed by a trusted key? Nothing checked that the catalog is "
+                "the one its publisher wrote.", name=printable(key)), tr("Add unsigned")):
+            return
+        if writable and not ask_first(self, "mcp-writable-mount", title, where + tr(
+                "Let the MCP server {name} change these folders of its host: {list}?", name=printable(key),
+                list=printable(", ".join(writable))), tr("Add")):
+            return
+        background(lambda: self.sai.host_run(host, *args, timeout=900), owner=self, source=self.add_button,
                    timeout=930, done=lambda result, error: self.added(result, error))
 
     def added(self, result, error):
         report(self, "mcp add", result, error)
         self.refresh()
+
+
+class PrivacyDialog(QDialog):
+    """Privacy check…: what the next push of repositories would publish that should stay private (sandbox-ai
+    privacy-check), on this machine or a host: the repositories (that host's paths), your own rules directory, the
+    project's rule file, and whether every file counts (--all), not only the changed ones."""
+
+    def __init__(self, parent, sai):
+        super().__init__(parent)
+        self.setWindowTitle(tr("Privacy check"))
+        form = QFormLayout(self)
+        self.host_choice = HostCombo(sai)
+        self.host_choice.chosen.connect(lambda host: self.host_changed())
+        form.addRow(tr("Host"), self.host_choice)
+        self.paths = ListField(path=True)
+        self.paths.setToolTip(tr("Git repositories, one per line (absolute paths on the host chosen)"))
+        form.addRow(tr("Repositories"), self.paths)
+        self.rules = PathField()
+        self.rules.setToolTip(tr("Your own rules (default: the project's --privacy-rules, else "
+                                 "~/.config/sandbox-ai/privacy if it exists)"))
+        form.addRow(tr("Rules directory"), self.rules)
+        self.project = QLineEdit()
+        self.project.setPlaceholderText(tr("the repository folder's name"))
+        self.project.setToolTip(tr("The name of the project rule file (--project)"))
+        form.addRow(tr("Project rules"), self.project)
+        self.every = QCheckBox(tr("Every tracked and untracked file, also unchanged ones (--all)"))
+        form.addRow(self.every)
+        self.note = plain_label(role="secondary")
+        form.addRow(self.note)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+        self.host_changed()
+
+    def host_changed(self):
+        host = self.host_choice.current()
+        for field in (self.paths, self.rules):
+            field.set_local(host == LOCAL)
+        self.note.setText(tr("Paths on {host}: type them in (this computer's folders are not {host}'s).",
+                             host=printable(host)) if host != LOCAL else "")
+
+    def values(self):
+        """(host, repositories, rules directory, project, every file)."""
+        return (self.host_choice.current(), self.paths.value(), self.rules.value().strip(), self.project.text().strip(),
+                self.every.isChecked())
+
+
+PRIVACY_COLUMNS = (N_("Repository"), N_("Where"), N_("File"), N_("Rule"), N_("Severity"), N_("Reason"), N_("Line"))
+
+
+def privacy_rows(results):
+    """[[repository, where, file, rule, severity, reason, line]] of privacy-check --json: every finding, and a row
+    for a repository without any."""
+    rows = []
+    for result in results:
+        repository = printable(str(result.get("repository") or ""))
+        findings = [f for f in result.get("findings") or [] if isinstance(f, dict)]
+        if not findings:
+            rows.append([repository, "", "", "", "", tr("nothing found ({count} files checked)",
+                                                         count=result.get("scanned", 0)), ""])
+        for finding in findings:
+            rows.append([repository, *(printable(str(finding.get(key) if finding.get(key) is not None else ""))[:400]
+                                       for key in ("where", "path", "id", "severity", "reason", "line"))])
+    return rows
+
+
+class PrivacyResults(QDialog):
+    """The findings of a privacy check as a table (not modal); the repositories' notes and what was refused below."""
+
+    def __init__(self, parent, title, results, problems):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(980, 520)
+        layout = QVBoxLayout(self)
+        rows = privacy_rows(results)
+        self.table = table([tr(column) for column in PRIVACY_COLUMNS], stretch=5)
+        fill(self.table, rows, ["bad" if row[4] == "block" else "warn" if row[4] else "ok" for row in rows])
+        layout.addWidget(self.table, 1)
+        notes = [printable(str(note)) for result in results for note in result.get("notes") or []][:20] + \
+            [printable(line) for line in problems]
+        self.notes = plain_label("\n".join(notes), role="secondary")
+        self.notes.setVisible(bool(notes))
+        layout.addWidget(self.notes)
+        close = QDialogButtonBox()
+        close.addButton(tr("Close"), QDialogButtonBox.ButtonRole.RejectRole)
+        close.rejected.connect(self.reject)
+        layout.addWidget(close)
 
 
 class SystemPage(QWidget):
@@ -2873,8 +3489,13 @@ class SystemPage(QWidget):
         self.version = plain_label(tr("Version {version}, from {path}", version=sai.version(), path=sai.directory))
         self.update_text = plain_label(tr("Update check not run yet."))
         self.update_button = QPushButton(tr("Check for updates"))
+        self.details_button = QPushButton(tr("Details…"))
+        self.details_button.setToolTip(tr("Where this sandbox-ai is installed, the keys its updates must be signed by, "
+                                          "whether the policy demands it (sandbox-ai version --verbose)"))
+        self.details_button.clicked.connect(lambda _=False: self.version_details())
         about_layout.addWidget(self.version, 1)
         about_layout.addWidget(self.update_text, 1)
+        about_layout.addWidget(self.details_button)
         about_layout.addWidget(self.update_button)
         layout.addWidget(about)
         # The administrator's policy, in one line; the Settings dialog shows it in full.
@@ -2907,16 +3528,50 @@ class SystemPage(QWidget):
         layout.addWidget(doctor, 1)
         tools = QGroupBox(tr("Images, updates, privacy"))
         tools_layout = QHBoxLayout(tools)
-        for text, args in ((tr("Build images"), ("build", "all")), (tr("Update sandbox-ai"), ("update",))):
-            button = QPushButton(text)
-            button.clicked.connect(lambda _=False, a=args: self.tool(a))
-            tools_layout.addWidget(button)
+        build = QPushButton(tr("Build images"))
+        build.clicked.connect(lambda _=False: self.tool(("build", "all")))
+        tools_layout.addWidget(build)
+        update = self.update_sai_button = QPushButton(tr("Update sandbox-ai"))
+        update.setToolTip(tr("sandbox-ai update in a terminal: the newest signed release, or the version given"))
+        update.clicked.connect(lambda _=False: self.update_sandbox_ai())
+        self.update_version = QLineEdit()
+        self.update_version.setPlaceholderText(tr("X.Y.Z (empty: the newest)"))
+        self.update_version.setToolTip(tr("Update to this version (sandbox-ai update --version), e.g. to go back"))
+        self.update_version.setAccessibleName(tr("Version to update to"))
+        self.update_version.setMaximumWidth(150)
+        tools_layout.addWidget(update)
+        tools_layout.addWidget(self.update_version)
         privacy = QPushButton(tr("Privacy check of a repository…"))
         privacy.clicked.connect(self.privacy)
         self.privacy_button = privacy
         tools_layout.addWidget(privacy)
         tools_layout.addStretch()
         layout.addWidget(tools)
+        # The emulated serial device the hardware-analysis preset practises on (sandbox-ai demo-device), on a host too.
+        demo = QGroupBox(tr("Emulated device (sandbox-ai demo-device)"))
+        demo_layout = QHBoxLayout(demo)
+        self.demo_host = HostCombo(sai)
+        self.demo_port = QSpinBox()
+        self.demo_port.setRange(1024, 65535)
+        self.demo_port.setValue(DEMO_PORT)
+        self.demo_port.setAccessibleName(tr("Port"))
+        self.demo_buttons = {}
+        for action, text, tip in (("start", tr("Start"), tr("Start the emulated serial device (on the port given)")),
+                                  ("status", tr("Status"), tr("Whether it runs, and where")),
+                                  ("stop", tr("Stop"), tr("Stop the emulated device"))):
+            button = QPushButton(text)
+            button.setToolTip(tip)
+            button.setAccessibleName(tr("{action} the emulated device", action=text))
+            button.clicked.connect(lambda _=False, a=action: self.demo_device(a))
+            self.demo_buttons[action] = button
+        self.demo_text = plain_label(role="secondary")
+        demo_layout.addWidget(self.demo_host)
+        demo_layout.addWidget(QLabel(tr("Port")))
+        demo_layout.addWidget(self.demo_port)
+        for button in self.demo_buttons.values():
+            demo_layout.addWidget(button)
+        demo_layout.addWidget(self.demo_text, 1)
+        layout.addWidget(demo)
         settings = QGroupBox(tr("Settings of the app"))
         form = QFormLayout(settings)
         current = sai.settings()
@@ -3013,14 +3668,67 @@ class SystemPage(QWidget):
     def tool(self, args):
         self.terminal(self.sai.command(*args), "sandbox-ai " + " ".join(args))
 
+    def showEvent(self, event):  # noqa: N802
+        self.demo_host.reload()  # a host added on the Hosts page meanwhile
+        super().showEvent(event)
+
+    def version_details(self):
+        """sandbox-ai version --verbose: where it is installed, its release keys, the policy on signed updates."""
+        background(self.sai.version_details, LOCAL, owner=self, source=self.details_button, timeout=90,
+                   done=lambda result, error: show_text(self, tr("sandbox-ai version"),
+                                                        printable("\n".join(outcome(result, error)[1:]).strip()),
+                                                        modal=False))
+
+    def update_sandbox_ai(self):
+        """sandbox-ai update [--version X.Y.Z] in a terminal (its signed release; install.sh's installation)."""
+        try:
+            args = backend.update_args(self.update_version.text().strip() or None)
+        except ValueError:
+            warn(self, tr("Update sandbox-ai"), tr("A version is X.Y.Z, e.g. 0.1.76."))
+            return
+        self.tool(tuple(args))
+
+    def demo_device(self, action):
+        """sandbox-ai demo-device start|status|stop on the host chosen, in the background."""
+        host, port = self.demo_host.current(), self.demo_port.value()
+        background(self.sai.demo_device, host, action, port if action == "start" and port != DEMO_PORT else None,
+                   owner=self, source=list(self.demo_buttons.values()), timeout=90,
+                   done=lambda result, error: self.demo_done(host, result, error))
+
+    def demo_done(self, host, result, error):
+        status, out, err = outcome(result, error)
+        said = printable((out + err).strip())[-300:]
+        self.demo_text.setText(tr("{host}: {said}", host=printable(host), said=said) if host != LOCAL else said)
+
     def privacy(self):
-        directory = choose_folder(self, tr("Git repository"), "repository")
-        if directory:
-            background(lambda: self.sai.call("privacy-check", directory, timeout=600), owner=self, timeout=630,
-                       source=self.privacy_button,
-                       done=lambda result, error: show_text(self, tr("Privacy check: {path}", path=directory),
-                                                            "\n".join(outcome(result, error)[1:]).strip(),
-                                                            modal=False))
+        """Privacy check…: the repositories, rules and options asked for, checked on the host chosen (sandbox-ai
+        privacy-check --json, in the background), the findings shown as a table."""
+        dialog = PrivacyDialog(self, self.sai)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        host, paths, rules, project, every = dialog.values()
+        try:
+            backend.privacy_check_args(paths, rules or None, project or None, every)
+        except ValueError as exc:
+            warn(self, tr("Privacy check"), printable(exc))
+            return
+        title = tr("Privacy check: {path}", path=printable(", ".join(paths))[:200]) if host == LOCAL else \
+            tr("Privacy check on {host}: {path}", host=printable(host), path=printable(", ".join(paths))[:200])
+        background(self.sai.privacy_check, host, paths, rules or None, project or None, every, owner=self,
+                   timeout=660, source=self.privacy_button,
+                   done=lambda result, error: self.privacy_checked(title, result, error))
+
+    def privacy_checked(self, title, result, error):
+        from . import widgets
+        if error is not None:
+            show_text(self, title, printable(str(error)), modal=False)
+            return
+        results, problems = result
+        self.privacy_dialog = PrivacyResults(self, title, results, problems)
+        if widgets.AUTO_ANSWER is not None:  # tests: what would be shown is collected
+            widgets.SHOWN.append((title, "\n".join("  ".join(row) for row in privacy_rows(results)), None))
+            return
+        widgets.show_modeless(self.privacy_dialog)
 
 
 def alive(widget):
@@ -3095,7 +3803,7 @@ SECTIONS = ((N_("Project"), (("launch", N_("Start")), ("board", N_("Board")))),
             (N_("Insight"), (("connections", N_("Connections")), ("activity", N_("Activity")),
                              ("statistics", N_("Statistics")), ("files", N_("Files")))),
             (N_("Manage"), (("kits", N_("Kits & plugins")), ("mcp", N_("MCP servers")), ("llm", N_("LLM servers")),
-                            ("images", N_("Images")), ("credentials", N_("Credentials")))),
+                            ("images", N_("Images")), ("credentials", N_("Credentials")), ("team", N_("Teams")))),
             (N_("System"), (("system", N_("System")), ("hosts", N_("Hosts")), ("help", N_("Help")))))
 PAGES = tuple(page for _, pages in SECTIONS for page in pages)
 SHORTCUT_PAGES = 9
@@ -3510,6 +4218,8 @@ class MainWindow(QMainWindow):
         self.mcp = McpPage(sai)
         from .llm_page import LlmPage
         self.llm = LlmPage(sai)  # the LLM servers of `sandbox-ai llm`, on this machine or a host
+        from .team_page import TeamPage
+        self.team = TeamPage(sai, self.in_terminal)  # the teams of `sandbox-ai team`, on this machine or a host
         self.images = ImagesPage(sai, self.in_terminal)
         self.credentials = CredentialsPage(sai, self.in_terminal)
         self.terminals = terminal.TerminalsPage(sai=sai, in_terminal=self.in_terminal)

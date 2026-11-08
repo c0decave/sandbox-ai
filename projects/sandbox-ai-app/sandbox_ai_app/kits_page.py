@@ -9,7 +9,11 @@ refused). Using a kit in the current project goes through the Board's Apply (sho
 
 A kit's hooks run only once approved. Approving is `sandbox-ai kits trust-hooks KIT` in a terminal: it shows every
 hook and the full text of every file, and the human types yes there. The app never approves on its own (no
---yes).
+--yes); taking an approval back is `sandbox-ai kits trust-hooks --revoke KIT`.
+
+The host chooser at the top shows and changes the kits of this machine or of a host of `sandbox-ai hosts` (over SSH:
+`sandbox-ai hosts run HOST -- kits ...`; the review of hooks and the plugin installs in a terminal tab with ssh -tt).
+A skill folder or a hook file is then a path on that host.
 """
 from __future__ import annotations
 
@@ -18,7 +22,8 @@ import re
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout,
-    QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSplitter, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
+    QInputDialog, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSplitter, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -28,8 +33,10 @@ from .state import choose_file, choose_folder
 from .i18n import N_, tr
 from .widgets import (
     ask_first, background, busy, fill, flow, inform, outcome, plain_label, row_key, selected_rows, set_enabled,
-    table, warn,
+    show_text, table, warn,
 )
+
+LOCAL = "local"
 
 KIND_TITLES = {"always": N_("always (sandbox-ai)"), "default": N_("always (default kit)"), "builtin": N_("built-in"),
                "user": N_("yours")}
@@ -196,7 +203,7 @@ class MarketplaceDialog(FormDialog):
 class HookDialog(FormDialog):
     """A hook for the kit: a script (with event, matcher and timeout), a hooks.json or an OpenCode plugin."""
 
-    def __init__(self, parent, agents):
+    def __init__(self, parent, agents, remote=False):
         super().__init__(parent, tr("Add hook"), tr("A script runs at the event for the tools the matcher names; a "
                                                     "hooks.json brings its own definitions; an OpenCode plugin is a "
                                                     ".js, .mjs or .ts module. The hook runs only once you have "
@@ -205,6 +212,9 @@ class HookDialog(FormDialog):
         self.file.setPlaceholderText(tr("check.sh, hooks.json or plugin.js"))
         browse = QPushButton(tr("File…"))
         browse.clicked.connect(self.choose)
+        browse.setVisible(not remote)  # another host's file: its path there, typed
+        if remote:
+            self.file.setToolTip(tr("A path on that host"))
         row = QHBoxLayout()
         row.addWidget(self.file, 1)
         row.addWidget(browse)
@@ -296,6 +306,10 @@ class KitsPage(QWidget):
         self.inventory, self.kits, self.project, self.project_kits, self.token = None, {}, None, [], 0
         self.installed, self.market_entries = set(), {}
         layout = QVBoxLayout(self)
+        from .host_choice import HostChooser
+        self.hosts = HostChooser(sai, tr("The kits of this machine, or of a host (over SSH)"))
+        self.hosts.changed.connect(lambda _host: self.refresh() if self.loaded_once else None)
+        layout.addWidget(self.hosts)
         top = QHBoxLayout()
         self.summary = plain_label(role="secondary")
         top.addWidget(self.summary, 1)
@@ -311,7 +325,10 @@ class KitsPage(QWidget):
         self.update_button = QPushButton(tr("Update plugins"))
         self.update_button.setToolTip(tr("sandbox-ai plugins claude --update, in a terminal"))
         self.update_button.clicked.connect(lambda _=False: self.install(True))
-        for widget in (self.refresh_button, new, self.install_button, self.update_button):
+        self.status_button = QPushButton(tr("Plugin status"))
+        self.status_button.setToolTip(tr("sandbox-ai plugins --status: the plugins declared and installed"))
+        self.status_button.clicked.connect(lambda _=False: self.plugin_status())
+        for widget in (self.refresh_button, new, self.install_button, self.update_button, self.status_button):
             top.addWidget(widget)
         layout.addLayout(top)
         split = self.split = QSplitter(Qt.Orientation.Horizontal)
@@ -337,6 +354,9 @@ class KitsPage(QWidget):
         self.hook_button.clicked.connect(lambda _=False: self.add_hook())
         self.trust_button = QPushButton(tr("Review and approve hooks…"))
         self.trust_button.clicked.connect(lambda _=False: self.trust_hooks())
+        self.revoke_button = QPushButton(tr("Take the approval back"))
+        self.revoke_button.setToolTip(tr("sandbox-ai kits trust-hooks --revoke: the kit's hooks no longer run"))
+        self.revoke_button.clicked.connect(lambda _=False: self.revoke_hooks())
         self.remove_button = QPushButton(tr("Remove…"))
         self.remove_button.clicked.connect(lambda _=False: self.remove())
         self.delete_button = QPushButton(tr("Delete kit…"))
@@ -348,7 +368,7 @@ class KitsPage(QWidget):
                             self.hook_button]
         self.change_buttons = [self.remove_button, self.delete_button]
         self.edit_buttons = self.add_buttons + self.change_buttons
-        kits_layout.addWidget(flow(self.use_button, *self.edit_buttons, self.trust_button))
+        kits_layout.addWidget(flow(self.use_button, *self.edit_buttons, self.trust_button, self.revoke_button))
         self.add_hint = plain_label(role="secondary")
         self.add_hint.setWordWrap(True)
         kits_layout.addWidget(self.add_hint)
@@ -390,9 +410,24 @@ class KitsPage(QWidget):
         if not self.loaded_once:
             self.refresh()
 
+    def host(self):
+        return self.hosts.host() or LOCAL
+
+    def on_host(self, title):
+        """TITLE with the host it runs on (for a terminal tab and a result)."""
+        return title if self.host() == LOCAL else f"{title} ({self.host()})"
+
     def refresh(self):
-        """`sandbox-ai kits list --json`, in the background."""
+        """`sandbox-ai kits list --json`, in the background (on the host chosen)."""
         self.loaded_once = True
+        host = self.host()
+        if host != LOCAL:
+            self.token += 1
+            token = self.token
+            self.summary.setText(tr("Asking {host}…", host=self.hosts.label(host)))
+            background(lambda: self.sai.host_kits_inventory(host), owner=self, source=self.refresh_button,
+                       timeout=150, done=lambda result, error: self.loaded(token, result, error))
+            return
         if not self.sai.has_kits_command():
             self.summary.setText(tr("This sandbox-ai has no kits command (sandbox-ai kits); update it with: "
                                     "sandbox-ai update"))
@@ -450,12 +485,13 @@ class KitsPage(QWidget):
         self.store.setText(tr("Plugin store {path}: {list}", path=store, list=printable(listed)))
         user = sum(1 for kit in self.kits.values() if kit.get("kind") == "user")
         self.summary.setText(tr("{count} kits ({user} of yours) in {path}", count=len(self.kits), user=user,
-                                path=printable(inventory.get("kits_dir") or "")))
+                                path=printable(inventory.get("kits_dir") or "")) +
+                             ("" if self.host() == LOCAL else f" · {self.hosts.label()}"))
         self.inventory_loaded.emit(inventory)
         self.selection_changed()
 
     def use_text(self, kit):
-        if not self.project:
+        if not self.project or self.host() != LOCAL:
             return ""
         return "✔" if kit.get("kind") in ("always", "default") or kit["name"] in self.project_kits else ""
 
@@ -550,13 +586,15 @@ class KitsPage(QWidget):
                               tr("{why} What you add goes to a kit of yours: you choose it (or a new one) first.",
                                  why=why))
         use_why = (none if kit is None else
+                   tr("The current project is on this machine: choose this machine as the host.")
+                   if self.host() != LOCAL else
                    tr("This kit is part of every sandbox already.") if kind in ("always", "default") else
                    tr("Choose a project first (at the top of the window).") if not self.project else
                    tr("The current project uses it already.") if kit["name"] in self.project_kits else None)
         set_enabled(self.use_button, use_why is None, use_why,
                     tooltip=tr("Add --kit NAME to the project's .sandbox-ai.json: shown first, then written and "
                                "trusted"))
-        if not self.sai.has_kit_hooks():
+        if self.host() == LOCAL and not self.sai.has_kit_hooks():
             set_enabled(self.hook_button, False, tr("This sandbox-ai has no kit hooks yet; update it."))
         with_hooks = kit is not None and any(hooks_of(info) for info in kit_agents(kit).values())
         trust_why = (none if kit is None else
@@ -565,6 +603,11 @@ class KitsPage(QWidget):
         set_enabled(self.trust_button, trust_why is None, trust_why,
                     tooltip=tr("sandbox-ai kits trust-hooks, in a terminal: shows every hook and the full text of "
                                "every file; you approve there"))
+        approved = kit is not None and any(hooks_of(info) and hooks_of(info).get("trusted")
+                                           for info in kit_agents(kit).values())
+        set_enabled(self.revoke_button, trust_why is None and approved,
+                    trust_why or tr("No hook of this kit is approved."),
+                    tooltip=tr("sandbox-ai kits trust-hooks --revoke: the kit's hooks no longer run"))
         rows = selected_rows(self.market)  # the kit of yours is chosen (or created) when adding
         market_why = tr("Select a plugin of the marketplace first.") if not rows else None
         set_enabled(self.add_to_kit_button, market_why is None, market_why)
@@ -581,19 +624,21 @@ class KitsPage(QWidget):
                     "code there.", what=what, name=printable(name)), tr("Add")):
                 return
 
+        host = self.host()
+
         def work():
             first = ""
             if create:
-                status, out, err = self.sai.kit_command("new", name)
+                status, out, err = self.sai.host_kit_command(host, "new", name)
                 if status != 0:
                     return status, out, err
                 first = out
-            status, out, err = self.sai.kit_command(action, name, *arguments, options=options)
+            status, out, err = self.sai.host_kit_command(host, action, name, *arguments, options=options)
             return status, first + out, err
         background(work, owner=self,
                    source=[self.refresh_button, self.use_button, self.add_to_kit_button, *self.edit_buttons],
-                   timeout=300, done=lambda result, error: self.done(title or f"sandbox-ai kits {action}", result,
-                                                                     error))
+                   timeout=600, done=lambda result, error: self.done(self.on_host(title or f"sandbox-ai kits {action}"),
+                                                                     result, error))
 
     def user_kits(self):
         return sorted(kit["name"] for kit in self.kits.values() if kit.get("kind") == "user")
@@ -654,7 +699,8 @@ class KitsPage(QWidget):
         if target is None:
             return
         name, create, _ = target
-        path = choose_folder(self, tr("Skill folder (with SKILL.md)"), "skill")
+        path = self.remote_path(tr("Skill folder (with SKILL.md)")) if self.host() != LOCAL else \
+            choose_folder(self, tr("Skill folder (with SKILL.md)"), "skill")
         if path:
             self.run("add-skill", name, path, title=tr("Add skill"), create=create)
 
@@ -673,6 +719,16 @@ class KitsPage(QWidget):
         if dialog.description.text().strip():
             options.append(f"--description={dialog.description.text().strip()}")
         self.run("new-skill", kit_name, name, options=options, title=tr("New skill"), create=create)
+
+    def remote_path(self, title):
+        """A path on the host chosen, typed (this machine's file dialog cannot see that host); None when cancelled
+        or not absolute."""
+        path, ok = QInputDialog.getText(self, title, tr("The absolute path on {host}:", host=self.hosts.label()))
+        path = path.strip() if ok else ""
+        if path and not backend.valid_directory(path):
+            warn(self, tr("Kits & plugins"), tr("Not an absolute path: {path}", path=printable(path)))
+            return None
+        return path or None
 
     def known_plugins(self):
         return list(self.market_entries)
@@ -737,7 +793,8 @@ class KitsPage(QWidget):
         if target is None:
             return
         name, create, kit = target
-        dialog = HookDialog(self, (sorted(kit_agents(kit)) if kit else []) or list(AGENTS))
+        agents = (sorted(kit_agents(kit)) if kit else []) or list(AGENTS)
+        dialog = HookDialog(self, agents, remote=True) if self.host() != LOCAL else HookDialog(self, agents)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         path = dialog.file.text().strip()
@@ -759,8 +816,34 @@ class KitsPage(QWidget):
                 "and the full text of every file before you approve there.", name=printable(name)),
                 tr("Open the review")):
             return
-        self.terminal(self.sai.trust_hooks_argv(name), f"sandbox-ai kits trust-hooks {name}")
+        host = self.host()
+        argv = self.sai.trust_hooks_argv(name) if host == LOCAL else self.sai.host_trust_hooks_argv(host, name)
+        self.terminal(argv, self.on_host(f"sandbox-ai kits trust-hooks {name}"))
         self.summary.setText(tr("Review the hooks of {name} in the terminal, then Refresh.", name=printable(name)))
+
+    def revoke_hooks(self):
+        """`sandbox-ai kits trust-hooks --revoke KIT`: the approval is taken back (nothing widens: no question)."""
+        kit, host = self.current(), self.host()
+        if kit is None:
+            return
+        name = kit["name"]
+        background(lambda: self.sai.revoke_hooks(host, name), owner=self, source=[self.revoke_button],
+                   timeout=150, done=lambda result, error: self.done(self.on_host(tr("Take the approval back")), result,
+                                                                     error))
+
+    def plugin_status(self):
+        """`sandbox-ai plugins --status` on the host chosen, shown as it says it."""
+        host = self.host()
+        background(lambda: self.sai.plugins_status(host), owner=self, source=[self.status_button], timeout=150,
+                   done=lambda result, error: self.plugin_status_shown(host, result, error))
+
+    def plugin_status_shown(self, host, result, error):
+        status, out, err = outcome(result, error)
+        text = "\n".join(printable(line) for line in (out if status == 0 else (err or out)).strip()[-8000:]
+                         .splitlines())
+        show_text(self, tr("Plugins on {host}", host=self.hosts.label(host)), text or tr("Failed (exit status "
+                                                                                        "{status}).", status=status),
+                  modal=False)
 
     def delete(self):
         kit = self.current()
@@ -791,9 +874,11 @@ class KitsPage(QWidget):
         """`sandbox-ai plugins claude [--update]` in a terminal, with --kit for the built-in kits the current
         project uses (their plugins are installed only on request)."""
         builtin = {kit["name"] for kit in self.kits.values() if kit.get("kind") == "builtin"}
-        chosen = [name for name in self.project_kits if name in builtin]
+        chosen = [name for name in self.project_kits if name in builtin] if self.host() == LOCAL else []
         kit = self.current()
         if kit is not None and kit.get("kind") == "builtin" and kit["name"] not in chosen:
             chosen.append(kit["name"])
-        self.terminal(self.sai.plugins_argv(update=update, kits=chosen),
-                      "sandbox-ai plugins claude" + (" --update" if update else ""))
+        host = self.host()
+        argv = self.sai.plugins_argv(update=update, kits=chosen) if host == LOCAL else \
+            self.sai.host_plugins_argv(host, update=update, kits=chosen)
+        self.terminal(argv, self.on_host("sandbox-ai plugins claude" + (" --update" if update else "")))

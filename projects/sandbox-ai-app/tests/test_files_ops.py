@@ -430,7 +430,7 @@ def test_the_command_is_podman_unshare_chown_to_namespace_root(places):
     assert argv[-6:] == [sandbox.path, "sub", str(info.st_dev), str(info.st_ino), "0", "0"]
 
 
-def test_take_ownership_refuses_the_host_links_foreign_owners_and_no_podman(places, tmp_path, fake_podman):
+def test_take_ownership_refuses_the_host_links_foreign_owners_and_no_podman(places, tmp_path, fake_podman, monkeypatch):
     sandbox, machine, ws, host, _ = places
     (host / "x").write_text("x")
     with pytest.raises(Refused, match="only below a sandbox"):
@@ -439,8 +439,10 @@ def test_take_ownership_refuses_the_host_links_foreign_owners_and_no_podman(plac
         files.take_ownership(sandbox, "", podman=fake_podman)
     with pytest.raises(Refused, match="symbolic link"):
         files.take_ownership(sandbox, "planted", podman=fake_podman)
+    monkeypatch.setattr(files.shutil, "which", lambda name: None)  # a runner may have Podman (GitHub's has)
     with pytest.raises(Refused, match="Podman was not found"):
-        files.take_ownership(sandbox, "sub", podman="")  # and no podman on PATH is not assumed: given empty
+        files.take_ownership(sandbox, "sub", podman="")
+    monkeypatch.undo()
     if can_give_away(4242):
         os.chown(ws / "a.txt", 4242, 4242)
         with pytest.raises(Refused, match="UID 4242"):

@@ -47,6 +47,1011 @@ def tr(key, **values):
 
 
 TEXTS = {
+    # == the command-line parity on every host (the Manage pages, Activity, Statistics, Teams, VPN, LLM,
+    # canaries, trusted projects): one block ===
+    'Tor (every connection through Tor, .onion names work)': {
+        'en': 'Tor (every connection through Tor, .onion names work)',
+        'de': 'Tor (jede Verbindung über Tor, .onion-Namen funktionieren)'},
+    'IPv6 in the tunnel (the default)': {
+        'en': 'IPv6 in the tunnel (the default)',
+        'de': 'IPv6 im Tunnel (die Voreinstellung)'},
+    'no IPv6 in the tunnel (IPv6 is blocked)': {
+        'en': 'no IPv6 in the tunnel (IPv6 is blocked)',
+        'de': 'kein IPv6 im Tunnel (IPv6 ist gesperrt)'},
+    'reach the relay over IPv6': {
+        'en': 'reach the relay over IPv6',
+        'de': 'das Relay über IPv6 erreichen'},
+    "A profile name is 1-32 lower-case letters, digits, '_' or '-'.": {
+        'en': "A profile name is 1-32 lower-case letters, digits, '_' or '-'.",
+        'de': "Ein Profilname besteht aus 1-32 Kleinbuchstaben, Ziffern, '_' oder '-'."},
+    'Choose the kind of profile.': {
+        'en': 'Choose the kind of profile.',
+        'de': 'Wählen Sie die Art des Profils.'},
+    '{option} does not fit this profile.': {
+        'en': '{option} does not fit this profile.',
+        'de': '{option} passt nicht zu diesem Profil.'},
+    'Choose how IPv6 goes.': {
+        'en': 'Choose how IPv6 goes.',
+        'de': 'Wählen Sie, wie IPv6 geht.'},
+    "Only the server's routes through the tunnel (the rest stays blocked)": {
+        'en': "Only the server's routes through the tunnel (the rest stays blocked)",
+        'de': 'Nur die Routen des Servers durch den Tunnel (der Rest bleibt gesperrt)'},
+    'default: sandbox-ai-NAME': {
+        'en': 'default: sandbox-ai-NAME',
+        'de': 'Voreinstellung: sandbox-ai-NAME'},
+    'A new ephemeral node per start (needs an auth key; parallel starts)': {
+        'en': 'A new ephemeral node per start (needs an auth key; parallel starts)',
+        'de': 'Ein neuer flüchtiger Knoten je Start (braucht einen Auth-Key; parallele Starts)'},
+    'What of the tailnet the agent may reach (default: the whole tailnet)': {
+        'en': 'What of the tailnet the agent may reach (default: the whole tailnet)',
+        'de': 'Was der Agent vom Tailnet erreichen darf (Voreinstellung: das ganze Tailnet)'},
+    'a private file (mode 0600) with obfs4 or plain bridge lines': {
+        'en': 'a private file (mode 0600) with obfs4 or plain bridge lines',
+        'de': 'eine private Datei (Modus 0600) mit obfs4- oder einfachen Bridge-Zeilen'},
+    'Tor exits only in these countries (two-letter codes)': {
+        'en': 'Tor exits only in these countries (two-letter codes)',
+        'de': 'Tor-Ausgänge nur in diesen Ländern (Zwei-Buchstaben-Codes)'},
+    'A SOCKS port 127.0.0.1:9050 in the sandbox (Tor Browser, Playwright)': {
+        'en': 'A SOCKS port 127.0.0.1:9050 in the sandbox (Tor Browser, Playwright)',
+        'de': 'Ein SOCKS-Port 127.0.0.1:9050 in der Sandbox (Tor Browser, Playwright)'},
+    'What goes through it passes the connection proxy by': {
+        'en': 'What goes through it passes the connection proxy by',
+        'de': 'Was darüber geht, umgeht den Verbindungs-Proxy'},
+    'Advanced options': {
+        'en': 'Advanced options',
+        'de': 'Erweiterte Optionen'},
+    "Resolvers to use instead of the configuration's": {
+        'en': "Resolvers to use instead of the configuration's",
+        'de': 'Resolver statt derer der Konfiguration'},
+    'Address echo services for the checks (https); they replace the defaults': {
+        'en': 'Address echo services for the checks (https); they replace the defaults',
+        'de': 'Adress-Echo-Dienste für die Prüfungen (https); sie ersetzen die voreingestellten'},
+    'Do not ask whoami.akamai.net where DNS leaves': {
+        'en': 'Do not ask whoami.akamai.net where DNS leaves',
+        'de': 'whoami.akamai.net nicht fragen, wo DNS hinausgeht'},
+    "The provider's name (mullvad enables its own check)": {
+        'en': "The provider's name (mullvad enables its own check)",
+        'de': 'Der Name des Anbieters (mullvad schaltet dessen eigene Prüfung ein)'},
+    'Replace a profile of that name': {
+        'en': 'Replace a profile of that name',
+        'de': 'Ein Profil dieses Namens ersetzen'},
+    'Resolvers': {
+        'en': 'Resolvers',
+        'de': 'Resolver'},
+    'Check URLs': {
+        'en': 'Check URLs',
+        'de': 'Prüf-URLs'},
+    'sandbox-ai vpn show: what the profile holds (no keys)': {
+        'en': 'sandbox-ai vpn show: what the profile holds (no keys)',
+        'de': 'sandbox-ai vpn show: was das Profil enthält (keine Schlüssel)'},
+    'VPN profile {name} on {host}': {
+        'en': 'VPN profile {name} on {host}',
+        'de': 'VPN-Profil {name} auf {host}'},
+    'The configuration is a file with its absolute path.': {
+        'en': 'The configuration is a file with its absolute path.',
+        'de': 'Die Konfiguration ist eine Datei mit ihrem absoluten Pfad.'},
+    'A WireGuard configuration holds its own key: no secret.': {
+        'en': 'A WireGuard configuration holds its own key: no secret.',
+        'de': 'Eine WireGuard-Konfiguration enthält ihren eigenen Schlüssel: kein Geheimnis.'},
+    'Bridges come from a file or from a secret, not both.': {
+        'en': 'Bridges come from a file or from a secret, not both.',
+        'de': 'Bridges kommen aus einer Datei oder aus einem Geheimnis, nicht aus beidem.'},
+    'The bridge lines are a file with its absolute path (mode 0600).': {
+        'en': 'The bridge lines are a file with its absolute path (mode 0600).',
+        'de': 'Die Bridge-Zeilen sind eine Datei mit ihrem absoluten Pfad (Modus 0600).'},
+    'A check URL is https://HOST[/PATH]: {value}': {
+        'en': 'A check URL is https://HOST[/PATH]: {value}',
+        'de': 'Eine Prüf-URL ist https://HOST[/PFAD]: {value}'},
+    "Not a provider's name: {value}": {
+        'en': "Not a provider's name: {value}",
+        'de': 'Kein Name eines Anbieters: {value}'},
+    'New VPN profile on {host}': {
+        'en': 'New VPN profile on {host}',
+        'de': 'Neues VPN-Profil auf {host}'},
+    'IPv6': {
+        'en': 'IPv6',
+        'de': 'IPv6'},
+    'Node name': {
+        'en': 'Node name',
+        'de': 'Knotenname'},
+    'Tailnet the agent may reach': {
+        'en': 'Tailnet the agent may reach',
+        'de': 'Tailnet, das der Agent erreichen darf'},
+    'Bridges file': {
+        'en': 'Bridges file',
+        'de': 'Bridge-Datei'},
+    'Or a secret with bridges': {
+        'en': 'Or a secret with bridges',
+        'de': 'Oder ein Geheimnis mit Bridges'},
+    'Exit countries': {
+        'en': 'Exit countries',
+        'de': 'Ausgangsländer'},
+    'A SOCKS port at 127.0.0.1:9050 in every sandbox with {name}: what goes through it passes the connection proxy by (no allow-list, no questions, no log of its requests). Add it?': {
+        'en': 'A SOCKS port at 127.0.0.1:9050 in every sandbox with {name}: what goes through it passes the connection proxy by (no allow-list, no questions, no log of its requests). Add it?',
+        'de': 'Ein SOCKS-Port an 127.0.0.1:9050 in jeder Sandbox mit {name}: Was darüber geht, umgeht den Verbindungs-Proxy (keine Erlaubnisliste, keine Rückfragen, kein Protokoll seiner Anfragen). Hinzufügen?'},
+    '{option} does not fit this profile: {value}': {
+        'en': '{option} does not fit this profile: {value}',
+        'de': '{option} passt nicht zu diesem Profil: {value}'},
+    'Not a network: {value}': {
+        'en': 'Not a network: {value}',
+        'de': 'Kein Netz: {value}'},
+    'Not an IP address: {value}': {
+        'en': 'Not an IP address: {value}',
+        'de': 'Keine IP-Adresse: {value}'},
+    'Files are paths on that host; a key typed here is kept as a secret of sandbox-ai there (standard input over SSH).': {
+        'en': 'Files are paths on that host; a key typed here is kept as a secret of sandbox-ai there (standard input over SSH).',
+        'de': 'Dateien sind Pfade auf jenem Host; ein hier eingegebener Schlüssel wird dort als Geheimnis von sandbox-ai aufbewahrt (Standardeingabe über SSH).'},
+    'VPN profiles on {host}: {count}': {
+        'en': 'VPN profiles on {host}: {count}',
+        'de': 'VPN-Profile auf {host}: {count}'},
+    'Run {run} ({status}), started {started}': {
+        'en': 'Run {run} ({status}), started {started}',
+        'de': 'Lauf {run} ({status}), gestartet {started}'},
+    'On a read: {read}; when a token leaves: {send}': {
+        'en': 'On a read: {read}; when a token leaves: {send}',
+        'de': 'Beim Lesen: {read}; wenn ein Token hinausgeht: {send}'},
+    'No canaries were planted.': {
+        'en': 'No canaries were planted.',
+        'de': 'Es wurden keine Köder ausgelegt.'},
+    'Nothing happened to them.': {
+        'en': 'Nothing happened to them.',
+        'de': 'Mit ihnen ist nichts geschehen.'},
+    "These are the run's decoy tokens in full: worthless, but planted elsewhere they could raise false alarms.": {
+        'en': "These are the run's decoy tokens in full: worthless, but planted elsewhere they could raise false alarms.",
+        'de': 'Das sind die Köder-Tokens des Laufs in voller Länge: wertlos, aber anderswo ausgelegt könnten sie Fehlalarme auslösen.'},
+    'The runs with canaries (sandbox-ai canaries list)': {
+        'en': 'The runs with canaries (sandbox-ai canaries list)',
+        'de': 'Die Läufe mit Ködern (sandbox-ai canaries list)'},
+    'Canaries of the run': {
+        'en': 'Canaries of the run',
+        'de': 'Köder des Laufs'},
+    'sandbox-ai canaries list RUN: its decoys, tokens masked, and its events': {
+        'en': 'sandbox-ai canaries list RUN: its decoys, tokens masked, and its events',
+        'de': 'sandbox-ai canaries list RUN: seine Köder, Tokens maskiert, und seine Ereignisse'},
+    'Show the tokens…': {
+        'en': 'Show the tokens…',
+        'de': 'Tokens zeigen…'},
+    'sandbox-ai canaries list RUN --tokens: the decoy tokens in full': {
+        'en': 'sandbox-ai canaries list RUN --tokens: the decoy tokens in full',
+        'de': 'sandbox-ai canaries list RUN --tokens: die Köder-Tokens in voller Länge'},
+    'Resume…': {
+        'en': 'Resume…',
+        'de': 'Fortsetzen…'},
+    'sandbox-ai canaries resume RUN: continue a sandbox a canary paused': {
+        'en': 'sandbox-ai canaries resume RUN: continue a sandbox a canary paused',
+        'de': 'sandbox-ai canaries resume RUN: eine Sandbox fortsetzen, die ein Köder angehalten hat'},
+    'Canaries of {run}': {
+        'en': 'Canaries of {run}',
+        'de': 'Köder von {run}'},
+    '{run} ({status}, {events} events, {alerts} alerts)': {
+        'en': '{run} ({status}, {events} events, {alerts} alerts)',
+        'de': '{run} ({status}, {events} Ereignisse, {alerts} Alarme)'},
+    'Cannot read the canaries of {run}: {error}': {
+        'en': 'Cannot read the canaries of {run}: {error}',
+        'de': 'Die Köder von {run} lassen sich nicht lesen: {error}'},
+    'Resume {run}? A canary paused it: something opened a decoy or sent a token away. Look at the log first; resumed, the sandbox goes on with what it holds.': {
+        'en': 'Resume {run}? A canary paused it: something opened a decoy or sent a token away. Look at the log first; resumed, the sandbox goes on with what it holds.',
+        'de': '{run} fortsetzen? Ein Köder hat sie angehalten: Etwas hat einen Köder geöffnet oder ein Token weggeschickt. Sehen Sie sich zuerst das Protokoll an; fortgesetzt macht die Sandbox mit dem weiter, was sie hat.'},
+    'Not resumed: {error}': {
+        'en': 'Not resumed: {error}',
+        'de': 'Nicht fortgesetzt: {error}'},
+    'Show the canary tokens of {run} in full? They are decoys made for the run, but shown here they can be copied and planted somewhere else.': {
+        'en': 'Show the canary tokens of {run} in full? They are decoys made for the run, but shown here they can be copied and planted somewhere else.',
+        'de': 'Die Köder-Tokens von {run} in voller Länge zeigen? Es sind für den Lauf gemachte Köder, aber hier gezeigt lassen sie sich kopieren und anderswo auslegen.'},
+    '{run} resumed.': {
+        'en': '{run} resumed.',
+        'de': '{run} fortgesetzt.'},
+    'The kits of this machine, or of a host (over SSH)': {
+        'en': 'The kits of this machine, or of a host (over SSH)',
+        'de': 'Die Kits dieses Rechners oder eines Hosts (über SSH)'},
+    'Plugin status': {
+        'en': 'Plugin status',
+        'de': 'Plugin-Stand'},
+    'sandbox-ai plugins --status: the plugins declared and installed': {
+        'en': 'sandbox-ai plugins --status: the plugins declared and installed',
+        'de': 'sandbox-ai plugins --status: die erklärten und die installierten Plugins'},
+    'Take the approval back': {
+        'en': 'Take the approval back',
+        'de': 'Freigabe zurücknehmen'},
+    "sandbox-ai kits trust-hooks --revoke: the kit's hooks no longer run": {
+        'en': "sandbox-ai kits trust-hooks --revoke: the kit's hooks no longer run",
+        'de': 'sandbox-ai kits trust-hooks --revoke: die Hooks des Kits laufen nicht mehr'},
+    'The absolute path on {host}:': {
+        'en': 'The absolute path on {host}:',
+        'de': 'Der absolute Pfad auf {host}:'},
+    'Plugins on {host}': {
+        'en': 'Plugins on {host}',
+        'de': 'Plugins auf {host}'},
+    'A path on that host': {
+        'en': 'A path on that host',
+        'de': 'Ein Pfad auf jenem Host'},
+    'The current project is on this machine: choose this machine as the host.': {
+        'en': 'The current project is on this machine: choose this machine as the host.',
+        'de': 'Das aktuelle Projekt liegt auf diesem Rechner: Wählen Sie diesen Rechner als Host.'},
+    'No hook of this kit is approved.': {
+        'en': 'No hook of this kit is approved.',
+        'de': 'Kein Hook dieses Kits ist freigegeben.'},
+    'Not an absolute path: {path}': {
+        'en': 'Not an absolute path: {path}',
+        'de': 'Kein absoluter Pfad: {path}'},
+    "This machine's credentials, or a host's (over SSH)": {
+        'en': "This machine's credentials, or a host's (over SSH)",
+        'de': 'Die Zugangsdaten dieses Rechners oder eines Hosts (über SSH)'},
+    'Publish login kinds': {
+        'en': 'Publish login kinds',
+        'de': 'Arten von Veröffentlichungs-Logins'},
+    'sandbox-ai publish-logins kinds: what each kind opens, sets and asks about': {
+        'en': 'sandbox-ai publish-logins kinds: what each kind opens, sets and asks about',
+        'de': 'sandbox-ai publish-logins kinds: was jede Art öffnet, setzt und nachfragt'},
+    'sandbox-ai identities check: whether the secrets each identity names are kept (the selected one, or every identity)': {
+        'en': 'sandbox-ai identities check: whether the secrets each identity names are kept (the selected one, or every identity)',
+        'de': 'sandbox-ai identities check: ob die Geheimnisse, die jede Identität nennt, aufbewahrt sind (die gewählte oder jede Identität)'},
+    'every secret is there': {
+        'en': 'every secret is there',
+        'de': 'jedes Geheimnis ist da'},
+    'every identity': {
+        'en': 'every identity',
+        'de': 'jede Identität'},
+    'Trusted project configurations': {
+        'en': 'Trusted project configurations',
+        'de': 'Vertraute Projektkonfigurationen'},
+    "sandbox-ai wizard forget: the configuration is no longer trusted; its project's starts stop until it is trusted again": {
+        'en': "sandbox-ai wizard forget: the configuration is no longer trusted; its project's starts stop until it is trusted again",
+        'de': 'sandbox-ai wizard forget: der Konfiguration wird nicht mehr vertraut; die Starts ihres Projekts halten an, bis ihr wieder vertraut wird'},
+    'trusted': {
+        'en': 'trusted',
+        'de': 'vertraut'},
+    'changed since it was trusted': {
+        'en': 'changed since it was trusted',
+        'de': 'geändert, seit ihr vertraut wurde'},
+    'missing': {
+        'en': 'missing',
+        'de': 'fehlt'},
+    'unreadable': {
+        'en': 'unreadable',
+        'de': 'unlesbar'},
+    'Trusted projects': {
+        'en': 'Trusted projects',
+        'de': 'Vertraute Projekte'},
+    'Cannot list the trusted configurations: {error}': {
+        'en': 'Cannot list the trusted configurations: {error}',
+        'de': 'Die vertrauten Konfigurationen lassen sich nicht auflisten: {error}'},
+    '{count} trusted on {host}: a start of such a project gets the options of its .sandbox-ai.json.': {
+        'en': '{count} trusted on {host}: a start of such a project gets the options of its .sandbox-ai.json.',
+        'de': '{count} vertraut auf {host}: Ein Start eines solchen Projekts bekommt die Optionen seiner .sandbox-ai.json.'},
+    'No trusted project configuration on {host}.': {
+        'en': 'No trusted project configuration on {host}.',
+        'de': 'Keine vertraute Projektkonfiguration auf {host}.'},
+    'No longer trust {path} on {host}? Starts of that project stop until its configuration is trusted again.': {
+        'en': 'No longer trust {path} on {host}? Starts of that project stop until its configuration is trusted again.',
+        'de': '{path} auf {host} nicht mehr vertrauen? Starts dieses Projekts halten an, bis seiner Konfiguration wieder vertraut wird.'},
+    'Build {name}': {
+        'en': 'Build {name}',
+        'de': '{name} bauen'},
+    'Only the extension layers, on the base image there is': {
+        'en': 'Only the extension layers, on the base image there is',
+        'de': 'Nur die Erweiterungsschichten, auf dem vorhandenen Basis-Image'},
+    'newest; e.g. {example}': {
+        'en': 'newest; e.g. {example}',
+        'de': 'neueste; z. B. {example}'},
+    'Install exactly this agent version (one agent only)': {
+        'en': 'Install exactly this agent version (one agent only)',
+        'de': 'Genau diese Agentenversion installieren (nur ein Agent)'},
+    'the current LTS; a tag or an @sha256 digest': {
+        'en': 'the current LTS; a tag or an @sha256 digest',
+        'de': 'die aktuelle LTS; ein Tag oder ein @sha256-Digest'},
+    'uv image tag': {
+        'en': 'uv image tag',
+        'de': 'Tag des uv-Images'},
+    'Node.js image': {
+        'en': 'Node.js image',
+        'de': 'Node.js-Image'},
+    'Variant from a recipe': {
+        'en': 'Variant from a recipe',
+        'de': 'Variante aus einem Rezept'},
+    'media: sound, video and speech (ffmpeg, PulseAudio, SoX, espeak-ng, Piper)': {
+        'en': 'media: sound, video and speech (ffmpeg, PulseAudio, SoX, espeak-ng, Piper)',
+        'de': 'media: Ton, Video und Sprache (ffmpeg, PulseAudio, SoX, espeak-ng, Piper)'},
+    'tor: torsocks and torbrowser-launcher, for a sandbox behind a Tor VPN profile': {
+        'en': 'tor: torsocks and torbrowser-launcher, for a sandbox behind a Tor VPN profile',
+        'de': 'tor: torsocks und torbrowser-launcher, für eine Sandbox hinter einem Tor-VPN-Profil'},
+    "the recipe's name": {
+        'en': "the recipe's name",
+        'de': 'der Name des Rezepts'},
+    'Recipe': {
+        'en': 'Recipe',
+        'de': 'Rezept'},
+    "Variant's name": {
+        'en': "Variant's name",
+        'de': 'Name der Variante'},
+    'The images of this machine, or of a host (over SSH)': {
+        'en': 'The images of this machine, or of a host (over SSH)',
+        'de': 'Die Images dieses Rechners oder eines Hosts (über SSH)'},
+    'Build with options…': {
+        'en': 'Build with options…',
+        'de': 'Mit Optionen bauen…'},
+    'Variant from a recipe…': {
+        'en': 'Variant from a recipe…',
+        'de': 'Variante aus einem Rezept…'},
+    'History of the extensions': {
+        'en': 'History of the extensions',
+        'de': 'Verlauf der Erweiterungen'},
+    'Check the extension with sandbox-ai': {
+        'en': 'Check the extension with sandbox-ai',
+        'de': 'Die Erweiterung mit sandbox-ai prüfen'},
+    'Delete the variant, keep its image…': {
+        'en': 'Delete the variant, keep its image…',
+        'de': 'Die Variante löschen, ihr Image behalten…'},
+    "Drop the extension of the agent's image…": {
+        'en': "Drop the extension of the agent's image…",
+        'de': 'Die Erweiterung des Agenten-Images verwerfen…'},
+    'Delete the variant {name}? Its image {image} stays; projects that start it with --image-variant stop working.': {
+        'en': 'Delete the variant {name}? Its image {image} stays; projects that start it with --image-variant stop working.',
+        'de': 'Die Variante {name} löschen? Ihr Image {image} bleibt; Projekte, die sie mit --image-variant starten, funktionieren nicht mehr.'},
+    'Reading the history…': {
+        'en': 'Reading the history…',
+        'de': 'Lese den Verlauf…'},
+    'Checking the extension of {name}…': {
+        'en': 'Checking the extension of {name}…',
+        'de': 'Prüfe die Erweiterung von {name}…'},
+    'Dropping the extension of {name}…': {
+        'en': 'Dropping the extension of {name}…',
+        'de': 'Verwerfe die Erweiterung von {name}…'},
+    'A variant from a recipe, the history, a check by sandbox-ai, dropping an extension': {
+        'en': 'A variant from a recipe, the history, a check by sandbox-ai, dropping an extension',
+        'de': 'Eine Variante aus einem Rezept, der Verlauf, eine Prüfung durch sandbox-ai, eine Erweiterung verwerfen'},
+    "The file's absolute path on {host}:": {
+        'en': "The file's absolute path on {host}:",
+        'de': 'Der absolute Pfad der Datei auf {host}:'},
+    'Created.': {
+        'en': 'Created.',
+        'de': 'Angelegt.'},
+    'Nothing recorded yet.': {
+        'en': 'Nothing recorded yet.',
+        'de': 'Noch nichts aufgezeichnet.'},
+    'sandbox-ai did not check the extension.': {
+        'en': 'sandbox-ai did not check the extension.',
+        'de': 'sandbox-ai hat die Erweiterung nicht geprüft.'},
+    "Select an agent's image with an extension first.": {
+        'en': "Select an agent's image with an extension first.",
+        'de': 'Wählen Sie zuerst das Image eines Agenten mit einer Erweiterung.'},
+    'Drop the extension': {
+        'en': 'Drop the extension',
+        'de': 'Die Erweiterung verwerfen'},
+    'Drop the extension of {name}? Its packages, files and fragment are removed; the next build is the base image.': {
+        'en': 'Drop the extension of {name}? Its packages, files and fragment are removed; the next build is the base image.',
+        'de': 'Die Erweiterung von {name} verwerfen? Ihre Pakete, Dateien und ihr Fragment werden entfernt; der nächste Bau ist das Basis-Image.'},
+    'Drop': {
+        'en': 'Drop',
+        'de': 'Verwerfen'},
+    "Not an absolute path without ':': {path}": {
+        'en': "Not an absolute path without ':': {path}",
+        'de': "Kein absoluter Pfad ohne ':': {path}"},
+    'Select a variant first.': {
+        'en': 'Select a variant first.',
+        'de': 'Wählen Sie zuerst eine Variante.'},
+    "The activity of this machine's sandboxes, or of a host's (over SSH)": {
+        'en': "The activity of this machine's sandboxes, or of a host's (over SSH)",
+        'de': 'Die Aktivität der Sandboxen dieses Rechners oder eines Hosts (über SSH)'},
+    'since (10m, 2h, 3d, 14:30)': {
+        'en': 'since (10m, 2h, 3d, 14:30)',
+        'de': 'seit (10m, 2h, 3d, 14:30)'},
+    'Only events from then on (sandbox-ai activity --since)': {
+        'en': 'Only events from then on (sandbox-ai activity --since)',
+        'de': 'Nur Ereignisse ab dann (sandbox-ai activity --since)'},
+    "Only for this machine's sandboxes": {
+        'en': "Only for this machine's sandboxes",
+        'de': 'Nur für die Sandboxen dieses Rechners'},
+    'A project folder or a log folder on {host} (absolute path):': {
+        'en': 'A project folder or a log folder on {host} (absolute path):',
+        'de': 'Ein Projektordner oder ein Protokollordner auf {host} (absoluter Pfad):'},
+    'Since: 10m, 2h, 3d, 14:30 or a date such as 2026-11-04.': {
+        'en': 'Since: 10m, 2h, 3d, 14:30 or a date such as 2026-11-04.',
+        'de': 'Seit: 10m, 2h, 3d, 14:30 oder ein Datum wie 2026-11-04.'},
+    'No running sandbox on {host}: choose a project or log folder there (Other folder…).': {
+        'en': 'No running sandbox on {host}: choose a project or log folder there (Other folder…).',
+        'de': 'Keine laufende Sandbox auf {host}: Wählen Sie dort einen Projekt- oder Protokollordner (Anderer Ordner…).'},
+    'The logs of this machine, or of a host (over SSH)': {
+        'en': 'The logs of this machine, or of a host (over SSH)',
+        'de': 'Die Protokolle dieses Rechners oder eines Hosts (über SSH)'},
+    'a project folder (its default log folder)': {
+        'en': 'a project folder (its default log folder)',
+        'de': 'ein Projektordner (sein voreingestellter Protokollordner)'},
+    'sandbox-ai logs --project PATH: the log folder the wizard gives that project': {
+        'en': 'sandbox-ai logs --project PATH: the log folder the wizard gives that project',
+        'de': 'sandbox-ai logs --project PFAD: der Protokollordner, den der Assistent diesem Projekt gibt'},
+    'a log folder or project folder on {host}': {
+        'en': 'a log folder or project folder on {host}',
+        'de': 'ein Protokoll- oder Projektordner auf {host}'},
+    'Type a folder on {host} and press Enter.': {
+        'en': 'Type a folder on {host} and press Enter.',
+        'de': 'Geben Sie einen Ordner auf {host} ein und drücken Sie Enter.'},
+    'by name': {
+        'en': 'by name',
+        'de': 'nach Name'},
+    'by size': {
+        'en': 'by size',
+        'de': 'nach Größe'},
+    'loaded first': {
+        'en': 'loaded first',
+        'de': 'geladene zuerst'},
+    'Headers the proxy adds with the value of a secret (HEADER=SECRET, several separated by spaces), e.g. for a gateway': {
+        'en': 'Headers the proxy adds with the value of a secret (HEADER=SECRET, several separated by spaces), e.g. for a gateway',
+        'de': 'Header, die der Proxy mit dem Wert eines Geheimnisses hinzufügt (HEADER=GEHEIMNIS, mehrere durch Leerzeichen getrennt), z. B. für ein Gateway'},
+    'a PEM file on that host (optional)': {
+        'en': 'a PEM file on that host (optional)',
+        'de': 'eine PEM-Datei auf jenem Host (optional)'},
+    "The CA that signed the server's certificate (copied)": {
+        'en': "The CA that signed the server's certificate (copied)",
+        'de': 'Die CA, die das Zertifikat des Servers signiert hat (wird kopiert)'},
+    'Allow plain http to an address outside the local networks (unencrypted)': {
+        'en': 'Allow plain http to an address outside the local networks (unencrypted)',
+        'de': 'Unverschlüsseltes http zu einer Adresse außerhalb der lokalen Netze erlauben'},
+    'Replace an LLM server of that name': {
+        'en': 'Replace an LLM server of that name',
+        'de': 'Einen LLM-Server dieses Namens ersetzen'},
+    'Headers from secrets': {
+        'en': 'Headers from secrets',
+        'de': 'Header aus Geheimnissen'},
+    'CA certificate': {
+        'en': 'CA certificate',
+        'de': 'CA-Zertifikat'},
+    'Sort the models': {
+        'en': 'Sort the models',
+        'de': 'Die Modelle sortieren'},
+    'How Models sorts the list (sandbox-ai llm models --sort)': {
+        'en': 'How Models sorts the list (sandbox-ai llm models --sort)',
+        'de': 'Wie Modelle die Liste sortiert (sandbox-ai llm models --sort)'},
+    'sandbox-ai llm show: the endpoint with what the agents get (no key)': {
+        'en': 'sandbox-ai llm show: the endpoint with what the agents get (no key)',
+        'de': 'sandbox-ai llm show: der Endpunkt mit dem, was die Agenten bekommen (kein Schlüssel)'},
+    'LLM server {name} on {host}': {
+        'en': 'LLM server {name} on {host}',
+        'de': 'LLM-Server {name} auf {host}'},
+    "A header from a secret is HEADER=SECRET (a header name, a secret's name): {value}": {
+        'en': "A header from a secret is HEADER=SECRET (a header name, a secret's name): {value}",
+        'de': 'Ein Header aus einem Geheimnis ist HEADER=GEHEIMNIS (ein Header-Name, der Name eines Geheimnisses): {value}'},
+    'The CA is a file with its absolute path.': {
+        'en': 'The CA is a file with its absolute path.',
+        'de': 'Die CA ist eine Datei mit ihrem absoluten Pfad.'},
+    'Not added.': {
+        'en': 'Not added.',
+        'de': 'Nicht hinzugefügt.'},
+    'Could not show {name}: {error}': {
+        'en': 'Could not show {name}: {error}',
+        'de': '{name} konnte nicht gezeigt werden: {error}'},
+    'Allow plain http to {url} even outside your local networks? Prompts, answers, code and the key cross the network unencrypted.': {
+        'en': 'Allow plain http to {url} even outside your local networks? Prompts, answers, code and the key cross the network unencrypted.',
+        'de': 'Unverschlüsseltes http zu {url} auch außerhalb Ihrer lokalen Netze erlauben? Prompts, Antworten, Code und der Schlüssel gehen unverschlüsselt durchs Netz.'},
+    'working': {
+        'en': 'working',
+        'de': 'in Arbeit'},
+    'done': {
+        'en': 'done',
+        'de': 'erledigt'},
+    'leads': {
+        'en': 'leads',
+        'de': 'leitet'},
+    'member': {
+        'en': 'member',
+        'de': 'Mitglied'},
+    '{workspace} · lead {lead}': {
+        'en': '{workspace} · lead {lead}',
+        'de': '{workspace} · Leitung {lead}'},
+    'Select a team first.': {
+        'en': 'Select a team first.',
+        'de': 'Wählen Sie zuerst ein Team.'},
+    'Start a team on {host}': {
+        'en': 'Start a team on {host}',
+        'de': 'Ein Team auf {host} starten'},
+    'the shared workspace (an absolute path on that host)': {
+        'en': 'the shared workspace (an absolute path on that host)',
+        'de': 'der gemeinsame Arbeitsbereich (ein absoluter Pfad auf jenem Host)'},
+    'Launcher options for every member (as on the command line)': {
+        'en': 'Launcher options for every member (as on the command line)',
+        'de': 'Startoptionen für jedes Mitglied (wie auf der Befehlszeile)'},
+    'Lead': {
+        'en': 'Lead',
+        'de': 'Leitung'},
+    'Members': {
+        'en': 'Members',
+        'de': 'Mitglieder'},
+    'Options': {
+        'en': 'Options',
+        'de': 'Optionen'},
+    'A task for team {name}': {
+        'en': 'A task for team {name}',
+        'de': 'Eine Aufgabe für das Team {name}'},
+    'What the member should do; it reports back on the board.': {
+        'en': 'What the member should do; it reports back on the board.',
+        'de': 'Was das Mitglied tun soll; es meldet sich auf der Tafel zurück.'},
+    'Task': {
+        'en': 'Task',
+        'de': 'Aufgabe'},
+    'Post': {
+        'en': 'Post',
+        'de': 'Stellen'},
+    'The teams of this machine, or of a host (over SSH)': {
+        'en': 'The teams of this machine, or of a host (over SSH)',
+        'de': 'Die Teams dieses Rechners oder eines Hosts (über SSH)'},
+    'Teams': {
+        'en': 'Teams',
+        'de': 'Teams'},
+    'Members and board': {
+        'en': 'Members and board',
+        'de': 'Mitglieder und Tafel'},
+    'Start a team…': {
+        'en': 'Start a team…',
+        'de': 'Team starten…'},
+    'Talk to the lead': {
+        'en': 'Talk to the lead',
+        'de': 'Mit der Leitung sprechen'},
+    'Post a task…': {
+        'en': 'Post a task…',
+        'de': 'Aufgabe stellen…'},
+    'Select a team to see its members and its board.': {
+        'en': 'Select a team to see its members and its board.',
+        'de': 'Wählen Sie ein Team, um seine Mitglieder und seine Tafel zu sehen.'},
+    'Team {name} starts in the terminal; Refresh once it says so.': {
+        'en': 'Team {name} starts in the terminal; Refresh once it says so.',
+        'de': 'Das Team {name} startet im Terminal; Aktualisieren Sie, sobald es das meldet.'},
+    'Stopping {name}…': {
+        'en': 'Stopping {name}…',
+        'de': 'Stoppe {name}…'},
+    'Deleting {name}…': {
+        'en': 'Deleting {name}…',
+        'de': 'Lösche {name}…'},
+    "One sandbox per agent on one workspace; the lead talks to you and hands the others tasks on the team's board.": {
+        'en': "One sandbox per agent on one workspace; the lead talks to you and hands the others tasks on the team's board.",
+        'de': 'Eine Sandbox je Agent auf einem Arbeitsbereich; die Leitung spricht mit Ihnen und gibt den anderen Aufgaben auf der Tafel des Teams.'},
+    "A team's name: 1-20 of a-z, 0-9, '_' and '-', starting with a letter or digit.": {
+        'en': "A team's name: 1-20 of a-z, 0-9, '_' and '-', starting with a letter or digit.",
+        'de': "Der Name eines Teams: 1-20 Zeichen aus a-z, 0-9, '_' und '-', beginnend mit einem Buchstaben oder einer Ziffer."},
+    'A team has two or three agents: choose at least one member besides the lead.': {
+        'en': 'A team has two or three agents: choose at least one member besides the lead.',
+        'de': 'Ein Team hat zwei oder drei Agenten: Wählen Sie neben der Leitung mindestens ein Mitglied.'},
+    'The workspace is an absolute path.': {
+        'en': 'The workspace is an absolute path.',
+        'de': 'Der Arbeitsbereich ist ein absoluter Pfad.'},
+    "Teams of agents (sandbox-ai team): one sandbox per agent on a shared workspace, started and stopped together; the lead hands the others tasks on the team's board, an MCP server of its own without network.": {
+        'en': "Teams of agents (sandbox-ai team): one sandbox per agent on a shared workspace, started and stopped together; the lead hands the others tasks on the team's board, an MCP server of its own without network.",
+        'de': 'Teams von Agenten (sandbox-ai team): eine Sandbox je Agent auf einem gemeinsamen Arbeitsbereich, zusammen gestartet und gestoppt; die Leitung gibt den anderen Aufgaben auf der Tafel des Teams, einem eigenen MCP-Server ohne Netzwerk.'},
+    'Member': {
+        'en': 'Member',
+        'de': 'Mitglied'},
+    'Role': {
+        'en': 'Role',
+        'de': 'Rolle'},
+    'sandbox-ai team start, in a terminal: every member starts there': {
+        'en': 'sandbox-ai team start, in a terminal: every member starts there',
+        'de': 'sandbox-ai team start, in einem Terminal: jedes Mitglied startet dort'},
+    'sandbox-ai attach NAME-LEAD, in a terminal': {
+        'en': 'sandbox-ai attach NAME-LEAD, in a terminal',
+        'de': 'sandbox-ai attach NAME-LEITUNG, in einem Terminal'},
+    'sandbox-ai team post: a task for a member, from you': {
+        'en': 'sandbox-ai team post: a task for a member, from you',
+        'de': 'sandbox-ai team post: eine Aufgabe für ein Mitglied, von Ihnen'},
+    'sandbox-ai team stop: every member and the board end': {
+        'en': 'sandbox-ai team stop: every member and the board end',
+        'de': 'sandbox-ai team stop: jedes Mitglied und die Tafel enden'},
+    "sandbox-ai team delete: stopped, then its members' HOMEs and the board removed": {
+        'en': "sandbox-ai team delete: stopped, then its members' HOMEs and the board removed",
+        'de': 'sandbox-ai team delete: gestoppt, dann die HOMEs seiner Mitglieder und die Tafel entfernt'},
+    'Could not list the teams on {host}: {error}': {
+        'en': 'Could not list the teams on {host}: {error}',
+        'de': 'Die Teams auf {host} konnten nicht aufgelistet werden: {error}'},
+    'Teams on {host}: {count}': {
+        'en': 'Teams on {host}: {count}',
+        'de': 'Teams auf {host}: {count}'},
+    'No team on {host} yet.': {
+        'en': 'No team on {host} yet.',
+        'de': 'Noch kein Team auf {host}.'},
+    'Could not read team {name}: {error}': {
+        'en': 'Could not read team {name}: {error}',
+        'de': 'Das Team {name} konnte nicht gelesen werden: {error}'},
+    'board: {error}': {
+        'en': 'board: {error}',
+        'de': 'Tafel: {error}'},
+    'The lead does not run: start the team again, or resume its session.': {
+        'en': 'The lead does not run: start the team again, or resume its session.',
+        'de': 'Die Leitung läuft nicht: Starten Sie das Team erneut oder setzen Sie ihre Sitzung fort.'},
+    'Post a task': {
+        'en': 'Post a task',
+        'de': 'Aufgabe stellen'},
+    'A task is at most {count} characters of text.': {
+        'en': 'A task is at most {count} characters of text.',
+        'de': 'Eine Aufgabe ist höchstens {count} Zeichen Text.'},
+    'Stop every member of team {name} on {host} and its board? What runs in them ends now.': {
+        'en': 'Stop every member of team {name} on {host} and its board? What runs in them ends now.',
+        'de': 'Jedes Mitglied des Teams {name} auf {host} und seine Tafel stoppen? Was in ihnen läuft, endet jetzt.'},
+    'Delete team {name} on {host}? Its members are stopped, then their HOMEs and the board are removed for good; the workspace stays.': {
+        'en': 'Delete team {name} on {host}? Its members are stopped, then their HOMEs and the board are removed for good; the workspace stays.',
+        'de': 'Das Team {name} auf {host} löschen? Seine Mitglieder werden gestoppt, dann werden ihre HOMEs und die Tafel endgültig entfernt; der Arbeitsbereich bleibt.'},
+    'Team {name}': {
+        'en': 'Team {name}',
+        'de': 'Team {name}'},
+    'The options cannot be read: {error}': {
+        'en': 'The options cannot be read: {error}',
+        'de': 'Die Optionen lassen sich nicht lesen: {error}'},
+    'Start a team': {
+        'en': 'Start a team',
+        'de': 'Ein Team starten'},
+    "Teams of agents on one workspace, on this machine or a host: one sandbox per agent, the lead hands the others tasks on the team's board.": {
+        'en': "Teams of agents on one workspace, on this machine or a host: one sandbox per agent, the lead hands the others tasks on the team's board.",
+        'de': 'Teams von Agenten auf einem Arbeitsbereich, auf diesem Rechner oder einem Host: eine Sandbox je Agent, die Leitung gibt den anderen Aufgaben auf der Tafel des Teams.'},
+    'Start a team of Claude Code and Codex on the current project, then talk to the lead.': {
+        'en': 'Start a team of Claude Code and Codex on the current project, then talk to the lead.',
+        'de': 'Starten Sie ein Team aus Claude Code und Codex auf dem aktuellen Projekt und sprechen Sie dann mit der Leitung.'},
+    # == end of the parity block ==
+    # the start/host parity work (ui.py: Start page host, Resume with, stop --wait, net keep and nameservers, MCP on a
+    # host, privacy check table, version details, update --version, demo device; board_view.py, preset_gallery.py,
+    # hosts_page.py)
+    'Where it runs: this machine, or a host of sandbox-ai hosts (over SSH)': {
+        'en': 'Where it runs: this machine, or a host of sandbox-ai hosts (over SSH)',
+        'de': 'Wo es läuft: dieser Rechner oder ein Host von sandbox-ai hosts (über SSH)'},
+    "A path on {host}: type it in (this computer's folders are not {host}'s)": {
+        'en': "A path on {host}: type it in (this computer's folders are not {host}'s)",
+        'de': 'Ein Pfad auf {host}: eintippen (die Ordner dieses Rechners sind nicht die von {host})'},
+    'Apply writes the project file on this machine; on {host} the board starts as it is (--no-config)': {
+        'en': 'Apply writes the project file on this machine; on {host} the board starts as it is (--no-config)',
+        'de': 'Übernehmen schreibt die Projektdatei auf diesem Rechner; auf {host} startet das Board so, wie es ist (--no-config)'},
+    "Starts on {host}: folders and files are {host}'s (typed in; nothing of this computer is chosen), and its sandbox-ai checks the board.": {
+        'en': "Starts on {host}: folders and files are {host}'s (typed in; nothing of this computer is chosen), and its sandbox-ai checks the board.",
+        'de': 'Startet auf {host}: Ordner und Dateien sind die von {host} (eingetippt; nichts von diesem Rechner wird gewählt), und dessen sandbox-ai prüft das Board.'},
+    "The board uses MCP servers the project defines ({names}): the launcher knows them only from the project's trusted .sandbox-ai.json, which Apply writes on this machine. On {host}, use MCP servers registered there (sandbox-ai mcp list).": {
+        'en': "The board uses MCP servers the project defines ({names}): the launcher knows them only from the project's trusted .sandbox-ai.json, which Apply writes on this machine. On {host}, use MCP servers registered there (sandbox-ai mcp list).",
+        'de': 'Das Board nutzt MCP-Server, die das Projekt definiert ({names}): Der Launcher kennt sie nur aus der vertrauten .sandbox-ai.json des Projekts, die Übernehmen auf diesem Rechner schreibt. Auf {host} die dort eingetragenen MCP-Server nutzen (sandbox-ai mcp list).'},
+    'Its options could not be read: {error}': {
+        'en': 'Its options could not be read: {error}',
+        'de': 'Seine Optionen konnten nicht gelesen werden: {error}'},
+    'The sandbox-ai on {host} does not know these options: {list}. Take them off the board, or update sandbox-ai there.': {
+        'en': 'The sandbox-ai on {host} does not know these options: {list}. Take them off the board, or update sandbox-ai there.',
+        'de': 'sandbox-ai auf {host} kennt diese Optionen nicht: {list}. Sie vom Board nehmen oder sandbox-ai dort aktualisieren.'},
+    '/opt/sandbox-ai/bin/sandbox-ai (optional)': {
+        'en': '/opt/sandbox-ai/bin/sandbox-ai (optional)',
+        'de': '/opt/sandbox-ai/bin/sandbox-ai (optional)'},
+    "sandbox-ai's path there, if it is not on the PATH or in ~/.local/bin (--command)": {
+        'en': "sandbox-ai's path there, if it is not on the PATH or in ~/.local/bin (--command)",
+        'de': 'Der Pfad von sandbox-ai dort, falls es nicht im PATH oder in ~/.local/bin liegt (--command)'},
+    'sandbox-ai there': {
+        'en': 'sandbox-ai there',
+        'de': 'sandbox-ai dort'},
+    'Which backend the host is checked for (sandbox-ai doctor --backend)': {
+        'en': 'Which backend the host is checked for (sandbox-ai doctor --backend)',
+        'de': 'Für welches Backend der Host geprüft wird (sandbox-ai doctor --backend)'},
+    'sandbox-ai doctor on the host, for the backend chosen': {
+        'en': 'sandbox-ai doctor on the host, for the backend chosen',
+        'de': 'sandbox-ai doctor auf dem Host, für das gewählte Backend'},
+    'Check the host': {
+        'en': 'Check the host',
+        'de': 'Den Host prüfen'},
+    'Checking {host} for {backend}…': {
+        'en': 'Checking {host} for {backend}…',
+        'de': '{host} wird für {backend} geprüft …'},
+    "sandbox-ai's path there is an absolute path, e.g. /opt/sandbox-ai/bin/sandbox-ai.": {
+        'en': "sandbox-ai's path there is an absolute path, e.g. /opt/sandbox-ai/bin/sandbox-ai.",
+        'de': 'Der Pfad von sandbox-ai dort ist ein absoluter Pfad, z. B. /opt/sandbox-ai/bin/sandbox-ai.'},
+    '{host}: checked for {backend}': {
+        'en': '{host}: checked for {backend}',
+        'de': '{host}: für {backend} geprüft'},
+    'Start the emulated device': {
+        'en': 'Start the emulated device',
+        'de': 'Das emulierte Gerät starten'},
+    'sandbox-ai demo-device start: the emulated serial device this preset practises on (port 4000), on the host the board starts on': {
+        'en': 'sandbox-ai demo-device start: the emulated serial device this preset practises on (port 4000), on the host the board starts on',
+        'de': 'sandbox-ai demo-device start: das emulierte serielle Gerät, an dem dieses Preset übt (Port 4000), auf dem Host, auf dem das Board startet'},
+    'Starting the emulated device on {host}…': {
+        'en': 'Starting the emulated device on {host}…',
+        'de': 'Das emulierte Gerät startet auf {host} …'},
+    'Starting the emulated device…': {
+        'en': 'Starting the emulated device…',
+        'de': 'Das emulierte Gerät startet …'},
+    'The emulated device runs on {host}: {said}': {
+        'en': 'The emulated device runs on {host}: {said}',
+        'de': 'Das emulierte Gerät läuft auf {host}: {said}'},
+    'The emulated device did not start on {host}: {said}': {
+        'en': 'The emulated device did not start on {host}: {said}',
+        'de': 'Das emulierte Gerät ist auf {host} nicht gestartet: {said}'},
+    'The emulated device runs: {said}': {
+        'en': 'The emulated device runs: {said}',
+        'de': 'Das emulierte Gerät läuft: {said}'},
+    'The emulated device did not start: {said}': {
+        'en': 'The emulated device did not start: {said}',
+        'de': 'Das emulierte Gerät ist nicht gestartet: {said}'},
+    'Repository': {
+        'en': 'Repository',
+        'de': 'Repository'},
+    'Rule': {
+        'en': 'Rule',
+        'de': 'Regel'},
+    'Severity': {
+        'en': 'Severity',
+        'de': 'Schwere'},
+    'Line': {
+        'en': 'Line',
+        'de': 'Zeile'},
+    "Starts on {host} (over SSH): workspace and mount paths are {host}'s - type them in, nothing of this computer is chosen. What its sandbox-ai does not know is greyed out and left out.": {
+        'en': "Starts on {host} (over SSH): workspace and mount paths are {host}'s - type them in, nothing of this computer is chosen. What its sandbox-ai does not know is greyed out and left out.",
+        'de': 'Startet auf {host} (über SSH): Workspace- und Mount-Pfade sind die von {host} - eintippen, nichts von diesem Rechner wird gewählt. Was dessen sandbox-ai nicht kennt, ist ausgegraut und wird weggelassen.'},
+    "Keep what you gave {run} (allowed names and addresses, networks, DNS, ports, devices, workspaces) in its project's .sandbox-ai.json? Every later start of that project gets it.": {
+        'en': "Keep what you gave {run} (allowed names and addresses, networks, DNS, ports, devices, workspaces) in its project's .sandbox-ai.json? Every later start of that project gets it.",
+        'de': 'Behalten, was du {run} gegeben hast (erlaubte Namen und Adressen, Netze, DNS, Ports, Geräte, Workspaces), in der .sandbox-ai.json seines Projekts? Jeder spätere Start dieses Projekts bekommt es.'},
+    "It writes the project file on this machine; on {host} a project's file is written there (sandbox-ai wizard).": {
+        'en': "It writes the project file on this machine; on {host} a project's file is written there (sandbox-ai wizard).",
+        'de': 'Das schreibt die Projektdatei auf diesem Rechner; auf {host} wird die Datei eines Projekts dort geschrieben (sandbox-ai wizard).'},
+    "Keep it for later starts (into the project's .sandbox-ai.json)": {
+        'en': "Keep it for later starts (into the project's .sandbox-ai.json)",
+        'de': 'Für spätere Starts behalten (in die .sandbox-ai.json des Projekts)'},
+    'Keep for later starts…': {
+        'en': 'Keep for later starts…',
+        'de': 'Für spätere Starts behalten …'},
+    "sandbox-ai net show --keep: the names and addresses you allowed (or approved always), wildcards, networks, DNS, host ports, devices and workspaces added go into the project's trusted .sandbox-ai.json; no Git logins": {
+        'en': "sandbox-ai net show --keep: the names and addresses you allowed (or approved always), wildcards, networks, DNS, host ports, devices and workspaces added go into the project's trusted .sandbox-ai.json; no Git logins",
+        'de': 'sandbox-ai net show --keep: die Namen und Adressen, die du erlaubt (oder immer freigegeben) hast, Wildcards, Netze, DNS, Host-Ports, hinzugefügte Geräte und Workspaces kommen in die vertraute .sandbox-ai.json des Projekts; keine Git-Anmeldungen'},
+    'Keep everything for later starts…': {
+        'en': 'Keep everything for later starts…',
+        'de': 'Alles für spätere Starts behalten …'},
+    'sandbox-ai net show --keep-all: also what approvals opened once or for the run': {
+        'en': 'sandbox-ai net show --keep-all: also what approvals opened once or for the run',
+        'de': 'sandbox-ai net show --keep-all: auch, was Freigaben einmal oder für den Lauf geöffnet haben'},
+    'Folders added at /workspaces/<name>, one per line (--workspace)': {
+        'en': 'Folders added at /workspaces/<name>, one per line (--workspace)',
+        'de': 'Ordner, hinzugefügt unter /workspaces/<name>, einer pro Zeile (--workspace)'},
+    'Workspaces': {
+        'en': 'Workspaces',
+        'de': 'Workspaces'},
+    'SOURCE:DESTINATION[:ro|rw], one per line (read-only unless :rw)': {
+        'en': 'SOURCE:DESTINATION[:ro|rw], one per line (read-only unless :rw)',
+        'de': 'QUELLE:ZIEL[:ro|rw], einer pro Zeile (nur lesbar außer mit :rw)'},
+    'Mounts': {
+        'en': 'Mounts',
+        'de': 'Mounts'},
+    'names, separated by spaces (sandbox-ai mcp list)': {
+        'en': 'names, separated by spaces (sandbox-ai mcp list)',
+        'de': 'Namen, durch Leerzeichen getrennt (sandbox-ai mcp list)'},
+    'Wait for it to end': {
+        'en': 'Wait for it to end',
+        'de': 'Auf sein Ende warten'},
+    'How long Stop waits for a session or kept start to end (sandbox-ai stop --wait)': {
+        'en': 'How long Stop waits for a session or kept start to end (sandbox-ai stop --wait)',
+        'de': 'Wie lange Stoppen auf das Ende einer Sitzung oder eines behaltenen Starts wartet (sandbox-ai stop --wait)'},
+    'Resume with…': {
+        'en': 'Resume with…',
+        'de': 'Fortsetzen mit …'},
+    'Resume with': {
+        'en': 'Resume with',
+        'de': 'Fortsetzen mit'},
+    'Start the selected kept start again with workspaces, mounts or MCP servers added (kept for its later starts), or restart it now (sandbox-ai resume)': {
+        'en': 'Start the selected kept start again with workspaces, mounts or MCP servers added (kept for its later starts), or restart it now (sandbox-ai resume)',
+        'de': 'Den gewählten behaltenen Start mit zusätzlichen Workspaces, Mounts oder MCP-Servern wieder starten (für seine späteren Starts behalten) oder ihn jetzt neu starten (sandbox-ai resume)'},
+    'Keep for later starts: {run} on {host}': {
+        'en': 'Keep for later starts: {run} on {host}',
+        'de': 'Für spätere Starts behalten: {run} auf {host}'},
+    'Keep for later starts: {run}': {
+        'en': 'Keep for later starts: {run}',
+        'de': 'Für spätere Starts behalten: {run}'},
+    'On {host}: ': {
+        'en': 'On {host}: ',
+        'de': 'Auf {host}: '},
+    "Podman (the image), Bubblewrap (the image's rootfs, checked and unpacked) or both": {
+        'en': "Podman (the image), Bubblewrap (the image's rootfs, checked and unpacked) or both",
+        'de': 'Podman (das Image), Bubblewrap (das Rootfs des Images, geprüft und entpackt) oder beides'},
+    'a VPN profile (sandbox-ai vpn list); needs the full network': {
+        'en': 'a VPN profile (sandbox-ai vpn list); needs the full network',
+        'de': 'ein VPN-Profil (sandbox-ai vpn list); braucht das volle Netz'},
+    'Do not pull the image (it is there already)': {
+        'en': 'Do not pull the image (it is there already)',
+        'de': 'Das Image nicht holen (es ist schon da)'},
+    'Take it although its catalog is not signed by a trusted key (--unsigned)': {
+        'en': 'Take it although its catalog is not signed by a trusted key (--unsigned)',
+        'de': 'Übernehmen, obwohl sein Katalog nicht von einem vertrauten Schlüssel signiert ist (--unsigned)'},
+    'a VPN profile in front (sandbox-ai vpn list)': {
+        'en': 'a VPN profile in front (sandbox-ai vpn list)',
+        'de': 'ein VPN-Profil davor (sandbox-ai vpn list)'},
+    'no start: only the server': {
+        'en': 'no start: only the server',
+        'de': 'kein Start: nur der Server'},
+    'For this agent start: started as it starts it (its backend and rules) and attached to it (--for)': {
+        'en': 'For this agent start: started as it starts it (its backend and rules) and attached to it (--for)',
+        'de': 'Für diesen Agenten-Start: so gestartet, wie er ihn startet (sein Backend und seine Regeln), und mit ihm verbunden (--for)'},
+    'For the start': {
+        'en': 'For the start',
+        'de': 'Für den Start'},
+    'Start the server sandbox: its backend, a VPN in front, or for an agent start (sandbox-ai mcp start)': {
+        'en': 'Start the server sandbox: its backend, a VPN in front, or for an agent start (sandbox-ai mcp start)',
+        'de': 'Die Server-Sandbox starten: ihr Backend, ein VPN davor oder für einen Agenten-Start (sandbox-ai mcp start)'},
+    'another catalog instead: https://… or a file on the host (--catalog)': {
+        'en': 'another catalog instead: https://… or a file on the host (--catalog)',
+        'de': 'ein anderer Katalog stattdessen: https://… oder eine Datei auf dem Host (--catalog)'},
+    'Catalog': {
+        'en': 'Catalog',
+        'de': 'Katalog'},
+    'Add {name} on {host}': {
+        'en': 'Add {name} on {host}',
+        'de': '{name} auf {host} hinzufügen'},
+    'Privacy check': {
+        'en': 'Privacy check',
+        'de': 'Datenschutzprüfung'},
+    'Git repositories, one per line (absolute paths on the host chosen)': {
+        'en': 'Git repositories, one per line (absolute paths on the host chosen)',
+        'de': 'Git-Repositorys, eines pro Zeile (absolute Pfade auf dem gewählten Host)'},
+    'Repositories': {
+        'en': 'Repositories',
+        'de': 'Repositorys'},
+    "Your own rules (default: the project's --privacy-rules, else ~/.config/sandbox-ai/privacy if it exists)": {
+        'en': "Your own rules (default: the project's --privacy-rules, else ~/.config/sandbox-ai/privacy if it exists)",
+        'de': 'Deine eigenen Regeln (Standard: --privacy-rules des Projekts, sonst ~/.config/sandbox-ai/privacy, falls vorhanden)'},
+    'Rules directory': {
+        'en': 'Rules directory',
+        'de': 'Regelordner'},
+    "the repository folder's name": {
+        'en': "the repository folder's name",
+        'de': 'der Name des Repository-Ordners'},
+    'The name of the project rule file (--project)': {
+        'en': 'The name of the project rule file (--project)',
+        'de': 'Der Name der Projekt-Regeldatei (--project)'},
+    'Every tracked and untracked file, also unchanged ones (--all)': {
+        'en': 'Every tracked and untracked file, also unchanged ones (--all)',
+        'de': 'Jede verfolgte und nicht verfolgte Datei, auch unveränderte (--all)'},
+    'Details…': {
+        'en': 'Details…',
+        'de': 'Details …'},
+    'Where this sandbox-ai is installed, the keys its updates must be signed by, whether the policy demands it (sandbox-ai version --verbose)': {
+        'en': 'Where this sandbox-ai is installed, the keys its updates must be signed by, whether the policy demands it (sandbox-ai version --verbose)',
+        'de': 'Wo dieses sandbox-ai installiert ist, mit welchen Schlüsseln seine Updates signiert sein müssen, ob die Richtlinie das verlangt (sandbox-ai version --verbose)'},
+    'sandbox-ai update in a terminal: the newest signed release, or the version given': {
+        'en': 'sandbox-ai update in a terminal: the newest signed release, or the version given',
+        'de': 'sandbox-ai update in einem Terminal: das neueste signierte Release oder die angegebene Version'},
+    'X.Y.Z (empty: the newest)': {
+        'en': 'X.Y.Z (empty: the newest)',
+        'de': 'X.Y.Z (leer: die neueste)'},
+    'Update to this version (sandbox-ai update --version), e.g. to go back': {
+        'en': 'Update to this version (sandbox-ai update --version), e.g. to go back',
+        'de': 'Auf diese Version aktualisieren (sandbox-ai update --version), z. B. um zurückzugehen'},
+    'Version to update to': {
+        'en': 'Version to update to',
+        'de': 'Version, auf die aktualisiert wird'},
+    'Emulated device (sandbox-ai demo-device)': {
+        'en': 'Emulated device (sandbox-ai demo-device)',
+        'de': 'Emuliertes Gerät (sandbox-ai demo-device)'},
+    'Privacy check on {host}: {path}': {
+        'en': 'Privacy check on {host}: {path}',
+        'de': 'Datenschutzprüfung auf {host}: {path}'},
+    'Resolvers instead of the defaults (--nameserver; implies real DNS), separated by spaces': {
+        'en': 'Resolvers instead of the defaults (--nameserver; implies real DNS), separated by spaces',
+        'de': 'Resolver statt der Standard-Resolver (--nameserver; bedeutet echtes DNS), durch Leerzeichen getrennt'},
+    "net allow --keep: the options go into the project's .sandbox-ai.json, only while that file is exactly what you trusted (the new file is trusted at once); logins are kept as references, never as tokens": {
+        'en': "net allow --keep: the options go into the project's .sandbox-ai.json, only while that file is exactly what you trusted (the new file is trusted at once); logins are kept as references, never as tokens",
+        'de': 'net allow --keep: Die Optionen kommen in die .sandbox-ai.json des Projekts, nur solange diese Datei genau das ist, dem du vertraut hast (der neuen Datei wird sofort vertraut); Anmeldungen werden als Verweise behalten, nie als Tokens'},
+    'Nameservers': {
+        'en': 'Nameservers',
+        'de': 'Nameserver'},
+    'Later starts': {
+        'en': 'Later starts',
+        'de': 'Spätere Starts'},
+    'Resume {name} with…': {
+        'en': 'Resume {name} with…',
+        'de': '{name} fortsetzen mit …'},
+    'Resume {name} on {host} with…': {
+        'en': 'Resume {name} on {host} with…',
+        'de': '{name} auf {host} fortsetzen mit …'},
+    'What is added here is kept for its later starts.': {
+        'en': 'What is added here is kept for its later starts.',
+        'de': 'Was hier hinzukommt, bleibt für seine späteren Starts.'},
+    'Only for kept starts (sessions).': {
+        'en': 'Only for kept starts (sessions).',
+        'de': 'Nur für behaltene Starts (Sitzungen).'},
+    'It is also kept for the later starts of its project: written into its trusted .sandbox-ai.json.': {
+        'en': 'It is also kept for the later starts of its project: written into its trusted .sandbox-ai.json.',
+        'de': 'Es bleibt auch für die späteren Starts seines Projekts: in dessen vertraute .sandbox-ai.json geschrieben.'},
+    'Also what approvals opened once or for the run.': {
+        'en': 'Also what approvals opened once or for the run.',
+        'de': 'Auch, was Freigaben einmal oder für den Lauf geöffnet haben.'},
+    'TARGET=HOST_FOLDER[:ro|rw], one per line (read-only unless :rw)': {
+        'en': 'TARGET=HOST_FOLDER[:ro|rw], one per line (read-only unless :rw)',
+        'de': 'ZIEL=HOST_ORDNER[:ro|rw], einer pro Zeile (nur lesbar außer mit :rw)'},
+    'variables of the environment there, separated by spaces': {
+        'en': 'variables of the environment there, separated by spaces',
+        'de': 'Variablen der Umgebung dort, durch Leerzeichen getrennt'},
+    'Variables': {
+        'en': 'Variables',
+        'de': 'Variablen'},
+    'default (Podman when it is there)': {
+        'en': 'default (Podman when it is there)',
+        'de': 'Standard (Podman, wenn vorhanden)'},
+    "Its catalog's signature does not verify: sandbox-ai refuses it anyway.": {
+        'en': "Its catalog's signature does not verify: sandbox-ai refuses it anyway.",
+        'de': 'Die Signatur seines Katalogs stimmt nicht: sandbox-ai lehnt es ohnehin ab.'},
+    'Start {name}': {
+        'en': 'Start {name}',
+        'de': '{name} starten'},
+    'Start {name} on {host}': {
+        'en': 'Start {name} on {host}',
+        'de': '{name} auf {host} starten'},
+    'as defined': {
+        'en': 'as defined',
+        'de': 'wie definiert'},
+    'Start…': {
+        'en': 'Start…',
+        'de': 'Starten …'},
+    "The MCP servers of {host} (sandbox-ai mcp there); paths are {host}'s.": {
+        'en': "The MCP servers of {host} (sandbox-ai mcp there); paths are {host}'s.",
+        'de': 'Die MCP-Server von {host} (sandbox-ai mcp dort); Pfade sind die von {host}.'},
+    "Paths on {host}: type them in (this computer's folders are not {host}'s).": {
+        'en': "Paths on {host}: type them in (this computer's folders are not {host}'s).",
+        'de': 'Pfade auf {host}: eintippen (die Ordner dieses Rechners sind nicht die von {host}).'},
+    'Start the emulated serial device (on the port given)': {
+        'en': 'Start the emulated serial device (on the port given)',
+        'de': 'Das emulierte serielle Gerät starten (auf dem angegebenen Port)'},
+    'Whether it runs, and where': {
+        'en': 'Whether it runs, and where',
+        'de': 'Ob es läuft, und wo'},
+    'Stop the emulated device': {
+        'en': 'Stop the emulated device',
+        'de': 'Das emulierte Gerät stoppen'},
+    '{action} the emulated device': {
+        'en': '{action} the emulated device',
+        'de': 'Emuliertes Gerät: {action}'},
+    '{host}: {said}': {
+        'en': '{host}: {said}',
+        'de': '{host}: {said}'},
+    'The profile {name} starts on {host}, which is not a host of sandbox-ai hosts (any more): the host stays as chosen.': {
+        'en': 'The profile {name} starts on {host}, which is not a host of sandbox-ai hosts (any more): the host stays as chosen.',
+        'de': 'Das Profil {name} startet auf {host}, das (nicht mehr) zu den Hosts von sandbox-ai hosts gehört: Der Host bleibt wie gewählt.'},
+    'Defined: {list}': {
+        'en': 'Defined: {list}',
+        'de': 'Definiert: {list}'},
+    'A mount is SOURCE:DESTINATION or SOURCE:DESTINATION:ro|rw: {line}': {
+        'en': 'A mount is SOURCE:DESTINATION or SOURCE:DESTINATION:ro|rw: {line}',
+        'de': 'Ein Mount ist QUELLE:ZIEL oder QUELLE:ZIEL:ro|rw: {line}'},
+    'Keep': {
+        'en': 'Keep',
+        'de': 'Behalten'},
+    'Restart': {
+        'en': 'Restart',
+        'de': 'Neu starten'},
+    'A folder is TARGET=HOST_FOLDER or TARGET=HOST_FOLDER:ro|rw: {line}': {
+        'en': 'A folder is TARGET=HOST_FOLDER or TARGET=HOST_FOLDER:ro|rw: {line}',
+        'de': 'Ein Ordner ist ZIEL=HOST_ORDNER oder ZIEL=HOST_ORDNER:ro|rw: {line}'},
+    'Add unsigned': {
+        'en': 'Add unsigned',
+        'de': 'Unsigniert hinzufügen'},
+    'nothing found ({count} files checked)': {
+        'en': 'nothing found ({count} files checked)',
+        'de': 'nichts gefunden ({count} Dateien geprüft)'},
+    'A version is X.Y.Z, e.g. 0.1.76.': {
+        'en': 'A version is X.Y.Z, e.g. 0.1.76.',
+        'de': 'Eine Version ist X.Y.Z, z. B. 0.1.76.'},
+    'The sandbox-ai on {host} does not know {option}': {
+        'en': 'The sandbox-ai on {host} does not know {option}',
+        'de': 'sandbox-ai auf {host} kennt {option} nicht'},
+    'Restart {name} now? What runs in it ends; the agent continues its conversation.': {
+        'en': 'Restart {name} now? What runs in it ends; the agent continues its conversation.',
+        'de': '{name} jetzt neu starten? Was darin läuft, endet; der Agent setzt sein Gespräch fort.'},
+    'Let {name} change these on its host, from now on at every start: {list}?': {
+        'en': 'Let {name} change these on its host, from now on at every start: {list}?',
+        'de': '{name} diese auf seinem Host ändern lassen, ab jetzt bei jedem Start: {list}?'},
+    'Give {name} the tools of these MCP servers, from now on at every start: {list}?': {
+        'en': 'Give {name} the tools of these MCP servers, from now on at every start: {list}?',
+        'de': '{name} die Werkzeuge dieser MCP-Server geben, ab jetzt bei jedem Start: {list}?'},
+    'Its catalog is not signed by a trusted key (sandbox/mcp-signers): sandbox-ai adds it only with --unsigned.': {
+        'en': 'Its catalog is not signed by a trusted key (sandbox/mcp-signers): sandbox-ai adds it only with --unsigned.',
+        'de': 'Sein Katalog ist nicht von einem vertrauten Schlüssel signiert (sandbox/mcp-signers): sandbox-ai fügt es nur mit --unsigned hinzu.'},
+    "Its catalog's signature does not verify: sandbox-ai refuses it.": {
+        'en': "Its catalog's signature does not verify: sandbox-ai refuses it.",
+        'de': 'Die Signatur seines Katalogs stimmt nicht: sandbox-ai lehnt es ab.'},
+    'Start {name} for {start} and restart {start} now? What runs in it ends; the agent continues its conversation.': {
+        'en': 'Start {name} for {start} and restart {start} now? What runs in it ends; the agent continues its conversation.',
+        'de': '{name} für {start} starten und {start} jetzt neu starten? Was darin läuft, endet; der Agent setzt sein Gespräch fort.'},
+    'Add {name} although its catalog is not signed by a trusted key? Nothing checked that the catalog is the one its publisher wrote.': {
+        'en': 'Add {name} although its catalog is not signed by a trusted key? Nothing checked that the catalog is the one its publisher wrote.',
+        'de': '{name} hinzufügen, obwohl sein Katalog nicht von einem vertrauten Schlüssel signiert ist? Nichts hat geprüft, dass der Katalog der ist, den sein Herausgeber geschrieben hat.'},
+    'Let the MCP server {name} change these folders of its host: {list}?': {
+        'en': 'Let the MCP server {name} change these folders of its host: {list}?',
+        'de': 'Den MCP-Server {name} diese Ordner seines Hosts ändern lassen: {list}?'},
+    'sandbox-ai version': {
+        'en': 'sandbox-ai version',
+        'de': 'sandbox-ai-Version'},
     # the wizard's Model step: a short radio button, the servers it means below it (wizard.py)
     'A model server of your own (its raw API)': {
         'en': 'A model server of your own (its raw API)',
@@ -1613,9 +2618,6 @@ TEXTS = {
     'The language changes when the app is started again.': {
         'en': 'The language changes when the app is started again.',
         'de': 'Die Sprache ändert sich beim nächsten Start der App.'},
-    'Git repository': {
-        'en': 'Git repository',
-        'de': 'Git-Repository'},
     'sandbox-ai {version} from {path}': {
         'en': 'sandbox-ai {version} from {path}',
         'de': 'sandbox-ai {version} aus {path}'},
@@ -6606,9 +7608,6 @@ TEXTS = {
     'Saved on {host}: {applied}. Refused: {refused} ({reason}). Not tried: {rest}.': {
         'en': 'Saved on {host}: {applied}. Refused: {refused} ({reason}). Not tried: {rest}.',
         'de': 'Gespeichert auf {host}: {applied}. Abgelehnt: {refused} ({reason}). Nicht versucht: {rest}.'},
-    'Secrets on': {
-        'en': 'Secrets on',
-        'de': 'Geheimnisse auf'},
     'Take {what} ({agent}) out of the kit {name}? Every later start with this kit is without it.': {
         'en': 'Take {what} ({agent}) out of the kit {name}? Every later start with this kit is without it.',
         'de': '{what} ({agent}) aus dem Kit {name} nehmen? Jeder spätere Start mit diesem Kit ist ohne es.'},
@@ -6618,9 +7617,6 @@ TEXTS = {
     'They wait on the Approvals page.': {
         'en': 'They wait on the Approvals page.',
         'de': 'Sie warten auf der Seite Freigaben.'},
-    "This machine's secrets, or a host's (over SSH)": {
-        'en': "This machine's secrets, or a host's (over SSH)",
-        'de': 'Die Geheimnisse dieses Rechners oder eines Hosts (über SSH)'},
     'This run approves at most once, and an allowed name stays pinned for the run: deny it, or allow the name at the next start (--allow-host).': {
         'en': 'This run approves at most once, and an allowed name stays pinned for the run: deny it, or allow the name at the next start (--allow-host).',
         'de': 'Dieser Lauf erlaubt höchstens einmal, und ein erlaubter Name bleibt für den Lauf festgehalten: Lehnen Sie ab, oder erlauben Sie den Namen beim nächsten Start (--allow-host).'},

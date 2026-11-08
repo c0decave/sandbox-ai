@@ -535,6 +535,39 @@ SECTIONS = (
         see=("sandbox", "releases-update", "page-system"),
         tours=("area:images",)),
     section(
+        "page-team", "app", ("Teams", "Teams"),
+        ("Teams lists the teams of `sandbox-ai team`: two or three agents, one sandbox each, on one shared "
+         "workspace, started and stopped together. The first agent leads: you talk to it, and it hands the others "
+         "tasks on the team's board, an MCP server of the team in a sandbox without network. Host chooses whose "
+         "teams these are: this machine's or a host's of `sandbox-ai hosts` (over SSH).\n\n"
+         "- Start a team… asks for a name, the lead, the members, the workspace (a path on that host) and launcher "
+         "options for every member, then runs `sandbox-ai team start` in a terminal tab: each member starts there, "
+         "one after the other.\n"
+         "- Select a team to see its members (each a session NAME-AGENT, with its state) and its board.\n"
+         "- Talk to the lead attaches to the lead's session in a terminal tab. Post a task… puts a task for one "
+         "member on the board, from you.\n"
+         "- Stop… ends every member and the board; Delete… also removes the members' HOMEs and the board, for "
+         "good. Both ask first; the workspace stays.",
+         "Teams listet die Teams von `sandbox-ai team`: zwei oder drei Agenten, je eine Sandbox, auf einem "
+         "gemeinsamen Arbeitsbereich, zusammen gestartet und gestoppt. Der erste Agent leitet: Mit ihm sprechen Sie, "
+         "und er gibt den anderen Aufgaben auf der Tafel des Teams, einem MCP-Server des Teams in einer Sandbox ohne "
+         "Netzwerk. Host wählt, wessen Teams es sind: die dieses Rechners oder die eines Hosts von `sandbox-ai "
+         "hosts` (über SSH).\n\n"
+         "- Team starten… fragt nach Name, Leitung, Mitgliedern, Arbeitsbereich (ein Pfad auf jenem Host) und "
+         "Startoptionen für jedes Mitglied und führt dann `sandbox-ai team start` in einem Terminal-Tab aus: Jedes "
+         "Mitglied startet dort, eines nach dem anderen.\n"
+         "- Wählen Sie ein Team, um seine Mitglieder (je eine Sitzung NAME-AGENT, mit ihrem Stand) und seine Tafel "
+         "zu sehen.\n"
+         "- Mit der Leitung sprechen verbindet ein Terminal-Tab mit der Sitzung der Leitung. Aufgabe stellen… legt "
+         "eine Aufgabe für ein Mitglied auf die Tafel, von Ihnen.\n"
+         "- Stoppen… beendet jedes Mitglied und die Tafel; Löschen… entfernt auch die HOMEs der Mitglieder und die "
+         "Tafel, endgültig. Beides fragt zuerst; der Arbeitsbereich bleibt."),
+        cli=("sandbox-ai team start NAME --agents claude,codex -w DIR", "sandbox-ai team list",
+             "sandbox-ai team show NAME", "sandbox-ai team post NAME AGENT TASK", "sandbox-ai team stop NAME",
+             "sandbox-ai team delete NAME --yes"),
+        see=("teams", "sessions", "page-sandboxes", "page-hosts"),
+        tours=("area:team",)),
+    section(
         "page-credentials", "app", ("Credentials", "Zugangsdaten"),
         ("Credentials keeps what sandboxes may log in with. Values are never shown.\n\n"
          "- Agent logins for sandboxes: each agent's login, from sandbox-ai's login store or the host, valid or "

@@ -1246,12 +1246,17 @@ class ApprovalsPage(QWidget):
 
 class StatisticsPage(QWidget):
     """What the logs of a project say: model calls and tokens, hosts, credentials, pushes, refusals,
-    processes, MCP tool calls."""
+    processes, MCP tool calls. On a host of `sandbox-ai hosts`: `sandbox-ai logs DIR --json` (or --project PATH)
+    there, over SSH, for a folder of that host typed in."""
 
     def __init__(self, sai):
         super().__init__()
         self.sai = sai
         layout = QVBoxLayout(self)
+        from .host_choice import HostChooser
+        self.hosts = HostChooser(sai, tr("The logs of this machine, or of a host (over SSH)"))
+        self.hosts.changed.connect(lambda _host: self.host_changed())
+        layout.addWidget(self.hosts)
         top = QHBoxLayout()
         self.directory = QComboBox()
         self.directory.setMinimumWidth(320)
@@ -1260,7 +1265,13 @@ class StatisticsPage(QWidget):
         browse.clicked.connect(self.browse)
         refresh = QPushButton(tr("Refresh"))
         refresh.clicked.connect(lambda: self.refresh_directories())
-        for widget in (QLabel(tr("Logs")), self.directory, browse, refresh):
+        from PySide6.QtWidgets import QCheckBox
+        self.project_folder = QCheckBox(tr("a project folder (its default log folder)"))
+        self.project_folder.setToolTip(tr("sandbox-ai logs --project PATH: the log folder the wizard gives that "
+                                          "project"))
+        self.project_folder.setVisible(False)
+        self.project_folder.toggled.connect(lambda _=False: self.load())
+        for widget in (QLabel(tr("Logs")), self.directory, browse, refresh, self.project_folder):
             top.addWidget(widget)
         top.addStretch()
         layout.addLayout(top)
@@ -1294,7 +1305,39 @@ class StatisticsPage(QWidget):
         self.data, self.generation = None, 0
         self.refresh_directories()
 
+    def host(self):
+        return self.hosts.host() or LOCAL
+
+    def host_changed(self):
+        """This machine: its log folders listed; another host: a folder of that host typed in (Enter reads it)."""
+        remote = self.host() != LOCAL
+        self.directory.blockSignals(True)
+        self.directory.clear()
+        self.directory.setEditable(remote)
+        if remote:
+            self.directory.lineEdit().setPlaceholderText(tr("a log folder or project folder on {host}",
+                                                            host=self.hosts.label()))
+            edit = self.directory.lineEdit()
+            if edit is not getattr(self, "typed_folder", None):  # a new line edit each time it becomes editable
+                edit.returnPressed.connect(self.load)
+                self.typed_folder = edit
+        self.directory.blockSignals(False)
+        self.project_folder.setVisible(remote)
+        if remote:
+            self.generation += 1
+            self.data = None
+            self.summary.setText(tr("Type a folder on {host} and press Enter.", host=self.hosts.label()))
+            for widget in self.tables.values():
+                fill(widget, [])
+        else:
+            self.refresh_directories()
+
     def refresh_directories(self, select=None):
+        if self.host() != LOCAL:
+            if select:
+                self.directory.setEditText(str(select))
+            self.load()
+            return
         current = select or self.directory.currentData()
         self.directory.blockSignals(True)
         self.directory.clear()
@@ -1308,6 +1351,13 @@ class StatisticsPage(QWidget):
         self.load()
 
     def browse(self):
+        if self.host() != LOCAL:
+            from PySide6.QtWidgets import QInputDialog
+            path, ok = QInputDialog.getText(self, tr("Log folder"), tr(
+                "A project folder or a log folder on {host} (absolute path):", host=self.hosts.label()))
+            if ok and path.strip():
+                self.refresh_directories(select=path.strip())
+            return
         path = choose_folder(self, tr("Log folder"), "logs")
         if path:
             self.refresh_directories(select=path)
@@ -1321,6 +1371,9 @@ class StatisticsPage(QWidget):
         self.refresh_directories(select=str(folder))
 
     def load(self):
+        if self.host() != LOCAL:
+            self.load_remote()
+            return
         directory = self.directory.currentData()
         if not directory or not os.path.isdir(directory):
             self.generation += 1
@@ -1335,6 +1388,20 @@ class StatisticsPage(QWidget):
         self.summary.setText(tr("Reading the logs…"))
         background(self.sai.statistics, directory, owner=self, timeout=300,
                    done=lambda data, error: self.loaded(token, data, error))
+
+    def load_remote(self):
+        """`sandbox-ai logs DIR --json` (or --project DIR) on the host chosen, in the background."""
+        host, folder = self.host(), self.directory.currentText().strip()
+        self.generation += 1
+        token = self.generation
+        if not backend.valid_directory(folder):
+            if folder:
+                self.summary.setText(tr("Not an absolute path: {path}", path=printable(folder)))
+            return
+        project = self.project_folder.isChecked()
+        self.summary.setText(tr("Asking {host}…", host=self.hosts.label(host)))
+        background(lambda: self.sai.host_statistics(host, None if project else folder, folder if project else None),
+                   owner=self, timeout=330, done=lambda data, error: self.loaded(token, data, error))
 
     def loaded(self, token, data, error):
         if token != self.generation:

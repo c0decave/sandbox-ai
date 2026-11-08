@@ -218,6 +218,27 @@ def attach_key(argv):
 AGENT_NAMES = ("claude", "codex", "opencode")
 
 
+def remote_words(command):
+    """The words of `sandbox-ai ...` in the command an ssh terminal hands another host (hosts.remote_command: `exec
+    sandbox-ai ARGS`, or the same in an if/else that looks for it; the program is the first one exec runs), or None
+    when it is not one."""
+    try:
+        lexer = shlex.shlex(str(command), posix=True, punctuation_chars=";&|")
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return None
+    for index, token in enumerate(tokens):
+        if index and tokens[index - 1] == "exec":  # sandbox-ai, from PATH, ~/.local/bin or the host's own command
+            words = []
+            for word in tokens[index + 1:]:
+                if word in (";", "&&", "||", "&", "|"):
+                    break
+                words.append(word)
+            return ["sandbox-ai", *words]
+    return None
+
+
 def detaches(argv, launcher=None):
     """Whether closing the terminal of ARGV only detaches it, the start running on: attaching to a start (tmux),
     a start with --session, or an interactive agent start, which the launcher runs as a detachable session in tmux
@@ -226,6 +247,11 @@ def detaches(argv, launcher=None):
     if attach_key(argv) is not None:
         return True
     argv = [str(arg) for arg in argv]
+    if argv and os.path.basename(argv[0]) == "ssh":  # a start on another host: its words there (its tmux is there)
+        words = remote_words(argv[-1])
+        if words is None:
+            return False
+        argv, launcher = words, None
     at = next((i + 1 for i, token in enumerate(argv) if os.path.basename(token) in ("main.py", "sandbox-ai")), None)
     if at is None or at >= len(argv) or argv[at] not in AGENT_NAMES:
         return False

@@ -249,6 +249,12 @@ class AddHostDialog(QDialog):
         form.addRow(tr("Port"), self.port)
         form.addRow(tr("Key"), self.identity)
         form.addRow(tr("Description"), self.description)
+        self.command = QLineEdit()
+        self.command.setPlaceholderText(tr("/opt/sandbox-ai/bin/sandbox-ai (optional)"))
+        self.command.setToolTip(tr("sandbox-ai's path there, if it is not on the PATH or in ~/.local/bin (--command)"))
+        form.addRow(tr("sandbox-ai there"), self.command)
+        self.update_sudo = QCheckBox(tr("Its sandbox-ai is a system installation: update it with sudo"))
+        form.addRow(self.update_sudo)
         form.addRow(plain_label(tr("Your user needs SSH access with a key (ssh-copy-id), and sandbox-ai installed "
                                    "there. The host key is learnt at the first contact and checked from then on."),
                                 role="secondary"))
@@ -260,6 +266,10 @@ class AddHostDialog(QDialog):
     def values(self):
         return (self.name.text().strip(), self.ssh.text().strip(), self.port.value(), self.identity.text().strip(),
                 self.description.text().strip())
+
+    def extra(self):
+        """{"command", "update_sudo"} of backend.host_add: sandbox-ai's path there, whether it updates with sudo."""
+        return {"command": self.command.text().strip(), "update_sudo": self.update_sudo.isChecked()}
 
 
 class HostsPage(QWidget):
@@ -344,7 +354,23 @@ class HostsPage(QWidget):
         # doctor
         from .doctor_view import DoctorView
         self.doctor = DoctorView()  # sandbox-ai doctor --json of the host, by area, the fix commands copyable
-        self.tabs.addTab(self.doctor, tr("Doctor"))
+        doctor_tab = QWidget()
+        doctor_layout = QVBoxLayout(doctor_tab)
+        doctor_layout.setContentsMargins(0, 0, 0, 0)
+        doctor_row = QHBoxLayout()
+        self.doctor_backend = QComboBox()
+        self.doctor_backend.addItems(["podman", "bwrap", "both"])
+        self.doctor_backend.setAccessibleName(tr("Backend"))
+        self.doctor_backend.setToolTip(tr("Which backend the host is checked for (sandbox-ai doctor --backend)"))
+        self.doctor_button = button(tr("Check"), tr("sandbox-ai doctor on the host, for the backend chosen"),
+                                    self.check_host, tr("Check the host"))
+        doctor_row.addWidget(self.doctor_backend)
+        doctor_row.addWidget(self.doctor_button)
+        doctor_row.addStretch(1)
+        doctor_layout.addLayout(doctor_row)
+        doctor_layout.addWidget(self.doctor, 1)
+        self.doctor_tab = doctor_tab
+        self.tabs.addTab(doctor_tab, tr("Doctor"))
         # updates
         self.updates = QPlainTextEdit()
         self.updates.setReadOnly(True)
@@ -502,7 +528,7 @@ class HostsPage(QWidget):
         remote = name not in (None, "local")
         set_enabled(self.remove_button, remote, tr("This machine is always in the list.") if name else None)
         set_enabled(self.edit_button, remote, tr("This machine has no SSH settings.") if name else None)
-        for widget in (self.starts_button, self.questions_button, self.test_button):
+        for widget in (self.starts_button, self.questions_button, self.test_button, self.doctor_button):
             widget.setEnabled(name is not None)
         # Install… stands out where the host has no sandbox-ai that answers (missing, or not reachable).
         set_enabled(self.install_button, remote and self.sai.host_install_supported(),
@@ -536,6 +562,11 @@ class HostsPage(QWidget):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         name, ssh, port, identity, description = dialog.values()
+        extra = dialog.extra()
+        if extra["command"] and not backend.valid_directory(extra["command"]):
+            warn(self, tr("Add a host"), tr("sandbox-ai's path there is an absolute path, e.g. "
+                                            "/opt/sandbox-ai/bin/sandbox-ai."))
+            return
 
         def done(result, error):
             if error:
@@ -548,8 +579,8 @@ class HostsPage(QWidget):
                                                                                                     "connection:"))]
             if said:
                 self.status.setText(printable("\n".join([name, *said])))
-        background(self.sai.host_add, name, ssh, port, identity, description, owner=self, source=self.add_button,
-                   timeout=60, done=done)
+        background(lambda: self.sai.host_add(name, ssh, port, identity, description, **extra), owner=self,
+                   source=self.add_button, timeout=60, done=done)
 
     def edit(self):
         name = self.host()
@@ -606,6 +637,22 @@ class HostsPage(QWidget):
                 self.status.setText(printable("\n".join([f"{name}: {result.get('version')}", *keys])))
             self.show_doctor(result.get("doctor") or [])
         background(self.sai.host_test, name, owner=self, source=self.test_button, timeout=180, done=done)
+
+    def check_host(self):
+        """sandbox-ai doctor --backend B --json on the chosen host (this machine too), shown on the Doctor tab."""
+        name = self.host()
+        if name is None:
+            return
+        engine = self.doctor_backend.currentText()
+        self.status.setText(tr("Checking {host} for {backend}…", host=name, backend=engine))
+
+        def done(result, error):
+            if error:
+                self.status.setText(printable(f"{name}: {error}"))
+                return
+            self.status.setText(tr("{host}: checked for {backend}", host=name, backend=engine))
+            self.show_doctor(result)
+        background(self.sai.host_doctor, name, engine, owner=self, source=self.doctor_button, timeout=330, done=done)
 
     # -- the chosen host's defaults --
 
@@ -888,4 +935,4 @@ class HostsPage(QWidget):
             self.doctor.set_text(results)
         else:
             self.doctor.set_results([r for r in results if isinstance(r, dict)])
-        self.tabs.setCurrentWidget(self.doctor)
+        self.tabs.setCurrentWidget(self.doctor_tab)

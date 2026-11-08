@@ -78,6 +78,10 @@ TOUR = (
          N_("Logins, secrets and Git tokens: kept on this computer, handed to a sandbox only when a start names "
             "them."),
          N_("Log in to your agent once; every sandbox gets the login from here.")),
+    Step("team", N_("Teams"),
+         N_("Teams of agents on one workspace, on this machine or a host: one sandbox per agent, the lead hands the "
+            "others tasks on the team's board."),
+         N_("Start a team of Claude Code and Codex on the current project, then talk to the lead.")),
     Step("system", N_("System"),
          N_("What sandbox-ai needs on this computer, and whether it is there: Podman, Bubblewrap, the image, the "
             "network."),

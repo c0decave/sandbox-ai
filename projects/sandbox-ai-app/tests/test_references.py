@@ -93,6 +93,18 @@ BLOCKING_SAI = {"call", "answer", "dry_run", "doctor", "mcp_catalog", "statistic
                 "collect", "host_set", "host_add", "host_remove", "collect_as_shown", "host_devices_added",
                 "host_workspaces", "host_secrets", "secret_exists", "host_approvals_history", "session_ids",
                 "recent_folders", "host_install",
+                # starts, MCP servers, net keep, the privacy check, version and demo device on a host (or here)
+                "host_launch_options", "host_dry_run", "host_mcp_servers", "host_mcp_catalog", "host_mcp_targets",
+                "host_mcp_attach", "net_keep", "privacy_check", "version_details", "host_doctor", "demo_device",
+                "mcp_servers", "mcp_serving", "mcp_attach", "mcp_attach_targets",
+                # the parity section: the Manage pages, Activity, Statistics and Teams on every host
+                "host_listing", "host_vpn_profiles", "host_git_logins", "host_publish_logins", "host_identities",
+                "host_save_identity", "host_login_status", "host_kits_inventory", "host_kit_command", "revoke_hooks",
+                "plugins_status", "host_canary_log", "canary_runs", "canary_run", "canary_resume", "host_preset_dirs",
+                "host_preset_dir_command", "trusted_projects", "forget_trusted", "host_activity", "host_statistics",
+                "teams", "team_show", "team_post", "team_stop", "team_delete", "kits_inventory", "kit_command",
+                "canary_log", "preset_dirs", "preset_dir_command", "identities", "save_identity", "git_logins",
+                "publish_logins", "vpn_check", "vpn_remove", "vpn_add",
                 # `sandbox-ai llm list` and `vpn list` (the wizard's Model page, the preset form, the VPN page)
                 "llm_endpoints", "vpn_profiles", "listing"}
 # (host_statuses(cached=True) reads what `sandbox-ai hosts list` kept, without SSH: the Hosts page lists it at once.)
@@ -164,7 +176,8 @@ def test_pages_run_commands_and_slow_reads_only_in_the_background():
     found = [f"{name}:{line} {what}"
              for name in ("pages.py", "images_page.py", "ui.py", "board_view.py", "wizard.py", "settings.py",
                           "hosts_page.py", "llm_page.py", "terminal.py", "preset_gallery.py", "vpn_page.py",
-                          "files_page.py")
+                          "files_page.py", "kits_page.py", "credentials_page.py", "identities_page.py",
+                          "activity_page.py", "canaries_view.py", "team_page.py", "host_choice.py")
              if (PACKAGE / name).exists()
              for line, what in blocking_calls((PACKAGE / name).read_text())]
     assert not found, "on the GUI thread (use widgets.background, ThreadCall or Task):\n" + "\n".join(found)
@@ -220,7 +233,7 @@ class Page:
 # (consecutive string literals of one call or tuple). The functions that issue one must ask first with
 # widgets.ask_first(..., ACTION, ...): in themselves or in a function they are nested in.
 MUTATIONS = {
-    "start-stop": ["stop_run", ("session", "stop")],
+    "start-stop": ["stop_run", ("session", "stop"), "team_stop"],
     "mcp-stop": ["stop_mcp"],
     "project-trust": ["trust_project"],
     "login-remove": [("identities", "remove"), "save_identity"],
@@ -241,23 +254,18 @@ MUTATIONS = {
     "llm-remove": [("llm", "remove")],
     "secret-delete": ["delete_secret"],
     "secret-replace": ["set_secret", "vpn_add"],
+    "canary-tokens": ["canary_run"],
+    "canary-resume": ["canary_resume"],
+    "project-forget": ["forget_trusted", ("wizard", "forget")],
+    "start-delete": ["team_delete"],
     "mcp-attach": ["mcp_attach"],
+    "net-keep": ["net_keep"],
 }
 
 # The actions of the web interface's table (backend.NEEDS_CONFIRM is the same set) that no page of the app does yet:
 # the app gets them with the command-line parity work, and asks first there then. Exact: an action a page asks for is
 # taken off this list (the test says so), and nothing else may be missing.
-WEB_ONLY = {
-    "project-forget",       # no "forget a trusted project configuration" in the app (backend.forget_project unused)
-    "mcp-unsigned",         # the app adds no MCP server from a catalog (sandbox-ai mcp add --unsigned)
-    "mcp-writable-mount",   # nor one with a writable mount
-    "net-keep",             # no sandbox-ai net keep
-    "start-restart",        # no restart of a running start (only mcp attach --restart: mcp-restart)
-    "canary-tokens",        # the Canaries tab shows the log, not the run's tokens in full
-    "canary-resume",        # no sandbox-ai canaries resume
-    "llm-insecure",         # the Model servers page offers no --insecure-http
-    "vpn-socks",            # the VPN page adds no Tor profile with --socks
-}
+WEB_ONLY = set()  # every action of the table is asked for by a page now
 
 def string_runs(node):
     """Every run of consecutive string literals among the arguments of a call or the items of a tuple or list."""
