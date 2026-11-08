@@ -200,7 +200,7 @@ NOT_WORDS = {
     "sandbox-ai", " sandbox-ai", "(prefers-color-scheme: dark)", "nav button", "#toasts .toast",
     'nav button[data-page="approvals"]', "noopener noreferrer", "use strict",
     "home", "lmstudio", "my-kit", "release-notes", "ct101", "exit-node-1", "se-sto", "VPN_HOME", "Proxmox CT 101",
-    "pypi.org api.example.org",
+    "pypi.org api.example.org", "GITEA_TOKEN", "button, input, select, textarea",
     "HTTPS (TCP/443)", "IP:PORT (TCP)", "CPUs", "SSH", "URL", "ok",
 }
 # Where a literal is read by people even when it is one lowercase word: (callee, argument) of the page's helpers.
@@ -378,7 +378,7 @@ def test_the_page_in_german_and_back_to_english(tmp_path):
     assert result["lang"] == ["de", "de"], "German from the browser's language, set on the document"
     frame = result["frame"]
     for text in ("Starts und Sitzungen", "Freigaben", "Standards", "Abmelden", "Verbinden", "Pausieren", "Stoppen",
-                 "Netzwerk…", "Ressourcen…", "Neuer Start", "In einem Terminal starten", "Arbeitsordner", "Zustand",
+                 "Netzwerk…", "Ressourcen…", "Neuer Start auf local", "In einem Terminal starten", "Arbeitsordner", "Zustand",
                  "local (dieser Rechner)", "ct1 (root@ct1)", "wie das System", "Deutsch", "English"):
         assert text in frame, (text, frame)
     assert "Stop" not in frame and "Log out" not in frame and "Approvals" not in frame
@@ -391,7 +391,7 @@ def test_the_page_in_german_and_back_to_english(tmp_path):
     assert result["toast"] == "!Warnung: Fertig<b>x</b>×", "the level in German, the text as it is"
     assert result["filled"] == "<img src=x> auf {host}", "values are put in as text, once"
     approvals = result["approvals"]
-    for text in ("Freigaben", "Host", "Frage", "Verbleibende Zeit", "Erlauben", "Ablehnen", "Immer blockieren…",
+    for text in ("Freigaben", "Host", "Frage", "Verbleibende Zeit", "Erlauben", "Für diesen Lauf ablehnen", "Immer blockieren…",
                  "nur dieses Mal", "für den Rest dieses Laufs", "immer (für das Projekt gemerkt)"):
         assert text in approvals, (text, approvals)
     assert result["closed"] == "die Verbindung wurde abgelehnt oder ging verloren (Code 1006): gone", \
@@ -399,7 +399,7 @@ def test_the_page_in_german_and_back_to_english(tmp_path):
     assert result["choices"] == [["en", "English", False, "en"], ["de", "Deutsch", True, "de"]], "each in its own language"
     lang, stored, after = result["after"]
     assert lang == "en" and stored == "en"
-    for text in ("Starts and sessions", "Approvals", "Log out", "Stop", "Attach", "New start", "local (this machine)"):
+    for text in ("Starts and sessions", "Approvals", "Log out", "Stop", "Attach", "New start on local", "local (this machine)"):
         assert text in after, (text, after)
     assert "Abmelden" not in after
     assert result["refusing"] == ["de", "en", "Cancel", "en"], "a storage that refuses changes nothing else"

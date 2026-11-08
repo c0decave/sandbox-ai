@@ -21,6 +21,13 @@ header must be one of the service's names. Every action is written to the audit 
 `sandbox-ai ARGS` with its arguments quoted one by one (locally, or over SSH: hosts.py); nothing it sends becomes
 a shell command. No sandbox can reach the service: the launcher refuses --allow-host-port for its port.
 
+What ends, removes or weakens something needs {"confirm": true} in the request, by one table (NEEDS_CONFIRM, served
+as GET /api/policy: the page asks for exactly these); a default or a limit counts as weakened by any step down from
+what its host has now (defaults show, limits --show). Each answer says how long the session lives without use
+(X-Session-Idle-Left): the page warns two minutes before. The questions and the starts of every host are asked at
+once with at most one request in flight per host (GET /api/approvals, GET /api/starts). A secret's value goes once,
+on standard input, to `secrets set` there: never on a command line, in a response or in the audit log.
+
 Standard library only (openssl for the certificate).
 """
 import argparse
@@ -337,6 +344,12 @@ class Sessions:
         with self.lock:
             self.items.pop(self.key(token or ""), None)
 
+    def left(self, session):
+        """(seconds until SESSION ends without use, seconds until its lifetime ends)."""
+        now = self.clock()
+        return (max(0, int(self.idle - (now - session["seen"]))),
+                max(0, int(self.lifetime - (now - session["created"]))))
+
     def current(self, token, users, touch=True):
         """The session of TOKEN while its user is still the one it was made for (USERS: load_users()), else None
         (and gone). TOUCH: as for get()."""
@@ -384,13 +397,25 @@ WORKSPACE_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.+@ -]{0,254}")  # the NAME
 # devices add waits up to devices.APPROVAL_SECONDS (60) for the answer to an "ask" rule; over SSH, with room to spare
 DEVICE_ADD_TIMEOUT = 180
 LIMIT_VALUE = re.compile(r"none|[0-9]{1,12}(?:\.[0-9]{1,6})?[kmgtKMGT]?")
+SIZE_UNITS = {"k": 1 << 10, "m": 1 << 20, "g": 1 << 30, "t": 1 << 40}  # as limits takes them (devices.bytes_of)
+
+
+def limit_number(key, value):
+    """A limit as limits --show gives it (bytes, CPUs, processes) from VALUE as limits takes it; none: infinite."""
+    if value == "none":
+        return float("inf")
+    if key == "memory" and value[-1:].lower() in SIZE_UNITS:
+        return float(value[:-1]) * SIZE_UNITS[value[-1].lower()]
+    return float(value)
 # The open questions of every host, asked at once: each host gets APPROVALS_HOST_SECONDS (an unreachable one is
 # named in "errors", the others are shown all the same).
 APPROVALS_HOST_SECONDS = 15
-APPROVALS_WORKERS = 16
+STARTS_HOST_SECONDS = 20  # the same for the starts of every host (GET /api/starts)
 
 
 CANARY_RUN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,80}")
+# What `approvals remembered` lists for a project: a host name (or *.wildcard), IP:PORT, [IPv6]:PORT; never "-...".
+REMEMBERED_ENTRY = re.compile(r"(?:\*\.)?[A-Za-z0-9][A-Za-z0-9.-]{0,252}(?::[0-9]{1,5})?|\[[0-9A-Fa-f:.]{2,45}\]:[0-9]{1,5}")
 VPN_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 VPN_LOCATION = re.compile(r"[a-z]{2}(?:-[a-z0-9-]{1,20})?")
 VPN_LOGIN_SERVER = re.compile(r"https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?/?")
@@ -399,6 +424,12 @@ VPN_LOGIN_SERVER = re.compile(r"https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?/?")
 def vpn_name(value):
     if not (isinstance(value, str) and VPN_NAME.fullmatch(value)):
         raise Refused(400, "a profile name is 1-32 lower-case letters, digits, '_' or '-'")
+    return value
+
+
+def secret_name(value):
+    if not (isinstance(value, str) and NET_REF.fullmatch(value)):
+        raise Refused(400, "a secret's name is letters, digits and _ (up to 64), not starting with a digit")
     return value
 
 
@@ -452,8 +483,49 @@ def device_value(value):
     return no_dots(value, "a device")
 
 
-def confirmed(body, why):
+# What ends, removes or weakens something: ONE table, consulted by every route (needs(), confirmed()), each route
+# naming the actions it may need (Api.routes' fourth element; tests/test_web.py checks every destructive or weakening
+# route against it). GET /api/policy serves it, so the page asks for exactly these, before it sends {"confirm": true}.
+NEEDS_CONFIRM = {
+    "start-stop": "stopping a start ends what runs in it (and its HOME, unless it is kept)",
+    "start-delete": "deleting a start removes its kept HOME",
+    "gc": "gc removes the leftovers of ended starts, and kept starts unused for that long with their HOME, for good",
+    "approval-allow-always": "an allow always is remembered for the project: every later start of it gets this "
+                             "without asking",
+    "approval-deny-always": "a deny always is remembered for the project: every later question like it is refused",
+    "approval-forget": "forgetting a remembered answer changes what every later start of that project gets (a "
+                       "forgotten block is asked again)",
+    "defaults-lower": "this lowers the protection of every later start on that host",
+    "net-allow": "net allow widens what the running sandbox reaches, at once (real DNS, ports on the host, host "
+                 "wildcards, Git logins included)",
+    "net-untaint": "untaint takes back the rules for tainted runs: the sandbox is treated as if no untrusted content "
+                   "had entered it",
+    "workspace-writable": "a writable workspace lets the agent change the directory on that host",
+    "workspace-force": "a forced removal leaves what a process there still holds usable, also for writing, until it "
+                       "is closed; a copy the agent took stays usable until the sandbox restarts",
+    "device-add": "a device gives the agent that hardware of the host",
+    "limits-raise": "a limit above the current one (or none) lets the agent use more of that host",
+    "host-remove": "removing a host ends this service's management of it",
+    "vpn-remove": "removing a VPN profile stops the starts that use it from starting",
+    "llm-remove": "removing an LLM server stops the starts that use it from starting",
+    "kit-delete": "deleting a kit removes its folder",
+    "kit-remove": "removing a skill or plugin from a kit takes it from every later start with that kit",
+    "secret-delete": "deleting a secret takes it from every start, VPN profile and Git login that names it",
+    "secret-replace": "a secret of that name exists: its value is replaced",
+}
+# The order of protection (weakest first) that decides whether a default is lowered: any step down needs a confirm.
+MODE_ORDER = ("lax", "low", "medium", "high", "paranoid")
+TELEMETRY_ORDER = ("on", "off", "strict")
+DEFAULT_MODE, DEFAULT_TELEMETRY = "medium", "off"
+
+
+def confirmed(body, action, detail=None):
+    """Refused unless BODY carries {"confirm": true}: ACTION is a key of NEEDS_CONFIRM (its reason in the error,
+    DETAIL first when given)."""
+    if action not in NEEDS_CONFIRM:
+        raise KeyError(action)  # a route asking for an action the table does not have: a bug, never a pass
     if body.get("confirm") is not True:
+        why = f"{detail}: {NEEDS_CONFIRM[action]}" if detail else NEEDS_CONFIRM[action]
         raise Refused(400, f"{why}: send {{\"confirm\": true}}")
 
 
@@ -470,6 +542,73 @@ def strings(value, what, limit=64):
     return value
 
 
+class FanOut:
+    """One question to many hosts at once (their open questions, their starts), with at most one request in flight
+    per host: a host that has not answered yet (an unreachable one takes its whole timeout) is not asked again on
+    top of it, and its last result (if it is at most KEEP seconds old) stands in meanwhile, with its age. ASK(name)
+    gives a host's result or raises (Refused: the message for the page)."""
+
+    KEEP = 60
+
+    def __init__(self, ask, clock=time.monotonic, wall=time.time):
+        self.ask, self.clock, self.wall = ask, clock, wall
+        self.lock = threading.Lock()
+        self.flight = {}  # host -> (Future, monotonic time asked)
+        self.last = {}    # host -> {"result" or "error", "at": monotonic, "seen": wall time}
+
+    def run(self, name, future):
+        try:
+            found = {"result": self.ask(name)}
+        except Refused as exc:
+            found = {"error": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - one host's failure is that host's error, not the page's
+            found = {"error": printable(f"{type(exc).__name__}: {exc}")[:600]}
+        found.update(at=self.clock(), seen=self.wall())
+        with self.lock:
+            self.last[name] = found
+            if self.flight.get(name, (None,))[0] is future:
+                del self.flight[name]
+        future.set_result(found)
+
+    def gather(self, names, seconds):
+        """{host: {"result" | "error", "age": seconds since it was fetched, "seen": wall time, "asking": bool}}:
+        each of NAMES asked unless a request to it still runs; waits up to SECONDS (+5) for the ones asked now."""
+        started = []
+        with self.lock:
+            for name in names:
+                if name not in self.flight:
+                    future = concurrent.futures.Future()
+                    self.flight[name] = (future, self.clock())
+                    started.append(future)
+                    threading.Thread(target=self.run, args=(name, future), daemon=True).start()
+        if started:
+            concurrent.futures.wait(started, timeout=seconds + 5)
+        now, found = self.clock(), {}
+        with self.lock:
+            for name in names:
+                flight, last = self.flight.get(name), self.last.get(name)
+                if flight is None and last is not None:
+                    found[name] = {**last, "age": max(0.0, now - last["at"]), "asking": False}
+                elif last is not None and "result" in last and now - last["at"] <= self.KEEP:
+                    found[name] = {**last, "age": max(0.0, now - last["at"]), "asking": True}
+                else:
+                    asked_now = flight is not None and flight[0] in started
+                    found[name] = {"error": f"no answer within {seconds} seconds" if asked_now or flight is None
+                                   else f"no answer yet: still asking it (for {int(now - flight[1])} seconds)",
+                                   "age": 0.0, "asking": True, "seen": None}
+        return found
+
+
+def host_names():
+    """(this machine and each host of `sandbox-ai hosts`, errors): a damaged hosts.json is named in the errors (as
+    "hosts.json", which is no host's name) and this machine is asked all the same."""
+    hosts = module("hosts")
+    try:
+        return [hosts.LOCAL, *sorted(hosts.load())], {}
+    except (OSError, ValueError) as exc:
+        return [hosts.LOCAL], {"hosts.json": printable(exc)[:600]}
+
+
 class Api:
     """The actions of the web interface: (method, path pattern) -> handler(match, body) -> JSON. RUNNER is
     hosts.run (tests give their own)."""
@@ -480,63 +619,90 @@ class Api:
         # hosts update and hosts list's status (several commands each; tests give their own)
         self.updater = updater or (lambda host, version=None, sudo=None: module("hosts").update(host, version, sudo))
         self.statuses = statuses or (lambda names, refresh=False: module("hosts").statuses(names, refresh=refresh))
+        self.approvals_fanout = FanOut(self.host_questions)
+        self.starts_fanout = FanOut(self.host_starts)
+        H = r"/api/hosts/(?P<host>[^/]+)"
+        # (method, path, handler, the NEEDS_CONFIRM actions it may need)
         self.routes = [
-            ("GET", r"/api/approvals", self.all_approvals),
-            ("GET", r"/api/hosts", self.hosts),
-            ("POST", r"/api/hosts", self.add_host),
-            ("GET", r"/api/hosts-status", self.host_statuses),
-            ("POST", r"/api/hosts-status", lambda params, body: self.host_statuses({"refresh": "1"}, body)),
-            ("DELETE", r"/api/hosts/(?P<host>[^/]+)", self.remove_host),
-            ("POST", r"/api/hosts/(?P<host>[^/]+)/test", self.test_host),
-            ("POST", r"/api/hosts/(?P<host>[^/]+)/update", self.update_host),
-            ("GET", r"/api/hosts/(?P<host>[^/]+)/starts", self.starts),
-            ("POST", r"/api/hosts/(?P<host>[^/]+)/starts/(?P<name>[^/]+)/(?P<action>pause|resume|stop|delete)",
-             self.start_action),
-            ("GET", r"/api/hosts/(?P<host>[^/]+)/starts/(?P<name>[^/]+)/review", self.review_home),
-            ("POST", r"/api/hosts/(?P<host>[^/]+)/mcp/(?P<name>[^/]+)/attach", self.mcp_attach),
-            ("GET", r"/api/hosts/(?P<host>[^/]+)/approvals", self.approvals),
-            ("POST", r"/api/hosts/(?P<host>[^/]+)/approvals/(?P<id>[^/]+)", self.answer),
-            ("GET", r"/api/hosts/(?P<host>[^/]+)/doctor", self.doctor),
-            ("GET", r"/api/hosts/(?P<host>[^/]+)/logs", self.logs),
-            ("GET", r"/api/hosts/(?P<host>[^/]+)/llm", self.llm),
-            ("GET", r"/api/hosts/(?P<host>[^/]+)/llm/(?P<name>[^/]+)/models", self.llm_models),
-            ("POST", r"/api/hosts/(?P<host>[^/]+)/llm", self.add_llm),
-            ("POST", r"/api/hosts/(?P<host>[^/]+)/llm/(?P<name>[^/]+)/check", self.check_llm),
-            ("DELETE", r"/api/hosts/(?P<host>[^/]+)/llm/(?P<name>[^/]+)", self.remove_llm),
-            ("GET", r"/api/hosts/(?P<host>[^/]+)/defaults", self.defaults),
-            ("POST", r"/api/hosts/(?P<host>[^/]+)/defaults", self.set_default),
-            ("GET", r"/api/hosts/(?P<host>[^/]+)/net/(?P<name>[^/]+)", self.net_show),
-            ("POST", r"/api/hosts/(?P<host>[^/]+)/net/(?P<name>[^/]+)", self.net_change),
-            ("GET", r"/api/hosts/(?P<host>[^/]+)/workspaces/(?P<name>[^/]+)", self.workspaces),
-            ("POST", r"/api/hosts/(?P<host>[^/]+)/workspaces/(?P<name>[^/]+)", self.workspace_add),
-            ("POST", r"/api/hosts/(?P<host>[^/]+)/workspaces/(?P<name>[^/]+)/remove", self.workspace_remove),
-            ("GET", r"/api/hosts/(?P<host>[^/]+)/devices/(?P<name>[^/]+)", self.devices),
-            ("POST", r"/api/hosts/(?P<host>[^/]+)/devices/(?P<name>[^/]+)", self.device_add),
-            ("POST", r"/api/hosts/(?P<host>[^/]+)/devices/(?P<name>[^/]+)/remove", self.device_remove),
-            ("GET", r"/api/hosts/(?P<host>[^/]+)/limits/(?P<name>[^/]+)", self.limits),
-            ("POST", r"/api/hosts/(?P<host>[^/]+)/limits/(?P<name>[^/]+)", self.set_limits),
-            ("GET", r"/api/hosts/(?P<host>[^/]+)/presets", self.presets),
-            ("GET", r"/api/hosts/(?P<host>[^/]+)/vpn", self.vpn_list),
-            ("POST", r"/api/hosts/(?P<host>[^/]+)/vpn", self.vpn_add),
-            ("POST", r"/api/hosts/(?P<host>[^/]+)/vpn/(?P<name>[^/]+)/check", self.vpn_check),
-            ("DELETE", r"/api/hosts/(?P<host>[^/]+)/vpn/(?P<name>[^/]+)", self.vpn_remove),
-            ("GET", r"/api/hosts/(?P<host>[^/]+)/kits", self.kits),
-            ("POST", r"/api/hosts/(?P<host>[^/]+)/kits", self.kit_new),
-            ("POST", r"/api/hosts/(?P<host>[^/]+)/kits/(?P<name>[^/]+)/(?P<action>[a-z-]+)", self.kit_change),
-            ("DELETE", r"/api/hosts/(?P<host>[^/]+)/kits/(?P<name>[^/]+)", self.kit_delete),
-            ("GET", r"/api/hosts/(?P<host>[^/]+)/canaries", self.canaries),
-            ("GET", r"/api/hosts/(?P<host>[^/]+)/canaries/(?P<run>[^/]+)", self.canaries),
+            ("GET", r"/api/policy", self.policy, ()),
+            ("GET", r"/api/approvals", self.all_approvals, ()),
+            ("GET", r"/api/starts", self.all_starts, ()),
+            ("GET", r"/api/hosts", self.hosts, ()),
+            ("POST", r"/api/hosts", self.add_host, ()),
+            ("GET", r"/api/hosts-status", self.host_statuses, ()),
+            ("POST", r"/api/hosts-status", lambda params, body: self.host_statuses({"refresh": "1"}, body), ()),
+            ("POST", H, self.edit_host, ()),
+            ("DELETE", H, self.remove_host, ("host-remove",)),
+            ("POST", H + r"/test", self.test_host, ()),
+            ("POST", H + r"/update", self.update_host, ()),
+            ("GET", H + r"/starts", self.starts, ()),
+            ("POST", H + r"/starts/(?P<name>[^/]+)/(?P<action>pause|resume|stop|delete)", self.start_action,
+             ("start-stop", "start-delete")),
+            ("POST", H + r"/starts/(?P<name>[^/]+)/rename", self.rename, ()),
+            ("GET", H + r"/starts/(?P<name>[^/]+)/history", self.history, ()),
+            ("GET", H + r"/starts/(?P<name>[^/]+)/review", self.review_home, ()),
+            ("GET", H + r"/gc", self.gc_preview, ()),
+            ("GET", H + r"/gc/(?P<days>[0-9]{1,5})", self.gc_preview, ()),
+            ("POST", H + r"/gc", self.gc, ("gc",)),
+            ("POST", H + r"/mcp/(?P<name>[^/]+)/attach", self.mcp_attach, ()),
+            ("GET", H + r"/approvals", self.approvals, ()),
+            ("GET", H + r"/approvals-history", self.approvals_history, ()),
+            ("GET", H + r"/approvals-history/(?P<run>[^/]+)", self.approvals_history, ()),
+            ("GET", H + r"/remembered", self.remembered, ()),
+            ("POST", H + r"/remembered/forget", self.forget, ("approval-forget",)),
+            ("POST", H + r"/approvals/(?P<id>[^/]+)", self.answer, ("approval-allow-always", "approval-deny-always")),
+            ("GET", H + r"/doctor", self.doctor, ()),
+            ("GET", H + r"/logs", self.logs, ()),
+            ("GET", H + r"/llm", self.llm, ()),
+            ("GET", H + r"/llm/(?P<name>[^/]+)/models", self.llm_models, ()),
+            ("POST", H + r"/llm", self.add_llm, ()),
+            ("POST", H + r"/llm/(?P<name>[^/]+)/check", self.check_llm, ()),
+            ("DELETE", H + r"/llm/(?P<name>[^/]+)", self.remove_llm, ("llm-remove",)),
+            ("GET", H + r"/defaults", self.defaults, ()),
+            ("POST", H + r"/defaults", self.set_default, ("defaults-lower",)),
+            ("GET", H + r"/net/(?P<name>[^/]+)", self.net_show, ()),
+            ("POST", H + r"/net/(?P<name>[^/]+)", self.net_change, ("net-allow",)),
+            ("POST", H + r"/net/(?P<name>[^/]+)/untaint", self.net_untaint, ("net-untaint",)),
+            ("GET", H + r"/workspaces/(?P<name>[^/]+)", self.workspaces, ()),
+            ("POST", H + r"/workspaces/(?P<name>[^/]+)", self.workspace_add, ("workspace-writable",)),
+            ("POST", H + r"/workspaces/(?P<name>[^/]+)/remove", self.workspace_remove, ("workspace-force",)),
+            ("GET", H + r"/devices/(?P<name>[^/]+)", self.devices, ()),
+            ("POST", H + r"/devices/(?P<name>[^/]+)", self.device_add, ("device-add",)),
+            ("POST", H + r"/devices/(?P<name>[^/]+)/remove", self.device_remove, ()),
+            ("GET", H + r"/limits/(?P<name>[^/]+)", self.limits, ()),
+            ("POST", H + r"/limits/(?P<name>[^/]+)", self.set_limits, ("limits-raise",)),
+            ("GET", H + r"/presets", self.presets, ()),
+            ("GET", H + r"/vpn", self.vpn_list, ()),
+            ("POST", H + r"/vpn", self.vpn_add, ()),
+            ("POST", H + r"/vpn/(?P<name>[^/]+)/check", self.vpn_check, ()),
+            ("DELETE", H + r"/vpn/(?P<name>[^/]+)", self.vpn_remove, ("vpn-remove",)),
+            ("GET", H + r"/kits", self.kits, ()),
+            ("POST", H + r"/kits", self.kit_new, ()),
+            ("POST", H + r"/kits/(?P<name>[^/]+)/(?P<action>[a-z-]+)", self.kit_change, ("kit-remove",)),
+            ("DELETE", H + r"/kits/(?P<name>[^/]+)", self.kit_delete, ("kit-delete",)),
+            ("GET", H + r"/canaries", self.canaries, ()),
+            ("GET", H + r"/canaries/(?P<run>[^/]+)", self.canaries, ()),
+            ("GET", H + r"/secrets", self.secrets, ()),
+            ("POST", H + r"/secrets/(?P<name>[^/]+)", self.secret_set, ("secret-replace",)),
+            ("DELETE", H + r"/secrets/(?P<name>[^/]+)", self.secret_delete, ("secret-delete",)),
         ]
 
     def dispatch(self, method, path, body):
-        for wanted, pattern, handler in self.routes:
+        for wanted, pattern, handler, _ in self.routes:
             match = re.fullmatch(pattern, path)
             if match and wanted == method:
                 params = {k: urllib.parse.unquote(v) for k, v in match.groupdict().items()}
                 return handler(params, body if isinstance(body, dict) else {})
-        if any(re.fullmatch(pattern, path) for _, pattern, _ in self.routes):
+        if any(re.fullmatch(pattern, path) for _, pattern, _, _ in self.routes):
             raise Refused(405, "method not allowed")
         raise Refused(404, "no such action")
+
+    def policy(self, params, body):
+        """What needs {"confirm": true} (NEEDS_CONFIRM) and the order of protection the defaults are compared in:
+        the page builds its confirmations from this, the service checks the same."""
+        return {"confirm": dict(NEEDS_CONFIRM), "order": {"mode": list(MODE_ORDER),
+                                                           "telemetry": list(TELEMETRY_ORDER)},
+                "defaults": {"mode": DEFAULT_MODE, "telemetry": DEFAULT_TELEMETRY}}
 
     def run(self, host, args, timeout=120, input=None):
         status, out, err = self.runner(host_name(host), list(args), timeout=timeout, input=input)
@@ -594,13 +760,52 @@ class Api:
 
     def remove_host(self, params, body):
         hosts = module("hosts")
-        current = hosts.load()
+        try:
+            current = hosts.load()
+        except ValueError as exc:
+            raise Refused(400, printable(exc)) from None
         if params["host"] not in current:
             raise Refused(404, "no such host")
-        del current[params["host"]]
+        confirmed(body, "host-remove", f"{params['host']} ({current[params['host']]['ssh']})")
+        removed = current.pop(params["host"])
         hosts.save(current)
         hosts.forget_status(params["host"])
+        with contextlib.suppress(Exception):  # its shared SSH connection would serve commands for a minute more
+            getattr(hosts, "stop_master", lambda entry: None)(removed)
         return {"removed": params["host"]}
+
+    def edit_host(self, params, body):
+        """A host's settings changed (hosts.json on the machine of the service, as `sandbox-ai hosts add` writes
+        it): what BODY gives replaces that setting ("" or null: left out, for identity, command and the
+        description), checked as hosts.check does; the name stays."""
+        hosts = module("hosts")
+        name = params["host"]
+        try:
+            current = hosts.load()
+            if name not in current:
+                raise Refused(404, "no such host")
+            before = current[name]
+            changed = dict(before)
+            for key in ("ssh", "port", "identity", "description", "command", "update_sudo"):
+                if key not in body:
+                    continue
+                if body[key] in (None, "") and key in ("identity", "command", "description"):
+                    changed.pop(key, None)
+                else:
+                    changed[key] = body[key]
+            if set(body) - {"ssh", "port", "identity", "description", "command", "update_sudo"}:
+                raise ValueError("a host has ssh, port, identity, description, command and update_sudo")
+            checked = hosts.check(name, changed)
+            current[name] = checked
+            hosts.save(current)
+        except ValueError as exc:
+            raise Refused(400, printable(exc)) from None
+        if any(before.get(key) != checked.get(key) for key in ("ssh", "port", "identity", "command")):
+            hosts.forget_status(name)
+            with contextlib.suppress(Exception):  # its shared connection was made for what the entry said before
+                getattr(hosts, "stop_master", lambda entry: None)(before)
+        fixed, warnings = hosts.protect_keys(checked)
+        return {"name": name, **checked, "fixed": fixed, "warnings": warnings}
 
     def test_host(self, params, body):
         """As `sandbox-ai hosts test`: whether the host answers, its sandbox-ai version and its doctor; a key file
@@ -652,17 +857,73 @@ class Api:
     def starts(self, params, body):
         return self.json_of(params["host"], ["list", "--json"])
 
+    def host_starts(self, name):
+        listed = self.json_of(name, ["list", "--json"], STARTS_HOST_SECONDS)
+        if not isinstance(listed, list):
+            raise Refused(502, f"sandbox-ai list on {name}: not a list of starts")
+        return [entry for entry in listed if isinstance(entry, dict)]
+
+    def all_starts(self, params, body):
+        """The starts of every host, asked at once (at most one request in flight per host; a host still asking
+        is given with its last list and how old that is): {"starts": [{"host", ...}], "errors": {host: why},
+        "seen": {host: when its list was read, Unix time}, "asking": [hosts still being asked]}."""
+        names, errors = host_names()
+        found = self.starts_fanout.gather(names, STARTS_HOST_SECONDS)
+        starts, seen, asking = [], {}, []
+        for name in names:
+            info = found[name]
+            if info.get("asking"):
+                asking.append(name)
+            if "error" in info:
+                errors[name] = info["error"]
+            else:
+                starts += [{**entry, "host": name} for entry in info["result"]]
+            if info.get("seen") is not None:
+                seen[name] = round(info["seen"], 3)
+        return {"starts": starts, "errors": errors, "seen": seen, "asking": asking}
+
     def start_action(self, params, body):
         """pause, resume, stop or delete a start; stop (it ends what runs, and a HOME that is not kept with it) and
         delete (its kept HOME goes) need {"confirm": true}: the page asks first, naming the host and the start."""
         name, action = start_name(params["name"]), params["action"]
         if action == "delete":
-            if body.get("confirm") is not True:
-                raise Refused(400, "deleting a start removes its kept HOME: send {\"confirm\": true}")
+            confirmed(body, "start-delete")
             return self.done(params["host"], ["delete", name, "--yes"])
         if action == "stop":
-            confirmed(body, "stopping a start ends what runs in it (and its HOME, unless it is kept)")
+            confirmed(body, "start-stop")
         return self.done(params["host"], [action, name], timeout=180)
+
+    def rename(self, params, body):
+        """sandbox-ai rename OLD NEW: another name for a start (its run id stays)."""
+        old, new = start_name(params["name"]), start_name(body.get("new"))
+        return self.done(params["host"], ["rename", old, new], 60)
+
+    def history(self, params, body):
+        """sandbox-ai list --history NAME --json: what happened to NAME (start, exit, pause, resume, rename)."""
+        found = self.json_of(params["host"], ["list", "--history", start_name(params["name"]), "--json"], 30)
+        if not isinstance(found, list):
+            raise Refused(502, "sandbox-ai list --history: not a list")
+        return [entry for entry in found if isinstance(entry, dict)]
+
+    @staticmethod
+    def gc_days(value):
+        if value is None:
+            return []
+        if isinstance(value, str) and value.isdigit():
+            value = int(value)
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 36500:
+            raise Refused(400, "older_than is a number of days (0-36500), or null for the host's keep_days")
+        return [f"--older-than={value}"]
+
+    def gc_preview(self, params, body):
+        """sandbox-ai gc --dry-run --json [--older-than DAYS]: what a clean-up would remove (nothing is)."""
+        return self.json_of(params["host"], ["gc", "--dry-run", "--json", *self.gc_days(params.get("days"))], 120)
+
+    def gc(self, params, body):
+        """sandbox-ai gc --json [--older-than DAYS]: the clean-up itself (asked first: the page shows the preview)."""
+        days = self.gc_days(body.get("older_than"))
+        confirmed(body, "gc")
+        return self.json_of(params["host"], ["gc", "--json", *days], 300)
 
     def review_home(self, params, body):
         """sandbox-ai resume NAME --review-home --json: what changed in the start files of its kept HOME since its
@@ -719,7 +980,15 @@ class Api:
             args.append(f"--git-token-{login['kind']}={login['url']}={login['ref']}")
         if len(args) == 3:
             raise Refused(400, "nothing to change")
+        if op == "allow":
+            confirmed(body, "net-allow", f"{' '.join(args[3:])} for {args[2]}")
         return self.done(params["host"], args, 60)
+
+    def net_untaint(self, params, body):
+        """sandbox-ai net untaint NAME: the run's taint taken back (asked first)."""
+        name = start_name(params["name"])
+        confirmed(body, "net-untaint", name)
+        return self.done(params["host"], ["net", "untaint", name], 60)
 
     # what a running sandbox is given while it runs: host directories (sandbox-ai workspace), devices (sandbox-ai
     # devices) and its resource limits (sandbox-ai limits); each with that command's checks on its host. What widens
@@ -737,7 +1006,7 @@ class Api:
         if not isinstance(read_only, bool):
             raise Refused(400, "read_only is true or false")
         if not read_only:
-            confirmed(body, "a writable workspace lets the agent change the directory on that host")
+            confirmed(body, "workspace-writable", directory)
         return self.done(params["host"], ["workspace", "add", name, directory, *(["--ro"] if read_only else [])], 120)
 
     def workspace_remove(self, params, body):
@@ -752,7 +1021,7 @@ class Api:
         if not isinstance(force, bool):
             raise Refused(400, "force is true or false")
         if force:
-            confirmed(body, "a forced removal leaves what is still open there usable, also for writing")
+            confirmed(body, "workspace-force", value)
         return self.done(params["host"], ["workspace", "remove", name, value, *(["--force"] if force else [])], 120)
 
     def devices(self, params, body):
@@ -762,7 +1031,7 @@ class Api:
         """sandbox-ai devices add NAME DEVICE: with --device's checks and the run's device rules there (an "ask"
         rule waits up to a minute for an answer in Approvals)."""
         name, device = start_name(params["name"]), device_value(body.get("device"))
-        confirmed(body, "a device gives the agent that hardware of the host")
+        confirmed(body, "device-add", device)
         return self.done(params["host"], ["devices", "add", name, device], DEVICE_ADD_TIMEOUT)
 
     def device_remove(self, params, body):
@@ -777,10 +1046,11 @@ class Api:
         return self.json_of(params["host"], ["limits", start_name(params["name"]), "--show", "--json"], 30)
 
     def set_limits(self, params, body):
-        """sandbox-ai limits NAME --memory=SIZE --cpus=N --pids=N (each one given or not; none: no limit, which needs
-        {"confirm": true}). The security mode's cap is kept by the command."""
-        args = ["limits", start_name(params["name"])]
-        removed = []
+        """sandbox-ai limits NAME --memory=SIZE --cpus=N --pids=N (each one given or not). A limit above the current
+        one (limits --show, read first unless the request is confirmed) or none (no limit) needs {"confirm": true}:
+        a huge value is no limit either. The security mode's cap is kept by the command."""
+        name = start_name(params["name"])
+        args, values = ["limits", name], {}
         for key in ("memory", "cpus", "pids"):
             value = body.get(key)
             if value in (None, ""):
@@ -788,13 +1058,37 @@ class Api:
             if not (isinstance(value, str) and LIMIT_VALUE.fullmatch(value)):
                 raise Refused(400, f"{key} is none or a number (with k, m, g or t for a size), e.g. 8g, 1.5, 4096")
             args.append(f"--{key}={value}")
-            if value == "none":
-                removed.append(key)
-        if len(args) == 2:
+            values[key] = value
+        if not values:
             raise Refused(400, "nothing to change: give memory, cpus or pids")
-        if removed:
-            confirmed(body, f"none takes the {' and '.join(removed)} limit away")
+        if body.get("confirm") is not True:
+            removed = [key for key, value in values.items() if value == "none"]
+            if removed:
+                confirmed(body, "limits-raise", f"none takes the {' and '.join(removed)} limit away")
+            raised = self.raised_limits(params["host"], name, values)
+            if raised:
+                confirmed(body, "limits-raise", raised)
         return self.done(params["host"], args, 60)
+
+    def raised_limits(self, host, name, values):
+        """What of VALUES ({key: "8g" | "1.5" | "4096"}) is above the start's current limits, as words (None: none
+        is); the current limits unreadable: all of it is (it cannot be told)."""
+        try:
+            current = self.json_of(host, ["limits", name, "--show", "--json"], 30)
+        except Refused as exc:
+            return f"the current limits could not be read ({exc})"
+        if not isinstance(current, dict):
+            return "the current limits could not be read"
+        above = []
+        for key, value in values.items():
+            now = current.get(key)
+            if now is None:
+                continue  # no limit now: any number is one
+            if isinstance(now, bool) or not isinstance(now, (int, float)):
+                return f"the current {key} limit could not be read"
+            if limit_number(key, value) > now:
+                above.append(f"{key} {value} is above the current {key} limit")
+        return "; ".join(above) or None
 
     # VPN profiles (sandbox-ai vpn): a profile names the secret that holds its key; the web never carries a key
     def vpn_list(self, params, body):
@@ -834,7 +1128,9 @@ class Api:
         return self.done(params["host"], ["vpn", "check", vpn_name(params["name"])], 180)
 
     def vpn_remove(self, params, body):
-        return self.done(params["host"], ["vpn", "remove", vpn_name(params["name"])], 60)
+        name = vpn_name(params["name"])
+        confirmed(body, "vpn-remove", name)
+        return self.done(params["host"], ["vpn", "remove", name], 60)
 
     # the canary log (sandbox-ai canaries log): every event, by which process, next to the agent's tool call and
     # model requests; redacted there, and the run's tokens never in it
@@ -847,6 +1143,41 @@ class Api:
 
     def presets(self, params, body):
         return self.json_of(params["host"], ["presets", "list", "--json"], 30)
+
+    # secrets (sandbox-ai secrets) of a host: their names and where each is kept, never a value. A value is sent
+    # once, as {"secret": VALUE} (a field the audit log leaves out), to `secrets set NAME` on its standard input as
+    # the command reads it (one line): never on a command line, in a response or in a log.
+    def secret_names(self, host):
+        status, out, err = self.run(host, ["secrets", "list"], 30)
+        if status != 0:
+            raise Refused(502, f"sandbox-ai secrets on {host}: exit status {status}: "
+                               f"{printable((err or out).strip()[-600:])}")
+        found, lines = [], out.splitlines()
+        if not lines or lines[0].split() != ["NAME", "STORE"]:
+            return found  # "no secrets" (the command's table has its header first)
+        for line in lines[1:]:
+            parts = line.split()
+            if len(parts) == 2 and NET_REF.fullmatch(parts[0]):
+                found.append({"name": parts[0], "store": printable(parts[1])[:32]})
+        return found
+
+    def secrets(self, params, body):
+        return self.secret_names(params["host"])
+
+    def secret_set(self, params, body):
+        name, value = secret_name(params["name"]), body.get("secret")
+        if not (isinstance(value, str) and 0 < len(value) <= 8192 and not any(ord(c) < 32 or ord(c) == 127
+                                                                               for c in value)):
+            raise Refused(400, "the value is one line of 1-8192 characters")
+        if body.get("confirm") is not True and any(entry["name"] == name for entry in
+                                                   self.secret_names(params["host"])):
+            confirmed(body, "secret-replace", name)
+        return self.done(params["host"], ["secrets", "set", name], 60, input=value + "\n")
+
+    def secret_delete(self, params, body):
+        name = secret_name(params["name"])
+        confirmed(body, "secret-delete", name)
+        return self.done(params["host"], ["secrets", "delete", name], 30)
 
     # kits (sandbox-ai kits): every change is that command on the host, so its checks apply (a skill folder is a
     # real folder with SKILL.md, nothing followed, limits, a note when it lies where sandboxes can write; built-in
@@ -895,6 +1226,8 @@ class Api:
             options += kit_agents(body, many=False)
         if body.get("create") not in (None, False, True):
             raise Refused(400, "create is true or false")
+        if action.startswith("remove-"):
+            confirmed(body, "kit-remove", f"{values[0]} from {name}")
         first = ""
         if body.get("create") is True:
             status, out, err = self.run(params["host"], ["kits", "list", "--json"], 60)
@@ -908,49 +1241,45 @@ class Api:
         return {"output": first + result["output"]}
 
     def kit_delete(self, params, body):
-        if body.get("confirm") is not True:
-            raise Refused(400, "deleting a kit removes its folder: send {\"confirm\": true}")
-        return self.done(params["host"], ["kits", "delete", "--yes", "--", kit_name(params["name"])], 60)
+        name = kit_name(params["name"])
+        confirmed(body, "kit-delete", name)
+        return self.done(params["host"], ["kits", "delete", "--yes", "--", name], 60)
 
     # approvals
     def approvals(self, params, body):
         return self.json_of(params["host"], ["approvals", "list", "--json"], 30)
 
+    def host_questions(self, name):
+        listed = self.json_of(name, ["approvals", "list", "--json"], APPROVALS_HOST_SECONDS)
+        if not isinstance(listed, list):
+            raise Refused(502, f"sandbox-ai approvals on {name}: not a list of questions")
+        return [question for question in listed if isinstance(question, dict)]
+
     def all_approvals(self, params, body):
         """The open questions of every host (this machine and each of `sandbox-ai hosts`), asked at once:
-        {"questions": [{"host", ...the question}], "errors": {host: why}}. A host that does not answer within
-        APPROVALS_HOST_SECONDS is named in errors; the others are listed all the same."""
-        names = [module("hosts").LOCAL, *sorted(module("hosts").load())]
-        found, errors = {}, {}
-
-        def ask(name):
-            listed = self.json_of(name, ["approvals", "list", "--json"], APPROVALS_HOST_SECONDS)
-            if not isinstance(listed, list):
-                raise Refused(502, f"sandbox-ai approvals on {name}: not a list of questions")
-            return [question for question in listed if isinstance(question, dict)]
-        pool = concurrent.futures.ThreadPoolExecutor(max_workers=min(APPROVALS_WORKERS, len(names)))
-        try:
-            futures = {pool.submit(ask, name): name for name in names}
-            done, _ = concurrent.futures.wait(futures, timeout=APPROVALS_HOST_SECONDS + 5)
-            for future, name in futures.items():
-                if future not in done:
-                    errors[name] = f"no answer within {APPROVALS_HOST_SECONDS} seconds"
-                    continue
-                try:
-                    found[name] = future.result()
-                except Refused as exc:
-                    errors[name] = str(exc)
-                except Exception as exc:  # noqa: BLE001 - one host's failure is that host's error, not the page's
-                    errors[name] = printable(f"{type(exc).__name__}: {exc}")[:600]
-        finally:
-            pool.shutdown(wait=False)
-        return {"questions": [{**question, "host": name} for name in names for question in found.get(name, [])],
-                "errors": errors}
+        {"questions": [{"host", ...the question}], "errors": {host: why}, "age": {host: seconds}, "seen": {host:
+        Unix time}}. A host that does not answer within APPROVALS_HOST_SECONDS is named in errors; the others are
+        listed all the same. At most one request is in flight per host: one still asking is given with its last
+        list (at most FanOut.KEEP seconds old). "age" is how long ago each host's list was read: its seconds_left
+        were counted then (the page subtracts the age, so a slow host does not make the others' countdowns late).
+        A damaged hosts.json is named in errors ("hosts.json"); this machine is asked all the same."""
+        names, errors = host_names()
+        found = self.approvals_fanout.gather(names, APPROVALS_HOST_SECONDS)
+        questions, age, seen = [], {}, {}
+        for name in names:
+            info = found[name]
+            if "error" in info:
+                errors[name] = info["error"]
+                continue
+            questions += [{**question, "host": name} for question in info["result"]]
+            age[name] = round(info["age"], 3)
+            seen[name] = round(info["seen"], 3)
+        return {"questions": questions, "errors": errors, "age": age, "seen": seen}
 
     def answer(self, params, body):
-        """allow or deny a question with a scope. A deny "always" (a rule remembered for the project) needs
-        {"confirm": true}; "no_open": true allows a browser question without opening the browser on that host
-        (the user opened its link)."""
+        """allow or deny a question with a scope. An "always" (a rule remembered for the project, allowed or
+        denied) needs {"confirm": true}; "no_open": true allows a browser question without opening the browser
+        on that host (the user opened its link)."""
         ident = params["id"]
         if not APPROVAL_ID.fullmatch(ident):
             raise Refused(400, "no such question")
@@ -961,13 +1290,42 @@ class Api:
             raise Refused(400, "scope is once, run or always")
         if not isinstance(no_open, bool) or no_open and decision != "allow":
             raise Refused(400, "no_open is true or false, and only for an allow")
-        if decision == "deny" and scope == "always":
-            confirmed(body, "a deny always is remembered for the project: every later question like it is refused")
+        if scope == "always":
+            confirmed(body, f"approval-{decision}-always")
         # An "always" waits up to approvals.VERIFY_WAIT for the sandbox before it is remembered; the call (over ssh,
         # perhaps, with a name to resolve) must outlast that clearly, or the "always" is lost.
         return self.done(params["host"], ["approvals", decision, ident, *(["--scope", scope] if scope else []),
                                           *(["--no-open"] if no_open else [])],
                          module("approvals").VERIFY_WAIT + 60)
+
+    def approvals_history(self, params, body):
+        """sandbox-ai approvals history [RUN]: the questions with their answers (the command's table)."""
+        run = params.get("run")
+        if run is not None and not CANARY_RUN.fullmatch(run):
+            raise Refused(400, "a run is 1-81 letters, digits, '_', '.' or '-'")
+        args = ["approvals", "history", *([run] if run else [])]
+        status, out, err = self.run(params["host"], args, 60)
+        if status != 0:
+            raise Refused(502, f"sandbox-ai approvals on {params['host']}: exit status {status}: "
+                               f"{printable((err or out).strip()[-600:])}")
+        return {"output": printable(out.strip()[-20000:])}  # the newest answers last: those are kept
+
+    def remembered(self, params, body):
+        """sandbox-ai approvals remembered --json: {project: {"hosts", "tcp", "blocked_hosts", "blocked_tcp",
+        "details"}}."""
+        found = self.json_of(params["host"], ["approvals", "remembered", "--json"], 30)
+        if not isinstance(found, dict):
+            raise Refused(502, "sandbox-ai approvals remembered: not an object")
+        return found
+
+    def forget(self, params, body):
+        """sandbox-ai approvals forget PROJECT ENTRY: one remembered answer forgotten (asked first)."""
+        project = no_dots(host_path(body.get("project"), "project"), "project")
+        entry = body.get("entry")
+        if not (isinstance(entry, str) and REMEMBERED_ENTRY.fullmatch(entry)):
+            raise Refused(400, "entry is a host name or IP:PORT, as remembered lists it")
+        confirmed(body, "approval-forget", f"{entry} for {project}")
+        return self.done(params["host"], ["approvals", "forget", project, entry], 30)
 
     # the doctor and the logs
     def doctor(self, params, body):
@@ -1008,6 +1366,7 @@ class Api:
     def remove_llm(self, params, body):
         if params["name"].startswith("-"):
             raise Refused(400, "no such server")
+        confirmed(body, "llm-remove", printable(params["name"])[:64])
         return self.done(params["host"], ["llm", "remove", params["name"]], 30)
 
     # sandbox-ai's defaults (defaults.json) on the host: the agents' telemetry, the mode, canaries
@@ -1015,20 +1374,77 @@ class Api:
         return self.json_of(params["host"], ["defaults", "show", "--json"], 30)
 
     def set_default(self, params, body):
-        """defaults set KEY VALUE (as JSON) or unset KEY. What lowers the protection of every later start there (the
-        mode lax or low, the agents' telemetry on, no canary files) needs {"confirm": true}."""
+        """defaults set KEY VALUE (as JSON) or unset KEY (null). Any step down in protection from what `defaults
+        show` says on that host now (read first, unless the request is confirmed) needs {"confirm": true}: the mode
+        (MODE_ORDER), the agents' telemetry (TELEMETRY_ORDER), fewer canary categories (false, [] or ["none"]: no
+        canary files). Unset is a change to sandbox-ai's own default, compared the same way."""
         key, value = body.get("key"), body.get("value")
         if not (isinstance(key, str) and re.fullmatch(r"[a-z_]{1,32}", key)):
             raise Refused(400, "no such key")
-        if (key, value) in LOWERING_DEFAULTS:
-            confirmed(body, f"{key} {json.dumps(value)} lowers the protection of every later start on that host")
+        if key in ("mode", "telemetry", "canaries") and body.get("confirm") is not True:
+            weakest = {"mode": MODE_ORDER[0], "telemetry": TELEMETRY_ORDER[0]}.get(key)
+            if (weakest is not None and value == weakest or key == "canaries" and value is not None
+                    and not canary_set(value, ["credentials", "home", "workspace"])):
+                confirmed(body, "defaults-lower", f"{key} {json.dumps(value)}")  # the weakest there is: not read first
+            lowered = self.lowered_default(params["host"], key, value)
+            if lowered:
+                confirmed(body, "defaults-lower", lowered)
         if value is None:
             return self.done(params["host"], ["defaults", "unset", key], 30)
         return self.done(params["host"], ["defaults", "set", key, json.dumps(value)], 30)
 
+    def lowered_default(self, host, key, value):
+        """Words for how VALUE (None: the default again) lowers KEY from what that host has now, or None."""
+        try:
+            shown = self.json_of(host, ["defaults", "show", "--json"], 30)
+        except Refused as exc:
+            return f"{key}: the current value could not be read ({exc})"
+        shown = shown if isinstance(shown, dict) else {}
+        values = shown.get("values") if isinstance(shown.get("values"), dict) else {}
+        if key == "canaries":
+            categories = shown.get("canary_categories") or ["credentials", "home", "workspace"]
+            default = shown.get("canary_default") or ["credentials", "home"]
+            try:
+                before = canary_set(values.get("canaries", default), categories)
+            except Refused:
+                before = set(categories)  # unreadable now: every category counts as planted
+            after = canary_set(default if value is None else value, categories)
+            fewer = sorted(before - after)
+            if not fewer:
+                return None
+            return ("canaries: no canary files at all" if not after else
+                    f"canaries: no {' and '.join(fewer)} canary files any more")
+        order = MODE_ORDER if key == "mode" else TELEMETRY_ORDER
+        default = DEFAULT_MODE if key == "mode" else DEFAULT_TELEMETRY
+        before, after = values.get(key, default), default if value is None else value
+        if after not in order:
+            raise Refused(400, f"{key} is one of {', '.join(order)}")
+        if before not in order:
+            return f"{key} {after}: the current value is not one of {', '.join(order)}"
+        if order.index(after) < order.index(before):
+            return f"{key} {after} instead of {before}"
+        return None
 
-# Defaults that lower the protection of every later start (they need {"confirm": true}).
-LOWERING_DEFAULTS = (("mode", "lax"), ("mode", "low"), ("telemetry", "on"), ("canaries", False))
+
+def canary_set(value, categories):
+    """The canary categories VALUE names, as `defaults set canaries` takes it (canary.parse_categories): false, a list,
+    "a,b", "all" or "none"; [] and ["none"] are none. Anything else: refused (400)."""
+    if value is False:
+        return set()
+    if isinstance(value, str):
+        items = value.split(",")
+    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+        items = value
+    else:
+        raise Refused(400, "canaries is false, a list of categories, all or none")
+    names = {item.strip() for item in items if item.strip()}
+    if names == {"all"}:
+        return set(categories)
+    if names <= {"none"}:
+        return set()
+    if names - set(categories):
+        raise Refused(400, f"canary categories are {', '.join(categories)}, all or none")
+    return names
 
 
 def terminal_command(query):
@@ -1277,7 +1693,18 @@ class Service:
         return origin is not None and origin.lower() == "https://" + (headers.get("Host") or "").lower()
 
     def handle(self, method, target, headers, body, address):
-        """(status, headers, body bytes) of one request."""
+        """(status, headers, body bytes) of one request. Every answer to a request of a live session says how long
+        it lives without use (X-Session-Idle-Left, seconds; the page's background polls do not count as use) and at
+        most (X-Session-Lifetime-Left): the page warns before the end and offers to stay logged in."""
+        seen = []
+        status, out_headers, data = self.respond(method, target, headers, body, address, seen)
+        if seen and self.sessions.get(self.cookie(headers), touch=False) is seen[0]:
+            idle, lifetime = self.sessions.left(seen[0])
+            out_headers = [*out_headers, ("X-Session-Idle-Left", str(idle)),
+                           ("X-Session-Lifetime-Left", str(lifetime))]
+        return status, out_headers, data
+
+    def respond(self, method, target, headers, body, address, seen):
         if not self.host_ok(headers):
             return self.error(421, "unknown host name; start the service with --hostname NAME for it")
         path = urllib.parse.urlsplit(target).path
@@ -1308,6 +1735,7 @@ class Service:
                 return self.login(data or {}, address)
             if session is None:
                 raise Refused(401, "log in")
+            seen.append(session)
             if method != "GET" and not hmac.compare_digest(headers.get("X-CSRF-Token") or "", session["csrf"]):
                 raise Refused(403, "the page is out of date: reload it")
             if path == "/api/me":

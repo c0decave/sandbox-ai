@@ -7,6 +7,7 @@ import hashlib
 import http.client
 import importlib.util
 import json
+import re
 import os
 from pathlib import Path
 import shutil
@@ -295,7 +296,7 @@ def logged_in():
     ("POST", "/api/hosts/ct1/llm/lmstudio/check", {"agent": "opencode"}, ["llm", "check", "lmstudio", "--agent",
                                                                            "opencode"]),
     ("GET", "/api/hosts/ct1/llm/lmstudio/models", None, ["llm", "models", "lmstudio", "--json"]),
-    ("DELETE", "/api/hosts/ct1/llm/lmstudio", None, ["llm", "remove", "lmstudio"]),
+    ("DELETE", "/api/hosts/ct1/llm/lmstudio", {"confirm": True}, ["llm", "remove", "lmstudio"]),
     ("GET", "/api/hosts/ct1/defaults", None, ["defaults", "show", "--json"]),
     ("POST", "/api/hosts/ct1/defaults", {"key": "telemetry", "value": "strict"},
      ["defaults", "set", "telemetry", '"strict"']),
@@ -307,18 +308,25 @@ def logged_in():
      ["defaults", "set", "telemetry", '"on"']),
     ("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": False, "confirm": True},
      ["defaults", "set", "canaries", "false"]),
-    ("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": ["home"]}, ["defaults", "set", "canaries", '["home"]']),
+    # fewer canary categories than the host has now (its default: credentials and home) is lowering: confirmed;
+    # more of them is not
+    ("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": ["home"], "confirm": True},
+     ["defaults", "set", "canaries", '["home"]']),
+    ("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": ["credentials", "home", "workspace"]},
+     ["defaults", "set", "canaries", '["credentials", "home", "workspace"]']),
+    ("POST", "/api/hosts/ct1/defaults", {"key": "telemetry", "value": "strict"}, ["defaults", "set", "telemetry", '"strict"']),
     # the network of a running sandbox: every value as --flag=VALUE, the token never (only where it is)
     ("GET", "/api/hosts/ct1/net/web", None, ["net", "show", "web", "--json"]),
     ("POST", "/api/hosts/ct1/net/web", {"op": "allow", "allow_host": ["pypi.org"], "allow_tcp": ["192.0.2.9:5432"],
-                                        "host_ports": [3000], "dns": True,
+                                        "host_ports": [3000], "dns": True, "confirm": True,
                                         "git_login": {"url": "http://localhost:3080", "kind": "secret", "ref": "GITEA"}},
      ["net", "allow", "web", "--allow-host=pypi.org", "--allow-tcp=192.0.2.9:5432", "--allow-host-port=3000", "--dns",
       "--git-token-secret=http://localhost:3080=GITEA"]),
     ("POST", "/api/hosts/ct1/net/web", {"op": "revoke", "host_ports": [3000]},
      ["net", "revoke", "web", "--allow-host-port=3000"]),
     # host wildcards as `net allow` takes them (*.DOMAIN.TLD), unchanged: the command refuses public suffixes
-    ("POST", "/api/hosts/ct1/net/web", {"op": "allow", "allow_host": ["*.example.org", "*.api.Example.co.uk"]},
+    ("POST", "/api/hosts/ct1/net/web", {"op": "allow", "allow_host": ["*.example.org", "*.api.Example.co.uk"],
+                                        "confirm": True},
      ["net", "allow", "web", "--allow-host=*.example.org", "--allow-host=*.api.Example.co.uk"]),
     ("POST", "/api/hosts/ct1/net/web", {"op": "revoke", "allow_host": ["*.example.org"]},
      ["net", "revoke", "web", "--allow-host=*.example.org"]),
@@ -356,7 +364,7 @@ def logged_in():
     ("POST", "/api/hosts/ct1/vpn", {"name": "mv", "kind": "mullvad", "secret": "MULLVAD", "location": "se-sto"},
      ["vpn", "add", "mv", "--mullvad", "--account-secret=MULLVAD", "--location=se-sto"]),
     ("POST", "/api/hosts/ct1/vpn/home/check", {}, ["vpn", "check", "home"]),
-    ("DELETE", "/api/hosts/ct1/vpn/home", None, ["vpn", "remove", "home"]),
+    ("DELETE", "/api/hosts/ct1/vpn/home", {"confirm": True}, ["vpn", "remove", "home"]),
     # kits: the values after "--", options as --flag=VALUE
     ("GET", "/api/hosts/ct1/kits", None, ["kits", "list", "--json"]),
     ("POST", "/api/hosts/ct1/kits", {"name": "team", "agents": ["claude", "codex"]},
@@ -373,11 +381,34 @@ def logged_in():
      ["kits", "add-plugin", "--agent=opencode", "--", "team", "@scope/pkg@1.2"]),
     ("POST", "/api/hosts/ct1/kits/team/add-marketplace", {"marketplace": "tools", "source": "owner/repo"},
      ["kits", "add-marketplace", "--", "team", "tools", "owner/repo"]),
-    ("POST", "/api/hosts/ct1/kits/team/remove-skill", {"skill": "notes", "agents": ["codex"]},
+    ("POST", "/api/hosts/ct1/kits/team/remove-skill", {"skill": "notes", "agents": ["codex"], "confirm": True},
      ["kits", "remove-skill", "--agent=codex", "--", "team", "notes"]),
-    ("POST", "/api/hosts/ct1/kits/team/remove-plugin", {"plugin": "egm@sandbox-ai"},
+    ("POST", "/api/hosts/ct1/kits/team/remove-plugin", {"plugin": "egm@sandbox-ai", "confirm": True},
      ["kits", "remove-plugin", "--", "team", "egm@sandbox-ai"]),
     ("DELETE", "/api/hosts/ct1/kits/team", {"confirm": True}, ["kits", "delete", "--yes", "--", "team"]),
+    # management: rename, a start's history, gc (preview, then confirmed), untaint, answers given before
+    ("POST", "/api/hosts/ct1/starts/web/rename", {"new": "web-2"}, ["rename", "web", "web-2"]),
+    ("GET", "/api/hosts/ct1/starts/web/history", None, ["list", "--history", "web", "--json"]),
+    ("GET", "/api/hosts/ct1/gc", None, ["gc", "--dry-run", "--json"]),
+    ("GET", "/api/hosts/ct1/gc/30", None, ["gc", "--dry-run", "--json", "--older-than=30"]),
+    ("POST", "/api/hosts/ct1/gc", {"older_than": 30, "confirm": True}, ["gc", "--json", "--older-than=30"]),
+    ("POST", "/api/hosts/ct1/gc", {"older_than": None, "confirm": True}, ["gc", "--json"]),
+    ("POST", "/api/hosts/ct1/net/web/untaint", {"confirm": True}, ["net", "untaint", "web"]),
+    ("POST", "/api/hosts/ct1/approvals/12-3-4", {"decision": "allow", "scope": "always", "confirm": True},
+     ["approvals", "allow", "12-3-4", "--scope", "always"]),
+    ("GET", "/api/hosts/ct1/approvals-history", None, ["approvals", "history"]),
+    ("GET", "/api/hosts/ct1/approvals-history/claude-1", None, ["approvals", "history", "claude-1"]),
+    ("POST", "/api/hosts/ct1/remembered/forget", {"project": "/home/u/src/web", "entry": "pypi.org", "confirm": True},
+     ["approvals", "forget", "/home/u/src/web", "pypi.org"]),
+    ("POST", "/api/hosts/ct1/remembered/forget", {"project": "/home/u/src/web", "entry": "[2001:db8::1]:443",
+                                                  "confirm": True},
+     ["approvals", "forget", "/home/u/src/web", "[2001:db8::1]:443"]),
+    ("POST", "/api/hosts/ct1/secrets/GITEA_TOKEN", {"secret": "glpat-x", "confirm": True},
+     ["secrets", "set", "GITEA_TOKEN"]),
+    ("DELETE", "/api/hosts/ct1/secrets/GITEA_TOKEN", {"confirm": True}, ["secrets", "delete", "GITEA_TOKEN"]),
+    ("GET", "/api/hosts/ct1/secrets", None, ["secrets", "list"]),
+    # a limit lower than the current one (here: none now) needs no confirmation
+    ("POST", "/api/hosts/ct1/limits/web", {"memory": "999999t"}, ["limits", "web", "--memory=999999t"]),
 ])
 def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     status, out = logged_in(method, path, data)
@@ -404,8 +435,12 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     ("POST", "/api/hosts/ct1/approvals/1-2", {"decision": "allow", "no_open": "yes"}, 400),
     ("POST", "/api/hosts/ct1/approvals/-x", {"decision": "allow", "no_open": True}, 400),
     ("POST", "/api/hosts/ct1/defaults", {"key": "mode", "value": "lax"}, 400),
-    ("POST", "/api/hosts/ct1/defaults", {"key": "mode", "value": "low"}, 400),
     ("POST", "/api/hosts/ct1/defaults", {"key": "telemetry", "value": "on"}, 400),
+    ("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": []}, 400),
+    ("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": ["none"]}, 400),
+    ("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": "none"}, 400),
+    ("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": ["passwords"]}, 400),
+    ("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": 3}, 400),
     ("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": False}, 400),
     ("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": False, "confirm": 1}, 400),
     ("POST", "/api/hosts/ct1/limits/web", {"memory": "none"}, 400),
@@ -504,6 +539,46 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     ("POST", "/api/hosts/ct1/kits/team/add-skill", {"path": "/x", "create": "yes"}, 400),
     ("POST", "/api/hosts/ct1/kits/team/trust-hooks", {}, 404),
     ("DELETE", "/api/hosts/ct1/kits/team", None, 400),
+    # what widens or removes, without its confirmation (W4, W7)
+    ("POST", "/api/hosts/ct1/net/web", {"op": "allow", "dns": True}, 400),
+    ("POST", "/api/hosts/ct1/net/web", {"op": "allow", "allow_host": ["*.example.org"], "confirm": "yes"}, 400),
+    ("POST", "/api/hosts/ct1/approvals/1-2", {"decision": "allow", "scope": "always"}, 400),
+    ("POST", "/api/hosts/ct1/approvals/1-2", {"decision": "allow", "scope": "always", "confirm": 1}, 400),
+    ("DELETE", "/api/hosts/ct1/vpn/home", None, 400),
+    ("DELETE", "/api/hosts/ct1/llm/lmstudio", {}, 400),
+    ("POST", "/api/hosts/ct1/kits/team/remove-skill", {"skill": "notes"}, 400),
+    ("POST", "/api/hosts/ct1/kits/team/remove-plugin", {"plugin": "egm@sandbox-ai", "confirm": "true"}, 400),
+    ("POST", "/api/hosts/ct1/net/web/untaint", {}, 400),
+    ("POST", "/api/hosts/ct1/net/--all/untaint", {"confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/gc", {}, 400),
+    ("POST", "/api/hosts/ct1/gc", {"older_than": -1, "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/gc", {"older_than": "--dry-run", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/gc", {"older_than": True, "confirm": True}, 400),
+    ("GET", "/api/hosts/ct1/gc/-1", None, 404),
+    ("GET", "/api/hosts/ct1/gc/123456", None, 404),
+    ("DELETE", "/api/hosts/ct1/secrets/GITEA_TOKEN", {}, 400),
+    ("POST", "/api/hosts/ct1/remembered/forget", {"project": "/home/u/src/web", "entry": "pypi.org"}, 400),
+    ("POST", "/api/hosts/ct1/remembered/forget", {"project": "relative", "entry": "pypi.org", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/remembered/forget", {"project": "-x", "entry": "pypi.org", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/remembered/forget", {"project": "/a/../b", "entry": "pypi.org", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/remembered/forget", {"project": "/a", "entry": "--help", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/remembered/forget", {"project": "/a", "entry": "a b", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/remembered/forget", {"project": "/a", "entry": ["pypi.org"], "confirm": True}, 400),
+    # management: every value checked, nothing read as an option
+    ("POST", "/api/hosts/ct1/starts/web/rename", {"new": "--all"}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/rename", {"new": "a b"}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/rename", {}, 400),
+    ("POST", "/api/hosts/ct1/starts/-h/rename", {"new": "x"}, 400),
+    ("GET", "/api/hosts/ct1/starts/--all/history", None, 400),
+    ("GET", "/api/hosts/ct1/approvals-history/--all", None, 400),
+    ("GET", "/api/hosts/ct1/secrets/X", None, 405),
+    ("POST", "/api/hosts/ct1/secrets/-x", {"secret": "v", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/secrets/1X", {"secret": "v", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/secrets/X", {"secret": "", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/secrets/X", {"secret": "two\nlines", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/secrets/X", {"secret": "x" * 8193, "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/secrets/X", {"secret": 42, "confirm": True}, 400),
+    ("DELETE", "/api/hosts/ct1/secrets/a%20b", {"confirm": True}, 400),
 ])
 def test_what_is_refused_never_reaches_a_host(logged_in, method, path, data, status):
     assert logged_in(method, path, data)[0] == status
@@ -629,8 +704,11 @@ def test_hosts_are_added_tested_and_removed(logged_in):
     logged_in.runner.answers[("doctor",)] = (0, "[]", "")
     status, result = logged_in("POST", "/api/hosts/ct1/test")
     assert result["ssh"] and result["version"] == "sandbox-ai 0.1.31" and result["doctor"] == []
-    assert logged_in("DELETE", "/api/hosts/ct1")[0] == 200
-    assert logged_in("DELETE", "/api/hosts/ct1")[0] == 404
+    status, out = logged_in("DELETE", "/api/hosts/ct1")
+    assert status == 400 and '{"confirm": true}' in out["error"] and "root@192.0.2.10" in out["error"]
+    assert [h["name"] for h in logged_in("GET", "/api/hosts")[1]] == ["local", "ct1"], "not removed unconfirmed"
+    assert logged_in("DELETE", "/api/hosts/ct1", {"confirm": True})[0] == 200
+    assert logged_in("DELETE", "/api/hosts/ct1", {"confirm": True})[0] == 404
     events = [json.loads(line) for line in (w.state_dir() / "audit.jsonl").read_text().splitlines()]
     assert [e["path"] for e in events if e["event"] == "action"][:1] == ["/api/hosts"]
 
@@ -900,7 +978,7 @@ def test_the_terminals_page_lists_every_running_start():
 
 def test_the_page_offers_the_network_of_a_start_and_the_presets():
     script = (Path(w.__file__).parent / "web" / "app.js").read_text()
-    assert "/net/${encodeURIComponent(name)}" in script and 'hostPath("/presets")' in script
+    assert "/net/${encodeURIComponent(name)}" in script and 'hostPath("/presets", target)' in script
     assert "--preset ${chosen.id}" in script and "git_login" in script and "host_ports" in script
 
 
@@ -1249,7 +1327,8 @@ def test_an_answer_to_a_question_gets_more_time_than_the_approvals_wait(logged_i
         timeouts.append(timeout)
         return real(host, args, timeout, input)
     logged_in.svc.api.runner = runner
-    status, out = logged_in("POST", "/api/hosts/ct1/approvals/12-3-4", {"decision": "allow", "scope": "always"})
+    status, out = logged_in("POST", "/api/hosts/ct1/approvals/12-3-4", {"decision": "allow", "scope": "always",
+                                                                       "confirm": True})
     assert status == 200, out
     approvals = w.module("approvals")
     assert timeouts[-1] >= approvals.VERIFY_WAIT + 30, timeouts
@@ -1301,29 +1380,256 @@ def test_the_questions_of_every_host_come_together_and_a_failing_host_is_named(l
     assert logged_in("GET", "/api/approvals")[1]["errors"] == {} and [h for h, _, _ in asked] == ["local"]
 
 
-def test_what_ends_removes_or_weakens_needs_its_confirmation_on_the_server(logged_in):
+# Every action of NEEDS_CONFIRM with a request that needs it, and the one command it runs once confirmed (None: the
+# hosts list on the service's machine). Without {"confirm": true} it is refused, and nothing but the read its check
+# needs (READS) reaches the host.
+CONFIRM_CASES = {
+    "start-stop": ("POST", "/api/hosts/ct1/starts/web/stop", {}, ["stop", "web"]),
+    "start-delete": ("POST", "/api/hosts/ct1/starts/web/delete", {}, ["delete", "web", "--yes"]),
+    "gc": ("POST", "/api/hosts/ct1/gc", {"older_than": 7}, ["gc", "--json", "--older-than=7"]),
+    "approval-allow-always": ("POST", "/api/hosts/ct1/approvals/1-2", {"decision": "allow", "scope": "always"},
+                              ["approvals", "allow", "1-2", "--scope", "always"]),
+    "approval-deny-always": ("POST", "/api/hosts/ct1/approvals/1-2", {"decision": "deny", "scope": "always"},
+                             ["approvals", "deny", "1-2", "--scope", "always"]),
+    "approval-forget": ("POST", "/api/hosts/ct1/remembered/forget", {"project": "/home/u/web", "entry": "pypi.org"},
+                        ["approvals", "forget", "/home/u/web", "pypi.org"]),
+    "defaults-lower": ("POST", "/api/hosts/ct1/defaults", {"key": "mode", "value": "low"},
+                       ["defaults", "set", "mode", '"low"']),
+    "net-allow": ("POST", "/api/hosts/ct1/net/web", {"op": "allow", "dns": True}, ["net", "allow", "web", "--dns"]),
+    "net-untaint": ("POST", "/api/hosts/ct1/net/web/untaint", {}, ["net", "untaint", "web"]),
+    "workspace-writable": ("POST", "/api/hosts/ct1/workspaces/web", {"directory": "/home/u/src", "read_only": False},
+                           ["workspace", "add", "web", "/home/u/src"]),
+    "workspace-force": ("POST", "/api/hosts/ct1/workspaces/web/remove", {"workspace": "other", "force": True},
+                        ["workspace", "remove", "web", "other", "--force"]),
+    "device-add": ("POST", "/api/hosts/ct1/devices/web", {"device": "/dev/ttyUSB0"}, ["devices", "add", "web",
+                                                                                     "/dev/ttyUSB0"]),
+    # 8g now: a huge value is no limit either
+    "limits-raise": ("POST", "/api/hosts/ct1/limits/web", {"memory": "999999t"}, ["limits", "web", "--memory=999999t"]),
+    "host-remove": ("DELETE", "/api/hosts/ct1", {}, None),
+    "vpn-remove": ("DELETE", "/api/hosts/ct1/vpn/home", {}, ["vpn", "remove", "home"]),
+    "llm-remove": ("DELETE", "/api/hosts/ct1/llm/gpu", {}, ["llm", "remove", "gpu"]),
+    "kit-delete": ("DELETE", "/api/hosts/ct1/kits/team", {}, ["kits", "delete", "--yes", "--", "team"]),
+    "kit-remove": ("POST", "/api/hosts/ct1/kits/team/remove-plugin", {"plugin": "egm@sandbox-ai"},
+                   ["kits", "remove-plugin", "--", "team", "egm@sandbox-ai"]),
+    "secret-delete": ("DELETE", "/api/hosts/ct1/secrets/GITEA_TOKEN", {}, ["secrets", "delete", "GITEA_TOKEN"]),
+    "secret-replace": ("POST", "/api/hosts/ct1/secrets/GITEA_TOKEN", {"secret": "glpat-new"},
+                       ["secrets", "set", "GITEA_TOKEN"]),
+}
+READS = (["defaults", "show", "--json"], ["limits", "web", "--show", "--json"], ["secrets", "list"])
+# The POST routes that end, remove or weaken nothing (each of the others names its NEEDS_CONFIRM actions): a new route
+# has to be put here or in the table, deliberately.
+SAFE_POSTS = {r"/api/hosts", r"/api/hosts-status", r"/api/hosts/(?P<host>[^/]+)", r"/api/hosts/(?P<host>[^/]+)/test",
+              r"/api/hosts/(?P<host>[^/]+)/update", r"/api/hosts/(?P<host>[^/]+)/starts/(?P<name>[^/]+)/rename",
+              r"/api/hosts/(?P<host>[^/]+)/mcp/(?P<name>[^/]+)/attach", r"/api/hosts/(?P<host>[^/]+)/llm",
+              r"/api/hosts/(?P<host>[^/]+)/llm/(?P<name>[^/]+)/check", r"/api/hosts/(?P<host>[^/]+)/vpn",
+              r"/api/hosts/(?P<host>[^/]+)/vpn/(?P<name>[^/]+)/check", r"/api/hosts/(?P<host>[^/]+)/kits",
+              r"/api/hosts/(?P<host>[^/]+)/devices/(?P<name>[^/]+)/remove"}
+
+
+@pytest.fixture
+def confirming(logged_in):
+    """A service whose host ct1 has a start with 8g of memory, a secret GITEA_TOKEN and the default defaults."""
+    hosts = w.module("hosts")
+    hosts.save({"ct1": hosts.check("ct1", {"ssh": "root@192.0.2.10"})})
+    logged_in.runner.answers[("limits", "web", "--show")] = (0, json.dumps({"memory": 8 << 30, "memory_high": None,
+                                                                            "cpus": 2.0, "pids": 4096}), "")
+    logged_in.runner.answers[("secrets", "list")] = (0, "NAME         STORE\nGITEA_TOKEN  file\n", "")
+    logged_in.runner.answers[("defaults", "show")] = (0, json.dumps({"values": {}, "canary_default": ["credentials",
+                                                                                                     "home"]}), "")
+    return logged_in
+
+
+def test_the_confirmation_table_covers_every_route_that_ends_removes_or_weakens():
+    """One table (NEEDS_CONFIRM): every DELETE route names actions of it, every POST route does or is one that
+    weakens nothing (SAFE_POSTS), every action of it is named by a route and has its case here."""
+    api = w.Api(FakeRunner())
+    named = set()
+    for method, pattern, _, actions in api.routes:
+        assert set(actions) <= set(w.NEEDS_CONFIRM), (pattern, actions)
+        named |= set(actions)
+        if method == "DELETE":
+            assert actions, f"DELETE {pattern} removes something: it names its confirmation"
+        if method == "POST":
+            assert bool(actions) != (pattern in SAFE_POSTS), f"POST {pattern}: in the table or in SAFE_POSTS"
+        for action in actions:
+            case_method, path, _, _ = CONFIRM_CASES[action]
+            assert any(m == case_method and re.fullmatch(p, path) and action in a for m, p, _, a in api.routes), action
+    assert named == set(w.NEEDS_CONFIRM) == set(CONFIRM_CASES)
+
+
+@pytest.mark.parametrize("action", sorted(CONFIRM_CASES))
+def test_what_ends_removes_or_weakens_needs_its_confirmation_on_the_server(confirming, action):
     """The page asks first; the service refuses the same request without {"confirm": true} (another page, a script
-    with the session's token): a stop, a delete, a limit taken away, a deny always, defaults that lower the
-    protection of later starts. With it, the one command runs."""
-    for path, body, args in (
-            ("/api/hosts/ct1/starts/web/stop", {}, ["stop", "web"]),
-            ("/api/hosts/ct1/starts/web/delete", {}, ["delete", "web", "--yes"]),
-            ("/api/hosts/ct1/limits/web", {"memory": "none", "cpus": "2"}, ["limits", "web", "--memory=none",
-                                                                          "--cpus=2"]),
-            ("/api/hosts/ct1/approvals/1-2", {"decision": "deny", "scope": "always"},
-             ["approvals", "deny", "1-2", "--scope", "always"]),
-            ("/api/hosts/ct1/defaults", {"key": "mode", "value": "low"}, ["defaults", "set", "mode", '"low"'])):
-        status, out = logged_in("POST", path, body)
-        assert status == 400 and '{"confirm": true}' in out["error"], (path, out)
-        assert logged_in.runner.calls == [], path
-        status, out = logged_in("POST", path, {**body, "confirm": True})
-        assert status == 200 and logged_in.runner.calls.pop() == ("ct1", args), (path, out)
-    # what does not end or weaken anything needs none
+    with the session's token), naming why (the table's words); with it, the one command runs."""
+    method, path, body, args = CONFIRM_CASES[action]
+    for refused in (body, {**body, "confirm": "true"}, {**body, "confirm": 1}):
+        status, out = confirming(method, path, refused)
+        assert status == 400 and '{"confirm": true}' in out["error"] and w.NEEDS_CONFIRM[action] in out["error"], out
+    assert [args for _, args in confirming.runner.calls if args not in READS] == [], "nothing changed on a host"
+    assert {name for name in w.module("hosts").load()} == {"ct1"}
+    confirming.runner.calls.clear()
+    status, out = confirming(method, path, {**body, "confirm": True})
+    assert status == 200, out
+    if args is None:
+        assert w.module("hosts").load() == {} and confirming.runner.calls == []
+    else:
+        assert confirming.runner.calls == [("ct1", args)], "confirmed: no read first, the one command"
+
+
+def test_what_weakens_nothing_needs_no_confirmation(confirming):
+    """Compared with what the host has now: a stricter mode or telemetry, more canary categories, a lower limit, a
+    narrower answer, a new secret, a revoke."""
     for path, body in (("/api/hosts/ct1/starts/web/pause", {}), ("/api/hosts/ct1/starts/web/resume", {}),
-                       ("/api/hosts/ct1/limits/web", {"memory": "16g"}),
+                       ("/api/hosts/ct1/limits/web", {"memory": "4g", "cpus": "1.5", "pids": "1024"}),
+                       ("/api/hosts/ct1/limits/web", {"memory": "8g"}),
                        ("/api/hosts/ct1/approvals/1-2", {"decision": "deny", "scope": "run"}),
-                       ("/api/hosts/ct1/defaults", {"key": "mode", "value": "paranoid"})):
-        assert logged_in("POST", path, body)[0] == 200, path
+                       ("/api/hosts/ct1/approvals/1-2", {"decision": "allow", "scope": "run"}),
+                       ("/api/hosts/ct1/defaults", {"key": "mode", "value": "paranoid"}),
+                       ("/api/hosts/ct1/defaults", {"key": "mode", "value": None}),
+                       ("/api/hosts/ct1/defaults", {"key": "telemetry", "value": "strict"}),
+                       ("/api/hosts/ct1/defaults", {"key": "canaries", "value": "all"}),
+                       ("/api/hosts/ct1/defaults", {"key": "keep_days", "value": 30}),
+                       ("/api/hosts/ct1/net/web", {"op": "revoke", "dns": True}),
+                       ("/api/hosts/ct1/secrets/NEW_TOKEN", {"secret": "v1"})):
+        status, out = confirming("POST", path, body)
+        assert status == 200, (path, body, out)
+    assert ("ct1", ["secrets", "set", "NEW_TOKEN"]) in confirming.runner.calls
+
+
+@pytest.mark.parametrize("now, key, value, lowers", [
+    ({"mode": "paranoid"}, "mode", "high", True), ({"mode": "paranoid"}, "mode", None, True),
+    ({"mode": "lax"}, "mode", "low", False), ({"mode": "high"}, "mode", "high", False),
+    ({}, "mode", "low", True), ({}, "mode", "medium", False),
+    ({"telemetry": "strict"}, "telemetry", "off", True), ({"telemetry": "strict"}, "telemetry", None, True),
+    ({"telemetry": "on"}, "telemetry", "off", False), ({}, "telemetry", "strict", False),
+    ({"canaries": ["credentials", "home", "workspace"]}, "canaries", ["credentials", "home"], True),
+    ({"canaries": ["credentials", "home", "workspace"]}, "canaries", None, True),
+    ({"canaries": False}, "canaries", ["home"], False), ({"canaries": "all"}, "canaries", "credentials,home", True),
+    ({}, "canaries", ["credentials", "home"], False), ({}, "canaries", ["workspace", "home", "credentials"], False),
+])
+def test_a_default_is_lowered_by_any_step_down_from_what_the_host_has(logged_in, now, key, value, lowers):
+    """W3: compared with `defaults show` on that host: mode lax < low < medium < high < paranoid, telemetry on < off <
+    strict, canaries as a set (fewer categories, [] or none: no canary files); unset is the default."""
+    logged_in.runner.answers[("defaults", "show")] = (0, json.dumps({"values": now, "canary_categories": [
+        "credentials", "home", "workspace"], "canary_default": ["credentials", "home"]}), "")
+    status, out = logged_in("POST", "/api/hosts/ct1/defaults", {"key": key, "value": value})
+    assert (status == 400 and "lowers the protection" in out["error"]) if lowers else status == 200, out
+    assert logged_in.runner.calls[0] == ("ct1", ["defaults", "show", "--json"])
+    assert len(logged_in.runner.calls) == (1 if lowers else 2)
+
+
+def test_the_policy_is_the_services_own_table(logged_in):
+    status, out = logged_in("GET", "/api/policy")
+    assert status == 200 and out["confirm"] == w.NEEDS_CONFIRM
+    assert out["order"] == {"mode": ["lax", "low", "medium", "high", "paranoid"], "telemetry": ["on", "off", "strict"]}
+    script = (WEB / "app.js").read_text()
+    assert 'api("GET", "/api/policy")' in script and "function needsConfirm(action)" in script
+    for action in ("net-allow", "defaults-lower"):
+        assert f'needsConfirm("{action}")' in script
+
+
+def test_each_answer_says_how_long_the_session_lives_without_use():
+    """W5: X-Session-Idle-Left (the page's polls are no use: it goes down under them) and X-Session-Lifetime-Left;
+    a request of the user's renews it; none for a request without a session, or once it is gone."""
+    secret = add_user()
+    clock = [5000.0]
+    svc = service(sessions=w.Sessions(clock=lambda: clock[0]))
+    _, headers, body = login(svc, secret)
+    ok = {**HEADERS, "Cookie": cookie_of(headers), "X-CSRF-Token": body["csrf"]}
+    left = lambda answer: (dict(answer[1]).get("X-Session-Idle-Left"), dict(answer[1]).get("X-Session-Lifetime-Left"))
+    assert left(svc.handle("GET", "/api/me", ok, b"", "192.0.2.1")) == (str(w.IDLE), str(w.LIFETIME))
+    clock[0] += 600
+    assert left(svc.handle("GET", "/api/hosts", {**ok, "X-Background": "1"}, b"", "192.0.2.1")) == (
+        str(w.IDLE - 600), str(w.LIFETIME - 600)), "a poll is no use"
+    clock[0] += 60
+    assert left(svc.handle("GET", "/api/hosts", ok, b"", "192.0.2.1"))[0] == str(w.IDLE), "a request of the user's"
+    assert left(svc.handle("GET", "/api/me", HEADERS, b"", "192.0.2.1")) == (None, None)
+    assert left(svc.handle("POST", "/api/logout", ok, b"{}", "192.0.2.1")) == (None, None)
+    script = (WEB / "app.js").read_text()
+    assert 'response.headers.get(name)' in script and '"X-Session-Idle-Left"' in script
+
+
+def test_a_host_still_being_asked_is_not_asked_again_and_its_last_list_stands_in(logged_in, monkeypatch):
+    """At most one request in flight per host (an unreachable one held 15 s each time and the threads piled up): a
+    poll while it runs gets its last list with its age, or why there is none yet; once it answered, it is asked
+    again."""
+    hosts = w.module("hosts")
+    hosts.save({"slow": hosts.check("slow", {"ssh": "admin@192.0.2.9"})})
+    monkeypatch.setattr(w, "APPROVALS_HOST_SECONDS", 0.2)
+    asked, release, answers = [], threading.Event(), {"slow": [{"id": "1-1", "question": "q"}]}
+
+    def runner(host, args, timeout=120, input=None):
+        asked.append(host)
+        if host == "slow" and len([h for h in asked if h == "slow"]) > 1:
+            release.wait(10)
+        return 0, json.dumps(answers.get(host, [])), ""
+    logged_in.svc.api.runner = runner
+    first = logged_in("GET", "/api/approvals")[1]
+    assert [q["host"] for q in first["questions"]] == ["slow"] and set(first["age"]) == {"local", "slow"}
+    second = logged_in("GET", "/api/approvals")[1]   # slow is asked again, does not answer within the time
+    assert "slow" not in second["errors"] and [q["host"] for q in second["questions"]] == ["slow"], \
+        "its last list stands in"
+    third = logged_in("GET", "/api/approvals")[1]
+    assert asked.count("slow") == 2, "not asked again while its request runs"
+    assert third["age"]["slow"] >= second["age"]["slow"] and [q["host"] for q in third["questions"]] == ["slow"]
+    release.set()
+    for _ in range(100):
+        if not logged_in.svc.api.approvals_fanout.flight:
+            break
+        time.sleep(0.05)
+    logged_in("GET", "/api/approvals")
+    assert asked.count("slow") == 3, "asked again once it answered"
+
+
+def test_a_host_is_edited_as_hosts_add_checks_it(logged_in):
+    hosts = w.module("hosts")
+    hosts.save({"ct1": hosts.check("ct1", {"ssh": "root@192.0.2.10", "port": 2222, "description": "old"})})
+    status, out = logged_in("POST", "/api/hosts/ct1", {"ssh": "admin@192.0.2.11", "port": 22, "description": "",
+                                                       "update_sudo": True})
+    assert status == 200 and hosts.load()["ct1"] == {"ssh": "admin@192.0.2.11", "port": 22, "description": "",
+                                                     "update_sudo": True}, out
+    for bad in ({"ssh": "-oProxyCommand=id"}, {"port": 0}, {"identity": "relative/key"}, {"update_sudo": "yes"},
+                {"description": "two\nlines"}, {"shell": "/bin/sh"}, {"command": "sandbox-ai; id"}):
+        assert logged_in("POST", "/api/hosts/ct1", bad)[0] == 400, bad
+    assert logged_in("POST", "/api/hosts/nowhere", {"port": 22})[0] == 404
+    assert hosts.load()["ct1"]["ssh"] == "admin@192.0.2.11" and logged_in.runner.calls == []
+
+
+def test_the_secrets_of_a_host_are_their_names_and_stores_only(logged_in):
+    logged_in.runner.answers[("secrets", "list")] = (0, "no secrets\n", "")
+    assert logged_in("GET", "/api/hosts/ct1/secrets") == (200, [])
+    logged_in.runner.answers[("secrets", "list")] = (0, "NAME         STORE\nGITEA_TOKEN  secret-service\n"
+                                                        "MULLVAD      file\n\x1b[2J bad line here\n", "")
+    assert logged_in("GET", "/api/hosts/ct1/secrets") == (200, [{"name": "GITEA_TOKEN", "store": "secret-service"},
+                                                                {"name": "MULLVAD", "store": "file"}])
+    # a new name is kept without a question, its value on standard input only, and the audit log never has it
+    calls = []
+    real = logged_in.runner
+
+    def runner(host, args, timeout=120, input=None):
+        calls.append((args, input))
+        return real(host, args, timeout, input)
+    logged_in.svc.api.runner = runner
+    assert logged_in("POST", "/api/hosts/ct1/secrets/NEW_ONE", {"secret": "s3cr3t-value"})[0] == 200
+    assert calls == [(["secrets", "list"], None), (["secrets", "set", "NEW_ONE"], "s3cr3t-value\n")]
+    assert "s3cr3t-value" not in (w.state_dir() / "audit.jsonl").read_text()
+
+
+def test_the_page_tells_a_copy_from_an_open_file_when_a_removal_is_refused():
+    """The force-remove confirmation names the right consequence from the CLI's own refusal phrases: a copy the agent
+    took stays usable until a restart (--force only takes it out of the sandbox's own view); what is open stays usable
+    until it is closed. The refusal text itself is shown."""
+    spec = importlib.util.spec_from_file_location("workspaces_for_web_test", ROOT / "sandbox" / "workspaces.py")
+    workspaces = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(workspaces)
+    page = (WEB / "app.js").read_text().split("function workspaceRefusal")[1].split("\n}")[0]
+    for phrase in (workspaces.REFUSED_COPY, workspaces.REFUSED_UNKNOWN):
+        assert phrase in page.split('return "copy"')[0], phrase
+    for phrase in (workspaces.REFUSED_IN_USE, workspaces.REFUSED_BUSY):
+        assert phrase in page.split('return "copy"')[1].split('return "open"')[0], phrase
+    script = (WEB / "app.js").read_text()
+    assert "The agent's copy stays usable, also for writing, until the sandbox restarts" in script
+    assert 't("It was refused: {why}", { why: refusal })' in script
 
 
 def test_the_current_limits_and_the_review_of_a_kept_home_come_as_the_commands_say(logged_in):
@@ -1719,14 +2025,22 @@ class Node {
   get parentNode() { return this.parent; }
   get firstChild() { return this.children[0] || null; }
   get lastElementChild() { return this.children[this.children.length - 1]; }
+  get childNodes() { return this.children; }
   get isConnected() { let n = this; while (n.parent) n = n.parent; return n === body; }
   get textContent() { return this.tagName === "#text" ? this.text : this.children.map(c => c.textContent).join(""); }
   set textContent(v) { this.children = []; if (String(v) !== "") this.append(String(v)); }
   all() { const out = []; const walk = n => { out.push(n); n.children.forEach(walk); }; walk(this); return out; }
   querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
-  querySelectorAll(sel) { const cls = sel.replace(/^\./, ""); return this.all().filter(n => n !== this && (n.className || "").split(" ").includes(cls)); }
+  // ".class", or tag names ("button, input")
+  querySelectorAll(sel) {
+    if (sel.startsWith(".")) return this.all().filter(n => n !== this && (n.className || "").split(" ").includes(sel.slice(1)));
+    const tags = sel.split(",").map(x => x.trim());
+    return this.all().filter(n => n !== this && tags.includes(n.tagName));
+  }
 }
 const body = new Node("body");
+const app = new Node("div"); app.setAttribute("id", "app"); body.append(app);
+const live = new Node("div"); live.setAttribute("id", "live"); body.append(live);
 const nav = new Node("button");
 const document = {
   body, title: "", createElement: t => new Node(t),
@@ -1735,16 +2049,19 @@ const document = {
   querySelector: sel => (sel === 'nav button[data-page="approvals"]' ? nav : null), querySelectorAll: () => [],
   documentElement: { style: { setProperty() {} } },
 };
-const calls = [];
-let answer = null;
+const calls = [], opened = [];
+let answer = null, sessionLeft = null;
+// ANSWER's result: data, an Error (502), { __status: N } (that status), or a Promise of one of them (a slow host)
 const fetch = async (path, opts) => {
   calls.push({ method: opts.method, path, headers: opts.headers, body: opts.body });
-  const data = answer(opts.method, path, opts.body);
-  if (data instanceof Error) return { status: 502, ok: false, statusText: "Bad Gateway", json: async () => ({ error: data.message }) };
-  return { status: 200, ok: true, json: async () => data };
+  const data = await answer(opts.method, path, opts.body);
+  const headers = { get: (name) => (name === "X-Session-Idle-Left" && sessionLeft !== null ? String(sessionLeft) : name === "X-Session-Lifetime-Left" && sessionLeft !== null ? "40000" : null) };
+  if (data instanceof Error) return { status: 502, ok: false, statusText: "Bad Gateway", headers, json: async () => ({ error: data.message }) };
+  if (data && data.__status) return { status: data.__status, ok: false, statusText: "", headers, json: async () => ({ error: "log in" }) };
+  return { status: 200, ok: true, headers, json: async () => data };
 };
 const context = vm.createContext({ document, Node, setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0,
-  clearInterval() {}, console, window: {}, location: { host: "x", hash: "" }, localStorage: { getItem: () => null, setItem() {} }, fetch });
+  clearInterval() {}, console, window: { open: (...args) => { opened.push(args); return null; } }, location: { host: "x", hash: "" }, localStorage: { getItem: () => null, setItem() {} }, fetch });
 vm.runInContext("let __now = 1000000; Date.now = () => __now;", context);
 // the page's texts first, as index.html loads them (i18n.js before app.js)
 vm.runInContext(fs.readFileSync(require("path").join(require("path").dirname(process.argv[2]), "i18n.js"), "utf8"), context);
@@ -1782,7 +2099,8 @@ const cell = (r, cls) => r.all().find(n => (n.className || "").split(" ").includ
   const browser = row("ct1 1-1"), bad = row("ct1 1-4");
   const link = browser.all().find(n => n.tagName === "a");
   result.link = link && [link.getAttribute("href"), link.getAttribute("target"), link.getAttribute("rel"), link.textContent];
-  result.badLink = bad.all().some(n => n.tagName === "a") || Boolean(button(bad, "Opened it — allow"));
+  result.badLink = bad.all().some(n => n.tagName === "a") || Boolean(button(bad, "Open here and allow")) || Boolean(button(bad, "Allow"));
+  result.badText = bad.textContent;
   const options = (r) => r.all().filter(n => n.tagName === "option").map(o => [o.value, o.textContent, "disabled" in o.attributes]);
   result.options = [options(row("local 1-1")), options(browser), options(bad)];
   result.block = ["local 1-1", "ct1 1-1", "ct1 1-4"].map(k => Boolean(button(row(k), "Block always…")));
@@ -1807,11 +2125,14 @@ const cell = (r, cls) => r.all().find(n => (n.className || "").split(" ").includ
   await vm.runInContext("poll()", context); await settle();
   result.stillAsking = row("local 1-1") === kept && Boolean(button(kept, "Yes, allow"));
   button(kept, "Yes, allow").fire("click"); await settle();
-  // the browser question of ct1: its link opened here, allowed there without opening a browser
+  // the browser question of ct1: opened here, allowed there without opening a browser (no plain Allow for it)
+  result.browserButtons = browser.all().filter(n => n.tagName === "button").map(b => b.textContent);
   browser.all().find(n => n.tagName === "select").value = "run";
-  button(browser, "Opened it — allow").fire("click");
+  button(browser, "Open here and allow").fire("click");
   result.askedNoOpen = browser.all().find(n => n.className === "confirm").textContent;
-  button(browser, "Yes, allow").fire("click"); await settle();
+  result.openedBeforeYes = opened.length;
+  button(browser, "Yes, open and allow").fire("click"); await settle();
+  result.opened = opened;
   // Deny: for the run; Block always: asked first
   const other = row("local 1-3");
   button(other, "Block always…").fire("click");
@@ -1820,14 +2141,19 @@ const cell = (r, cls) => r.all().find(n => (n.className || "").split(" ").includ
   button(other, "Yes, block always").fire("click"); await settle();
   open.push(q("ct1", "2-1", "look up x.org", { max_scope: "always" }));
   await vm.runInContext("poll()", context); await settle();
-  button(row("ct1 2-1"), "Deny").fire("click"); await settle();
+  result.denyLabels = [button(row("ct1 2-1"), "Deny for this run") ? "run" : null];
+  const scope21 = row("ct1 2-1").all().find(n => n.tagName === "select");
+  scope21.value = "once"; scope21.fire("change");
+  result.denyLabels.push(button(row("ct1 2-1"), "Deny once") ? "once" : null);
+  scope21.value = "run"; scope21.fire("change");
+  button(row("ct1 2-1"), "Deny for this run").fire("click"); await settle();
   result.posts = calls.filter(c => c.method === "POST").map(c => [c.path, JSON.parse(c.body)]);
   result.toast = toasts().filter(t => t.includes("sandbox-ai approvals:"));
   // a host that cannot be asked keeps its rows and is named; the others are shown
   open = [q("ct1", "1-4", "open this", { seconds_left: 30 }), q("local", "5-1", "connect to a.org:443")];
   errors = {};
   await vm.runInContext("poll()", context); await settle();
-  result.revived = [Boolean(button(row("ct1 1-4"), "Allow")), cell(row("ct1 1-4"), "countdown").textContent];
+  result.revived = [Boolean(button(row("ct1 1-4"), "Deny once")), cell(row("ct1 1-4"), "countdown").textContent];
   open = [q("local", "5-1", "connect to a.org:443")];
   errors = { ct1: "ssh: connect to host ct1 port 22: No route to host" };
   await vm.runInContext("poll()", context); await settle();
@@ -1879,10 +2205,11 @@ def test_the_approvals_table_is_kept_between_polls(tmp_path):
                                    ["8 s", "countdown bad"]]
     assert result["link"] == ["https://login.example.org/device?code=1", "_blank", "noopener noreferrer",
                               "https://login.example.org/device?code=1"]
-    assert result["badLink"] is False, "a javascript: URL is no link, and offers no Opened it"
+    assert result["badLink"] is False, "a javascript: URL is no link, and offers no Allow of any kind"
+    assert "not opened anywhere" in result["badText"]
     labels = [["once", "this once"], ["run", "for the rest of this run"], ["always", "always (remembered for the project)"]]
     assert result["options"] == [[[*l, False] for l in labels], [[*labels[0], False], [*labels[1], False], [*labels[2], True]],
-                                 [[*labels[0], False], [*labels[1], True], [*labels[2], True]]]
+                                 []], "scopes wider than the question allows are off; one that cannot be allowed has none"
     assert result["block"] == [True, False, False], "Block always only where an always is possible"
     assert result["later"] == ["35 s", "35 s", "5 s", "expired"] and result["tickRequests"] == 0
     assert result["expired"] == ["countdown bad", True, False]
@@ -1893,11 +2220,15 @@ def test_the_approvals_table_is_kept_between_polls(tmp_path):
     for part in ("claude-web", "on local", "connect to pypi.org:443", "always (remembered for the project)",
                  "Allow always: pypi.org"):
         assert part in result["asked"], (part, result["asked"])
-    assert "on ct1" in result["askedNoOpen"] and "without opening a browser there" in result["askedNoOpen"]
+    assert "on ct1" in result["askedNoOpen"] and "nothing opens on ct1" in result["askedNoOpen"]
+    assert result["browserButtons"] == ["Open here and allow", "Deny for this run"], "never a plain Allow (it opens there)"
+    assert result["openedBeforeYes"] == 0
+    assert result["opened"] == [["https://login.example.org/device?code=1", "_blank", "noopener,noreferrer"]]
+    assert result["denyLabels"] == ["run", "once"], "the Deny button says what it does"
     assert "remembered for the project" in result["askedBlock"] and "on local" in result["askedBlock"]
     assert result["postsBeforeBlock"] == 2
     assert result["posts"] == [
-        ["/api/hosts/local/approvals/1-1", {"decision": "allow", "scope": "always"}],
+        ["/api/hosts/local/approvals/1-1", {"decision": "allow", "scope": "always", "confirm": True}],
         ["/api/hosts/ct1/approvals/1-1", {"decision": "allow", "scope": "run", "no_open": True}],
         ["/api/hosts/local/approvals/1-3", {"decision": "deny", "scope": "always", "confirm": True}],
         ["/api/hosts/ct1/approvals/2-1", {"decision": "deny", "scope": "run"}]]
@@ -1914,6 +2245,126 @@ def test_the_approvals_table_is_kept_between_polls(tmp_path):
     assert result["toastsAfter"] == [], "the toast of a question goes with it"
     assert "code 1008" in result["close"][0] and "at most 8 terminals" in result["close"][0]
     assert "\u001b" not in result["close"][0] and "could not connect" in result["close"][1]
+
+
+QUESTIONS_DRIVER = FAKE_DOM + r"""
+const rows = () => body.all().filter(n => n.attributes["data-id"]);
+const key = (r) => `${r.attributes["data-host"]} ${r.attributes["data-id"]}`;
+const row = (k) => rows().find(r => key(r) === k);
+const cell = (r, cls) => r.all().find(n => (n.className || "").split(" ").includes(cls));
+const asks = () => toasts().filter(t => t.includes("sandbox-ai asks"));
+(async () => {
+  const result = {};
+  vm.runInContext('state.me = { user: "admin", csrf: "c" }; state.page = "logs"; state.host = "local";', context);
+  const q = (host, id, question, extra) => Object.assign({ host, id, run: "r1", sandbox: "web", kind: "connect", question,
+    seconds_left: 45, max_scope: "always" }, extra || {});
+  let open = [q("local", "1-1", "connect to a.org:443"), q("ct1", "2-1", "connect to b.org:443")], errors = {}, age = {};
+  let held = null;  // a poll fetched before an answer, arriving after it
+  answer = (method, path, sent) => {
+    if (method === "GET" && path === "/api/approvals") return held ? held : { questions: open, errors, age };
+    if (method === "GET") return {};
+    open = open.filter(x => path !== `/api/hosts/${x.host}/approvals/${x.id}`);
+    return { output: "done" };
+  };
+  // W1: two questions in one poll elsewhere: one toast for both; one answered or gone leaves it for the other
+  await vm.runInContext("poll()", context); await settle();
+  result.together = asks();
+  open = open.filter(x => x.id !== "2-1");
+  await vm.runInContext("poll()", context); await settle();
+  result.oneLeft = asks();
+  open = [];
+  await vm.runInContext("poll()", context); await settle();
+  result.noneLeft = asks();
+  // a closed toast stays closed for its questions
+  open = [q("local", "3-1", "connect to c.org:443")];
+  await vm.runInContext("poll()", context); await settle();
+  document.getElementById("toasts").children[0].all().find(n => n.tagName === "button" && n.getAttribute("aria-label") === "Close").fire("click");
+  await vm.runInContext("poll()", context); await settle();
+  result.closedStays = asks();
+  // the approvals page: countdowns from when each host's list was read; no deadline; what cannot be allowed
+  vm.runInContext('state.page = "approvals";', context);
+  open = [q("local", "4-1", "connect to d.org:443", { seconds_left: 30 }), q("ct1", "4-2", "connect to e.org:443", { seconds_left: 30 }),
+    q("ct1", "4-3", "open the page", { kind: "browser", url: "https://bank.example@evil.example/x", url_host: "evil.example", seconds_left: null, timeout: null, max_scope: "once" }),
+    q("ct1", "4-4", "look up f.org", { kind: "dns", max_scope: null, allow_refused: "a lookup is allowed for the run or not at all" }),
+    q("ct1", "4-5", "open the docs", { kind: "browser", url: "https://docs.example.org/a@b", url_host: "docs.example.org", url_truncated: true, seconds_left: null, max_scope: "run" })];
+  age = { local: 0.5, ct1: 12 };
+  await vm.runInContext("pages.approvals(__main)", context); await settle();
+  result.countdowns = rows().map(r => [key(r), cell(r, "countdown").textContent]);
+  const userinfo = row("ct1 4-3"), refused = row("ct1 4-4"), docs = row("ct1 4-5");
+  result.userinfo = [userinfo.all().some(n => n.tagName === "a"), userinfo.all().filter(n => n.tagName === "button").map(b => b.textContent), userinfo.textContent.includes("opens evil.example")];
+  result.refused = [refused.all().filter(n => n.tagName === "button").map(b => b.textContent), refused.all().some(n => n.tagName === "select"), refused.textContent.includes("cannot be allowed: a lookup is allowed for the run or not at all")];
+  const link = docs.all().find(n => n.tagName === "a");
+  result.docs = [link && link.getAttribute("href"), docs.textContent.includes("the URL was cut"), docs.textContent.includes("opens docs.example.org")];
+  // spoken at 20 and 10 seconds, once each
+  const spoken = [];
+  for (let i = 0; i < 25; i++) { vm.runInContext("__now += 1000; tickApprovals();", context); if (live.textContent && !spoken.includes(live.textContent)) spoken.push(live.textContent); }
+  result.spoken = spoken;
+  // keys in a focused row: d denies (for the run), a asks to allow
+  const local = row("local 4-1");
+  result.focusable = local.getAttribute("tabindex");
+  local.fire("keydown", { key: "a" });
+  result.keyAsk = Boolean(local.all().find(n => n.className === "confirm"));
+  button(local, "Cancel").fire("click");
+  result.cancelFocus = globalThis.focused && globalThis.focused.textContent;
+  // W10: the answer is given; a poll fetched before it arrives after: its row does not come back
+  const before = { questions: open.slice(), errors: {}, age: {} };
+  local.fire("keydown", { key: "d" }); await settle();
+  result.denied = calls.filter(c => c.method === "POST").map(c => [c.path, JSON.parse(c.body)]);
+  held = before;
+  await vm.runInContext("poll()", context); await settle();
+  result.afterStalePoll = [rows().map(key).includes("local 4-1"), vm.runInContext("state.approvals", context)];
+  held = null;
+  await vm.runInContext("poll()", context); await settle();
+  result.answeredKept = vm.runInContext('state.answered.has("local 4-1")', context);  // that list is older than the answer
+  age = {};
+  await vm.runInContext("poll()", context); await settle();
+  result.answeredForgotten = !vm.runInContext('state.answered.has("local 4-1")', context);
+  // W5: the session's end, two minutes before; Stay logged in is a request of the user's
+  sessionLeft = 100;
+  await vm.runInContext('api("GET", "/api/hosts/local/doctor", undefined, { background: true })', context);
+  const banner = document.getElementById("session-banner");
+  result.banner = banner && banner.textContent;
+  calls.length = 0;
+  sessionLeft = 1800;
+  button(banner, "Stay logged in").fire("click"); await settle();
+  result.stay = [calls.map(c => [c.method, c.path, c.headers["X-Background"] || null]), Boolean(document.getElementById("session-banner"))];
+  // a 401: the login says the session ended, and what was open where
+  vm.runInContext('state.questions = [{ host: "local", id: "9-1" }, { host: "ct1", id: "9-2" }, { host: "ct1", id: "9-3" }];', context);
+  answer = () => ({ __status: 401 });
+  await vm.runInContext('api("GET", "/api/hosts/local/doctor").catch(() => {})', context); await settle();
+  result.login = [vm.runInContext("state.me", context), app.textContent];
+  console.log(JSON.stringify(result));
+})().catch(e => { console.error(e.stack); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_questions_toasts_countdowns_keys_and_the_sessions_end(tmp_path):
+    """W1: one toast for the questions that came, drawn anew from what is still open (an answer to one leaves it for
+    the other), closed for good by the user; countdowns from when each host's list was read (age), none without a
+    deadline; a URL with a user part is no link and gets no Allow; max_scope null: no Allow, no scope, why; spoken at
+    20 and 10 s; a and d in a focused row; W10: an answered question never comes back from an older poll; W5: the
+    banner before the session ends, Stay logged in, and the login that says what was open."""
+    result = run_driver(tmp_path, QUESTIONS_DRIVER, "questions")
+    assert len(result["together"]) == 1 and "and 1 more" in result["together"][0]
+    assert len(result["oneLeft"]) == 1 and "on local" in result["oneLeft"][0] and "more" not in result["oneLeft"][0]
+    assert result["noneLeft"] == [] and result["closedStays"] == []
+    assert result["countdowns"] == [["local 4-1", "30 s"], ["ct1 4-2", "18 s"], ["ct1 4-3", "no time limit"],
+                                    ["ct1 4-4", "33 s"], ["ct1 4-5", "no time limit"]], "a slow host's age is taken off"
+    assert result["userinfo"] == [False, ["Deny once"], True], "a user part makes no link, the real host is named"
+    assert result["refused"][0] == ["Deny for this run"] and result["refused"][1] is False and result["refused"][2]
+    assert result["docs"] == ["https://docs.example.org/a@b", True, True], "an @ in the path is fine"
+    assert any("20 seconds left: connect to d.org:443 (web on local)" in s for s in result["spoken"])
+    assert any("10 seconds left" in s for s in result["spoken"]) and len([s for s in result["spoken"] if "seconds left" in s]) <= 8
+    assert result["focusable"] == "0" and result["keyAsk"] and result["cancelFocus"]
+    assert result["denied"] == [["/api/hosts/local/approvals/4-1", {"decision": "deny", "scope": "run"}]]
+    assert result["afterStalePoll"] == [False, 4], "an older poll does not bring the answered question back"
+    assert result["answeredKept"] is True and result["answeredForgotten"] is True, "forgotten once a newer list lacks it"
+    assert result["banner"] and "Session ends in 1:40" in result["banner"] and "Stay logged in" in result["banner"]
+    assert result["stay"] == [[["GET", "/api/me", None]], False], "a real request: the session is used, the banner goes"
+    me, login = result["login"]
+    assert me is None and "The session ended" in login
+    assert "When it ended, 3 questions were open: 1 on local, 2 on ct1." in login
 
 
 PAGE_DRIVER = FAKE_DOM + r"""
@@ -1974,14 +2425,153 @@ def test_the_page_splits_options_confirms_in_place_and_keeps_the_starts_table(tm
     assert result["asking"] == ["Delete web on ct1?Yes, delete itCancel", "Cancel"], "Cancel has the focus"
     assert result["cancelled"] == [True, 0], "Cancel puts back what was there, nothing is sent"
     assert result["yes"] == [[["POST", "/api/x", '{"confirm":true}']], True]
-    assert result["buttons"] == [["Attach", "Pause", "Stop", "Network…", "Resources…"], ["Stop", "Attach to…"],
-                                 ["Resume", "Delete"]], "an MCP server has no Pause, Network or Resources"
+    assert result["buttons"] == [["Attach", "Pause", "Stop", "Network…", "Resources…", "Rename…", "History"],
+                                 ["Stop", "Attach to…", "History"], ["Resume", "Delete", "Rename…", "History"]], \
+        "an MCP server has no Pause, Network, Resources or Rename"
     assert "Stop web on ct1?" in result["stopAsk"] and "its HOME is kept" in result["stopAsk"]
     same, asking, names, polled = result["refreshed"]
     assert same and asking, "an unchanged row stays, its Stop still asked"
     assert names == ["web", "mcp-files", "old", "new"] and polled == [["/api/hosts/ct1/starts", "1"]]
     assert "Stop new on ct1?" in result["stopAskDiscarded"] and "not kept" in result["stopAskDiscarded"]
     assert result["stopPost"] == [["/api/hosts/ct1/starts/web/stop", {"confirm": True}]]
+
+
+STARTS_DRIVER = FAKE_DOM + r"""
+const rowOf = (name) => body.all().find(n => n.attributes["data-name"] === name);
+const buttonsOf = (r) => r.all().filter(n => n.tagName === "button");
+(async () => {
+  const result = {};
+  vm.runInContext('state.me = { user: "admin", csrf: "c", terminals: true }; state.page = "settings"; state.host = "ct1"; state.hosts = [{ name: "local", kind: "local" }, { name: "ct1", kind: "ssh", ssh: "root@ct1" }];', context);
+  // W2/W3: the defaults page: one prompt at a time, compared with what the host has now
+  let defaults = { values: { mode: "high" }, canary_categories: ["credentials", "home", "workspace"], canary_default: ["credentials", "home"] };
+  answer = (method, path, sent) => (method === "GET" && path.endsWith("/defaults") ? defaults : { output: "ok" });
+  await vm.runInContext("pages.settings(__main)", context); await settle();
+  const mode = document.getElementById("mode"), modeAsk = mode.parent.children[mode.parent.children.indexOf(mode) + 2];
+  mode.value = "lax"; mode.fire("change");
+  result.first = modeAsk.textContent;
+  mode.value = "low"; mode.fire("change");
+  result.second = [modeAsk.all().filter(n => n.className === "confirm").length, modeAsk.textContent];
+  button(modeAsk, "Cancel").fire("click");
+  result.cancelled = [modeAsk.textContent, mode.value, calls.filter(c => c.method === "POST").length, globalThis.focused === mode];
+  mode.value = "paranoid"; mode.fire("change"); await settle();
+  result.stricter = [modeAsk.textContent, calls.filter(c => c.method === "POST").map(c => JSON.parse(c.body))];
+  mode.value = "high"; mode.fire("change"); await settle();
+  result.stepDown = modeAsk.textContent.includes("Make high instead of paranoid");
+  button(modeAsk, "Yes, lower it").fire("click"); await settle();
+  result.lowered = calls.filter(c => c.method === "POST").map(c => JSON.parse(c.body)).pop();
+  const telemetry = document.getElementById("telemetry");
+  telemetry.value = "strict"; telemetry.fire("change"); await settle();
+  telemetry.value = "off"; telemetry.fire("change"); await settle();
+  result.telemetryDown = telemetry.parent.textContent.includes("instead of strict");
+
+  // the starts of ct1; a listing that fails leaves the rows as last seen, greyed, their buttons off
+  calls.length = 0;
+  vm.runInContext('state.page = "starts"; state.startsHost = "ct1";', context);
+  let starts = [{ name: "web", agent: "claude", kind: "session", state: "running", keep: true, home: "kept", directory: "/d", attachable: true, run: "claude-1" }];
+  let pending = null;
+  answer = (method, path) => {
+    if (path === "/api/hosts/ct1/starts") return pending ? pending.promise : starts;
+    if (path.endsWith("/net/web")) return { https: [], taint: { tainted: true, since: "2026-11-08T10:00:00Z" } };
+    if (path.endsWith("/presets")) return [];
+    return { output: "ok" };
+  };
+  await vm.runInContext("pages.starts(__main)", context); await settle();
+  result.address = vm.runInContext("addressFor('starts')", context);
+  button(rowOf("web"), "Network…").fire("click"); await settle();
+  const card = document.getElementById("network-card");
+  result.cardOpen = Boolean(card) && !button(card, "Allow…").disabled;
+  // W4: Allow widens at once: asked first, naming what
+  for (const id of ["net-tcp", "net-ports", "net-git-url", "net-git-ref"]) document.getElementById(id).value = "";
+  document.getElementById("net-dns").checked = true;
+  document.getElementById("net-hosts").value = "*.example.org";
+  button(card, "Allow…").fire("click");
+  result.netAsk = card.all().find(n => n.className === "confirm").textContent;
+  result.netPostsBefore = calls.filter(c => c.method === "POST").length;
+  button(card, "Yes, allow it").fire("click"); await settle();
+  result.netPost = calls.filter(c => c.method === "POST").map(c => JSON.parse(c.body)).pop();
+  result.untaint = Boolean(button(card, "Untaint…"));
+  starts = new Error("ssh: connect to host ct1 port 22: No route to host");
+  vm.runInContext("__now += 7000;", context);
+  await vm.runInContext("refreshStarts(__main)", context); await settle();
+  const web = rowOf("web");
+  result.stale = [web.className, buttonsOf(web).every(b => b.disabled), web.textContent.includes("(last seen 7 s ago)"), main.textContent.includes("No route to host")];
+  result.cardWhileStale = !button(card, "Allow…").disabled;
+  // W10: a refresh asked for while one runs is queued, not dropped
+  starts = [{ name: "web", agent: "claude", kind: "session", state: "running", keep: true, home: "kept", directory: "/d", attachable: true, run: "claude-1" }];
+  let release; pending = { promise: new Promise(r => { release = r; }) };
+  calls.length = 0;
+  const first = vm.runInContext("refreshStarts(__main)", context); await settle();
+  vm.runInContext("refreshStarts(__main, true)", context); await settle();
+  result.whileLoading = calls.filter(c => c.path === "/api/hosts/ct1/starts").length;
+  pending = null; release(starts); await first; await settle();
+  result.queued = calls.filter(c => c.path === "/api/hosts/ct1/starts").map(c => c.headers["X-Background"] || null);
+  result.fresh = [rowOf("web").className, buttonsOf(rowOf("web")).some(b => b.disabled)];
+  // W11: the start stopped: its card is switched off, with why
+  starts = [Object.assign({}, starts[0], { state: "stopped", attachable: false })];
+  await vm.runInContext("refreshStarts(__main, true)", context); await settle();
+  result.cardRetired = [button(card, "Allow…").disabled, card.textContent.includes("web on ct1 is stopped now"), !button(card, "Close").disabled];
+  starts = [];
+  await vm.runInContext("refreshStarts(__main, true)", context); await settle();
+  result.gone = rowOf("web") === undefined;
+
+  // every host at once: a host column, the asking badge, a failing host's rows greyed
+  vm.runInContext('state.startsHost = "all"; state.questions = [{ host: "ct1", id: "1-1", run: "r9" }];', context);
+  let fleet = { starts: [{ host: "local", name: "a", agent: "claude", kind: "session", state: "running" },
+    { host: "ct1", name: "b", agent: "codex", kind: "session", state: "running", run: "r9" }], errors: {}, seen: { local: 1000, ct1: 1000 } };
+  answer = (method, path) => (path === "/api/starts" ? fleet : path.endsWith("/presets") ? [] : { output: "ok" });
+  await vm.runInContext("pages.starts(__main)", context); await settle();
+  result.fleet = ["a", "b"].map(n => [rowOf(n).attributes["data-host"], rowOf(n).children[0].textContent]);
+  result.badge = [Boolean(rowOf("b").all().find(n => (n.className || "").includes("asking"))), Boolean(rowOf("a").all().find(n => (n.className || "").includes("asking")))];
+  result.fleetAddress = vm.runInContext("addressFor('starts')", context);
+  fleet = { starts: [fleet.starts[0]], errors: { ct1: "no answer within 20 seconds" }, seen: { local: 1015 } };
+  vm.runInContext("__now = 1012000;", context);
+  await vm.runInContext("refreshStarts(__main)", context); await settle();
+  result.fleetStale = [rowOf("a").className, rowOf("b").className, rowOf("b").textContent.includes("(last seen 12 s ago)")];
+  // the first visit: no start, no other host: the checklist
+  vm.runInContext('state.hosts = [{ name: "local", kind: "local" }]; state.startsHost = "local"; state.host = "local";', context);
+  answer = (method, path) => (path.endsWith("/starts") ? [] : path.endsWith("/doctor") ? [{ status: "fail" }, { status: "warn" }] : path.endsWith("/presets") ? [] : {});
+  await vm.runInContext("pages.starts(__main)", context); await settle();
+  const checklist = main.all().find(n => (n.className || "").includes("first-run"));
+  result.firstRun = checklist ? checklist.textContent : null;
+  console.log(JSON.stringify(result));
+})().catch(e => { console.error(e.stack); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_prompts_stale_rows_queued_refreshes_retired_cards_and_the_fleet(tmp_path):
+    result = run_driver(tmp_path, STARTS_DRIVER, "starts")
+    # W2: never a prompt on top of a prompt; Cancel puts back what was there, the focus back on the control
+    assert "Make lax instead of high" in result["first"]
+    count, second = result["second"]
+    assert count == 1 and "Make low instead of high" in second and "lax" not in second.split("instead")[0]
+    assert result["cancelled"] == ["", "high", 0, True]
+    # W3: a step up is saved at once; a step down from what the host has now is asked
+    assert result["stricter"] == ["", [{"key": "mode", "value": "paranoid"}]]
+    assert result["stepDown"] and result["lowered"] == {"key": "mode", "value": "high", "confirm": True}
+    assert result["telemetryDown"], "strict to off is a step down"
+    assert result["address"] == "#starts@ct1"
+    # W4: the network's Allow asks first, naming what it widens
+    assert result["cardOpen"] and result["netPostsBefore"] == 0
+    for part in ("*.example.org", "real DNS", "web on ct1", "at once"):
+        assert part in result["netAsk"], (part, result["netAsk"])
+    assert result["netPost"] == {"op": "allow", "allow_host": ["*.example.org"], "allow_tcp": [], "host_ports": [],
+                                 "dns": True, "confirm": True}
+    assert result["untaint"], "a tainted run offers Untaint…"
+    # W9: the rows of a listing that failed: as last seen, greyed, buttons off
+    assert result["stale"] == ["stale", True, True, True]
+    assert result["cardWhileStale"], "a host that did not answer is no news about its start"
+    # W10: queued, not dropped
+    assert result["whileLoading"] == 1 and result["queued"] == ["1", None]
+    assert result["fresh"] == ["", False]
+    # W11: the card of a start that stopped is switched off (its Close stays)
+    assert result["cardRetired"] == [True, True, True] and result["gone"]
+    # the fleet: the host in a column of its own, the asking badge, a failing host's rows greyed
+    assert result["fleet"] == [["local", "local"], ["ct1", "ct1"]]
+    assert result["badge"] == [True, False] and result["fleetAddress"] == "#starts@all"
+    assert result["fleetStale"] == ["", "stale", True]
+    for part in ("First steps", "1 problem(s), 1 warning(s)", "Add a host", "Start one below"):
+        assert part in result["firstRun"], (part, result["firstRun"])
 
 
 def test_the_page_never_uses_the_browsers_dialogs_or_markup_from_data():
@@ -2000,15 +2590,19 @@ def test_the_page_never_uses_the_browsers_dialogs_or_markup_from_data():
 
 
 def test_the_page_is_reachable_and_announced_sensibly():
-    """#app is no live region (each new drawing would be read out); toasts and the questions' count have their own;
-    the nav says which page is current and the address keeps it (#page); terminal tabs are tabs, their close button
-    is outside the tablist; the boxes of open terminals outlive a new drawing of the frame."""
+    """#app is no live region (each new drawing would be read out); each toast has its own role, so their box is none
+    (a toast would be announced twice); the questions' count has its own; the nav says which page is current and the
+    address keeps it and its host (#page@host); terminal tabs are tabs, their close button is outside the tablist;
+    the boxes of open terminals outlive a new drawing of the frame; the tables have captions; a confirmation gives
+    the focus back to what opened it."""
     html = (WEB / "index.html").read_text()
     script = (WEB / "app.js").read_text()
-    assert '<div id="app"></div>' in html and 'id="live"' in html and 'id="toasts" class="toasts" aria-live="polite"' in html
+    assert '<div id="app"></div>' in html and 'id="live"' in html and '<div id="toasts" class="toasts"></div>' in html
+    assert 'id: "toasts", class: "toasts" }' in script and '"aria-live"' not in script.split("function toast(")[1].split("\n}")[0]
     assert '"aria-current": state.page === key ? "page" : null' in script and 'setAttribute("aria-current", "page")' in script
-    assert 'window.addEventListener("hashchange"' in script and "location.hash = page" in script
-    assert "state.page = pageFromHash() || state.page" in script
+    assert 'window.addEventListener("hashchange"' in script and "location.hash = addressFor(page)" in script
+    assert "const where = addressOf();" in script and "useAddressHost(where)" in script
+    assert script.count('el("caption", { class: "sr-only" }') >= 5 and "function returnFocus(trigger, container)" in script
     page = script.split("pages.terminals = ")[1].split("\n};")[0]
     assert '"aria-selected": current ? "true" : "false"' in page and 'role: "tablist"' in page
     assert 'el("div", { class: "terminal-close" })' in page and "terminalBoxes().append(t.box)" in page

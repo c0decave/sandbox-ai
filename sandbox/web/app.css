@@ -136,3 +136,15 @@ td.countdown.bad { color: var(--bad); font-weight: 700; }
 .net-shown { margin-top: 8px; }
 #review-card details pre { max-height: 24em; }
 .inline-ask .confirm { display: inline-block; margin: 0 6px; }
+/* The session's end, two minutes before: on top of everything, until it is renewed or ends. */
+.session-banner {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 1100; display: flex; gap: 12px; align-items: center; justify-content: center;
+  padding: 8px 16px; background: var(--base); color: var(--text); border-bottom: 3px solid var(--warn); font-weight: 600;
+}
+/* A row of a host that could not be asked: as last seen, greyed, its buttons off. */
+tr.stale td { opacity: .6; }
+tr.stale .stale-note { font-weight: 400; }
+.badge.asking { background: var(--warn); color: var(--on-warn, var(--base)); border: 0; border-radius: 9px; padding: 0 7px; }
+.first-run ol { margin: 0; padding-left: 20px; }
+.first-run li { margin: 6px 0; }
+tr[data-id]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }

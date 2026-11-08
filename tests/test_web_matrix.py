@@ -91,10 +91,11 @@ class Web:
         hosts = w.module("hosts")
         hosts.save({"ct1": hosts.check("ct1", REMOTE)})
         self.processes, self.clock = Processes(), [1000.0]
+        self.processes.answers[("list", "--history")] = (0, "[]", "")  # a list (the JSON echo is an object)
         api = w.Api(lambda host, args, timeout=120, input=None:
                     hosts.run(host, args, input=input, timeout=timeout, runner=self.processes))
         self.svc = w.Service({HOST}, api=api, sessions=w.Sessions(clock=lambda: self.clock[0]))
-        self.responses, self.token, self.csrf, self.codes = [], None, None, []
+        self.responses, self.token, self.csrf, self.codes, self.extra_secrets = [], None, None, [], []
 
     def code(self, offset=0):
         code = w.totp(self.secret, int(time.time() // 30) + offset)
@@ -145,7 +146,7 @@ class Web:
         return sent
 
     def secrets(self):
-        return [value for value in (PASSWORD, self.secret, self.token, *self.codes) if value]
+        return [value for value in (PASSWORD, self.secret, self.token, *self.codes, *self.extra_secrets) if value]
 
     def assert_nothing_leaked(self):
         """No password, code or TOTP secret anywhere; the session token only in the Set-Cookie of a login; the CSRF
@@ -182,7 +183,7 @@ ACTIONS = [
     ("POST", "/starts/web/delete", {"confirm": True}, [["delete", "web", "--yes"]]),
     ("GET", "/starts/web/review", None, [["resume", "web", "--review-home", "--json"]]),
     ("GET", "/approvals", None, [["approvals", "list", "--json"]]),
-    ("POST", "/approvals/1700000000-1-2", {"decision": "allow", "scope": "always"},
+    ("POST", "/approvals/1700000000-1-2", {"decision": "allow", "scope": "always", "confirm": True},
      [["approvals", "allow", "1700000000-1-2", "--scope", "always"]]),
     ("POST", "/approvals/1700000000-1-2", {"decision": "deny", "scope": "once"},
      [["approvals", "deny", "1700000000-1-2", "--scope", "once"]]),
@@ -197,14 +198,18 @@ ACTIONS = [
      [["llm", "add", "gpu", "--kind", "vllm", "--url", "http://100.100.1.5:8000", "--model", "qwen3"]]),
     ("GET", "/llm/gpu/models", None, [["llm", "models", "gpu", "--json"]]),
     ("POST", "/llm/gpu/check", {"agent": "codex"}, [["llm", "check", "gpu", "--agent", "codex"]]),
-    ("DELETE", "/llm/gpu", None, [["llm", "remove", "gpu"]]),
+    ("DELETE", "/llm/gpu", {"confirm": True}, [["llm", "remove", "gpu"]]),
     ("GET", "/defaults", None, [["defaults", "show", "--json"]]),
-    ("POST", "/defaults", {"key": "telemetry", "value": "strict"}, [["defaults", "set", "telemetry", '"strict"']]),
-    ("POST", "/defaults", {"key": "telemetry", "value": None}, [["defaults", "unset", "telemetry"]]),
+    # not confirmed: compared with what the host has first (no step down: then set)
+    ("POST", "/defaults", {"key": "telemetry", "value": "strict"}, [["defaults", "show", "--json"],
+                                                                   ["defaults", "set", "telemetry", '"strict"']]),
+    ("POST", "/defaults", {"key": "telemetry", "value": None}, [["defaults", "show", "--json"],
+                                                               ["defaults", "unset", "telemetry"]]),
     ("POST", "/defaults", {"key": "mode", "value": "lax", "confirm": True}, [["defaults", "set", "mode", '"lax"']]),
     ("GET", "/net/web", None, [["net", "show", "web", "--json"]]),
     ("POST", "/net/web", {"op": "allow", "allow_host": ["pypi.org"], "allow_tcp": [], "host_ports": [3000],
-                          "dns": False, "git_login": {"url": "https://github.com", "kind": "secret", "ref": "GH_PUSH"}},
+                          "dns": False, "git_login": {"url": "https://github.com", "kind": "secret", "ref": "GH_PUSH"},
+                          "confirm": True},
      [["net", "allow", "web", "--allow-host=pypi.org", "--allow-host-port=3000",
        "--git-token-secret=https://github.com=GH_PUSH"]]),
     ("POST", "/net/web", {"op": "revoke", "allow_host": ["pypi.org"], "allow_tcp": [], "host_ports": [], "dns": False},
@@ -219,7 +224,9 @@ ACTIONS = [
     ("GET", "/devices/web", None, [["devices", "list", "web", "--json"]]),
     ("POST", "/devices/web", {"device": "usb:2e8a:000a", "confirm": True}, [["devices", "add", "web", "usb:2e8a:000a"]]),
     ("POST", "/devices/web/remove", {"device": "2"}, [["devices", "remove", "web", "2"]]),
-    ("POST", "/limits/web", {"memory": "4g", "cpus": "2"}, [["limits", "web", "--memory=4g", "--cpus=2"]]),
+    ("POST", "/limits/web", {"memory": "4g", "cpus": "2"}, [["limits", "web", "--show", "--json"],
+                                                           ["limits", "web", "--memory=4g", "--cpus=2"]]),
+    ("POST", "/limits/web", {"memory": "64g", "confirm": True}, [["limits", "web", "--memory=64g"]]),
     ("POST", "/limits/web", {"pids": "none", "confirm": True}, [["limits", "web", "--pids=none"]]),
     ("GET", "/limits/web", None, [["limits", "web", "--show", "--json"]]),
     ("GET", "/presets", None, [["presets", "list", "--json"]]),
@@ -227,7 +234,7 @@ ACTIONS = [
     ("POST", "/vpn", {"name": "mv", "kind": "mullvad", "secret": "MULLVAD", "location": "se-sto"},
      [["vpn", "add", "mv", "--mullvad", "--account-secret=MULLVAD", "--location=se-sto"]]),
     ("POST", "/vpn/mv/check", {}, [["vpn", "check", "mv"]]),
-    ("DELETE", "/vpn/mv", None, [["vpn", "remove", "mv"]]),
+    ("DELETE", "/vpn/mv", {"confirm": True}, [["vpn", "remove", "mv"]]),
     ("GET", "/canaries", None, [["canaries", "log", "--json"]]),
     ("GET", "/canaries/web", None, [["canaries", "log", "web", "--json"]]),
     ("POST", "/test", {}, [["--version"], ["doctor", "--json"]]),
@@ -239,11 +246,25 @@ ACTIONS = [
      [["kits", "new-skill", "--description=when noting", "--", "mv", "notes"]]),
     ("POST", "/kits/mv/add-plugin", {"plugin": "egm@sandbox-ai", "agent": "claude", "source": "", "create": False},
      [["kits", "add-plugin", "--agent=claude", "--", "mv", "egm@sandbox-ai"]]),
-    ("POST", "/kits/mv/remove-skill", {"skill": "notes", "agents": ["claude"]},
+    ("POST", "/kits/mv/remove-skill", {"skill": "notes", "agents": ["claude"], "confirm": True},
      [["kits", "remove-skill", "--agent=claude", "--", "mv", "notes"]]),
-    ("POST", "/kits/mv/remove-plugin", {"plugin": "egm@sandbox-ai", "agent": "claude"},
+    ("POST", "/kits/mv/remove-plugin", {"plugin": "egm@sandbox-ai", "agent": "claude", "confirm": True},
      [["kits", "remove-plugin", "--agent=claude", "--", "mv", "egm@sandbox-ai"]]),
     ("DELETE", "/kits/mv", {"confirm": True}, [["kits", "delete", "--yes", "--", "mv"]]),
+    # management: rename, history, gc, untaint, answers given before, secrets
+    ("POST", "/starts/web/rename", {"new": "web-2"}, [["rename", "web", "web-2"]]),
+    ("GET", "/starts/web/history", None, [["list", "--history", "web", "--json"]]),
+    ("GET", "/gc", None, [["gc", "--dry-run", "--json"]]),
+    ("GET", "/gc/14", None, [["gc", "--dry-run", "--json", "--older-than=14"]]),
+    ("POST", "/gc", {"older_than": 14, "confirm": True}, [["gc", "--json", "--older-than=14"]]),
+    ("POST", "/net/web/untaint", {"confirm": True}, [["net", "untaint", "web"]]),
+    ("GET", "/approvals-history", None, [["approvals", "history"]]),
+    ("GET", "/remembered", None, [["approvals", "remembered", "--json"]]),
+    ("POST", "/remembered/forget", {"project": "/srv/project", "entry": "pypi.org", "confirm": True},
+     [["approvals", "forget", "/srv/project", "pypi.org"]]),
+    ("GET", "/secrets", None, [["secrets", "list"]]),
+    ("POST", "/secrets/GH_TOKEN", {"secret": "ghp-matrix-value", "confirm": True}, [["secrets", "set", "GH_TOKEN"]]),
+    ("DELETE", "/secrets/GH_TOKEN", {"confirm": True}, [["secrets", "delete", "GH_TOKEN"]]),
 ]
 
 
@@ -278,7 +299,13 @@ def test_every_action_in_every_login_state_on_every_host(web, state, host, metho
         assert web.processes.args() == [(host, command) for command in commands]
         if host == "ct1":
             assert {entry["target"] for entry in web.processes.log} == {REMOTE["ssh"]}
-        assert all(entry["input"] is None for entry in web.processes.log), "nothing on standard input"
+        if path.startswith("/secrets/") and method == "POST":
+            # a secret's value: on standard input only, as the command reads it; never in argv, a response or the log
+            assert [entry["input"] for entry in web.processes.log] == [body["secret"] + "\n"]
+            assert all(body["secret"] not in arg for entry in web.processes.log for arg in entry["args"])
+            web.extra_secrets.append(body["secret"])
+        else:
+            assert all(entry["input"] is None for entry in web.processes.log), "nothing on standard input"
     events = [json.loads(line) for line in (w.state_dir() / "audit.jsonl").read_text().splitlines()] \
         if (w.state_dir() / "audit.jsonl").exists() else []
     actions = [e for e in events if e["event"] == "action"]
@@ -311,8 +338,45 @@ def test_the_questions_of_every_host_in_every_login_state(web, state):
         assert [q["host"] for q in found["questions"]] == list(HOSTS) and found["errors"] == {}, "in the hosts' order"
         assert sorted(web.processes.args()) == sorted((host, ["approvals", "list", "--json"]) for host in HOSTS)
         assert {e["target"] for e in web.processes.log if e["host"] == "ct1"} == {REMOTE["ssh"]}
-        assert all(e["timeout"] == w.APPROVALS_HOST_SECONDS for e in web.processes.log)
+        # hosts.run gives the process what is left of its deadline (a shared SSH connection's start is spent out of it)
+        assert all(w.APPROVALS_HOST_SECONDS - 1 < e["timeout"] <= w.APPROVALS_HOST_SECONDS for e in web.processes.log)
     web.assert_nothing_leaked()
+
+
+@pytest.mark.parametrize("state", STATES)
+def test_the_starts_of_every_host_in_every_login_state(web, state):
+    """GET /api/starts: with a full login, `list --json` on this machine and on ct1 (over SSH), each start with its
+    host and when its host's list was read; nothing runs without one."""
+    headers = web.headers(state)
+    web.processes.answers[("list", "--json")] = (0, json.dumps([{"name": "web", "agent": "claude", "state": "running",
+                                                                 "host": "elsewhere"}]), "")
+    status, out_headers, data = web.request("GET", "/api/starts", None, headers)
+    assert status == expected_status(state, "GET"), data
+    if status != 200:
+        assert web.processes.log == []
+    else:
+        found = json.loads(data)
+        assert [(s["host"], s["name"]) for s in found["starts"]] == [("local", "web"), ("ct1", "web")], \
+            "each start with its own host (whatever it says)"
+        assert found["errors"] == {} and set(found["seen"]) == {"local", "ct1"} and found["asking"] == []
+        assert sorted(web.processes.args()) == sorted((host, ["list", "--json"]) for host in HOSTS)
+        assert all(0 < e["timeout"] <= w.STARTS_HOST_SECONDS for e in web.processes.log), "each host its own limit"
+    web.assert_nothing_leaked()
+
+
+def test_a_damaged_hosts_file_still_asks_this_machine(web):
+    """A hosts.json that cannot be read is named in errors ("hosts.json"); this machine's questions and starts come
+    all the same."""
+    headers = web.headers("full")
+    web.processes.answers[("approvals", "list")] = (0, json.dumps([{"id": "1-1", "question": "q"}]), "")
+    web.processes.answers[("list", "--json")] = (0, json.dumps([{"name": "web", "state": "running"}]), "")
+    (w.module("hosts").config_file()).write_text("{not json")
+    for path, field in (("/api/approvals", "questions"), ("/api/starts", "starts")):
+        status, _, data = web.request("GET", path, None, headers)
+        found = json.loads(data)
+        assert status == 200 and [q["host"] for q in found[field]] == ["local"], (path, found)
+        assert list(found["errors"]) == ["hosts.json"] and "not valid JSON" in found["errors"]["hosts.json"]
+    assert {host for host, _ in web.processes.args()} == {"local"}
 
 
 def test_a_host_that_fails_is_named_and_the_others_are_listed(web):
@@ -344,8 +408,10 @@ SESSION_CALLS = [
     ("GET", "/api/me", None),
     ("POST", "/api/logout", {}),
     ("GET", "/api/hosts", None),
+    ("GET", "/api/policy", None),
     ("POST", "/api/hosts", {"name": "ct2", "ssh": "root@192.0.2.20", "port": 22}),
-    ("DELETE", "/api/hosts/ct1", None),
+    ("POST", "/api/hosts/ct1", {"description": "edited", "port": 2200}),
+    ("DELETE", "/api/hosts/ct1", {"confirm": True}),
 ]
 
 
@@ -366,8 +432,12 @@ def test_the_session_and_hosts_endpoints_in_every_login_state(web, state, method
     elif path == "/api/logout":
         assert "Max-Age=0" in out_headers["Set-Cookie"]
         assert web.request("GET", "/api/me", None, headers)[0] == 401, "the session is gone"
+    elif path == "/api/policy":
+        assert json.loads(data)["confirm"] == w.NEEDS_CONFIRM
     elif method == "GET":
         assert [h["name"] for h in json.loads(data)] == ["local", "ct1"]
+    elif path == "/api/hosts/ct1" and method == "POST":
+        assert after["ct1"] == {**before["ct1"], "description": "edited", "port": 2200}
     elif method == "POST":
         assert set(after) == {"ct1", "ct2"} and after["ct2"]["ssh"] == "root@192.0.2.20"
     else:
@@ -480,11 +550,12 @@ def test_a_start_its_question_answered_and_its_stop(web, host, agent):
     questions = json.loads(web.request("GET", f"/api/hosts/{host}/approvals", None, headers)[2])
     for scope in ("once", "run", "always"):
         status, _, data = web.request("POST", f"/api/hosts/{host}/approvals/{questions[0]['id']}",
-                                      {"decision": "allow", "scope": scope}, headers)
+                                      {"decision": "allow", "scope": scope, **({"confirm": True} if scope == "always"
+                                                                               else {})}, headers)
         assert status == 200, data
     status, _, _ = web.request("POST", f"/api/hosts/{host}/net/{name}",
                                {"op": "allow", "allow_host": [], "allow_tcp": ["192.0.2.9:5432"], "host_ports": [],
-                                "dns": True}, headers)
+                                "dns": True, "confirm": True}, headers)
     assert status == 200
     for action in ("stop", "delete"):
         status, _, data = web.request("POST", f"/api/hosts/{host}/starts/{name}/{action}",
@@ -498,7 +569,8 @@ def test_a_start_its_question_answered_and_its_stop(web, host, agent):
         ["net", "allow", name, "--allow-tcp=192.0.2.9:5432", "--dns"],
         ["stop", name], ["delete", name, "--yes"])]
     timeouts = [entry["timeout"] for entry in web.processes.log]
-    assert timeouts[2:5] == [w.module("approvals").VERIFY_WAIT + 60] * 3 and timeouts[6] == 180
+    within = lambda found, limit: limit - 1 < found <= limit  # what is left of each call's deadline (hosts.run)
+    assert all(within(t, w.module("approvals").VERIFY_WAIT + 60) for t in timeouts[2:5]) and within(timeouts[6], 180)
     web.assert_nothing_leaked()
 
 
@@ -539,7 +611,8 @@ def test_every_call_of_the_page_is_in_the_matrix():
         prefix = "/api/hosts/X" if path.startswith("hostPath(") else ""
         path = re.sub(r", [A-Za-z_.]+\)$", ")", path)[len("hostPath("):-1] if prefix else path
         calls.add((method, prefix + re.sub(r"\$\{[^}]*\}", "X", path.strip("\"`"))))
-    covered = {(m, "/api/hosts/X" + re.sub(r"/(web|gpu|mv|1700000000-1-2)(?=/|$)", "/X", p)) for m, p, _, _ in ACTIONS}
+    covered = {(m, "/api/hosts/X" + re.sub(r"/(web|gpu|mv|1700000000-1-2|GH_TOKEN|14)(?=/|$)", "/X", p))
+               for m, p, _, _ in ACTIONS}
     covered |= {(m, re.sub(r"/ct1$", "/X", p)) for m, p, _ in SESSION_CALLS} | {("POST", "/api/login")}
     covered |= {("GET", "/api/approvals")}  # test_the_questions_of_every_host_in_every_login_state
     covered |= {("POST", "/api/hosts/X/starts/X/X")}  # ${action}: pause, resume, stop, delete above
