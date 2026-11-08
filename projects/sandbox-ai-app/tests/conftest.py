@@ -86,3 +86,17 @@ def wait_until(qapp, condition, timeout=10.0):
 def wait(qapp):
     return lambda condition, timeout=10.0: wait_until(qapp, condition, timeout)
 
+
+
+def pytest_sessionfinish(session, exitstatus):
+    session.config.qt_exit_status = int(exitstatus)
+
+
+def pytest_unconfigure(config):
+    """Once everything is reported: with Qt loaded the process ends here, without Python's finalization. Qt's and
+    QtWebEngine's own objects destroyed after it crash now and then (SIGSEGV on the main thread, "<no Python
+    frame>"), which turned runs whose every test had passed into exit 139 on CI runners."""
+    if "PySide6.QtWidgets" in sys.modules and hasattr(config, "qt_exit_status"):
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(config.qt_exit_status)

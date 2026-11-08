@@ -1267,6 +1267,9 @@ time.sleep(120)
 
 
 def test_quitting_stops_running_commands_with_their_children(window, env, monkeypatch, wait):
+    # The window's own reads (the board's dry run, a slow subprocess on a CI runner) end first: what is measured
+    # below is the stopped command's thread alone.
+    widgets.ThreadCall.wait_all(120)
     pid_file = env / "child"
     monkeypatch.setattr(window.sai, "command", lambda *args: [sys.executable, "-c", SPAWNER, str(pid_file)])
     monkeypatch.setattr(QtWidgets.QFileDialog, "getExistingDirectory", lambda *a, **k: str(env))
