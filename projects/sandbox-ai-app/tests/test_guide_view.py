@@ -32,7 +32,7 @@ def test_the_tour_walks_the_pages_and_remembers_where_it_was(window):  # noqa: F
 
 def test_a_new_part_is_set_up_question_by_question(window, monkeypatch, tmp_path):  # noqa: F811
     board = window.board
-    folder = tmp_path / "data"
+    folder = tmp_path / "mount-source"  # not "data": XDG_DATA_HOME of the window lives there
     folder.mkdir()
 
     def answer(dialog):
