@@ -108,7 +108,8 @@ jobs:
           status=0; scripts/build_appimage.sh --bundle dist/sandbox-ai-bundle-*.tar.gz --out packages > build.log 2>&1 || status=$?
           tail -n 200 build.log
           if [ "$status" -ne 0 ]; then
-            text=$(tail -n 25 build.log | cut -c1-200 | sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g')
+            # Python, not sed: macOS's sed has no :a;N;$!ba (the annotation kept one line only).
+            text=$(tail -n 25 build.log | cut -c1-200 | python3 -c 'import sys; print(sys.stdin.read().replace("%", "%25").replace("\n", "%0A"))')
             echo "::error title=build_appimage.sh failed::exit $status%0A$text"
           fi
           exit "$status"
@@ -185,7 +186,8 @@ jobs:
           status=0; scripts/build_macos_app.sh --bundle dist/sandbox-ai-bundle-*.tar.gz --out packages > build.log 2>&1 || status=$?
           tail -n 200 build.log
           if [ "$status" -ne 0 ]; then
-            text=$(tail -n 25 build.log | cut -c1-200 | sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g')
+            # Python, not sed: macOS's sed has no :a;N;$!ba (the annotation kept one line only).
+            text=$(tail -n 25 build.log | cut -c1-200 | python3 -c 'import sys; print(sys.stdin.read().replace("%", "%25").replace("\n", "%0A"))')
             echo "::error title=build_macos_app.sh failed::exit $status%0A$text"
           fi
           exit "$status"
