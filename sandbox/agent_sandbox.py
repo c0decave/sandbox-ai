@@ -5953,6 +5953,9 @@ def register_run(a, run, session):
         "name": run_name(a), "start": getattr(a, "start_key", None) or a.start_id,
         "kind": "mcp" if a.mcp_socket_dir else "agent",
         "pod": pod_name(a, run) if a.backend == "podman" else None, "podman_url": a.podman_url,
+        # sandbox-ai list (and the app and the web, which group by them): the agents --with in this sandbox, and
+        # whose helper this sandbox is (--helper starts it as an MCP server of the lead).
+        "companions": companions(a), "helper_of": getattr(a, "helper_of", None),
         # A HOME of your own (--state-dir) stays when the run ends; sandbox-ai list says so.
         "own_home": bool(a.state_dir) and not (getattr(a, "start_key", None) or a.tmux_socket_dir or a.mcp_socket_dir),
         "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "proxy": proxy_enabled(a),

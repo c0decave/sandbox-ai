@@ -427,7 +427,8 @@ def entries(include_all=False, prune=True):
     by_pid = {entry["pid"]: entry for entry in servers.values() if entry["pid"]}
     legacy = {f"session-{key}": entry for key, entry in starts.items()}  # sessions of versions before 0.1.30
     plain = []
-    for run, record_ in module("net").running().items():
+    records = module("net").running()
+    for run, record_ in records.items():
         session = starts.get(text(record_.get("start")) or "") or legacy.get(run)
         if session is not None:
             session["run"], session["run_dir"], session["mode"] = run, record_.get("directory"), mode_of(record_)
@@ -452,6 +453,15 @@ def entries(include_all=False, prune=True):
     found = list(starts.values()) + plain + list(servers.values())
     for entry in found:
         entry["attach_why"] = attach_why(entry)
+    # What belongs together (the app and the web group by it): a running start's pod (Podman), the agents --with in
+    # its sandbox, whose helper it is, and the teams it belongs to (its team-NAME board servers).
+    for entry in found:
+        record_ = records.get(entry.get("run") or "") or {}
+        names = list(entry.get("mcp") or []) + list(entry.get("mcp_running") or [])
+        entry["pod"] = text(record_.get("pod")) if record_.get("pod") else None
+        entry["companions"] = [text(c) for c in record_.get("companions") or [] if isinstance(c, str)]
+        entry["helper_of"] = text(record_.get("helper_of")) if isinstance(record_.get("helper_of"), str) else None
+        entry["teams"] = sorted({n[len("team-"):] for n in names if isinstance(n, str) and n.startswith("team-")})
     # Whom each MCP server serves: the starts that reach it, or will at their next start (sandbox-ai mcp attach).
     for name, server in servers.items():
         server["serves"] = [entry["name"] for entry in found if entry.get("kind") != "mcp"

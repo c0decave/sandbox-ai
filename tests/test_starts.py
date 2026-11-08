@@ -124,6 +124,17 @@ def test_entries(scenario, tmp_path):
         assert [(e["name"], e["state"]) for e in listed()] == [("bad", "damaged")]
 
 
+def test_entries_say_what_belongs_together(tmp_path):
+    """list --json names a running start's pod, its --with companions, whose helper it is and its teams: the app and
+    the web group the starts by them."""
+    register("claude-1234abcd", pod="agent-claude-1234abcd", companions=["codex"], mcp_servers=["team-app", "web"])
+    register("codex-helper99", helper_of="claude-1234abcd", backend="bwrap")
+    found = {e["name"]: e for e in listed()}
+    lead, helper = found["claude-1234abcd"], found["codex-helper99"]
+    assert lead["pod"] == "agent-claude-1234abcd" and lead["companions"] == ["codex"] and lead["teams"] == ["app"]
+    assert helper["helper_of"] == "claude-1234abcd" and helper["pod"] is None and helper["companions"] == []
+
+
 def test_entries_say_why_nothing_can_be_attached(scenario, tmp_path):
     """attach_why: one word for the desktop app and the web page, null exactly when attachable."""
     def foreground_start(key, pid, paused=False):  # a kept start in the foreground (--no-tmux): its own launcher
