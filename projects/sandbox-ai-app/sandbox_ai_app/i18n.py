@@ -63,9 +63,6 @@ TEXTS = {
     '{count} on other hosts': {
         'en': '{count} on other hosts',
         'de': '{count} auf anderen Hosts'},
-    'On {host}: this is changed on that host (sandbox-ai net, devices, limits there).': {
-        'en': 'On {host}: this is changed on that host (sandbox-ai net, devices, limits there).',
-        'de': 'Auf {host}: das wird auf jenem Host geändert (sandbox-ai net, devices, limits dort).'},
     'Not while it is {state} on {host}.': {
         'en': 'Not while it is {state} on {host}.',
         'de': 'Nicht, solange es auf {host} {state} ist.'},
@@ -390,9 +387,6 @@ TEXTS = {
     'always (this project)': {
         'en': 'always (this project)',
         'de': 'immer (dieses Projekt)'},
-    'Open questions of the running sandboxes': {
-        'en': 'Open questions of the running sandboxes',
-        'de': 'Offene Fragen der laufenden Sandboxen'},
     'Allow': {
         'en': 'Allow',
         'de': 'Erlauben'},
@@ -1296,9 +1290,6 @@ TEXTS = {
     'No project configuration': {
         'en': 'No project configuration',
         'de': 'Keine Projektkonfiguration'},
-    'Delete session {name} and its HOME?': {
-        'en': 'Delete session {name} and its HOME?',
-        'de': 'Sitzung {name} und ihr HOME löschen?'},
     'Quit': {
         'en': 'Quit',
         'de': 'Beenden'},
@@ -5313,9 +5304,6 @@ TEXTS = {
     'Add workspace…': {
         'en': 'Add workspace…',
         'de': 'Workspace hinzufügen…'},
-    'Mount a folder of this computer into the selected sandbox until it ends (sandbox-ai workspace add)': {
-        'en': 'Mount a folder of this computer into the selected sandbox until it ends (sandbox-ai workspace add)',
-        'de': 'Einen Ordner dieses Computers in die gewählte Sandbox einhängen, bis sie endet (sandbox-ai workspace add)'},
     'Remove workspace…': {
         'en': 'Remove workspace…',
         'de': 'Workspace entfernen…'},
@@ -5346,10 +5334,172 @@ TEXTS = {
     'No workspace was added to {run} during its run (those of the start stay).': {
         'en': 'No workspace was added to {run} during its run (those of the start stay).',
         'de': 'Zu {run} wurde während des Laufs kein Workspace hinzugefügt (die des Starts bleiben).'},
-    'A process in {run} still uses {path}. Detach it anyway? Whatever is open there stays usable until it is closed; a restart takes it away for sure.': {
-        'en': 'A process in {run} still uses {path}. Detach it anyway? Whatever is open there stays usable until it is closed; a restart takes it away for sure.',
-        'de': 'Ein Prozess in {run} benutzt {path} noch. Trotzdem lösen? Was dort offen ist, bleibt nutzbar, bis es geschlossen wird; sicher nimmt ihn nur ein Neustart weg.'},
     'Detach': {
         'en': 'Detach',
         'de': 'Lösen'},
+    '({count} on other hosts)': {
+        'en': '({count} on other hosts)',
+        'de': '({count} auf anderen Hosts)'},
+    'A device is a path under /dev/.': {
+        'en': 'A device is a path under /dev/.',
+        'de': 'Ein Gerät ist ein Pfad unter /dev/.'},
+    'Add device on {host}': {
+        'en': 'Add device on {host}',
+        'de': 'Gerät auf {host} hinzufügen'},
+    'Add device to {run} on {host}': {
+        'en': 'Add device to {run} on {host}',
+        'de': 'Gerät zu {run} auf {host} hinzufügen'},
+    'Add workspace on {host}': {
+        'en': 'Add workspace on {host}',
+        'de': 'Workspace auf {host} hinzufügen'},
+    'Add workspace to {run} on {host}': {
+        'en': 'Add workspace to {run} on {host}',
+        'de': 'Workspace zu {run} auf {host} hinzufügen'},
+    'All hosts': {
+        'en': 'All hosts',
+        'de': 'Alle Hosts'},
+    'Allow for {run} on {host}': {
+        'en': 'Allow for {run} on {host}',
+        'de': 'Für {run} auf {host} erlauben'},
+    'Asked on {host}: the answer goes there, over SSH.': {
+        'en': 'Asked on {host}: the answer goes there, over SSH.',
+        'de': 'Gefragt auf {host}: Die Antwort geht dorthin, über SSH.'},
+    'Delete session {name} and its HOME on this machine? This cannot be undone.': {
+        'en': 'Delete session {name} and its HOME on this machine? This cannot be undone.',
+        'de': 'Die Sitzung {name} und ihr HOME auf diesem Rechner löschen? Das lässt sich nicht rückgängig machen.'},
+    'Device added during the run (a path under /dev/)': {
+        'en': 'Device added during the run (a path under /dev/)',
+        'de': 'Während des Laufs hinzugefügtes Gerät (ein Pfad unter /dev/)'},
+    'Folder on {host}': {
+        'en': 'Folder on {host}',
+        'de': 'Ordner auf {host}'},
+    'Give the folder as an absolute path, or its name under /workspaces.': {
+        'en': 'Give the folder as an absolute path, or its name under /workspaces.',
+        'de': 'Gib den Ordner als absoluten Pfad an oder seinen Namen unter /workspaces.'},
+    'Give {path} of {host} to {run} until it ends? Devices weaken the isolation; sandbox-ai there checks the device as at a start.': {
+        'en': 'Give {path} of {host} to {run} until it ends? Devices weaken the isolation; sandbox-ai there checks the device as at a start.',
+        'de': '{path} von {host} an {run} geben, bis sie endet? Geräte schwächen die Isolation; sandbox-ai dort prüft das Gerät wie bei einem Start.'},
+    'If you did not make these changes, check them before it starts again ({command}).': {
+        'en': 'If you did not make these changes, check them before it starts again ({command}).',
+        'de': 'Wenn diese Änderungen nicht von dir sind, prüfe sie, bevor sie wieder startet ({command}).'},
+    'Its HOME has more files than were checked: not every change is named.': {
+        'en': 'Its HOME has more files than were checked: not every change is named.',
+        'de': 'Ihr HOME hat mehr Dateien, als geprüft wurden: Nicht jede Änderung ist genannt.'},
+    'Its connection log is on {host} (sandbox-ai there).': {
+        'en': 'Its connection log is on {host} (sandbox-ai there).',
+        'de': 'Ihr Verbindungsprotokoll liegt auf {host} (sandbox-ai dort).'},
+    'Let {run} change {path} on {host} until it ends? The agent can write, delete and run there.': {
+        'en': 'Let {run} change {path} on {host} until it ends? The agent can write, delete and run there.',
+        'de': '{run} {path} auf {host} ändern lassen, bis sie endet? Der Agent kann dort schreiben, löschen und ausführen.'},
+    'Limits of {run} on {host}': {
+        'en': 'Limits of {run} on {host}',
+        'de': 'Grenzen von {run} auf {host}'},
+    'Memory pressure from {size} on (memory.high): set at the start.': {
+        'en': 'Memory pressure from {size} on (memory.high): set at the start.',
+        'de': 'Speicherdruck ab {size} (memory.high): beim Start festgelegt.'},
+    'Mount a folder of its host into the selected sandbox until it ends (sandbox-ai workspace add)': {
+        'en': 'Mount a folder of its host into the selected sandbox until it ends (sandbox-ai workspace add)',
+        'de': 'Einen Ordner ihres Hosts in die gewählte Sandbox einhängen, bis sie endet (sandbox-ai workspace add)'},
+    'Not while it is {state}.': {
+        'en': 'Not while it is {state}.',
+        'de': 'Nicht, solange der Start {state} ist.'},
+    'On {host}: stop {start}? Its agent ends; what it did not save is lost (a session keeps its HOME, and Resume starts it again).': {
+        'en': 'On {host}: stop {start}? Its agent ends; what it did not save is lost (a session keeps its HOME, and Resume starts it again).',
+        'de': 'Auf {host}: {start} stoppen? Ihr Agent endet; was er nicht gespeichert hat, geht verloren (eine Sitzung behält ihr HOME, und Fortsetzen startet sie wieder).'},
+    'Only http and https pages are opened here.': {
+        'en': 'Only http and https pages are opened here.',
+        'de': 'Hier werden nur http- und https-Seiten geöffnet.'},
+    'Open here': {
+        'en': 'Open here',
+        'de': 'Hier öffnen'},
+    'Open questions of the running sandboxes, on every host': {
+        'en': 'Open questions of the running sandboxes, on every host',
+        'de': 'Offene Fragen der laufenden Sandboxen, auf allen Hosts'},
+    "Open the page in this computer's browser and allow the question without opening it on its host": {
+        'en': "Open the page in this computer's browser and allow the question without opening it on its host",
+        'de': 'Die Seite im Browser dieses Rechners öffnen und die Frage erlauben, ohne sie auf ihrem Host zu öffnen'},
+    'Remove device from {run} on {host}': {
+        'en': 'Remove device from {run} on {host}',
+        'de': 'Gerät von {run} auf {host} entfernen'},
+    'Remove host': {
+        'en': 'Remove host',
+        'de': 'Host entfernen'},
+    'Remove workspace from {run} on {host}': {
+        'en': 'Remove workspace from {run} on {host}',
+        'de': 'Workspace von {run} auf {host} entfernen'},
+    'Remove {host} from the list of hosts? Its sandbox-ai and its starts stay there; this app and sandbox-ai web no longer reach it (its approvals are no longer answered from here).': {
+        'en': 'Remove {host} from the list of hosts? Its sandbox-ai and its starts stay there; this app and sandbox-ai web no longer reach it (its approvals are no longer answered from here).',
+        'de': '{host} aus der Liste der Hosts entfernen? Sein sandbox-ai und seine Starts bleiben dort; diese App und sandbox-ai web erreichen ihn nicht mehr (seine Freigaben werden von hier nicht mehr beantwortet).'},
+    'Resume it anyway?': {
+        'en': 'Resume it anyway?',
+        'de': 'Trotzdem fortsetzen?'},
+    'Resume {name}': {
+        'en': 'Resume {name}',
+        'de': '{name} fortsetzen'},
+    'Resume {name} on {host}': {
+        'en': 'Resume {name} on {host}',
+        'de': '{name} auf {host} fortsetzen'},
+    'Revoke for {run} on {host}': {
+        'en': 'Revoke for {run} on {host}',
+        'de': 'Für {run} auf {host} zurücknehmen'},
+    'Select a start first.': {
+        'en': 'Select a start first.',
+        'de': 'Wähle zuerst einen Start.'},
+    "The HOME of {name} changed since its last start ({since}) in files that decide what runs at a start (shell, git, ssh, the agent's settings, hooks, plugins, skills):": {
+        'en': "The HOME of {name} changed since its last start ({since}) in files that decide what runs at a start (shell, git, ssh, the agent's settings, hooks, plugins, skills):",
+        'de': 'Das HOME von {name} hat sich seit dem letzten Start ({since}) in Dateien geändert, die bestimmen, was bei einem Start läuft (Shell, git, ssh, die Einstellungen des Agenten, Hooks, Plugins, Skills):'},
+    'The folder on {host}, or its name under /workspaces': {
+        'en': 'The folder on {host}, or its name under /workspaces',
+        'de': 'Der Ordner auf {host} oder sein Name unter /workspaces'},
+    'The limits it has now could not be read: {error}': {
+        'en': 'The limits it has now could not be read: {error}',
+        'de': 'Ihre aktuellen Grenzen ließen sich nicht lesen: {error}'},
+    "The page opens in this computer's browser, not on {host}.": {
+        'en': "The page opens in this computer's browser, not on {host}.",
+        'de': 'Die Seite öffnet sich im Browser dieses Rechners, nicht auf {host}.'},
+    'This machine': {
+        'en': 'This machine',
+        'de': 'Dieser Rechner'},
+    'What changed in the HOME of {name} since its last start could not be checked:\n{error}\n\nResume it anyway?': {
+        'en': 'What changed in the HOME of {name} since its last start could not be checked:\n{error}\n\nResume it anyway?',
+        'de': 'Was sich seit dem letzten Start im HOME von {name} geändert hat, ließ sich nicht prüfen:\n{error}\n\nTrotzdem fortsetzen?'},
+    "Whose sandboxes are listed: this machine's, a host's, or all of them": {
+        'en': "Whose sandboxes are listed: this machine's, a host's, or all of them",
+        'de': 'Wessen Sandboxen gelistet werden: die dieses Rechners, die eines Hosts oder alle'},
+    'added': {
+        'en': 'added',
+        'de': 'hinzugefügt'},
+    'changed': {
+        'en': 'changed',
+        'de': 'geändert'},
+    'permissions': {
+        'en': 'permissions',
+        'de': 'Rechte'},
+    'removed': {
+        'en': 'removed',
+        'de': 'entfernt'},
+    'sandbox-ai did not remove {path} from {run}:\n\n{reason}\n\nDetach it anyway? Whatever is open there stays usable until it is closed; a restart takes it away for sure.': {
+        'en': 'sandbox-ai did not remove {path} from {run}:\n\n{reason}\n\nDetach it anyway? Whatever is open there stays usable until it is closed; a restart takes it away for sure.',
+        'de': 'sandbox-ai hat {path} nicht von {run} entfernt:\n\n{reason}\n\nTrotzdem lösen? Was dort offen ist, bleibt nutzbar, bis es geschlossen wird; sicher nimmt ihn nur ein Neustart weg.'},
+    'type': {
+        'en': 'type',
+        'de': 'Art'},
+    '{action} on {host}': {
+        'en': '{action} on {host}',
+        'de': '{action} auf {host}'},
+    '{count} open questions, on this machine and every host': {
+        'en': '{count} open questions, on this machine and every host',
+        'de': '{count} offene Fragen, auf diesem Rechner und allen Hosts'},
+    '{host} asks to open: {url}': {
+        'en': '{host} asks to open: {url}',
+        'de': '{host} möchte öffnen: {url}'},
+    '{run} on {host}': {
+        'en': '{run} on {host}',
+        'de': '{run} auf {host}'},
+    '{sandbox} on {host}': {
+        'en': '{sandbox} on {host}',
+        'de': '{sandbox} auf {host}'},
+    '… and {count} more': {
+        'en': '… and {count} more',
+        'de': '… und {count} weitere'},
 }

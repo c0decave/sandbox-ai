@@ -445,9 +445,8 @@ class CredentialsPage(QWidget):
             QMessageBox.information(self, tr("Logins"), tr("Select an agent first."))
             return
         if logout:
-            if QMessageBox.question(self, tr("Log out"), tr("Forget the stored {agent} login? Sandboxes then use "
-                                                             "the host's login again.", agent=agent)) != \
-                    QMessageBox.StandardButton.Yes:
+            if not confirm(self, tr("Log out"), tr("Forget the stored {agent} login? Sandboxes then use the host's login "
+                                                   "again.", agent=agent), tr("Log out"), destructive=True):
                 return
             self.terminal(self.sai.command("login", agent, "--logout"), f"sandbox-ai login {agent} --logout")
         else:
@@ -478,8 +477,8 @@ class CredentialsPage(QWidget):
         if not name or not self.sai.valid_secret(name):
             QMessageBox.information(self, tr("Secret"), tr("Select a secret first."))
             return
-        if QMessageBox.question(self, tr("Delete secret"), tr("Delete the secret {name}?", name=name)) != \
-                QMessageBox.StandardButton.Yes:
+        if not confirm(self, tr("Delete secret"), tr("Delete the secret {name}?", name=printable(name)), tr("Delete"),
+                       destructive=True):
             return
         background(self.sai.delete_secret, name, owner=self, source=self.secret_buttons, timeout=90,
                    done=self.secret_deleted)

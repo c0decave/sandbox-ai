@@ -151,3 +151,25 @@ def test_a_typed_key_does_not_stay_behind_in_the_dialog(qapp, env, monkeypatch, 
     assert [d.value.text() for d in dialogs] == ["", ""], "added or cancelled: the typed key is gone"
     assert not any(e.text() == "tskey-auth-kept-nowhere" for e in parent.findChildren(QLineEdit))
     parent.deleteLater()
+
+
+def test_removing_a_profile_asks_with_cancel_as_the_default(qapp, env, monkeypatch, wait):
+    """Regression: Remove asked with QMessageBox.question, whose default is Yes: Enter removed the profile."""
+    from sandbox_ai_app import widgets
+    from sandbox_ai_app.vpn_page import VpnBox
+    sai = backend.SandboxAI()
+    removed = []
+    monkeypatch.setattr(sai, "vpn_profiles", lambda: [{"profile": "home", "type": "wireguard", "provider": ""}])
+    monkeypatch.setattr(sai, "vpn_remove", lambda name: removed.append(name) or (0, "", ""))
+    monkeypatch.setattr(widgets, "SHOWN", [])
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", False)  # Cancel
+    box = VpnBox(sai)
+    box.refresh()
+    assert wait(lambda: box.profiles.rowCount() == 1)
+    box.profiles.selectRow(0)
+    box.remove()
+    assert widgets.SHOWN[-1][:2] == ("Remove", "Remove the VPN profile home?") and removed == []
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    box.remove()
+    assert wait(lambda: removed == ["home"])
+    box.deleteLater()

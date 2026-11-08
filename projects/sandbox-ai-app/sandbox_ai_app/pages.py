@@ -6,8 +6,8 @@ import os
 from pathlib import Path
 import time
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
     QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QVBoxLayout, QWidget,
@@ -24,6 +24,9 @@ from .widgets import (
 
 
 ANSWER_WAIT = 90  # seconds an answer may take (sandbox-ai approvals: up to 60)
+REMOTE_ANSWER_WAIT = 130  # an answer on another host: SSH on top (and "always" waits for the certificate check)
+REMOTE_POLL = 5000  # ms between two looks at the other hosts' open questions (one look per host at a time)
+LOCAL = "local"  # the host of this machine's own questions
 SNAPSHOT_WAIT = 30  # seconds a scan of the questions may take before the next one is tried
 POLL_WAIT = 0.2  # seconds a scan on the GUI thread waits for one running in a thread
 
@@ -46,7 +49,10 @@ def shown(value, limit=300):
 
 
 def describe(question):
-    """What a question asks, in the app's language; everything the agent chose is escaped."""
+    """What a question asks, in the app's language; everything the agent chose is escaped. A question of another
+    host is said as that host's sandbox-ai says it (escaped there and here)."""
+    if isinstance(question, backend.RemoteQuestion):
+        return printable(question.get("question") or question.get("kind") or "?")
     kind = question.get("kind")
     if kind == "connect":
         text = tr("connect to {destination}", destination=printable(question.get("destination", "?")))
@@ -85,6 +91,14 @@ def describe(question):
         return tr("canary {name}: {summary}", name=shown(question.get("canary", "?"), 40),
                   summary=shown(question.get("summary", ""), 500))
     return printable(kind)
+
+
+def openable_url(text):
+    """QUrl of TEXT if it is an http or https URL with a host (what "Open here" opens), else None."""
+    url = QUrl(str(text or ""), QUrl.ParsingMode.StrictMode)
+    if url.isValid() and url.scheme().lower() in ("http", "https") and url.host():
+        return url
+    return None
 
 
 def scope_items(combo):
@@ -161,7 +175,7 @@ class QuestionsWindow(QDialog):
     def show_questions(self):
         page = self.page
         keys = list(page.questions)
-        fill(self.table, [[page.labels.get(key, printable(key[0])), describe(page.questions[key][1])] for key in keys],
+        fill(self.table, [[page.labels.get(key, printable(key[1])), describe(page.questions[key][1])] for key in keys],
              keys=keys)
         if not selected_rows(self.table) and len(keys) == 1:
             self.table.selectRow(0)
@@ -183,17 +197,20 @@ class QuestionsWindow(QDialog):
 
 
 class ApprovalsPage(QWidget):
-    """Open questions of every running sandbox, answered through `sandbox-ai approvals`; the history.
+    """Open questions of every running sandbox, on this machine and on every host of `sandbox-ai hosts`, answered
+    through `sandbox-ai approvals` (there: over SSH); the history (of this machine).
 
-    Rows are found by their (run, question id) key, never by their position: the table can be sorted, and a
-    question that disappears leaves nothing selected, so Allow can only answer the question highlighted."""
-    pending_changed = Signal(int, list)  # number of open questions, the new ones [(run, question)]
+    Rows are found by their (host, run, question id) key, never by their position: the table can be sorted, and a
+    question that disappears leaves nothing selected, so Allow can only answer the question highlighted. The other
+    hosts are read every REMOTE_POLL ms in threads, one look per host at a time, whether the page is shown or not
+    (their questions are refused after a minute too)."""
+    pending_changed = Signal(int, list)  # number of open questions (all hosts), the new ones [(sandbox, question)]
 
-    def __init__(self, sai, interval=1000):
+    def __init__(self, sai, interval=1000, remote_interval=None):
         super().__init__()
         self.sai = sai
         layout = QVBoxLayout(self)
-        open_box = QGroupBox(tr("Open questions of the running sandboxes"))
+        open_box = QGroupBox(tr("Open questions of the running sandboxes, on every host"))
         open_layout = QVBoxLayout(open_box)
         self.url = plain_label()
         font = QFont()
@@ -202,8 +219,18 @@ class ApprovalsPage(QWidget):
         self.url.setFont(font)
         self.url.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.url.hide()
-        open_layout.addWidget(self.url)
-        self.open = table([tr("Sandbox"), tr("Kind"), tr("Question"), tr("Asked"), tr("Refused in")])
+        url_row = QHBoxLayout()
+        url_row.addWidget(self.url, 1)
+        # A browser question of another host: the page is opened here, where the human is, and that host is told
+        # not to open it (--no-open).
+        self.open_here_button = QPushButton(tr("Open here"))
+        self.open_here_button.setToolTip(tr("Open the page in this computer's browser and allow the question without "
+                                            "opening it on its host"))
+        self.open_here_button.clicked.connect(lambda: self.open_here())
+        self.open_here_button.hide()
+        url_row.addWidget(self.open_here_button)
+        open_layout.addLayout(url_row)
+        self.open = table([tr("Sandbox"), tr("Kind"), tr("Question"), tr("Asked"), tr("Refused in"), tr("Host")])
         self.open.itemSelectionChanged.connect(self.selection_changed)
         open_layout.addWidget(self.open)
         # What the selected question means (resolved names, the run's earlier connections): in a thread.
@@ -245,6 +272,9 @@ class ApprovalsPage(QWidget):
         open_layout.addLayout(row)
         self.message = plain_label()
         open_layout.addWidget(self.message)
+        self.remote_note = plain_label(role="secondary")  # hosts that did not answer
+        self.remote_note.hide()
+        open_layout.addWidget(self.remote_note)
         self.seconds = sai.approval_seconds
         hint = plain_label(tr("Without an answer within {seconds} seconds a question is refused. A deny lasts at "
                               "most for the run; “always” is remembered for the project. Allowing a URL opens it "
@@ -277,6 +307,11 @@ class ApprovalsPage(QWidget):
         split.addWidget(always_box)
         layout.addWidget(split, 1)
         self.entries, self.questions, self.labels, self.seen, self.history_key = [], {}, {}, set(), None
+        self.entry_keys, self.local_pending = [], []
+        # The other hosts: {host: [RemoteQuestion]} as last read, why a host did not answer, the reads running
+        # ({host: ThreadCall}) and the hosts to read once more when their read is done (after an answer).
+        self.remote, self.remote_problems, self.remote_reading, self.remote_again = {}, {}, {}, set()
+        self.hosts_reading, self.hosts_again, self.known_hosts = None, False, None
         self.project, self.marked, self.project_pending = None, None, 0
         self.open_box = open_box
         self.records, self.contexts, self.always_token, self.always_loaded = {}, {}, 0, False
@@ -291,6 +326,12 @@ class ApprovalsPage(QWidget):
         self.timer.timeout.connect(self.poll_soon)
         if interval:
             self.timer.start(interval)
+        self.remote_timer = QTimer(self)
+        self.remote_timer.timeout.connect(lambda: self.poll_remote())
+        remote_interval = (REMOTE_POLL if interval else 0) if remote_interval is None else remote_interval
+        if remote_interval:
+            self.remote_timer.start(remote_interval)
+            QTimer.singleShot(0, lambda: self.poll_remote())
         self.poll()
 
     def poll_soon(self):
@@ -324,13 +365,94 @@ class ApprovalsPage(QWidget):
             self.message.setText(tr("Cannot read the questions: {error}", error=printable(error)))
             return
         pending, answered = result
-        self.show_open(pending, now)
+        self.local_pending = pending
         self.show_history(answered)
-        keys = {(run, q.get("id")) for run, _, q in pending}
-        new = [(asker(run, record), q) for run, record, q in pending if (run, q.get("id")) not in self.seen]
-        self.seen = keys | {k for k in self.seen if k in keys}
+        self.show_all(now)
+
+    def show_all(self, now=None):
+        """This machine's open questions and the other hosts' in one table; new ones are announced once."""
+        pending = [(LOCAL, run, record, q) for run, record, q in self.local_pending] + [
+            (host, q.get("run", ""), {}, q) for host in sorted(self.remote) for q in self.remote[host]]
+        self.show_open(pending, now)
+        keys = {(host, run, q.get("id")) for host, run, _, q in pending}
+        new = [(self.label_of(host, run, record, q), q) for host, run, record, q in pending
+               if (host, run, q.get("id")) not in self.seen]
+        self.seen = keys
         self.offer_questions()
         self.pending_changed.emit(len(pending), new)
+
+    def label_of(self, host, run, record, question):
+        """Which sandbox asks, and on which host when it is not this machine."""
+        if host == LOCAL:
+            return asker(run, record)
+        return tr("{sandbox} on {host}", sandbox=printable(question.get("sandbox") or run), host=printable(host))
+
+    # -- the other hosts --
+
+    def poll_remote(self, hosts=None):
+        """Read the open questions of the other hosts in threads, one read per host at a time: HOSTS (after an answer
+        there; read once more when a read of it runs already), or every host of `sandbox-ai hosts`."""
+        if hosts is not None:
+            for host in hosts:
+                if host in self.remote_reading:
+                    self.remote_again.add(host)
+                else:
+                    self.read_host(host)
+            return
+        if self.hosts_reading is not None:
+            self.hosts_again = True
+            return
+        self.hosts_reading = background(self.sai.remote_hosts, timeout=30, done=self.hosts_listed)
+
+    def hosts_listed(self, hosts, error):
+        self.hosts_reading = None
+        hosts = list(hosts or []) if error is None else list(self.remote)
+        self.known_hosts = set(hosts)
+        for gone in (set(self.remote) | set(self.remote_problems)) - set(hosts):
+            self.remote.pop(gone, None)
+            self.remote_problems.pop(gone, None)
+        for host in hosts:
+            if host not in self.remote_reading:
+                self.read_host(host)
+        if self.hosts_again:
+            self.hosts_again = False
+            self.poll_remote()
+        self.show_remote_note()
+        self.show_all()
+
+    def read_host(self, host):
+        self.remote_reading[host] = background(
+            self.sai.host_questions, host, timeout=backend.REMOTE_QUESTION_WAIT + 15,
+            done=lambda result, error, h=host: self.host_read(h, result, error))
+
+    def host_read(self, host, result, error):
+        self.remote_reading.pop(host, None)
+        if self.known_hosts is not None and host not in self.known_hosts:
+            self.remote_again.discard(host)
+            return  # removed from the list meanwhile: its questions are not answered from here any more
+        if error is None:
+            self.remote[host] = list(result or [])
+            self.remote_problems.pop(host, None)
+        else:
+            # Its last questions stay while their time runs (a host that answers again soon must not announce them
+            # anew); those whose time is up go.
+            self.remote_problems[host] = printable(error)[:200]
+            kept = [q for q in self.remote.get(host, []) if q.timing()[1] != 0]
+            if kept:
+                self.remote[host] = kept
+            else:
+                self.remote.pop(host, None)
+        if host in self.remote_again:
+            self.remote_again.discard(host)
+            self.read_host(host)
+        self.show_remote_note()
+        self.show_all()
+
+    def show_remote_note(self):
+        problems = sorted(self.remote_problems.items())
+        self.remote_note.setVisible(bool(problems))
+        self.remote_note.setText("\n".join(tr("{host}: no answer", host=printable(host)) + f" ({text})"
+                                           for host, text in problems))
 
     def offer_questions(self):
         """While a modal dialog blocks the window, open questions are shown in a window above it."""
@@ -363,21 +485,31 @@ class ApprovalsPage(QWidget):
         return bool(self.project and workspace and os.path.realpath(str(workspace)) == self.project)
 
     def show_open(self, pending, now=None):
-        keys = [(run, q.get("id")) for run, _, q in pending]
-        self.project_pending = sum(1 for _, record, _ in pending if self.of_project(record))
-        self.open_box.setTitle(tr("Open questions of the running sandboxes") + (
-            "  " + tr("({count} of the current project)", count=self.project_pending) if self.project_pending else ""))
-        if keys != [(run, q.get("id")) for run, q in self.entries] or self.marked != self.project:
+        """PENDING: [(host, run, record, question)], LOCAL questions first."""
+        keys = [(host, run, q.get("id")) for host, run, _, q in pending]
+        self.project_pending = sum(1 for host, _, record, _ in pending if host == LOCAL and self.of_project(record))
+        elsewhere = sum(1 for host, *_ in pending if host != LOCAL)
+        title = tr("Open questions of the running sandboxes, on every host")
+        if elsewhere:
+            title += "  " + tr("({count} on other hosts)", count=elsewhere)
+        if self.project_pending:
+            title += "  " + tr("({count} of the current project)", count=self.project_pending)
+        self.open_box.setTitle(title)
+        # The questions themselves are taken every time (a host's newer read counts down from its own time left).
+        self.questions = {key: (run, q, host) for key, (host, run, _, q) in zip(keys, pending)}
+        self.labels = {key: self.label_of(host, run, record, q) for key, (host, run, record, q) in zip(keys, pending)}
+        self.records = {key: record for key, (_, _, record, _) in zip(keys, pending)}
+        if keys != self.entry_keys or self.marked != self.project:
             self.marked = self.project
-            had_selection = self.current() is not None
-            self.entries = [(run, q) for run, _, q in pending]
-            self.questions = {(run, q.get("id")): (run, q) for run, q in self.entries}
-            self.labels = {(run, q.get("id")): asker(run, record) for run, record, q in pending}
-            self.records = {(run, q.get("id")): record for run, record, q in pending}
+            had_selection = selected_rows(self.open) != []
+            self.entry_keys = keys
+            self.entries = [(run, q, host) for host, run, _, q in pending]
             self.contexts = {key: text for key, text in self.contexts.items() if key in self.questions}
             # fill() selects the highlighted question again where it now is, or nothing when it is gone.
-            fill(self.open, [[asker(run, record), kind_name(q.get("kind")), describe(q), "", ""]
-                             for run, record, q in pending], keys=keys)
+            fill(self.open, [[asker(run, record) if host == LOCAL else printable(q.get("sandbox") or run),
+                              kind_name(q.get("kind")), describe(q), "", "",
+                              tr("this machine") if host == LOCAL else printable(host)]
+                             for host, run, record, q in pending], keys=keys)
             if not had_selection and self.current() is None and len(self.entries) == 1:
                 # The one open question (e.g. after its notification) is ready to answer; a selection that
                 # just lost its question never moves to another one.
@@ -402,7 +534,7 @@ class ApprovalsPage(QWidget):
         for entry, asked, cell in cells:
             if entry is None or asked is None or cell is None:
                 continue
-            age, left = backend.question_timing(entry[1], now, default=self.seconds)
+            age, left = self.timing(entry, now)
             asked.setText(tr("{seconds} s ago", seconds=age) if age is not None else "?")
             asked.setData(SORT_ROLE, age if age is not None else -1)
             if left is None:
@@ -415,6 +547,13 @@ class ApprovalsPage(QWidget):
                 color = "bad" if left <= 10 else "warn" if left <= 30 else None
                 cell.setForeground(QColor(theme.color(color)) if color else self.open.palette().text())
         self.update_buttons()
+
+    def timing(self, entry, now=None):
+        """(age, seconds left) of ENTRY (run, question, host); another host's counts down from its own time left."""
+        question = entry[1]
+        if isinstance(question, backend.RemoteQuestion):
+            return question.timing(now)
+        return backend.question_timing(question, now, default=self.seconds)
 
     def show_history(self, answered):
         key = tuple((run, q.get("id"), json.dumps(q.get("result"), sort_keys=True)) for run, _, q in answered)
@@ -433,17 +572,36 @@ class ApprovalsPage(QWidget):
         fill(self.history, rows, colors, keys=keys)
 
     def current(self):
-        """(run, question) of the highlighted row, found by its key; None when nothing is selected."""
+        """(run, question, host) of the highlighted row, found by its key; None when nothing is selected."""
         rows = selected_rows(self.open)
         return self.questions.get(row_key(self.open, rows[0])) if rows else None
 
+    def widest(self, entry):
+        """The widest answer ENTRY may get: this machine's policy, or what the other host said (its policy, the run's
+        security mode, the kind of question)."""
+        if entry is not None and entry[2] != LOCAL:
+            scope = entry[1].get("max_scope")
+            return scope if scope in backend.SCOPES else "once"
+        return self.max_scope
+
     def update_buttons(self):
         entry = None if self.answering is not None else self.current()
+        widest = self.widest(entry)
         self.allow_button.setEnabled(entry is not None)
         self.deny_button.setEnabled(entry is not None)
-        self.block_button.setEnabled(entry is not None and self.max_scope == "always"
+        self.block_button.setEnabled(entry is not None and widest == "always"
                                      and entry[1].get("kind") in ("connect", "dns"))
         self.scope.setEnabled(entry is not None and not backend.question_url(entry[1]))
+        # The scopes the selected question may get (another host's policy is that host's).
+        for index in range(self.scope.count()):
+            self.scope.model().item(index).setEnabled(
+                backend.SCOPES.index(self.scope.itemData(index)) <= backend.SCOPES.index(widest))
+        if backend.SCOPES.index(self.scope.currentData()) > backend.SCOPES.index(widest):
+            self.scope.setCurrentIndex(self.scope.findData("once"))
+        remote_url = entry is not None and entry[2] != LOCAL and openable_url(entry[1].get("url")) is not None \
+            and entry[1].get("kind") == "browser"
+        self.open_here_button.setVisible(remote_url)
+        self.open_here_button.setEnabled(remote_url)
         if self.questions_window is not None:
             self.questions_window.update_buttons()
 
@@ -451,19 +609,25 @@ class ApprovalsPage(QWidget):
         entry = self.current()
         url = backend.question_url(entry[1]) if entry else None
         self.url.setVisible(bool(url))
-        self.url.setText(tr("Open in your browser: {url}", url=url) if url else "")
+        if url and entry[2] != LOCAL:
+            self.url.setText(tr("{host} asks to open: {url}", host=printable(entry[2]), url=url))
+        else:
+            self.url.setText(tr("Open in your browser: {url}", url=url) if url else "")
         self.update_buttons()
         self.show_context()
 
     def show_context(self):
         """Details of the selected question, looked up once per question in a thread (a name lookup may
-        take seconds)."""
+        take seconds); another host's log is not read from here."""
         entry = self.current()
+        if entry and entry[2] != LOCAL:
+            self.set_context(tr("Asked on {host}: the answer goes there, over SSH.", host=printable(entry[2])), [])
+            return
         if not entry or entry[1].get("kind") not in ("dns", "connect"):
             self.set_context("", [])
             return
-        run, question = entry
-        key = (run, question.get("id"))
+        run, question, host = entry
+        key = (host, run, question.get("id"))
         if key in self.contexts:
             self.set_context(*self.contexts[key])
             return
@@ -478,7 +642,7 @@ class ApprovalsPage(QWidget):
         self.contexts[key] = context_text(result) if error is None else \
             (tr("No details: {error}", error=printable(error)), [])
         entry = self.current()
-        if entry and (entry[0], entry[1].get("id")) == key:
+        if entry and (entry[2], entry[0], entry[1].get("id")) == key:
             self.set_context(*self.contexts[key])
 
     def set_context(self, text, log):
@@ -541,36 +705,61 @@ class ApprovalsPage(QWidget):
         status, out, err = outcome(result, error)
         self.load_always(note=printable((out + err).strip()) if status != 0 else tr("Forgotten."))
 
-    def answer(self, decision, scope=None, entry=None, parent=None):
-        """Send the answer in the background (`sandbox-ai approvals` may take up to a minute). Allow asks
-        first, naming the sandbox, the question and the scope; Deny takes one click and lasts for the run at
-        most ("once" from the scope box: this time only); Block always is a deny with the scope "always".
-        ENTRY: the (run, question) to answer (default: the one highlighted); PARENT: the window asking."""
+    def answer(self, decision, scope=None, entry=None, parent=None, open_here=False):
+        """Send the answer in the background (`sandbox-ai approvals` may take up to a minute; on another host through
+        `sandbox-ai hosts run HOST --`). Allow asks first, naming the sandbox, its host, the question and the scope;
+        Deny takes one click and lasts for the run at most ("once" from the scope box: this time only); Block always
+        is a deny with the scope "always". ENTRY: the (run, question, host) to answer (default: the one highlighted);
+        PARENT: the window asking; OPEN_HERE (a browser question of another host): allowed there with --no-open, and
+        the page opened here once that host took the answer."""
         entry = entry or self.current()
         if not entry or self.answering is not None:
             return
-        run, question = entry
+        run, question, host = entry
         if scope is None:
             scope = self.scope.currentData()
             if decision == "deny" and scope != "once":
                 scope = "run"
-        if backend.SCOPES.index(scope) > backend.SCOPES.index(self.max_scope):
-            self.message.setText(tr("The administrator's policy allows answers up to “{scope}”.", scope=self.max_scope))
+        widest = self.widest(entry)
+        if backend.SCOPES.index(scope) > backend.SCOPES.index(widest):
+            self.message.setText(tr("The administrator's policy allows answers up to “{scope}”.", scope=widest))
             return
-        if decision == "allow" and not self.confirm_allow(run, question, scope, parent):
+        url = openable_url(question.get("url")) if open_here and question.get("kind") == "browser" else None
+        if open_here and url is None:
+            self.message.setText(tr("Only http and https pages are opened here."))
+            return
+        if decision == "allow" and not self.confirm_allow(entry, scope, parent, open_here=url is not None):
             return
         if self.answering is not None:  # answered meanwhile (in the other window, while the question was open)
             return
         self.message.setText(tr("Sending the answer…"))
-        # sandbox-ai answers within 60 s; a call that hangs past that (e.g. on a stuck pipe) frees the buttons.
-        self.answering = background(self.sai.answer, question.get("id", ""), decision, scope, timeout=ANSWER_WAIT,
-                                    done=lambda result, error: self.answered(result, error, decision, scope))
+        ident = question.get("id", "")
+        done = lambda result, error: self.answered(result, error, decision, scope, host, url)  # noqa: E731
+        if host == LOCAL:
+            # sandbox-ai answers within 60 s; a call that hangs past that (e.g. on a stuck pipe) frees the buttons.
+            self.answering = background(self.sai.answer, ident, decision, scope, timeout=ANSWER_WAIT, done=done)
+        elif not self.sai.question_id.fullmatch(str(ident)):
+            self.message.setText(tr("Not a question of sandbox-ai: {ident}", ident=printable(ident)[:60]))
+            return
+        else:
+            argv = ["approvals", decision, ident, "--scope", scope] + (["--no-open"] if url is not None else [])
+            self.answering = background(lambda: self.sai.host_run(host, *argv, timeout=REMOTE_ANSWER_WAIT - 30),
+                                        timeout=REMOTE_ANSWER_WAIT, done=done)
         self.update_buttons()
 
-    def confirm_allow(self, run, question, scope, parent=None):
+    def open_here(self):
+        """A browser question of another host: allowed there without opening it (--no-open), opened here."""
+        self.answer("allow", "once", open_here=True)
+
+    def confirm_allow(self, entry, scope, parent=None, open_here=False):
+        run, question, host = entry
         url = backend.question_url(question)
-        lines = [tr("Sandbox: {sandbox}", sandbox=self.labels.get((run, question.get("id")), printable(run))),
-                 tr("Asks to: {question}", question=describe(question))]
+        lines = [tr("Sandbox: {sandbox}", sandbox=self.labels.get((host, run, question.get("id")), printable(run)))]
+        if host != LOCAL:
+            lines.append(tr("Host: {host}", host=printable(host)))
+        lines.append(tr("Asks to: {question}", question=describe(question)))
+        if open_here:
+            lines.append(tr("The page opens in this computer's browser, not on {host}.", host=printable(host)))
         if not url:
             lines.append(tr("Scope: {scope}", scope=self.scope.itemText(self.scope.findData(scope))))
         if scope == "always" and not url:
@@ -579,7 +768,7 @@ class ApprovalsPage(QWidget):
         return confirm(parent or self, tr("Allow this request?"), "\n".join(lines), tr("Allow"),
                        destructive=scope == "always" and not url)
 
-    def answered(self, result, error, decision="deny", scope="once"):
+    def answered(self, result, error, decision="deny", scope="once", host=LOCAL, url=None):
         self.answering = None
         self.scope.setCurrentIndex(self.scope.findData("once"))  # a wider scope is chosen for one answer only
         status, out, err = outcome(result, error)
@@ -589,9 +778,15 @@ class ApprovalsPage(QWidget):
             warn(self, tr("Not answered"), text or tr("sandbox-ai refused the answer."), modal=False)
         else:
             self.message.setText(text)
-        self.poll()
-        if status == 0 and scope == "always":
-            self.load_always()  # it is listed there now
+            if url is not None and decision == "allow":
+                QDesktopServices.openUrl(url)
+        if host == LOCAL:
+            self.poll()
+            if status == 0 and scope == "always":
+                self.load_always()  # it is listed there now
+        else:
+            self.poll_remote([host])  # read again now, also when a read of it runs already
+            self.update_buttons()
 
 
 class StatisticsPage(QWidget):

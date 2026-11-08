@@ -86,7 +86,11 @@ BLOCKING_SAI = {"call", "answer", "dry_run", "doctor", "mcp_catalog", "statistic
                 "secrets", "login_status", "remembered", "forget_remembered", "question_context", "run_log",
                 "devices_added", "device_check", "device_candidates", "add_device", "remove_device", "set_limits",
                 "workspaces", "add_workspace", "remove_workspace",
-                "write_project"}
+                "write_project",
+                # over SSH to the hosts of `sandbox-ai hosts` (seconds; a host that does not answer: up to the timeout)
+                "host_run", "host_json", "host_instances", "host_questions", "host_test", "host_update",
+                "limits_shown", "review_home"}
+# (host_statuses(cached=True) reads what `sandbox-ai hosts list` kept, without SSH: the Hosts page lists it at once.)
 # (stop_commands runs on the GUI thread on purpose: only when quitting, bounded by one grace period.)
 BLOCKING_MODULES = {"subprocess"}
 BLOCKING_BACKEND = {"read_connections"}
@@ -143,7 +147,8 @@ def blocking_calls(source):
 
 def test_pages_run_commands_and_slow_reads_only_in_the_background():
     found = [f"{name}:{line} {what}"
-             for name in ("pages.py", "images_page.py", "ui.py", "board_view.py", "wizard.py", "settings.py")
+             for name in ("pages.py", "images_page.py", "ui.py", "board_view.py", "wizard.py", "settings.py",
+                          "hosts_page.py")
              if (PACKAGE / name).exists()
              for line, what in blocking_calls((PACKAGE / name).read_text())]
     assert not found, "on the GUI thread (use widgets.background, ThreadCall or Task):\n" + "\n".join(found)

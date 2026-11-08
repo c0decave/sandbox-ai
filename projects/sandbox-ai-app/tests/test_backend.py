@@ -710,3 +710,107 @@ def test_settings_have_typed_defaults_and_the_checkout_override(tmp_path, monkey
     assert backend.sandbox_ai_home_override() == "/opt/sandbox-ai"
     monkeypatch.setenv("SANDBOX_AI_HOME", "/elsewhere")
     assert backend.sandbox_ai_home_override() is None, "$SANDBOX_AI_HOME wins"
+
+
+# -- other hosts (sandbox-ai hosts): their questions, keys, limits, HOME reviews, live changes --
+
+
+def json_runner(calls, answers):
+    """A runner for SandboxAI that records the argv and answers by the sandbox-ai command (the words after --)."""
+    def run(argv, **kwargs):
+        calls.append(argv)
+        words = argv[argv.index("--") + 1:] if "--" in argv else argv[3:]
+        status, out, err = answers.get(words[0], (0, "", ""))
+        return subprocess.CompletedProcess(argv, status, out, err)
+    return run
+
+
+def test_the_open_questions_of_another_host_are_checked_and_count_down():
+    items = [{"id": "1700000000-1-1", "run": "claude-abc", "sandbox": "claude-abc (~/p)", "kind": "connect",
+              "time": "2026-11-08T10:00:00Z", "question": "connect to 192.0.2.7:443 \x1b[31m", "timeout": 60,
+              "seconds_left": 42, "max_scope": "run"},
+             {"id": "1700000000-1-2", "run": "claude-abc", "kind": "browser", "url": "https://login.example/x",
+              "question": "open https://login.example/x in your browser", "timeout": 60, "seconds_left": 50,
+              "max_scope": "once"},
+             {"id": "--evil", "run": "claude-abc"}, {"id": "1-2-3", "run": "-x"}, "junk",
+             {"id": "1-2-4", "run": "r", "kind": "dns", "max_scope": "bogus", "seconds_left": True,
+              "url": "https://not.a.browser.question", "extra": "dropped"}]
+    calls = []
+    s = backend.SandboxAI(runner=json_runner(calls, {"approvals": (0, json.dumps(items), "")}))
+    found = s.host_questions("ct1")
+    assert calls[-1][3:] == ["hosts", "run", "ct1", "--", "approvals", "list", "--json"]
+    assert [q["id"] for q in found] == ["1700000000-1-1", "1700000000-1-2", "1-2-4"], "ids and runs that read as options go"
+    assert all(isinstance(q, backend.RemoteQuestion) and q.host == "ct1" for q in found)
+    assert "\x1b" not in found[0]["question"] and found[0]["max_scope"] == "run"
+    assert found[2]["max_scope"] == "always" and found[2]["seconds_left"] is None and "extra" not in found[2]
+    assert "url" not in found[2] and backend.question_url(found[1]) == "https://login.example/x"
+    # The time left is the other host's (its clock never matters here): counted on from when it was read.
+    question = backend.RemoteQuestion("ct1", {"id": "1-1-1", "run": "r", "kind": "dns", "timeout": 60,
+                                              "seconds_left": 42}, read_at=1000.0)
+    assert question.timing(now=1010.0) == (28, 32) and question.timing(now=5000.0)[1] == 0
+    browser = backend.RemoteQuestion("ct1", {"kind": "browser", "timeout": 60, "seconds_left": 50}, read_at=1000.0)
+    assert browser.timing(now=1001.0) == (11, None), "a browser question waits until it is answered"
+    for answer in ((0, "{}", ""), (0, "not json", ""), (255, "", "ssh: connect to host: timed out")):
+        s = backend.SandboxAI(runner=json_runner([], {"approvals": answer}))
+        with pytest.raises(ValueError):
+            s.host_questions("ct1")
+
+
+def test_the_keys_of_other_hosts_starts_never_meet_this_machines():
+    """A host may be called "session" or "run": its starts' keys live in a namespace of their own."""
+    listing = [{"name": "web", "kind": "session", "state": "running"}, {"name": "--evil"}]
+    s = backend.SandboxAI(runner=json_runner([], {"list": (0, json.dumps(listing), "")}))
+    for host in ("session", "run", "mcp", "pid", "ct1"):
+        found = s.host_instances(host)
+        assert [i.key for i in found] == [f"host:{host}:web"] and found[0].host == host
+        assert backend.remote_key(host, "web") == f"host:{host}:web"
+        assert not found[0].key.startswith(("session:", "run:", "mcp:", "pid:", "project:"))
+
+
+def test_limits_shown_and_the_review_of_a_kept_home():
+    calls = []
+    review = {"name": "work", "id": "work", "state": "stopped", "pending": True,
+              "review": {"since": "2026-11-07T10:00:00Z", "changes": [{"path": ".bashrc", "change": "changed"}],
+                         "complete": True}}
+    answers = {"limits": (0, json.dumps({"memory": 8 << 30, "memory_high": None, "cpus": 1.5, "pids": True}), ""),
+               "resume": (0, json.dumps(review), "")}
+    s = backend.SandboxAI(runner=json_runner(calls, answers))
+    assert s.limits_shown("claude-abc") == {"memory": 8 << 30, "memory_high": None, "cpus": 1.5, "pids": None}
+    assert calls[-1][3:] == ["limits", "claude-abc", "--show", "--json"]
+    s.limits_shown("web", "ct1")
+    assert calls[-1][3:] == ["hosts", "run", "ct1", "--", "limits", "web", "--show", "--json"]
+    assert s.review_home("work") == review and calls[-1][3:] == ["resume", "work", "--review-home", "--json"]
+    s.review_home("web", "ct1")
+    assert calls[-1][3:] == ["hosts", "run", "ct1", "--", "resume", "web", "--review-home", "--json"]
+    count = len(calls)
+    for bad in (lambda: s.limits_shown("--all"), lambda: s.review_home("-x")):
+        with pytest.raises(ValueError):
+            bad()
+    assert len(calls) == count, "nothing invalid reaches sandbox-ai"
+    s = backend.SandboxAI(runner=json_runner([], {"resume": (1, "", "sandbox-ai: claude-1 keeps no HOME: there is "
+                                                                    "nothing to review\n")}))
+    with pytest.raises(ValueError, match="keeps no HOME"):
+        s.review_home("claude-1")
+    s = backend.SandboxAI(runner=json_runner([], {"limits": (2, "", "unrecognized arguments: --show")}))
+    with pytest.raises(ValueError, match="unrecognized"):
+        s.limits_shown("claude-abc")
+
+
+def test_devices_workspaces_and_limits_of_a_sandbox_on_another_host_are_its_commands():
+    calls = []
+    s = backend.SandboxAI(runner=json_runner(calls, {}))
+    tail = ["hosts", "run", "ct1", "--"]
+    assert s.add_device("web", "/dev/video0", host="ct1")[0] == 0
+    assert calls[-1][3:] == tail + ["devices", "add", "web", "/dev/video0"]
+    assert s.remove_device("web", "/dev/video0", host="ct1")[0] == 0 and calls[-1][3:][4:6] == ["devices", "remove"]
+    assert s.add_workspace("web", "/srv/data", True, host="ct1")[0] == 0
+    assert calls[-1][3:] == tail + ["workspace", "add", "web", "/srv/data", "--ro"]
+    assert s.remove_workspace("web", "data", True, host="ct1")[0] == 0
+    assert calls[-1][3:] == tail + ["workspace", "remove", "web", "data", "--force"]
+    assert s.set_limits("web", "4g", "", "none", host="ct1")[0] == 0
+    assert calls[-1][3:] == tail + ["limits", "web", "--memory", "4g", "--pids", "none"]
+    count = len(calls)
+    for bad in (s.add_device("web", "/dev/../etc/passwd", host="ct1"), s.add_device("web", "/dev/x\n", host="ct1"),
+                s.add_workspace("web", "relative", host="ct1"), s.set_limits("--x", "1g", host="ct1")):
+        assert bad[0] == 2
+    assert len(calls) == count, "nothing invalid reaches sandbox-ai"

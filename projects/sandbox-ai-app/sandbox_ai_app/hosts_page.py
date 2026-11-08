@@ -22,11 +22,31 @@ from PySide6.QtWidgets import (
 )
 
 from .files import printable
-from .i18n import tr
-from .widgets import MONO, background, confirm, plain_label, warn
+from .i18n import N_, tr
+from .reviews import home_review, review_refusal
+from .widgets import MONO, background, confirm, plain_label, set_enabled, warn
 
 # Seconds between two looks at the chosen host while the page is shown (one at a time; an SSH host may be slow).
 REFRESH_SECONDS = 20
+STATES = {"running": N_("running"), "paused": N_("paused"), "stopped": N_("stopped"), "damaged": N_("damaged"),
+          "starting": N_("starting")}
+START_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}"
+
+
+def is_remote(entry):
+    """A host of the list other than this machine (as SandboxAI.remote_hosts counts them)."""
+    return entry.get("kind") != "local" and entry.get("name") != "local"
+
+
+def start_rules(entry):
+    """{action: why not, or None} for a start of a host's `sandbox-ai list --json` (ENTRY)."""
+    state = entry.get("state") if entry else None
+    shown = tr(STATES[state]) if state in STATES else printable(str(state or "?"))
+    if entry is None:
+        return {action: tr("Select a start first.") for action in ("attach", "pause", "resume", "stop")}
+    rules = {"attach": state == "running" and bool(entry.get("attachable")), "pause": state == "running",
+             "resume": state in ("paused", "stopped"), "stop": state in ("running", "paused")}
+    return {action: None if ok else tr("Not while it is {state}.", state=shown) for action, ok in rules.items()}
 
 
 def version_text(info):
@@ -148,7 +168,9 @@ class HostsPage(QWidget):
         self.starts = QTableWidget(0, 5)
         self.starts.setHorizontalHeaderLabels([tr("Name"), tr("Agent"), tr("State"), tr("Workspace"), tr("Started")])
         self.starts.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.starts.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.starts.horizontalHeader().setStretchLastSection(True)
+        self.starts.itemSelectionChanged.connect(self.update_start_buttons)
         starts_layout.addWidget(self.starts, 1)
         row = QHBoxLayout()
         self.attach_button = QPushButton(tr("Attach"))
@@ -172,6 +194,7 @@ class HostsPage(QWidget):
         self.questions = QTableWidget(0, 2)
         self.questions.setHorizontalHeaderLabels([tr("Question"), tr("Sandbox")])
         self.questions.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.questions.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.questions.horizontalHeader().setStretchLastSection(True)
         approvals_layout.addWidget(self.questions, 1)
         row = QHBoxLayout()
@@ -222,6 +245,7 @@ class HostsPage(QWidget):
         self.timer.setInterval(REFRESH_SECONDS * 1000)
         self.timer.timeout.connect(self.tick)
         self.load_hosts()
+        self.update_start_buttons()
 
     # -- the list --
 
@@ -300,6 +324,7 @@ class HostsPage(QWidget):
         self.questions.setRowCount(0)
         self.shown_host = None
         self.pane_title.setText(printable(text))
+        self.update_start_buttons()
 
     def add(self):
         dialog = AddHostDialog(self)
@@ -322,6 +347,11 @@ class HostsPage(QWidget):
     def remove(self):
         name = self.host()
         if name in (None, "local"):
+            return
+        if not confirm(self, tr("Remove host"), tr(
+                "Remove {host} from the list of hosts? Its sandbox-ai and its starts stay there; this app and sandbox-ai "
+                "web no longer reach it (its approvals are no longer answered from here).", host=self.label(name)),
+                tr("Remove"), destructive=True):
             return
         background(self.sai.host_remove, name, owner=self, source=self.remove_button, timeout=60,
                    done=lambda result, error: warn(self, tr("Remove"), printable(str(error))) if error
@@ -383,33 +413,62 @@ class HostsPage(QWidget):
                                              host=self.label(name), starts=len(starts), questions=len(questions))))
         self.status.setText(tr("{host}: {starts} starts, {questions} open questions", host=name, starts=len(starts),
                                questions=len(questions)))
-        self.starts.setRowCount(0)
-        for entry in starts:
-            row = self.starts.rowCount()
-            self.starts.insertRow(row)
+        # Row by row in place, the selection kept on its start (by name) and its question (by id): the page reads
+        # again every REFRESH_SECONDS, and a row chosen just before must not jump to another start.
+        starts = [e for e in starts if isinstance(e, dict)]
+        questions = [q for q in questions if isinstance(q, dict)]
+        chosen = self.chosen_start()
+        chosen_name = chosen.get("name") if chosen else None
+        chosen_question = self.chosen_question()
+        self.starts.blockSignals(True)
+        self.starts.setRowCount(len(starts))
+        for row, entry in enumerate(starts):
             for column, key in enumerate(("name", "agent", "state", "workspace", "started")):
-                item = cell(entry.get(key))
+                value = entry.get(key)
+                item = cell(tr(STATES[value]) if key == "state" and value in STATES else value)
                 item.setData(Qt.ItemDataRole.UserRole, entry)
                 self.starts.setItem(row, column, item)
-        self.questions.setRowCount(0)
-        for question in questions:
-            row = self.questions.rowCount()
-            self.questions.insertRow(row)
+        self.select(self.starts, next((r for r, e in enumerate(starts) if chosen_name and e.get("name") == chosen_name),
+                                      None))
+        self.starts.blockSignals(False)
+        self.questions.setRowCount(len(questions))
+        for row, question in enumerate(questions):
             item = cell(question.get("question"))
             item.setData(Qt.ItemDataRole.UserRole, question.get("id"))
             self.questions.setItem(row, 0, item)
             self.questions.setItem(row, 1, cell(question.get("sandbox") or question.get("run")))
+        self.select(self.questions, next((r for r, q in enumerate(questions)
+                                          if chosen_question and q.get("id") == chosen_question), None))
+        self.update_start_buttons()
         level = (defaults.get("values") or {}).get("telemetry", "off")
         self.telemetry.setEnabled(bool(defaults.get("telemetry_levels")))
         self.telemetry.setCurrentIndex(max(0, self.telemetry.findData(level)))
         self.defaults_note.setText(printable(tr("For every start on {host}, in {path}", host=name,
                                                 path=defaults.get("path", "?"))))
 
+    @staticmethod
+    def select(table, row):
+        """Select ROW of TABLE alone, or nothing (None)."""
+        table.clearSelection()
+        if row is not None:
+            table.selectRow(row)
+
     def chosen_start(self):
         rows = self.starts.selectionModel().selectedRows() if self.starts.selectionModel() else []
-        if not rows:
-            return None
-        return self.starts.item(rows[0].row(), 0).data(Qt.ItemDataRole.UserRole)
+        item = self.starts.item(rows[0].row(), 0) if rows else None
+        return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+
+    def chosen_question(self):
+        rows = self.questions.selectionModel().selectedRows() if self.questions.selectionModel() else []
+        item = self.questions.item(rows[0].row(), 0) if rows else None
+        return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+
+    def update_start_buttons(self):
+        """Attach, Pause, Resume and Stop follow the state of the selected start (as on the Sandboxes page)."""
+        rules = start_rules(self.chosen_start())
+        set_enabled(self.attach_button, rules["attach"] is None, rules["attach"])
+        for action, button in self.action_buttons.items():
+            set_enabled(button, rules[action] is None, rules[action])
 
     def attach(self):
         entry, name = self.chosen_start(), self.host()
@@ -428,12 +487,44 @@ class HostsPage(QWidget):
         entry, name = self.chosen_start(), self.host()
         if entry is None or name is None:
             return
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}", str(entry.get("name"))):
+        if not re.fullmatch(START_NAME, str(entry.get("name"))):
             warn(self, tr("Hosts"), tr("Not a start's name: {ident}", ident=printable(str(entry.get("name")))[:60]))
             return
-        background(lambda: self.sai.host_run(name, action, entry["name"], timeout=180), owner=self,
-                   source=self.action_buttons[action], timeout=210,
-                   done=lambda result, error: self.acted(result, error))
+        start = entry["name"]
+        if action == "stop" and not confirm(self, tr("Stop"), tr(
+                "On {host}: stop {start}? Its agent ends; what it did not save is lost (a session keeps its HOME, and "
+                "Resume starts it again).", host=self.label(name), start=printable(start)), tr("Stop"),
+                destructive=True):
+            return
+
+        def go():
+            background(lambda: self.sai.host_run(name, action, start, timeout=180), owner=self,
+                       source=self.action_buttons[action], timeout=210,
+                       done=lambda result, error: self.acted(result, error))
+        if action == "resume" and entry.get("state") == "stopped":
+            # What changed in its kept HOME since its last start, before it starts again (asked when anything did).
+            background(lambda: self.sai.review_home(start, name), owner=self, source=self.action_buttons[action],
+                       timeout=150, done=lambda result, error: self.home_reviewed(name, start, result, error, go))
+            return
+        go()
+
+    def home_reviewed(self, host, start, result, error, go):
+        title = tr("Resume {name} on {host}", name=printable(start), host=printable(host))
+        if error is not None:
+            if review_refusal(error) or confirm(self, title, tr(
+                    "What changed in the HOME of {name} since its last start could not be checked:\n{error}\n\n"
+                    "Resume it anyway?", name=printable(start), error=printable(str(error))[-800:]), tr("Resume"),
+                    destructive=True):
+                go()
+            return
+        found = home_review(start, result, host)
+        if found is None:
+            go()
+            return
+        text, details = found
+        if confirm(self, title, text + "\n\n" + tr("Resume it anyway?"), tr("Resume"), destructive=True,
+                   details=details):
+            go()
 
     def acted(self, result, error):
         if error or (result and result[0] != 0):
@@ -510,7 +601,7 @@ class HostsPage(QWidget):
         self.next_update()
 
     def update_all(self):
-        names = [entry["name"] for entry in self.entries if entry.get("kind") == "ssh"]
+        names = [entry["name"] for entry in self.entries if is_remote(entry)]
         if not names:
             return
         self.results, self.queue = [], list(names)
