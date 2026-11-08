@@ -2587,7 +2587,11 @@ der Agent durch einen Symlink ersetzen könnte.
 
 Ein Starter liest `.sandbox-ai.json` danach automatisch aus dem
 Haupt-Workspace; `--config DATEI` wählt eine andere Datei, `--no-config`
-ignoriert sie. Optionen mit Wert auf der Kommandozeile haben Vorrang vor denen
+ignoriert sie. **Der Ordner, in dem Sie starten,
+entscheidet:** Liegt dort eine `.sandbox-ai.json`, ist er das Projekt – der Haupt-Workspace (`/work`)
+und die Datei, die gilt –, und was `--workspace` nennt, folgt als weitere Workspaces (`/workspaces/NAME`);
+ohne Projektdatei dort ist wie bisher der erste `--workspace` der Haupt-Workspace. Jeder Start nennt, welcher
+Ordner `/work` ist und welche Konfiguration gilt. Optionen mit Wert auf der Kommandozeile haben Vorrang vor denen
 der Datei, eine Auth-Wahl (`--copy-auth`, `--no-auth`, `--auth-file`,
 `--import-codex-auth`, ein `--copy` einer Anmeldedatei) ersetzt die der Datei, und Agent-Argumente nach `--`
 ersetzen die gespeicherten; einen Schalter, den die Datei setzt (z. B.
