@@ -1557,7 +1557,9 @@ def cli(argv):
     forget_parser.add_argument("path", type=Path)
     models = commands.add_parser("models", help="List the models of a local LLM server, or of one registered "
                                                 "with sandbox-ai llm (--llm NAME)")
-    models.add_argument("-k", "--kind", choices=list(SERVERS))
+    # The four local kinds have a default port for --host; with --url (or --port) any kind sandbox-ai knows works,
+    # so a plain OpenAI-compatible server can be tested too (what the app's and the web's "Test connection" needs).
+    models.add_argument("-k", "--kind", choices=[*SERVERS, "openai-compatible"])
     models.add_argument("-H", "--host")
     models.add_argument("-l", "--llm", metavar="NAME", help="a server of sandbox-ai llm list (key, https, its CA)")
     models.add_argument("-p", "--port", type=int)
@@ -1598,7 +1600,10 @@ def cli(argv):
                 parser.error("--url needs --kind")
             found = llm().discover_url(a.kind, a.url, ca=a.ca, api_key_secret=a.api_key_secret)
         elif a.kind and a.host:
-            found = discover(a.kind, a.host, a.port or SERVERS[a.kind][1], fetch=fetch_json)
+            port = a.port or (SERVERS[a.kind][1] if a.kind in SERVERS else None)
+            if port is None:
+                parser.error(f"--kind {a.kind} has no default port: give --port, or --url with the whole address")
+            found = discover(a.kind, a.host, port, fetch=fetch_json)
         else:
             parser.error("models needs --kind with --host or --url, or --llm NAME")
         found = sort_models(found, a.sort)
