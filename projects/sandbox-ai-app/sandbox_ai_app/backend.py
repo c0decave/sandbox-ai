@@ -726,6 +726,29 @@ class SandboxAI:
             return 2, "", "invalid run or device"
         return self.call("devices", "remove", run, path, timeout=120)
 
+    # -- workspaces of a running sandbox (sandbox-ai workspace) --
+
+    def workspaces(self, run):
+        """The workspaces of the running sandbox RUN: [{host, sandbox, mode, source ("start" or "added"), kept,
+        since}] (workspaces.listing). Older sandbox-ai versions lack it: AttributeError (or ImportError)."""
+        record = self.runs().get(run)
+        return list(self.module("workspaces").listing(record)) if record else []
+
+    def add_workspace(self, run, directory, read_only=False):
+        """`sandbox-ai workspace add RUN DIR [--ro]`: DIR at /workspaces/NAME until the sandbox ends (kept for a
+        restart of a session). The launcher does every check of a start (scope, private places, the policy)."""
+        if not valid_run(run) or not valid_directory(directory):
+            return 2, "", "invalid run or directory"
+        return self.call("workspace", "add", run, str(directory), *(["--ro"] if read_only else []), timeout=120)
+
+    def remove_workspace(self, run, value, force=False):
+        """`sandbox-ai workspace remove RUN DIR|NAME [--force]`: refused while a process in the sandbox uses it,
+        unless FORCE (detached lazily)."""
+        if not valid_run(run) or not valid_directory(value) and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}",
+                                                                                  str(value)):
+            return 2, "", "invalid run or workspace"
+        return self.call("workspace", "remove", run, str(value), *(["--force"] if force else []), timeout=120)
+
     def set_limits(self, run, memory=None, cpus=None, pids=None):
         """`sandbox-ai limits RUN --memory/--cpus/--pids` (a value of "none": no limit) for the rest of the run."""
         if not valid_run(run):
@@ -1600,6 +1623,12 @@ class ProjectReview:
 
 def valid_run(run):
     return isinstance(run, str) and bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run))
+
+
+def valid_directory(path):
+    """An absolute path of one line (never read as an option)."""
+    path = str(path or "")
+    return path.startswith("/") and len(path) <= 4096 and path.isprintable() and "\0" not in path
 
 
 def url_host(url):

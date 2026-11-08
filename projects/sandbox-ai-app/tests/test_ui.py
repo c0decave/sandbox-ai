@@ -1664,6 +1664,44 @@ def test_devices_and_limits_of_a_running_sandbox(window, env, monkeypatch, wait)
     assert wait(lambda: len(calls) == 3, 20) and calls[2] == ("limits", "claude-abc", ("4g", "", "none"))
 
 
+def test_workspaces_of_a_running_sandbox(window, env, monkeypatch, wait):
+    from sandbox_ai_app import ui
+    fake_run(env)
+    page = window.sandboxes
+    entries = [{"host": "/home/me/project", "sandbox": "/work", "mode": "rw", "source": "start"},
+               {"host": "/home/me/docs", "sandbox": "/workspaces/docs", "mode": "ro", "source": "added"}]
+    monkeypatch.setattr(window.sai, "workspaces", lambda run: entries)
+    page.refresh()
+    page.table.selectRow(0)
+    assert wait(lambda: "/workspaces/docs" in page.workspaces_label.text(), 20), page.workspaces_label.text()
+    assert "/work " not in page.workspaces_label.text(), "only the added ones"
+    calls = []
+    monkeypatch.setattr(window.sai, "add_workspace", lambda run, d, ro: calls.append(("add", run, d, ro)) or (0, "", ""))
+    answers = iter([(1, "", "sandbox-ai workspace: busy. Let the agent leave it, or --force"), (0, "removed", "")])
+    monkeypatch.setattr(window.sai, "remove_workspace",
+                        lambda run, value, force: calls.append(("remove", run, value, force)) or next(answers))
+
+    class FakeWorkspace:
+        def __init__(self, parent, run):
+            self.read_only = QtWidgets.QCheckBox()
+
+        def exec(self):
+            return QtWidgets.QDialog.DialogCode.Accepted
+
+        def directory(self):
+            return "/home/me/more"
+    monkeypatch.setattr(ui, "WorkspaceDialog", FakeWorkspace)
+    shown = len(widgets.SHOWN)
+    page.add_workspace()
+    assert wait(lambda: calls, 20) and calls[0] == ("add", "claude-abc", "/home/me/more", False)
+    assert any("can write" in text for _, text, _ in widgets.SHOWN[shown:]), "a writable add is confirmed first"
+    assert wait(lambda: not widgets.busy(page), 20)
+    page.remove_workspace()
+    assert wait(lambda: len(calls) == 3, 20), calls
+    assert calls[1] == ("remove", "claude-abc", "/workspaces/docs", False)
+    assert calls[2] == ("remove", "claude-abc", "/workspaces/docs", True), "busy: asked, then forced"
+
+
 def test_the_board_applies_devices_and_limits_live(window, env, monkeypatch, wait):
     fake_run(env)
     board = window.board

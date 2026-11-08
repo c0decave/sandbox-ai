@@ -649,7 +649,10 @@ class NetworkDialog(QDialog):
         self.supported = set(supported or ())
         form = QFormLayout(self)
         self.hosts = QLineEdit()
-        self.hosts.setPlaceholderText("api.example.org pypi.org")
+        self.hosts.setPlaceholderText("api.example.org *.example.net pypi.org")
+        self.hosts.setToolTip(safe_tooltip(tr("Names separated by spaces. *.DOMAIN opens every name below DOMAIN, each "
+                                              "as it is looked up (not for shared hosting such as *.github.io, nor "
+                                              "public suffixes).")))
         self.tcp = QLineEdit()
         self.tcp.setPlaceholderText("192.0.2.10:5432")
         self.nets = QLineEdit()
@@ -742,6 +745,41 @@ class DeviceDialog(QDialog):
         return self.edit.text().strip()
 
 
+class WorkspaceDialog(QDialog):
+    """A host directory for a running sandbox (sandbox-ai workspace add): the folder, read-only or not."""
+
+    def __init__(self, parent, run):
+        super().__init__(parent)
+        self.setWindowTitle(tr("Add workspace to {run}", run=printable(run)))
+        form = QFormLayout(self)
+        self.edit = QLineEdit()
+        self.edit.setPlaceholderText(tr("/path/to/a/folder"))
+        browse = QPushButton(tr("Choose…"))
+        browse.clicked.connect(self.browse)
+        row = QHBoxLayout()
+        row.addWidget(self.edit, 1)
+        row.addWidget(browse)
+        form.addRow(tr("Folder"), row)
+        self.read_only = QCheckBox(tr("Read-only (the agent cannot change it)"))
+        form.addRow("", self.read_only)
+        form.addRow(plain_label(tr("It appears at /workspaces/NAME until the sandbox ends; a session keeps it for a "
+                                   "restart unless it is read-only. sandbox-ai checks it as at a start: private "
+                                   "places, package stores and the policy are refused."), role="secondary"))
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+        self.resize(560, 0)
+
+    def browse(self):
+        path = choose_folder(self, tr("Folder for the sandbox"), key="workspace")
+        if path:
+            self.edit.setText(path)
+
+    def directory(self):
+        return self.edit.text().strip()
+
+
 class LimitsDialog(QDialog):
     def __init__(self, parent, run):
         super().__init__(parent)
@@ -790,6 +828,7 @@ class SandboxesPage(QWidget):
         self.sai, self.terminal = sai, terminal
         self.project, self.instances, self.problems, self.stoppable = None, {}, [], None
         self.reading, self.added, self.devices_token = None, [], 0
+        self.added_workspaces = []
         layout = QVBoxLayout(self)
         top = QHBoxLayout()
         self.summary = plain_label(role="secondary")
@@ -838,6 +877,11 @@ class SandboxesPage(QWidget):
                                 (tr("Add device…"), tr("Hand a host device to the selected sandbox until it ends"),
                                  self.add_device),
                                 (tr("Remove device"), tr("Take back a device added during the run"), self.remove_device),
+                                (tr("Add workspace…"), tr("Mount a folder of this computer into the selected "
+                                                           "sandbox until it ends (sandbox-ai workspace add)"),
+                                 self.add_workspace),
+                                (tr("Remove workspace…"), tr("Take back a workspace added during the run "
+                                                             "(sandbox-ai workspace remove)"), self.remove_workspace),
                                 (tr("Limits…"), tr("Change memory, CPUs and processes of the selected sandbox"),
                                  self.limits)):
             button = QPushButton(text)
@@ -847,6 +891,8 @@ class SandboxesPage(QWidget):
         run_layout.addWidget(flow(*self.run_buttons))
         self.devices_label = plain_label(role="secondary")
         run_layout.addWidget(self.devices_label)
+        self.workspaces_label = plain_label(role="secondary")
+        run_layout.addWidget(self.workspaces_label)
         boxes = QHBoxLayout()
         boxes.addWidget(session_box, 2)
         boxes.addWidget(run_box, 5)
@@ -1146,11 +1192,29 @@ class SandboxesPage(QWidget):
         self.devices_token += 1
         token = self.devices_token
         if not run:
-            self.added = []
+            self.added, self.added_workspaces = [], []
             self.devices_label.setText("")
+            self.workspaces_label.setText("")
             return
         background(self.sai.devices_added, run, timeout=30,
                    done=lambda found, error: self.devices_loaded(token, found, error))
+        background(self.sai.workspaces, run, timeout=30,
+                   done=lambda found, error: self.workspaces_loaded(token, found, error))
+
+    def workspaces_loaded(self, token, found, error):
+        if token != self.devices_token:
+            return
+        entries = list(found or []) if error is None else []
+        self.added_workspaces = [e for e in entries if e.get("source") == "added"]
+        if isinstance(error, (AttributeError, ImportError)):
+            self.workspaces_label.setText(tr("This sandbox-ai version cannot add workspaces during a run."))
+            return
+        def shown(entry):
+            return (f"{printable(entry.get('sandbox'))} ← {printable(entry.get('host'))}"
+                    + (f" ({tr('read-only')})" if entry.get("mode") == "ro" else ""))
+        self.workspaces_label.setText(tr("Workspaces added during the run: {list}",
+                                         list=", ".join(map(shown, self.added_workspaces)))
+                                      if self.added_workspaces else tr("No workspace added during the run."))
 
     def devices_loaded(self, token, found, error):
         if token != self.devices_token:
@@ -1210,6 +1274,56 @@ class SandboxesPage(QWidget):
         report(self, title, result, error)
         self.update_buttons()
         self.load_devices()
+
+    def add_workspace(self):
+        run = self.current_run()
+        if not run:
+            return
+        dialog = WorkspaceDialog(self, run)
+        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.directory():
+            return
+        directory, read_only = dialog.directory(), dialog.read_only.isChecked()
+        if not directory.startswith("/"):
+            warn(self, tr("Not added"), tr("Give the folder as an absolute path."))
+            return
+        if not read_only and not confirm(self, tr("Add workspace"), tr(
+                "Let {run} change {path} until it ends? The agent can write, delete and run there.",
+                run=printable(run), path=printable(directory)), tr("Add"), destructive=True):
+            return
+        background(self.sai.add_workspace, run, directory, read_only, owner=self, source=self.run_buttons,
+                   timeout=150, done=lambda result, error: self.device_done(tr("Add workspace"), result, error))
+
+    def remove_workspace(self):
+        run = self.current_run()
+        if not run:
+            return
+        if not self.added_workspaces:
+            inform(self, tr("Remove workspace"), tr("No workspace was added to {run} during its run (those of the "
+                                                    "start stay).", run=printable(run)))
+            return
+        choices = [f"{e.get('sandbox')} ← {e.get('host')}" for e in self.added_workspaces]
+        index = 0
+        if len(choices) > 1:
+            choice, ok = QInputDialog.getItem(self, tr("Remove workspace"), tr("Workspace"), choices, 0, False)
+            if not ok:
+                return
+            index = choices.index(choice)
+        entry = self.added_workspaces[index]
+        target = entry.get("sandbox") or entry.get("host")
+
+        def done(result, error):
+            status = outcome(result, error)[0]
+            if status != 0 and "--force" in (outcome(result, error)[2] or "") and confirm(
+                    self, tr("Remove workspace"), tr(
+                        "A process in {run} still uses {path}. Detach it anyway? Whatever is open there stays usable "
+                        "until it is closed; a restart takes it away for sure.", run=printable(run),
+                        path=printable(target)), tr("Detach"), destructive=True):
+                background(self.sai.remove_workspace, run, target, True, owner=self, source=self.run_buttons,
+                           timeout=150, done=lambda r, e: self.device_done(tr("Remove workspace"), r, e))
+                return
+            self.device_done(tr("Remove workspace"), result, error)
+        background(self.sai.remove_workspace, run, target, False, owner=self, source=self.run_buttons, timeout=150,
+                   done=done)
 
     def limits(self):
         run = self.current_run()

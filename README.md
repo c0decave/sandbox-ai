@@ -3997,7 +3997,9 @@ against the machine's own users.
 `sandbox-ai web` is the desktop app's counterpart in the browser, with the same
 themes: one service on one machine manages it and every host of
 [`sandbox-ai hosts`](#other-hosts) over SSH. Starts and sessions (attach in a
-terminal in the page, start, pause, resume, stop, delete), approvals (with a
+terminal in the page, start, pause, resume, stop, delete; while one runs, its
+network, workspaces, devices and resource limits, with a writable workspace, a
+device or a forced removal confirmed first), approvals (with a
 badge for open questions), the doctor, the logs, LLM servers (add, check,
 models, remove), each host's defaults (the agents' telemetry, the security
 mode, the canaries) and the hosts themselves. The Terminals page lists every

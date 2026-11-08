@@ -374,6 +374,16 @@ NET_GIT_URL = re.compile(r"https?://(?:[A-Za-z0-9._-]{1,64}@)?(?:[A-Za-z0-9.-]{1
 NET_REF = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 
 
+# What a running sandbox is given while it runs (sandbox-ai workspace, devices, limits): never a leading "-".
+DEVICE_PATH = re.compile(r"/dev/[A-Za-z0-9_+:.@-][A-Za-z0-9_+:.@/-]{0,250}")
+USB_SELECTOR = re.compile(r"usb:[0-9A-Fa-f]{4}:[0-9A-Fa-f]{4}(?::[!-~]{1,126})?")  # usb:VENDOR:PRODUCT[:SERIAL]
+DEVICE_ID = re.compile(r"[0-9]{1,9}")  # a grant's id, as devices list shows it
+WORKSPACE_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.+@ -]{0,254}")  # the NAME of /workspaces/NAME
+# devices add waits up to devices.APPROVAL_SECONDS (60) for the answer to an "ask" rule; over SSH, with room to spare
+DEVICE_ADD_TIMEOUT = 180
+LIMIT_VALUE = re.compile(r"none|[0-9]{1,12}(?:\.[0-9]{1,6})?[kmgtKMGT]?")
+
+
 CANARY_RUN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,80}")
 VPN_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 VPN_LOCATION = re.compile(r"[a-z]{2}(?:-[a-z0-9-]{1,20})?")
@@ -418,6 +428,27 @@ def host_path(value, what):
     if not (isinstance(value, str) and value.startswith("/") and "\0" not in value and len(value) < 4096):
         raise Refused(400, f"{what} is an absolute path on that host")
     return value
+
+
+def no_dots(value, what):
+    """VALUE (an absolute path) without a "." or ".." part, printable."""
+    if not value.isprintable() or any(part in (".", "..") for part in value.split("/")):
+        raise Refused(400, f"{what}: a printable absolute path without . or .. parts")
+    return value
+
+
+def device_value(value):
+    """A device as `sandbox-ai devices add` takes it: a path under /dev or usb:VENDOR:PRODUCT[:SERIAL]."""
+    if isinstance(value, str) and USB_SELECTOR.fullmatch(value):
+        return value
+    if not (isinstance(value, str) and DEVICE_PATH.fullmatch(value)):
+        raise Refused(400, "a device is a path under /dev or usb:VENDOR:PRODUCT[:SERIAL] (four hex digits each)")
+    return no_dots(value, "a device")
+
+
+def confirmed(body, why):
+    if body.get("confirm") is not True:
+        raise Refused(400, f"{why}: send {{\"confirm\": true}}")
 
 
 def one_line(value, what, limit=1024):
@@ -468,6 +499,13 @@ class Api:
             ("POST", r"/api/hosts/(?P<host>[^/]+)/defaults", self.set_default),
             ("GET", r"/api/hosts/(?P<host>[^/]+)/net/(?P<name>[^/]+)", self.net_show),
             ("POST", r"/api/hosts/(?P<host>[^/]+)/net/(?P<name>[^/]+)", self.net_change),
+            ("GET", r"/api/hosts/(?P<host>[^/]+)/workspaces/(?P<name>[^/]+)", self.workspaces),
+            ("POST", r"/api/hosts/(?P<host>[^/]+)/workspaces/(?P<name>[^/]+)", self.workspace_add),
+            ("POST", r"/api/hosts/(?P<host>[^/]+)/workspaces/(?P<name>[^/]+)/remove", self.workspace_remove),
+            ("GET", r"/api/hosts/(?P<host>[^/]+)/devices/(?P<name>[^/]+)", self.devices),
+            ("POST", r"/api/hosts/(?P<host>[^/]+)/devices/(?P<name>[^/]+)", self.device_add),
+            ("POST", r"/api/hosts/(?P<host>[^/]+)/devices/(?P<name>[^/]+)/remove", self.device_remove),
+            ("POST", r"/api/hosts/(?P<host>[^/]+)/limits/(?P<name>[^/]+)", self.set_limits),
             ("GET", r"/api/hosts/(?P<host>[^/]+)/presets", self.presets),
             ("GET", r"/api/hosts/(?P<host>[^/]+)/vpn", self.vpn_list),
             ("POST", r"/api/hosts/(?P<host>[^/]+)/vpn", self.vpn_add),
@@ -662,6 +700,71 @@ class Api:
             args.append(f"--git-token-{login['kind']}={login['url']}={login['ref']}")
         if len(args) == 3:
             raise Refused(400, "nothing to change")
+        return self.done(params["host"], args, 60)
+
+    # what a running sandbox is given while it runs: host directories (sandbox-ai workspace), devices (sandbox-ai
+    # devices) and its resource limits (sandbox-ai limits); each with that command's checks on its host. What widens
+    # the sandbox (a writable directory, a device, a forced removal that leaves open files usable) needs
+    # {"confirm": true}: the page asks first, naming the host.
+    def workspaces(self, params, body):
+        return self.json_of(params["host"], ["workspace", "list", start_name(params["name"]), "--json"], 30)
+
+    def workspace_add(self, params, body):
+        """sandbox-ai workspace add NAME DIR [--ro]: DIR, an absolute directory on that host, mounted at
+        /workspaces/<its name> in the running sandbox."""
+        name = start_name(params["name"])
+        directory = no_dots(host_path(body.get("directory"), "directory"), "directory")
+        read_only = body.get("read_only", False)
+        if not isinstance(read_only, bool):
+            raise Refused(400, "read_only is true or false")
+        if not read_only:
+            confirmed(body, "a writable workspace lets the agent change the directory on that host")
+        return self.done(params["host"], ["workspace", "add", name, directory, *(["--ro"] if read_only else [])], 120)
+
+    def workspace_remove(self, params, body):
+        """sandbox-ai workspace remove NAME DIR|NAME [--force]: a workspace added during the run (its path in the
+        sandbox, its host directory, or its name below /workspaces)."""
+        name = start_name(params["name"])
+        value, force = body.get("workspace"), body.get("force", False)
+        if isinstance(value, str) and value.startswith("/"):
+            no_dots(host_path(value, "workspace"), "workspace")
+        elif not (isinstance(value, str) and WORKSPACE_NAME.fullmatch(value) and value.strip() == value):
+            raise Refused(400, "workspace is its path (in the sandbox or on the host) or its name below /workspaces")
+        if not isinstance(force, bool):
+            raise Refused(400, "force is true or false")
+        if force:
+            confirmed(body, "a forced removal leaves what is still open there usable, also for writing")
+        return self.done(params["host"], ["workspace", "remove", name, value, *(["--force"] if force else [])], 120)
+
+    def devices(self, params, body):
+        return self.json_of(params["host"], ["devices", "list", start_name(params["name"]), "--json"], 30)
+
+    def device_add(self, params, body):
+        """sandbox-ai devices add NAME DEVICE: with --device's checks and the run's device rules there (an "ask"
+        rule waits up to a minute for an answer in Approvals)."""
+        name, device = start_name(params["name"]), device_value(body.get("device"))
+        confirmed(body, "a device gives the agent that hardware of the host")
+        return self.done(params["host"], ["devices", "add", name, device], DEVICE_ADD_TIMEOUT)
+
+    def device_remove(self, params, body):
+        name, device = start_name(params["name"]), body.get("device")
+        if not (isinstance(device, str) and DEVICE_ID.fullmatch(device)):
+            device = device_value(device)
+        return self.done(params["host"], ["devices", "remove", name, device], 60)
+
+    def set_limits(self, params, body):
+        """sandbox-ai limits NAME --memory=SIZE --cpus=N --pids=N (each one given or not; none: no limit). The
+        security mode's cap is kept by the command."""
+        args = ["limits", start_name(params["name"])]
+        for key in ("memory", "cpus", "pids"):
+            value = body.get(key)
+            if value in (None, ""):
+                continue
+            if not (isinstance(value, str) and LIMIT_VALUE.fullmatch(value)):
+                raise Refused(400, f"{key} is none or a number (with k, m, g or t for a size), e.g. 8g, 1.5, 4096")
+            args.append(f"--{key}={value}")
+        if len(args) == 2:
+            raise Refused(400, "nothing to change: give memory, cpus or pids")
         return self.done(params["host"], args, 60)
 
     # VPN profiles (sandbox-ai vpn): a profile names the secret that holds its key; the web never carries a key

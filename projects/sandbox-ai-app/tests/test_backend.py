@@ -672,6 +672,22 @@ def test_devices_and_limits_of_a_running_sandbox_are_commands(monkeypatch, tmp_p
     assert all(path.startswith(str(tmp_path)) for path, _, _ in candidates)
 
 
+def test_workspaces_of_a_running_sandbox_are_commands():
+    calls = []
+    s = backend.SandboxAI(runner=lambda argv, **k: calls.append(argv) or subprocess.CompletedProcess(argv, 0, "", ""))
+    assert s.add_workspace("claude-abc", "/home/me/docs")[0] == 0
+    assert calls[-1][-4:] == ["workspace", "add", "claude-abc", "/home/me/docs"]
+    assert s.add_workspace("claude-abc", "/home/me/docs", True)[0] == 0 and calls[-1][-1] == "--ro"
+    assert s.remove_workspace("claude-abc", "/workspaces/docs")[0] == 0
+    assert calls[-1][-4:] == ["workspace", "remove", "claude-abc", "/workspaces/docs"]
+    assert s.remove_workspace("claude-abc", "docs", True)[0] == 0 and calls[-1][-2:] == ["docs", "--force"]
+    count = len(calls)
+    for bad in (s.add_workspace("--evil", "/x"), s.add_workspace("run", "--ro"), s.add_workspace("run", "relative"),
+                s.add_workspace("run", "/a\nb"), s.remove_workspace("run", "--force"), s.remove_workspace("-r", "x")):
+        assert bad[0] == 2
+    assert len(calls) == count, "nothing invalid reaches sandbox-ai"
+
+
 def test_device_candidates_mark_what_the_launcher_refuses(sai):
     found = {path: (why, note) for path, why, note in sai.device_candidates()}
     if "/dev/mem" in found:

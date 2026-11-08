@@ -306,6 +306,27 @@ def logged_in():
     ("POST", "/api/hosts/ct1/net/web", {"op": "revoke", "allow_host": ["*.example.org"]},
      ["net", "revoke", "web", "--allow-host=*.example.org"]),
     ("GET", "/api/hosts/ct1/presets", None, ["presets", "list", "--json"]),
+    # what a running sandbox is given while it runs: workspaces, devices, limits (a widening one confirmed)
+    ("GET", "/api/hosts/ct1/workspaces/web", None, ["workspace", "list", "web", "--json"]),
+    ("POST", "/api/hosts/ct1/workspaces/web", {"directory": "/home/u/src/other", "read_only": True},
+     ["workspace", "add", "web", "/home/u/src/other", "--ro"]),
+    ("POST", "/api/hosts/ct1/workspaces/web", {"directory": "/home/u/src/my lib", "confirm": True},
+     ["workspace", "add", "web", "/home/u/src/my lib"]),
+    ("POST", "/api/hosts/ct1/workspaces/web/remove", {"workspace": "/workspaces/other"},
+     ["workspace", "remove", "web", "/workspaces/other"]),
+    ("POST", "/api/hosts/ct1/workspaces/web/remove", {"workspace": "other-2", "force": True, "confirm": True},
+     ["workspace", "remove", "web", "other-2", "--force"]),
+    ("GET", "/api/hosts/ct1/devices/web", None, ["devices", "list", "web", "--json"]),
+    ("POST", "/api/hosts/ct1/devices/web", {"device": "/dev/ttyUSB0", "confirm": True},
+     ["devices", "add", "web", "/dev/ttyUSB0"]),
+    ("POST", "/api/hosts/ct1/devices/web", {"device": "usb:2e8a:000A:E6609CB2D3A7", "confirm": True},
+     ["devices", "add", "web", "usb:2e8a:000A:E6609CB2D3A7"]),
+    ("POST", "/api/hosts/ct1/devices/web/remove", {"device": "3"}, ["devices", "remove", "web", "3"]),
+    ("POST", "/api/hosts/ct1/devices/web/remove", {"device": "/dev/bus/usb/001/004"},
+     ["devices", "remove", "web", "/dev/bus/usb/001/004"]),
+    ("POST", "/api/hosts/ct1/limits/web", {"memory": "8g", "cpus": "1.5", "pids": "none"},
+     ["limits", "web", "--memory=8g", "--cpus=1.5", "--pids=none"]),
+    ("POST", "/api/hosts/local/limits/web", {"memory": "", "pids": "4096"}, ["limits", "web", "--pids=4096"]),
     ("GET", "/api/hosts/ct1/vpn", None, ["vpn", "list", "--json"]),
     ("POST", "/api/hosts/ct1/vpn", {"name": "home", "kind": "wireguard", "file": "/etc/wireguard/home.conf"},
      ["vpn", "add", "home", "--wireguard=/etc/wireguard/home.conf"]),
@@ -379,6 +400,46 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     ("POST", "/api/hosts/ct1/net/web", {"op": "allow", "git_login": {"url": "http://x", "kind": "env",
                                                                      "ref": "glpat-the-token-itself"}}, 400),
     ("POST", "/api/hosts/ct1/net/web", {"op": "allow", "git_login": {"url": "-x", "kind": "env", "ref": "A"}}, 400),
+    # workspaces, devices, limits of a running sandbox: nothing that could be read as an option, every widening
+    # one confirmed
+    ("GET", "/api/hosts/ct1/workspaces/--all", None, 400),
+    ("POST", "/api/hosts/ct1/workspaces/-h", {"directory": "/x", "read_only": True}, 400),
+    ("POST", "/api/hosts/ct1/workspaces/web", {"directory": "relative/dir", "read_only": True}, 400),
+    ("POST", "/api/hosts/ct1/workspaces/web", {"directory": "--ro", "read_only": True}, 400),
+    ("POST", "/api/hosts/ct1/workspaces/web", {"directory": "/home/u/../../etc", "read_only": True}, 400),
+    ("POST", "/api/hosts/ct1/workspaces/web", {"directory": "/home/u/a\nb", "read_only": True}, 400),
+    ("POST", "/api/hosts/ct1/workspaces/web", {"directory": "/home/u/src"}, 400),  # writable, not confirmed
+    ("POST", "/api/hosts/ct1/workspaces/web", {"directory": "/home/u/src", "read_only": False,
+                                               "confirm": "yes"}, 400),
+    ("POST", "/api/hosts/ct1/workspaces/web", {"directory": "/home/u/src", "read_only": "true"}, 400),
+    ("POST", "/api/hosts/ct1/workspaces/web", {"directory": ["/a", "/b"], "read_only": True}, 400),
+    ("POST", "/api/hosts/ct1/workspaces/web/remove", {"workspace": "--force"}, 400),
+    ("POST", "/api/hosts/ct1/workspaces/web/remove", {"workspace": "-h"}, 400),
+    ("POST", "/api/hosts/ct1/workspaces/web/remove", {"workspace": ""}, 400),
+    ("POST", "/api/hosts/ct1/workspaces/web/remove", {"workspace": "a/b"}, 400),
+    ("POST", "/api/hosts/ct1/workspaces/web/remove", {"workspace": "other", "force": True}, 400),  # not confirmed
+    ("POST", "/api/hosts/ct1/workspaces/web/remove", {"workspace": "other", "force": "yes", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/workspaces/web/drop", {"workspace": "other"}, 404),
+    ("GET", "/api/hosts/ct1/devices/-x", None, 400),
+    ("POST", "/api/hosts/ct1/devices/web", {"device": "/dev/ttyUSB0"}, 400),  # not confirmed
+    ("POST", "/api/hosts/ct1/devices/web", {"device": "/dev/ttyUSB0", "confirm": 1}, 400),
+    ("POST", "/api/hosts/ct1/devices/web", {"device": "/etc/shadow", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/devices/web", {"device": "/dev/../etc/shadow", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/devices/web", {"device": "/dev/", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/devices/web", {"device": "--gpu", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/devices/web", {"device": "usb:2e8a", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/devices/web", {"device": "usb:2e8a:000a:with space", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/devices/web/remove", {"device": "-3"}, 400),
+    ("POST", "/api/hosts/ct1/devices/web/remove", {"device": 3}, 400),
+    ("POST", "/api/hosts/ct1/devices/web/remove", {"device": "all"}, 400),
+    ("POST", "/api/hosts/ct1/limits/web", {}, 400),  # nothing to change
+    ("POST", "/api/hosts/ct1/limits/web", {"memory": "-1"}, 400),
+    ("POST", "/api/hosts/ct1/limits/web", {"memory": "8 g"}, 400),
+    ("POST", "/api/hosts/ct1/limits/web", {"cpus": 2}, 400),
+    ("POST", "/api/hosts/ct1/limits/web", {"pids": "--memory=none"}, 400),
+    ("POST", "/api/hosts/ct1/limits/web", {"memory": "unlimited"}, 400),
+    ("POST", "/api/hosts/ct1/limits/--all", {"memory": "8g"}, 400),
+    ("GET", "/api/hosts/ct1/limits/web", None, 405),
     ("POST", "/api/hosts/ct1/vpn", {"name": "Home", "kind": "wireguard", "file": "/x"}, 400),
     ("POST", "/api/hosts/ct1/vpn", {"name": "home", "kind": "ipsec"}, 400),
     ("POST", "/api/hosts/ct1/vpn", {"name": "home", "kind": "wireguard", "file": "relative.conf"}, 400),
@@ -405,6 +466,44 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
 def test_what_is_refused_never_reaches_a_host(logged_in, method, path, data, status):
     assert logged_in(method, path, data)[0] == status
     assert logged_in.runner.calls == []
+
+
+def test_a_running_sandboxs_workspaces_and_devices_come_as_the_command_lists_them(logged_in):
+    """The lists are the commands' own JSON, passed on; a failure is the command's message (its stderr), as a 502."""
+    listed = [{"host": "/home/u/src/web", "sandbox": "/work", "mode": "rw", "source": "start"},
+              {"host": "/home/u/src/lib", "sandbox": "/workspaces/lib", "mode": "ro", "source": "added", "kept": False,
+               "since": "2026-11-08T10:00:00Z"}]
+    logged_in.runner.answers[("workspace", "list")] = (0, json.dumps(listed), "")
+    assert logged_in("GET", "/api/hosts/ct1/workspaces/web") == (200, listed)
+    grants = [{"id": "1", "value": "/dev/ttyUSB0", "source": "added", "state": "attached", "nodes": ["/dev/ttyUSB0"],
+               "device": {}, "rule": None, "ruleset": None, "replugs": 0, "since": "2026-11-08T10:00:00Z"}]
+    logged_in.runner.answers[("devices", "list")] = (0, json.dumps(grants), "")
+    assert logged_in("GET", "/api/hosts/local/devices/web") == (200, grants)
+    logged_in.runner.answers[("workspace", "remove")] = (
+        1, "", "sandbox-ai workspace: /workspaces/lib is in use in the sandbox: 42 bash (cwd). Let the agent leave it")
+    status, out = logged_in("POST", "/api/hosts/ct1/workspaces/web/remove", {"workspace": "/workspaces/lib"})
+    assert status == 502 and "is in use in the sandbox: 42 bash (cwd)" in out["error"] and "on ct1" in out["error"]
+    logged_in.runner.answers[("limits",)] = (1, "", "sandbox-ai limits: --memory none: no limit (security mode high)")
+    status, out = logged_in("POST", "/api/hosts/ct1/limits/web", {"memory": "none"})
+    assert status == 502 and "security mode high" in out["error"]
+    logged_in.runner.answers[("devices", "list")] = (1, "", "sandbox-ai devices: no sandbox named web runs")
+    status, out = logged_in("GET", "/api/hosts/ct1/devices/web")
+    assert status == 502 and "no sandbox named web runs" in out["error"]
+    assert logged_in.runner.calls[-1] == ("ct1", ["devices", "list", "web", "--json"])
+
+
+def test_a_device_add_outlasts_the_question_a_device_rule_may_ask(logged_in):
+    timeouts = []
+    real = logged_in.svc.api.runner
+
+    def runner(host, args, timeout=120, input=None):
+        timeouts.append((args[:2], timeout))
+        return real(host, args, timeout=timeout, input=input)
+    logged_in.svc.api.runner = runner
+    assert logged_in("POST", "/api/hosts/ct1/devices/web", {"device": "/dev/video0", "confirm": True})[0] == 200
+    assert timeouts == [(["devices", "add"], w.DEVICE_ADD_TIMEOUT)]
+    assert w.DEVICE_ADD_TIMEOUT >= 60 + 60, "devices.APPROVAL_SECONDS and the way there"
+    assert "\nAPPROVAL_SECONDS = 60\n" in (ROOT / "sandbox" / "devices.py").read_text()
 
 
 def test_adding_to_a_new_kit_creates_it_first(logged_in):

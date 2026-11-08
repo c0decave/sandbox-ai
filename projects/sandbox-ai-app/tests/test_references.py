@@ -85,6 +85,7 @@ def test_the_check_catches_a_missing_name(tmp_path):
 BLOCKING_SAI = {"call", "answer", "dry_run", "doctor", "mcp_catalog", "statistics", "set_secret", "delete_secret",
                 "secrets", "login_status", "remembered", "forget_remembered", "question_context", "run_log",
                 "devices_added", "device_check", "device_candidates", "add_device", "remove_device", "set_limits",
+                "workspaces", "add_workspace", "remove_workspace",
                 "write_project"}
 # (stop_commands runs on the GUI thread on purpose: only when quitting, bounded by one grace period.)
 BLOCKING_MODULES = {"subprocess"}

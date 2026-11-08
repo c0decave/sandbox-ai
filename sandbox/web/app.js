@@ -330,7 +330,8 @@ pages.starts = async (main) => {
     }, extra || {}), label);
     if (s.attachable) actions.append(el("button", { class: "primary", onclick: () => openTerminal({ kind: "attach", name: s.name }, `${s.name}`) }, "Attach"));
     if (s.state === "running") actions.append(act("Pause", "pause"), act("Stop", "stop"),
-      el("button", { onclick: () => networkCard(main, s.name) }, "Network…"));
+      el("button", { onclick: () => networkCard(main, s.name) }, "Network…"),
+      el("button", { title: "workspaces, devices and resource limits while it runs", onclick: () => resourcesCard(main, s.name) }, "Resources…"));
     if (s.state === "paused") actions.append(act("Resume", "resume"), act("Stop", "stop"));
     if (s.state === "stopped" && s.keep) actions.append(act("Resume", "resume"), act("Delete", "delete", { class: "danger" }));
     if (s.kind === "mcp") actions.append(...attachControls(s, starts));
@@ -412,6 +413,146 @@ function networkCard(main, name) {
         el("button", { onclick: refresh }, "Show"))),
     shown));
   refresh();
+}
+
+// What a running start is given while it runs (sandbox-ai workspace, devices and limits on its host): host
+// directories at /workspaces/NAME, devices, its resource limits. Each change runs that command there, with its
+// checks; what widens the sandbox (a writable directory, a device, a removal by force) asks first, in place, naming
+// the host. Failures are error toasts with the command's own message.
+function resourcesCard(main, name) {
+  const old = document.getElementById("resources-card");
+  if (old) old.remove();
+  const host = state.host, where = `${name} on ${host}`;
+  const ask = (text, yes, onYes, onCancel) => [el("div", { class: "confirm", role: "group", "aria-label": "Confirm" }, text),
+    el("button", { class: "danger", onclick: onYes }, yes), el("button", { onclick: onCancel }, "Cancel")];
+  const head = (columns) => el("thead", {}, el("tr", {}, columns.map(c => el("th", {}, c))));
+
+  // workspaces: the start's (they stay) and the added ones (Remove; Force… asks first)
+  const wsBody = el("tbody"), wsStatus = el("div");
+  const wsTable = el("table", {}, head(["In the sandbox", "Mode", "Source", "On the host", ""]), wsBody);
+  const workspaceRow = (w) => {
+    const target = String(w.sandbox || w.host || ""), actions = el("td", { class: "actions" });
+    const remove = (force) => async (event) => busy(event.target, async () => {
+      try {
+        const r = await api("POST", hostPath(`/workspaces/${encodeURIComponent(name)}/remove`), force ? { workspace: target, force: true, confirm: true } : { workspace: target });
+        toast(force ? "warning" : "success", `Removed ${target} from ${where}`, (r && r.output) || "");
+        loadWorkspaces();
+      } catch (e) { failed(`Could not remove ${target} from ${where}`)(e); buttons(); }
+    });
+    const buttons = () => clear(actions).append(...(w.source === "added"
+      ? [el("button", { onclick: remove(false) }, "Remove"), el("button", { class: "danger", onclick: () => askForce() }, "Force…")]
+      : [el("span", { class: "hint" }, "until the run ends")]));
+    const askForce = () => clear(actions).append(...ask(`Detach ${target} from ${where} by force? What a process there still holds stays usable, also for writing, until it is closed; only a restart takes it away for sure.`,
+      "Yes, by force", remove(true), () => buttons()));
+    buttons();
+    return el("tr", {}, el("td", { class: "mono" }, target), el("td", {}, w.mode || "-"),
+      el("td", {}, `${w.source || ""}${w.kept ? ", kept for the session" : ""}`), el("td", { class: "mono" }, w.host || ""), actions);
+  };
+  const loadWorkspaces = async () => {
+    let list;
+    try { list = await api("GET", hostPath(`/workspaces/${encodeURIComponent(name)}`)); }
+    catch (e) { clear(wsStatus).append(notice(e.message, "error")); wsTable.hidden = true; return; }
+    list = (Array.isArray(list) ? list : []).filter(w => w && typeof w === "object");
+    clear(wsStatus).append(list.length ? "" : el("p", { class: "hint" }, "No workspaces listed."));
+    clear(wsBody).append(...list.map(workspaceRow));
+    wsTable.hidden = !list.length;
+  };
+  const directory = el("input", { id: "ws-dir", class: "mono", placeholder: "/home/you/src/other (on that host)" });
+  const readOnly = el("input", { id: "ws-ro", type: "checkbox", checked: true });
+  const wsActions = el("div", { class: "row" });
+  const addWorkspace = (dir, ro) => async (event) => busy(event.target, async () => {
+    try {
+      const r = await api("POST", hostPath(`/workspaces/${encodeURIComponent(name)}`), ro ? { directory: dir, read_only: true } : { directory: dir, read_only: false, confirm: true });
+      toast("success", `Added ${dir} to ${where}`, (r && r.output) || "");
+      directory.value = ""; loadWorkspaces();
+    } catch (e) { failed(`Could not add ${dir} to ${where}`)(e); }
+    wsButtons();
+  });
+  const wsButtons = () => clear(wsActions).append(el("button", { class: "primary", onclick: (event) => {
+    const dir = directory.value.trim();
+    if (!dir.startsWith("/")) { toast("warning", "Which directory?", `An absolute path on ${host}.`); return; }
+    if (readOnly.checked) { addWorkspace(dir, true)(event); return; }
+    clear(wsActions).append(...ask(`Give ${name} write access to ${dir} on ${host}? The agent can change and delete what is in it, until you remove it (kept for the session's next start).`,
+      "Yes, writable", addWorkspace(dir, false), () => wsButtons()));
+  } }, "Add workspace"), el("span", { class: "hint" }, "at /workspaces/its name"));
+  wsButtons();
+
+  // devices: given at the start (they stay) or added (Remove); adding asks first
+  const devBody = el("tbody"), devStatus = el("div");
+  const devTable = el("table", {}, head(["ID", "State", "Nodes", "Device", "Rule", "Given", ""]), devBody);
+  const deviceRow = (d) => {
+    const id = String(d.id ?? ""), info = d.device && typeof d.device === "object" ? d.device : {};
+    const what = [info.usb, info.product && `"${info.product}"`, info.serial && `serial ${info.serial}`, info.port && `port ${info.port}`].filter(Boolean).join(" ") || "-";
+    const removable = d.source === "added" && ["attached", "held", "gone"].includes(d.state);
+    const remove = el("button", { onclick: (event) => busy(event.target, async () => {
+      try {
+        const r = await api("POST", hostPath(`/devices/${encodeURIComponent(name)}/remove`), { device: id });
+        toast("success", `Removed ${d.value || id} from ${where}`, (r && r.output) || "");
+        loadDevices();
+      } catch (e) { failed(`Could not remove ${d.value || id} from ${where}`)(e); }
+    }) }, "Remove");
+    return el("tr", {}, el("td", {}, id), statusCell(d.state), el("td", { class: "mono" }, (d.nodes || []).join(", ") || "-"), el("td", {}, what),
+      el("td", {}, d.rule ? `${d.rule} (${d.ruleset || ""})` : "-"), el("td", { class: "mono" }, `${d.value || ""} (${d.source || ""})`),
+      el("td", { class: "actions" }, removable ? remove : null));
+  };
+  const loadDevices = async () => {
+    let list;
+    try { list = await api("GET", hostPath(`/devices/${encodeURIComponent(name)}`)); }
+    catch (e) { clear(devStatus).append(notice(e.message, "error")); devTable.hidden = true; return; }
+    list = (Array.isArray(list) ? list : []).filter(d => d && typeof d === "object");
+    clear(devStatus).append(list.length ? "" : el("p", { class: "hint" }, "No devices given to it."));
+    clear(devBody).append(...list.map(deviceRow));
+    devTable.hidden = !list.length;
+  };
+  const device = el("input", { id: "dev-value", class: "mono", placeholder: "/dev/ttyUSB0 or usb:2e8a:000a" });
+  const devActions = el("div", { class: "row" });
+  const addDevice = (value) => async (event) => busy(event.target, async () => {
+    try {
+      const r = await api("POST", hostPath(`/devices/${encodeURIComponent(name)}`), { device: value, confirm: true });
+      toast("success", `Gave ${value} to ${where}`, (r && r.output) || "");
+      device.value = ""; loadDevices();
+    } catch (e) { failed(`Could not give ${value} to ${where}`)(e); }
+    devButtons();
+  });
+  const devButtons = () => clear(devActions).append(el("button", { class: "primary", onclick: () => {
+    const value = device.value.trim();
+    if (!value.startsWith("/dev/") && !value.startsWith("usb:")) { toast("warning", "Which device?", `A path under /dev or usb:VENDOR:PRODUCT[:SERIAL] of ${host}.`); return; }
+    clear(devActions).append(...ask(`Hand ${value} of ${host} to ${name}? The agent can use that hardware until the sandbox ends or you remove it. A device rule may ask first (Approvals, within a minute).`,
+      "Yes, hand it over", addDevice(value), () => devButtons()));
+  } }, "Add device"));
+  devButtons();
+
+  // limits: there is no command that shows them; each field left empty stays as it is
+  const limit = (id, placeholder) => el("input", { id, placeholder, class: "mono", size: 10 });
+  const memory = limit("lim-memory", "8g, 512m or none"), cpus = limit("lim-cpus", "2, 1.5 or none"), pids = limit("lim-pids", "4096 or none");
+  const applyLimits = (event) => busy(event.target, async () => {
+    const body = {};
+    for (const [key, input] of [["memory", memory], ["cpus", cpus], ["pids", pids]]) if (input.value.trim()) body[key] = input.value.trim();
+    if (!Object.keys(body).length) { toast("warning", "Nothing to change", "Give a memory size, CPUs or processes (none: no limit)."); return; }
+    try {
+      const r = await api("POST", hostPath(`/limits/${encodeURIComponent(name)}`), body);
+      toast("success", `Limits of ${where}`, (r && r.output) || "");
+      for (const input of [memory, cpus, pids]) input.value = "";
+    } catch (e) { failed(`Could not change the limits of ${where}`)(e); }
+  });
+
+  main.append(el("div", { class: "card", id: "resources-card" }, el("h2", {}, `Workspaces, devices and limits of ${where}`),
+    el("p", { class: "hint" }, "While it runs, without a restart; each change runs sandbox-ai workspace, devices or limits on that host, with its checks."),
+    el("h3", {}, "Workspaces"), wsStatus, wsTable,
+    el("div", { class: "form" }, el("label", { for: "ws-dir" }, "Directory"), directory,
+      el("label", { for: "ws-ro" }, "Read-only"), readOnly, el("span"), wsActions),
+    el("h3", {}, "Devices"), devStatus, devTable,
+    el("div", { class: "form" }, el("label", { for: "dev-value" }, "Device"), device, el("span"), devActions),
+    el("h3", {}, "Resource limits"),
+    el("p", { class: "hint" }, "Nothing shows the current ones: a start has its --memory, --cpus and --pids (8g, half the CPUs and 4096 unless changed). An empty field stays as it is; none takes the limit away. A strict security mode keeps its caps."),
+    el("div", { class: "form" },
+      el("label", { for: "lim-memory" }, "Memory"), memory,
+      el("label", { for: "lim-cpus" }, "CPUs"), cpus,
+      el("label", { for: "lim-pids" }, "Processes"), pids,
+      el("span"), el("div", { class: "row" }, el("button", { class: "primary", onclick: applyLimits }, "Apply limits"),
+        el("button", { onclick: () => { loadWorkspaces(); loadDevices(); } }, "Refresh")))));
+  loadWorkspaces();
+  loadDevices();
 }
 
 // The open questions of the chosen host. The table is kept between the polls: its rows are keyed by the question's

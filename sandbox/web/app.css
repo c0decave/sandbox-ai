@@ -120,7 +120,7 @@ div.actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; mar
 .canary-event td:first-child { border-left: 3px solid var(--bad); }
 .canary-links ul { margin: 0; padding-left: 18px; }
 nav .badge.unknown { background: var(--warn); color: var(--on-warn, var(--base)); }
-td.actions .confirm { display: inline-block; white-space: normal; max-width: 36em; margin-right: 6px; vertical-align: middle; }
+td.actions .confirm, .row .confirm { display: inline-block; white-space: normal; max-width: 36em; margin-right: 6px; vertical-align: middle; }
 .terminal-tabs button.ended { text-decoration: line-through; opacity: 0.8; }
 @media (max-width: 760px) {
   .layout { grid-template-columns: 1fr; grid-template-rows: auto auto 1fr; }

@@ -5289,4 +5289,67 @@ TEXTS = {
     '{where}, secret {secret}': {
         'en': '{where}, secret {secret}',
         'de': '{where}, Geheimnis {secret}'},
+    'Names separated by spaces. *.DOMAIN opens every name below DOMAIN, each as it is looked up (not for shared hosting such as *.github.io, nor public suffixes).': {
+        'en': 'Names separated by spaces. *.DOMAIN opens every name below DOMAIN, each as it is looked up (not for shared hosting such as *.github.io, nor public suffixes).',
+        'de': 'Namen durch Leerzeichen getrennt. *.DOMAIN öffnet jeden Namen unter DOMAIN, jeweils wenn er nachgeschlagen wird (nicht für geteiltes Hosting wie *.github.io und nicht für öffentliche Suffixe).'},
+    'Add workspace to {run}': {
+        'en': 'Add workspace to {run}',
+        'de': 'Workspace zu {run} hinzufügen'},
+    '/path/to/a/folder': {
+        'en': '/path/to/a/folder',
+        'de': '/pfad/zu/einem/ordner'},
+    'Choose…': {
+        'en': 'Choose…',
+        'de': 'Wählen…'},
+    'Read-only (the agent cannot change it)': {
+        'en': 'Read-only (the agent cannot change it)',
+        'de': 'Nur lesen (der Agent kann ihn nicht ändern)'},
+    'It appears at /workspaces/NAME until the sandbox ends; a session keeps it for a restart unless it is read-only. sandbox-ai checks it as at a start: private places, package stores and the policy are refused.': {
+        'en': 'It appears at /workspaces/NAME until the sandbox ends; a session keeps it for a restart unless it is read-only. sandbox-ai checks it as at a start: private places, package stores and the policy are refused.',
+        'de': 'Er erscheint unter /workspaces/NAME, bis die Sandbox endet; eine Sitzung behält ihn für einen Neustart, außer er ist nur lesbar. sandbox-ai prüft ihn wie bei einem Start: private Orte, Paketspeicher und die Richtlinie werden abgelehnt.'},
+    'Folder for the sandbox': {
+        'en': 'Folder for the sandbox',
+        'de': 'Ordner für die Sandbox'},
+    'Add workspace…': {
+        'en': 'Add workspace…',
+        'de': 'Workspace hinzufügen…'},
+    'Mount a folder of this computer into the selected sandbox until it ends (sandbox-ai workspace add)': {
+        'en': 'Mount a folder of this computer into the selected sandbox until it ends (sandbox-ai workspace add)',
+        'de': 'Einen Ordner dieses Computers in die gewählte Sandbox einhängen, bis sie endet (sandbox-ai workspace add)'},
+    'Remove workspace…': {
+        'en': 'Remove workspace…',
+        'de': 'Workspace entfernen…'},
+    'Take back a workspace added during the run (sandbox-ai workspace remove)': {
+        'en': 'Take back a workspace added during the run (sandbox-ai workspace remove)',
+        'de': 'Einen während des Laufs hinzugefügten Workspace zurücknehmen (sandbox-ai workspace remove)'},
+    'This sandbox-ai version cannot add workspaces during a run.': {
+        'en': 'This sandbox-ai version cannot add workspaces during a run.',
+        'de': 'Diese sandbox-ai-Version kann während eines Laufs keine Workspaces hinzufügen.'},
+    'Workspaces added during the run: {list}': {
+        'en': 'Workspaces added during the run: {list}',
+        'de': 'Während des Laufs hinzugefügte Workspaces: {list}'},
+    'No workspace added during the run.': {
+        'en': 'No workspace added during the run.',
+        'de': 'Kein Workspace während des Laufs hinzugefügt.'},
+    'Give the folder as an absolute path.': {
+        'en': 'Give the folder as an absolute path.',
+        'de': 'Gib den Ordner als absoluten Pfad an.'},
+    'Add workspace': {
+        'en': 'Add workspace',
+        'de': 'Workspace hinzufügen'},
+    'Let {run} change {path} until it ends? The agent can write, delete and run there.': {
+        'en': 'Let {run} change {path} until it ends? The agent can write, delete and run there.',
+        'de': '{run} {path} ändern lassen, bis sie endet? Der Agent kann dort schreiben, löschen und ausführen.'},
+    'Remove workspace': {
+        'en': 'Remove workspace',
+        'de': 'Workspace entfernen'},
+    'No workspace was added to {run} during its run (those of the start stay).': {
+        'en': 'No workspace was added to {run} during its run (those of the start stay).',
+        'de': 'Zu {run} wurde während des Laufs kein Workspace hinzugefügt (die des Starts bleiben).'},
+    'A process in {run} still uses {path}. Detach it anyway? Whatever is open there stays usable until it is closed; a restart takes it away for sure.': {
+        'en': 'A process in {run} still uses {path}. Detach it anyway? Whatever is open there stays usable until it is closed; a restart takes it away for sure.',
+        'de': 'Ein Prozess in {run} benutzt {path} noch. Trotzdem lösen? Was dort offen ist, bleibt nutzbar, bis es geschlossen wird; sicher nimmt ihn nur ein Neustart weg.'},
+    'Detach': {
+        'en': 'Detach',
+        'de': 'Lösen'},
 }
