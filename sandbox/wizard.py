@@ -1563,7 +1563,11 @@ def cli(argv):
     models.add_argument("-p", "--port", type=int)
     models.add_argument("-u", "--url", metavar="URL", help="http(s)://HOST[:PORT][/PREFIX] of a server not "
                                                            "registered yet (with --kind)")
-    models.add_argument("-s", "--sort", choices=["name", "size", "loaded"], default="loaded")
+    models.add_argument("-c", "--ca", metavar="FILE", help="with --url https://...: the PEM CA that signed its "
+                                                            "certificate")
+    models.add_argument("-s", "--api-key-secret", metavar="NAME", dest="api_key_secret",
+                        help="with --url: the secret (sandbox-ai secrets) holding its API key")
+    models.add_argument("--sort", choices=["name", "size", "loaded"], default="loaded")
     models.add_argument("-j", "--json", action="store_true", help="as JSON")
     a = parser.parse_args(argv)
     if a.command in (None, "new", "edit") or a.command == "trust" and not (a.show or a.list or a.digest):
@@ -1590,7 +1594,9 @@ def cli(argv):
         elif a.url:
             # A server that is not registered yet, by its whole URL (https and a path prefix included): what the
             # app's and the web's "Test connection" asks before anything is stored.
-            found = llm().discover_url(a.kind, a.url) if a.kind else parser.error("--url needs --kind")
+            if not a.kind:
+                parser.error("--url needs --kind")
+            found = llm().discover_url(a.kind, a.url, ca=a.ca, api_key_secret=a.api_key_secret)
         elif a.kind and a.host:
             found = discover(a.kind, a.host, a.port or SERVERS[a.kind][1], fetch=fetch_json)
         else:

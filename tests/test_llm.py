@@ -598,3 +598,15 @@ def test_replace_keeps_the_ca_unless_no_ca_is_given(tmp_path):
     assert run("add", "gpu", "--kind", "openai-compatible", "--url", "http://127.0.0.1:1234", "--replace",
                "--no-ca")[0] == 0
     assert not llm.load_store()["endpoints"]["gpu"].get("ca") and not kept.exists()
+
+
+def test_the_name_refusal_names_the_character_that_is_wrong():
+    """What a front end shows when a name is refused: the offending character and a name that would work."""
+    assert "'.'" in llm.name_refusal("lm.studio") and "'lm-studio'" in llm.name_refusal("lm.studio")
+    assert "starts with a letter or a digit" in llm.name_refusal("-gpu")
+    assert "at most 32 characters" in llm.name_refusal("g" * 33)
+    assert llm.name_refusal("192-168-1-20") and llm.name_refusal("")
+    assert "'gpu-1'" not in llm.name_refusal("gpu 1") or "' '" in llm.name_refusal("gpu 1")
+    lines = []
+    assert llm.main(["add", "lm.studio", "--kind", "lmstudio", "--url", "http://127.0.0.1:1234"],
+                    out=lines.append) == 1  # the CLI uses the same words

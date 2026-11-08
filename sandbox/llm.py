@@ -292,7 +292,7 @@ def check_record(name, record):
 def endpoint(name, path=None):
     """The checked endpoint NAME; ValueError if there is none."""
     if not isinstance(name, str) or not NAME.fullmatch(name):
-        raise ValueError(f"an LLM endpoint's name is 1-32 letters, digits, _ or - (no ':'): {printable(name)!r}")
+        raise ValueError(name_refusal(name))
     store = load_store(path)
     if name not in store["endpoints"]:
         known = ", ".join(sorted(store["endpoints"])) or "none yet"
@@ -309,7 +309,10 @@ def record_of(endpoint):
 
 
 def ca_text(endpoint):
-    """The PEM text of the endpoint's own CA (copied into ca_dir() by `llm add`), or None."""
+    """The PEM text of the endpoint's own CA (copied into ca_dir() by `llm add`), or None. A test of a server that
+    is not registered yet (discover_url) carries the text itself, not a file of the store."""
+    if endpoint.get("ca_text"):
+        return endpoint["ca_text"]
     if not endpoint.get("ca"):
         return None
     try:
@@ -569,14 +572,38 @@ def model_table(models):
     return lines if models else [lines[0], "(no models found)"]
 
 
-def discover_url(kind, url, get=None, client=None):
+def name_refusal(name):
+    """Why NAME is no name for an LLM endpoint, in words that name the offending character (front ends show this)."""
+    if not isinstance(name, str) or not name:
+        return "an LLM endpoint's name is 1-32 letters, digits, _ or -"
+    if len(name) > 32:
+        return f"an LLM endpoint's name is at most 32 characters; {printable(name)!r} has {len(name)}"
+    if not re.fullmatch(r"[A-Za-z0-9]", name[0]):
+        return (f"an LLM endpoint's name starts with a letter or a digit, not {printable(name[0])!r} "
+                f"({printable(name)!r})")
+    bad = sorted({c for c in name[1:] if not re.fullmatch(r"[A-Za-z0-9_-]", c)})
+    if bad:
+        shown = ", ".join(repr(printable(c)) for c in bad[:4])
+        return (f"an LLM endpoint's name takes letters, digits, _ and -; {printable(name)!r} has {shown} "
+                f"(try {printable(re.sub(r'[^A-Za-z0-9_-]', '-', name)[:32])!r})")
+    return f"an LLM endpoint's name is 1-32 letters, digits, _ or -: {printable(name)!r}"
+
+
+def discover_url(kind, url, get=None, client=None, ca=None, api_key_secret=None):
     """The models a server of KIND at URL lists, before it is registered anywhere (the "test connection" of the app
     and the web): the URL is checked as `llm add` checks it, nothing is stored, no key is sent."""
     if kind not in KINDS:
         raise ValueError(f"Unknown server type: {printable(kind)}")
     parsed = parse_url(url)
-    endpoint = {"name": "test", "kind": kind, "url": parsed["url"], "parsed": parsed, "api_key_secret": None,
-                "headers": {}, "ca": None, "vpn": None, "model": None, "anthropic": False, "insecure_http": False}
+    if api_key_secret is not None and not SECRET.fullmatch(str(api_key_secret)):
+        raise ValueError("the API key's secret is named with letters, digits and _")
+    text = None
+    if ca is not None:
+        text = read_private(Path(ca).expanduser(), CA_LIMIT, f"--ca {ca}").decode("ascii", "strict")
+        check_ca(text, ca)
+    endpoint = {"name": "test", "kind": kind, "url": parsed["url"], "parsed": parsed,
+                "api_key_secret": api_key_secret, "headers": {}, "ca": None, "ca_text": text, "vpn": None,
+                "model": None, "anthropic": False, "insecure_http": False}
     return discover(kind, (client or Client(endpoint, get)).json)
 
 
@@ -1111,7 +1138,7 @@ def public_view(endpoint):
 def add(args, out=print, get=None):
     """sandbox-ai llm add: check everything that can be checked offline, copy the CA, then store."""
     if not NAME.fullmatch(args.name):
-        raise ValueError(f"an endpoint's name is 1-32 letters, digits, _ or - (no ':'): {printable(args.name)!r}")
+        raise ValueError(name_refusal(args.name))
     parsed = parse_url(args.url)
     if parsed["note"]:
         out(f"note: {parsed['note']}")
@@ -1165,6 +1192,10 @@ def add(args, out=print, get=None):
     for name in [args.api_key_secret, *headers.values()]:
         if name and get(name) is None:
             out(f"note: there is no secret {name} yet; keep it with: sandbox-ai secrets set {name}")
+    old = store["endpoints"].get(args.name) if isinstance(store["endpoints"].get(args.name), dict) else {}
+    if old.get("models") and old.get("url") == record.get("url") and old.get("kind") == record.get("kind"):
+        # The same server at the same address: its model list stays until it is read again.
+        record["models"], record["checked"] = old["models"], old.get("checked")
     if args.ca:
         source = Path(args.ca).expanduser()
         try:
@@ -1183,14 +1214,12 @@ def add(args, out=print, get=None):
         # A copy of our own: the agent may be able to change the original later, and the store names only files here.
         write_private(ca_dir() / f"{args.name}.pem", text.encode())
         record["ca"] = f"{args.name}.pem"
+    elif old.get("ca") and not args.no_ca:
+        # --replace without --ca keeps the CA that is stored: a front end cannot send the file again (the store
+        # holds only a copy of it). --no-ca drops it.
+        record["ca"] = old["ca"]
     elif args.name in store["endpoints"]:
-        kept = store["endpoints"][args.name].get("ca") if isinstance(store["endpoints"][args.name], dict) else None
-        if kept and not args.no_ca:
-            # --replace without --ca keeps the CA that is stored (a front end cannot send the file again: the store
-            # holds only a copy of it). --no-ca drops it.
-            record["ca"] = kept
-        else:
-            (ca_dir() / f"{args.name}.pem").unlink(missing_ok=True)
+        (ca_dir() / f"{args.name}.pem").unlink(missing_ok=True)
     store["endpoints"][args.name] = record
     save_store(store)
     for line in describe(check_record(args.name, record)):
