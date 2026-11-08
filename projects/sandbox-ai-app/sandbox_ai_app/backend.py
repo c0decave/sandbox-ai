@@ -67,6 +67,8 @@ PATH_OPTIONS = {"--workspace", "--state-dir", "--privacy-rules", "--rules", "--l
                 "--auth-file", "--import-codex-auth", "--gui-vnc", "--kit-dir", "--config", "--runtime", "--device"}
 # Options the app sets itself (it starts sessions and dry runs on its own).
 HIDDEN = {"--session", "--dry-run", "--help", "--version"}
+# A hidden launcher option the app adds to its own starts on this machine (SandboxAI.as_given).
+AS_GIVEN = "--workspaces-as-given"
 SCOPES = ("once", "run", "always")
 REMOTE_QUESTION_WAIT = 30  # seconds a host may take to list its open questions (over SSH)
 NET_OPTIONS_SECONDS = 600  # how long a host's `net allow --help` is kept when its sandbox-ai version is not known
@@ -1949,18 +1951,33 @@ class SandboxAI:
 
     # -- actions --
 
+    def knows_option(self, option):
+        """Whether this machine's launcher takes OPTION (hidden ones too)."""
+        return any(option in action.option_strings for action in self.parser_actions())
+
+    def as_given(self, argv):
+        """ARGV (a start's options on this machine) with --workspaces-as-given when it names its workspace: the
+        workspace chosen in the app is the main one, never a directory with a .sandbox-ai.json the app itself runs
+        in (sandbox-ai 0.1.78 makes that one /work otherwise). Not for another host, whose older sandbox-ai may not
+        know the option; not when this machine's launcher does not either."""
+        argv = list(argv)
+        names_workspace = any(word == "--workspace" or word.startswith("--workspace=") for word in argv)
+        if names_workspace and AS_GIVEN not in argv and self.knows_option(AS_GIVEN):
+            argv.append(AS_GIVEN)
+        return argv
+
     def launch_argv(self, agent, argv, agent_args=(), session=None):
-        """The sandbox-ai command line for a start."""
+        """The sandbox-ai command line for a start on this machine."""
         extra = ["--session", session] if session else []
-        return self.command(agent, *argv, *extra, *(["--", *agent_args] if agent_args else []))
+        return self.command(agent, *self.as_given(argv), *extra, *(["--", *agent_args] if agent_args else []))
 
     def dry_run_argv(self, agent, argv):
-        return self.command(agent, *argv, "--dry-run")
+        return self.command(agent, *self.as_given(argv), "--dry-run")
 
     def dry_run(self, agent, argv):
         """(plan or None, error text) of a dry run with these options (blocking; the window uses
         dry_run_argv with AsyncCommand and parse_dry_run)."""
-        return parse_dry_run(*self.call(agent, *argv, "--dry-run", timeout=60))
+        return parse_dry_run(*self.call(agent, *self.as_given(argv), "--dry-run", timeout=60))
 
     def in_terminal(self, argv, title="sandbox-ai"):
         """argv that runs ARGV in a new terminal window, or None if no terminal emulator is known."""
@@ -2313,6 +2330,8 @@ class SandboxAI:
             raise ValueError("the workspace is an absolute path")
         if any(not isinstance(o, str) or "\0" in o for o in options):
             raise ValueError("invalid option")
+        if host == "local":  # each member's start: the team's workspace is the main one (see as_given)
+            options = self.as_given(["--workspace", workspace, *options])[2:]
         return self.host_terminal(host, "team", "start", "--agents", ",".join(agents), "--workspace", workspace, name,
                                   *(["--", *options] if options else []))
 

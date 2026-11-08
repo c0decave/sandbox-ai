@@ -112,8 +112,10 @@ def test_a_team_its_board_and_every_action(qapp, sai, monkeypatch, host):
     monkeypatch.setattr(team_page.StartDialog, "exec", start)
     page.start()
     argv, title = opened[-1]
-    assert argv[-11:] == ["team", "start", "--agents", "codex,claude,opencode", "--workspace", "/srv/other", "trio",
-                          "--", "--allow-pypi", "--kit", "egm"]
+    # this machine's members take the workspace as given (sandbox-ai 0.1.78); another host's may not know the option
+    tail = ["--allow-pypi", "--kit", "egm", *([] if remote else ["--workspaces-as-given"])]
+    assert argv[-8 - len(tail):] == ["team", "start", "--agents", "codex,claude,opencode", "--workspace", "/srv/other",
+                                     "trio", "--", *tail]
     assert title == "sandbox-ai team start trio" + (" (ct1)" if remote else "")
     page.deleteLater()
 

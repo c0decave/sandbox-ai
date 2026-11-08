@@ -124,6 +124,32 @@ def test_a_start_its_dry_run_and_options_on_a_host(sai):
 
 
 @needs_sai
+def test_starts_here_take_their_workspaces_as_given_and_another_hosts_never(sai):
+    """Since sandbox-ai 0.1.78 a directory with a .sandbox-ai.json the launcher starts in becomes /work; the app names
+    its main workspace itself, so its own working directory must not decide: --workspaces-as-given on this machine
+    (starts, dry runs, team members), never on another host, whose older sandbox-ai may not know the option."""
+    assert sai.knows_option("--workspaces-as-given")
+    here = sai.launch_argv("claude", ["--workspace", "/srv/x", "--mode", "high"], ["-p", "hi"], "api")
+    assert here[3:] == ["claude", "--workspace", "/srv/x", "--mode", "high", "--workspaces-as-given", "--session", "api",
+                        "--", "-p", "hi"]
+    parsed = sai.launcher.parse_args(here[3:here.index("--")])
+    assert parsed.workspaces_as_given and parsed.workspaces == ["/srv/x"] and parsed.cwd_project is None
+    assert sai.launch_argv("claude", ["--workspace=/srv/x"])[-1] == "--workspaces-as-given"
+    assert "--workspaces-as-given" not in sai.launch_argv("claude", ["--mode", "high"]), "no workspace named: as ever"
+    assert sai.dry_run_argv("codex", ["--workspace", "/srv/x"])[-2:] == ["--workspaces-as-given", "--dry-run"]
+    assert sai.as_given(["--workspace", "/srv/x", "--workspaces-as-given"]).count("--workspaces-as-given") == 1
+    assert sai.host_launch_argv("local", "claude", ["--workspace", "/srv/x"]) == \
+        sai.launch_argv("claude", ["--workspace", "/srv/x"])
+    assert "--workspaces-as-given" not in " ".join(sai.host_launch_argv("ct1", "claude", ["--workspace", "/srv/x"]))
+    sai.host_dry_run("ct1", "claude", ["--workspace", "/srv/x"])
+    assert sai.asked[-1] == ("ct1", "claude", "--workspace", "/srv/x", "--dry-run")
+    assert "--workspaces-as-given" not in " ".join(sai.team_start_argv("ct1", "t", ["claude", "codex"], "/srv/x"))
+    assert sai.team_start_argv("local", "t", ["claude", "codex"], "/srv/x")[-1].endswith(" t -- --workspaces-as-given")
+    sai.knows_option = lambda option: False  # this machine's launcher older than 0.1.78: never passed
+    assert "--workspaces-as-given" not in sai.launch_argv("claude", ["--workspace", "/srv/x"])
+
+
+@needs_sai
 def test_net_keep_privacy_check_doctor_and_the_mcp_catalog_on_a_host(sai):
     sai.net_keep("ct1", "api", every=True)
     assert sai.asked[-1] == ("ct1", "net", "show", "api", "--keep-all")

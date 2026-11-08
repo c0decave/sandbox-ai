@@ -149,8 +149,10 @@ def test_the_terminal_commands(sai, host):
     """A login, a team start, a build, the review of hooks and the plugin installs run in a terminal there."""
     assert sai.login_argv(host, "codex", logout=True)[-3:] == ["login", "codex", "--logout"]
     argv = sai.team_start_argv(host, "review", ["claude", "codex", "claude"], "/srv/work", ["--allow-pypi"])
-    assert argv[-9:] == ["team", "start", "--agents", "claude,codex", "--workspace", "/srv/work", "review", "--",
-                         "--allow-pypi"]
+    # This machine's members take the team's workspace as given (sandbox-ai 0.1.78); another host's may not know it.
+    tail = ["--allow-pypi", "--workspaces-as-given"] if host == "local" else ["--allow-pypi"]
+    assert argv[-8 - len(tail):] == ["team", "start", "--agents", "claude,codex", "--workspace", "/srv/work", "review",
+                                     "--", *tail]
     assert sai.image_build_argv(host, "claude", extension_only=True, pin="2.1.0", uv="0.9.5", node="node:22")[-9:] == \
         ["build", "--extension-only", "--pin", "2.1.0", "--uv", "0.9.5", "--node", "node:22", "claude"]
     if host == "ct1":

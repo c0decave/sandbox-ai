@@ -180,7 +180,7 @@ def test_loading_a_profile_keeps_the_projects_workspace(window, env):
     launch.load_profile()
     assert launch.argv() == ["--workspace", str(project), "--allow-pypi"] and launch.workspace() == str(project)
     launch.start()
-    assert window.started[-1][4:] == ["codex", "--workspace", str(project), "--allow-pypi"]
+    assert window.started[-1][4:] == ["codex", "--workspace", str(project), "--allow-pypi", "--workspaces-as-given"]
     launch.profile.setCurrentText("elsewhere")
     launch.load_profile()
     assert launch.workspace() == "/tmp/x", "a profile's own workspace wins"

@@ -190,7 +190,8 @@ def test_start_page_workflow(qapp, env, monkeypatch, wait, agent, engine, langua
         launch.dry_run()
         title = i18n.tr("Plan (dry run)")
         assert wait(lambda: title in shown_titles(), 10)
-        assert w.commands.argv(agent) == [[agent, *expected, "--dry-run"]]
+        # Started here with its workspace named: --workspaces-as-given (the app's own directory never decides)
+        assert w.commands.argv(agent) == [[agent, *expected, "--workspaces-as-given", "--dry-run"]]
         assert json.loads(widgets.SHOWN[-1][1]) == plan
         # Start in the app: one terminal tab running exactly that command line, in the project folder.
         launch.start_in_app()
@@ -199,7 +200,8 @@ def test_start_page_workflow(qapp, env, monkeypatch, wait, agent, engine, langua
         assert tab_title == agent and cwd == str(project)
         parsed_agent, parsed, agent_args = launcher_args(sai, argv)
         assert parsed_agent == agent and agent_args == ["--verbose", "two words"]
-        assert argv[3:] == [agent, *expected, "--", "--verbose", "two words"]
+        assert argv[3:] == [agent, *expected, "--workspaces-as-given", "--", "--verbose", "two words"]
+        assert parsed.workspaces_as_given
         assert parsed.backend == engine and parsed.workspace == [str(project)]
         for option, _, dest, value in FORM_CHOICES:
             assert getattr(parsed, dest) == value, option
@@ -303,7 +305,7 @@ def test_board_from_a_preset_to_apply_and_start(window, env, monkeypatch, wait, 
     w.commands.replies[(runs,)] = (0, json.dumps({"agent": runs}), "")
     page.check()
     assert wait(lambda: page.launcher_ok is True, 10)
-    assert w.commands.argv(runs)[-1] == [runs, *B.launcher_argv(sai, board), "--dry-run"]
+    assert w.commands.argv(runs)[-1] == [runs, *B.launcher_argv(sai, board), "--workspaces-as-given", "--dry-run"]
     # Apply: written, trusted (exactly the bytes written), the layout next to it; read back it is the same board.
     shown = len(widgets.SHOWN)
     assert page.apply()
@@ -327,7 +329,7 @@ def test_board_from_a_preset_to_apply_and_start(window, env, monkeypatch, wait, 
     assert argv == sai.launch_argv(runs, B.launcher_argv(sai, page.board), agent_args)
     parsed_agent, parsed, parsed_args = launcher_args(sai, argv)
     assert parsed_agent == runs and parsed.backend == engine and parsed.no_config and parsed_args == agent_args
-    assert parsed.workspace == [str(project)]
+    assert parsed.workspace == [str(project)] and parsed.workspaces_as_given
 
 
 def test_a_vpn_preset_on_bwrap_is_refused_before_anything_is_written(window, env, monkeypatch, wait):
