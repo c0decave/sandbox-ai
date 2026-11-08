@@ -156,17 +156,17 @@ def test_export_json_and_text(window, env, wait, monkeypatch):
     assert wait(lambda: page.model.rowCount() == 7, timeout=20)
     page.set_kinds(["prompt", "command"])
     target = env / "out.jsonl"
-    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName", lambda *a, **k: (str(target), ""))
+    monkeypatch.setattr("sandbox_ai_app.state.run_dialog", lambda dialog: [str(target)])
     assert page.export("json") == str(target)
     assert [json.loads(line)["id"] for line in target.read_text().splitlines()] == ["p1", "c1"]
     assert target.stat().st_mode & 0o777 == 0o600
     text = env / "out.txt"
-    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName", lambda *a, **k: (str(text), ""))
+    monkeypatch.setattr("sandbox_ai_app.state.run_dialog", lambda dialog: [str(text)])
     page.export("text")
     lines = text.read_text().splitlines()
     assert len(lines) == 2 and lines[1].split()[2:4] == ["command", "claude"] and lines[1].endswith("pytest · exit 1")
     (env / "link.txt").symlink_to(env / "elsewhere.txt")
-    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName", lambda *a, **k: (str(env / "link.txt"), ""))
+    monkeypatch.setattr("sandbox_ai_app.state.run_dialog", lambda dialog: [str(env / "link.txt")])
     assert page.export("text") is None and not (env / "elsewhere.txt").exists()
 
 

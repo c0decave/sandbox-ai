@@ -98,15 +98,16 @@ def main(argv=None):
     i18n.set_language(settings.get("language", "system"))
     theme.apply(settings.get("theme", "system"), app)
     from .ui import MainWindow, risk_text
-    from .widgets import confirm
+    from .widgets import ask_first
     # Before any of sandbox-ai's modules runs in this process: are they (or the app) where a sandbox writes?
     risk = sai.startup_risk()
     if risk is not None and self_test:
         print(f"sandbox-ai-app self-test: {risk_text(risk)}", file=sys.stderr)
         return 1
-    if risk is not None and not confirm(None, i18n.tr("sandbox-ai in a sandbox folder"),
-                                        risk_text(risk) + "\n\n" + i18n.tr("Load sandbox-ai's code from there anyway?"),
-                                        i18n.tr("Load anyway"), destructive=True, reject=i18n.tr("Quit")):
+    if risk is not None and not ask_first(None, "startup-risk", i18n.tr("sandbox-ai in a sandbox folder"),
+                                          risk_text(risk) + "\n\n" + i18n.tr("Load sandbox-ai's code from there "
+                                                                             "anyway?"),
+                                          i18n.tr("Load anyway"), reject=i18n.tr("Quit")):
         return 1
     # Built without the style sheet and styled once at the end: Qt polishes each new widget under an
     # application style sheet as it is added, which made building the window about a third slower.

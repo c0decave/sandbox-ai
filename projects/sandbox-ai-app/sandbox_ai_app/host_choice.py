@@ -23,6 +23,14 @@ def valid_host(name):
         else None
 
 
+def on_host(host, text):
+    """TEXT (a question or a result) with the host it is about: "On this computer: …" or "On HOST: …" (a confirmation
+    always says where it acts)."""
+    if host in (None, LOCAL):
+        return tr("On this computer: {text}", text=text)
+    return tr("On {host}: {text}", host=printable(host), text=text)
+
+
 def host_label(host):
     return tr("{name} (this machine)", name=LOCAL) if host in (None, LOCAL) else printable(host)
 

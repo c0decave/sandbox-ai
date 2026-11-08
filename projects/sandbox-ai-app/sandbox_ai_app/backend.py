@@ -436,7 +436,7 @@ class SandboxAI:
         if status != 0:
             return []
         try:
-            data = json.loads(out)
+            data = json_part(out)
         except ValueError:
             return []
         return [entry for entry in data if isinstance(entry, dict)] if isinstance(data, list) else []
@@ -473,13 +473,51 @@ class SandboxAI:
     # The server of each kind of publish login when no own one is named (sandbox-ai publish_logins.KINDS).
     PUBLISH_HOSTS = {"pypi": "upload.pypi.org", "testpypi": "test.pypi.org", "npm": "registry.npmjs.org",
                      "crates": "crates.io", "gitlab": "gitlab.com", "github": "api.github.com"}
+    # The secret a token typed for a publish login is kept as, unless another name is given.
+    PUBLISH_SECRETS = {"pypi": "PYPI_TOKEN", "testpypi": "TESTPYPI_TOKEN", "npm": "NPM_TOKEN", "crates": "CARGO_TOKEN",
+                       "gitlab": "GITLAB_TOKEN", "github": "GITHUB_TOKEN"}
+
+    @classmethod
+    def token_secret_name(cls, kind=None, url=None):
+        """The secret name offered for a token typed for a login: PUBLISH_SECRETS of a publish KIND, GIT_TOKEN_<HOST>
+        for a Git login to URL (its host in capitals, other characters as _)."""
+        if kind:
+            return cls.PUBLISH_SECRETS.get(kind) or (re.sub(r"[^A-Z0-9]+", "_", str(kind).upper()).strip("_")[:50]
+                                                     or "PUBLISH") + "_TOKEN"
+        host = urllib.parse.urlsplit(str(url or "")).hostname or ""
+        tail = re.sub(r"[^A-Z0-9]+", "_", host.upper()).strip("_")[:50]
+        return f"GIT_TOKEN_{tail}" if tail else "GIT_TOKEN"
+
+    @staticmethod
+    def login_steps(command, add_args, secret, value=None):
+        """[(arguments, standard input)] of a Git or publish login whose token is VALUE (typed; None: SECRET is kept
+        already): `secrets set SECRET` with VALUE on standard input first, then `COMMAND ADD_ARGS` (which names
+        --secret SECRET) - so the login never names a secret that is not there. The value is never an argument."""
+        steps = [(["secrets", "set", secret], value + "\n")] if value else []
+        return steps + [([command, *add_args], None)]
+
+    def add_login(self, host, command, add_args, secret, value=None):
+        """login_steps on HOST, one after the other: (status, out, err) of the first that failed, or of the add."""
+        if command not in ("git-logins", "publish-logins") or not self.valid_secret(secret, value):
+            return 2, "", "invalid login or secret"
+        said, result = [], (0, "", "")
+        for args, stdin in self.login_steps(command, add_args, secret, value):
+            if args[0] == "secrets":
+                result = self.set_secret(secret, value, host)
+            else:
+                result = self.host_run(host, *args, timeout=90)
+            said.append(((result[1] or "") + (result[2] or "")).strip())
+            if result[0] != 0:
+                return result[0], "", "\n".join(part for part in said if part)
+        return 0, "\n".join(part for part in said if part), ""
 
     @staticmethod
     def identity_steps(name, old, new):
         """The `sandbox-ai identities` argument lists that turn identity NAME from OLD (None: not there yet) into
         NEW ({name, email, description, git: [{url, user, secret}], publish: [{kind, host, secret, url?}]}):
         add or set, then the logins that went away, then the new or changed ones. Every value is one argument, never
-        read as an option (the command line checks each again)."""
+        read as an option: the options first, then "--", then the identity's name and the URL or kind (the command line
+        checks each again)."""
         steps = []
         fields = []
         for key in ("name", "email", "description"):
@@ -490,27 +528,27 @@ class SandboxAI:
                 continue
             fields += [f"--{key}={value}"]
         if old is None:
-            steps.append(["identities", "add", name, *fields])
+            steps.append(["identities", "add", *fields, "--", name])
         elif fields:
-            steps.append(["identities", "set", name, *fields])
+            steps.append(["identities", "set", *fields, "--", name])
         old_git = {e["url"]: e for e in (old or {}).get("git", [])}
         new_git = {e["url"]: e for e in new.get("git", []) if e.get("url")}
         for url in old_git.keys() - new_git.keys():
-            steps.append(["identities", "logout", name, url])
+            steps.append(["identities", "logout", "--", name, url])
         for url, entry in new_git.items():
             if old_git.get(url) != {"url": url, "user": entry.get("user") or "x-access-token", "secret": entry["secret"]}:
-                steps.append(["identities", "login", name, url, f"--secret={entry['secret']}",
-                              f"--user={entry.get('user') or 'x-access-token'}"])
+                steps.append(["identities", "login", f"--secret={entry['secret']}",
+                              f"--user={entry.get('user') or 'x-access-token'}", "--", name, url])
         old_pub = {e["kind"]: e for e in (old or {}).get("publish", [])}
         new_pub = {e["kind"]: e for e in new.get("publish", []) if e.get("kind")}
         for kind in old_pub.keys() - new_pub.keys():
-            steps.append(["identities", "unpublish", name, kind])
+            steps.append(["identities", "unpublish", "--", name, kind])
         for kind, entry in new_pub.items():
             before = old_pub.get(kind)
             host = urllib.parse.urlsplit(entry["url"]).hostname if entry.get("url") else SandboxAI.PUBLISH_HOSTS.get(kind)
             if before is None or before.get("secret") != entry["secret"] or before.get("host") != host:
-                steps.append(["identities", "publish", name, kind, f"--secret={entry['secret']}",
-                              *([f"--url={entry['url']}"] if entry.get("url") else [])])
+                steps.append(["identities", "publish", f"--secret={entry['secret']}",
+                              *([f"--url={entry['url']}"] if entry.get("url") else []), "--", name, kind])
         return steps
 
     def save_identity(self, name, old, new):
@@ -556,16 +594,24 @@ class SandboxAI:
         return args
 
     def vpn_add(self, name, kind, secret_value=None, **fields):
-        """Add a VPN profile; SECRET_VALUE (a key or password typed in the app) is first kept as the secret
-        fields["secret"] with `sandbox-ai secrets set` (standard input), never passed on a command line."""
+        """Add a VPN profile; SECRET_VALUE (a key or password typed in the app) is kept as the secret fields["secret"]
+        with `sandbox-ai secrets set` (standard input), never passed on a command line - after `vpn add` succeeded (a
+        profile refused keeps no key), but for Mullvad, whose account number `vpn add` reads, before it."""
         args = self.vpn_add_argv(name, kind, **fields)
-        if secret_value:
-            if not fields.get("secret"):
-                raise ValueError("a typed key or password needs the name of the secret to keep it as")
+        if secret_value and not fields.get("secret"):
+            raise ValueError("a typed key or password needs the name of the secret to keep it as")
+        first = bool(secret_value) and kind == "mullvad"
+        if first:
             status, out, err = self.set_secret(fields["secret"], secret_value)
             if status != 0:
                 return status, out, err
-        return self.call(*args, timeout=180)
+        status, out, err = self.call(*args, timeout=180)
+        if status != 0 or not secret_value or first:
+            return status, out, err
+        kept, kept_out, kept_err = self.set_secret(fields["secret"], secret_value)
+        if kept != 0:
+            return kept, out + kept_out, err + kept_err
+        return status, out, err
 
     def vpn_remove(self, name):
         return self.call("vpn", "remove", name, timeout=60)
@@ -1219,6 +1265,15 @@ class SandboxAI:
         stores = {where for _, where in found}
         return (stores.pop() if len(stores) == 1 else "?"), found
 
+    def secrets_backend(self, host="local"):
+        """Where `sandbox-ai secrets set` keeps a secret on HOST: "keyring" or "file" (`sandbox-ai secrets backend`
+        there). ValueError: not answered."""
+        status, out, err = self.host_run(host, "secrets", "backend", timeout=60)
+        word = (out.strip().splitlines() or [""])[-1].strip()
+        if status != 0 or not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", word):
+            raise ValueError(printable((err or out).strip())[-300:] or f"exit status {status}")
+        return word
+
     def secret_exists(self, name, host="local"):
         """Whether a secret NAME is kept on HOST (names only are read)."""
         return any(found == name for found, _ in self.host_secrets(host)[1])
@@ -1283,33 +1338,54 @@ class SandboxAI:
         except Exception:  # noqa: BLE001 - the browser shows what it can
             runs = {}
         sessions = self.module("sessions")
+        try:
+            ids = self.session_ids()  # {name shown: id}: a renamed session keeps its id (its directory)
+        except Exception:  # noqa: BLE001 - an older sandbox-ai: the names are the ids
+            ids = {}
+        names = {key: name for name, key in ids.items()}
+
+        def key_of(name):
+            """The id of the session NAME (its name shown, or its id already)."""
+            if name in ids:
+                return ids[name]
+            if name in names:
+                return name
+            try:
+                return sessions.resolve(name) if hasattr(sessions, "resolve") else name
+            except ValueError:
+                return name
         for name, record in runs.items():
             session = session_of(record)
-            add("run", session or name, record.get("workspace"))
+            shown = names.get(key_of(session), session) if session else None
+            add("run", shown or name, record.get("workspace"))
             paths = run_paths(self.launcher, record.get("pid"))
             if session:
                 try:
-                    add("session-home", session, sessions.session_dir(session) / "home")
+                    add("session-home", shown, sessions.session_dir(key_of(session)) / "home")
                 except ValueError:
                     pass
             for workspace in paths["workspaces"]:
-                add("run", session or name, workspace)
+                add("run", shown or name, workspace)
             add("run-home", name, paths["state_dir"])
         try:
             rows = sessions.rows()
         except Exception:  # noqa: BLE001
             rows = []
         for row in rows:
-            name = row[0]
+            name = row[0]  # the name shown (after a rename); load() and session_dir() take the session's id
+            key = key_of(name)
             try:
-                data = sessions.load(name)
+                data = sessions.load(key)
             except (OSError, ValueError):
                 continue
             add("session", name, data.get("workspace"))
             options = paths_from_options(self.launcher, data.get("options", []), data.get("cwd"))
             for workspace in options["workspaces"]:
                 add("session", name, workspace)
-            add("session-home", name, sessions.session_dir(name) / "home")
+            try:
+                add("session-home", name, sessions.session_dir(key) / "home")
+            except ValueError:
+                pass
         for kind, label, path in extra:
             add(kind, label, path)
         return found
@@ -2056,7 +2132,60 @@ class SandboxAI:
             return 2, "", "invalid run"
         return self.host_run(host, "canaries", "resume", "--", run, timeout=120)
 
-    # preset directories and trusted project configurations
+    # presets, preset directories and trusted project configurations
+    def host_presets(self, host):
+        """[document] of `sandbox-ai presets list --json` on HOST: its presets (built-in, from its preset directories
+        and its user's), each with "origin" (and "directory" for one of an extra directory). ValueError: not
+        answered."""
+        data = self.host_json(host, "presets", "list", "--json", timeout=60)
+        if not isinstance(data, list):
+            raise ValueError("sandbox-ai presets list --json: not a list of presets")
+        return [entry for entry in data if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+                and re.fullmatch(KIT_NAME, entry["id"])]
+
+    def host_preset(self, host, name):
+        """The document of `sandbox-ai presets show --json NAME` on HOST (what it sets, needs and asks for, as it is
+        there now). ValueError: no such preset, or not answered."""
+        if not (isinstance(name, str) and re.fullmatch(KIT_NAME, name)):
+            raise ValueError("not a preset name")
+        data = self.host_json(host, "presets", "show", "--json", name, timeout=60)
+        if not isinstance(data, dict) or data.get("id") != name:
+            raise ValueError(f"sandbox-ai presets show {name}: not that preset")
+        return data
+
+    def host_image_variants(self, host):
+        """[name] of the image variants on HOST (`sandbox-ai images --json` there: the entries that are variants),
+        what --image-variant takes. ValueError: not answered."""
+        data = self.host_json(host, "images", "--json", timeout=90)
+        if not isinstance(data, list):
+            raise ValueError("sandbox-ai images --json: not a list of images")
+        return sorted({str(e["target"]) for e in data if isinstance(e, dict) and e.get("variant")
+                       and isinstance(e.get("target"), str) and re.fullmatch(KIT_NAME, e["target"])})
+
+    START_CHOICES = ("--vpn", "--kit", "--identity", "--mcp", "--image-variant")
+
+    def host_start_choices(self, host):
+        """({option: [name]}, {option: problem}) of what HOST has for the Start page's choosers: --vpn its VPN profiles
+        (vpn list --json), --kit its kits that are named (kits list --json), --identity its identities (identities
+        list --json), --mcp its MCP servers (mcp list --json), --image-variant its image variants (images --json). A
+        list that could not be read is a problem (its field stays typed in)."""
+        readers = {
+            "--vpn": lambda: [e["profile"] for e in self.host_vpn_profiles(host)],
+            "--kit": lambda: [k["name"] for k in self.host_kits_inventory(host).get("kits", [])
+                              if isinstance(k, dict) and isinstance(k.get("name"), str)
+                              and k.get("kind") not in ("always", "default")],
+            "--identity": lambda: list(self.host_identities(host)),
+            "--mcp": lambda: [row[0] for row in self.host_mcp_servers(host)],
+            "--image-variant": lambda: self.host_image_variants(host),
+        }
+        found, problems = {}, {}
+        for option, read in readers.items():
+            try:
+                found[option] = sorted({printable(str(name))[:64] for name in read() if str(name).strip()})
+            except Exception as exc:  # noqa: BLE001 - one list not answered: the others are still offered
+                problems[option] = printable(str(exc))[-300:]
+        return found, problems
+
     def host_preset_dirs(self, host):
         if host == "local":
             return self.preset_dirs()
@@ -2592,8 +2721,31 @@ NEEDS_CONFIRM = {
     'login-logout': 'logging out forgets the stored login of that agent: its sandboxes need a new login',
     'kit-hooks-trust': 'trusted hooks of a kit run in every later start with that kit',
     'mcp-detach': 'detaching an MCP server from a running start closes its relay there now: the agent\'s connections to it end and its calls fail (its later starts go without it)',
+    "vpn-replace": "replacing a VPN profile of that name changes the tunnel of every start that uses it",
+    "llm-replace": "replacing an LLM server of that name changes where every start that uses it sends its prompts "
+                   "and its key",
+    "team-stop": "stopping a team ends what runs in every member and its board",
+    "team-delete": "deleting a team removes its members with their HOMEs and its board",
+    "image-file": "a host file added to an image's extension is built into the image: every later start of it can "
+                  "read it",
+    "image-remove": "removing an extension drops what it adds from the next build (a variant's image goes with it, "
+                    "unless kept)",
 }
-APP_NEEDS_CONFIRM = {}
+APP_NEEDS_CONFIRM = {
+    "preset-delete": "deleting a preset of your own removes it for good (export it first to keep a copy)",
+    "files-delete": "deleting removes the files or folders for good (there is no wastebasket)",
+    "files-replace": "replacing overwrites what is there now with what is copied or moved",
+    # what the window itself ends, drops or runs (no sandbox-ai command): asked the same way, Cancel the default
+    "home-review-skip": "resuming without a clean review of the kept HOME runs whatever was written there (the agent "
+                        "too) at the next start",
+    "startup-risk": "sandbox-ai's code or the app lies where a sandbox writes: loading it runs what a sandbox may have "
+                    "changed",
+    "board-discard": "dropping the board's unapplied changes loses them",
+    "tab-close": "closing the tab drops the board's unapplied changes",
+    "terminal-end": "ending the command of a terminal tab loses what it did not save",
+    "app-quit": "quitting ends what runs only in the window (its commands and work) and leaves the sandboxes' questions "
+                "unanswered",
+}
 MODE_ORDER = ("lax", "low", "medium", "high", "paranoid")  # the order of protection, weakest first (webui.MODE_ORDER)
 TELEMETRY_ORDER = ("on", "off", "strict")  # the agents' telemetry, the least private first (webui.TELEMETRY_ORDER)
 DEFAULT_MODE, DEFAULT_TELEMETRY = "medium", "off"
@@ -2669,8 +2821,10 @@ def canary_categories(value, default, categories=CANARY_CATEGORIES):
 def defaults_lowered(old, new, canary_default=None):
     """What of the defaults OLD -> NEW ({key: value} of defaults.json, a key missing: sandbox-ai's own default)
     lowers the protection of every later start: [(key, before, after)] - a weaker mode (MODE_ORDER), telemetry less
-    private (TELEMETRY_ORDER), canary categories no longer planted (against that host's own CANARY_DEFAULT), and a
-    keep_days set where there was none or lowered (kept starts and their HOME go sooner). Empty: nothing does."""
+    private (TELEMETRY_ORDER), canary categories no longer planted (against that host's own CANARY_DEFAULT), a
+    keep_days set where there was none or lowered (kept starts and their HOME go sooner), preset_dirs gaining a
+    directory (later starts read presets from it too) and any change of subnet or subnet6 (the network of every later
+    start changes): the rules of the web interface's lowered_default. Empty: nothing does."""
     found = []
     for key, order, default in (("mode", MODE_ORDER, DEFAULT_MODE), ("telemetry", TELEMETRY_ORDER, DEFAULT_TELEMETRY)):
         before, after = old.get(key, default), new.get(key, default)
@@ -2684,6 +2838,15 @@ def defaults_lowered(old, new, canary_default=None):
     if isinstance(after, int) and not isinstance(after, bool) and (
             not isinstance(before, int) or isinstance(before, bool) or after < before):
         found.append(("keep_days", before, after))
+    value = new.get("preset_dirs")
+    if value is not None:  # unset: fewer places presets are read from
+        kept = set(old.get("preset_dirs")) if isinstance(old.get("preset_dirs"), list) else set()
+        added = [item for item in value if item not in kept] if isinstance(value, list) else [value]
+        if added:
+            found.append(("preset_dirs", sorted(kept), added))
+    for key in ("subnet", "subnet6"):  # set, changed or unset: another network for every later start
+        if new.get(key) != old.get(key):
+            found.append((key, old.get(key), new.get(key)))
     return found
 
 
@@ -3549,6 +3712,26 @@ def runs_of_starts(runs, ids):
     return found
 
 
+def json_part(out):
+    """The JSON document in OUT, the output of a `sandbox-ai ... --json`: all of it, or - when the command said notes
+    on standard output before it (`llm list --json` names an unusable server in a line of its own) - from the first
+    line that begins with "[" or "{" on (anything after the document is left out). ValueError: no JSON in it."""
+    text = out or ""
+    try:
+        return json.loads(text)
+    except ValueError:
+        pass
+    decoder, offset = json.JSONDecoder(), 0
+    for line in text.splitlines(keepends=True):
+        if line.lstrip()[:1] in ("[", "{"):
+            try:
+                return decoder.raw_decode(text, offset + len(line) - len(line.lstrip()))[0]
+            except ValueError:
+                pass
+        offset += len(line)
+    raise ValueError("no JSON in the answer")
+
+
 def session_of(record):
     """The session NAME of a run record, or None. A session's sandbox registers with its pod name
     (agent-session-NAME, see sessions.launch); `--session` runs carry the name itself."""
@@ -3785,6 +3968,15 @@ def argv_for_host(options, values, known=None):
     """Launcher arguments of VALUES (argv_from_values) without the options a host's launcher does not know (KNOWN:
     host_launch_options; None: not known, all of them)."""
     return argv_from_values([o for o in options if known is None or o.long in known], values)
+
+
+def dropped_options(options, values, known=None):
+    """The options of VALUES that are set (they give command-line tokens) but that a host's launcher does not know
+    (KNOWN; None: not known, none): what argv_for_host would leave out. A start refuses them by name instead - a
+    restrictive one (--workspace-ro, --no-provider-defaults) left out would start a weaker sandbox without a word."""
+    if known is None:
+        return []
+    return [o.long for o in options if o.long not in known and o.long in values and o.tokens(values[o.long])]
 
 
 def unknown_options(options, argv, known):

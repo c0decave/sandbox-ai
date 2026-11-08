@@ -48,6 +48,23 @@ AREA_TOURS = {
              ("Claude Code, Codex or OpenCode. Each has its own image; the System page says whether it is built.",
               "Claude Code, Codex oder OpenCode. Jeder hat sein eigenes Image; die Seite System sagt, ob es gebaut ist."),
              ("Pick the agent you are logged in to.", "Wählen Sie den Agenten, bei dem Sie angemeldet sind.")),
+        step("host_choice", ("Where it starts", "Wo es startet"),
+             ("This machine or a host of sandbox-ai hosts (over SSH). The Model choice, the Preset list beside "
+              "Gallery… and the form's choosers (VPN profiles, kits, identities, MCP servers, image variants) are "
+              "that host's; what its sandbox-ai does not know is greyed out.",
+              "Dieser Rechner oder ein Host von sandbox-ai hosts (über SSH). Die Modellwahl, die Liste Vorlage neben "
+              "Galerie… und die Auswahllisten des Formulars (VPN-Profile, Kits, Identitäten, MCP-Server, "
+              "Image-Varianten) sind die dieses Hosts; was sein sandbox-ai nicht kennt, ist ausgegraut."),
+             ("Choose a host and watch the command line begin with hosts run.",
+              "Wählen Sie einen Host und sehen Sie, wie die Befehlszeile mit hosts run beginnt.")),
+        step("model_choice", ("The model", "Das Modell"),
+             ("The agent's own provider, or a model server registered on the chosen host (NAME or NAME:MODEL): "
+              "--llm, without --model. Only this server lets the agent reach nothing but that server.",
+              "Der eigene Anbieter des Agenten oder ein auf dem gewählten Host registrierter Modellserver (NAME "
+              "oder NAME:MODELL): --llm, ohne --model. Nur dieser Server lässt den Agenten nichts als diesen Server "
+              "erreichen."),
+             ("Choose a server of yours, then the agent's provider again.",
+              "Wählen Sie einen Ihrer Server, dann wieder den Anbieter des Agenten.")),
         step("profile", ("Your saved settings", "Ihre gespeicherten Einstellungen"),
              ("A profile here is a set of this form's settings you saved (Save as profile…): agent, options and "
               "agent arguments. Load brings them back. Network profiles such as development are in the form's "
@@ -72,7 +89,7 @@ AREA_TOURS = {
               "dieselbe Sandbox zu starten."),
              ("Change an option and watch the command follow.", "Ändern Sie eine Option und sehen Sie, wie der Befehl "
               "folgt.")),
-        step("review_button", ("Check before starting", "Vor dem Start prüfen"),
+        step("dry_button", ("Check before starting", "Vor dem Start prüfen"),
              ("A dry run: the launcher checks everything (options, policy, images, network) and shows its plan, "
               "without starting anything.",
               "Ein Probelauf: Der Launcher prüft alles (Optionen, Richtlinie, Images, Netzwerk) und zeigt seinen "
@@ -112,17 +129,19 @@ AREA_TOURS = {
     ),
     "sandboxes": (
         step("table", ("What runs and what is kept", "Was läuft und was bleibt"),
-             ("One-off runs, sessions that keep running when you close the app, and MCP servers, with their state, "
-              "project and host. A host that did not answer has its rows greyed (last seen N s ago); a start with "
-              "an open question is marked asking.",
-              "Einmalige Läufe, Sessions, die weiterlaufen, wenn Sie die App schließen, und MCP-Server, mit Zustand, "
-              "Projekt und Host. Die Zeilen eines Hosts, der nicht antwortete, sind ausgegraut (zuletzt gesehen vor "
-              "N s); ein Start mit offener Frage ist als fragt markiert."),
+             ("A tree: each host, under it its one-off runs, sessions that keep running when you close the app and "
+              "MCP servers, with their state and project, and under each start the MCP servers, helpers and pod it "
+              "has. A host that did not answer has its rows greyed (last seen N s ago); a start with an open "
+              "question is marked asking.",
+              "Ein Baum: jeder Host, darunter seine einmaligen Läufe, Sitzungen, die weiterlaufen, wenn Sie die App "
+              "schließen, und MCP-Server mit Zustand und Projekt, und unter jedem Start seine MCP-Server, Helfer und "
+              "sein Pod. Die Zeilen eines Hosts, der nicht antwortete, sind ausgegraut (zuletzt gesehen vor N s); "
+              "ein Start mit offener Frage ist als fragt markiert."),
              ("Select a row to see its options and history.", "Wählen Sie eine Zeile, um Optionen und Verlauf zu "
               "sehen.")),
         step("only_project", ("Only this project", "Nur dieses Projekt"),
              ("Limits the list to the sandboxes of the project that is open.",
-              "Beschränkt die Liste auf die Sandboxes des geöffneten Projekts."),
+              "Beschränkt die Liste auf die Sandboxen des geöffneten Projekts."),
              ("Switch it off to see everything on this computer.", "Schalten Sie es aus, um alles auf diesem Rechner "
               "zu sehen.")),
         step("show_ended", ("What ended", "Was beendet ist"),
@@ -146,9 +165,29 @@ AREA_TOURS = {
               "zeigt, was mit ihm geschah; Aufräumen… entfernt Übriggebliebenes, nachdem es dies gezeigt hat, und "
               "nur das."),
              ("Look at the history of a start.", "Sehen Sie sich den Verlauf eines Starts an.")),
+        step("devices_label", ("While it runs", "Während sie läuft"),
+             ("For a running start: allow or revoke destinations, devices and limits until it ends; Add workspace… "
+              "mounts a folder or a single file of its host (with a name of its own); Add MCP server… gives it a "
+              "server or a helper agent now, without a restart, and keeps it for its later starts, offering the "
+              "agent's restart where it needs one; Remove MCP server… takes one away.",
+              "Für einen laufenden Start: Ziele, Geräte und Grenzen erlauben oder zurücknehmen, bis er endet; "
+              "Workspace hinzufügen… bindet einen Ordner oder eine einzelne Datei seines Hosts ein (mit eigenem "
+              "Namen); MCP-Server hinzufügen… gibt ihm sofort und ohne Neustart einen Server oder einen "
+              "Helfer-Agenten, behält ihn für die späteren Starts und bietet den Neustart des Agenten an, wo er "
+              "einen braucht; MCP-Server entfernen… nimmt einen weg."),
+             ("Select a running session and add a read-only folder.",
+              "Wählen Sie eine laufende Sitzung und fügen Sie einen nur lesbaren Ordner hinzu.")),
+        step("resume_with_button", ("Resume with", "Fortsetzen mit"),
+             ("Starts a kept start again with workspaces, mounts or MCP servers added (kept for its later starts), "
+              "or restarts a running one now; the agent continues its conversation.",
+              "Startet einen aufbewahrten Start erneut mit hinzugefügten Workspaces, Mounts oder MCP-Servern (für "
+              "seine späteren Starts behalten) oder startet einen laufenden sofort neu; der Agent setzt sein "
+              "Gespräch fort."),
+             ("Resume a stopped session with one more workspace.",
+              "Setzen Sie eine gestoppte Sitzung mit einem weiteren Workspace fort.")),
         step("stop_button", ("Stop", "Stoppen"),
              ("Ends the selected sandbox; its launcher cleans up. A session can also be paused and resumed.",
-              "Stoppt die gewählte Sandbox; ihr Launcher räumt auf. Eine Session lässt sich auch pausieren und "
+              "Stoppt die gewählte Sandbox; ihr Launcher räumt auf. Eine Sitzung lässt sich auch pausieren und "
               "fortsetzen."),
              ("Stop a run you no longer need.", "Stoppen Sie einen Lauf, den Sie nicht mehr brauchen.")),
     ),
@@ -202,9 +241,9 @@ AREA_TOURS = {
         step("tabs", ("Terminals in the app", "Terminals in der App"),
              ("The sandboxes started in the app, builds and logins, each in a tab. The agent runs in tmux window 0, a "
               "shell in window 1.",
-              "Die in der App gestarteten Sandboxes, Builds und Logins, jede in einem Tab. Der Agent läuft in "
+              "Die in der App gestarteten Sandboxen, Builds und Logins, jede in einem Tab. Der Agent läuft in "
               "tmux-Fenster 0, eine Shell in Fenster 1."),
-             ("Ctrl-b d detaches from a session: it keeps running.", "Strg-b d löst sich von einer Session: Sie "
+             ("Ctrl-b d detaches from a session: it keeps running.", "Strg-b d löst sich von einer Sitzung: Sie "
               "läuft weiter.")),
         step("fetch", ("No terminal tabs?", "Keine Terminal-Tabs?"),
              ("The tabs need xterm.js, fetched once and checked against its pinned digest; without it commands open "
@@ -262,11 +301,13 @@ AREA_TOURS = {
              ("The HOME and workspaces of a sandbox: look into them without opening a shell in it.",
               "HOME und Workspaces einer Sandbox: hineinsehen, ohne eine Shell darin zu öffnen."),
              ("Pick a running sandbox.", "Wählen Sie eine laufende Sandbox.")),
-        step("table", ("Copy in and out", "Hinein- und herauskopieren"),
-             ("Copy a file into a sandbox without giving it a mount, or one out of it. Links inside are never "
-              "followed.",
-              "Kopieren Sie eine Datei in eine Sandbox, ohne ihr ein Mount zu geben, oder eine heraus. Links darin "
-              "werden nie verfolgt."),
+        step("table", ("Two panes: copy in and out", "Zwei Bereiche: hinein- und herauskopieren"),
+             ("The sandbox on the left, this machine on the right. Copy (F5) or Move (F6) takes what is selected in "
+              "one pane into the other's folder, without giving the sandbox a mount; Tab switches panes. Links "
+              "inside are never followed.",
+              "Links die Sandbox, rechts dieser Rechner. Kopieren (F5) oder Verschieben (F6) bringt das in einem "
+              "Bereich Gewählte in den Ordner des anderen, ohne der Sandbox ein Mount zu geben; Tab wechselt den "
+              "Bereich. Links darin werden nie verfolgt."),
              ("Copy a small file in.", "Kopieren Sie eine kleine Datei hinein.")),
         step("replace", ("Replace", "Ersetzen"),
              ("Allows overwriting a file of the same name; off, nothing is ever replaced.",

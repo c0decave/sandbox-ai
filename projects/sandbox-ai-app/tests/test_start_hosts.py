@@ -228,6 +228,10 @@ def test_the_start_page_starts_on_a_host_with_its_launchers_options(ui, sai, mon
     assert "--memory" not in page.argv() and page.argv()[:2] == ["--workspace", "/srv/work"]
     assert page.preview.toPlainText().startswith("sandbox-ai hosts run ct1 -- claude --workspace /srv/work")
     page.start_in_app()
+    assert not started and "does not know these options: --memory" in widgets.SHOWN[-1][1], \
+        "an option that host does not know is refused by name, never left out without a word"
+    memory.setText("")
+    page.start_in_app()
     assert started[-1] == (["ssh", "-tt", "ct1", "claude --workspace /srv/work"], "ct1: claude", None)
     monkeypatch.setattr(sai, "host_dry_run", lambda host, agent, argv: ({"host": host, "argv": argv}, ""))
     page.dry_run()
@@ -235,6 +239,7 @@ def test_the_start_page_starts_on_a_host_with_its_launchers_options(ui, sai, mon
     monkeypatch.setattr(ui.QInputDialog, "getText", lambda *a, **k: ("far", True))
     page.save_profile()
     assert sai.profiles()["far"]["host"] == "ct1"
+    memory.setText("8g")
     chosen(page.host_choice, "local")
     assert page.form.widgets["--workspace"].value() == ["/srv/work"] and memory.isEnabled()
     assert "--memory" in page.argv(), "this machine's launcher knows it"
@@ -400,13 +405,19 @@ def test_the_board_starts_on_a_host_and_the_gallery_starts_the_emulated_device(u
     if hardware is None:
         pytest.skip("this sandbox-ai has no hardware-analysis preset")
     assert needs_demo_device(hardware) and not needs_demo_device(PR.find("development"))
+    # The gallery of a board on ct1 shows ct1's presets (`presets list --json` there), never this machine's.
+    documents = [{k: v for k, v in d.items() if not k.startswith("_")} | {"origin": "built-in"}
+                 for d in PR.local_documents(sai)[0]]
+    sai.answers[("presets", "list")] = (0, json.dumps(documents), "")
     gallery = PresetGallery(sai, None, "claude", {}, None, host="ct1")
+    assert ("ct1", "presets", "list", "--json") in sai.asked
+    assert all(c.preset.host == "ct1" for c in gallery.cards if c.preset.source == "sandbox-ai")
     card = next(c for c in gallery.cards if c.preset.id == "sai-hardware-analysis")
     gallery.choose(card)
     assert gallery.demo_button.isVisibleTo(gallery)
     gallery.demo_button.click()
     assert sai.asked[-1] == ("ct1", "demo-device", "start") and "ct1" in gallery.demo_status.text()
-    gallery.choose(next(c for c in gallery.cards if c.preset.id == "development"))
+    gallery.choose(next(c for c in gallery.cards if c.preset.name == "development"))
     assert not gallery.demo_button.isVisibleTo(gallery)
 
 

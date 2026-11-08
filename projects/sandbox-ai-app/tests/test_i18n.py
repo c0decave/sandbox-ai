@@ -79,8 +79,8 @@ def test_language_choice():
     assert i18n.system_language({"LANGUAGE": "de:en"}) == "de" and i18n.system_language({}) == "en"
     assert i18n.system_language({"SANDBOX_AI_APP_LANGUAGE": "de", "LANG": "C"}) == "de"
     assert i18n.set_language("de") == "de"
-    assert i18n.tr("Approvals") == "Freigaben" and i18n.tr("Delete the secret {name}?", name="X") == \
-        "Das Geheimnis X löschen?"
+    assert i18n.tr("Approvals") == "Freigaben" and i18n.tr("Not added: the secret {name} stays as it is.", name="X") \
+        == "Nicht hinzugefügt: Das Geheimnis X bleibt, wie es ist."
     assert i18n.tr("not a key {x}", x=1) == "not a key 1"
     i18n.set_language("en")
     assert i18n.tr("Approvals") == "Approvals"

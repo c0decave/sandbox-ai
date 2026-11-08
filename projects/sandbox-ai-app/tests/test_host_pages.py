@@ -138,7 +138,7 @@ def test_a_typed_key_goes_to_the_hosts_secrets_on_standard_input(qapp, sai, monk
     monkeypatch.setattr(vpn_page.VpnDialog, "exec", fill_dialog)
     names = []
     vpn_page.add_profile(QtWidgets.QWidget(), sai, names.append, host="ct1", host_label="ct1")
-    secret, add = [a for a in sai.asked if a[0] == "ct1"][-2:]
+    add, secret = [a for a in sai.asked if a[0] == "ct1"][-2:]  # the profile first, then its key
     assert secret == ("ct1", ("secrets", "set", "TS_KEY"), "tskey-auth-typed\n")
     assert add == ("ct1", ("vpn", "add", "ts", "--tailscale", "--auth-key-secret=TS_KEY", "--hostname=node-1",
                            "--tailnet-allow=100.64.0.7/32", "--ephemeral"))
@@ -212,7 +212,7 @@ def test_kits_of_a_host(qapp, sai, monkeypatch):
     monkeypatch.setattr(QtWidgets.QInputDialog, "getText", lambda *a, **k: ("/srv/skills/review", True))
     page.add_skill()
     assert ("kits", "add-skill", "--", "mine", "/srv/skills/review") in asked(sai)
-    assert any(text.startswith("Add /srv/skills/review to the kit mine?") for _, text, _ in widgets.SHOWN)
+    assert any(text.startswith("On ct1: Add /srv/skills/review to the kit mine?") for _, text, _ in widgets.SHOWN)
     page.revoke_button.click()
     assert ("kits", "trust-hooks", "--revoke", "--", "mine") in asked(sai)
     page.trust_hooks()
@@ -257,13 +257,13 @@ def test_credentials_of_a_host(qapp, sai, monkeypatch):
     assert widgets.SHOWN[-1][0] == "Publish login kinds" and "\\x1b[1m" in widgets.SHOWN[-1][1]
     page.git.list.selectRow(0)
     page.git.remove()
-    assert ("git-logins", "remove", "https://git.example.org") in asked(sai)
+    assert ("git-logins", "remove", "--", "https://git.example.org") in asked(sai)
     page.identities.list.selectRow(0)
-    answer(sai, ["identities", "check", "work"], "work: ready", status=0)
+    answer(sai, ["identities", "check", "--", "work"], "work: ready", status=0)
     page.identities.check_button.click()
     assert widgets.SHOWN[-1][0] == "Check of work" and widgets.SHOWN[-1][1].startswith("every secret is there")
     page.identities.remove()
-    assert ("identities", "remove", "work") in asked(sai)
+    assert ("identities", "remove", "--", "work") in asked(sai)
     page.deleteLater()
 
 

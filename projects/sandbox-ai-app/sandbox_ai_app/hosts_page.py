@@ -99,12 +99,35 @@ def security_steps_down(old, new, canary_default=None):
             found.append(tr("the agents' telemetry from {old} to {new}", old=printable(before), new=printable(after)))
         elif key == "canaries":
             found.append(tr("no canaries of {categories} any more", categories=", ".join(map(printable, before))))
+        elif key in ("subnet", "subnet6"):
+            found.append(tr("the network of every later start: {setting} from {old} to {new}", setting=key,
+                            old=printable(before) if before else tr("sandbox-ai's default"),
+                            new=printable(after) if after else tr("sandbox-ai's default")))
+        elif key == "preset_dirs":
+            added = after if isinstance(after, (list, tuple)) else [after] if after else []
+            found.append(tr("presets read from {dirs} too", dirs=", ".join(map(printable, added))))
         elif isinstance(before, int):
             found.append(tr("kept starts unused for {days} days removed with their HOME (instead of {before})",
                             days=after, before=before))
         else:
             found.append(tr("kept starts unused for {days} days removed with their HOME", days=after))
     return found
+
+
+EDITED_DEFAULTS = ("mode", "canaries", "keep_days", "telemetry", "subnet", "subnet6")  # what the Defaults tab writes
+
+
+def subnet_value(text, version):
+    """TEXT as a subnet of IP VERSION (4 or 6) in CIDR form (as sandbox-ai's defaults take it), or a ValueError."""
+    import ipaddress
+    try:
+        network = ipaddress.ip_network(text.strip(), strict=False)
+    except ValueError:
+        network = None
+    if network is None or network.version != version or "/" not in text:
+        raise ValueError(tr("Not an IPv{version} subnet (ADDRESS/PREFIX, e.g. {example}): {text}", version=version,
+                            example="10.77.0.0/24" if version == 4 else "fd77::/64", text=printable(text)[:60]))
+    return str(network)
 
 
 def default_step(op, key, value):
@@ -417,6 +440,16 @@ class HostsPage(QWidget):
         form.addRow(tr("Canaries"), canary_row)
         form.addRow(tr("Kept starts"), keep_row)
         form.addRow(tr("Telemetry of Claude Code, Codex and OpenCode"), self.telemetry)
+        # The sandboxes' own networks there (--subnet, --subnet6 of every start that names none): empty, sandbox-ai's.
+        self.subnet, self.subnet6 = QLineEdit(), QLineEdit()
+        for field, example, name in ((self.subnet, "10.77.0.0/24", tr("Subnet (IPv4)")),
+                                     (self.subnet6, "fd77::/64", tr("Subnet (IPv6)"))):
+            field.setAccessibleName(name)
+            field.setPlaceholderText(tr("empty: sandbox-ai's default (e.g. {example})", example=example))
+            field.setToolTip(tr("The network of every later start on the host that names none (--subnet, --subnet6); "
+                                "a change is asked first"))
+        form.addRow(tr("Subnet (IPv4)"), self.subnet)
+        form.addRow(tr("Subnet (IPv6)"), self.subnet6)
         self.save_defaults_button = button(tr("Save defaults…"), tr("Write the defaults of every later start on the "
                                                                     "host (sandbox-ai defaults set/unset there); a "
                                                                     "step down in security is asked first"),
@@ -658,7 +691,7 @@ class HostsPage(QWidget):
 
     def set_defaults_enabled(self, enabled):
         for widget in (self.mode, self.canaries, self.canary_list, self.keep, self.keep_days, self.telemetry,
-                       self.save_defaults_button):
+                       self.subnet, self.subnet6, self.save_defaults_button):
             widget.setEnabled(enabled)
         if enabled:
             self.canary_list.setEnabled(self.canaries.currentData() == CANARY_LIST)
@@ -704,6 +737,8 @@ class HostsPage(QWidget):
         if isinstance(days, int) and days > 0:
             self.keep_days.setValue(days)
         self.telemetry.setCurrentIndex(max(0, self.telemetry.findData(values.get("telemetry", "off"))))
+        for key, field in (("subnet", self.subnet), ("subnet6", self.subnet6)):
+            field.setText(printable(values[key]) if isinstance(values.get(key), str) else "")
         self.set_defaults_enabled(True)
         self.telemetry.setEnabled(bool(result.get("telemetry_levels")))
         self.defaults_note.setText(printable(tr("For every start on {host}, in {path}", host=name,
@@ -731,6 +766,10 @@ class HostsPage(QWidget):
                 chosen["telemetry"] = before
         elif level != "off" or before == "off":  # "off" is the default: written only where it was written
             chosen["telemetry"] = level
+        for key, field, version in (("subnet", self.subnet, 4), ("subnet6", self.subnet6, 6)):
+            text = field.text().strip()
+            if text:
+                chosen[key] = subnet_value(text, version)
         return chosen
 
     def save_defaults(self):
@@ -742,8 +781,7 @@ class HostsPage(QWidget):
         except ValueError as exc:
             warn(self, tr("Defaults"), str(exc))
             return
-        old = {key: value for key, value in self.defaults.items() if key in ("mode", "canaries", "keep_days",
-                                                                              "telemetry")}
+        old = {key: value for key, value in self.defaults.items() if key in EDITED_DEFAULTS}
         steps = [("set", key, value) for key, value in chosen.items() if old.get(key, object()) != value] + \
                 [("unset", key, None) for key in old if key not in chosen]
         if not steps:
@@ -829,6 +867,7 @@ class HostsPage(QWidget):
         self.tabs.setCurrentWidget(self.updates)
         self.queue_sudo = self.update_sudo.currentData()
         self.next_update()
+
 
     def next_update(self, sudo=None):
         """The next host of the queue, one after the other (each may take minutes); the summary at the end."""

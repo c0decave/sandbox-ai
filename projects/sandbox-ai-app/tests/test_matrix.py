@@ -237,7 +237,8 @@ VPN_LIST = [{"profile": "mv", "type": "wireguard", "provider": "mullvad"},
 LLM_LIST = [{"name": "gpu", "kind": "vllm", "url": "http://100.100.1.5:8000", "vpn": "ts"}]
 # (preset, agent of the settings, backend of the settings, {placeholder: value typed}, the agent it runs)
 PRESET_MATRIX = [
-    ("development", "claude", "podman", {}, "claude"),
+    # sandbox-ai's own "development" replaces the app's of that id (the one `--preset development` starts)
+    ("sai-development", "claude", "podman", {}, "claude"),
     ("binary-analysis", "codex", "bwrap", {"<folder:samples>": "{root}/samples", "<mcp:unpack>": "unpack",
                                            "<mcp:scan>": "scan"}, "codex"),
     ("remote-llm", "opencode", "podman", {"<llm:remote>": "gpu", "<vpn:tailnet>": "ts"}, "opencode"),
@@ -422,11 +423,15 @@ def test_wizard_end_to_end_to_the_board(qapp, env, monkeypatch, wait, agent, eng
         git.table.setRowCount(0)
         git.add_row("https://github.com", "secret", "GH_PUSH")
         git.add_row("https://gitlab.com", "typed", typed_token)
-        assert git.table.cellWidget(1, 2).echoMode() == QtWidgets.QLineEdit.EchoMode.Password
+        typed = git.token_edit(1)
+        assert typed.echoMode() == QtWidgets.QLineEdit.EchoMode.Normal, "Show value is on by default"
+        typed.show_toggle.setChecked(False)
+        assert typed.echoMode() == QtWidgets.QLineEdit.EchoMode.Password
+        typed.show_toggle.setChecked(True)
         git.identity.setChecked(True)
         wizard.next()
         assert wizard.currentPage() is wizard.mcp_page, git.note.text()
-        assert git.table.cellWidget(1, 2).text() != typed_token, "the typed token is no longer held in the page"
+        assert git.token_edit(1).text() != typed_token, "the typed token is no longer held in the page"
         servers = wizard.mcp_page.servers
         names = [servers.item(i).data(QtCore.Qt.ItemDataRole.UserRole) for i in range(servers.count())]
         assert names == ["fetch", "search"]
@@ -473,8 +478,8 @@ def test_wizard_end_to_end_to_the_board(qapp, env, monkeypatch, wait, agent, eng
             expected |= {"--backend", engine}
         else:
             expected |= {"--allow-host-port", "5432"}
-        if start == "development":
-            expected |= {"--allow-github", "--token-proxy", "registry.npmjs.org"}
+        if start == "development":  # sandbox-ai's own preset of that id (it replaces the app's)
+            expected |= {"--allow-github", "--allow-npm", "--allow-duckduckgo"}
         if model:
             expected |= {"--model", model}
         if effort:
@@ -769,12 +774,12 @@ CREDENTIAL_MATRIX = [
     ("claude", "wireguard", {"file": "{root}/home.conf"}, None,
      [["vpn", "add", "home", "--wireguard={root}/home.conf"]]),
     ("codex", "mullvad", {"secret": "MULLVAD", "location": "se-sto"}, "1234567890123456",
-     [["secrets", "set", "MULLVAD"],
+     [["secrets", "set", "MULLVAD"],  # Mullvad reads its account number while it is added: kept first
       ["vpn", "add", "home", "--mullvad", "--account-secret=MULLVAD", "--location=se-sto"]]),
     ("opencode", "tailscale", {"secret": "TS_KEY", "exit_node": "exit-1", "login_server": "https://hs.example.org"},
      "tskey-auth-kVERYSECRET",
-     [["secrets", "set", "TS_KEY"], ["vpn", "add", "home", "--tailscale", "--auth-key-secret=TS_KEY",
-                                     "--exit-node=exit-1", "--login-server=https://hs.example.org"]]),
+     [["vpn", "add", "home", "--tailscale", "--auth-key-secret=TS_KEY", "--exit-node=exit-1",
+       "--login-server=https://hs.example.org"], ["secrets", "set", "TS_KEY"]]),
 ]
 
 
@@ -803,8 +808,11 @@ def test_credentials_secrets_vpn_and_logins(window, env, monkeypatch, wait, agen
     page.set_secret()
     assert page.value.text() == ""
     assert wait(lambda: not widgets.busy(page) and page.secrets.rowCount() == 1, 10)
-    assert [entry for entry in w.commands.log if entry[0][0] == "secrets"] == [
+    # The value goes once, on standard input of secrets set; nothing else (secrets backend, list) ever carries it.
+    assert [entry for entry in w.commands.log if entry[0][:2] == ["secrets", "set"]] == [
         (["secrets", "set", "DEMO_TOKEN"], secret + "\n")]
+    assert not [entry for entry in w.commands.log if entry[0][:2] != ["secrets", "set"] and
+                (secret in " ".join(map(str, entry[0])) or secret in (entry[1] or ""))]
     assert page.secrets.item(0, 0).text() == "DEMO_TOKEN" and page.message.text() == "kept DEMO_TOKEN"
     page.secrets.selectRow(0)
     page.delete_secret()
@@ -833,8 +841,8 @@ def test_credentials_secrets_vpn_and_logins(window, env, monkeypatch, wait, agen
     sent = [(args, given) for args, given in w.commands.log[start:]
             if args[0] in ("secrets", "vpn") and args[:2] != ["vpn", "list"]]  # not the board's dry runs
     assert [args for args, _ in sent] == [[part.format(root=env) for part in command] for command in expected]
-    if typed:
-        assert sent[0][1] == typed + "\n" and sent[1][1] is None
+    if typed:  # the profile first, then its key kept as its secret (Mullvad's first: it is read while added)
+        assert [given for _, given in sent] == ([typed + "\n", None] if kind == "mullvad" else [None, typed + "\n"])
     # Logins: the agent's own login in a sandbox, in a tab of the app; log out asks first.
     page.logins.selectRow(next(r for r in range(page.logins.rowCount()) if page.logins.item(r, 0).text() == agent))
     page.login(False)

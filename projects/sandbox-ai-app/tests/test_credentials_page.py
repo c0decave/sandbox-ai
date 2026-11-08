@@ -115,7 +115,8 @@ def test_git_and_publish_logins_go_through_their_commands(page, wait, monkeypatc
         else:
             dialog.edits["url"].setText("https://git.example.org")
             dialog.edits["user"].setText("ada")
-        dialog.secret.setText("GH_PUSH")
+        dialog.stored.setChecked(True)  # a secret kept already
+        dialog.secret_choice.setCurrentText("GH_PUSH")
         dialog.check_and_accept()
         return dialog.result()
     monkeypatch.setattr(C.LoginDialog, "exec", filled)
@@ -127,7 +128,7 @@ def test_git_and_publish_logins_go_through_their_commands(page, wait, monkeypatc
     page.git.remove()
     assert wait(lambda: not widgets.busy(page.git))
     calls = page.sai.calls
-    assert ("git-logins", "add", "https://git.example.org", "--secret", "GH_PUSH", "--user", "ada") in calls
+    assert ("git-logins", "add", "--secret", "GH_PUSH", "--user", "ada", "--", "https://git.example.org") in calls
     assert ("publish-logins", "add", "npm", "--secret", "GH_PUSH") in calls
     assert any(c[:2] == ("git-logins", "remove") for c in calls)
 
@@ -152,7 +153,8 @@ def test_deleting_a_secret_and_a_stored_login_ask_with_cancel_as_the_default(pag
     monkeypatch.setattr(widgets, "AUTO_ANSWER", False)  # Cancel
     page.name.setText("PYPI_TOKEN")
     page.delete_secret()
-    assert widgets.SHOWN[-1][:2] == ("Delete secret", "Delete the secret PYPI_TOKEN?")
+    assert widgets.SHOWN[-1][:2] == ("Remove secret", "Remove the secret PYPI_TOKEN? Every start, VPN profile and "
+                                                     "Git login that names it goes without it.")
     page.logins.selectRow(0)
     page.login(True)
     assert widgets.SHOWN[-1][0] == "Log out" and opened == []
@@ -193,5 +195,6 @@ def test_the_secrets_of_another_host_and_a_replace_asked_first(page, monkeypatch
     assert wait(lambda: ("set", "LLM_KEY", "sk-new", "ct1") in page.sai.calls)
     assert wait(lambda: not widgets.busy(page))
     page.delete_secret()
-    assert widgets.SHOWN[-1][1] == "On ct1: Delete the secret LLM_KEY?"
+    assert widgets.SHOWN[-1][1] == "On ct1: Remove the secret LLM_KEY? Every start, VPN profile and Git login " \
+        "that names it goes without it."
     assert wait(lambda: ("delete", "LLM_KEY", "ct1") in page.sai.calls)

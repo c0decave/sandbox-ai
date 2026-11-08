@@ -19,7 +19,7 @@ import time
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QProcess, QSortFilterProxyModel, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
+    QAbstractItemView, QCheckBox, QComboBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
     QMenu,
     QPlainTextEdit, QPushButton, QSplitter, QTableView, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
@@ -245,6 +245,7 @@ class ActivityPage(QWidget):
         self.sai, self.window = sai, window
         self.process, self.buffer, self.errors, self.starts = None, b"", "", {}
         self.seen, self.remote_token, self.remote_busy = set(), 0, False
+        self.listing_token = 0  # the newest listing of a host's sources (its own counter: a poll never drops it)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         from .host_choice import HostChooser
@@ -367,8 +368,18 @@ class ActivityPage(QWidget):
         return self.hosts.host() or LOCAL
 
     def host_changed(self, host):
-        """Another host chosen: its sources and timeline, and its canary log."""
+        """Another host chosen: its sources and timeline, and its canary log. Nothing of the host before stays: its
+        --follow stream ends, its rows go, and its sources (this machine's log folders too) are never asked for on
+        this one."""
+        self.stop()
+        self.listing_token += 1
         self.remote_sources = []
+        self.model.clear()
+        self.starts, self.errors, self.seen = {}, "", set()
+        self.detail.clear()
+        self.source.blockSignals(True)
+        self.source.clear()
+        self.source.blockSignals(False)
         self.canaries.set_host(host)
         if self.started:
             self.refresh_sources()
@@ -407,8 +418,8 @@ class ActivityPage(QWidget):
         host = self.host()
         if host != LOCAL and select is None:
             # That host's running starts and sessions (`sandbox-ai list --json` there, in the background).
-            self.remote_token += 1
-            token = self.remote_token
+            self.listing_token += 1
+            token = self.listing_token
             self.status.setText(tr("Asking {host}…", host=self.hosts.label(host)))
             widgets.background(lambda: self.sai.host_instances(host), owner=self, timeout=90,
                                done=lambda result, error: self.remote_listed(host, token, result, error))
@@ -416,7 +427,7 @@ class ActivityPage(QWidget):
         self.fill_sources(select)
 
     def remote_listed(self, host, token, result, error):
-        if token != self.remote_token or host != self.host():
+        if token != self.listing_token or host != self.host():
             return
         found = []
         for instance in result if error is None else []:
@@ -457,7 +468,8 @@ class ActivityPage(QWidget):
             elif ok and path:
                 self.status.setText(tr("Not an absolute path: {path}", path=printable(path)))
             return
-        path = QFileDialog.getExistingDirectory(self, tr("Log folder"))
+        from .state import choose_folder
+        path = choose_folder(self, tr("Log folder"), "logs")
         if path:
             self.refresh_sources(select=["--log-dir", path])
 
@@ -548,9 +560,9 @@ class ActivityPage(QWidget):
                            done=lambda result, error: self.remote_read(host, token, result, error))
 
     def remote_read(self, host, token, result, error):
-        self.remote_busy = False
         if token != self.remote_token or host != self.host():
-            return
+            return  # a look from before (stop() let another begin): it neither shows nor frees the newer one
+        self.remote_busy = False
         if error is not None:
             self.status.setText(printable(str(error).removeprefix("sandbox-ai activity: "))[:500])
             return
@@ -693,8 +705,9 @@ class ActivityPage(QWidget):
     def export(self, kind):
         records = self.shown_records()
         suffix = "jsonl" if kind == "json" else "txt"
-        path, _ = QFileDialog.getSaveFileName(self, tr("Export the activity"), f"activity.{suffix}",
-                                              tr("JSON lines (*.jsonl)") if kind == "json" else tr("Text (*.txt)"))
+        from .state import choose_save
+        path = choose_save(self, tr("Export the activity"), f"activity.{suffix}",
+                           tr("JSON lines (*.jsonl)") if kind == "json" else tr("Text (*.txt)"), "export")
         if not path:
             return None
         lines = [json.dumps(r, ensure_ascii=False) if kind == "json" else text_line(r) for r in records]

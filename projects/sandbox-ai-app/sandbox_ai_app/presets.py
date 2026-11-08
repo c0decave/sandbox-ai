@@ -73,9 +73,22 @@ class Preset:
     user: bool = False  # the user's own (texts are shown as they are, not translated)
     agents: tuple = ()  # the agents it is for (sandbox-ai's presets); () for any
     prompt: str = ""  # the first task (sandbox-ai's presets): a positional argument, for OpenCode --prompt
+    source: str = "app"  # SOURCES: the app's own, a host's sandbox-ai's (sandbox-ai presets) or the user's own
+    name: str = ""  # sandbox-ai's presets: its id there (sandbox-ai AGENT --preset NAME); else the id
+    value_names: tuple = ()  # sandbox-ai's presets: (marker, its value's name for --preset-value NAME=VALUE)
+    host: str = "local"  # sandbox-ai's presets: the host whose sandbox-ai has it
+
+    def __post_init__(self):
+        if not self.name:
+            object.__setattr__(self, "name", self.id)
 
     def text(self, value):
         return value if self.user else tr(value)
+
+    @property
+    def key(self):
+        """"SOURCE:ID": what tells the presets of one catalogue apart (the same id may be in two sources)."""
+        return f"{self.source}:{self.id}"
 
 
 def _search(vpn=None):
@@ -291,12 +304,126 @@ PRESETS = (
 BUILTIN = {preset.id: preset for preset in PRESETS}
 
 
-def find(name, mine=None):
-    """The preset NAME (built-in, or one of MINE)."""
+SOURCES = ("sandbox-ai", "app", "mine")  # a catalogue's sources: (source, id) is a preset's key
+
+
+def split_key(key):
+    """(source or None, id) of KEY: a (source, id) pair, "SOURCE:ID" or a bare id (source None: any)."""
+    if isinstance(key, tuple) and len(key) == 2:
+        return key
+    source, colon, ident = str(key or "").partition(":")
+    return (source, ident) if colon and source in SOURCES else (None, str(key or ""))
+
+
+def find(name, mine=None, catalogue=None):
+    """The preset NAME (a key of a catalogue, "SOURCE:ID", or an id) of CATALOGUE, else of the app's own and MINE."""
+    if catalogue is not None:
+        return catalogue.find(name)
+    source, ident = split_key(name)
     for preset in list(PRESETS) + list(mine or []):
-        if preset.id == name:
+        if preset.id == ident and source in (None, preset.source):
             return preset
     raise ValueError(f"unknown preset {name!r}")
+
+
+@dataclass
+class Catalogue:
+    """The presets one host offers, as one list: that host's sandbox-ai presets (`sandbox-ai presets list --json`
+    there), the app's own and the user's own, each told apart by its key (source, id). Where the host's sandbox-ai has
+    a preset of the same id as one of the app's own (tor, local-api, development ...), sandbox-ai's is kept and the
+    app's left out (REPLACED): it is what `sandbox-ai AGENT --preset ID` and the web interface start on that host,
+    and the app's stays the one offered for a host whose sandbox-ai lacks it."""
+    host: str = "local"
+    presets: list = field(default_factory=list)
+    problems: list = field(default_factory=list)
+    replaced: tuple = ()  # ids of the app's own presets the host's sandbox-ai has too
+    complete: bool = True  # False: the host's sandbox-ai presets were not read (yet)
+
+    def find(self, key):
+        """The preset of KEY ((source, id), "SOURCE:ID" or an id: the app's, then sandbox-ai's - as ID or sai-ID,
+        the one that replaced the app's of that id -, then the user's own). ValueError: none."""
+        source, ident = split_key(key)
+        for wanted in ([source] if source else ["app", "sandbox-ai", "mine"]):
+            for preset in self.presets:
+                if preset.source == wanted and (preset.id == ident or (wanted == "sandbox-ai" and preset.name == ident)):
+                    return preset
+        raise ValueError(f"unknown preset {key!r}")
+
+    def own(self):
+        return [p for p in self.presets if p.source == "sandbox-ai"]
+
+    def mine(self):
+        return [p for p in self.presets if p.source == "mine"]
+
+    def groups(self):
+        """[(category key, title, [Preset])] by category, sandbox-ai's then the user's own last (MINE)."""
+        found = []
+        for key, title in CATEGORIES:
+            if key == SAI_CATEGORY:
+                title = title if self.host == "local" else tr("sandbox-ai's presets on {host}", host=self.host)
+                found.append((key, title, self.own()))
+            else:
+                found.append((key, title, [p for p in self.presets if p.source == "app" and p.category == key]))
+        return found + [("mine", MINE, self.mine())]
+
+
+def catalogue(sai, host="local", documents=None, problems=(), mine=None):
+    """The Catalogue of HOST: DOCUMENTS (sandbox-ai's presets as `presets list --json` there says them; None: this
+    machine's from sandbox-ai's module, another host's as remembered() last, else none yet: complete False), the
+    app's own and MINE (None: the user's own, loaded)."""
+    problems, complete = list(problems), True
+    if documents is None:
+        if host == "local":
+            documents, problems = local_documents(sai)
+        else:
+            documents, kept_problems = remembered(host) or (None, [])
+            complete = documents is not None
+            documents, problems = documents or [], problems + list(kept_problems)
+    own = []
+    for document in documents:
+        try:
+            own.append(from_sandbox_ai(sai, document, host=host))
+        except ValueError as exc:
+            problems.append(f"{document.get('id') if isinstance(document, dict) else '?'}: {exc}")
+    if mine is None:
+        mine, mine_problems = load_mine(sai)
+        problems = mine_problems + problems
+    names = {preset.name for preset in own}
+    replaced = tuple(p.id for p in PRESETS if p.id in names)
+    app = [p for p in PRESETS if p.id not in names]
+    return Catalogue(host, own + app + list(mine), problems, replaced, complete)
+
+
+HOST_DOCUMENTS = {}  # {host: (documents, problems)}: what `presets list --json` there said last
+
+
+def remember(host, documents, problems=()):
+    HOST_DOCUMENTS[host] = (list(documents), list(problems))
+
+
+def remembered(host):
+    return HOST_DOCUMENTS.get(host)
+
+
+def local_documents(sai):
+    """([document], [problem]) of this machine's sandbox-ai presets, from its module (with each file's path, so that
+    a preset's ruleset beside it is read); none from a sandbox-ai without presets."""
+    try:
+        module = sai.module("presets")
+    except Exception:  # noqa: BLE001 - an older sandbox-ai: no presets of its own
+        return [], []
+    problems = []
+    return [{**document} for document in module.catalog(problems).values()], problems
+
+
+def host_documents(sai, host):
+    """([document], [problem]) of the sandbox-ai presets of HOST (this machine: local_documents; another host:
+    `sandbox-ai presets list --json` there, kept for the next look: remember). ValueError: not answered."""
+    if host == "local":
+        return local_documents(sai)
+    documents = sai.host_presets(host)
+    remember(host, documents)
+    return documents, []
 
 
 def role_keys(board):
@@ -478,7 +605,8 @@ def from_document(sai, document):
         for k, v in positions.items()), N_("Positions are KIND#N: [x, y]."))
     return Preset(ident, title.strip(), description.strip(), category, difficulty, tuple(lists["options"]), agent,
                   tuple(lists["mcp"]), tuple(sorted(servers.items())), rules, tuple(marks), tuple(lists["notes"]),
-                  tuple(lists["agent_args"]), {k: list(v) for k, v in positions.items()}, user=True)
+                  tuple(lists["agent_args"]), {k: list(v) for k, v in positions.items()}, user=True, source="mine",
+                  name=ident)
 
 
 def from_board(sai, board, title, description="", category="simple", ident=None):
@@ -525,10 +653,13 @@ def floor_mode(options):
     return out
 
 
-def from_sandbox_ai(sai, document):
-    """sandbox-ai's own preset DOCUMENT (sandbox-ai presets list --json) as a Preset of the gallery: its {values}
-    become the board's placeholders, its MCP servers registered ones by name, its ruleset file the approvals
-    node's rules, its first task the agent's arguments. Checked as an imported preset is (from_document)."""
+def from_sandbox_ai(sai, document, host="local"):
+    """sandbox-ai's own preset DOCUMENT (sandbox-ai presets list --json on HOST) as a Preset of the gallery: its
+    {values} become the board's placeholders, its MCP servers registered ones by name, its ruleset file the approvals
+    node's rules (read beside the preset file on this machine; another host's stays there and is said in a note), its
+    first task the agent's arguments. Checked as an imported preset is (from_document)."""
+    if not isinstance(document, dict):
+        raise ValueError(tr("Not a preset of sandbox-ai."))
     values = document.get("values") if isinstance(document.get("values"), dict) else {}
     markers = {}
     for name, spec in values.items():
@@ -538,12 +669,18 @@ def from_sandbox_ai(sai, document):
     agents = [a for a in document.get("agents") or [] if isinstance(a, str)]
     agent = agents[0] if len(agents) == 1 else None
     prompt = document.get("prompt") if isinstance(document.get("prompt"), str) else ""
-    rules = None
+    rules, rules_note = None, []
     if isinstance(document.get("rules"), str) and isinstance(document.get("_path"), str):
         try:
             rules = json.loads((Path(document["_path"]).parent / document["rules"]).read_text())
         except (OSError, ValueError):
             rules = None
+    elif isinstance(document.get("rules"), str):
+        rules_note = [tr("Its ruleset {file} is a file on {host}: it is not on this board; a start with --preset "
+                         "{name} there brings it.", file=document["rules"][:200], host=host,
+                         name=str(document.get("id", ""))[:60])]
+    origin = document.get("_origin") or document.get("origin")
+    folder = document.get("_dir") or document.get("directory")
     converted = {
         "format": FORMAT, "version": 1, "id": "sai-" + str(document.get("id", ""))[:60],
         "title": str(document.get("title", ""))[:80], "description": str(document.get("description", ""))[:400],
@@ -558,28 +695,21 @@ def from_sandbox_ai(sai, document):
                                             if (spec or {}).get("default") not in (None, "") else {})}
                          for name, spec in values.items()],
         "notes": [str(note)[:1000] for note in (document.get("notes") or []) + (document.get("needs") or [])]
-                 + ([tr("From the preset directory {path}", path=str(document["_dir"])[:900])]
-                    if document.get("_origin") == "extra" and isinstance(document.get("_dir"), str) else [])}
+                 + ([tr("From the preset directory {path}", path=str(folder)[:900])]
+                    if origin == "extra" and isinstance(folder, str) else []) + rules_note}
     checked = from_document(sai, converted)  # the task is checked with the arguments, then kept apart
     import dataclasses
     return dataclasses.replace(checked, agent_args=(), prompt=checked.agent_args[0] if checked.agent_args else "",
-                               agents=tuple(a for a in agents if a in tuple(getattr(sai, "agents", B.AGENTS))))
+                               agents=tuple(a for a in agents if a in tuple(getattr(sai, "agents", B.AGENTS))),
+                               source="sandbox-ai", name=str(document.get("id", ""))[:60], host=host,
+                               value_names=tuple((markers[name], name) for name in values))
 
 
-def sandbox_ai_presets(sai):
-    """([Preset] of sandbox-ai's own presets (built-in, from the extra preset directories and the user's),
-    [problem]); none from a sandbox-ai without presets."""
-    try:
-        module = sai.module("presets")
-    except Exception:  # noqa: BLE001 - an older sandbox-ai: no presets of its own
-        return [], []
-    found, problems = [], []
-    for document in module.catalog(problems).values():
-        try:
-            found.append(from_sandbox_ai(sai, {**document, "_path": document.get("_path")}))
-        except ValueError as exc:
-            problems.append(f"{document.get('id')}: {exc}")
-    return found, problems
+def sandbox_ai_presets(sai, host="local", documents=None):
+    """([Preset] of the sandbox-ai presets of HOST (built-in, from the extra preset directories and the user's there),
+    [problem]); none from a sandbox-ai without presets. DOCUMENTS: as `presets list --json` there said them."""
+    found = catalogue(sai, host, documents, mine=[])
+    return found.own(), found.problems
 
 
 def load_mine(sai):

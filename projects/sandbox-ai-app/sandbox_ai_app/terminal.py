@@ -25,7 +25,7 @@ from .backend import setting as backend_setting
 from .files import printable
 from .i18n import N_, tr
 from .pty_bridge import PtyBridge
-from .widgets import background, confirm, fill, plain_label, row_key, table, warn
+from .widgets import ask_first, background, fill, plain_label, row_key, table, warn
 
 WEB = Path(__file__).resolve().with_name("web")
 # The vendoring script next to the package (a checkout or sandbox-ai's installation; not in a wheel).
@@ -572,9 +572,8 @@ class TerminalsPage(QWidget):
         if view is None:
             return
         # Ending a command that runs loses what it did not save: asked, with Cancel as the default.
-        if ask and view.running and not confirm(self, tr("Close terminal"), tr("The command in this tab still runs. "
-                                                                              "End it?"), tr("End it"),
-                                                destructive=True):
+        if ask and view.running and not ask_first(self, "terminal-end", tr("Close terminal"),
+                                                  tr("The command in this tab still runs. End it?"), tr("End it")):
             return
         view.close_terminal()
         self.tabs.removeTab(index)

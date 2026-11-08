@@ -148,7 +148,7 @@ def test_extra_preset_directories_are_managed_through_sandbox_ai(qapp, env, monk
     assert wait(lambda: box.list.count() == 2, 10)
     assert box.list.item(0).text() == "/srv/presets  (3 presets)" and "skipped: it lies in /work" in box.list.item(1).text()
     assert "/home/u/.config/sandbox-ai/presets" in box.status.text() and not box.remove_button.isEnabled()
-    monkeypatch.setattr(QtWidgets.QFileDialog, "getExistingDirectory", lambda *a, **k: "/srv/more")
+    monkeypatch.setattr("sandbox_ai_app.state.run_dialog", lambda dialog: ["/srv/more"])
     box.add()
     assert wait(lambda: calls == [("add", "/srv/more")], 10)
     assert wait(lambda: box.add_button.isEnabled(), 10)
@@ -157,7 +157,7 @@ def test_extra_preset_directories_are_managed_through_sandbox_ai(qapp, env, monk
     box.remove()
     assert wait(lambda: calls[-1] == ("remove", "/srv/presets"), 10)
     assert wait(lambda: box.add_button.isEnabled(), 10)
-    monkeypatch.setattr(QtWidgets.QFileDialog, "getExistingDirectory", lambda *a, **k: "/tmp/x")
+    monkeypatch.setattr("sandbox_ai_app.state.run_dialog", lambda dialog: ["/tmp/x"])
     box.add()
     assert wait(lambda: widgets.SHOWN and "cannot hold presets" in widgets.SHOWN[-1][1], 10)
     # A sandbox-ai without the command: said, nothing to press.

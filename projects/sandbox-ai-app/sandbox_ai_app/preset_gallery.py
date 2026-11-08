@@ -12,7 +12,7 @@ import os
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGraphicsScene, QHBoxLayout, QLabel,
+    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QGraphicsScene, QHBoxLayout, QLabel,
     QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QVBoxLayout, QWidget,
 )
 
@@ -24,7 +24,7 @@ from .board_view import NODE_H, NODE_W, PathEdit, elide
 from .files import printable
 from .i18n import tr
 from .state import choose_file
-from .widgets import MONO, FlowLayout, background, confirm, inform, plain_label, safe_tooltip, warn
+from .widgets import MONO, FlowLayout, ask_first, background, inform, plain_label, safe_tooltip, warn
 
 THUMB = QSize(248, 124)
 
@@ -34,6 +34,40 @@ def needs_demo_device(preset):
     hardware-analysis does."""
     words = [*(preset.text(note) for note in preset.notes), *(str(p.hint) for p in preset.placeholders)]
     return any("demo-device start" in str(word) for word in words)
+
+
+def fill_preset_combo(combo, catalogue, current=None):
+    """COMBO with the presets of CATALOGUE by category (the headings cannot be chosen), sandbox-ai's of its host and
+    yours among them, each with its key (source:id) as data; CURRENT (a key or id) chosen again if it is there.
+    True if it was."""
+    combo.blockSignals(True)
+    try:
+        combo.clear()
+        for _key, title, presets in catalogue.groups():
+            if not presets:
+                continue
+            combo.addItem(tr(title))
+            combo.model().item(combo.count() - 1).setEnabled(False)
+            for preset in presets:
+                combo.addItem("   " + preset.text(preset.title), preset.key)
+                combo.setItemData(combo.count() - 1, safe_tooltip(preset.text(preset.description)),
+                                  Qt.ItemDataRole.ToolTipRole)
+        found = select_preset(combo, catalogue, current) if current else False
+    finally:
+        combo.blockSignals(False)
+    return found
+
+
+def select_preset(combo, catalogue, wanted):
+    """Choose WANTED (a key or an id of CATALOGUE) in COMBO; False if it is not there."""
+    try:
+        key = catalogue.find(wanted).key
+    except ValueError:
+        return False
+    index = combo.findData(key)
+    if index >= 0:
+        combo.setCurrentIndex(index)
+    return index >= 0
 
 
 def thumbnail(board, size=THUMB, ratio=1.0):
@@ -154,7 +188,11 @@ class PresetGallery(QDialog):
                  host="local"):
         super().__init__(parent)
         self.sai, self.directory, self.agent, self.policy = sai, directory, agent, policy or {}
-        self.host = host or "local"  # where the board starts (the Board's host): the demo device starts there
+        # Where the board starts (the Board's host): its presets, servers and profiles are offered, and the demo
+        # device starts there.
+        self.host = host or "local"
+        self.documents, self.host_problems = None, []  # that host's sandbox-ai presets once read (None: not yet)
+        self.catalogue, self.reading = None, None if self.host == "local" else self.host
         self.current_board, self.backend_name = board, backend_name
         self.result_ = None  # (preset, values) once created
         self.setWindowTitle(tr("New from preset"))
@@ -236,19 +274,43 @@ class PresetGallery(QDialog):
         layout.addLayout(row)
         self.cards, self.sections, self.selected = [], [], None
         self.populate()
+        if self.host != "local":
+            self.read_host_presets()
 
     # -- the cards --
 
+    def read_host_presets(self):
+        """The sandbox-ai presets of the board's host (`sandbox-ai presets list --json` there), read in the background;
+        meanwhile the ones it said last (or none: the app's own and yours) are shown."""
+        host = self.host
+        self.reading = host
+        background(PR.host_documents, self.sai, host, owner=self, timeout=90,
+                   done=lambda result, error: self.host_presets_read(host, result, error))
+
+    def host_presets_read(self, host, result, error):
+        if host != self.host:
+            return
+        self.reading = None
+        if error is not None:
+            self.host_problems = [tr("The presets of {host} could not be read: {error}", host=printable(host),
+                                     error=printable(error)[-300:])]
+            self.documents = PR.remembered(host)[0] if PR.remembered(host) else []
+        else:
+            self.documents, self.host_problems = list(result[0]), list(result[1])
+        self.populate(select=self.selected.preset.key if self.selected is not None else None)
+
     def presets(self):
-        mine, problems = PR.load_mine(self.sai)
-        own, own_problems = PR.sandbox_ai_presets(self.sai)
-        problems = problems + own_problems
-        self.mine = mine
+        """The catalogue of the board's host: its sandbox-ai presets, the app's own and yours, by category."""
+        self.catalogue = PR.catalogue(self.sai, self.host, self.documents, self.host_problems)
+        self.mine = self.catalogue.mine()
+        problems, notes = list(self.catalogue.problems), []
         if problems:
-            self.problem.setText(tr("Some of your presets were left out: {problems}", problems="; ".join(problems)))
-        self.problem.setVisible(bool(problems))
-        return [(key, title, own if key == PR.SAI_CATEGORY else [p for p in PR.PRESETS if p.category == key])
-                for key, title in PR.CATEGORIES] + [("mine", PR.MINE, mine)]
+            notes.append(tr("Some of your presets were left out: {problems}", problems="; ".join(problems)))
+        if self.reading == self.host and self.documents is None:
+            notes.append(tr("Reading the presets of {host}…", host=printable(self.host)))
+        self.problem.setText(" ".join(notes))
+        self.problem.setVisible(bool(notes))
+        return self.catalogue.groups()
 
     def populate(self, select=None):
         holder = QWidget()
@@ -278,7 +340,8 @@ class PresetGallery(QDialog):
             self.cards += cards
         column.addStretch()
         self.scroll.setWidget(holder)
-        wanted = next((c for c in self.cards if c.preset.id == select), None) or (self.cards[0] if self.cards else None)
+        wanted = next((c for c in self.cards if select in (c.preset.key, c.preset.id)), None) or \
+            (self.cards[0] if self.cards else None)
         if wanted is not None:
             self.choose(wanted)
         self.filter(self.search.text())
@@ -311,7 +374,7 @@ class PresetGallery(QDialog):
         self.selected = card_
         self.create_button.setEnabled(card_ is not None)
         self.export_button.setEnabled(card_ is not None)
-        self.delete_button.setEnabled(card_ is not None and card_.preset.user)
+        self.delete_button.setEnabled(card_ is not None and card_.preset.source == "mine")
         if card_ is None:
             self.title.setText(tr("No preset matches"))
             for widget in (self.description, self.meta, self.notes, self.fill_in):
@@ -384,7 +447,7 @@ class PresetGallery(QDialog):
             return False
         preset, values = self.selected.preset, {}
         if preset.placeholders and not fill_later:
-            form = PlaceholderForm(self.sai, preset, self, agent=self.agent)
+            form = PlaceholderForm(self.sai, preset, self, agent=self.agent, host=self.host)
             if widgets.AUTO_ANSWER is None and form.exec() != QDialog.DialogCode.Accepted:
                 return False
             values = form.values()
@@ -408,7 +471,7 @@ class PresetGallery(QDialog):
         except (OSError, ValueError) as exc:
             warn(self, tr("Not saved"), printable(exc))
             return None
-        self.populate(select=preset.id)
+        self.populate(select=preset.key)
         return preset
 
     def import_preset(self, path=None):
@@ -421,7 +484,7 @@ class PresetGallery(QDialog):
         except (OSError, ValueError) as exc:
             warn(self, tr("Not imported"), printable(exc))
             return None
-        self.populate(select=preset.id)
+        self.populate(select=preset.key)
         return preset
 
     def export_preset(self, path=None):
@@ -429,8 +492,8 @@ class PresetGallery(QDialog):
             return None
         preset = self.selected.preset
         if path is None:
-            path = QFileDialog.getSaveFileName(self, tr("Export the preset"), f"{preset.id}.json",
-                                               tr("Presets (*.json)"))[0]
+            from .state import choose_save
+            path = choose_save(self, tr("Export the preset"), f"{preset.id}.json", tr("Presets (*.json)"), "preset")
         if not path:
             return None
         try:
@@ -442,11 +505,11 @@ class PresetGallery(QDialog):
         return path
 
     def delete_preset(self):
-        if self.selected is None or not self.selected.preset.user:
+        if self.selected is None or self.selected.preset.source != "mine":
             return False
         preset = self.selected.preset
-        if not confirm(self, tr("Delete"), tr("Delete your preset {name}?", name=printable(preset.title)),
-                       tr("Delete"), destructive=True):
+        if not ask_first(self, "preset-delete", tr("Delete"), tr("Delete your preset {name}?",
+                                                                 name=printable(preset.title)), tr("Delete")):
             return False
         try:
             PR.remove_mine(self.sai, preset.id)
@@ -459,18 +522,21 @@ class PresetGallery(QDialog):
 
 
 class PlaceholderForm(QDialog):
-    """What a preset leaves to the user, one row each, with what sandbox-ai knows offered: VPN profiles
-    (sandbox-ai vpn list --json), LLM servers (sandbox-ai llm list --json), MCP servers (the MCP servers
-    page's definitions). Empty rows stay placeholders on the board ("Fill in later" leaves them all). An LLM server
-    is offered as NAME and as NAME:MODEL for the models it listed; "Add a server…" registers and checks one (for
-    AGENT: the preset's own, else the one given) without leaving the preset, as "New VPN profile…" does."""
+    """What a preset leaves to the user, one row each, with what sandbox-ai on HOST knows offered: VPN profiles
+    (sandbox-ai vpn list --json there), LLM servers (sandbox-ai llm list --json there), MCP servers (this machine: the
+    MCP servers page's definitions; another host: sandbox-ai mcp list --json there). Empty rows stay placeholders on
+    the board ("Fill in later" leaves them all). An LLM server is offered as NAME and as NAME:MODEL for the models it
+    listed; "Add a server…" registers and checks one on this machine (for AGENT: the preset's own, else the one given)
+    without leaving the preset, as "New VPN profile…" does (on HOST)."""
 
-    def __init__(self, sai, preset, parent=None, agent=None):
+    def __init__(self, sai, preset, parent=None, agent=None, host="local"):
         super().__init__(parent)
         self.sai, self.preset, self.fields, self.later = sai, preset, {}, False
+        self.host = host or "local"
         self.agent = preset.agent or agent
         self.endpoints = {}
-        self.setWindowTitle(tr("Fill in: {name}", name=preset.text(preset.title)))
+        self.setWindowTitle(tr("Fill in: {name}", name=preset.text(preset.title)) if self.host == "local" else
+                            tr("Fill in: {name} (on {host})", name=preset.text(preset.title), host=printable(self.host)))
         self.resize(620, 120 + 70 * len(preset.placeholders))
         layout = QVBoxLayout(self)
         layout.addWidget(plain_label(tr("What only you know. Left empty, a value stays a placeholder on the board "
@@ -492,8 +558,9 @@ class PlaceholderForm(QDialog):
                 new = QPushButton(tr("New VPN profile…"))
                 new.clicked.connect(lambda _=False, marker=placeholder.marker: self.new_vpn(marker))
                 column.addWidget(new)
-            if placeholder.kind == "llm":
-                # No server yet, or another one: registered and checked here (sandbox-ai llm add, llm check).
+            if placeholder.kind == "llm" and self.host == "local":
+                # No server yet, or another one: registered and checked here (sandbox-ai llm add, llm check); one of
+                # another host is added on the Model servers page with that host chosen.
                 new = QPushButton(tr("Add a server…"))
                 new.setToolTip(tr("Register a model server of your own (sandbox-ai llm add), then check it for "
                                   "the agent (sandbox-ai llm check)"))
@@ -514,18 +581,22 @@ class PlaceholderForm(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        host = self.host
         if "vpn" in kinds:
-            background(sai.vpn_profiles, owner=self, timeout=90,
+            background(lambda: sai.host_vpn_profiles(host), owner=self, timeout=90,
                        done=lambda result, error: self.offer("vpn", result if error is None else []))
         if "llm" in kinds:
-            background(sai.llm_endpoints, owner=self, timeout=90,
+            background(lambda: sai.host_llm_endpoints(host), owner=self, timeout=90,
                        done=lambda result, error: self.offer("llm", result if error is None else []))
-        if "mcp" in kinds:
+        if "mcp" in kinds and host == "local":
             try:
                 names = sorted(sai.mcp_definitions())
             except Exception:  # noqa: BLE001 - an mcp.json that does not load: typed in by hand
                 names = []
             self.offer("mcp", [{"name": n} for n in names])
+        elif "mcp" in kinds:
+            background(lambda: [{"name": row[0]} for row in sai.host_mcp_servers(host)], owner=self, timeout=90,
+                       done=lambda result, error: self.offer("mcp", result if error is None else []))
 
     def field(self, placeholder):
         default = getattr(placeholder, "default", "")  # sandbox-ai's presets: the value's default (a port, a name)
@@ -554,7 +625,7 @@ class PlaceholderForm(QDialog):
                 choices = WL.placeholder_choices(entry)
                 if not choices:
                     continue
-                self.endpoints[choices[0]] = entry
+                self.endpoints[entry["name"]] = entry  # by its name (NAME alone may not be offered)
                 detail = WL.endpoint_detail(entry)
                 agents = entry.get("agents")
                 if isinstance(agents, list):
@@ -576,24 +647,29 @@ class PlaceholderForm(QDialog):
                 combo.addItem(name)
                 combo.setItemData(combo.count() - 1, safe_tooltip(printable(detail)), Qt.ItemDataRole.ToolTipRole)
             if kind == "mcp" and not combo.currentText() and placeholder.marker == "<mcp:browser>":
-                browser = next((e["name"] for e in entries if e["name"].lower() in PR.BROWSER_SERVERS), "")
+                browser = next((e["name"] for e in entries if str(e.get("name", "")).lower() in PR.BROWSER_SERVERS),
+                               "")
                 combo.setCurrentText(browser)
             usable = [i for i in range(1, combo.count()) if combo.model().item(i) is None
                       or combo.model().item(i).isEnabled()]
             distinct = len([e for e in self.endpoints.values() if not self.agent or WL.usable_by(e, self.agent)]) \
                 if kind == "llm" else len(usable)
+            if kind == "llm":  # the only server: by its name when that alone starts, else its only NAME:MODEL
+                usable = [i for i in usable if ":" not in combo.itemText(i)] or (usable if len(usable) == 1 else [])
             if not combo.currentText() and distinct == 1 and usable and not placeholder.optional:
                 combo.setCurrentIndex(usable[0])  # the only one there is (a server: by its name)
 
     def new_vpn(self, marker):
         from .vpn_page import add_profile
 
+        host = self.host
+
         def added(name):
             if name:
-                background(self.sai.vpn_profiles, owner=self, timeout=90,
+                background(lambda: self.sai.host_vpn_profiles(host), owner=self, timeout=90,
                            done=lambda result, error: (self.offer("vpn", result if error is None else []),
                                                        self.fields[marker].setCurrentText(name)))
-        add_profile(self, self.sai, added)
+        add_profile(self, self.sai, added, host=host, host_label="" if host == "local" else printable(host))
 
     def new_llm(self, marker):
         """A model server of your own, added and checked for the agent (wizard.add_server), then chosen here."""

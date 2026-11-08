@@ -12,14 +12,15 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox, QCompleter, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QLineEdit,
-    QMessageBox, QPushButton, QTabWidget, QVBoxLayout, QWidget,
+    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QLineEdit,
+    QMessageBox, QPushButton, QRadioButton, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from . import theme
+from . import theme, widgets
 from .backend import SandboxAI
 from .files import printable
 from .i18n import N_, tr
+from .host_choice import on_host
 from .widgets import ask_first, background, fill, outcome, plain_label, selected, show_text, table
 
 LOCAL = "local"  # the host of this machine's own secrets (sandbox-ai hosts' name for it)
@@ -37,6 +38,7 @@ class LoginsBox(QGroupBox):
     def __init__(self, sai, changed):
         super().__init__(tr(self.title))
         self.sai, self.changed, self.entries, self.secret_names, self.host = sai, changed, [], [], LOCAL
+        self.secrets_known = False  # whether secret_names are what the host said (else a replace is asked about)
         layout = QVBoxLayout(self)
         layout.addWidget(plain_label(self.about(), role="secondary"))
         self.list = table([tr(h) for h in self.headers])
@@ -60,8 +62,8 @@ class LoginsBox(QGroupBox):
     def buttons(self):
         return [self.add_button, self.remove_button, self.check_button, *self.more_buttons()]
 
-    def show_entries(self, entries, secret_names):
-        self.entries, self.secret_names = entries, secret_names
+    def show_entries(self, entries, secret_names, known=True):
+        self.entries, self.secret_names, self.secrets_known = entries, secret_names, bool(known)
         fill(self.list, [self.row(e) for e in entries], ["ok" if e.get("secret") in secret_names else "warn"
                                                          for e in entries])
 
@@ -95,6 +97,27 @@ class LoginsBox(QGroupBox):
     def check(self):
         self.run("check", what="check")
 
+    def add_with_token(self, add_args, values, what="add"):
+        """ADD_ARGS (after the command; they name --secret) on the host chosen; a token typed in the dialog is kept
+        first as that secret (`secrets set NAME`, the value on standard input), asked first when a secret of that name
+        is there or may be (the host's names not read)."""
+        secret, value = values["secret"], values.get("value")
+        if not value:  # a secret kept already: the add alone
+            self.run(*add_args, what=what)
+            return True
+        if value:
+            exists = (secret in self.secret_names) if self.secrets_known else None
+            if not ask_first(self, "secret-replace", tr(self.title), on_host(self.host, tr(
+                    "A secret {name} is kept already (or may be): the token typed replaces its value, for everything "
+                    "that names it. Replace it?", name=printable(secret))), tr("Replace"), detail={"exists": exists}):
+                self.message.setText(tr("Not added: the secret {name} stays as it is.", name=printable(secret)))
+                return False
+        self.message.setText(tr("Working…"))
+        host, command = self.host, self.command
+        background(lambda: self.sai.add_login(host, command, add_args, secret, value), owner=self, timeout=150,
+                   source=self.buttons(), done=lambda result, error: self.ran(what, result, error))
+        return True
+
 
 class GitLoginsBox(LoginsBox):
     command = "git-logins"
@@ -111,25 +134,26 @@ class GitLoginsBox(LoginsBox):
     def add(self):
         dialog = LoginDialog(self, tr("New Git login"), self.secret_names,
                              ((tr("Git server"), "url", "https://git.example.org"),
-                              (tr("User"), "user", "x-access-token")))
+                              (tr("User"), "user", "x-access-token")), host=self.host)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
         values = dialog.values()
+        dialog.forget_value()
         # Every sandbox's proxy logs in there from now on: asked first (git-login-add).
-        if not ask_first(self, "git-login-add", tr("New Git login"), "\n\n".join([printable(values["url"]),
-                                                                                  self.about()]), tr("Add")):
+        if not ask_first(self, "git-login-add", tr("New Git login"), on_host(self.host, "\n\n".join(
+                [printable(values["url"]), self.about()])), tr("Add")):
             return None
-        args = ["add", values["url"], "--secret", values["secret"]] + (["--user", values["user"]]
-                                                                      if values["user"] else [])
-        self.run(*args, what="add")
-        return values
+        args = ["add", "--secret", values["secret"], *(["--user", values["user"]] if values["user"] else []),
+                "--", values["url"]]  # the URL after "--": never read as an option
+        self.add_with_token(args, values)
+        return {k: v for k, v in values.items() if k != "value"}
 
     def remove(self):
         url = selected(self.list)
-        if not url or not ask_first(self, "login-remove", tr("Remove"),
-                                    tr("Remove the Git login for {name}? Its secret stays.", name=url), tr("Remove")):
+        if not url or not ask_first(self, "login-remove", tr("Remove"), on_host(self.host, tr(
+                "Remove the Git login for {name}? Its secret stays.", name=printable(url))), tr("Remove")):
             return
-        self.run("remove", url, what="remove")
+        self.run("remove", "--", url, what="remove")
 
 
 class PublishLoginsBox(LoginsBox):
@@ -155,30 +179,32 @@ class PublishLoginsBox(LoginsBox):
     def add(self):
         dialog = LoginDialog(self, tr("New publish login"), self.secret_names,
                              ((tr("Own server (optional)"), "url", "https://gitlab.example.org"),),
-                             kinds=tuple(SandboxAI.PUBLISH_HOSTS))
+                             kinds=tuple(SandboxAI.PUBLISH_HOSTS), host=self.host)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
         values = dialog.values()
-        self.run("add", values["kind"], "--secret", values["secret"],
-                 *(["--url", values["url"]] if values["url"] else []), what="add")
-        return values
+        dialog.forget_value()
+        self.add_with_token(["add", values["kind"], "--secret", values["secret"],
+                             *(["--url", values["url"]] if values["url"] else [])], values)
+        return {k: v for k, v in values.items() if k != "value"}
 
     def remove(self):
         kind = selected(self.list)
-        if not kind or not ask_first(self, "login-remove", tr("Remove"),
-                                     tr("Remove the publish login for {name}? Its secret stays.", name=kind),
-                                     tr("Remove")):
+        if not kind or not ask_first(self, "login-remove", tr("Remove"), on_host(self.host, tr(
+                "Remove the publish login for {name}? Its secret stays.", name=printable(kind))), tr("Remove")):
             return
         self.run("remove", kind, what="remove")
 
 
 class LoginDialog(QDialog):
-    """A Git or publish login: its fields and the NAME of the secret holding the token (offered as typed)."""
+    """A Git or publish login on HOST: its fields and its token - typed here (kept as the secret named, prefilled:
+    PYPI_TOKEN ... for a publish kind, GIT_TOKEN_<HOST> for a Git server; `secrets set NAME`, the value on standard
+    input) or a secret kept there already (a list of that host's secret names)."""
 
-    def __init__(self, parent, title, secret_names, fields, kinds=None):
+    def __init__(self, parent, title, secret_names, fields, kinds=None, host=LOCAL):
         super().__init__(parent)
-        self.setWindowTitle(title)
-        form = QFormLayout(self)
+        self.setWindowTitle(title if host == LOCAL else tr("{title} (on {host})", title=title, host=printable(host)))
+        form = self.form = QFormLayout(self)
         self.kind = None
         if kinds:
             self.kind = QComboBox()
@@ -190,30 +216,78 @@ class LoginDialog(QDialog):
             edit.setPlaceholderText(placeholder)
             form.addRow(label, edit)
             self.edits[key] = edit
-        self.secret = QLineEdit()
-        self.secret.setPlaceholderText("GIT_TOKEN")
-        self.secret.setCompleter(QCompleter(list(secret_names), self.secret))
-        form.addRow(tr("Secret (its name)"), self.secret)
-        form.addRow(plain_label(tr("Keep the token first on the Secrets tab; only its name is written here."),
-                                role="secondary"))
+        self.typed = QRadioButton(tr("Enter the token"))
+        self.stored = QRadioButton(tr("Use a stored secret"))
+        self.typed.setChecked(True)
+        choice = QHBoxLayout()
+        choice.addWidget(self.typed)
+        choice.addWidget(self.stored)
+        choice.addStretch()
+        form.addRow(tr("Token"), choice)
+        self.value = QLineEdit()
+        self.value.setMaxLength(1 << 16)  # a token, not a name: long ones fit
+        self.value.setPlaceholderText(tr("the token (kept as the secret below, on standard input)"))
+        self.value_row = widgets.secret_value(self.value)
+        form.addRow(tr("The token"), self.value_row)
+        self.secret = QLineEdit()  # the name a typed token is kept as
+        self.secret.setMaxLength(64)
+        self.secret.textEdited.connect(lambda _text: setattr(self, "name_typed", True))
+        self.name_typed = False
+        form.addRow(tr("Kept as the secret"), self.secret)
+        self.secret_choice = QComboBox()  # a secret that host keeps already
+        self.secret_choice.addItems(list(secret_names))
+        form.addRow(tr("Stored secret"), self.secret_choice)
+        form.addRow(plain_label(tr("A secret name (e.g. PYPI_TOKEN) is how sandbox-ai keeps a token: the login only "
+                                   "names it, the token itself stays in sandbox-ai secrets."), role="secondary"))
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.check_and_accept)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
         self.problem = plain_label(role="notice-error")
         form.addRow(self.problem)
+        self.typed.toggled.connect(lambda _on: self.show_choice())
+        if self.kind is not None:
+            self.kind.currentTextChanged.connect(lambda _text: self.offer_name())
+        if "url" in self.edits:
+            self.edits["url"].textChanged.connect(lambda _text: self.offer_name())
+        self.stored.setEnabled(bool(secret_names))
+        self.offer_name()
+        self.show_choice()
+
+    def offer_name(self):
+        """The secret name offered for a typed token, until one is typed by hand."""
+        if self.name_typed:
+            return
+        url = self.edits["url"].text().strip() if "url" in self.edits else ""
+        kind = self.kind.currentText() if self.kind is not None else None
+        self.secret.setText(SandboxAI.token_secret_name(kind=kind, url=None if kind else url))
+
+    def show_choice(self):
+        typed = self.typed.isChecked()
+        for widget, shown in ((self.value_row, typed), (self.secret, typed), (self.secret_choice, not typed)):
+            self.form.setRowVisible(widget, shown)
 
     def values(self):
         found = {key: edit.text().strip() for key, edit in self.edits.items()}
-        found["secret"] = self.secret.text().strip()
+        if self.typed.isChecked():
+            found["secret"], found["value"] = self.secret.text().strip(), self.value.text().strip() or None
+        else:
+            found["secret"], found["value"] = self.secret_choice.currentText(), None
         if self.kind is not None:
             found["kind"] = self.kind.currentText()
         return found
+
+    def forget_value(self):
+        """The typed token is passed on and kept nowhere else (not in a dialog that lives on)."""
+        self.value.clear()
 
     def check_and_accept(self):
         values = self.values()
         if not self.parent().sai.valid_secret(values["secret"]):
             self.problem.setText(tr("A name is letters, digits and _ (up to 64), not starting with a digit."))
+            return
+        if self.typed.isChecked() and not values["value"]:
+            self.problem.setText(tr("Enter the token, or use a stored secret."))
             return
         if "url" in self.edits and self.kind is None and not values["url"]:
             self.problem.setText(tr("Give the server's address."))
@@ -274,9 +348,14 @@ class CredentialsPage(QWidget):
         # secrets
         secrets = QGroupBox(tr("Secrets (API keys and tokens for --secret-env and MCP servers)"))
         secrets_layout = QVBoxLayout(secrets)
-        self.remote_secrets, self.secrets_token = {}, 0  # {host: [(name, where)]} as last read there
+        # {host: [(name, where)]} of the secret names read there; a host missing: not known (not read yet, or the
+        # read failed), and a replace there is asked about (an unknown secret may exist).
+        self.remote_secrets, self.secrets_token = {}, 0
         self.backend_label = plain_label()
         secrets_layout.addWidget(self.backend_label)
+        # Where a secret kept now goes on the chosen host (`sandbox-ai secrets backend` there: keyring or file).
+        self.store_label, self.store_token = plain_label(role="secondary"), 0
+        secrets_layout.addWidget(self.store_label)
         self.secrets = table([tr("Name"), tr("Kept in"), tr("Used by")])
         self.secrets.itemSelectionChanged.connect(lambda: self.name.setText(selected(self.secrets) or self.name.text()))
         secrets_layout.addWidget(self.secrets, 1)
@@ -284,15 +363,18 @@ class CredentialsPage(QWidget):
         self.name = QLineEdit()
         self.name.setPlaceholderText("API_TOKEN")
         self.value = QLineEdit()
-        self.value.setEchoMode(QLineEdit.EchoMode.Password)
-        self.value.setPlaceholderText(tr("the value (never shown, passed on standard input)"))
+        self.value.setPlaceholderText(tr("the value (passed on standard input; a kept one is never read back)"))
         form.addRow(tr("Name"), self.name)
-        form.addRow(tr("Value"), self.value)
+        form.addRow(tr("Value"), widgets.secret_value(self.value))
         secrets_layout.addLayout(form)
         row = QHBoxLayout()
-        keep = QPushButton(tr("Keep secret"))
+        keep = self.add_button = QPushButton(tr("Add"))
+        keep.setToolTip(tr("Keep the value under that name for good (sandbox-ai secrets set, on standard input); a "
+                           "name kept already is replaced only after a yes"))
         keep.clicked.connect(self.set_secret)
-        delete = QPushButton(tr("Delete…"))
+        delete = self.remove_button = QPushButton(tr("Remove…"))
+        delete.setToolTip(tr("Remove the selected secret (asked first): every start, VPN profile and Git login that "
+                             "names it goes without it"))
         delete.clicked.connect(self.delete_secret)
         self.secret_buttons = [keep, delete]
         self.generation = 0
@@ -351,14 +433,39 @@ class CredentialsPage(QWidget):
         """Every tab shows HOST's from now on."""
         for box in (self.git, self.publish):
             box.host = host
-            box.show_entries([], [])
+            box.show_entries([], [], known=False)
         self.state.update(logins=[], secrets=[], store="?", git=[], publish=[])
+        self.remote_secrets.pop(host, None)  # read again before a replace there counts as known
         fill(self.logins, [])
         self.vpn.set_host(host)
         if self.identities is not None:
             self.identities.set_host(host)
         self.refresh()
         self.load_secrets()
+
+    def read_store(self):
+        """`sandbox-ai secrets backend` on the chosen host, in the background (a late answer for another host is
+        dropped)."""
+        self.store_token += 1
+        token, host = self.store_token, self.host()
+        read = getattr(self.sai, "secrets_backend", None)
+        self.store_label.setVisible(read is not None)
+        if read is None:
+            return
+        self.store_label.setText(tr("Secrets backend: asking…"))
+        background(read, host, owner=self, timeout=90,
+                   done=lambda result, error: self.store_read(token, host, result, error))
+
+    def store_read(self, token, host, result, error):
+        if token != self.store_token or host != self.host():
+            return
+        stores = {"keyring": tr("your system keyring (Secret Service)"), "file": tr("private files (mode 0600)")}
+        if error is not None or not isinstance(result, str):
+            text = tr("Secrets backend: not known ({error})", error=printable(error)[:200])
+        else:
+            text = tr("Secrets backend (sandbox-ai secrets backend): {store}",
+                      store=stores.get(result, printable(result)[:40]))
+        self.store_label.setText(text if host == LOCAL else tr("On {host}: {text}", host=printable(host), text=text))
 
     def refresh(self):
         """Read the logins, the secrets' names and the Git and publish logins in a thread (asking the keyring may
@@ -376,13 +483,14 @@ class CredentialsPage(QWidget):
                     found.append([])
                     problems.append(printable(exc)[:300])
             try:
-                store, names = self.sai.host_secrets(host)
+                listed = self.sai.host_secrets(host)
             except Exception as exc:  # noqa: BLE001
-                store, names = "?", []
+                listed = None  # not known: a replace there is asked about
                 problems.append(printable(exc)[:300])
             rows, git, publish = found
-            return rows, (store, names), "; ".join(problems) or None, git, publish, None
+            return rows, listed, "; ".join(problems) or None, git, publish, None
         if host != LOCAL:
+            self.read_store()
             self.summary.setText(tr("Asking {host}…", host=self.hosts.label(host)))
             background(read_remote, owner=self, timeout=300,
                        done=lambda result, error: self.refreshed(token, result, error, host))
@@ -402,8 +510,9 @@ class CredentialsPage(QWidget):
             try:
                 return rows, self.sai.secrets(), None, git, publish, hosts
             except Exception as exc:  # noqa: BLE001 - shown on the page
-                return rows, ("?", []), exc, git, publish, hosts
+                return rows, None, exc, git, publish, hosts  # not known: a replace is asked about
         # The keyring is asked with timeouts of its own (secret-tool: 10 s and 30 s); this one is the last word.
+        self.read_store()
         background(read, owner=self, timeout=90,
                    done=lambda result, error: self.refreshed(token, result, error, LOCAL))
 
@@ -411,11 +520,15 @@ class CredentialsPage(QWidget):
         if token != self.generation or host != self.host():
             return
         if error is not None:
+            self.remote_secrets.pop(host, None)
             self.message.setText(printable(error))
             return
-        rows, (store, names), problem, git, publish, hosts = result
+        rows, listed, problem, git, publish, hosts = result
+        store, names = listed if listed is not None else ("?", [])
         self.state.update(logins=rows, secrets=names, store=store, git=git, publish=publish)
-        if host != LOCAL:
+        if listed is None:
+            self.remote_secrets.pop(host, None)
+        else:
             self.remote_secrets[host] = list(names)
         if hosts is not None:
             self.fill_secret_hosts(hosts)
@@ -428,8 +541,8 @@ class CredentialsPage(QWidget):
             self.message.setText(printable(problem))
         self.show_secrets(host, store, names)
         secret_names = [name for name, _ in names]
-        self.git.show_entries(git, secret_names)
-        self.publish.show_entries(publish, secret_names)
+        self.git.show_entries(git, secret_names, known=listed is not None)
+        self.publish.show_entries(publish, secret_names, known=listed is not None)
         self.show_overview()
 
     def fill_secret_hosts(self, hosts):
@@ -471,6 +584,7 @@ class CredentialsPage(QWidget):
         if token != self.secrets_token or host != self.secret_host_of():
             return
         if error is not None:
+            self.remote_secrets.pop(host, None)
             self.backend_label.setText(tr("{host}: no answer", host=printable(host)) + f" ({printable(error)[:300]})")
             return
         store, names = result
@@ -597,7 +711,7 @@ class CredentialsPage(QWidget):
             return
         self.value.clear()  # at once: the value goes on standard input of the command, and nowhere else
         # A secret of that name: its value is replaced, for everything that names it - asked first (not known: too).
-        listed = self.state.get("secrets") if host == "local" else self.remote_secrets.get(host)
+        listed = self.remote_secrets.get(host)  # None: not read (yet), or the read failed
         exists = None if listed is None else any(found == name for found, _ in listed)
         text = tr("A secret {name} is kept already: replace its value? Everything that names it gets the new one.",
                   name=printable(name)) if exists else             tr("Whether a secret {name} is kept there could not be told: a value it has would be replaced. Go on?",
@@ -629,10 +743,11 @@ class CredentialsPage(QWidget):
         if not name or not self.sai.valid_secret(name):
             QMessageBox.information(self, tr("Secret"), tr("Select a secret first."))
             return
-        text = tr("Delete the secret {name}?", name=printable(name))
+        text = tr("Remove the secret {name}? Every start, VPN profile and Git login that names it goes without "
+                  "it.", name=printable(name))
         if host != "local":
             text = tr("On {host}: {text}", host=printable(host), text=text)
-        if not ask_first(self, "secret-delete", tr("Delete secret"), text, tr("Delete")):
+        if not ask_first(self, "secret-delete", tr("Remove secret"), text, tr("Remove")):
             return
         if host == "local":
             background(self.sai.delete_secret, name, owner=self, source=self.secret_buttons, timeout=90,

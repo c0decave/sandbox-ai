@@ -180,14 +180,84 @@ def confirm(parent, title_text, text, accept, destructive=False, details=None, r
     return box.clickedButton() is yes
 
 
-def ask_first(parent, action, title_text, text, accept, detail=None, details=None):
+def ask_first(parent, action, title_text, text, accept, detail=None, details=None, reject=None):
     """The app's one confirmation policy: True when ACTION (a key of backend.NEEDS_CONFIRM or APP_NEEDS_CONFIRM) may
     go ahead - at once when backend.needs_confirm(ACTION, DETAIL) says it needs no confirmation, else only when the
     human chose ACCEPT in a destructive confirmation (Cancel the default)."""
     from . import backend  # here: backend never imports Qt, and the widgets need no backend otherwise
     if backend.needs_confirm(action, detail) is None:
         return True
-    return confirm(parent, title_text, text, accept, destructive=True, details=details)
+    return confirm(parent, title_text, text, accept, destructive=True, details=details, reject=reject)
+
+
+# -- fields where a secret's value is typed: a "Show value" toggle beside each, on by default --
+# What is typed is shown while typing unless the human turns it off; the choice is one for every such field, kept in the
+# app's state (state.json: SHOW_VALUES). A value already stored is never read back into any field.
+SHOW_VALUES = "show_secret_values"
+_values_shown = [True]  # without a State (tests, a dialog before the window): this run's choice
+_toggles = []  # the toggles shown now: a change in one is the change of all
+
+
+def values_shown():
+    from . import state
+    kept = state.current()
+    return kept.get(SHOW_VALUES, True, bool) if kept is not None else _values_shown[0]
+
+
+def set_values_shown(on):
+    from . import state
+    _values_shown[0] = bool(on)
+    kept = state.current()
+    if kept is not None:
+        kept.set(SHOW_VALUES, bool(on))
+    try:
+        from shiboken6 import isValid
+    except ImportError:  # pragma: no cover
+        isValid = lambda _w: True  # noqa: E731
+    _toggles[:] = [t for t in _toggles if isValid(t)]
+    for toggle in _toggles:
+        toggle.blockSignals(True)
+        toggle.setChecked(bool(on))
+        toggle.blockSignals(False)
+        apply_echo(toggle.edit)
+
+
+def apply_echo(edit):
+    """EDIT's echo mode: hidden (Password) only for a secret's value while "Show value" is off."""
+    from PySide6.QtWidgets import QLineEdit
+    hidden = bool(edit.property("secret_value")) and not values_shown()
+    edit.setEchoMode(QLineEdit.EchoMode.Password if hidden else QLineEdit.EchoMode.Normal)
+
+
+def secret_value(edit, secret=True):
+    """EDIT (a QLineEdit for a secret's value) with its "Show value" toggle beside it: the row's widget to lay out.
+    SECRET False: not a secret's value now (e.g. a token field that names a variable): shown as typed, the toggle
+    greyed out. The toggle is edit.show_toggle."""
+    from PySide6.QtWidgets import QCheckBox
+    box = QWidget()
+    row = QHBoxLayout(box)
+    row.setContentsMargins(0, 0, 0, 0)
+    toggle = QCheckBox(tr("Show value"))
+    toggle.setAccessibleName(tr("Show value"))
+    toggle.setToolTip(tr("Show what is typed here (a value kept already is never read back)"))
+    toggle.edit = edit
+    toggle.setChecked(values_shown())
+    toggle.toggled.connect(set_values_shown)
+    edit.show_toggle = toggle
+    _toggles.append(toggle)
+    row.addWidget(edit, 1)
+    row.addWidget(toggle)
+    mark_secret(edit, secret)
+    return box
+
+
+def mark_secret(edit, secret=True):
+    """Whether EDIT holds a secret's value now (its echo and toggle follow)."""
+    edit.setProperty("secret_value", bool(secret))
+    toggle = getattr(edit, "show_toggle", None)
+    if toggle is not None:
+        toggle.setEnabled(bool(secret))
+    apply_echo(edit)
 
 
 def show_text(parent, title_text, text, modal=True):

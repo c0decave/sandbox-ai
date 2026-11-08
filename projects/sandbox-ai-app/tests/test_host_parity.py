@@ -139,8 +139,9 @@ def test_identity_steps_run_on_the_host(sai):
         {"url": "https://git.example.org", "user": "", "secret": "W_GIT"}], "publish": []})
     assert status == 0
     assert [args for args, _ in sai.calls] == [
-        (*REMOTE, "identities", "add", "work", "--name=W", "--email=w@example.org"),
-        (*REMOTE, "identities", "login", "work", "https://git.example.org", "--secret=W_GIT", "--user=x-access-token")]
+        (*REMOTE, "identities", "add", "--name=W", "--email=w@example.org", "--", "work"),
+        (*REMOTE, "identities", "login", "--secret=W_GIT", "--user=x-access-token", "--", "work",
+         "https://git.example.org")]
 
 
 @pytest.mark.parametrize("host", ["local", "ct1"])

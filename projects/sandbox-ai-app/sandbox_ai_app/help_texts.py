@@ -159,9 +159,32 @@ AREA_TIPS = (
          ("The form below shows the options of this agent; the command line follows.",
           "Das Formular darunter zeigt die Optionen dieses Agenten; die Befehlszeile folgt."),
          "sandbox-ai claude | codex | opencode", "page-launch"),
+    _tip("launch.host", ("Host", "Host"),
+         ("Where it starts: this machine, or a host of sandbox-ai hosts (over SSH). The Model choice, the presets "
+          "and the choosers of the form (VPN profiles, kits, identities, MCP servers, image variants) follow it.",
+          "Wo es startet: dieser Rechner oder ein Host von sandbox-ai hosts (über SSH). Die Modellwahl, die "
+          "Vorlagen und die Auswahllisten des Formulars (VPN-Profile, Kits, Identitäten, MCP-Server, "
+          "Image-Varianten) folgen ihm."),
+         ("On another host paths are that host's and typed in; what its sandbox-ai does not know is greyed out, "
+          "and a start that needs it is refused with its names.",
+          "Auf einem anderen Host sind Pfade die dieses Hosts und werden eingetippt; was sein sandbox-ai nicht "
+          "kennt, ist ausgegraut, und ein Start, der es braucht, wird mit den Namen abgelehnt."),
+         "sandbox-ai hosts run HOST -- AGENT", "hosts"),
+    _tip("launch.model", ("Model", "Modell"),
+         ("The agent's own provider (cloud), or a model server registered on the chosen host, as NAME or "
+          "NAME:MODEL.",
+          "Der eigene Anbieter des Agenten (Cloud) oder ein auf dem gewählten Host registrierter Modellserver, als "
+          "NAME oder NAME:MODELL."),
+         ("A server sets --llm and empties --model; only this server adds --no-provider-defaults. A server the "
+          "agent cannot use is shown greyed out.",
+          "Ein Server setzt --llm und leert --model; nur dieser Server fügt --no-provider-defaults hinzu. Ein "
+          "Server, den der Agent nicht nutzen kann, wird ausgegraut gezeigt."),
+         "--llm NAME[:MODEL]", "llm"),
     _tip("launch.profile", ("Profile", "Profil"),
-         ("Your saved option sets for the Start page (Save as profile…), loaded with Load.",
-          "Ihre gespeicherten Optionssätze der Seite Start (Als Profil speichern…), geladen mit Laden."),
+         ("Your saved option sets for the Start page (Save as profile…): host, agent, options and arguments, "
+          "loaded with Load.",
+          "Ihre gespeicherten Optionssätze der Seite Start (Als Profil speichern…): Host, Agent, Optionen und "
+          "Argumente, geladen mit Laden."),
          ("Load fills the whole form with the profile; nothing starts until you press a start button.",
           "Laden füllt das ganze Formular mit dem Profil; nichts startet, bevor Sie einen Start-Knopf drücken."),
          "", "page-launch"),
@@ -339,12 +362,23 @@ AREA_TIPS = (
          None, "sandbox-ai stop NAME", "sessions"),
     _tip("sandboxes.live", ("While it runs", "Während sie läuft"),
          ("Changes for a running sandbox: allow or revoke a host, hand over a device, change the limits, show "
-          "its log.",
+          "its log, add or remove a workspace (a folder, a single file, with a name of its own) and add or remove "
+          "an MCP server or a helper agent without a restart.",
           "Änderungen für eine laufende Sandbox: einen Host erlauben oder entziehen, ein Gerät geben, die Grenzen "
-          "ändern, ihr Log zeigen."),
-         ("They last until the sandbox ends; the project file stays as it is.",
-          "Sie gelten, bis die Sandbox endet; die Projektdatei bleibt, wie sie ist."),
-         "sandbox-ai net allow | sandbox-ai devices | sandbox-ai limits", "network"),
+          "ändern, ihr Log zeigen, einen Workspace (einen Ordner, eine einzelne Datei, mit eigenem Namen) "
+          "hinzufügen oder entfernen und einen MCP-Server oder einen Helfer-Agenten ohne Neustart hinzufügen oder "
+          "entfernen."),
+         ("Allowed hosts, devices and limits last until the sandbox ends; a session keeps an added folder for its "
+          "restart unless it is read-only. An MCP server added here is kept for the start's later starts too "
+          "(Remove MCP server… takes it from them); where the agent needs a restart to see it, the app offers one "
+          "(the agent continues its conversation). Each widening asks first; the project file stays as it is.",
+          "Erlaubte Hosts, Geräte und Grenzen gelten, bis die Sandbox endet; eine Sitzung behält einen "
+          "hinzugefügten Ordner für ihren Neustart, außer er ist nur lesbar. Ein hier hinzugefügter MCP-Server "
+          "bleibt auch für die späteren Starts des Starts (MCP-Server entfernen… nimmt ihn ihnen); braucht der "
+          "Agent einen Neustart, um ihn zu sehen, bietet die App einen an (der Agent setzt sein Gespräch fort). "
+          "Jede Erweiterung fragt zuerst; die Projektdatei bleibt, wie sie ist."),
+         "sandbox-ai net allow | devices | limits | workspace add | mcp attach --live | mcp detach --live",
+         "page-sandboxes"),
     # Approvals
     _tip("approvals.open", ("Open questions", "Offene Fragen"),
          ("What running sandboxes ask, on this computer and on every host: a destination not allowed yet, a push "
@@ -377,7 +411,7 @@ AREA_TIPS = (
     _tip("approvals.always", ("Allowed or blocked always", "Immer erlaubt oder blockiert"),
          ("Your standing answers per project, of this machine or of a host chosen beside Refresh.",
           "Ihre dauerhaften Antworten pro Projekt, die dieses Rechners oder eines Hosts, den Sie neben "
-          "Aktualisieren wählen."),
+          "Neu laden wählen."),
          ("Forget… one, there too, and the sandbox asks again the next time.",
           "Vergessen Sie eine mit Vergessen…, auch dort, fragt die Sandbox beim nächsten Mal wieder."),
          "sandbox-ai approvals remembered, sandbox-ai approvals forget", "approvals"),
@@ -449,10 +483,14 @@ AREA_TIPS = (
           "Wählen Sie eines, um es zu durchsuchen, ohne eine Shell in der Sandbox zu öffnen."),
          "", "page-files"),
     _tip("files.table", ("Files", "Dateien"),
-         ("The files of the chosen folder. Links are shown with where they point but never followed.",
-          "Die Dateien des gewählten Ordners. Links werden mit ihrem Ziel gezeigt, aber nie verfolgt."),
-         ("Copy a file in or out with the buttons below: no mount is needed.",
-          "Kopieren Sie eine Datei mit den Knöpfen darunter hinein oder heraus: Es braucht keine Einbindung."),
+         ("The left pane: the files of the chosen sandbox folder; the right pane: this machine. Links are shown "
+          "with where they point but never followed.",
+          "Der linke Bereich: die Dateien des gewählten Sandbox-Ordners; der rechte Bereich: dieser Rechner. Links "
+          "werden mit ihrem Ziel gezeigt, aber nie verfolgt."),
+         ("Copy (F5) or Move (F6) what is selected in one pane into the other pane's folder: no mount is needed. "
+          "Tab switches panes.",
+          "Kopieren (F5) oder Verschieben (F6) bringt das in einem Bereich Gewählte in den Ordner des anderen "
+          "Bereichs: Es braucht keine Einbindung. Tab wechselt den Bereich."),
          "", "page-files"),
     _tip("files.replace", ("Replace existing files", "Vorhandene Dateien ersetzen"),
          ("Allows a copy to overwrite a file of the same name; off, nothing is ever replaced.",
@@ -765,7 +803,8 @@ TIPS = _build()
 # around it. The board's palette, inspector and nodes, the settings' tabs, the gallery and the Help page place
 # their own.
 PLACES = {
-    "launch": (("agent", "launch.agent", "after"), ("profile", "launch.profile", "after"),
+    "launch": (("host_choice", "launch.host", "after"), ("agent", "launch.agent", "after"),
+               ("model_choice", "launch.model", "after"), ("profile", "launch.profile", "after"),
                ("form", "launch.form", "corner"), ("preview", "launch.preview", "corner"),
                ("dry_button", "launch.dry", "after"), ("session", "launch.session", "after")),
     "board": (("view", "board.canvas", "corner"), ("findings", "board.findings", "corner"),

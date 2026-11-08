@@ -129,7 +129,7 @@ def test_a_skill_added_with_a_built_in_kit_selected_goes_to_a_kit_of_yours(fake,
     page, calls = fake.kits, fake.calls
     skill = env / "skill"
     skill.mkdir()
-    monkeypatch.setattr(QtWidgets.QFileDialog, "getExistingDirectory", lambda *a, **k: str(skill))
+    monkeypatch.setattr("sandbox_ai_app.state.run_dialog", lambda dialog: [str(skill)])
     target = fake_target("team", True)
     monkeypatch.setattr(kits_page, "TargetKitDialog", target)
     select_kit(page, "builtin", "egm")
@@ -218,7 +218,7 @@ def test_every_change_runs_sandbox_ai_kits(fake, env, monkeypatch, wait):
     page.new_kit()
     assert wait(lambda: calls and calls[-1] == ("new", "team", "--agent=claude", "--agent=codex"), 10)
     select_kit(page, "user", "mine")
-    monkeypatch.setattr(QtWidgets.QFileDialog, "getExistingDirectory", lambda *a, **k: str(skill))
+    monkeypatch.setattr("sandbox_ai_app.state.run_dialog", lambda dialog: [str(skill)])
     page.add_skill()
     assert wait(lambda: calls[-1] == ("add-skill", "mine", str(skill)), 10)
     monkeypatch.setattr(kits_page, "NewSkillDialog", dialog(name=edit("checks"), description=edit("-when reviewing"),

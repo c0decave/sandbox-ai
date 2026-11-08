@@ -955,7 +955,7 @@ def test_credentials_page_logins_and_secrets(window, env, wait):
     assert "private files" in page.backend_label.text()
     page.name.setText("DEMO_TOKEN")
     page.value.setText("very-secret-value")
-    assert page.value.echoMode() == QtWidgets.QLineEdit.EchoMode.Password
+    assert page.value.property("secret_value") and page.value.show_toggle.isChecked(), "Show value: on"
     page.set_secret()
     assert page.value.text() == "", "cleared at once"
     assert not page.secret_buttons[0].isEnabled() or not widgets.busy(page)
@@ -1035,7 +1035,7 @@ def test_slow_commands_do_not_block_the_window(window, env, monkeypatch, wait):
     monkeypatch.setattr(window.sai, "doctor", lambda backend="podman": release.wait(30) and [("ok", "Podman", "5", "")])
     monkeypatch.setattr(window.sai, "dry_run", lambda agent, argv: release.wait(30) and ({"plan": 1}, ""))
     monkeypatch.setattr(window.sai, "mcp_catalog", lambda: release.wait(30) and ([], []))
-    monkeypatch.setattr(QtWidgets.QFileDialog, "getExistingDirectory", lambda *a, **k: str(env))
+    monkeypatch.setattr("sandbox_ai_app.state.run_dialog", lambda dialog: [str(env)])
     from sandbox_ai_app import ui
     monkeypatch.setattr(ui.PrivacyDialog, "exec", lambda dialog: (dialog.paths.set_value([str(env)]),
                                                                   QtWidgets.QDialog.DialogCode.Accepted)[-1])
@@ -2804,6 +2804,8 @@ def test_rename_history_clean_up_and_untaint(window, monkeypatch, wait):
     monkeypatch.setattr(QtWidgets.QInputDialog, "getText", lambda *a, **k: ("work-2", True))
     page.rename()
     assert wait(lambda: ("local", ("rename", "work", "work-2")) in ran, 15)
+    # its outcome is shown once the background command is done (not later, over the history below)
+    assert wait(lambda: any(title == "Rename work" for title, _, _ in widgets.SHOWN), 15)
     monkeypatch.setattr(QtWidgets.QInputDialog, "getText", lambda *a, **k: ("-x", True))
     count = len(ran)
     page.rename()

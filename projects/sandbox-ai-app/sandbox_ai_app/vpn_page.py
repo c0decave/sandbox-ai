@@ -18,7 +18,9 @@ from PySide6.QtWidgets import (
 )
 
 from .files import printable
+from . import widgets
 from .i18n import N_, tr
+from .host_choice import on_host
 from .widgets import ask_first, background, fill, outcome, plain_label, selected, show_text, table
 
 LOCAL = "local"
@@ -170,7 +172,6 @@ class VpnDialog(QDialog):
         self.secret = QLineEdit()
         self.secret.setPlaceholderText(SECRET_EXAMPLE)
         self.value = QLineEdit()
-        self.value.setEchoMode(QLineEdit.EchoMode.Password)
         self.value.setPlaceholderText(tr("typed here: kept as that secret (or leave it empty if it is kept already)"))
         self.split = QCheckBox(tr("Only the server's routes through the tunnel (the rest stays blocked)"))
         self.location = QLineEdit()
@@ -202,7 +203,7 @@ class VpnDialog(QDialog):
         self.socks = QCheckBox(tr("A SOCKS port 127.0.0.1:9050 in the sandbox (Tor Browser, Playwright)"))
         self.socks.setToolTip(tr("What goes through it passes the connection proxy by"))
         self.rows = {"file": (tr("Configuration"), file_row), "secret": (tr("Secret"), self.secret),
-                     "value": (tr("Its value"), self.value), "split": ("", self.split),
+                     "value": (tr("Its value"), widgets.secret_value(self.value)), "split": ("", self.split),
                      "location": (tr("Location"), self.location), "ipv6": (tr("IPv6"), self.ipv6),
                      "exit_node": (tr("Exit node"), self.exit_node), "login_server": (tr("Login server"), self.login_server),
                      "hostname": (tr("Node name"), self.hostname), "ephemeral": ("", self.ephemeral),
@@ -274,8 +275,8 @@ class VpnDialog(QDialog):
                 label.setText(tr(SECRET_LABELS[kind]))
 
     def choose(self, edit):
-        from PySide6.QtWidgets import QFileDialog
-        path, _ = QFileDialog.getOpenFileName(self, tr("VPN configuration"))
+        from .state import choose_file
+        path = choose_file(self, tr("VPN configuration"), "vpn")
         if path:
             edit.setText(path)
 
@@ -301,8 +302,8 @@ class VpnDialog(QDialog):
 
 def add_profile(parent, sai, done=None, host=LOCAL, host_label=""):
     """Ask for a new profile on HOST and add it in the background; DONE(name or None) afterwards. A typed key is kept
-    as its secret there first (standard input); a secret of that name is replaced only after a yes, a SOCKS port only
-    after one (vpn-socks)."""
+    as its secret there after the profile was added (Mullvad's before: it is read while added), on standard input; a
+    secret of that name is replaced only after a yes, a SOCKS port only after one (vpn-socks)."""
     dialog = VpnDialog(parent, host_label, remote=host != LOCAL)
     if dialog.exec() != QDialog.DialogCode.Accepted:
         dialog.value.clear()
@@ -320,24 +321,41 @@ def add_profile(parent, sai, done=None, host=LOCAL, host_label=""):
     except ValueError as exc:
         QMessageBox.warning(parent, tr("New VPN profile"), printable(exc))
         return
-    if fields.get("socks") and not ask_first(parent, "vpn-socks", tr("New VPN profile"), tr(
+    if fields.get("socks") and not ask_first(parent, "vpn-socks", tr("New VPN profile"), on_host(host, tr(
             "A SOCKS port at 127.0.0.1:9050 in every sandbox with {name}: what goes through it passes the connection "
-            "proxy by (no allow-list, no questions, no log of its requests). Add it?", name=name), tr("Add")):
+            "proxy by (no allow-list, no questions, no log of its requests). Add it?", name=name)), tr("Add")):
+        return
+    # --force: a profile of that name changes the tunnel of every start that uses it - asked first (vpn-replace).
+    if fields.get("force") and not ask_first(parent, "vpn-replace", tr("New VPN profile"), on_host(host, tr(
+            "Replace the VPN profile {name} if there is one? Every start that uses it gets the new tunnel.",
+            name=name)), tr("Replace")):
         return
 
     def added(result, error):
+        result, problem = result if error is None else (None, None)
         status, out, err = outcome(result, error)
         if status != 0:
             QMessageBox.warning(parent, tr("New VPN profile"), printable((err or out).strip()[-1500:]))
+        elif problem is not None:
+            QMessageBox.warning(parent, tr("New VPN profile"), tr(
+                "{name} added, but its key was not kept as the secret {secret}: {error}", name=name,
+                secret=fields.get("secret") or "", error=printable(problem)[:300]))
         if done:
             done(name if status == 0 else None)
 
     def work():
-        if value:
+        """`sandbox-ai vpn add` first (it checks every field), then the typed key as its secret: a profile refused
+        keeps no key. Only Mullvad reads its account number while it is added: that one is kept first."""
+        first = bool(value) and kind == "mullvad"
+        if first:
             kept = sai.set_secret(fields["secret"], value, host=host)
             if kept[0] != 0:
-                return kept
-        return sai.host_run(host, *args, timeout=ADD_SECONDS)
+                return kept, None
+        status, out, err = sai.host_run(host, *args, timeout=ADD_SECONDS)
+        if status != 0 or not value or first:
+            return (status, out, err), None
+        kept = sai.set_secret(fields["secret"], value, host=host)
+        return (status, out, err), None if kept[0] == 0 else (kept[2] or kept[1]).strip() or "?"
 
     def go():
         background(work, owner=parent, timeout=ADD_SECONDS + 90, done=added)
@@ -353,7 +371,8 @@ def add_profile(parent, sai, done=None, host=LOCAL, host_label=""):
                   "Replace it?", name=printable(secret)) if exists else \
             tr("Whether a secret {name} is kept already could not be told: the key typed would replace its value. "
                "Go on?", name=printable(secret))
-        if ask_first(parent, "secret-replace", tr("New VPN profile"), text, tr("Replace"), detail={"exists": exists}):
+        if ask_first(parent, "secret-replace", tr("New VPN profile"), on_host(host, text), tr("Replace"),
+                     detail={"exists": exists}):
             go()
     background(lambda: sai.secret_exists(secret, host), owner=parent, timeout=90, done=looked)
 

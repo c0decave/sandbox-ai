@@ -47,6 +47,423 @@ def tr(key, **values):
 
 
 TEXTS = {
+    # == the LLM servers page: a models table with Use as default, Edit…, Test connection, the name checked as
+    # it is typed (llm_page.py, wizard_llm.py) ==
+    'the CA kept now': {
+        'en': 'the CA kept now',
+        'de': 'die jetzt hinterlegte CA'},
+    'a CA is kept and stays; name a PEM file of that host to replace it': {
+        'en': 'a CA is kept and stays; name a PEM file of that host to replace it',
+        'de': 'Eine CA ist hinterlegt und bleibt; zum Ersetzen eine PEM-Datei dieses Hosts angeben'},
+    "1-32 letters A-Z or a-z, digits, '_' or '-'; a digit may come first, '-' and '_' not. It is what --llm NAME names.": {
+        'en': "1-32 letters A-Z or a-z, digits, '_' or '-'; a digit may come first, '-' and '_' not. It is what --llm NAME names.",
+        'de': "1-32 Buchstaben A-Z oder a-z, Ziffern, '_' oder '-'; eine Ziffer darf am Anfang stehen, '-' und '_' nicht. Das ist der NAME in --llm NAME."},
+    "A server's name is at most 32 characters; this one has {count}.": {
+        'en': "A server's name is at most 32 characters; this one has {count}.",
+        'de': 'Der Name eines Servers hat höchstens 32 Zeichen; dieser hat {count}.'},
+    "A server's name starts with a letter or a digit, not '{char}'.": {
+        'en': "A server's name starts with a letter or a digit, not '{char}'.",
+        'de': "Der Name eines Servers beginnt mit einem Buchstaben oder einer Ziffer, nicht mit '{char}'."},
+    "Change the server's settings, the others kept (sandbox-ai llm add --replace); a double-click does it too": {
+        'en': "Change the server's settings, the others kept (sandbox-ai llm add --replace); a double-click does it too",
+        'de': 'Die Einstellungen des Servers ändern, die übrigen bleiben (sandbox-ai llm add --replace); ein Doppelklick tut es auch'},
+    "Give the server a name: 1-32 letters, digits, '_' or '-', e.g. {example}.": {
+        'en': "Give the server a name: 1-32 letters, digits, '_' or '-', e.g. {example}.",
+        'de': "Geben Sie dem Server einen Namen: 1-32 Buchstaben, Ziffern, '_' oder '-', z. B. {example}."},
+    "Not allowed in a server's name: {char}. A name holds only the letters A-Z and a-z, digits, '_' and '-' (a digit may come first).": {
+        'en': "Not allowed in a server's name: {char}. A name holds only the letters A-Z and a-z, digits, '_' and '-' (a digit may come first).",
+        'de': "Im Namen eines Servers nicht erlaubt: {char}. Ein Name besteht nur aus den Buchstaben A-Z und a-z, Ziffern, '_' und '-' (eine Ziffer darf am Anfang stehen)."},
+    "Take this name instead (the characters a name cannot hold as '-')": {
+        'en': "Take this name instead (the characters a name cannot hold as '-')",
+        'de': "Stattdessen diesen Namen nehmen (die Zeichen, die ein Name nicht enthalten kann, als '-')"},
+    '(Tested without its key: a server that needs one refuses this test; llm check uses the key once it is saved.)': {
+        'en': '(Tested without its key: a server that needs one refuses this test; llm check uses the key once it is saved.)',
+        'de': '(Ohne seinen Schlüssel getestet: ein Server, der einen braucht, lehnt diesen Test ab; llm check verwendet den Schlüssel, sobald er gespeichert ist.)'},
+    'A server keeps its name: add one under another name, then remove this one': {
+        'en': 'A server keeps its name: add one under another name, then remove this one',
+        'de': 'Ein Server behält seinen Namen: einen unter anderem Namen hinzufügen, dann diesen entfernen'},
+    'A server named {name} is registered on this host already: check Replace below, or cancel and use Edit… in the list.': {
+        'en': 'A server named {name} is registered on this host already: check Replace below, or cancel and use Edit… in the list.',
+        'de': 'Ein Server namens {name} ist auf diesem Host schon eingetragen: unten „Einen LLM-Server dieses Namens ersetzen“ ankreuzen, oder abbrechen und in der Liste Bearbeiten… verwenden.'},
+    'An OpenAI-compatible server cannot be tested before it is saved.': {
+        'en': 'An OpenAI-compatible server cannot be tested before it is saved.',
+        'de': 'Ein OpenAI-kompatibler Server lässt sich vor dem Speichern nicht testen.'},
+    'Anthropic Messages API': {
+        'en': 'Anthropic Messages API',
+        'de': 'Anthropic-Messages-API'},
+    'Ask the server for its models now, without saving it (sandbox-ai wizard models), and offer them as the default model': {
+        'en': 'Ask the server for its models now, without saving it (sandbox-ai wizard models), and offer them as the default model',
+        'de': 'Den Server jetzt nach seinen Modellen fragen, ohne ihn zu speichern (sandbox-ai wizard models), und sie als Standardmodell anbieten'},
+    'Asking the server…': {
+        'en': 'Asking the server…',
+        'de': 'Der Server wird gefragt …'},
+    'Change the LLM server {name}? Every start that uses it gets the new settings:\n{changes}': {
+        'en': 'Change the LLM server {name}? Every start that uses it gets the new settings:\n{changes}',
+        'de': 'Den LLM-Server {name} ändern? Jeder Start, der ihn verwendet, bekommt die neuen Einstellungen:\n{changes}'},
+    'Changing {name}…': {
+        'en': 'Changing {name}…',
+        'de': '{name} wird geändert …'},
+    'Context': {
+        'en': 'Context',
+        'de': 'Kontext'},
+    'Copied {value}: start with --llm {value}': {
+        'en': 'Copied {value}: start with --llm {value}',
+        'de': '{value} kopiert: starten mit --llm {value}'},
+    'Copy NAME:MODEL': {
+        'en': 'Copy NAME:MODEL',
+        'de': 'NAME:MODELL kopieren'},
+    'Copy the value for --llm that starts with the selected model': {
+        'en': 'Copy the value for --llm that starts with the selected model',
+        'de': 'Den Wert für --llm kopieren, der mit dem ausgewählten Modell startet'},
+    'Could not change {name}: {error}': {
+        'en': 'Could not change {name}: {error}',
+        'de': '{name} konnte nicht geändert werden: {error}'},
+    'Could not read {name}: {error}': {
+        'en': 'Could not read {name}: {error}',
+        'de': '{name} konnte nicht gelesen werden: {error}'},
+    'Default model': {
+        'en': 'Default model',
+        'de': 'Standardmodell'},
+    'Edit LLM server': {
+        'en': 'Edit LLM server',
+        'de': 'LLM-Server bearbeiten'},
+    'Edit the LLM server {name} on {host}': {
+        'en': 'Edit the LLM server {name} on {host}',
+        'de': 'Den LLM-Server {name} auf {host} bearbeiten'},
+    'Edit the server': {
+        'en': 'Edit the server',
+        'de': 'Den Server bearbeiten'},
+    'Filter the models': {
+        'en': 'Filter the models',
+        'de': 'Modelle filtern'},
+    'It is the default model already.': {
+        'en': 'It is the default model already.',
+        'de': 'Es ist schon das Standardmodell.'},
+    'Key secret': {
+        'en': 'Key secret',
+        'de': 'Geheimnis des Schlüssels'},
+    'Make the selected model the one a start uses when --llm names none (sandbox-ai llm add --replace --model, the other settings kept)': {
+        'en': 'Make the selected model the one a start uses when --llm names none (sandbox-ai llm add --replace --model, the other settings kept)',
+        'de': 'Das ausgewählte Modell zu dem machen, das ein Start verwendet, wenn --llm keines nennt (sandbox-ai llm add --replace --model, die übrigen Einstellungen bleiben)'},
+    'Not changed.': {
+        'en': 'Not changed.',
+        'de': 'Nicht geändert.'},
+    'Not reachable: {error}': {
+        'en': 'Not reachable: {error}',
+        'de': 'Nicht erreichbar: {error}'},
+    'Not saved.': {
+        'en': 'Not saved.',
+        'de': 'Nicht gespeichert.'},
+    'Not saved: plain http outside the local networks was not allowed.': {
+        'en': 'Not saved: plain http outside the local networks was not allowed.',
+        'de': 'Nicht gespeichert: unverschlüsseltes http außerhalb der lokalen Netze wurde nicht erlaubt.'},
+    'Params': {
+        'en': 'Params',
+        'de': 'Parameter'},
+    'Plain http outside the local networks': {
+        'en': 'Plain http outside the local networks',
+        'de': 'Unverschlüsseltes http außerhalb der lokalen Netze'},
+    'Quant': {
+        'en': 'Quant',
+        'de': 'Quant.'},
+    'Reachable, but the server lists no models: load or pull one first.': {
+        'en': 'Reachable, but the server lists no models: load or pull one first.',
+        'de': 'Erreichbar, aber der Server nennt keine Modelle: zuerst eines laden oder holen.'},
+    'Reachable: {count} models, {loaded} loaded. Choose the default model below (or leave it empty).': {
+        'en': 'Reachable: {count} models, {loaded} loaded. Choose the default model below (or leave it empty).',
+        'de': 'Erreichbar: {count} Modelle, {loaded} geladen. Unten das Standardmodell wählen (oder leer lassen).'},
+    'Reading {name}…': {
+        'en': 'Reading {name}…',
+        'de': '{name} wird gelesen …'},
+    'Result of the test': {
+        'en': 'Result of the test',
+        'de': 'Ergebnis des Tests'},
+    'Saving…': {
+        'en': 'Saving…',
+        'de': 'Wird gespeichert …'},
+    'Select a model first.': {
+        'en': 'Select a model first.',
+        'de': 'Zuerst ein Modell auswählen.'},
+    'Show only the models whose name holds this text': {
+        'en': 'Show only the models whose name holds this text',
+        'de': 'Nur die Modelle zeigen, deren Name diesen Text enthält'},
+    'Test connection': {
+        'en': 'Test connection',
+        'de': 'Verbindung testen'},
+    'The model a start uses when --llm names none (optional): type it, or choose one Test connection listed': {
+        'en': 'The model a start uses when --llm names none (optional): type it, or choose one Test connection listed',
+        'de': 'Das Modell, das ein Start verwendet, wenn --llm keines nennt (optional): eintippen oder eines wählen, das Verbindung testen aufgelistet hat'},
+    'The models the server offers now: choose its default model there': {
+        'en': 'The models the server offers now: choose its default model there',
+        'de': 'Die Modelle, die der Server jetzt anbietet: dort sein Standardmodell wählen'},
+    'Use as default': {
+        'en': 'Use as default',
+        'de': 'Als Standard verwenden'},
+    'Use {name}': {
+        'en': 'Use {name}',
+        'de': '{name} verwenden'},
+    'What is wrong with the name': {
+        'en': 'What is wrong with the name',
+        'de': 'Was am Namen nicht stimmt'},
+    'a space': {
+        'en': 'a space',
+        'de': 'ein Leerzeichen'},
+    'not an LLM server': {
+        'en': 'not an LLM server',
+        'de': 'kein LLM-Server'},
+    'sandbox-ai llm add refused it: {error}': {
+        'en': 'sandbox-ai llm add refused it: {error}',
+        'de': 'sandbox-ai llm add hat abgelehnt: {error}'},
+    'the default model of {name}': {
+        'en': 'the default model of {name}',
+        'de': 'das Standardmodell von {name}'},
+    '{count} loaded': {
+        'en': '{count} loaded',
+        'de': '{count} geladen'},
+    '{model} is the default model of {name} already.': {
+        'en': '{model} is the default model of {name} already.',
+        'de': '{model} ist schon das Standardmodell von {name}.'},
+    '{model} is the default model of {name} now.': {
+        'en': '{model} is the default model of {name} now.',
+        'de': '{model} ist jetzt das Standardmodell von {name}.'},
+    '{name}: nothing changed.': {
+        'en': '{name}: nothing changed.',
+        'de': '{name}: nichts geändert.'},
+    '{reason} It is checked with sandbox-ai llm check (its key, TLS and CA) once it is saved.': {
+        'en': '{reason} It is checked with sandbox-ai llm check (its key, TLS and CA) once it is saved.',
+        'de': '{reason} Er wird mit sandbox-ai llm check (Schlüssel, TLS und CA) geprüft, sobald er gespeichert ist.'},
+    # == round 4 review (presets and choosers per host, confirmations, host switches, wizard and board, help and
+    # tours): one block; each part below its own heading ==
+    # -- presets per host, the Start page's choosers, trust and defaults --
+    'The presets of {host} could not be read: {error}': {
+        'en': 'The presets of {host} could not be read: {error}',
+        'de': 'Die Presets von {host} konnten nicht gelesen werden: {error}'},
+    'Reading the presets of {host}…': {
+        'en': 'Reading the presets of {host}…',
+        'de': 'Die Presets von {host} werden gelesen …'},
+    'Fill in: {name} (on {host})': {
+        'en': 'Fill in: {name} (on {host})',
+        'de': 'Ausfüllen: {name} (auf {host})'},
+    'Not a preset of sandbox-ai.': {
+        'en': 'Not a preset of sandbox-ai.',
+        'de': 'Kein Preset von sandbox-ai.'},
+    'Its ruleset {file} is a file on {host}: it is not on this board; a start with --preset {name} there brings it.': {
+        'en': 'Its ruleset {file} is a file on {host}: it is not on this board; a start with --preset {name} there brings it.',
+        'de': 'Sein Regelwerk {file} ist eine Datei auf {host}: Es ist nicht auf diesem Board; ein Start mit --preset {name} dort bringt es mit.'},
+    "sandbox-ai's presets on {host}": {
+        'en': "sandbox-ai's presets on {host}",
+        'de': 'Presets von sandbox-ai auf {host}'},
+    'this computer': {
+        'en': 'this computer',
+        'de': 'diesem Computer'},
+    'Add {path} to the preset directories of {host}? Every later start there reads presets from it too: whoever can write that folder chooses what a preset there sets.': {
+        'en': 'Add {path} to the preset directories of {host}? Every later start there reads presets from it too: whoever can write that folder chooses what a preset there sets.',
+        'de': '{path} zu den Preset-Verzeichnissen von {host} hinzufügen? Jeder spätere Start dort liest auch Presets daraus: Wer diesen Ordner schreiben kann, bestimmt, was ein Preset darin setzt.'},
+    "A preset of the chosen host: sandbox-ai's own there (sandbox-ai presets list), the app's own and yours. What it leaves to you is asked for.": {
+        'en': "A preset of the chosen host: sandbox-ai's own there (sandbox-ai presets list), the app's own and yours. What it leaves to you is asked for.",
+        'de': 'Ein Preset des gewählten Hosts: die eigenen von sandbox-ai dort (sandbox-ai presets list), die der App und Ihre. Was es Ihnen überlässt, wird erfragt.'},
+    'The presets of the chosen host with a picture of each board, their scores and what they need': {
+        'en': 'The presets of the chosen host with a picture of each board, their scores and what they need',
+        'de': 'Die Presets des gewählten Hosts mit einem Bild jedes Boards, ihren Bewertungen und was sie brauchen'},
+    '(none)': {
+        'en': '(none)',
+        'de': '(keines)'},
+    'The sandbox-ai on {host} does not know these options: {list}. Clear them, or update sandbox-ai there; none is left out without a word.': {
+        'en': 'The sandbox-ai on {host} does not know these options: {list}. Clear them, or update sandbox-ai there; none is left out without a word.',
+        'de': 'Das sandbox-ai auf {host} kennt diese Optionen nicht: {list}. Leeren Sie sie oder aktualisieren Sie sandbox-ai dort; keine wird stillschweigend weggelassen.'},
+    'Could not be read: {error}': {
+        'en': 'Could not be read: {error}',
+        'de': 'Konnte nicht gelesen werden: {error}'},
+    'Add one that {host} has': {
+        'en': 'Add one that {host} has',
+        'de': 'Eines hinzufügen, das {host} hat'},
+    'Add one': {
+        'en': 'Add one',
+        'de': 'Eines hinzufügen'},
+    '{example} (on {host})': {
+        'en': '{example} (on {host})',
+        'de': '{example} (auf {host})'},
+    'Reading {name} on {host}…': {
+        'en': 'Reading {name} on {host}…',
+        'de': '{name} auf {host} wird gelesen …'},
+    'It is for {agents}: {agent} chosen.': {
+        'en': 'It is for {agents}: {agent} chosen.',
+        'de': 'Es ist für {agents}: {agent} gewählt.'},
+    '--preset {name}: the sandbox-ai on {host} applies it at the start (its options, MCP servers and ruleset); the options here come on top.': {
+        'en': '--preset {name}: the sandbox-ai on {host} applies it at the start (its options, MCP servers and ruleset); the options here come on top.',
+        'de': '--preset {name}: Das sandbox-ai auf {host} wendet es beim Start an (seine Optionen, MCP-Server und sein Regelwerk); die Optionen hier kommen hinzu.'},
+    'Still to fill in: {list}': {
+        'en': 'Still to fill in: {list}',
+        'de': 'Noch auszufüllen: {list}'},
+    'None on {host}': {
+        'en': 'None on {host}',
+        'de': 'Keine auf {host}'},
+    "Its own MCP servers and ruleset belong in the project's file: create it on the Board (New from preset) to have them; only its options are here.": {
+        'en': "Its own MCP servers and ruleset belong in the project's file: create it on the Board (New from preset) to have them; only its options are here.",
+        'de': 'Seine eigenen MCP-Server und sein Regelwerk gehören in die Datei des Projekts: Erstellen Sie es auf dem Board (Neu aus Vorlage), um sie zu bekommen; hier sind nur seine Optionen.'},
+    'Every kind: whether {host} has that GPU is checked by its launcher at the start.': {
+        'en': 'Every kind: whether {host} has that GPU is checked by its launcher at the start.',
+        'de': 'Jede Art: Ob {host} diese GPU hat, prüft sein Launcher beim Start.'},
+    'Reading what {host} has…': {
+        'en': 'Reading what {host} has…',
+        'de': 'Es wird gelesen, was {host} hat …'},
+    '{count} on {host}': {
+        'en': '{count} on {host}',
+        'de': '{count} auf {host}'},
+    'Save the extension': {
+        'en': 'Save the extension',
+        'de': 'Die Erweiterung speichern'},
+    'Build {files} into the image {name}? Every later start of it can read them.': {
+        'en': 'Build {files} into the image {name}? Every later start of it can read them.',
+        'de': '{files} in das Image {name} einbauen? Jeder spätere Start davon kann sie lesen.'},
+    'Replace an LLM server named {name} if there is one? Every start that uses it sends its prompts to the new address.': {
+        'en': 'Replace an LLM server named {name} if there is one? Every start that uses it sends its prompts to the new address.',
+        'de': 'Einen LLM-Server namens {name} ersetzen, falls es einen gibt? Jeder Start, der ihn nutzt, schickt seine Prompts an die neue Adresse.'},
+    'Replace the VPN profile {name} if there is one? Every start that uses it gets the new tunnel.': {
+        'en': 'Replace the VPN profile {name} if there is one? Every start that uses it gets the new tunnel.',
+        'de': 'Das VPN-Profil {name} ersetzen, falls es eines gibt? Jeder Start, der es nutzt, bekommt den neuen Tunnel.'},
+    # -- host switches: credentials, kits, connections, teams, images, activity, files, VPN, identities --
+    'Secrets backend: asking…': {
+        'en': 'Secrets backend: asking…',
+        'de': 'Speicher der Secrets: wird abgefragt…'},
+    'Secrets backend: not known ({error})': {
+        'en': 'Secrets backend: not known ({error})',
+        'de': 'Speicher der Secrets: nicht bekannt ({error})'},
+    'Secrets backend (sandbox-ai secrets backend): {store}': {
+        'en': 'Secrets backend (sandbox-ai secrets backend): {store}',
+        'de': 'Speicher der Secrets (sandbox-ai secrets backend): {store}'},
+    'On this computer: {text}': {
+        'en': 'On this computer: {text}',
+        'de': 'Auf diesem Computer: {text}'},
+    "The kits shown are {old}'s, not {host}'s: Refresh first.": {
+        'en': "The kits shown are {old}'s, not {host}'s: Refresh first.",
+        'de': 'Die angezeigten Kits sind die von {old}, nicht die von {host}: Laden Sie zuerst neu.'},
+    "The teams shown are {old}'s, not {host}'s: Refresh first.": {
+        'en': "The teams shown are {old}'s, not {host}'s: Refresh first.",
+        'de': 'Die angezeigten Teams sind die von {old}, nicht die von {host}: Laden Sie zuerst neu.'},
+    'Listing {path}…': {
+        'en': 'Listing {path}…',
+        'de': '{path} wird aufgelistet…'},
+    'Wait until the copy, move or delete running now has finished (or cancel it).': {
+        'en': 'Wait until the copy, move or delete running now has finished (or cancel it).',
+        'de': 'Warten Sie, bis das laufende Kopieren, Verschieben oder Löschen fertig ist (oder brechen Sie es ab).'},
+    'Remove the secret {name}? Every start, VPN profile and Git login that names it goes without it.': {
+        'en': 'Remove the secret {name}? Every start, VPN profile and Git login that names it goes without it.',
+        'de': 'Das Geheimnis {name} entfernen? Jeder Start, jedes VPN-Profil und jeder Git-Login, der es nennt, kommt dann ohne es aus.'},
+    'the value (passed on standard input; a kept one is never read back)': {
+        'en': 'the value (passed on standard input; a kept one is never read back)',
+        'de': 'der Wert (über die Standardeingabe übergeben; ein gespeicherter wird nie zurückgelesen)'},
+    'Keep the value under that name for good (sandbox-ai secrets set, on standard input); a name kept already is replaced only after a yes': {
+        'en': 'Keep the value under that name for good (sandbox-ai secrets set, on standard input); a name kept already is replaced only after a yes',
+        'de': 'Den Wert dauerhaft unter diesem Namen speichern (sandbox-ai secrets set, über die Standardeingabe); ein schon gespeicherter Name wird erst nach einem Ja ersetzt'},
+    'Remove the selected secret (asked first): every start, VPN profile and Git login that names it goes without it': {
+        'en': 'Remove the selected secret (asked first): every start, VPN profile and Git login that names it goes without it',
+        'de': 'Das gewählte Geheimnis entfernen (mit Rückfrage): Jeder Start, jedes VPN-Profil und jeder Git-Login, der es nennt, kommt dann ohne es aus'},
+    'Remove secret': {
+        'en': 'Remove secret',
+        'de': 'Geheimnis entfernen'},
+    'Show value': {
+        'en': 'Show value',
+        'de': 'Wert anzeigen'},
+    'Show what is typed here (a value kept already is never read back)': {
+        'en': 'Show what is typed here (a value kept already is never read back)',
+        'de': 'Zeigen, was hier eingegeben wird (ein schon gespeicherter Wert wird nie zurückgelesen)'},
+    'Enter the token': {
+        'en': 'Enter the token',
+        'de': 'Token eingeben'},
+    'Use a stored secret': {
+        'en': 'Use a stored secret',
+        'de': 'Ein gespeichertes Geheimnis verwenden'},
+    'Token': {
+        'en': 'Token',
+        'de': 'Token'},
+    'the token (kept as the secret below, on standard input)': {
+        'en': 'the token (kept as the secret below, on standard input)',
+        'de': 'das Token (als das Geheimnis darunter gespeichert, über die Standardeingabe)'},
+    'The token': {
+        'en': 'The token',
+        'de': 'Das Token'},
+    'Kept as the secret': {
+        'en': 'Kept as the secret',
+        'de': 'Gespeichert als Geheimnis'},
+    'Stored secret': {
+        'en': 'Stored secret',
+        'de': 'Gespeichertes Geheimnis'},
+    '{title} (on {host})': {
+        'en': '{title} (on {host})',
+        'de': '{title} (auf {host})'},
+    'A secret name (e.g. PYPI_TOKEN) is how sandbox-ai keeps a token: the login only names it, the token itself stays in sandbox-ai secrets.': {
+        'en': 'A secret name (e.g. PYPI_TOKEN) is how sandbox-ai keeps a token: the login only names it, the token itself stays in sandbox-ai secrets.',
+        'de': 'Ein Geheimnisname (z. B. PYPI_TOKEN) ist, unter dem sandbox-ai ein Token speichert: Der Login nennt nur ihn, das Token selbst bleibt in sandbox-ai secrets.'},
+    'Enter the token, or use a stored secret.': {
+        'en': 'Enter the token, or use a stored secret.',
+        'de': 'Geben Sie das Token ein oder verwenden Sie ein gespeichertes Geheimnis.'},
+    'A secret {name} is kept already (or may be): the token typed replaces its value, for everything that names it. Replace it?': {
+        'en': 'A secret {name} is kept already (or may be): the token typed replaces its value, for everything that names it. Replace it?',
+        'de': 'Ein Geheimnis {name} ist schon gespeichert (oder könnte es sein): Das eingegebene Token ersetzt seinen Wert für alles, was es nennt. Ersetzen?'},
+    # -- wizard, board, hosts page --
+    'Start on {host}': {
+        'en': 'Start on {host}',
+        'de': 'Auf {host} starten'},
+    'The board comes from {path}, which is not trusted. Apply (write and trust) is for this machine only, so on {host} the board starts as it is shown, without any project file (--no-config). Look at every part of the board first: whoever could write that folder chose it. Start it on {host} as shown?': {
+        'en': 'The board comes from {path}, which is not trusted. Apply (write and trust) is for this machine only, so on {host} the board starts as it is shown, without any project file (--no-config). Look at every part of the board first: whoever could write that folder chose it. Start it on {host} as shown?',
+        'de': 'Das Board stammt aus {path}, der nicht vertraut wird. Übernehmen (schreiben und vertrauen) gibt es nur für diesen Rechner, daher startet das Board auf {host} so, wie es angezeigt wird, ohne Projektdatei (--no-config). Sehen Sie sich zuerst jeden Teil des Boards an: Wer diesen Ordner schreiben konnte, hat ihn gewählt. Auf {host} so starten, wie angezeigt?'},
+    'Start as shown': {
+        'en': 'Start as shown',
+        'de': 'Wie angezeigt starten'},
+    "Choose the host the board starts on (beside Apply), then a preset (New from preset…) or the parts; paths are that host's, typed in.": {
+        'en': "Choose the host the board starts on (beside Apply), then a preset (New from preset…) or the parts; paths are that host's, typed in.",
+        'de': 'Wählen Sie den Host, auf dem das Board startet (neben Übernehmen), dann eine Vorlage (Neu aus Vorlage…) oder die Teile; Pfade sind die dieses Hosts und werden eingetippt.'},
+    'Subnet (IPv4)': {
+        'en': 'Subnet (IPv4)',
+        'de': 'Subnetz (IPv4)'},
+    'Subnet (IPv6)': {
+        'en': 'Subnet (IPv6)',
+        'de': 'Subnetz (IPv6)'},
+    "empty: sandbox-ai's default (e.g. {example})": {
+        'en': "empty: sandbox-ai's default (e.g. {example})",
+        'de': 'leer: Standard von sandbox-ai (z. B. {example})'},
+    'The network of every later start on the host that names none (--subnet, --subnet6); a change is asked first': {
+        'en': 'The network of every later start on the host that names none (--subnet, --subnet6); a change is asked first',
+        'de': 'Das Netz jedes späteren Starts auf dem Host, der keines nennt (--subnet, --subnet6); eine Änderung wird vorher erfragt'},
+    'Not an IPv{version} subnet (ADDRESS/PREFIX, e.g. {example}): {text}': {
+        'en': 'Not an IPv{version} subnet (ADDRESS/PREFIX, e.g. {example}): {text}',
+        'de': 'Kein IPv{version}-Subnetz (ADRESSE/PRÄFIX, z. B. {example}): {text}'},
+    'the network of every later start: {setting} from {old} to {new}': {
+        'en': 'the network of every later start: {setting} from {old} to {new}',
+        'de': 'das Netz jedes späteren Starts: {setting} von {old} zu {new}'},
+    "sandbox-ai's default": {
+        'en': "sandbox-ai's default",
+        'de': 'Standard von sandbox-ai'},
+    'presets read from {dirs} too': {
+        'en': 'presets read from {dirs} too',
+        'de': 'Vorlagen werden auch aus {dirs} gelesen'},
+    "The project uses its own model server ({value}). The Model page says the agent's provider (cloud): --llm {value} is taken off the board.": {
+        'en': "The project uses its own model server ({value}). The Model page says the agent's provider (cloud): --llm {value} is taken off the board.",
+        'de': 'Das Projekt nutzt einen eigenen Modellserver ({value}). Die Seite Modell sagt: der Anbieter des Agenten (Cloud). --llm {value} wird vom Board genommen.'},
+    'It was the only model the agent reached (--no-provider-defaults): from now on the agent reaches its cloud provider, and its login is copied in.': {
+        'en': 'It was the only model the agent reached (--no-provider-defaults): from now on the agent reaches its cloud provider, and its login is copied in.',
+        'de': 'Er war das einzige Modell, das der Agent erreichte (--no-provider-defaults): Ab jetzt erreicht der Agent seinen Cloud-Anbieter, und seine Anmeldung wird hineinkopiert.'},
+    'Go back to the Model page to keep the server.': {
+        'en': 'Go back to the Model page to keep the server.',
+        'de': 'Gehen Sie zurück zur Seite Modell, um den Server zu behalten.'},
+    "Use the agent's provider": {
+        'en': "Use the agent's provider",
+        'de': 'Den Anbieter des Agenten nutzen'},
+    'The Board starts on {host}, but this wizard sets up a project on this machine (its folder, model servers and project file). For a project on {host}, use the Board.': {
+        'en': 'The Board starts on {host}, but this wizard sets up a project on this machine (its folder, model servers and project file). For a project on {host}, use the Board.',
+        'de': 'Das Board startet auf {host}, aber dieser Assistent richtet ein Projekt auf diesem Rechner ein (seinen Ordner, seine Modellserver und seine Projektdatei). Für ein Projekt auf {host} nutzen Sie das Board.'},
+    'This wizard sets up a project on this machine (its folder, model servers and project file). For a project on another host (sandbox-ai hosts), use the Board: choose the host there.': {
+        'en': 'This wizard sets up a project on this machine (its folder, model servers and project file). For a project on another host (sandbox-ai hosts), use the Board: choose the host there.',
+        'de': 'Dieser Assistent richtet ein Projekt auf diesem Rechner ein (seinen Ordner, seine Modellserver und seine Projektdatei). Für ein Projekt auf einem anderen Host (sandbox-ai hosts) nutzen Sie das Board: Wählen Sie den Host dort.'},
+    'Use the Board for a host': {
+        'en': 'Use the Board for a host',
+        'de': 'Das Board für einen Host nutzen'},
+    'Close the wizard and choose the host on the Board, beside Apply: its launcher checks and starts the board there': {
+        'en': 'Close the wizard and choose the host on the Board, beside Apply: its launcher checks and starts the board there',
+        'de': 'Den Assistenten schließen und den Host auf dem Board wählen, neben Übernehmen: Sein Launcher prüft und startet das Board dort'},
+    # -- help and tours --
+    # == end of the round 4 block ==
     # == MCP servers, workspaces (files, names), connection logs and model servers of a running start on every
     # host (sandbox-ai mcp attach|detach --live, workspace add --name, activity/logs, llm on that host): one block ==
     'The connections the proxy on {host} logged: refusals, pushes and the first request to each host, repeats counted (sandbox-ai activity there); Summary… reads its logs in short (sandbox-ai logs).': {
@@ -764,7 +1181,7 @@ TEXTS = {
         'de': 'Wählen Sie ein Team, um seine Mitglieder und seine Tafel zu sehen.'},
     'Team {name} starts in the terminal; Refresh once it says so.': {
         'en': 'Team {name} starts in the terminal; Refresh once it says so.',
-        'de': 'Das Team {name} startet im Terminal; Aktualisieren Sie, sobald es das meldet.'},
+        'de': 'Das Team {name} startet im Terminal; klicken Sie auf Neu laden, sobald es das meldet.'},
     'Stopping {name}…': {
         'en': 'Stopping {name}…',
         'de': 'Stoppe {name}…'},
@@ -945,7 +1362,7 @@ TEXTS = {
         'de': 'Startet auf {host} (über SSH): Workspace- und Mount-Pfade sind die von {host} - eintippen, nichts von diesem Rechner wird gewählt. Was dessen sandbox-ai nicht kennt, ist ausgegraut und wird weggelassen.'},
     "Keep what you gave {run} (allowed names and addresses, networks, DNS, ports, devices, workspaces) in its project's .sandbox-ai.json? Every later start of that project gets it.": {
         'en': "Keep what you gave {run} (allowed names and addresses, networks, DNS, ports, devices, workspaces) in its project's .sandbox-ai.json? Every later start of that project gets it.",
-        'de': 'Behalten, was du {run} gegeben hast (erlaubte Namen und Adressen, Netze, DNS, Ports, Geräte, Workspaces), in der .sandbox-ai.json seines Projekts? Jeder spätere Start dieses Projekts bekommt es.'},
+        'de': 'Behalten, was Sie {run} gegeben haben (erlaubte Namen und Adressen, Netze, DNS, Ports, Geräte, Workspaces), in der .sandbox-ai.json seines Projekts? Jeder spätere Start dieses Projekts bekommt es.'},
     "It writes the project file on this machine; on {host} a project's file is written there (sandbox-ai wizard).": {
         'en': "It writes the project file on this machine; on {host} a project's file is written there (sandbox-ai wizard).",
         'de': 'Das schreibt die Projektdatei auf diesem Rechner; auf {host} wird die Datei eines Projekts dort geschrieben (sandbox-ai wizard).'},
@@ -957,7 +1374,7 @@ TEXTS = {
         'de': 'Für spätere Starts behalten …'},
     "sandbox-ai net show --keep: the names and addresses you allowed (or approved always), wildcards, networks, DNS, host ports, devices and workspaces added go into the project's trusted .sandbox-ai.json; no Git logins": {
         'en': "sandbox-ai net show --keep: the names and addresses you allowed (or approved always), wildcards, networks, DNS, host ports, devices and workspaces added go into the project's trusted .sandbox-ai.json; no Git logins",
-        'de': 'sandbox-ai net show --keep: die Namen und Adressen, die du erlaubt (oder immer freigegeben) hast, Wildcards, Netze, DNS, Host-Ports, hinzugefügte Geräte und Workspaces kommen in die vertraute .sandbox-ai.json des Projekts; keine Git-Anmeldungen'},
+        'de': 'sandbox-ai net show --keep: die Namen und Adressen, die Sie erlaubt (oder immer freigegeben) haben, Wildcards, Netze, DNS, Host-Ports, hinzugefügte Geräte und Workspaces kommen in die vertraute .sandbox-ai.json des Projekts; keine Git-Anmeldungen'},
     'Keep everything for later starts…': {
         'en': 'Keep everything for later starts…',
         'de': 'Alles für spätere Starts behalten …'},
@@ -1050,7 +1467,7 @@ TEXTS = {
         'de': 'Repositorys'},
     "Your own rules (default: the project's --privacy-rules, else ~/.config/sandbox-ai/privacy if it exists)": {
         'en': "Your own rules (default: the project's --privacy-rules, else ~/.config/sandbox-ai/privacy if it exists)",
-        'de': 'Deine eigenen Regeln (Standard: --privacy-rules des Projekts, sonst ~/.config/sandbox-ai/privacy, falls vorhanden)'},
+        'de': 'Ihre eigenen Regeln (Standard: --privacy-rules des Projekts, sonst ~/.config/sandbox-ai/privacy, falls vorhanden)'},
     'Rules directory': {
         'en': 'Rules directory',
         'de': 'Regelordner'},
@@ -1092,7 +1509,7 @@ TEXTS = {
         'de': 'Resolver statt der Standard-Resolver (--nameserver; bedeutet echtes DNS), durch Leerzeichen getrennt'},
     "net allow --keep: the options go into the project's .sandbox-ai.json, only while that file is exactly what you trusted (the new file is trusted at once); logins are kept as references, never as tokens": {
         'en': "net allow --keep: the options go into the project's .sandbox-ai.json, only while that file is exactly what you trusted (the new file is trusted at once); logins are kept as references, never as tokens",
-        'de': 'net allow --keep: Die Optionen kommen in die .sandbox-ai.json des Projekts, nur solange diese Datei genau das ist, dem du vertraut hast (der neuen Datei wird sofort vertraut); Anmeldungen werden als Verweise behalten, nie als Tokens'},
+        'de': 'net allow --keep: Die Optionen kommen in die .sandbox-ai.json des Projekts, nur solange diese Datei genau das ist, dem Sie vertraut haben (der neuen Datei wird sofort vertraut); Anmeldungen werden als Verweise behalten, nie als Tokens'},
     'Nameservers': {
         'en': 'Nameservers',
         'de': 'Nameserver'},
@@ -1670,7 +2087,7 @@ TEXTS = {
         'de': 'nur dieser Server (keine Cloud: --no-provider-defaults)'},
     'The agent reaches this server and what you allow on the next pages, not its cloud provider': {
         'en': 'The agent reaches this server and what you allow on the next pages, not its cloud provider',
-        'de': 'Der Agent erreicht diesen Server und was du auf den nächsten Seiten erlaubst, nicht seinen Cloud-Anbieter'},
+        'de': 'Der Agent erreicht diesen Server und was Sie auf den nächsten Seiten erlauben, nicht seinen Cloud-Anbieter'},
     'Reading the model servers (sandbox-ai llm list)…': {
         'en': 'Reading the model servers (sandbox-ai llm list)…',
         'de': 'Die Modell-Server werden gelesen (sandbox-ai llm list)…'},
@@ -1691,13 +2108,13 @@ TEXTS = {
         'de': 'Die Modell-Server konnten nicht gelesen werden: {error}'},
     "{name} did not list its models: {error}. Type the model's name, or check that the server runs.": {
         'en': "{name} did not list its models: {error}. Type the model's name, or check that the server runs.",
-        'de': '{name} hat seine Modelle nicht aufgelistet: {error}. Gib den Namen des Modells ein oder prüfe, ob der Server läuft.'},
+        'de': '{name} hat seine Modelle nicht aufgelistet: {error}. Geben Sie den Namen des Modells ein oder prüfen Sie, ob der Server läuft.'},
     '{name} offers {count} models.': {
         'en': '{name} offers {count} models.',
         'de': '{name} bietet {count} Modelle an.'},
     '{name} offers no model now: load one on the server, or type its name.': {
         'en': '{name} offers no model now: load one on the server, or type its name.',
-        'de': '{name} bietet gerade kein Modell an: lade eines auf dem Server oder gib seinen Namen ein.'},
+        'de': '{name} bietet gerade kein Modell an: Laden Sie eines auf dem Server oder geben Sie seinen Namen ein.'},
     '{agent} can use {name}.': {
         'en': '{agent} can use {name}.',
         'de': '{agent} kann {name} nutzen.'},
@@ -1724,7 +2141,7 @@ TEXTS = {
         'de': '{name} hinzugefügt und für {agent} geprüft.'},
     'A server named {name} is registered already: choose another name.': {
         'en': 'A server named {name} is registered already: choose another name.',
-        'de': 'Ein Server namens {name} ist schon eingetragen: wähle einen anderen Namen.'},
+        'de': 'Ein Server namens {name} ist schon eingetragen: Wählen Sie einen anderen Namen.'},
     'No model server yet: “Add a server…” registers one (sandbox-ai llm add).': {
         'en': 'No model server yet: “Add a server…” registers one (sandbox-ai llm add).',
         'de': 'Noch kein Modell-Server: „Server hinzufügen…“ trägt einen ein (sandbox-ai llm add).'},
@@ -1788,7 +2205,7 @@ TEXTS = {
         'de': 'Auf {host}: {text}'},
     'On {host}: delete session {name} and its HOME?': {
         'en': 'On {host}: delete session {name} and its HOME?',
-        'de': 'Auf {host}: Session {name} und ihr HOME löschen?'},
+        'de': 'Auf {host}: Sitzung {name} und ihr HOME löschen?'},
     'On {host}': {
         'en': 'On {host}',
         'de': 'Auf {host}'},
@@ -1998,7 +2415,7 @@ TEXTS = {
         'de': 'Dieses sandbox-ai kennt noch keine Hosts: bitte aktualisieren.'},
     'Your user needs SSH access with a key (ssh-copy-id), and sandbox-ai installed there. The host key is learnt at the first contact and checked from then on.': {
         'en': 'Your user needs SSH access with a key (ssh-copy-id), and sandbox-ai installed there. The host key is learnt at the first contact and checked from then on.',
-        'de': 'Dein Benutzer braucht dort SSH-Zugang mit Schlüssel (ssh-copy-id) und ein installiertes sandbox-ai. Der Host-Schlüssel wird beim ersten Kontakt gelernt und ab dann geprüft.'},
+        'de': 'Ihr Benutzer braucht dort SSH-Zugang mit Schlüssel (ssh-copy-id) und ein installiertes sandbox-ai. Der Host-Schlüssel wird beim ersten Kontakt gelernt und ab dann geprüft.'},
     '{name} (this machine)': {
         'en': '{name} (this machine)',
         'de': '{name} (diese Maschine)'},
@@ -2076,7 +2493,7 @@ TEXTS = {
         'de': '{refs} trotz Datenschutz-Warnungen nach {url} pushen'},
     'open {url} in your browser': {
         'en': 'open {url} in your browser',
-        'de': '{url} in deinem Browser öffnen'},
+        'de': '{url} in Ihrem Browser öffnen'},
     '{requests} HTTP requests, {processes} processes; pushes: {ok} checked, {refused} refused': {
         'en': '{requests} HTTP requests, {processes} processes; pushes: {ok} checked, {refused} refused',
         'de': '{requests} HTTP-Anfragen, {processes} Prozesse; Pushes: {ok} geprüft, {refused} abgelehnt'},
@@ -2103,7 +2520,7 @@ TEXTS = {
         'de': 'Anderer Ordner…'},
     'Refresh': {
         'en': 'Refresh',
-        'de': 'Aktualisieren'},
+        'de': 'Neu laden'},
     'Log folder': {
         'en': 'Log folder',
         'de': 'Log-Ordner'},
@@ -2164,18 +2581,12 @@ TEXTS = {
     'Secrets (API keys and tokens for --secret-env and MCP servers)': {
         'en': 'Secrets (API keys and tokens for --secret-env and MCP servers)',
         'de': 'Geheimnisse (API-Schlüssel und Tokens für --secret-env und MCP-Server)'},
-    'the value (never shown, passed on standard input)': {
-        'en': 'the value (never shown, passed on standard input)',
-        'de': 'der Wert (nie angezeigt, über die Standardeingabe übergeben)'},
     'Name': {
         'en': 'Name',
         'de': 'Name'},
     'Value': {
         'en': 'Value',
         'de': 'Wert'},
-    'Keep secret': {
-        'en': 'Keep secret',
-        'de': 'Geheimnis speichern'},
     'Delete…': {
         'en': 'Delete…',
         'de': 'Löschen…'},
@@ -2268,7 +2679,7 @@ TEXTS = {
         'de': 'Grund'},
     'Open in your browser: {url}': {
         'en': 'Open in your browser: {url}',
-        'de': 'In deinem Browser öffnen: {url}'},
+        'de': 'In Ihrem Browser öffnen: {url}'},
     'Not answered': {
         'en': 'Not answered',
         'de': 'Nicht beantwortet'},
@@ -2328,7 +2739,7 @@ TEXTS = {
         'de': 'Dateien'},
     'Select files or folders first.': {
         'en': 'Select files or folders first.',
-        'de': 'Wähle zuerst Dateien oder Ordner.'},
+        'de': 'Wählen Sie zuerst Dateien oder Ordner.'},
     'Agent': {
         'en': 'Agent',
         'de': 'Agent'},
@@ -2358,7 +2769,7 @@ TEXTS = {
         'de': 'Images'},
     'Select an image first.': {
         'en': 'Select an image first.',
-        'de': 'Wähle zuerst ein Image.'},
+        'de': 'Wählen Sie zuerst ein Image.'},
     'The {agent} image is not built.': {
         'en': 'The {agent} image is not built.',
         'de': 'Das Image von {agent} ist nicht gebaut.'},
@@ -2385,7 +2796,7 @@ TEXTS = {
         'de': 'Anmeldungen'},
     'Select an agent first.': {
         'en': 'Select an agent first.',
-        'de': 'Wähle zuerst einen Agenten.'},
+        'de': 'Wählen Sie zuerst einen Agenten.'},
     'Secret': {
         'en': 'Secret',
         'de': 'Geheimnis'},
@@ -2394,19 +2805,13 @@ TEXTS = {
         'de': 'Ein Name besteht aus Buchstaben, Ziffern und _ (bis zu 64), beginnt aber nicht mit einer Ziffer.'},
     'Enter the value first.': {
         'en': 'Enter the value first.',
-        'de': 'Gib zuerst den Wert ein.'},
+        'de': 'Geben Sie zuerst den Wert ein.'},
     'Not kept: {error}': {
         'en': 'Not kept: {error}',
         'de': 'Nicht gespeichert: {error}'},
     'Select a secret first.': {
         'en': 'Select a secret first.',
-        'de': 'Wähle zuerst ein Geheimnis.'},
-    'Delete secret': {
-        'en': 'Delete secret',
-        'de': 'Geheimnis löschen'},
-    'Delete the secret {name}?': {
-        'en': 'Delete the secret {name}?',
-        'de': 'Das Geheimnis {name} löschen?'},
+        'de': 'Wählen Sie zuerst ein Geheimnis.'},
     'Cannot read the questions: {error}': {
         'en': 'Cannot read the questions: {error}',
         'de': 'Die Fragen können nicht gelesen werden: {error}'},
@@ -2493,7 +2898,7 @@ TEXTS = {
         'de': 'abgelehnt'},
     'your system keyring (Secret Service)': {
         'en': 'your system keyring (Secret Service)',
-        'de': 'dein System-Schlüsselbund (Secret Service)'},
+        'de': 'Ihr System-Schlüsselbund (Secret Service)'},
     'private files (mode 0600)': {
         'en': 'private files (mode 0600)',
         'de': 'private Dateien (Modus 0600)'},
@@ -2505,10 +2910,10 @@ TEXTS = {
         'de': 'QtWebEngine ist nicht installiert ({error})'},
     'xterm.js is not vendored ({files}); run scripts/vendor_xterm.py': {
         'en': 'xterm.js is not vendored ({files}); run scripts/vendor_xterm.py',
-        'de': 'xterm.js ist nicht eingebunden ({files}); führe scripts/vendor_xterm.py aus'},
+        'de': 'xterm.js ist nicht eingebunden ({files}); führen Sie scripts/vendor_xterm.py aus'},
     '[sandbox-ai: exit status {status}; close the tab with ×]': {
         'en': '[sandbox-ai: exit status {status}; close the tab with ×]',
-        'de': '[sandbox-ai: Exit-Status {status}; schließe den Tab mit ×]'},
+        'de': '[sandbox-ai: Exit-Status {status}; schließen Sie den Tab mit ×]'},
     'Every terminal of the app opens here as a tab: starts in the app, sessions you attach, builds and logins. Any start that runs in tmux, wherever it was started, can be attached from the list.': {
         'en': 'Every terminal of the app opens here as a tab: starts in the app, sessions you attach, builds and logins. Any start that runs in tmux, wherever it was started, can be attached from the list.',
         'de': 'Jedes Terminal der App öffnet sich hier als Tab: Starts in der App, Sitzungen, mit denen Sie sich verbinden, Builds und Logins. Mit jedem Start, der in tmux läuft, gleich wo er gestartet wurde, können Sie sich über die Liste verbinden.'},
@@ -2742,7 +3147,7 @@ TEXTS = {
         'de': 'Prozesse'},
     'Your MCP servers (use them with --mcp NAME)': {
         'en': 'Your MCP servers (use them with --mcp NAME)',
-        'de': 'Deine MCP-Server (verwende sie mit --mcp NAME)'},
+        'de': 'Ihre MCP-Server (verwenden Sie sie mit --mcp NAME)'},
     'Catalogs: sandbox-ai-mcp (mcp:) and axross-mcp-hub (hub:)': {
         'en': 'Catalogs: sandbox-ai-mcp (mcp:) and axross-mcp-hub (hub:)',
         'de': 'Kataloge: sandbox-ai-mcp (mcp:) und axross-mcp-hub (hub:)'},
@@ -2817,13 +3222,13 @@ TEXTS = {
         'de': 'Sitzung'},
     'Give the session a name first.': {
         'en': 'Give the session a name first.',
-        'de': 'Gib der Sitzung zuerst einen Namen.'},
+        'de': 'Geben Sie der Sitzung zuerst einen Namen.'},
     'Project configuration': {
         'en': 'Project configuration',
         'de': 'Projektkonfiguration'},
     'Choose a workspace first: the file is written there.': {
         'en': 'Choose a workspace first: the file is written there.',
-        'de': 'Wähle zuerst einen Arbeitsordner: Die Datei wird dort geschrieben.'},
+        'de': 'Wählen Sie zuerst einen Arbeitsordner: Die Datei wird dort geschrieben.'},
     'Write {path} with this content and trust it?': {
         'en': 'Write {path} with this content and trust it?',
         'de': '{path} mit diesem Inhalt schreiben und ihr vertrauen?'},
@@ -2853,10 +3258,10 @@ TEXTS = {
         'de': 'Status'},
     'Select a running sandbox first.': {
         'en': 'Select a running sandbox first.',
-        'de': 'Wähle zuerst eine laufende Sandbox.'},
+        'de': 'Wählen Sie zuerst eine laufende Sandbox.'},
     'Select a session first.': {
         'en': 'Select a session first.',
-        'de': 'Wähle zuerst eine Sitzung.'},
+        'de': 'Wählen Sie zuerst eine Sitzung.'},
     'session {name}': {
         'en': 'session {name}',
         'de': 'Sitzung {name}'},
@@ -2877,7 +3282,7 @@ TEXTS = {
         'de': 'beschreibbar'},
     'Variables from your environment': {
         'en': 'Variables from your environment',
-        'de': 'Variablen aus deiner Umgebung'},
+        'de': 'Variablen aus Ihrer Umgebung'},
     'Runs': {
         'en': 'Runs',
         'de': 'Führt aus'},
@@ -2898,7 +3303,7 @@ TEXTS = {
         'de': 'Hinzufügen'},
     'Load the catalogs and select an entry first.': {
         'en': 'Load the catalogs and select an entry first.',
-        'de': 'Lade die Kataloge und wähle zuerst einen Eintrag.'},
+        'de': 'Laden Sie die Kataloge und wählen Sie zuerst einen Eintrag.'},
     'How to fix': {
         'en': 'How to fix',
         'de': 'Abhilfe'},
@@ -2997,7 +3402,7 @@ TEXTS = {
         'de': 'noch nicht'},
     'No terminal emulator found. Set SANDBOX_AI_TERMINAL, or run:': {
         'en': 'No terminal emulator found. Set SANDBOX_AI_TERMINAL, or run:',
-        'de': 'Kein Terminalprogramm gefunden. Setze SANDBOX_AI_TERMINAL oder führe aus:'},
+        'de': 'Kein Terminalprogramm gefunden. Setzen Sie SANDBOX_AI_TERMINAL oder führen Sie aus:'},
     'required': {
         'en': 'required',
         'de': 'nötig'},
@@ -5124,7 +5529,7 @@ TEXTS = {
         'de': 'Läuft: {run} ({workspace})'},
     'Session: {name} ({status})': {
         'en': 'Session: {name} ({status})',
-        'de': 'Session: {name} ({status})'},
+        'de': 'Sitzung: {name} ({status})'},
     'Project: {name} (every run)': {
         'en': 'Project: {name} (every run)',
         'de': 'Projekt: {name} (alle Läufe)'},
@@ -6192,7 +6597,7 @@ TEXTS = {
         'de': 'Hooks prüfen und freigeben…'},
     'Review the hooks of {name} in the terminal, then Refresh.': {
         'en': 'Review the hooks of {name} in the terminal, then Refresh.',
-        'de': 'Prüfen Sie die Hooks von {name} im Terminal, dann Aktualisieren.'},
+        'de': 'Prüfen Sie die Hooks von {name} im Terminal, dann Neu laden.'},
     'This sandbox-ai has no kit hooks yet; update it.': {
         'en': 'This sandbox-ai has no kit hooks yet; update it.',
         'de': 'Dieses sandbox-ai kennt noch keine Kit-Hooks; aktualisieren Sie es.'},
@@ -6471,7 +6876,7 @@ TEXTS = {
         'de': 'Benutzer'},
     'Who a sandbox works as: commit name and address, Git and publish logins under one name; a start uses one with --identity NAME. Without it: default (your git-logins and publish-logins).': {
         'en': 'Who a sandbox works as: commit name and address, Git and publish logins under one name; a start uses one with --identity NAME. Without it: default (your git-logins and publish-logins).',
-        'de': 'Als wer eine Sandbox arbeitet: Commit-Name und -Adresse, Git- und Veröffentlichungs-Anmeldungen unter einem Namen; ein Start nutzt eine mit --identity NAME. Ohne: default (deine git-logins und publish-logins).'},
+        'de': 'Als wer eine Sandbox arbeitet: Commit-Name und -Adresse, Git- und Veröffentlichungs-Anmeldungen unter einem Namen; ein Start nutzt eine mit --identity NAME. Ohne: default (Ihre git-logins und publish-logins).'},
     "a secret's name, e.g. GH_PUSH": {
         'en': "a secret's name, e.g. GH_PUSH",
         'de': 'der Name eines Secrets, z. B. GH_PUSH'},
@@ -6480,7 +6885,7 @@ TEXTS = {
         'de': 'Kleinbuchstaben, Ziffern, - und _, z. B. work oder c0decave'},
     'the commit address, e.g. you@users.noreply.github.com': {
         'en': 'the commit address, e.g. you@users.noreply.github.com',
-        'de': 'die Commit-Adresse, z. B. du@users.noreply.github.com'},
+        'de': 'die Commit-Adresse, z. B. name@users.noreply.github.com'},
     'the commit name, e.g. Ada Lovelace': {
         'en': 'the commit name, e.g. Ada Lovelace',
         'de': 'der Commit-Name, z. B. Ada Lovelace'},
@@ -6904,18 +7309,12 @@ TEXTS = {
     'New publish login': {
         'en': 'New publish login',
         'de': 'Neuer Veröffentlichungs-Login'},
-    'Secret (its name)': {
-        'en': 'Secret (its name)',
-        'de': 'Geheimnis (sein Name)'},
     'Overview': {
         'en': 'Overview',
         'de': 'Übersicht'},
     'Not done: {error}': {
         'en': 'Not done: {error}',
         'de': 'Nicht erledigt: {error}'},
-    'Keep the token first on the Secrets tab; only its name is written here.': {
-        'en': 'Keep the token first on the Secrets tab; only its name is written here.',
-        'de': 'Bewahren Sie das Token zuerst im Reiter Geheimnisse auf; hier wird nur sein Name eingetragen.'},
     "Give the server's address.": {
         'en': "Give the server's address.",
         'de': 'Geben Sie die Adresse des Servers an.'},
@@ -7035,13 +7434,13 @@ TEXTS = {
         'de': 'Die Sitzung {name} und ihr HOME auf diesem Rechner löschen? Das lässt sich nicht rückgängig machen.'},
     'Give the folder as an absolute path, or its name under /workspaces.': {
         'en': 'Give the folder as an absolute path, or its name under /workspaces.',
-        'de': 'Gib den Ordner als absoluten Pfad an oder seinen Namen unter /workspaces.'},
+        'de': 'Geben Sie den Ordner als absoluten Pfad an oder seinen Namen unter /workspaces.'},
     'Give {path} of {host} to {run} until it ends? Devices weaken the isolation; sandbox-ai there checks the device as at a start.': {
         'en': 'Give {path} of {host} to {run} until it ends? Devices weaken the isolation; sandbox-ai there checks the device as at a start.',
         'de': '{path} von {host} an {run} geben, bis sie endet? Geräte schwächen die Isolation; sandbox-ai dort prüft das Gerät wie bei einem Start.'},
     'If you did not make these changes, check them before it starts again ({command}).': {
         'en': 'If you did not make these changes, check them before it starts again ({command}).',
-        'de': 'Wenn diese Änderungen nicht von dir sind, prüfe sie, bevor sie wieder startet ({command}).'},
+        'de': 'Wenn diese Änderungen nicht von Ihnen sind, prüfen Sie sie, bevor sie wieder startet ({command}).'},
     'Its HOME has more files than were checked: not every change is named.': {
         'en': 'Its HOME has more files than were checked: not every change is named.',
         'de': 'Ihr HOME hat mehr Dateien, als geprüft wurden: Nicht jede Änderung ist genannt.'},
@@ -7183,7 +7582,7 @@ TEXTS = {
         'de': 'Jetzt bei jedem Host nachsehen (seine Starts und Fragen)'},
     'Refresh the hosts': {
         'en': 'Refresh the hosts',
-        'de': 'Hosts neu lesen'},
+        'de': 'Hosts neu laden'},
     'Add a host reached over SSH (sandbox-ai hosts add)': {
         'en': 'Add a host reached over SSH (sandbox-ai hosts add)',
         'de': 'Einen über SSH erreichbaren Host hinzufügen (sandbox-ai hosts add)'},
@@ -7315,7 +7714,7 @@ TEXTS = {
         'de': 'Wessen Liste: die dieses Rechners oder eines Hosts'},
     'Refresh the remembered answers': {
         'en': 'Refresh the remembered answers',
-        'de': 'Gemerkte Antworten neu lesen'},
+        'de': 'Gemerkte Antworten neu laden'},
     'Select a question first.': {
         'en': 'Select a question first.',
         'de': 'Wählen Sie zuerst eine Frage.'},
@@ -7390,7 +7789,7 @@ TEXTS = {
         'de': 'Auch die beendeten Starts: gestoppte MCP-Server und was sandbox-ai list --all sonst aufbewahrt, auf diesem Rechner und jedem Host'},
     'Refresh the sandboxes': {
         'en': 'Refresh the sandboxes',
-        'de': 'Sandboxen neu lesen'},
+        'de': 'Sandboxen neu laden'},
     'Sandboxes and sessions': {
         'en': 'Sandboxes and sessions',
         'de': 'Sandboxen und Sitzungen'},
@@ -7532,9 +7931,6 @@ TEXTS = {
     "The server's root, http(s)://HOST[:PORT][/PREFIX]; each agent gets the API path it needs. Plain http only to this host, private or Tailscale addresses.": {
         'en': "The server's root, http(s)://HOST[:PORT][/PREFIX]; each agent gets the API path it needs. Plain http only to this host, private or Tailscale addresses.",
         'de': 'Die Wurzel des Servers, http(s)://HOST[:PORT][/PRÄFIX]; jeder Agent bekommt den API-Pfad, den er braucht. Unverschlüsseltes http nur zu diesem Rechner, privaten oder Tailscale-Adressen.'},
-    'The model a start uses when --llm names none (optional)': {
-        'en': 'The model a start uses when --llm names none (optional)',
-        'de': 'Das Modell, das ein Start nimmt, wenn --llm keines nennt (optional)'},
     'The VPN profile the server is reached through (optional)': {
         'en': 'The VPN profile the server is reached through (optional)',
         'de': 'Das VPN-Profil, über das der Server erreicht wird (optional)'},
@@ -7550,9 +7946,6 @@ TEXTS = {
     "A key typed here is kept as a secret of sandbox-ai (standard input, never a command line); the server's entry only names that secret, and the proxy adds the key on the wire.": {
         'en': "A key typed here is kept as a secret of sandbox-ai (standard input, never a command line); the server's entry only names that secret, and the proxy adds the key on the wire.",
         'de': 'Ein hier eingegebener Schlüssel wird als Geheimnis von sandbox-ai abgelegt (Standardeingabe, nie eine Befehlszeile); der Eintrag des Servers nennt nur dieses Geheimnis, und der Proxy fügt den Schlüssel unterwegs hinzu.'},
-    "A server's name is 1-32 letters, digits, '_' or '-', not starting with '-'.": {
-        'en': "A server's name is 1-32 letters, digits, '_' or '-', not starting with '-'.",
-        'de': "Der Name eines Servers sind 1-32 Buchstaben, Ziffern, '_' oder '-', nicht mit '-' am Anfang."},
     'Choose the kind of server.': {
         'en': 'Choose the kind of server.',
         'de': 'Die Art des Servers wählen.'},
@@ -7610,9 +8003,6 @@ TEXTS = {
     "Reachability, TLS, the key, the models and the agents' APIs": {
         'en': "Reachability, TLS, the key, the models and the agents' APIs",
         'de': 'Erreichbarkeit, TLS, der Schlüssel, die Modelle und die APIs der Agenten'},
-    'The models the server offers now': {
-        'en': 'The models the server offers now',
-        'de': 'Die Modelle, die der Server jetzt anbietet'},
     'Forget the server (its secrets stay in sandbox-ai secrets)': {
         'en': 'Forget the server (its secrets stay in sandbox-ai secrets)',
         'de': 'Den Server vergessen (seine Geheimnisse bleiben in sandbox-ai secrets)'},
@@ -7741,7 +8131,7 @@ TEXTS = {
         'de': 'Erhöhen'},
     'Refresh the history': {
         'en': 'Refresh the history',
-        'de': 'Den Verlauf aktualisieren'},
+        'de': 'Den Verlauf neu laden'},
     'Refused now and at every later start of this project, without a question (Ctrl+Shift+K, asked first)': {
         'en': 'Refused now and at every later start of this project, without a question (Ctrl+Shift+K, asked first)',
         'de': 'Jetzt und bei jedem späteren Start dieses Projekts abgelehnt, ohne Frage (Strg+Umschalt+K, mit Rückfrage)'},

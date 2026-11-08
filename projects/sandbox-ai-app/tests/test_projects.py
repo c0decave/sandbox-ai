@@ -210,7 +210,7 @@ def test_switching_keeps_each_projects_board_and_reopening_asks(window, env, mon
 
 def test_open_folder_and_new_project_from_the_switcher(window, env, monkeypatch):
     folder = project(env, "opened")
-    monkeypatch.setattr(QtWidgets.QFileDialog, "getExistingDirectory", lambda *a, **k: str(folder))
+    monkeypatch.setattr("sandbox_ai_app.state.run_dialog", lambda dialog: [str(folder)])
     bar = window.project_bar
     bar.activated(bar.combo.findData(bar.OPEN))
     assert window.project == str(folder)

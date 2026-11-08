@@ -40,9 +40,11 @@ def test_a_new_project_from_a_template_to_the_board(wizard, tmp_path, wait):
     walk(wizard, wizard.folder_page, wizard.agent_page)
     assert wizard.agent_page.agent.currentText() == "codex", "the settings' default agent"
     wizard.start_page.initializePage()
-    assert wizard.start_page.choice() == "development" and not wizard.start_page.buttons["existing"].isVisible()
+    assert wizard.start_page.chosen_preset().name == "development" and not wizard.start_page.buttons["existing"].isVisible()
     assert wizard.start_page.validatePage()
-    assert B.values(wizard.board)[0] == "codex" and "--token-proxy" in B.to_argv(wizard.sai, wizard.board)
+    # sandbox-ai's development preset where it has one (it replaces the app's of that id), else the app's own
+    expected = "--token-proxy" if wizard.start_page.chosen_preset().source == "app" else "--allow-github"
+    assert B.values(wizard.board)[0] == "codex" and expected in B.to_argv(wizard.sai, wizard.board)
     wizard.network_page.initializePage()
     assert wizard.network_page.presets["--allow-pypi"].isChecked() and wizard.network_page.presets["--allow-github"].isChecked()
     wizard.network_page.hosts.setPlainText("docs.example.org")
@@ -188,7 +190,7 @@ def test_the_git_page_shows_how_tokens_get_there(wizard, tmp_path, monkeypatch, 
     github.click()
     row = page.table.rowCount() - 1
     assert page.table.item(row, 0).text() == "https://github.com"
-    kind, edit = page.table.cellWidget(row, 1), page.table.cellWidget(row, 2)
+    kind, edit = page.table.cellWidget(row, 1), page.token_edit(row)
     assert kind.currentData() == "secret" and edit.text() == "GH_PUSH"
     assert edit.completer() is not None and "GH_PUSH, PYPI_TOKEN" in edit.toolTip()
     kind.setCurrentIndex(kind.findData("env"))

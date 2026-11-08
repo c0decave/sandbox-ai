@@ -20,7 +20,7 @@ import pwd
 import stat
 import time
 
-from PySide6.QtCore import QEvent, Qt, QTimer
+from PySide6.QtCore import QEvent, QEventLoop, Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
     QSplitter, QVBoxLayout, QWidget,
@@ -30,8 +30,8 @@ from . import files
 from .files import printable
 from .i18n import N_, tr
 from .state import choose_files, choose_folder
-from .widgets import Task, button, confirm, fill, flow, plain_label, row_key, select_keys, selected_rows, set_enabled, \
-    table, warn
+from .widgets import Task, ask_first, background, button, confirm, fill, flow, plain_label, row_key, select_keys, \
+    selected_rows, set_enabled, table, warn
 
 ROOT_KINDS = {
     "run": N_("Running sandbox {name}: workspace"), "run-home": N_("Running sandbox {name}: HOME"),
@@ -43,6 +43,10 @@ COLUMNS = (N_("Name"), N_("Type"), N_("Size"), N_("Modified"), N_("Points to (no
            N_("Mode"))
 LINK_COLUMN = 4
 PROGRESS_INTERVAL = 250  # ms
+# A folder is listed in a thread (a slow or hung file system never holds up the window); the pane waits up to
+# LIST_WAIT ms for it, the window answering meanwhile, so a fast folder shows at once - a slow one fills in later.
+LIST_WAIT = 1500
+LIST_TIMEOUT = 120  # s: a listing that never comes back is given up (the pane says so)
 
 
 def root_title(kind, label, path):
@@ -97,6 +101,7 @@ class Pane(QWidget):
         super().__init__()
         self.page, self.side = page, side
         self.root, self.relative, self.entries = None, "", []
+        self.list_token = 0  # the newest listing: one that comes back after another began is dropped
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         top = QHBoxLayout()
@@ -235,23 +240,63 @@ class Pane(QWidget):
     # -- the list --
 
     def list(self):
-        """List the folder shown; False if it could not be (the root's own folder, or HOME, is shown then)."""
-        self.entries, listed = [], True
+        """List the folder shown, in a thread; True when it was listed, False if it could not be (the root's own
+        folder, or HOME, is shown then), None while a slow one is still on its way (shown when it comes)."""
+        self.list_token += 1
+        token = self.list_token
+        self.entries = []
         if self.root is None:
             self.path.setText("")
             fill(self.table, [])
             return False
-        try:
-            self.entries = self.root.list(self.relative)
-        except (OSError, ValueError) as exc:
-            listed = False
-            self.page.message.setText(printable(exc))
-            self.relative = "" if self.side == "sandbox" else host_relative(os.path.realpath(os.path.expanduser("~")))
-            self.table.clearSelection()
+        root, relative = self.root, self.relative
+        fallback = "" if self.side == "sandbox" else host_relative(os.path.realpath(os.path.expanduser("~")))
+
+        def work():
             try:
-                self.entries = self.root.list(self.relative)
-            except (OSError, ValueError):
-                self.entries = []
+                return root.list(relative), relative, None
+            except (OSError, ValueError) as exc:
+                try:
+                    return root.list(fallback), fallback, exc
+                except (OSError, ValueError):
+                    return [], fallback, exc
+        outcome, waiting = {}, []
+
+        def done(result, error):
+            outcome["listed"] = self.listed(token, root, result, error)
+            if waiting:  # only while list() still waits for it (a late answer never touches the loop)
+                waiting[0].quit()
+        background(work, timeout=LIST_TIMEOUT, done=done)
+        if "listed" not in outcome:
+            loop = QEventLoop()
+            timer = QTimer()
+            timer.setSingleShot(True)
+            timer.timeout.connect(loop.quit)
+            waiting.append(loop)
+            timer.start(LIST_WAIT)
+            loop.exec()
+            waiting.clear()
+            timer.stop()
+        if "listed" not in outcome:
+            self.page.message.setText(tr("Listing {path}…", path=printable(self.path_text())))
+            return None
+        return outcome["listed"]
+
+    def listed(self, token, root, result, error):
+        """Show what the listing of TOKEN found (dropped when another began since, or another root was chosen)."""
+        if token != self.list_token or root is not self.root:
+            return None
+        if error is not None:  # the thread itself failed (or never came back)
+            self.page.message.setText(printable(error))
+            self.entries = []
+            fill(self.table, [])
+            return False
+        self.entries, relative, problem = result
+        listed = problem is None
+        if not listed:
+            self.page.message.setText(printable(problem))
+            self.relative = relative
+            self.table.clearSelection()
         self.path.setText(printable(self.path_text()))
         ranges = self.page.ranges
         rows, colors = [], []
@@ -500,6 +545,11 @@ class FilesPage(QWidget):
         Key = Qt.Key
         control = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
         self.activate(pane)
+        if self.task.running and key in (Key.Key_F2, Key.Key_F5, Key.Key_F6, Key.Key_F7, Key.Key_F8, Key.Key_Delete):
+            # Its buttons are greyed out meanwhile: so are its keys (a rename or a new folder in the middle of a copy
+            # or move would change what it works on).
+            self.message.setText(tr("Wait until the copy, move or delete running now has finished (or cancel it)."))
+            return True
         if key in (Key.Key_Tab, Key.Key_Backtab) and not control:
             self.other(pane).table.setFocus(Qt.FocusReason.TabFocusReason)
             self.activate(self.other(pane))
@@ -612,11 +662,11 @@ class FilesPage(QWidget):
             return None
         if not existing:
             return False
-        if confirm(self, tr("Replace existing files?"),
-                   tr("{count} of the {total} item(s) from {source} already exist in {target}. Replace them? Files "
-                      "are replaced, folders are filled with what is copied.", count=len(existing), total=len(names),
-                      source=printable(source_text), target=printable(target_text)),
-                   tr("Replace"), destructive=True, details="\n".join(printable(name) for name in existing)):
+        if ask_first(self, "files-replace", tr("Replace existing files?"),
+                     tr("{count} of the {total} item(s) from {source} already exist in {target}. Replace them? Files "
+                        "are replaced, folders are filled with what is copied.", count=len(existing), total=len(names),
+                        source=printable(source_text), target=printable(target_text)),
+                     tr("Replace"), details="\n".join(printable(name) for name in existing)):
             return True
         return None
 
@@ -748,11 +798,11 @@ class FilesPage(QWidget):
         if not entries or pane.root is None:
             self.message.setText(tr("Select files or folders first."))
             return False
-        if not confirm(self, tr("Delete?"),
-                       tr("Delete {count} item(s) in {folder}? Folders are deleted with everything in them; links "
-                          "are removed, not what they point to. This cannot be undone.", count=len(entries),
-                          folder=printable(pane.path_text())),
-                       tr("Delete"), destructive=True, details="\n".join(printable(entry.name) for entry in entries)):
+        if not ask_first(self, "files-delete", tr("Delete?"),
+                         tr("Delete {count} item(s) in {folder}? Folders are deleted with everything in them; links "
+                            "are removed, not what they point to. This cannot be undone.", count=len(entries),
+                            folder=printable(pane.path_text())),
+                         tr("Delete"), details="\n".join(printable(entry.name) for entry in entries)):
             return False
         root, items = pane.root, [(entry.name, pane.path_of(entry)) for entry in entries]
         progress = files.Progress()

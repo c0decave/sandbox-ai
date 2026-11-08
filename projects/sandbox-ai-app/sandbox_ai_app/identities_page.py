@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 from .backend import SandboxAI
 from .files import printable
 from .i18n import tr
+from .host_choice import on_host
 from .widgets import ask_first, background, fill, outcome, plain_label, selected, show_text, table
 
 LOCAL = "local"
@@ -104,10 +105,10 @@ class IdentitiesBox(QGroupBox):
         target, new = dialog.result_identity()
         old = self.known.get(target)
         # Logins taken from the identity are taken from every later start that uses it: asked first (login-remove).
-        gone = [step[3] for step in self.sai.identity_steps(target, old, new) if step[1] in ("logout", "unpublish")]
-        if gone and not ask_first(self, "login-remove", tr("Remove"), tr(
+        gone = [step[-1] for step in self.sai.identity_steps(target, old, new) if step[1] in ("logout", "unpublish")]
+        if gone and not ask_first(self, "login-remove", tr("Remove"), on_host(self.host, tr(
                 "Remove these logins from the identity {name}: {list}? Their secrets stay in sandbox-ai secrets.",
-                name=printable(target), list=", ".join(printable(value) for value in gone)), tr("Remove")):
+                name=printable(target), list=", ".join(printable(value) for value in gone))), tr("Remove")):
             return
         self.message.setText(tr("Saving {name}…", name=target))
         host = self.host
@@ -126,16 +127,16 @@ class IdentitiesBox(QGroupBox):
 
     def remove(self):
         name = selected(self.list)
-        if not name or not ask_first(self, "login-remove", tr("Remove identity"),
-                                     tr("Remove the identity {name}? Its secrets stay in sandbox-ai secrets.",
-                                        name=name), tr("Remove")):
+        if not name or not ask_first(self, "login-remove", tr("Remove identity"), on_host(self.host, tr(
+                "Remove the identity {name}? Its secrets stay in sandbox-ai secrets.", name=printable(name))),
+                tr("Remove")):
             return
         host = self.host
 
         def work():
             if host == LOCAL:
-                return self.sai.call("identities", "remove", name, timeout=60)
-            return self.sai.host_run(host, "identities", "remove", name, timeout=90)
+                return self.sai.call("identities", "remove", "--", name, timeout=60)
+            return self.sai.host_run(host, "identities", "remove", "--", name, timeout=90)
         background(work, owner=self, timeout=120,
                    done=lambda result, error: self.saved(name, (result[0], result[1] + result[2]) if error is None
                                                          else (1, str(error)), None))
@@ -145,7 +146,7 @@ class IdentitiesBox(QGroupBox):
         name, host = selected(self.list), self.host
         if name is not None and not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", name):
             return
-        background(lambda: self.sai.host_run(host, "identities", "check", *([name] if name else []), timeout=90),
+        background(lambda: self.sai.host_run(host, "identities", "check", *(["--", name] if name else []), timeout=90),
                    owner=self, source=self.buttons(), timeout=120,
                    done=lambda result, error: self.checked(name, result, error))
 

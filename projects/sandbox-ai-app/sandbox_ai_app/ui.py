@@ -26,6 +26,7 @@ from .i18n import N_, tr
 from .activity_page import ActivityPage
 from .board_view import BoardPage, HostCombo
 from . import help_view
+from . import presets as PR
 from .hosts_page import HostsPage
 from .kits_page import KitsPage
 from .state import State, scrub_arguments
@@ -35,7 +36,7 @@ from .reviews import home_review, review_refusal
 from .start_tree import ID_ROLE, KEY_ROLE, KIND_ROLE, StartTree, id_host, related, row_id
 from . import wizard_llm as WL
 from .widgets import (
-    MONO, AsyncCommand, ThreadCall, append_rows, ask_first, background, busy, confirm, fill, find_row, fit_columns, flow,
+    MONO, AsyncCommand, ThreadCall, append_rows, ask_first, background, busy, fill, find_row, fit_columns, flow,
     inform,
     local_time,
     outcome, plain_label, row_key, safe_tooltip, selected, selected_rows, set_enabled, show_text, table, warn,
@@ -142,10 +143,11 @@ class DeviceField(QWidget):
 
 
 class ListField(QWidget):
-    """One value per line; for path options with a button that adds a folder."""
+    """One value per line; for path options with a button that adds a folder; with CHOICES a button that adds one of
+    the names the chosen host has (set_choices: its MCP servers for --mcp, its kits for --kit)."""
     changed = Signal()
 
-    def __init__(self, path=False):
+    def __init__(self, path=False, choices=False):
         super().__init__()
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -153,13 +155,38 @@ class ListField(QWidget):
         self.edit.setFixedHeight(52)
         self.edit.textChanged.connect(self.changed)
         layout.addWidget(self.edit)
-        self.add_button = None
+        self.add_button = self.pick = None
         if path:
             add = self.add_button = QToolButton()
             add.setText("+")
             add.setToolTip(tr("Add a folder"))
             add.clicked.connect(self.add_folder)
             layout.addWidget(add, alignment=Qt.AlignmentFlag.AlignTop)
+        if choices:
+            self.pick = QToolButton()
+            self.pick.setText("+")
+            self.pick.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+            self.pick.setMenu(QMenu(self.pick))
+            layout.addWidget(self.pick, alignment=Qt.AlignmentFlag.AlignTop)
+            self.set_choices(None)
+
+    def set_choices(self, names, where="", problem=None):
+        """The names the pick button offers (None: not read yet), those of WHERE ("this computer" or a host)."""
+        if self.pick is None:
+            return
+        menu = self.pick.menu()
+        menu.clear()
+        for name in names or []:
+            menu.addAction(name, lambda n=name: self.add(n))
+        if not names:
+            text = (tr("Could not be read: {error}", error=problem) if problem else
+                    tr("Reading…") if names is None else tr("None on {host}", host=where))
+            menu.addAction(text).setEnabled(False)
+        self.pick.setToolTip(tr("Add one that {host} has", host=where) if where else tr("Add one"))
+
+    def add(self, value):
+        if value not in self.value():
+            self.edit.appendPlainText(value)
 
     def set_local(self, local):
         """LOCAL False: the paths are another host's, typed in (this computer's chooser is off)."""
@@ -232,29 +259,38 @@ class OptionsForm(QTabWidget):
             scroll.setWidget(page)
             self.addTab(scroll, tr(GROUP_TITLES.get(title, title)).replace("&", "&&"))  # & would mark a shortcut
 
+    # The options whose values the chosen host lists (backend.host_start_choices): a chooser filled from its lists,
+    # the value still typed in where it has none (or the list could not be read).
+    HOST_CHOICES = ("--vpn", "--kit", "--identity", "--mcp", "--image-variant")
+
     def widget_for(self, option):
         from . import hardware
         if option.long == "--gpu" and option.kind == "choice":
-            # Only the kinds this computer has: a kind it lacks would be refused at the start.
-            found = [kind for kind in option.choices if kind in hardware.gpu_kinds()]
+            # This computer: only the kinds it has (a kind it lacks would be refused at the start); another host:
+            # every kind (set_host), its launcher checks it there.
             widget = QComboBox()
-            widget.addItems([""] + found)
-            widget.setEnabled(bool(found))
             widget.currentTextChanged.connect(self.changed)
-            widget.setProperty("detected", ", ".join(found) or tr("none"))
+            self.fill_gpu(widget, option, "local")
             return widget
         if option.long == "--device" and option.kind == "list":
             widget = DeviceField(hardware.devices())
             widget.changed.connect(self.changed)
             return widget
         if option.long in ("--memory", "--cpus") and option.kind not in ("flag", "choice", "multi", "list"):
-            memory, cpus = hardware.limits_hint()
             widget = QLineEdit()
-            have = memory if option.long == "--memory" else tr("{count} CPUs", count=cpus)
-            widget.setPlaceholderText(tr("{example} (this computer: {have})", example=option.metavar or "",
-                                         have=have) if have else option.metavar or "")
-            widget.setProperty("detected", have)
             widget.textChanged.connect(self.changed)
+            self.limit_hint(widget, option, "local")
+            return widget
+        if option.long in self.HOST_CHOICES and option.kind == "list":
+            widget = ListField(choices=True)
+            widget.changed.connect(self.changed)
+            return widget
+        if option.long in self.HOST_CHOICES and option.kind == "value":
+            widget = QComboBox()
+            widget.setEditable(True)
+            widget.addItem("")
+            widget.lineEdit().setPlaceholderText(option.metavar or "")
+            widget.currentTextChanged.connect(self.changed)
             return widget
         if option.kind == "flag":
             widget = QCheckBox(option.help.split(";")[0][:90] if option.help else "")
@@ -280,6 +316,79 @@ class OptionsForm(QTabWidget):
             widget.setPlaceholderText(option.metavar or "")
             widget.textChanged.connect(self.changed)
         return widget
+
+    def fill_gpu(self, widget, option, host):
+        """--gpu's kinds: those this computer has (none: greyed out), every kind for another HOST."""
+        from . import hardware
+        current = widget.currentText()
+        found = [kind for kind in option.choices if kind in hardware.gpu_kinds()] if host == "local" else \
+            [str(kind) for kind in option.choices]
+        widget.blockSignals(True)
+        try:
+            widget.clear()
+            widget.addItems([""] + found)
+            if current and widget.findText(current) < 0:  # kept, not dropped (set_values does the same)
+                widget.addItem(current)
+            widget.setCurrentText(current)
+        finally:
+            widget.blockSignals(False)
+        widget.setEnabled(bool(found) or bool(current))
+        widget.setProperty("detected", (", ".join(found) or tr("none")) if host == "local" else "")
+        widget.setProperty("host", host)
+        widget.setToolTip(option.help if host == "local" else
+                          tr("Every kind: whether {host} has that GPU is checked by its launcher at the start.",
+                             host=printable(host)) + "\n" + option.help)
+
+    def limit_hint(self, widget, option, host):
+        """--memory and --cpus: what this computer has, or for another HOST only where it starts."""
+        from . import hardware
+        if host == "local":
+            memory, cpus = hardware.limits_hint()
+            have = memory if option.long == "--memory" else tr("{count} CPUs", count=cpus)
+            widget.setPlaceholderText(tr("{example} (this computer: {have})", example=option.metavar or "",
+                                         have=have) if have else option.metavar or "")
+        else:
+            have = ""
+            widget.setPlaceholderText(tr("{example} (on {host})", example=option.metavar or "", host=printable(host)))
+        widget.setProperty("detected", have)
+
+    def set_host(self, host):
+        """The fields that depend on where it starts: --gpu's kinds, the limits' hints, the choosers (emptied until
+        set_choices gives that host's lists)."""
+        for option in self.options:
+            widget = self.widgets.get(option.long)
+            if option.long == "--gpu" and isinstance(widget, QComboBox):
+                self.fill_gpu(widget, option, host)
+            elif option.long in ("--memory", "--cpus") and isinstance(widget, QLineEdit):
+                self.limit_hint(widget, option, host)
+        self.set_choices(host, None, {})
+
+    def set_choices(self, host, found, problems):
+        """The choosers' entries: FOUND ({option: [name]} of host_start_choices; None: being read), PROBLEMS ({option:
+        why a list could not be read})."""
+        where = tr("this computer") if host == "local" else printable(host)
+        for long in self.HOST_CHOICES:
+            widget = self.widgets.get(long)
+            names = None if found is None else found.get(long, [] if long not in problems else None)
+            if isinstance(widget, ListField):
+                widget.set_choices(names if names is not None or long not in problems else [], where,
+                                   problems.get(long))
+            elif isinstance(widget, QComboBox) and widget.isEditable():
+                current = widget.currentText()
+                widget.blockSignals(True)
+                try:
+                    widget.clear()
+                    widget.addItem("")
+                    for name in names or []:
+                        widget.addItem(name)
+                    widget.setCurrentText(current)  # what was typed or chosen stays, also a name it lacks
+                finally:
+                    widget.blockSignals(False)
+                option = next(o for o in self.options if o.long == long)
+                note = (tr("Reading what {host} has…", host=where) if names is None and long not in problems else
+                        tr("Could not be read: {error}", error=problems[long]) if long in problems else
+                        tr("{count} on {host}", count=len(names), host=where))
+                widget.setToolTip(f"{option.help}\n{note}" if option.help else note)
 
     def values(self):
         result = {}
@@ -326,9 +435,12 @@ class OptionsForm(QTabWidget):
                 widget.setChecked(bool(value))
             elif isinstance(widget, QComboBox):
                 text = "" if value is None and option.default is None else str(value or option.default)
-                if text and widget.findText(text) < 0:  # e.g. a GPU kind this computer lacks: kept, not dropped
+                if text and widget.findText(text) < 0 and not widget.isEditable():
+                    # e.g. a GPU kind this computer lacks: kept, not dropped
                     widget.addItem(text)
-                    widget.setItemData(widget.count() - 1, tr("not found on this computer"), Qt.ItemDataRole.ToolTipRole)
+                    if option.long == "--gpu" and widget.property("host") in (None, "local"):
+                        widget.setItemData(widget.count() - 1, tr("not found on this computer"),
+                                           Qt.ItemDataRole.ToolTipRole)
                     widget.setEnabled(True)
                 widget.setCurrentText(text)
             elif isinstance(widget, (ListField, DeviceField, MultiChoice)):
@@ -386,6 +498,24 @@ class LaunchPage(QWidget):
         self.host_note = plain_label(role="secondary")
         self.host_note.hide()
         layout.addWidget(self.host_note)
+        # A preset of the chosen host's catalogue (its sandbox-ai presets, the app's own, yours): sandbox-ai's becomes
+        # --preset NAME (with --preset-value for what it asks), the launcher there applies it; the app's own and
+        # yours fill in the form's options.
+        self.preset_choice = QComboBox()
+        self.preset_choice.setMinimumWidth(260)
+        self.preset_choice.setToolTip(tr("A preset of the chosen host: sandbox-ai's own there (sandbox-ai presets list), "
+                                         "the app's own and yours. What it leaves to you is asked for."))
+        self.preset_choice.activated.connect(lambda _index: self.preset_picked())
+        self.preset_gallery_button = QPushButton(tr("Gallery…"))
+        self.preset_gallery_button.setToolTip(tr("The presets of the chosen host with a picture of each board, their "
+                                                 "scores and what they need"))
+        self.preset_gallery_button.clicked.connect(lambda _=False: self.open_preset_gallery())
+        self.preset_note = plain_label(role="secondary")
+        self.preset_note.hide()
+        layout.addWidget(flow(QLabel(tr("Preset")), self.preset_choice, self.preset_gallery_button))
+        layout.addWidget(self.preset_note)
+        self.preset_catalogue, self.presets_host, self.presets_reading = PR.Catalogue(), None, None
+        self.choices_host, self.choices_read_at, self.choices_token = None, 0.0, 0
         self.form = OptionsForm(self.options)
         try:
             self.form.apply_policy(sai.forbidden())
@@ -474,6 +604,187 @@ class LaunchPage(QWidget):
         super().showEvent(event)
         if time.monotonic() - self.llm_read_at > 30:
             self.read_llm_servers()
+        if self.presets_host != self.host():
+            self.refresh_presets()
+        if self.choices_host != self.host() or time.monotonic() - self.choices_read_at > 60:
+            self.read_host_choices()
+
+    # -- presets of the chosen host --
+
+    def refresh_presets(self):
+        """The preset chooser: the chosen host's catalogue (presets.catalogue), the same as the gallery's and the
+        wizard's. Another host's sandbox-ai presets are read in the background (meanwhile what it said last)."""
+        from .preset_gallery import fill_preset_combo
+        host = self.host()
+        self.presets_host = host
+        try:
+            self.preset_catalogue = PR.catalogue(self.sai, host)
+        except Exception as exc:  # noqa: BLE001 - a broken store of yours: the app's own still offered
+            self.preset_catalogue = PR.catalogue(self.sai, host, mine=[], problems=[str(exc)])
+        current = self.preset_choice.currentData()
+        fill_preset_combo(self.preset_choice, self.preset_catalogue, current)
+        self.preset_choice.insertItem(0, tr("(none)"), "")
+        if not current or self.preset_choice.findData(current) < 0:
+            self.preset_choice.setCurrentIndex(0)
+        if host != LOCAL and not self.preset_catalogue.complete and self.presets_reading != host:
+            self.presets_reading = host
+            background(PR.host_documents, self.sai, host, timeout=90,
+                       done=lambda _result, error: alive(self) and self.host_presets_read(host, error))
+
+    def host_presets_read(self, host, error):
+        self.presets_reading = None
+        if host != self.host():
+            return
+        if error is not None:
+            self.show_preset_note(tr("The presets of {host} could not be read: {error}", host=printable(host),
+                                     error=printable(error)[-300:]), "notice-warn")
+            return
+        self.refresh_presets()
+
+    def show_preset_note(self, text, role="secondary"):
+        self.preset_note.setText(text)
+        self.preset_note.setProperty("role", role)
+        self.preset_note.style().unpolish(self.preset_note)
+        self.preset_note.style().polish(self.preset_note)
+        self.preset_note.setVisible(bool(text))
+
+    def open_preset_gallery(self):
+        """The gallery of the chosen host's presets; the one chosen there (and what was filled in) comes here."""
+        from .preset_gallery import PresetGallery
+        gallery = PresetGallery(self.sai, None, self.agent.currentText(), self.policy_or_empty(), None, self,
+                                backend.setting("default_backend"), host=self.host())
+        if gallery.exec() != gallery.DialogCode.Accepted or gallery.result_ is None:
+            return None
+        preset, values = gallery.result_
+        self.refresh_presets()
+        return self.apply_preset(preset, values or {})
+
+    def policy_or_empty(self):
+        try:
+            return self.sai.policy()[0] or {}
+        except Exception:  # noqa: BLE001 - a broken policy is shown on the System page
+            return {}
+
+    def preset_picked(self):
+        """A preset chosen in the chooser: sandbox-ai's of another host as it is there now (`presets show NAME
+        --json`), then what it leaves to you asked for and applied (apply_preset)."""
+        key = self.preset_choice.currentData()
+        if not key:
+            self.set_option("--preset", "")
+            self.set_option("--preset-value", [])
+            self.show_preset_note("")
+            return None
+        try:
+            preset = self.preset_catalogue.find(key)
+        except ValueError:
+            return None
+        host = self.host()
+        if preset.source == "sandbox-ai" and host != LOCAL:
+            self.show_preset_note(tr("Reading {name} on {host}…", name=printable(preset.name), host=printable(host)))
+            background(self.sai.host_preset, host, preset.name, owner=self, timeout=60,
+                       done=lambda document, error: alive(self) and self.preset_shown(host, preset, document, error))
+            return None
+        return self.apply_preset(preset)
+
+    def preset_shown(self, host, preset, document, error):
+        if host != self.host():
+            return None  # another host was chosen meanwhile: never this one's preset there
+        if error is None:
+            try:
+                preset = PR.from_sandbox_ai(self.sai, document, host=host)
+            except ValueError as exc:
+                self.show_preset_note(printable(exc), "notice-warn")
+                return None
+        return self.apply_preset(preset)
+
+    def set_option(self, long, value):
+        widget = self.form.widgets.get(long)
+        if widget is None:
+            return
+        if isinstance(widget, QCheckBox):
+            widget.setChecked(bool(value))
+        elif isinstance(widget, QComboBox):
+            widget.setCurrentText(str(value or ""))
+        elif isinstance(widget, (ListField, DeviceField, MultiChoice)):
+            widget.set_value(value or [])
+        elif isinstance(widget, PathField):
+            widget.set_value(value)
+        else:
+            widget.setText(str(value or ""))
+
+    def apply_preset(self, preset, values=None):
+        """PRESET into the form, its placeholders asked for first (the fill-in form, with what the chosen host has).
+        sandbox-ai's: --preset NAME and --preset-value NAME=VALUE (the launcher there applies the preset itself, its
+        ruleset and MCP servers too). The app's own and yours: their options replace the form's (the workspace stays);
+        MCP servers they define and a ruleset of the project need its file (the Board). True if applied."""
+        from .preset_gallery import PlaceholderForm
+        from . import board as B
+        from . import widgets
+        host = self.host()
+        if values is None and preset.placeholders:
+            form = PlaceholderForm(self.sai, preset, self, agent=self.agent.currentText(), host=host)
+            if widgets.AUTO_ANSWER is None and form.exec() != QDialog.DialogCode.Accepted:
+                return False
+            values = form.values() or {}
+        values = values or {}
+        notes = []
+        if preset.agents and self.agent.currentText() not in preset.agents:
+            self.agent.setCurrentText(preset.agents[0])
+            notes.append(tr("It is for {agents}: {agent} chosen.", agents=", ".join(preset.agents),
+                            agent=preset.agents[0]))
+        elif preset.agent and preset.agent in self.sai.agents:
+            self.agent.setCurrentText(preset.agent)
+        if preset.source == "sandbox-ai":
+            pairs = [f"{name}={values[marker]}" for marker, name in preset.value_names if values.get(marker)]
+            self.set_option("--preset", preset.name)
+            self.set_option("--preset-value", pairs)
+            left = [name for marker, name in preset.value_names if not values.get(marker)
+                    and not next((p.optional for p in preset.placeholders if p.marker == marker), False)]
+            notes.insert(0, tr("--preset {name}: the sandbox-ai on {host} applies it at the start (its options, MCP "
+                               "servers and ruleset); the options here come on top.", name=printable(preset.name),
+                               host=tr("this computer") if host == LOCAL else printable(host)))
+        else:
+            board = PR.build(self.sai, preset, None, agent=self.agent.currentText(), values=values)
+            kept = self.form.values().get("--workspace") or []
+            parsed, _ = backend.values_from_argv(self.options, B.to_argv(self.sai, board, workspaces=False),
+                                                 self.sai.launcher.canonical_options)
+            parsed["--workspace"] = kept
+            self.form.set_values(parsed)
+            left = [marker for marker, _ in B.placeholders(board)]
+            if preset.servers or preset.rules is not None:
+                notes.append(tr("Its own MCP servers and ruleset belong in the project's file: create it on the Board "
+                                "(New from preset) to have them; only its options are here."))
+        if left:
+            notes.append(tr("Still to fill in: {list}", list=", ".join(printable(m) for m in left)))
+        self.show_preset_note(" ".join(notes), "notice-warn" if left else "secondary")
+        index = self.preset_choice.findData(preset.key)
+        if index >= 0:
+            self.preset_choice.setCurrentIndex(index)
+        self.form.changed.emit()
+        return True
+
+    # -- what the chosen host has, for the choosers (--vpn, --kit, --identity, --mcp, --image-variant) --
+
+    def read_host_choices(self):
+        """The chosen host's VPN profiles, kits, identities, MCP servers and image variants (backend.host_start_choices),
+        read in the background; a late answer for another host is dropped (a token per read)."""
+        host = self.host()
+        self.choices_token += 1
+        token = self.choices_token
+        self.choices_host = host
+        self.form.set_choices(host, None, {})
+        background(self.sai.host_start_choices, host, timeout=180,
+                   done=lambda result, error: alive(self) and self.host_choices_read(token, host, result, error))
+
+    def host_choices_read(self, token, host, result, error):
+        if token != self.choices_token or host != self.host():
+            return
+        self.choices_read_at = time.monotonic()
+        if error is not None:
+            found, problems = {}, {long: printable(error)[-200:] for long in OptionsForm.HOST_CHOICES}
+        else:
+            found, problems = result
+        self.form.set_choices(host, found, problems)
 
     # -- the host it starts on --
 
@@ -499,6 +810,11 @@ class LaunchPage(QWidget):
         for widget in self.form.widgets.values():
             if hasattr(widget, "set_local"):
                 widget.set_local(not remote)
+        self.form.set_host(host)  # --gpu's kinds and the limits' hints: that host's, not this computer's
+        if self.presets_host is not None and self.presets_host != host:
+            self.refresh_presets()
+        if self.choices_host is not None and self.choices_host != host:
+            self.read_host_choices()
         set_enabled(self.write_button, not remote, tr("It writes the project file on this machine; on {host} a "
                                                       "project's file is written there (sandbox-ai wizard).",
                                                       host=printable(host)))
@@ -693,8 +1009,20 @@ class LaunchPage(QWidget):
         self.review_button.setVisible(state in ("changed", "untrusted"))
 
     def argv(self):
-        """The launcher's options of the form; for another host without the ones its launcher does not know."""
+        """The launcher's options of the form; for another host without the ones its launcher does not know (a start
+        or dry run refuses those by name first: refused_options)."""
         return backend.argv_for_host(self.options, self.form.values(), self.known_options())
+
+    def refused_options(self, title):
+        """True (and said) when options set in the form are unknown to the chosen host's launcher: they would be left
+        out, and leaving out a restrictive one (--workspace-ro, --no-provider-defaults) starts a weaker sandbox."""
+        dropped = backend.dropped_options(self.options, self.form.values(), self.known_options())
+        if not dropped:
+            return False
+        warn(self, title, tr("The sandbox-ai on {host} does not know these options: {list}. Clear them, or update "
+                             "sandbox-ai there; none is left out without a word.", host=printable(self.host()),
+                             list=", ".join(dropped)))
+        return True
 
     def workspace(self):
         """The first workspace of the form, or None."""
@@ -804,6 +1132,8 @@ class LaunchPage(QWidget):
 
     def dry_run(self):
         """The launcher's plan, nothing started: on the chosen host by its own launcher."""
+        if self.refused_options(tr("Dry run")):
+            return
         background(self.sai.host_dry_run, self.host(), self.agent.currentText(), self.argv(), owner=self,
                    source=self.dry_button, timeout=120, done=self.dry_run_done)
 
@@ -815,6 +1145,8 @@ class LaunchPage(QWidget):
         show_text(self, tr("Plan (dry run)"), (message + "\n\n" if message else "") + json.dumps(plan, indent=2))
 
     def start(self, session=None, embedded=False):
+        if self.refused_options(tr("Not started")):
+            return False
         try:
             host = self.host()
             if host != LOCAL:  # ssh -tt there: its tmux keeps an interactive start when the tab closes
@@ -851,10 +1183,11 @@ class LaunchPage(QWidget):
                                     tr("Choose a workspace first: the file is written there."))
             return
         text = json.dumps(document, indent=2)
-        # Trusted, the file's options apply at every start there without a question: Cancel is the default.
-        if confirm(self, tr("Write and trust"), tr("Write {path} with this content and trust it?",
-                                                   path=f"{main}/.sandbox-ai.json"), tr("Write and trust"),
-                   destructive=True, details=text):  # the folder may be slow (a network file system): in a thread
+        # Trusted, the file's options apply at every start there without a question: asked first (the policy of
+        # project-trust), Cancel the default.
+        if ask_first(self, "project-trust", tr("Write and trust"), tr("Write {path} with this content and trust it?",
+                                                                      path=f"{main}/.sandbox-ai.json"),
+                     tr("Write and trust"), details=text):  # the folder may be slow (a network file system): in a thread
             background(self.sai.write_project, main, document, owner=self, timeout=60, done=self.project_written)
 
     def project_written(self, path, error):
@@ -2989,9 +3322,10 @@ class SandboxesPage(QWidget):
         if error is not None:
             if review_refusal(error):  # nothing kept: nothing to review
                 go()
-            elif confirm(self, title, tr("What changed in the HOME of {name} since its last start could not be "
-                                         "checked:\n{error}\n\nResume it anyway?", name=printable(name),
-                                         error=printable(error)[-800:]), tr("Resume"), destructive=True):
+            elif ask_first(self, "home-review-skip", title,
+                           tr("What changed in the HOME of {name} since its last start could not be checked:\n"
+                              "{error}\n\nResume it anyway?", name=printable(name), error=printable(error)[-800:]),
+                           tr("Resume")):
                 go()
             return
         found = home_review(name, result, host)
@@ -2999,8 +3333,8 @@ class SandboxesPage(QWidget):
             go()
             return
         text, details = found
-        if confirm(self, title, text + "\n\n" + tr("Resume it anyway?"), tr("Resume"), destructive=True,
-                   details=details):
+        if ask_first(self, "home-review-skip", title, text + "\n\n" + tr("Resume it anyway?"), tr("Resume"),
+                     details=details):
             go()
 
 
@@ -3058,6 +3392,7 @@ class ConnectionsPage(QWidget):
         self.records, self.shown, self.state, self.base = [], [], None, 0
         self.position = None  # (path, (inode, offset)) where the last read ended: a follow reads only what came
         self.reading = None  # the path being looked at in a thread (log_state, then up to 16 MiB of log)
+        self.read_token = 0  # the newest read (a host switch makes every older one late: its answer is dropped)
         self.listing = 0  # the newest listing of folders or logs (an older one that comes back late is dropped)
         self.wanted_log = None  # the end of the name of the log to choose once the logs are listed
         self.timer = QTimer(self)
@@ -3082,6 +3417,11 @@ class ConnectionsPage(QWidget):
         self.remote_note.setVisible(remote)
         self.remote_note.setText(self.remote_text() if remote else "")
         self.position, self.reading = None, None
+        self.read_token += 1  # a read still on its way is the host's before: dropped when it comes back
+        self.listing += 1  # so is a listing of this machine's folders or logs
+        self.file.blockSignals(True)
+        self.file.clear()  # this machine's logs are no source of another host (nor a host's of this one)
+        self.file.blockSignals(False)
         self.apply(None, [])
         if remote:
             self.refresh_remote_sources()
@@ -3197,7 +3537,7 @@ class ConnectionsPage(QWidget):
                    done=lambda found, error: self.directories_listed(token, current, found or [], error))
 
     def directories_listed(self, token, current, found, error):
-        if token != self.listing:
+        if token != self.listing or self.remote():
             return
         self.directory.blockSignals(True)
         self.directory.clear()
@@ -3245,7 +3585,7 @@ class ConnectionsPage(QWidget):
         background(look, timeout=STATE_WAIT, done=lambda found, error: self.files_listed(token, found or [], error))
 
     def files_listed(self, token, found, error):
-        if token != self.listing:
+        if token != self.listing or self.remote():
             return
         self.file.blockSignals(True)
         self.file.clear()
@@ -3292,7 +3632,10 @@ class ConnectionsPage(QWidget):
                 return state, None  # unchanged: nothing read
             return state, backend.read_connections(path, strict=True, since=since, track=True)
         self.reading = path
-        background(look, owner=self, timeout=60, done=lambda result, error: self.loaded(path, result, error))
+        self.read_token += 1
+        token = self.read_token
+        background(look, owner=self, timeout=60,
+                   done=lambda result, error: alive(self) and self.loaded(path, result, error, token))
 
     def load_remote(self, force=False):
         """The chosen start's connections on that host (`sandbox-ai activity SOURCE --kind=network --json` there),
@@ -3305,10 +3648,14 @@ class ConnectionsPage(QWidget):
             return
         key = ("remote", host, tuple(source))
         self.reading, self.remote_read_at = key, time.monotonic()
+        self.read_token += 1
+        token = self.read_token
         background(lambda: self.sai.host_connections(host, source, tail=CONNECTIONS_LIMIT), timeout=150,
-                   done=lambda records, error: alive(self) and self.remote_loaded(key, records, error))
+                   done=lambda records, error: alive(self) and self.remote_loaded(key, records, error, token))
 
-    def remote_loaded(self, key, records, error):
+    def remote_loaded(self, key, records, error, token=None):
+        if token is not None and token != self.read_token:
+            return  # a read of the host before (or of a source before): never shown, and no longer the one running
         self.reading = None
         if key != ("remote", self.host(), tuple(self.directory.currentData() or ())):
             self.load(force=True)  # another source or host was chosen meanwhile
@@ -3321,8 +3668,12 @@ class ConnectionsPage(QWidget):
             return
         self.apply((key, len(records)), records)
 
-    def loaded(self, path, result, error):
+    def loaded(self, path, result, error, token=None):
+        if token is not None and token != self.read_token:
+            return  # a read of this machine's log from before a host switch: never shown under another host
         self.reading = None
+        if self.remote():
+            return
         if path != self.file.currentData():
             self.load()  # another log was chosen meanwhile
             return
@@ -4575,6 +4926,10 @@ class ProjectTabs(QTabBar):
 
 # Pages with a canvas or terminal of their own that fills the page: never in a scroll area.
 UNSCROLLED_PAGES = ("board", "terminals")
+# The pages the current project (the tab chosen) changes - MainWindow.apply_project: the Start page's workspace, the
+# Board, Sandboxes and Approvals (its rows and questions marked), Connections and Statistics (its logs), Files (its
+# folder), Kits (what it uses), Teams (the workspace a new team is offered). On the others the tabs are hidden.
+PROJECT_TAB_PAGES = ("launch", "board", "sandboxes", "approvals", "connections", "statistics", "files", "kits", "team")
 SCROLL_MIN_HEIGHT = 220  # the height a scrolled page may shrink to before the window does
 
 
@@ -4812,6 +5167,11 @@ class MainWindow(QMainWindow):
         self.add_tab_button.setMenu(self.add_tab_menu)
         strip_layout.addWidget(self.tabs, 1)
         strip_layout.addWidget(self.add_tab_button)
+        # Hidden on the pages the project does not change (PROJECT_TAB_PAGES), keeping their place: nothing below moves.
+        for widget in (self.tabs, self.add_tab_button):
+            policy = widget.sizePolicy()
+            policy.setRetainSizeWhenHidden(True)
+            widget.setSizePolicy(policy)
         self.page_help = help_view.HelpButton("page.launch")  # explains the page shown (page_changed)
         strip_layout.addWidget(self.page_help, 0, Qt.AlignmentFlag.AlignVCenter)
         content_layout.addWidget(strip)
@@ -4865,6 +5225,7 @@ class MainWindow(QMainWindow):
         self.restore_tabs()
         self.restore_docks()
         self.restore_window()
+        self.show_project_tabs(self.current_page())
 
     # -- pages --
 
@@ -5173,10 +5534,18 @@ class MainWindow(QMainWindow):
         """A page was shown: its panels appear (those of other pages are put away unless floating), and on the
         Terminals page the keys a terminal needs go to the terminal."""
         self.update_docks()
+        self.show_project_tabs(key)
         if key in help_view.H.PAGE_SECTIONS and hasattr(self, "page_help"):
             self.page_help.set_tip(f"page.{key}")
         for name, keys in getattr(self, "terminal_keys", {}).items():
             self.actions[name].setShortcuts([] if key == "terminals" else keys)
+
+    def show_project_tabs(self, key):
+        """The project tabs only where the current project changes what the page shows or does (PROJECT_TAB_PAGES)."""
+        if hasattr(self, "tabs"):
+            shown = key in PROJECT_TAB_PAGES
+            self.tabs.setVisible(shown)
+            self.add_tab_button.setVisible(shown)
 
     def window_icon(self, name):
         return theme.glyph(name, theme.colors()["title"], 18)
@@ -5603,7 +5972,7 @@ class MainWindow(QMainWindow):
         except OSError:  # a read-only configuration folder: the project is used, not kept
             self.project = path
         self.board.activate(path)
-        for page in (self.launch, self.files, self.approvals, self.sandboxes, self.kits, self.statistics):
+        for page in (self.launch, self.files, self.approvals, self.sandboxes, self.kits, self.statistics, self.team):
             page.set_project(path)
         self.connections.open_for_workspace(path)
         self.show_project_state()
@@ -5659,9 +6028,10 @@ class MainWindow(QMainWindow):
                   and same_folder((self.tabs.entry(i) or {}).get("path"), path)]
         last = bool(path) and not others
         if last and self.board.dirty_for(path):
-            if not confirm(self, tr("Close tab"), tr("The board of {path} has changes that are not applied. Close the "
-                                                     "tab and drop them?", path=printable(path)),
-                           tr("Close and drop them"), destructive=True, reject=tr("Keep the tab")):
+            if not ask_first(self, "tab-close", tr("Close tab"), tr("The board of {path} has changes that are not "
+                                                                    "applied. Close the tab and drop them?",
+                                                                    path=printable(path)),
+                             tr("Close and drop them"), reject=tr("Keep the tab")):
                 return False
         self.tabs.removeTab(index)
         if last:
@@ -6139,10 +6509,10 @@ class MainWindow(QMainWindow):
             runs = {}
         if not runs:
             return True
-        return confirm(self, tr("Quit"), tr("{count} sandbox(es) still run. Without this window nobody answers their "
-                                            "questions: each is refused after {seconds} seconds. Quit anyway?",
-                                            count=len(runs), seconds=self.sai.approval_seconds),
-                       tr("Quit"), destructive=True, reject=tr("Keep the window"))
+        return ask_first(self, "app-quit", tr("Quit"),
+                         tr("{count} sandbox(es) still run. Without this window nobody answers their questions: each "
+                            "is refused after {seconds} seconds. Quit anyway?", count=len(runs),
+                            seconds=self.sai.approval_seconds), tr("Quit"), reject=tr("Keep the window"))
 
     def closeEvent(self, event):  # noqa: N802
         self.close_seen = True
@@ -6162,10 +6532,10 @@ class MainWindow(QMainWindow):
         # Tabs of sessions and attached starts only detach (the sandbox and its agent run on): no question for
         # them. Asked only for commands that really end with the app, by name.
         ending = self.terminals.ending()
-        if ending and not confirm(self, tr("Quit"), tr("These end with the app: {list}. Sessions keep running "
-                                                       "(attach again from Terminals or with sandbox-ai attach NAME). "
-                                                       "Quit?", list=", ".join(ending)),
-                                  tr("End them and quit"), destructive=True, reject=tr("Keep the window")):
+        if ending and not ask_first(self, "app-quit", tr("Quit"),
+                                    tr("These end with the app: {list}. Sessions keep running (attach again from "
+                                       "Terminals or with sandbox-ai attach NAME). Quit?", list=", ".join(ending)),
+                                    tr("End them and quit"), reject=tr("Keep the window")):
             event.ignore()
             return
         if self.terminals.detaching():
@@ -6173,10 +6543,10 @@ class MainWindow(QMainWindow):
                          f"with sandbox-ai attach NAME\n")
         work = self.running_work()
         if work:
-            if not confirm(self, tr("Quit"), tr("Still at work: {pages}. Quit anyway? Copies are cancelled and what "
-                                                "they created is removed; running sandbox-ai commands are stopped.",
-                                                pages=", ".join(work)),
-                           tr("Stop and quit"), destructive=True, reject=tr("Keep working")):
+            if not ask_first(self, "app-quit", tr("Quit"),
+                             tr("Still at work: {pages}. Quit anyway? Copies are cancelled and what they created is "
+                                "removed; running sandbox-ai commands are stopped.", pages=", ".join(work)),
+                             tr("Stop and quit"), reject=tr("Keep working")):
                 event.ignore()
                 return
             self.stop_work()

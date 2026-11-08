@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import re
+import time
 
 from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
@@ -34,9 +35,11 @@ from . import help_view, theme
 from .files import printable
 from .state import choose_file, choose_folder
 from .i18n import tr
-from .widgets import MONO, ask_first, background, confirm, flow, inform, plain_label, safe_tooltip, warn
+from .widgets import MONO, ask_first, background, flow, inform, plain_label, safe_tooltip, warn
 
 LOCAL = "local"  # this machine, as `sandbox-ai hosts` names it
+REMOTE_CHECK_DELAY = 2000  # ms after an edit before another host's launcher checks the board (a dry run over SSH)
+HOST_RETRY = 60  # seconds before another host's launcher options are asked for again after a failed read
 
 
 def scrub_board(state):
@@ -955,6 +958,12 @@ class BoardPage(QWidget):
         self.host_choice = HostCombo(sai)
         self.host_choice.chosen.connect(lambda _host: self.host_changed())
         self.host_known = {}  # {(host, agent): the option strings of that host's launcher, or None: not known}
+        # {(host, agent): time.monotonic() of a read that failed}: asked again after HOST_RETRY s, or at once when the
+        # host is chosen again or a start or dry run needs them (never "not known" for good after one failure).
+        self.host_failed = {}
+        self.host_reading = set()  # (host, agent) whose options are being read now
+        # The launcher's verdict on another host is a dry run over SSH: one at a time, the last edit's after it.
+        self.check_running, self.check_pending = False, False
         self.host_note = plain_label(role="secondary")
         self.host_note.hide()
         layout.addWidget(self.host_note)
@@ -1078,9 +1087,9 @@ class BoardPage(QWidget):
         if not self.dirty():
             return True
         where = printable(self.directory) if self.directory else tr("the new board")
-        return confirm(self, tr("Changes not applied"),
-                       tr("The board of {path} has changes that are not applied. Drop them?", path=where),
-                       tr("Drop the changes"), destructive=True, reject=tr("Keep them"))
+        return ask_first(self, "board-discard", tr("Changes not applied"),
+                         tr("The board of {path} has changes that are not applied. Drop them?", path=where),
+                         tr("Drop the changes"), reject=tr("Keep them"))
 
     def show_notice(self, text, role="secondary"):
         draft = getattr(self, "draft_notice", "")
@@ -1451,23 +1460,52 @@ class BoardPage(QWidget):
         self.preview.setPlainText(B.command_line(self.sai, self.board))
         self.problems = problems
         self.verdict.setText(tr("The launcher checks the options…"))
-        self.check_timer.start(int(self.settings().get("board_check_delay", 700)))
+        self.check_timer.start(self.check_delay())
 
     def check(self):
-        """The launcher's own verdict: a dry run of the board (no side effects), in the background."""
-        self.check_token += 1
-        token = self.check_token
+        """The launcher's own verdict: a dry run of the board (no side effects), in the background. On another host
+        (a dry run over SSH, seconds each) one runs at a time: an edit meanwhile asks for one more after it, with the
+        board as it is then; an answer for an older board or another host is dropped (the token)."""
         agent, _, _ = B.values(self.board)
         host = self.host()
-        if host != LOCAL and (host, agent) not in self.host_known:  # another agent: its options there
-            self.host_known[(host, agent)] = None
-            background(self.sai.host_launch_options, host, agent, timeout=90,
-                       done=lambda found, error: self.host_options_read(host, agent, found, error))
+        if host != LOCAL:
+            self.read_host_options(host, agent)
+            if self.check_running:
+                self.check_pending = True
+                return
+        self.check_token += 1
+        token = self.check_token
+        self.check_running, self.check_pending = host != LOCAL, False
         background(self.sai.host_dry_run, host, agent, B.launcher_argv(self.sai, self.board), timeout=120,
-                   done=lambda result, error: self.checked(token, result, error))
+                   done=lambda result, error: self.checked(token, result, error, host))
 
-    def checked(self, token, result, error):
-        if token != self.check_token:
+    def check_delay(self):
+        """Milliseconds after an edit before the launcher's verdict is asked for: longer for another host (SSH)."""
+        delay = int(self.settings().get("board_check_delay", 700))
+        return delay if self.host() == LOCAL else max(delay, REMOTE_CHECK_DELAY)
+
+    def read_host_options(self, host, agent, now=False):
+        """The options the launcher of HOST takes for AGENT, read in the background unless known or being read; a
+        failed read is tried again after HOST_RETRY seconds (NOW: at once)."""
+        key = (host, agent)
+        if host == LOCAL or key in self.host_reading or self.host_known.get(key) is not None:
+            return
+        failed = self.host_failed.get(key)
+        if failed is not None and not now and time.monotonic() - failed < HOST_RETRY:
+            return
+        self.host_known.setdefault(key, None)
+        self.host_reading.add(key)
+        background(self.sai.host_launch_options, host, agent, timeout=90,
+                   done=lambda found, error: self.host_options_read(host, agent, found, error))
+
+    def checked(self, token, result, error, host=None):
+        if host is not None and host != LOCAL:
+            self.check_running = False
+            if self.check_pending:  # edited meanwhile: the verdict of the board as it is now
+                self.check_pending = False
+                self.check_timer.start(0)
+                return
+        if token != self.check_token or (host is not None and host != self.host()):
             return
         plan, message = result if error is None else (None, str(error))
         if plan is not None:
@@ -2079,13 +2117,14 @@ class BoardPage(QWidget):
         return self.new_from_preset(preset, values)
 
     def new_from_preset(self, preset, values=None):
-        """The board of PRESET (a Preset or the name of a built-in one) for the current project; VALUES fill
-        in its placeholders (None: they stay, shown as problems until filled in on the board)."""
+        """The board of PRESET (a Preset, or the key or id of one of the board's host's catalogue: its sandbox-ai
+        presets, the app's own and yours) for the current project; VALUES fill in its placeholders (None: they stay,
+        shown as problems until filled in on the board)."""
         from . import presets
         if not self.may_discard():
             return None
         if isinstance(preset, str):
-            preset = presets.find(preset, presets.load_mine(self.sai)[0])
+            preset = presets.catalogue(self.sai, self.host()).find(preset)
         directory = self.project_folder()
         board = presets.build(self.sai, preset, directory, agent=self.default_agent(), values=values,
                               grid=self.grid(), backend=self.settings().get("default_backend"))
@@ -2104,10 +2143,17 @@ class BoardPage(QWidget):
         if ask and not self.may_discard():
             return None
         from .wizard import SandboxWizard
-        wizard = SandboxWizard(self.sai, self.settings, self)
+        wizard = SandboxWizard(self.sai, self.settings, self, board_host=self.host())
         wizard.written.connect(lambda board, directory: self.wizard_written(board, directory, asked=ask))
+        wizard.board_wanted.connect(self.board_for_host)
         wizard.exec()
         return wizard
+
+    def board_for_host(self):
+        """The wizard is for this machine; "Use the Board for a host" lands here: the host is chosen beside Apply."""
+        self.show_notice(tr("Choose the host the board starts on (beside Apply), then a preset (New from preset…) or "
+                            "the parts; paths are that host's, typed in."), "notice-warn")
+        self.host_choice.setFocus()
 
     def wizard_written(self, board, directory, asked=True):
         """Show the board the wizard wrote. Opened without asking first (new_project) and written for the
@@ -2130,6 +2176,8 @@ class BoardPage(QWidget):
         run and the start from that host's launcher, whose options are read in the background."""
         host = self.host()
         remote = host != LOCAL
+        self.host_failed = {key: when for key, when in self.host_failed.items() if key[0] != host}  # asked again
+        self.check_pending = self.check_running  # an answer for the host before is dropped; this one's after it
         self.apply_button.setEnabled(not remote)
         self.apply_button.setToolTip(tr("Apply writes the project file on this machine; on {host} the board starts "
                                         "as it is (--no-config)", host=printable(host)) if remote else
@@ -2145,7 +2193,12 @@ class BoardPage(QWidget):
         self.check_timer.start(0)
 
     def host_options_read(self, host, agent, found, error):
+        self.host_reading.discard((host, agent))
         self.host_known[(host, agent)] = set(found) if error is None and found else None
+        if self.host_known[(host, agent)] is None:
+            self.host_failed[(host, agent)] = time.monotonic()  # asked again later, or when needed
+        else:
+            self.host_failed.pop((host, agent), None)
         if error is not None and host == self.host():
             self.host_note.setText(self.host_note.text() + " " + tr("Its options could not be read: {error}",
                                                                     error=printable(str(error))[-200:]))
@@ -2173,8 +2226,9 @@ class BoardPage(QWidget):
                                               lineterm="")) if old else new
         question = tr("Write {path} with this content and trust exactly it? The details show what changes.",
                       path=f"{main}/.sandbox-ai.json")
-        if not confirm(self, tr("Write and trust"), (lead + "\n\n" + question) if lead else question,
-                       tr("Write and trust"), details=diff):
+        # Trusted, the file's options apply at every later start of the project: asked first (Cancel the default).
+        if not ask_first(self, "project-trust", tr("Write and trust"), (lead + "\n\n" + question) if lead else question,
+                         tr("Write and trust"), details=diff):
             return False
         background(self.sai.write_project, main, document, owner=self, source=self.apply_button, timeout=60,
                    done=lambda result, error: self.applied(main, result, error, then))
@@ -2204,6 +2258,7 @@ class BoardPage(QWidget):
 
     def dry_run(self):
         agent, _, _ = B.values(self.board)
+        self.read_host_options(self.host(), agent, now=True)  # on demand, also after a failed read
         background(self.sai.host_dry_run, self.host(), agent, B.launcher_argv(self.sai, self.board), owner=self,
                    source=self.dry_button, timeout=120, done=self.dry_run_done)
 
@@ -2222,7 +2277,12 @@ class BoardPage(QWidget):
             warn(self, tr("Not started"), "\n".join(p.text for p in errors))
             return False
         untrusted = self.untrusted.get(self.key_of(self.directory))
-        if untrusted:
+        if untrusted and self.host() != LOCAL:
+            # Apply writes and trusts this machine's file, so it is not offered for another host: there the board starts
+            # as it is shown (--no-config: no project file is read there), after a yes to what came from that file.
+            if not self.start_untrusted_on_host(untrusted):
+                return False
+        elif untrusted:
             warn(self, tr("Not started"), tr("{path} is not trusted: look at the board, then Apply (it writes and trusts "
                                              "what you see) before you start it.", path=printable(untrusted)))
             return False
@@ -2242,6 +2302,17 @@ class BoardPage(QWidget):
             return self.start_from_project_file(servers, embedded, session)
         return self.run_start(B.launcher_argv(self.sai, self.board), embedded, session)
 
+    def start_untrusted_on_host(self, path):
+        """The board came from the untrusted project file PATH of this machine and starts on another host: asked first
+        (Cancel the default) whether exactly the board shown may start there - the file itself is neither written
+        nor trusted (Apply is this machine's), and nothing of it is read on that host."""
+        host = printable(self.host())
+        return ask_first(self, "project-trust", tr("Start on {host}", host=host), tr(
+            "The board comes from {path}, which is not trusted. Apply (write and trust) is for this machine only, so "
+            "on {host} the board starts as it is shown, without any project file (--no-config). Look at every part of "
+            "the board first: whoever could write that folder chose it. Start it on {host} as shown?",
+            path=printable(path), host=host), tr("Start as shown"))
+
     def run_start(self, options, embedded, session):
         """Run the start in a terminal; a failure to start it is a message, never an exception in a slot."""
         try:
@@ -2249,6 +2320,8 @@ class BoardPage(QWidget):
             host = self.host()
             if host != LOCAL:
                 known = self.host_known.get((host, agent))
+                if not known:  # not read yet, or the read failed: asked again now, for the next start and the verdict
+                    self.read_host_options(host, agent, now=True)
                 unknown = backend.unknown_options(self.sai.options(), options, known) if known else []
                 if unknown:
                     warn(self, tr("Not started"), tr("The sandbox-ai on {host} does not know these options: {list}. "

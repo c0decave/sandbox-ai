@@ -172,6 +172,7 @@ class TeamPage(QWidget):
         super().__init__()
         self.sai, self.terminal = sai, terminal
         self.teams, self.shown, self.token, self.show_token, self.loaded_once = [], None, 0, 0, False
+        self.teams_host = None  # whose teams the rows are
         self.project = None
         layout = QVBoxLayout(self)
         layout.addWidget(plain_label(tr("Teams of agents (sandbox-ai team): one sandbox per agent on a shared "
@@ -180,7 +181,7 @@ class TeamPage(QWidget):
                                      role="secondary"))
         from .host_choice import HostChooser
         self.hosts = HostChooser(sai, tr("The teams of this machine, or of a host (over SSH)"))
-        self.hosts.changed.connect(lambda _host: self.refresh() if self.loaded_once else None)
+        self.hosts.changed.connect(lambda _host: self.host_changed())
         layout.addWidget(self.hosts)
         split = QSplitter(Qt.Orientation.Horizontal)
         left = QGroupBox(tr("Teams"))
@@ -253,6 +254,27 @@ class TeamPage(QWidget):
 
     # -- reading --
 
+    def host_changed(self):
+        """Another host: the teams of the one before go at once (Talk to the lead, Stop and Delete never name a team
+        of one host on another), and its answers still on their way are dropped."""
+        self.token += 1
+        self.show_token += 1
+        self.teams, self.teams_host = [], None
+        fill(self.table, [], keys=[])
+        self.clear_details()
+        self.update_buttons()
+        if self.loaded_once:
+            self.refresh()
+
+    def acting_host(self):
+        """The host chosen, when the teams shown are its own; None (and said) when they are another's."""
+        host = self.host()
+        if self.teams_host not in (None, host):
+            self.status.setText(tr("The teams shown are {old}'s, not {host}'s: Refresh first.",
+                                   old=self.hosts.label(self.teams_host), host=self.hosts.label(host)))
+            return None
+        return host
+
     def refresh(self):
         self.loaded_once = True
         host = self.host()
@@ -273,7 +295,7 @@ class TeamPage(QWidget):
                                    error=printable(error)[:500]))
             self.update_buttons()
             return
-        self.teams = [t for t in result if valid_team(t.get("name"))]
+        self.teams, self.teams_host = [t for t in result if valid_team(t.get("name"))], host
         before = self.chosen()
         fill(self.table, [[t["name"], ", ".join(t["members"]), t["workspace"]] for t in self.teams],
              keys=[t["name"] for t in self.teams])
@@ -371,7 +393,9 @@ class TeamPage(QWidget):
         self.status.setText(tr("Team {name} starts in the terminal; Refresh once it says so.", name=name))
 
     def attach(self):
-        name, host = self.chosen(), self.host()
+        name, host = self.chosen(), self.acting_host()
+        if host is None:
+            return
         lead = (self.shown or {}).get("lead") if (self.shown or {}).get("name") == name else None
         if name is None or lead not in AGENTS:
             return
@@ -380,8 +404,8 @@ class TeamPage(QWidget):
         self.terminal(argv, f"sandbox-ai attach {session}" + ("" if host == LOCAL else f" ({host})"))
 
     def post(self):
-        name, host = self.chosen(), self.host()
-        if name is None:
+        name, host = self.chosen(), self.acting_host()
+        if name is None or host is None:
             return
         members = [m for m in (self.shown or {}).get("members") or [] if m in AGENTS] or \
             next((t["members"] for t in self.teams if t["name"] == name), list(AGENTS))
@@ -398,10 +422,10 @@ class TeamPage(QWidget):
                    timeout=POST_SECONDS + 15, done=lambda result, error: self.done(name, result, error))
 
     def stop(self):
-        name, host = self.chosen(), self.host()
-        if name is None:
+        name, host = self.chosen(), self.acting_host()
+        if name is None or host is None:
             return
-        if not ask_first(self, "start-stop", tr("Stop…").rstrip("…"), tr(
+        if not ask_first(self, "team-stop", tr("Stop…").rstrip("…"), tr(
                 "Stop every member of team {name} on {host} and its board? What runs in them ends now.", name=name,
                 host=self.hosts.label(host)), tr("Stop")):
             return
@@ -410,10 +434,10 @@ class TeamPage(QWidget):
                    timeout=STOP_SECONDS + 30, done=lambda result, error: self.done(name, result, error))
 
     def delete(self):
-        name, host = self.chosen(), self.host()
-        if name is None:
+        name, host = self.chosen(), self.acting_host()
+        if name is None or host is None:
             return
-        if not ask_first(self, "start-delete", tr("Delete…").rstrip("…"), tr(
+        if not ask_first(self, "team-delete", tr("Delete…").rstrip("…"), tr(
                 "Delete team {name} on {host}? Its members are stopped, then their HOMEs and the board are removed "
                 "for good; the workspace stays.", name=name, host=self.hosts.label(host)), tr("Delete")):
             return

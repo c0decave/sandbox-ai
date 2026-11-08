@@ -83,7 +83,7 @@ def test_secrets_never_reach_a_file(window, env, monkeypatch, wait):
     window.set_project(folder)
     window.launch.agent_args.setText(f"--model sonnet --api-key {secret} --token={token} {token}")
     for edit in window.findChildren(QtWidgets.QLineEdit):  # every password field holds the secret
-        if edit.echoMode() == QtWidgets.QLineEdit.EchoMode.Password:
+        if edit.property("secret_value") or edit.echoMode() == QtWidgets.QLineEdit.EchoMode.Password:
             edit.setText(secret)
     window.board.set_prop(window.board.board.first("agent").id, "arguments", f"--verbose --api-key {secret}")
     window.connections.filter.setText("example.org")
@@ -177,8 +177,8 @@ def test_tables_splitters_filters_and_folders_come_back(window, env, monkeypatch
     picked = env / "picked"
     picked.mkdir()
     asked = []
-    monkeypatch.setattr(QtWidgets.QFileDialog, "getExistingDirectory",
-                        lambda parent, title, start="": asked.append(start) or str(picked))
+    monkeypatch.setattr("sandbox_ai_app.state.run_dialog",
+                        lambda dialog: asked.append(dialog.directory().absolutePath()) or [str(picked)])
     window.files.add_other()
     again = restart(window, monkeypatch)
     try:

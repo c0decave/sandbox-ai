@@ -134,7 +134,22 @@ class PresetDirs(QWidget):
             from .state import choose_folder
             path = choose_folder(self, tr("Folder with presets (*.json)"), "presets")
         if path:
-            self.run("add", path)
+            self.add_path(path)
+
+    def add_path(self, path):
+        """Add PATH to the preset directories of the host chosen, asked first as the web interface asks it
+        (defaults-lower): every later start there reads presets from it too."""
+        host = self.host()
+        listed = [entry["path"] for entry in self.entries]
+        where = tr("this computer") if host == LOCAL else printable(host)
+        if not ask_first(self, "defaults-lower", tr("Preset directories"),
+                         tr("Add {path} to the preset directories of {host}? Every later start there reads presets "
+                            "from it too: whoever can write that folder chooses what a preset there sets.",
+                            path=printable(path), host=where), tr("Add"),
+                         detail={"old": {"preset_dirs": listed}, "new": {"preset_dirs": listed + [path]}}):
+            return False
+        self.run("add", path)
+        return True
 
     def remove(self):
         items = self.list.selectedItems()
@@ -143,6 +158,7 @@ class PresetDirs(QWidget):
 
     def run(self, action, path):
         host = self.host()
+        PR.HOST_DOCUMENTS.pop(host, None)  # the presets that host offers change: read again where they are shown
         if host == LOCAL:
             background(lambda: self.sai.preset_dir_command(action, path), owner=self,
                        source=[self.add_button, self.remove_button], timeout=90,
@@ -358,7 +374,19 @@ class SettingsDialog(QDialog):
         self.combo(form, "default_agent", tr("Agent"), [(a, a) for a in sai.agents], current)
         backends = [("podman", "Podman"), ("bwrap", "Bubblewrap")]
         self.combo(form, "default_backend", tr("Backend"), backends, current)
-        self.combo(form, "default_template", tr("Preset"), [(p.id, tr(p.title)) for p in PR.PRESETS], current)
+        # The presets of this machine's catalogue (sandbox-ai's, the app's own and yours): an app's own by its id, the
+        # others by their key (source:id), as the wizard finds them.
+        catalogue = PR.catalogue(sai, LOCAL)
+        template = self.combo(form, "default_template", tr("Preset"),
+                              [(p.id if p.source == "app" else p.key, p.text(p.title)) for p in catalogue.presets],
+                              current)
+        try:  # an app's own id that sandbox-ai's preset of that id replaced (development): that one is shown
+            chosen = catalogue.find(backend.setting("default_template", current))
+            template.blockSignals(True)
+            template.setCurrentIndex(max(0, template.findData(chosen.id if chosen.source == "app" else chosen.key)))
+            template.blockSignals(False)
+        except ValueError:
+            pass
         self.spin(form, "board_grid", tr("Board grid (0: no snapping)"), 0, 200, current)
 
         # privacy: sandbox-ai's own defaults, for every start (the app's and the command line's)

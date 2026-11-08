@@ -236,7 +236,8 @@ class Page:
 # (consecutive string literals of one call or tuple). The functions that issue one must ask first with
 # widgets.ask_first(..., ACTION, ...): in themselves or in a function they are nested in.
 MUTATIONS = {
-    "start-stop": ["stop_run", ("session", "stop"), "team_stop"],
+    "start-stop": ["stop_run", ("session", "stop")],
+    "team-stop": ["team_stop"],
     "mcp-stop": ["stop_mcp"],
     "project-trust": ["trust_project"],
     "login-remove": [("identities", "remove"), "save_identity"],
@@ -260,7 +261,8 @@ MUTATIONS = {
     "canary-tokens": ["canary_run"],
     "canary-resume": ["canary_resume"],
     "project-forget": ["forget_trusted", ("wizard", "forget")],
-    "start-delete": ["team_delete"],
+    "team-delete": ["team_delete"],
+    "image-remove": [("images", "remove")],
     "mcp-attach": ["mcp_attach", "host_mcp_attach_live"],
     "mcp-detach": ["host_mcp_detach_live"],
     "net-keep": ["net_keep"],

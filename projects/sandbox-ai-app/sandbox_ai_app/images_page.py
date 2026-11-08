@@ -18,16 +18,17 @@ import re
 from PySide6.QtCore import QEvent, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QSyntaxHighlighter, QTextCharFormat, QTextCursor, QTextFormat
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout,
     QLineEdit, QListWidget, QListWidgetItem, QMenu, QPlainTextEdit, QPushButton, QSplitter, QTabWidget, QTextEdit,
     QToolTip, QVBoxLayout, QWidget,
 )
 
 from . import theme
 from .files import printable
+from .host_choice import on_host
 from .i18n import tr
 from .widgets import (
-    MONO, AsyncCommand, Task, button, confirm, fill, inform, plain_label, safe_tooltip, select_keys,
+    MONO, AsyncCommand, Task, ask_first, button, confirm, fill, inform, plain_label, safe_tooltip, select_keys,
     selected_keys, show_text, table, warn,
 )
 
@@ -911,7 +912,8 @@ class ImagesPage(QWidget):
                 warn(self, tr("Images"), tr("Not an absolute path without ':': {path}", path=printable(source)))
                 return
         else:
-            source, _ = QFileDialog.getOpenFileName(self, tr("File to copy into the image"))
+            from .state import choose_file
+            source = choose_file(self, tr("File to copy into the image"), "image-file")
         if not source:
             return
         dialog = FileTargetDialog(self, source)
@@ -1020,11 +1022,19 @@ class ImagesPage(QWidget):
     def save(self):
         if self.description is None or not self.dirty():
             return
-        argv, stdin = self.save_argv()
-        self.task.run(argv, self.saved, tr("Saving the extension of {name}…", name=self.target), self.save_button,
-                      input=stdin)
+        argv, stdin, host = *self.save_argv(), self.host()
+        # A host file built into the image reaches every later start of it: asked first (image-file).
+        if self.pending_files and not ask_first(self, "image-file", tr("Save the extension"), on_host(host, tr(
+                "Build {files} into the image {name}? Every later start of it can read them.",
+                files=", ".join(printable(f"{s} -> {t}") for s, t, _m in self.pending_files), name=self.target)),
+                tr("Save")):
+            return
+        self.task.run(argv, lambda status, out, err: self.saved(status, out, err, host),
+                      tr("Saving the extension of {name}…", name=self.target), self.save_button, input=stdin)
 
-    def saved(self, status, out, err):
+    def saved(self, status, out, err, host=None):
+        if host is not None and host != self.host():
+            return  # saved on the host before: its extension is never shown under this one (the lists were read again)
         try:
             document = json.loads(out) if out.strip() else None
         except ValueError:
@@ -1061,11 +1071,12 @@ class ImagesPage(QWidget):
 
     def create_variant(self, name, agent, empty=False):
         argv = self.run_argv("images", "new", name, "--from", agent, *(["--empty"] if empty else []), "--json")
-        self.task.run(argv, lambda status, out, err: self.variant_done(status, out, err, name),
+        host = self.host()
+        self.task.run(argv, lambda status, out, err: self.variant_done(status, out, err, name, host),
                       tr("Creating the variant {name}…", name=name), self.new_button)
 
-    def variant_done(self, status, out, err, name):
-        if status == -2:
+    def variant_done(self, status, out, err, name, host=None):
+        if status == -2 or (host is not None and host != self.host()):
             return
         if status != 0:
             warn(self, tr("Images"), tr("sandbox-ai did not create the variant {name}.", name=name),
@@ -1087,13 +1098,16 @@ class ImagesPage(QWidget):
                   "stop working.", name=entry["target"], image=entry["image"]) if keep_image else \
             tr("Delete the variant {name} and its image {image}? Projects that start it with --image-variant stop "
                "working.", name=entry["target"], image=entry["image"])
-        if not confirm(self, tr("Delete variant"), text, tr("Delete"), destructive=True):
+        host = self.host()
+        if not ask_first(self, "image-remove", tr("Delete variant"), on_host(host, text), tr("Delete")):
             return
         self.task.run(self.run_argv("images", "remove", entry["target"], *(["--keep-image"] if keep_image else [])),
-                      lambda status, out, err: self.deleted(status, out, err, entry["target"]),
+                      lambda status, out, err: self.deleted(status, out, err, entry["target"], host),
                       tr("Deleting the variant {name}…", name=entry["target"]), self.delete_button)
 
-    def deleted(self, status, out, err, name):
+    def deleted(self, status, out, err, name, host=None):
+        if host is not None and host != self.host():
+            return  # removed on the host before: this host's lists are read already
         if status not in (0, -2):
             warn(self, tr("Images"), tr("sandbox-ai did not delete the variant {name}.", name=name),
                  details=printable((err or out).strip()[-3000:]))
@@ -1180,10 +1194,11 @@ class ImagesPage(QWidget):
         if not entry or entry["variant"] or not entry.get("extended"):
             warn(self, tr("Images"), tr("Select an agent's image with an extension first."))
             return
-        if not confirm(self, tr("Drop the extension"), tr("Drop the extension of {name}? Its packages, files and "
-                                                         "fragment are removed; the next build is the base image.",
-                                                         name=entry["target"]), tr("Drop"), destructive=True):
+        host = self.host()
+        if not ask_first(self, "image-remove", tr("Drop the extension"), on_host(host, tr(
+                "Drop the extension of {name}? Its packages, files and fragment are removed; the next build is the "
+                "base image.", name=entry["target"])), tr("Drop")):
             return
         self.task.run(self.run_argv("images", "remove", entry["target"]),
-                      lambda status, out, err: self.deleted(status, out, err, entry["target"]),
+                      lambda status, out, err: self.deleted(status, out, err, entry["target"], host),
                       tr("Dropping the extension of {name}…", name=entry["target"]), self.more_button)

@@ -17,6 +17,10 @@ def page(qapp, tmp_path, monkeypatch):
                       ("XDG_DATA_HOME", "data")):
         monkeypatch.setenv(name, str(tmp_path / sub))
     (tmp_path / "runtime").mkdir()
+    # Without a workspace node the launcher's verdict takes the working directory as the workspace: a project of
+    # the test's own, not the app's directory (which lies in sandbox-ai's own tree and is refused for that).
+    (tmp_path / "cwd").mkdir()
+    monkeypatch.chdir(tmp_path / "cwd")
     monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
     monkeypatch.setattr(widgets, "SHOWN", [])
     from sandbox_ai_app.board_view import BoardPage
@@ -240,13 +244,14 @@ def test_the_wizard_for_the_boards_own_folder_asks_before_dropping_its_changes(p
     assert page.dirty()
 
     class FakeWizard:
-        def __init__(self, sai, settings, parent):
+        def __init__(self, sai, settings, parent, board_host="local"):
             from PySide6.QtCore import QObject, Signal
 
             class Emitter(QObject):
                 written = Signal(object, str)
+                board_wanted = Signal()
             self.emitter = Emitter()
-            self.written = self.emitter.written
+            self.written, self.board_wanted = self.emitter.written, self.emitter.board_wanted
 
         def exec(self):
             self.written.emit(B.from_argv(page.sai, "codex", [], workspaces=[str(folder)]), str(folder))

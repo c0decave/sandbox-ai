@@ -54,21 +54,30 @@ def test_the_arguments_of_each_kind_are_checked(env):
             sai.vpn_add_argv(*args)
 
 
-def test_a_typed_key_is_kept_as_a_secret_first_never_on_a_command_line(env, monkeypatch):
+def test_a_typed_key_is_kept_after_the_add_never_on_a_command_line(env, monkeypatch):
+    """Review round 4: the profile is added first (vpn add checks every field), then the typed key is kept as its
+    secret - a profile refused keeps no key; only Mullvad (whose account number vpn add reads) keeps it first."""
     sai = backend.SandboxAI()
     calls = []
     monkeypatch.setattr(sai, "call", lambda *args, timeout=120, input=None: calls.append((args, input)) or (0, "", ""))
     assert sai.vpn_add("ts", "tailscale", secret_value="tskey-auth-abc123", secret="TS_KEY")[0] == 0
-    (secret_args, secret_input), (add_args, add_input) = calls
+    (add_args, add_input), (secret_args, secret_input) = calls
     assert secret_args == ("secrets", "set", "TS_KEY") and secret_input == "tskey-auth-abc123\n"
     assert add_args == ("vpn", "add", "ts", "--tailscale", "--auth-key-secret=TS_KEY") and add_input is None
     assert "tskey-auth-abc123" not in json.dumps(add_args)
     with pytest.raises(ValueError, match="needs the name of the secret"):
         sai.vpn_add("ts", "tailscale", secret_value="tskey-x")
     calls.clear()
+    monkeypatch.setattr(sai, "call", lambda *args, timeout=120, input=None: calls.append((args, input)) or
+                        (1, "", "refused"))
+    assert sai.vpn_add("ts", "tailscale", secret_value="tskey-x", secret="TS_KEY") == (1, "", "refused")
+    assert [args[:2] for args, _ in calls] == [("vpn", "add")], "a refused profile keeps no key"
+    calls.clear()
+    monkeypatch.setattr(sai, "call", lambda *args, timeout=120, input=None: calls.append((args, input)) or (0, "", ""))
     monkeypatch.setattr(sai, "set_secret", lambda name, value: (1, "", "no keyring"))
-    assert sai.vpn_add("ts", "tailscale", secret_value="tskey-x", secret="TS_KEY") == (1, "", "no keyring")
-    assert calls == [], "no profile without its secret"
+    assert sai.vpn_add("ts", "tailscale", secret_value="tskey-x", secret="TS_KEY")[0] == 1
+    assert sai.vpn_add("mv", "mullvad", secret_value="1234123412341234", secret="MV") == (1, "", "no keyring")
+    assert [args[:2] for args, _ in calls] == [("vpn", "add")], "Mullvad: no profile without its account number"
 
 
 def test_the_dialog_asks_what_each_kind_needs(qapp, env):
@@ -76,7 +85,7 @@ def test_the_dialog_asks_what_each_kind_needs(qapp, env):
     dialog = VpnDialog()
     shown = lambda widget: dialog.form.isRowVisible(widget)  # noqa: E731
     dialog.kind.setCurrentIndex(dialog.kind.findData("wireguard"))
-    assert shown(dialog.rows["file"][1]) and not shown(dialog.secret) and not shown(dialog.value)
+    assert shown(dialog.rows["file"][1]) and not shown(dialog.secret) and not shown(dialog.rows["value"][1])
     dialog.kind.setCurrentIndex(dialog.kind.findData("tailscale"))
     assert not shown(dialog.rows["file"][1]) and shown(dialog.secret) and shown(dialog.exit_node)
     assert dialog.form.labelForField(dialog.secret).text().startswith("Secret for the auth key")
@@ -86,7 +95,7 @@ def test_the_dialog_asks_what_each_kind_needs(qapp, env):
     dialog.exit_node.setText("exit-1")
     dialog.file.setText("/ignored/for/tailscale")
     assert dialog.request() == ("ts", "tailscale", "tskey-auth-1", {"secret": "TS_KEY", "exit_node": "exit-1"})
-    assert dialog.value.echoMode() == dialog.value.EchoMode.Password
+    assert dialog.value.property("secret_value") and dialog.value.show_toggle.isChecked(), "Show value: on"
     dialog.deleteLater()
 
 
@@ -149,7 +158,7 @@ def test_a_typed_key_does_not_stay_behind_in_the_dialog(qapp, env, monkeypatch, 
         monkeypatch.setattr(vpn_page.VpnDialog, "exec", lambda dialog, c=cancel: run(dialog, c))
         vpn_page.add_profile(parent, sai, names.append)
     assert wait(lambda: names == ["ts"])
-    assert calls[0] == (("secrets", "set", "TS_KEY"), "tskey-auth-kept-nowhere\n")
+    assert calls[0][0][:2] == ("vpn", "add") and calls[1] == (("secrets", "set", "TS_KEY"), "tskey-auth-kept-nowhere\n")
     assert [d.value.text() for d in dialogs] == ["", ""], "added or cancelled: the typed key is gone"
     assert not any(e.text() == "tskey-auth-kept-nowhere" for e in parent.findChildren(QLineEdit))
     assert not widgets.SHOWN, "a secret not kept yet: nothing to replace, nothing asked"

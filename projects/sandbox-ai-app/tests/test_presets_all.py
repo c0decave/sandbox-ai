@@ -134,7 +134,8 @@ def test_the_model_choice_lists_the_provider_and_every_server_with_its_models(re
                                sai)
     assert choices[0][1] == "" and "provider" in choices[0][0]
     values = [value for _, value, _ in choices]
-    assert {"api", "gateway", "gpu", "ollama", "listed", "listed:a:7b", "listed:b"} <= set(values)
+    assert {"api", "gateway", "gpu", "ollama", "listed:a:7b", "listed:b"} <= set(values)
+    assert "listed" not in values, "several models and no default: the launcher needs NAME:MODEL"
     hints = {value: hint for _, value, hint in choices}
     assert "Anthropic Messages API" in hints["api"] and hints["gateway"] == "" and hints["ollama"] == ""
     assert all(hint == "" for _, _, hint in WL.model_choices(endpoints, "codex", sai))

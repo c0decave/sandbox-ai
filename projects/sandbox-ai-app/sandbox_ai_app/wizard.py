@@ -38,6 +38,7 @@ from .widgets import MONO, ask_first, background, confirm, plain_label, show_tex
 DEFAULT_MEMORY = "8g"  # the launcher's default, as a placeholder
 SECRET_EXAMPLE = "LLM_KEY"  # the same in every language
 URL_EXAMPLE = "https://llm.example.org"
+LOCAL = "local"  # this machine, as `sandbox-ai hosts` names it
 TOKEN_KINDS = (("env", "--git-token-env"), ("secret", "--git-token-secret"), ("typed", "--git-token-file"),
                ("file", "--git-token-file"))
 
@@ -88,6 +89,22 @@ class FolderPage(Page):
         self.form.addRow(tr("Used last"), self.recent)
         self.note = plain_label(role="secondary")
         self.form.addRow(self.note)
+        # The wizard is for this machine: its folders, its model servers (sandbox-ai llm here), its project file
+        # (written and trusted here). For another host of sandbox-ai hosts the Board starts there.
+        board_host = wizard.board_host
+        self.where = plain_label(role="notice-warn" if board_host != LOCAL else "secondary")
+        self.where.setText(tr("The Board starts on {host}, but this wizard sets up a project on this machine (its "
+                              "folder, model servers and project file). For a project on {host}, use the Board.",
+                              host=printable(board_host)) if board_host != LOCAL else
+                           tr("This wizard sets up a project on this machine (its folder, model servers and project "
+                              "file). For a project on another host (sandbox-ai hosts), use the Board: choose the "
+                              "host there."))
+        self.board_button = QPushButton(tr("Use the Board for a host"))
+        self.board_button.setToolTip(tr("Close the wizard and choose the host on the Board, beside Apply: its "
+                                        "launcher checks and starts the board there"))
+        self.board_button.clicked.connect(lambda _=False: wizard.use_board())
+        self.form.addRow(self.where)
+        self.form.addRow("", self.board_button)
         self.recent_loaded = False
 
     def initializePage(self):  # noqa: N802
@@ -284,6 +301,7 @@ class ModelPage(Page):
         self.form.addRow(self.status)
         self.endpoints, self.notes, self.listed = {}, [], {}
         self.loaded, self.shown_agent, self.existing_choice, self.seen_existing = False, None, None, None
+        self.seen_directory = None  # the folder the choice was made for
         self.wanted, self.wanted_model, self.models_for = None, "", None  # the server (and model) to choose once read
         self.ticket = 0
         self.where.buttonToggled.connect(lambda *_: self.where_changed())
@@ -319,6 +337,12 @@ class ModelPage(Page):
         if agent != self.shown_agent:
             self.agent_changed(agent)
         existing = self.wizard_.existing
+        directory = self.wizard_.directory
+        if directory != self.seen_directory:
+            # Another folder: its own choice, never the one made for the folder before (its --llm, its server).
+            if self.seen_directory is not None:
+                self.reset_choice()
+            self.seen_directory = directory
         if existing is not self.seen_existing:  # an existing project's --llm is shown as chosen
             self.seen_existing, self.existing_choice = existing, None
             if existing is not None and existing.document is not None:
@@ -336,6 +360,18 @@ class ModelPage(Page):
         else:
             self.show_endpoints()
         self.where_changed()
+
+    def reset_choice(self):
+        """Back to the agent's provider, no server chosen (a folder of its own: wizard.llm_choice too)."""
+        self.cloud.setChecked(True)
+        self.wanted, self.wanted_model, self.models_for = None, "", None
+        self.only.setChecked(True)
+        self.servers.blockSignals(True)
+        self.servers.clearSelection()
+        self.servers.setCurrentItem(None)
+        self.servers.blockSignals(False)
+        self.server_model.clear()
+        self.wizard_.llm_choice, self.wizard_.llm_endpoint = None, None
 
     def where_changed(self):
         own = self.own.isChecked()
@@ -558,7 +594,6 @@ class ServerDialog(QDialog):
         self.secret = QLineEdit()
         self.secret.setPlaceholderText(SECRET_EXAMPLE)
         self.value = QLineEdit()
-        self.value.setEchoMode(QLineEdit.EchoMode.Password)
         self.value.setPlaceholderText(tr("typed here: kept as that secret (or leave it empty if it is kept already)"))
         self.vpn = QComboBox()
         self.vpn.setEditable(True)
@@ -570,7 +605,7 @@ class ServerDialog(QDialog):
         form.addRow(tr("URL"), self.url)
         form.addRow(tr("Name"), self.name)
         form.addRow(tr("Secret for the API key (optional)"), self.secret)
-        form.addRow(tr("Its value"), self.value)
+        form.addRow(tr("Its value"), widgets.secret_value(self.value))
         form.addRow(tr("VPN profile (optional)"), self.vpn)
         form.addRow("", self.anthropic)
         layout.addWidget(plain_label(tr("Most local servers need no key. A key typed here is kept as a secret of "
@@ -755,33 +790,39 @@ class StartPage(Page):
         self.form.addRow("", self.about)
         self.form.addRow(self.buttons["custom"])
         self.mine, self.values, self.values_for = [], None, None
+        self.catalogue, self.reading = PR.Catalogue(), None  # the presets of the wizard's host (fill_presets)
+
+    def host(self):
+        """The host the wizard sets the project up for ("local": this machine)."""
+        return getattr(self.wizard_, "host", lambda: "local")()
 
     def fill_presets(self):
-        """The presets by category (the headings cannot be chosen), your own last."""
-        self.mine = PR.load_mine(self.wizard_.sai)[0]
-        self.preset.blockSignals(True)
-        self.preset.clear()
-        groups = [(tr(title), [p for p in PR.PRESETS if p.category == key]) for key, title in PR.CATEGORIES]
-        groups.append((tr(PR.MINE), self.mine))
-        for heading, presets in groups:
-            if not presets:
-                continue
-            self.preset.addItem(heading)
-            self.preset.model().item(self.preset.count() - 1).setEnabled(False)
-            for preset in presets:
-                self.preset.addItem("   " + preset.text(preset.title), preset.id)
-        self.preset.blockSignals(False)
+        """The catalogue of the wizard's host by category (the headings cannot be chosen): that host's sandbox-ai
+        presets, the app's own and yours - the same list as the gallery's. Another host's sandbox-ai presets are read
+        in the background (meanwhile the ones it said last)."""
+        from .preset_gallery import fill_preset_combo
+        host, current = self.host(), self.preset.currentData()
+        self.catalogue = PR.catalogue(self.wizard_.sai, host)
+        self.mine = self.catalogue.mine()
+        fill_preset_combo(self.preset, self.catalogue, current)
+        if host != "local" and not self.catalogue.complete and getattr(self, "reading", None) != host:
+            self.reading = host
+            background(PR.host_documents, self.wizard_.sai, host, owner=self, timeout=90,
+                       done=lambda result, error: self.host_presets_read(host, error))
+
+    def host_presets_read(self, host, error):
+        self.reading = None
+        if error is None and host == self.host():
+            self.fill_presets()  # what that host said is remembered (presets.remember): its catalogue now
 
     def select_preset(self, name):
-        index = self.preset.findData(name)
-        if index >= 0:
-            self.preset.setCurrentIndex(index)
-        return index >= 0
+        from .preset_gallery import select_preset
+        return select_preset(self.preset, self.catalogue, name)
 
     def chosen_preset(self):
-        name = self.preset.currentData()
+        key = self.preset.currentData()
         try:
-            return PR.find(name, self.mine) if name else None
+            return self.catalogue.find(key) if key else None
         except ValueError:
             return None
 
@@ -789,19 +830,22 @@ class StartPage(Page):
         self.buttons["preset"].setChecked(True)
         preset = self.chosen_preset()
         self.about.setText(preset.text(preset.description) if preset else "")
-        if preset is None or preset.id != self.values_for:
+        if preset is None or preset.key != self.values_for:
             self.values, self.values_for = None, None
 
     def open_gallery(self):
         from .preset_gallery import PresetGallery
         wizard = self.wizard_
         gallery = PresetGallery(wizard.sai, wizard.directory, wizard.agent_page.agent.currentText(), wizard.policy,
-                                None, self, wizard.settings().get("default_backend"))
+                                None, self, wizard.settings().get("default_backend"), host=self.host())
         if gallery.exec() == gallery.DialogCode.Accepted and gallery.result_ is not None:
             preset, values = gallery.result_
             self.fill_presets()
-            self.select_preset(preset.id)
-            self.values, self.values_for = values, preset.id
+            if not self.select_preset(preset.key):  # e.g. the host's presets read anew meanwhile: never another one
+                from .preset_gallery import fill_preset_combo
+                self.catalogue.presets.append(preset)
+                fill_preset_combo(self.preset, self.catalogue, preset.key)
+            self.values, self.values_for = values, preset.key
 
     def initializePage(self):  # noqa: N802
         has_existing = self.wizard_.existing is not None
@@ -819,6 +863,11 @@ class StartPage(Page):
             return self.preset.currentData() or "custom"
         return key
 
+    def confirm_cloud(self, existing):
+        """True when the human agrees that the project's own model server EXISTING goes for the agent's provider."""
+        return confirm(self, tr("Model"), cloud_question(existing), tr("Use the agent's provider"),
+                       reject=tr("Back"))
+
     def validatePage(self):  # noqa: N802
         wizard, choice = self.wizard_, self.choice()
         agent_page, model_page = wizard.agent_page, wizard.model_page
@@ -828,14 +877,14 @@ class StartPage(Page):
         if choice == "existing" and wizard.existing is not None:
             board = B.from_project(wizard.sai, wizard.existing.document, wizard.directory)
         elif preset is not None:
-            values = self.values if self.values_for == preset.id else None
+            values = self.values if self.values_for == preset.key else None
             # The preset's LLM server (and the VPN that follows it) is the one chosen on the Model page.
             given = WL.prefilled(preset, llm, wizard.llm_endpoint)
-            if values is None and preset.placeholders and self.values_for != preset.id:
+            if values is None and preset.placeholders and self.values_for != preset.key:
                 if given and not WL.needs_form(preset, given):
                     values = given
                 else:
-                    form = PlaceholderForm(wizard.sai, preset, self, agent=agent)
+                    form = PlaceholderForm(wizard.sai, preset, self, agent=agent, host=self.host())
                     for marker, value in given.items():
                         form.set_value(marker, value)
                     if widgets.AUTO_ANSWER is None and form.exec() != QDialog.DialogCode.Accepted:
@@ -855,8 +904,12 @@ class StartPage(Page):
             node.props["--dangerously-skip-permissions"] = True
         if llm:
             WL.apply(board, llm)  # --llm NAME[:MODEL] for whichever agent, no cloud model
-        elif model_page.dropped_existing():
-            WL.clear(board)  # the project's own server let go for the agent's provider
+        elif model_page.dropped_existing() and choice == "existing" and WL.uses_server(board):
+            # The project's own server let go for the agent's provider: said, and only after a yes (a server-only
+            # project reaches its cloud provider from now on). A preset keeps its own server (its form asks for it).
+            if not self.confirm_cloud(model_page.existing_choice):
+                return False
+            WL.clear(board)
         if not WL.uses_server(board):
             if model_page.model_name():
                 node.props["model"] = model_page.model_name()
@@ -866,6 +919,18 @@ class StartPage(Page):
             node.props.pop("model", None)  # the launcher refuses --model with --llm: the model is the server's
         wizard.board = board
         return True
+
+
+def cloud_question(existing):
+    """The question before the project's own model server EXISTING ({name, model, only}) is taken off the board for
+    the agent's provider (the Model page's cloud choice)."""
+    value = WL.llm_value(existing["name"], existing.get("model") or "") if existing else "?"
+    text = tr("The project uses its own model server ({value}). The Model page says the agent's provider (cloud): "
+              "--llm {value} is taken off the board.", value=printable(value))
+    if existing and existing.get("only"):
+        text += " " + tr("It was the only model the agent reached (--no-provider-defaults): from now on the agent "
+                         "reaches its cloud provider, and its login is copied in.")
+    return text + "\n\n" + tr("Go back to the Model page to keep the server.")
 
 
 class NetworkPage(Page):
@@ -1044,27 +1109,31 @@ class GitPage(Page):
         combo.setCurrentIndex(max(0, combo.findData(kind)))
         self.table.setCellWidget(row, 1, combo)
         edit = QLineEdit(value)
-        edit.setEchoMode(QLineEdit.EchoMode.Password if kind == "typed" else QLineEdit.EchoMode.Normal)
+        cell = widgets.secret_value(edit, kind == "typed")  # a typed token: its value, "Show value" beside it
 
         def kind_changed(_=None, e=edit, c=combo):
-            e.setEchoMode(QLineEdit.EchoMode.Password if c.currentData() == "typed" else QLineEdit.EchoMode.Normal)
+            widgets.mark_secret(e, c.currentData() == "typed")
             e.setPlaceholderText(tr(self.PLACEHOLDERS[c.currentData()]))
             e.setCompleter(self.completer() if c.currentData() == "secret" else None)
             e.setToolTip(tr("Kept secrets: {names}", names=", ".join(self.stored) or tr("none yet"))
                          if c.currentData() == "secret" else "")
         combo.currentIndexChanged.connect(kind_changed)
         kind_changed()
-        self.table.setCellWidget(row, 2, edit)
+        self.table.setCellWidget(row, 2, cell)
 
     def entries(self):
         found = []
         for row in range(self.table.rowCount()):
             url = (self.table.item(row, 0).text() if self.table.item(row, 0) else "").strip()
             kind = self.table.cellWidget(row, 1).currentData()
-            value = self.table.cellWidget(row, 2).text()
+            value = self.token_edit(row).text()
             if url or value:
                 found.append((url, kind, value))
         return found
+
+    def token_edit(self, row):
+        """The token field of ROW (in its cell beside its "Show value" toggle)."""
+        return self.table.cellWidget(row, 2).findChild(QLineEdit)
 
     def completer(self):
         from PySide6.QtWidgets import QCompleter
@@ -1076,7 +1145,7 @@ class GitPage(Page):
     def secrets_read(self, result, error):
         self.stored = [name for name, _ in result[1]] if error is None and result else []
         for row in range(self.table.rowCount()):
-            combo, edit = self.table.cellWidget(row, 1), self.table.cellWidget(row, 2)
+            combo, edit = self.table.cellWidget(row, 1), self.token_edit(row)
             if combo is not None and combo.currentData() == "secret":
                 edit.setCompleter(self.completer())
                 edit.setToolTip(tr("Kept secrets: {names}", names=", ".join(self.stored) or tr("none yet")))
@@ -1097,7 +1166,7 @@ class GitPage(Page):
         values = {"--git-token-env": [], "--git-token-secret": [], "--git-token-file": []}
         for row in range(self.table.rowCount()):
             url = (self.table.item(row, 0).text() if self.table.item(row, 0) else "").strip()
-            kind_box, edit = self.table.cellWidget(row, 1), self.table.cellWidget(row, 2)
+            kind_box, edit = self.table.cellWidget(row, 1), self.token_edit(row)
             kind, value = kind_box.currentData(), edit.text()
             if not url and not value:
                 continue
@@ -1283,8 +1352,13 @@ class SandboxWizard(QWizard):
     """The pages above around one board; done(board, directory) when the file was written."""
     written = Signal(object, str)
 
-    def __init__(self, sai, settings=None, parent=None):
+    board_wanted = Signal()  # "Use the Board for a host": the wizard closed for the Board's host choice
+
+    def __init__(self, sai, settings=None, parent=None, board_host=LOCAL):
         super().__init__(parent)
+        # The wizard works on this machine only (folders, model servers, the project file it writes and trusts);
+        # BOARD_HOST is where the Board that opened it starts (said on the first page).
+        self.board_host = board_host if isinstance(board_host, str) and board_host else LOCAL
         self.write_state = None  # None, "writing" (in its thread), "written": what Finish may do
         self.sai, self.settings = sai, settings or (lambda: {})
         self.setWindowTitle(tr("New sandbox for a project"))
@@ -1310,6 +1384,18 @@ class SandboxWizard(QWizard):
         self.currentIdChanged.connect(lambda _=0: self.lock_buttons())
         self.review_page.completeChanged.connect(self.lock_buttons)  # after QWizard's own update of the buttons
         self.resize(820, 640)
+
+    def host(self):
+        """Where the wizard's project is: this machine (the presets, servers and project file are read and written
+        here); another host's project is made on the Board."""
+        return LOCAL
+
+    def use_board(self):
+        """Closed for the Board (when nothing is being written): there the host is chosen."""
+        if self.write_state == "writing":
+            return
+        self.board_wanted.emit()
+        self.reject()
 
     def set_write_state(self, state):
         self.write_state = state
@@ -1351,9 +1437,10 @@ class SandboxWizard(QWizard):
         if not main:
             warn(self, tr("Not written"), tr("Add a workspace first: the file is written there."))
             return False
-        if not confirm(self, tr("Write and trust"), tr("Write {path} with this content and trust exactly it? The "
-                                                       "details show what changes.", path=f"{main}/.sandbox-ai.json"),
-                       tr("Write and trust"), details=self.file_diff()):
+        # Trusted, the file's options apply at every later start of the project: asked first (Cancel the default).
+        if not ask_first(self, "project-trust", tr("Write and trust"),
+                         tr("Write {path} with this content and trust exactly it? The details show what changes.",
+                            path=f"{main}/.sandbox-ai.json"), tr("Write and trust"), details=self.file_diff()):
             return False
         # The folder may be slow (a network file system): written in a thread; the wizard closes when it is.
         self.set_write_state("writing")

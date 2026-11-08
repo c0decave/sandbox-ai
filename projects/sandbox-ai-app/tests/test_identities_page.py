@@ -32,10 +32,10 @@ def test_a_new_identity_is_added_then_logged_in_and_published():
                                             "git": [{"url": "https://github.com", "user": "", "secret": "GH"}],
                                             "publish": [{"kind": "pypi", "secret": "PYPI"},
                                                         {"kind": "npm", "secret": "NPM", "url": "https://npm.example.org"}]})
-    assert steps == [["identities", "add", "work", "--name=Ada"],
-                     ["identities", "login", "work", "https://github.com", "--secret=GH", "--user=x-access-token"],
-                     ["identities", "publish", "work", "pypi", "--secret=PYPI"],
-                     ["identities", "publish", "work", "npm", "--secret=NPM", "--url=https://npm.example.org"]]
+    assert steps == [["identities", "add", "--name=Ada", "--", "work"],
+                     ["identities", "login", "--secret=GH", "--user=x-access-token", "--", "work", "https://github.com"],
+                     ["identities", "publish", "--secret=PYPI", "--", "work", "pypi"],
+                     ["identities", "publish", "--secret=NPM", "--url=https://npm.example.org", "--", "work", "npm"]]
 
 
 def test_an_unchanged_identity_needs_no_step():
@@ -49,16 +49,16 @@ def test_changes_set_logout_relogin_unpublish_and_reset_a_server():
            "git": [{"url": "https://github.com", "user": "", "secret": "GH_OTHER"}],
            "publish": [{"kind": "npm", "secret": "NPM"}]}
     assert S.identity_steps("work", OLD, new) == [
-        ["identities", "set", "work", "--email=ada@example.com", "--description=work"],
-        ["identities", "logout", "work", "http://localhost:3080"],
-        ["identities", "login", "work", "https://github.com", "--secret=GH_OTHER", "--user=x-access-token"],
-        ["identities", "unpublish", "work", "pypi"],
-        ["identities", "publish", "work", "npm", "--secret=NPM"]]  # back on registry.npmjs.org
+        ["identities", "set", "--email=ada@example.com", "--description=work", "--", "work"],
+        ["identities", "logout", "--", "work", "http://localhost:3080"],
+        ["identities", "login", "--secret=GH_OTHER", "--user=x-access-token", "--", "work", "https://github.com"],
+        ["identities", "unpublish", "--", "work", "pypi"],
+        ["identities", "publish", "--secret=NPM", "--", "work", "npm"]]  # back on registry.npmjs.org
 
 
 def test_option_looking_values_stay_one_argument():
     steps = S.identity_steps("w", None, {"name": "--help", "git": [], "publish": []})
-    assert steps == [["identities", "add", "w", "--name=--help"]]
+    assert steps == [["identities", "add", "--name=--help", "--", "w"]]
 
 
 def test_saving_stops_at_the_first_failed_step(monkeypatch):

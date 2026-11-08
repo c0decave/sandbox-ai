@@ -51,7 +51,11 @@ def shown(gallery):
 
 def test_the_gallery_lists_every_preset_by_category_with_a_picture_and_its_score(gallery):
     own = [p.id for p in PR.sandbox_ai_presets(gallery.sai)[0]]
-    assert shown(gallery) == [p.id for key, _ in PR.CATEGORIES for p in PR.PRESETS if p.category == key] + own
+    # One catalogue: an app's own preset that sandbox-ai has too (tor, local-api, development) is shown once, as
+    # sandbox-ai's.
+    replaced = {p.id for p in PR.PRESETS} & {ident[len("sai-"):] for ident in own}
+    assert shown(gallery) == [p.id for key, _ in PR.CATEGORIES for p in PR.PRESETS
+                              if p.category == key and p.id not in replaced] + own
     headings = [h.text() for h, _, _, _ in gallery.sections]
     assert headings == ["Simple", "Development", "Research", "Local & remote LLM", "Privacy & VPN", "Teams & policy",
                         *(["sandbox-ai's presets (sandbox-ai presets)"] if own else []), "My presets"]
@@ -157,7 +161,7 @@ def test_the_wizard_offers_the_same_library(env):
     wizard.directory = str(root / "project")
     page = wizard.start_page
     page.initializePage()
-    assert page.choice() == "vpn-mcp"
+    assert page.choice() == "app:vpn-mcp" and page.chosen_preset().id == "vpn-mcp", "a key of the catalogue"
     items = [page.preset.itemText(i).strip() for i in range(page.preset.count())]
     assert "Privacy & VPN" in items and "Strict rules for GitHub" in items
     heading = page.preset.findText("Privacy & VPN")

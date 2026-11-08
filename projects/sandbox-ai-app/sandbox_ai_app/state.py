@@ -17,7 +17,7 @@ from pathlib import Path
 import re
 import time
 
-from PySide6.QtCore import QByteArray, QObject, Qt, QTimer
+from PySide6.QtCore import QByteArray, QDir, QObject, Qt, QTimer
 from PySide6.QtWidgets import QApplication, QFileDialog
 
 from . import backend
@@ -221,26 +221,70 @@ class State(QObject):
             self.schedule()
 
 
-def choose_folder(parent, title, key="folder"):
-    """QFileDialog.getExistingDirectory, starting where the last one of KEY ended; the folder chosen is kept."""
+def file_dialog(parent, title, start="", mode="folder", name_filter="", name=""):
+    """A file dialog that lists hidden entries too (.claude, .config: QDir.Filter.Hidden; the platform's own dialog
+    would ignore that filter, so Qt's own is used, with its "Show hidden files" in the context menu). MODE: folder,
+    file, files or save (NAME the file offered). A typed path with a leading dot is taken as it is."""
+    dialog = QFileDialog(parent, title, start or "")
+    dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+    dialog.setFilter(dialog.filter() | QDir.Filter.Hidden)
+    if mode == "folder":
+        dialog.setFileMode(QFileDialog.FileMode.Directory)
+        dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
+    elif mode == "files":
+        dialog.setFileMode(QFileDialog.FileMode.ExistingFiles)
+    elif mode == "save":
+        dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+        dialog.setFileMode(QFileDialog.FileMode.AnyFile)
+        if name:
+            dialog.selectFile(name)
+    else:
+        dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
+    if name_filter:
+        dialog.setNameFilter(name_filter)
+    return dialog
+
+
+def run_dialog(dialog):
+    """[path] the human chose in DIALOG ([]: cancelled). Tests replace this; with widgets.AUTO_ANSWER set no dialog
+    is shown (it would wait for a human)."""
+    from . import widgets
+    try:
+        if widgets.AUTO_ANSWER is not None:
+            return []
+        return list(dialog.selectedFiles()) if dialog.exec() == QFileDialog.DialogCode.Accepted else []
+    finally:
+        dialog.deleteLater()
+
+
+def choose_path(parent, title, key, mode="folder", name_filter="", name=""):
+    """[path] chosen with file_dialog, starting where the last one of KEY ended; the folder chosen is kept."""
     state = current()
-    path = QFileDialog.getExistingDirectory(parent, title, state.folder(key) if state else "")
-    if path and state:
-        state.remember_folder(key, path)
-    return path
-
-
-def choose_file(parent, title, key="file"):
-    state = current()
-    path = QFileDialog.getOpenFileName(parent, title, state.folder(key) if state else "")[0]
-    if path and state:
-        state.remember_folder(key, path)
-    return path
-
-
-def choose_files(parent, title, key="files"):
-    state = current()
-    paths = QFileDialog.getOpenFileNames(parent, title, state.folder(key) if state else "")[0]
+    start = state.folder(key) if state else ""
+    if mode == "save" and name:
+        name = os.path.join(start, name) if start else name
+    paths = [p for p in run_dialog(file_dialog(parent, title, start, mode, name_filter, name)) if p]
     if paths and state:
         state.remember_folder(key, paths[0])
     return paths
+
+
+def choose_folder(parent, title, key="folder"):
+    """A folder (hidden ones listed too), starting where the last one of KEY ended; the folder chosen is kept."""
+    found = choose_path(parent, title, key, "folder")
+    return found[0] if found else ""
+
+
+def choose_file(parent, title, key="file", name_filter=""):
+    found = choose_path(parent, title, key, "file", name_filter)
+    return found[0] if found else ""
+
+
+def choose_files(parent, title, key="files"):
+    return choose_path(parent, title, key, "files")
+
+
+def choose_save(parent, title, name, name_filter="", key="save"):
+    """Where to write a file (NAME offered), hidden folders listed too; "" when cancelled."""
+    found = choose_path(parent, title, key, "save", name_filter, name)
+    return found[0] if found else ""

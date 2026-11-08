@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 
 from . import backend
 from .files import printable
+from .host_choice import on_host
 from .state import choose_file, choose_folder
 from .i18n import N_, tr
 from .widgets import (
@@ -304,11 +305,11 @@ class KitsPage(QWidget):
         super().__init__()
         self.sai, self.terminal = sai, terminal
         self.inventory, self.kits, self.project, self.project_kits, self.token = None, {}, None, [], 0
-        self.installed, self.market_entries = set(), {}
+        self.installed, self.market_entries, self.kits_host = set(), {}, None  # kits_host: whose rows are shown
         layout = QVBoxLayout(self)
         from .host_choice import HostChooser
         self.hosts = HostChooser(sai, tr("The kits of this machine, or of a host (over SSH)"))
-        self.hosts.changed.connect(lambda _host: self.refresh() if self.loaded_once else None)
+        self.hosts.changed.connect(lambda _host: self.host_changed())
         layout.addWidget(self.hosts)
         top = QHBoxLayout()
         self.summary = plain_label(role="secondary")
@@ -417,6 +418,23 @@ class KitsPage(QWidget):
         """TITLE with the host it runs on (for a terminal tab and a result)."""
         return title if self.host() == LOCAL else f"{title} ({self.host()})"
 
+    def host_changed(self):
+        """Another host: the rows of the one before go at once (an action never names a kit of one host on another),
+        and a late answer of that host is dropped."""
+        self.token += 1
+        self.clear_rows()
+        if self.loaded_once:
+            self.refresh()
+
+    def clear_rows(self):
+        self.inventory, self.kits, self.kits_host, self.market_entries = None, {}, None, {}
+        self.installed = set()
+        fill(self.table, [])
+        fill(self.market, [])
+        self.tree.clear()
+        self.store.setText("")
+        self.selection_changed()
+
     def refresh(self):
         """`sandbox-ai kits list --json`, in the background (on the host chosen)."""
         self.loaded_once = True
@@ -426,7 +444,7 @@ class KitsPage(QWidget):
             token = self.token
             self.summary.setText(tr("Asking {host}…", host=self.hosts.label(host)))
             background(lambda: self.sai.host_kits_inventory(host), owner=self, source=self.refresh_button,
-                       timeout=150, done=lambda result, error: self.loaded(token, result, error))
+                       timeout=150, done=lambda result, error: self.loaded(token, result, error, host))
             return
         if not self.sai.has_kits_command():
             self.summary.setText(tr("This sandbox-ai has no kits command (sandbox-ai kits); update it with: "
@@ -437,19 +455,21 @@ class KitsPage(QWidget):
         token = self.token
         self.summary.setText(tr("Reading the kits…"))
         background(self.sai.kits_inventory, owner=self, source=self.refresh_button, timeout=90,
-                   done=lambda result, error: self.loaded(token, result, error))
+                   done=lambda result, error: self.loaded(token, result, error, LOCAL))
 
-    def loaded(self, token, result, error):
-        if token != self.token:
-            return
+    def loaded(self, token, result, error, host=LOCAL):
+        if token != self.token or host != self.host():
+            return  # asked for another host (or before another refresh): never shown under this one
         if error is not None:
+            self.clear_rows()  # this host's kits are not known: none of another's stay
             self.summary.setText(tr("Cannot list the kits: {error}", error=printable(error)))
             self.update_buttons()
             return
-        self.show_inventory(result)
+        self.show_inventory(result, host)
 
-    def show_inventory(self, inventory):
+    def show_inventory(self, inventory, host=None):
         self.inventory = inventory
+        self.kits_host = host or self.kits_host or self.host()  # whose kits the rows are
         kits = [kit for kit in inventory.get("kits", []) if isinstance(kit, dict) and isinstance(kit.get("name"), str)]
         self.kits = {f"{kit.get('kind')}:{kit['name']}": kit for kit in kits}
         installed = inventory.get("installed") if isinstance(inventory.get("installed"), dict) else {}
@@ -619,12 +639,16 @@ class KitsPage(QWidget):
         (nothing more runs when that fails). What is added to a kit reaches every later start with it: asked first."""
         if action.startswith("add-") or action == "new-skill":
             what = " ".join(printable(a) for a in arguments) or printable(name)
-            if not ask_first(self, "kit-add", title or tr("Kits"), tr(
+            if not ask_first(self, "kit-add", title or tr("Kits"), on_host(self.host(), tr(
                     "Add {what} to the kit {name}? Every later start with this kit gets it; a plugin or a hook runs "
-                    "code there.", what=what, name=printable(name)), tr("Add")):
+                    "code there.", what=what, name=printable(name))), tr("Add")):
                 return
 
         host = self.host()
+        if self.kits_host not in (None, host):  # rows of another host: never acted on here
+            warn(self, title or tr("Kits"), tr("The kits shown are {old}'s, not {host}'s: Refresh first.",
+                                               old=self.hosts.label(self.kits_host), host=self.hosts.label(host)))
+            return
 
         def work():
             first = ""
@@ -782,9 +806,9 @@ class KitsPage(QWidget):
             return
         kind, agent, value = dialog.chosen()
         action = {"skill": "remove-skill", "hook": "remove-hook"}.get(kind, "remove-plugin")
-        if not ask_first(self, "kit-remove", tr("Remove from the kit"), tr(
+        if not ask_first(self, "kit-remove", tr("Remove from the kit"), on_host(self.host(), tr(
                 "Take {what} ({agent}) out of the kit {name}? Every later start with this kit is without it.",
-                what=printable(value), agent=printable(agent), name=printable(kit["name"])), tr("Remove")):
+                what=printable(value), agent=printable(agent), name=printable(kit["name"]))), tr("Remove")):
             return
         self.run(action, kit["name"], value, options=[f"--agent={agent}"], title=tr("Remove from the kit"))
 
@@ -811,9 +835,9 @@ class KitsPage(QWidget):
         name = kit["name"]
         # Trusted hooks run in every later start with the kit: asked first (kit-hooks-trust), then reviewed and
         # approved hook by hook in the terminal.
-        if not ask_first(self, "kit-hooks-trust", tr("Review and approve hooks…"), tr(
+        if not ask_first(self, "kit-hooks-trust", tr("Review and approve hooks…"), on_host(self.host(), tr(
                 "Hooks of {name} you approve run in every later start with that kit. The terminal shows every hook "
-                "and the full text of every file before you approve there.", name=printable(name)),
+                "and the full text of every file before you approve there.", name=printable(name))),
                 tr("Open the review")):
             return
         host = self.host()
@@ -849,9 +873,9 @@ class KitsPage(QWidget):
         kit = self.current()
         if kit is None:
             return
-        if ask_first(self, "kit-delete", tr("Delete kit…").rstrip("…"), tr(
+        if ask_first(self, "kit-delete", tr("Delete kit…").rstrip("…"), on_host(self.host(), tr(
                 "Delete the kit {name} with everything in it ({path})? Projects that use it can no longer start until "
-                "you remove --kit {name}.", name=printable(kit["name"]), path=printable(kit.get("path") or "")),
+                "you remove --kit {name}.", name=printable(kit["name"]), path=printable(kit.get("path") or ""))),
                 tr("Delete")):
             self.run("delete", kit["name"], options=["--yes"], title=tr("Delete"))
 
