@@ -934,3 +934,31 @@ def test_install_removes_the_copy_also_when_sudo_fails(remote):
     assert any(command.startswith("sh -c ") and "rm -rf --" in command and "case $d in" in command
                for command in sent), "cleaned up after"
     assert set(Path("/tmp").glob("sandbox-ai-install.*")) <= before
+
+
+def test_update_from_here_installs_this_machines_copy_as_the_same_kind(remote):
+    """hosts update --from-here: a host that cannot reach the release server (or before a release is published) gets
+    this machine's copy, as the kind of installation it has (here: the user's own)."""
+    h.save({"ct1": h.check("ct1", {"ssh": "user@ct1"})})
+    not_root(remote)
+    (remote["home"] / "kind").write_text("user")
+    result = h.update("ct1", from_here=True)
+    assert not result["error"], result
+    assert any("from this machine's copy" in note for note in result["notes"])
+    assert list((remote["home"] / ".local/share/sandbox-ai").glob("versions/*/sandbox/agent_sandbox.py"))
+    with pytest.raises(ValueError, match="--version is for the signed release"):
+        h.update("ct1", version="0.1.77", from_here=True)
+
+
+def test_an_update_with_no_release_points_to_from_here(remote, monkeypatch):
+    h.save({"ct1": h.check("ct1", {"ssh": "user@ct1"})})
+    real = h.run
+
+    def run(name, args, **kw):
+        if args[:1] == ["update"]:
+            return 1, "", "install.sh: https://github.com/c0decave/sandbox-ai has no published release"
+        return real(name, args, **kw)
+    monkeypatch.setattr(h, "run", run)
+    (remote["home"] / "kind").write_text("user")
+    result = h.update("ct1")
+    assert "sandbox-ai hosts update ct1 --from-here" in result["error"]

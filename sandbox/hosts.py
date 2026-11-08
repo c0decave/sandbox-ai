@@ -843,11 +843,14 @@ def status_text(info):
     return f"{version}, update unknown"
 
 
-def update(name, version=None, sudo=None, path=None, runner=subprocess.run):
+def update(name, version=None, sudo=None, path=None, runner=subprocess.run, from_here=False):
     """Update sandbox-ai on host NAME with its own `sandbox-ai update` (install.sh's signed update), as the same
     kind of installation. SUDO (None: the host's update_sudo): as `sudo -n`, which never asks for a password.
     {"name", "before", "after", "changed", "kind", "sudo", "error", "needs_sudo", "needs_password", "output",
-    "notes", "fixed"}; "needs_password": sudo wants one (update_terminal asks in a terminal)."""
+    "notes", "fixed"}; "needs_password": sudo wants one (update_terminal asks in a terminal). FROM_HERE: this
+    machine's copy of sandbox-ai is installed there instead (hosts install), as the same kind of installation (the
+    user's own, or for every user in its prefix): for a host that cannot reach the release server, or before a
+    release is published."""
     entry = {} if name == LOCAL else load(path).get(name)
     if entry is None:
         raise ValueError(f"no host {printable(name)}; see: sandbox-ai hosts list")
@@ -863,6 +866,21 @@ def update(name, version=None, sudo=None, path=None, runner=subprocess.run):
     why = not_updatable(name, info)
     if why:
         result["error"] = why
+        return result
+    if from_here:
+        if name == LOCAL:
+            raise ValueError("--from-here is for another host (this machine updates with: sandbox-ai update)")
+        if version is not None:
+            raise ValueError("--from-here installs this machine's version; --version is for the signed release")
+        mode = "system" if info["kind"] == "system" else "user"
+        done = install(name, mode, info.get("prefix") if mode == "system" else None,
+                       (bool(entry.get("update_sudo")) or None) if sudo is None else sudo, "here", None, path, runner)
+        result.update(sudo=done.get("sudo", False), error=done.get("error"), output=done.get("output", ""),
+                      needs_password=done.get("needs_password", False), after=done.get("after"),
+                      changed=bool(done.get("after")) and done.get("after") != result["before"])
+        result["notes"] += ["from this machine's copy (hosts install --from-here)", *done.get("notes", [])]
+        if not result["error"]:
+            forget_status(name)
         return result
     args = update_args(info, version)
     use_sudo = bool(entry.get("update_sudo")) if sudo is None else bool(sudo)
@@ -893,6 +911,10 @@ def update(name, version=None, sudo=None, path=None, runner=subprocess.run):
                                "on)")
         else:
             result["error"] = failure(status, out, err)
+            if "no published release" in said:
+                # Nothing to download yet (or the host cannot reach the release server): this machine's copy.
+                result["error"] += (f"; update it with this machine's copy instead: sandbox-ai hosts update {name} "
+                                    "--from-here")
         return result
     return finish_update(name, result, path, runner)
 
@@ -1252,11 +1274,12 @@ def update_lines(result):
     return lines
 
 
-def update_many(names, version=None, sudo=None, jobs=1, path=None, runner=subprocess.run, done=None):
+def update_many(names, version=None, sudo=None, jobs=1, path=None, runner=subprocess.run, done=None,
+                from_here=False):
     """[update result] for the hosts NAMES in their order, JOBS at a time; DONE(result) as each one ends."""
     def one(name):
         try:
-            result = update(name, version, sudo, path, runner)
+            result = update(name, version, sudo, path, runner, from_here=from_here)
         except (OSError, ValueError) as exc:
             result = {"name": name, "before": None, "after": None, "changed": False, "error": printable(exc),
                       "needs_password": False, "needs_sudo": False, "notes": [], "fixed": []}
@@ -1312,6 +1335,9 @@ def cli(argv_, out=print):
     updating.add_argument("--no-sudo", dest="sudo", action="store_false", help="without sudo, whatever the host says")
     updating.add_argument("--jobs", type=int, default=1, metavar="N", help="hosts at a time (1-8, default 1)")
     updating.add_argument("--json", action="store_true")
+    updating.add_argument("--from-here", action="store_true",
+                          help="install this machine's copy there instead of the signed release (no release server "
+                               "needed; the same kind of installation)")
     installing = commands.add_parser("install", help="install sandbox-ai on a host (from here, or its signed release)")
     installing.add_argument("name")
     target = installing.add_mutually_exclusive_group()
@@ -1386,7 +1412,8 @@ def cli(argv_, out=print):
             out(f"updating {', '.join(names)}" + (f" to {a.release}" if a.release else "") + " ...")
         results = update_many(names, a.release, a.sudo, a.jobs,
                               done=None if a.json else lambda result: [out(line) for line in update_lines(result)]
-                              if not (result.get("needs_password") and sys.stdin.isatty()) else None)
+                              if not (result.get("needs_password") and sys.stdin.isatty()) else None,
+                              from_here=a.from_here)
         if not a.json and sys.stdin.isatty():
             for result in results:
                 if not result.get("needs_password"):
