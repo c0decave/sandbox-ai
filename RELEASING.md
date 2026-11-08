@@ -258,7 +258,7 @@ The repository runs `.github/workflows/`:
   with real sandboxes, rootless Podman and Bubblewrap with Firejail.
 - `release.yml`, for a pushed tag `vX.Y.Z`: tests, checks that the tag matches
   `__version__`, builds `dist/` (with `sandbox-ai.pyz`), the AppImages
-  (`ubuntu-24.04`, `ubuntu-24.04-arm`) and the macOS disk images (`macos-14`,
+  (`ubuntu-24.04`, `ubuntu-24.04-arm`) and the macOS disk images (`macos-15`,
   `macos-15-intel`: `macos-13` is retired), checks each package end to end
   (the `.pyz` on Python 3.9 and 3.13), writes `SHA256SUMS` over all of them,
   creates the GitHub release with all files and

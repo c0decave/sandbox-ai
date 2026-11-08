@@ -146,7 +146,7 @@ def test_the_release_collects_every_package_into_sha256sums():
     text = (ROOT / ".github" / "workflows" / "release.yml").read_text()
     for job in ("build:", "e2e-pyz:", "build-appimage:", "e2e-appimage:", "build-macos:", "e2e-macos:", "release:"):
         assert f"\n  {job}" in text, job
-    assert "ubuntu-24.04-arm" in text and "macos-14" in text and "macos-15-intel" in text
+    assert "ubuntu-24.04-arm" in text and "macos-15" in text and "macos-15-intel" in text
     assert '"3.9", "3.13"' in text and "debian:12" in text and "ubuntu:22.04" in text
     assert "make_dist.py --sums-only --out dist --add packages/*" in text
     assert "needs: [build, e2e-pyz, e2e-appimage, e2e-macos]" in text
