@@ -56,6 +56,7 @@ import urllib.parse
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "web"
 STATIC_FILES = {"index.html": "text/html; charset=utf-8", "app.js": "text/javascript; charset=utf-8",
+                "i18n.js": "text/javascript; charset=utf-8",
                 "app.css": "text/css; charset=utf-8", "themes.json": "application/json",
                 "icon.svg": "image/svg+xml"}
 VENDOR_FILES = {"xterm.js": "text/javascript; charset=utf-8", "xterm.css": "text/css; charset=utf-8",

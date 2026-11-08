@@ -378,7 +378,8 @@ def test_the_session_and_hosts_endpoints_in_every_login_state(web, state, method
 
 # -- the pages: served in every state, holding nothing of a session --
 
-PAGES = ["/", "/index.html", "/static/app.js", "/static/app.css", "/static/themes.json", "/static/icon.svg"]
+PAGES = ["/", "/index.html", "/static/app.js", "/static/i18n.js", "/static/app.css", "/static/themes.json",
+         "/static/icon.svg"]
 
 
 @pytest.mark.parametrize("state", STATES)

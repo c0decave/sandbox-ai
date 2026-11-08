@@ -606,7 +606,7 @@ def test_kits_end_to_end_through_the_real_command(tmp_path, monkeypatch):
 def test_the_page_has_a_kits_page_that_adds_to_a_kit_of_yours():
     script = (Path(w.__file__).parent / "web" / "app.js").read_text()
     page = script.split("pages.kits = ")[1].split("pages.settings")[0]
-    assert '["kits", "Kits"]' in script and 'hostPath("/kits")' in script
+    assert '["kits", N_("Kits")]' in script and 'hostPath("/kits")' in script
     for action in ("add-skill", "new-skill", "add-plugin", "remove-${kind}"):
         assert action in page
     assert "create: fresh" in page and "a new kit…" in page and "innerHTML" not in page
@@ -645,7 +645,7 @@ def test_static_files_only_the_listed_ones(logged_in):
     svc = logged_in.svc
     status, headers, body = svc.handle("GET", "/", {"Host": "localhost:8443"}, b"", "192.0.2.1")
     assert status == 200 and b"/static/app.js" in body and dict(headers)["Content-Type"].startswith("text/html")
-    for path in ("/static/app.js", "/static/app.css", "/static/themes.json", "/static/icon.svg"):
+    for path in ("/static/app.js", "/static/i18n.js", "/static/app.css", "/static/themes.json", "/static/icon.svg"):
         assert svc.handle("GET", path, {"Host": "localhost:8443"}, b"", "192.0.2.1")[0] == 200, path
     for path in ("/static/../webui.py", "/static/webui.py", "/static/vendor/../../hosts.py", "/etc/passwd"):
         assert svc.handle("GET", path, {"Host": "localhost:8443"}, b"", "192.0.2.1")[0] == 404, path
@@ -906,7 +906,7 @@ def test_the_page_offers_the_network_of_a_start_and_the_presets():
 
 def test_the_page_has_a_vpn_page_that_sends_only_names_of_secrets():
     script = (Path(w.__file__).parent / "web" / "app.js").read_text()
-    assert '["vpn", "VPN profiles"]' in script and "pages.vpn" in script and 'hostPath("/vpn")' in script
+    assert '["vpn", N_("VPN profiles")]' in script and "pages.vpn" in script and 'hostPath("/vpn")' in script
     assert "no key passes through this page" in script and 'type: "password"' not in script.split("pages.vpn")[1].split("pages.llm")[0]
 
 
@@ -999,6 +999,7 @@ const advance = ms => { now += ms; for (const t of timers.filter(t => t.at <= no
 const context = vm.createContext({ document, Node, setTimeout, clearTimeout, console, window: {}, location: { host: "x" },
   localStorage: { getItem: () => null, setItem() {} }, fetch: () => Promise.reject(new Error("offline")) });
 const source = fs.readFileSync(process.argv[2], "utf8").replace(/loadThemes\(\)\.then\(render\);\s*$/, "");
+vm.runInContext(fs.readFileSync(require("path").join(require("path").dirname(process.argv[2]), "i18n.js"), "utf8"), context);
 vm.runInContext(source, context);
 const box = () => document.getElementById("toasts");
 const result = {};
@@ -1393,7 +1394,7 @@ def test_the_canary_log_is_one_fixed_command(logged_in):
 def test_the_page_has_a_canaries_page_with_the_links_of_each_event():
     script = (Path(w.__file__).parent / "web" / "app.js").read_text()
     page = script.split("pages.canaries")[1].split("pages.settings")[0]
-    assert '["canaries", "Canaries"]' in script and 'hostPath("/canaries")' in page
+    assert '["canaries", N_("Canaries")]' in script and 'hostPath("/canaries")' in page
     assert "status-bad" in page and "canaryLinks(e)" in page and "aria-expanded" in page
     assert "innerHTML" not in script.split("function canaryProcess")[1].split("pages.settings")[0]
     css = (Path(w.__file__).parent / "web" / "app.css").read_text()
@@ -1745,6 +1746,8 @@ const fetch = async (path, opts) => {
 const context = vm.createContext({ document, Node, setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0,
   clearInterval() {}, console, window: {}, location: { host: "x", hash: "" }, localStorage: { getItem: () => null, setItem() {} }, fetch });
 vm.runInContext("let __now = 1000000; Date.now = () => __now;", context);
+// the page's texts first, as index.html loads them (i18n.js before app.js)
+vm.runInContext(fs.readFileSync(require("path").join(require("path").dirname(process.argv[2]), "i18n.js"), "utf8"), context);
 vm.runInContext(fs.readFileSync(process.argv[2], "utf8").replace(/loadThemes\(\)\.then\(render\);\s*$/, ""), context);
 const settle = async () => { for (let i = 0; i < 20; i++) await new Promise(r => setImmediate(r)); };
 const button = (row, text) => row.all().find(n => n.tagName === "button" && n.textContent === text);
@@ -2020,7 +2023,7 @@ def test_an_ended_terminal_keeps_its_tab_and_says_why():
     assert "setTimeout" not in handler, "no tab vanishes on its own"
     assert 'window.removeEventListener("resize", entry.fit)' in handler and "closeText(event, entry.opened)" in handler
     assert "event.code" in script.split("function closeText")[1] and "event.reason" in script.split("function closeText")[1]
-    assert "function closeTerminal(entry)" in script and "onclick: () => closeTerminal(t)" in script
+    assert "function closeTerminal(entry)" in script and "onclick: () => closeTerminal(entry)" in script
     assert 'api("GET", "/api/approvals", undefined, { background: true })' in script
     assert 'hostPath("/starts"), undefined, { background: Boolean(background) }' in script
     assert 'refreshTerminalStarts(main, true)' in script and 'const main = document.getElementById("main")' in script
