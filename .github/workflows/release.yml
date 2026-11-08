@@ -101,7 +101,15 @@ jobs:
         with:
           name: dist
           path: dist/
-      - run: scripts/build_appimage.sh --bundle dist/sandbox-ai-bundle-*.tar.gz --out packages
+      - name: Build (the end of its output as an annotation when it fails, readable through the API)
+        run: |
+          status=0; scripts/build_appimage.sh --bundle dist/sandbox-ai-bundle-*.tar.gz --out packages > build.log 2>&1 || status=$?
+          tail -n 200 build.log
+          if [ "$status" -ne 0 ]; then
+            text=$(tail -n 25 build.log | cut -c1-200 | sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g')
+            echo "::error title=build_appimage.sh failed::exit $status%0A$text"
+          fi
+          exit "$status"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2, published 2026-10-07
         with:
           name: appimage-${{ matrix.arch }}
@@ -168,7 +176,15 @@ jobs:
         with:
           name: dist
           path: dist/
-      - run: scripts/build_macos_app.sh --bundle dist/sandbox-ai-bundle-*.tar.gz --out packages
+      - name: Build (the end of its output as an annotation when it fails, readable through the API)
+        run: |
+          status=0; scripts/build_macos_app.sh --bundle dist/sandbox-ai-bundle-*.tar.gz --out packages > build.log 2>&1 || status=$?
+          tail -n 200 build.log
+          if [ "$status" -ne 0 ]; then
+            text=$(tail -n 25 build.log | cut -c1-200 | sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g')
+            echo "::error title=build_macos_app.sh failed::exit $status%0A$text"
+          fi
+          exit "$status"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2, published 2026-10-07
         with:
           name: macos-${{ matrix.arch }}
