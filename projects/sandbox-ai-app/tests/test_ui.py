@@ -1267,8 +1267,11 @@ time.sleep(120)
 
 
 def test_quitting_stops_running_commands_with_their_children(window, env, monkeypatch, wait):
-    # The window's own reads (the board's dry run, a slow subprocess on a CI runner) end first: what is measured
-    # below is the stopped command's thread alone.
+    # The window's own reads (the board's dry run, a slow subprocess on a CI runner, started again by its timer
+    # whenever events are processed) end first and start no more: what is measured below is the stopped
+    # command's thread alone.
+    window.board.check_timer.stop()
+    window.board.check_timer.blockSignals(True)  # its timeout is wired to check() itself: no new dry run
     widgets.ThreadCall.wait_all(120)
     pid_file = env / "child"
     monkeypatch.setattr(window.sai, "command", lambda *args: [sys.executable, "-c", SPAWNER, str(pid_file)])
