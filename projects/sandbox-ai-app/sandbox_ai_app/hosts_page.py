@@ -12,7 +12,9 @@ can read private (ssh refuses it) and say so.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+import re
+
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit,
     QPushButton, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout,
@@ -22,6 +24,9 @@ from PySide6.QtWidgets import (
 from .files import printable
 from .i18n import tr
 from .widgets import MONO, background, confirm, plain_label, warn
+
+# Seconds between two looks at the chosen host while the page is shown (one at a time; an SSH host may be slow).
+REFRESH_SECONDS = 20
 
 
 def version_text(info):
@@ -129,7 +134,14 @@ class HostsPage(QWidget):
             updates.addWidget(button)
         left_layout.addLayout(updates)
         split.addWidget(left)
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        # Whose starts and questions the tabs show: never another host's while the chosen one is asked.
+        self.pane_title = plain_label(role="section")
+        right_layout.addWidget(self.pane_title)
         self.tabs = QTabWidget()
+        right_layout.addWidget(self.tabs, 1)
         # starts
         starts = QWidget()
         starts_layout = QVBoxLayout(starts)
@@ -164,8 +176,8 @@ class HostsPage(QWidget):
         approvals_layout.addWidget(self.questions, 1)
         row = QHBoxLayout()
         self.scope = QComboBox()
-        for scope in ("once", "run", "always"):
-            self.scope.addItem(scope, scope)
+        for scope, text in (("once", tr("once")), ("run", tr("for this run")), ("always", tr("always"))):
+            self.scope.addItem(text, scope)
         self.allow_button, self.deny_button = QPushButton(tr("Allow")), QPushButton(tr("Deny"))
         self.allow_button.clicked.connect(lambda: self.answer("allow"))
         self.deny_button.clicked.connect(lambda: self.answer("deny"))
@@ -199,12 +211,16 @@ class HostsPage(QWidget):
         self.defaults_note = plain_label(role="secondary")
         form.addRow(self.defaults_note)
         self.tabs.addTab(defaults, tr("Defaults"))
-        split.addWidget(self.tabs)
+        split.addWidget(right)
         split.setStretchFactor(1, 3)
         layout.addWidget(split, 1)
         self.status = plain_label(role="secondary")
         layout.addWidget(self.status)
         self.entries, self.versions, self.queue, self.results = [], {}, [], []
+        self.shown_host, self.asking, self.asked = None, None, 0
+        self.timer = QTimer(self)
+        self.timer.setInterval(REFRESH_SECONDS * 1000)
+        self.timer.timeout.connect(self.tick)
         self.load_hosts()
 
     # -- the list --
@@ -258,10 +274,32 @@ class HostsPage(QWidget):
 
     def showEvent(self, event):
         """The selected host is asked when the page is shown, not when the window is built: no sandbox-ai command
-        (and no SSH connection) at every start of the app for a page nobody opened."""
+        (and no SSH connection) at every start of the app for a page nobody opened; then every REFRESH_SECONDS while
+        it is shown (open questions time out after a minute)."""
         super().showEvent(event)
         if self.host() is not None and not event.spontaneous():
             self.refresh_host()
+        self.timer.start()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self.timer.stop()
+
+    def tick(self):
+        if self.isVisible() and self.asking is None and self.host() is not None:
+            self.refresh_host(quiet=True)
+
+    def label(self, name):
+        entry = next((e for e in self.entries if e.get("name") == name), {})
+        return tr("{name} (this machine)", name=name) if entry.get("kind") == "local" or name == "local" else \
+            f"{name}  {entry.get('ssh', '')}".strip()
+
+    def clear_view(self, name, text):
+        """Empty the tabs of the host shown so far: what is there belongs to NAME only once it answered."""
+        self.starts.setRowCount(0)
+        self.questions.setRowCount(0)
+        self.shown_host = None
+        self.pane_title.setText(printable(text))
 
     def add(self):
         dialog = AddHostDialog(self)
@@ -309,25 +347,40 @@ class HostsPage(QWidget):
 
     # -- the chosen host --
 
-    def refresh_host(self):
+    def refresh_host(self, quiet=False):
+        """Ask the chosen host for its starts, questions and defaults. Another host's rows go at once (a slow SSH
+        host must not look like the one asked before); QUIET (the timer): the same host's rows stay until it
+        answers."""
         name = self.host()
         self.remove_button.setEnabled(name not in (None, "local"))
         if name is None:
+            self.clear_view(None, "")
             return
-        self.status.setText(tr("Asking {host}…", host=name))
+        if name != self.shown_host:
+            self.clear_view(name, tr("{host}: asking…", host=self.label(name)))
+        if not quiet:
+            self.status.setText(tr("Asking {host}…", host=name))
+        self.asked += 1
+        token = self.asking = (name, self.asked)
         background(lambda: (self.sai.host_json(name, "list", "--json"),
                             self.sai.host_json(name, "approvals", "list", "--json", timeout=60),
                             self.sai.host_json(name, "defaults", "show", "--json", timeout=60)),
                    owner=self, source=self.refresh_button, timeout=270,
-                   done=lambda result, error: self.shown(name, result, error))
+                   done=lambda result, error: self.shown(name, result, error, token))
 
-    def shown(self, name, result, error):
-        if name != self.host():
-            return
+    def shown(self, name, result, error, token=None):
+        if token is not None and token == self.asking:
+            self.asking = None
+        if name != self.host() or (token is not None and token[1] != self.asked):
+            return  # another host was chosen meanwhile, or asked again since: only the latest answer counts
         if error:
+            self.clear_view(name, tr("{host}: no answer", host=self.label(name)))
             self.status.setText(printable(f"{name}: {error}"))
             return
         starts, questions, defaults = result
+        self.shown_host = name
+        self.pane_title.setText(printable(tr("{host}: {starts} starts, {questions} open questions",
+                                             host=self.label(name), starts=len(starts), questions=len(questions))))
         self.status.setText(tr("{host}: {starts} starts, {questions} open questions", host=name, starts=len(starts),
                                questions=len(questions)))
         self.starts.setRowCount(0)
@@ -362,14 +415,21 @@ class HostsPage(QWidget):
         entry, name = self.chosen_start(), self.host()
         if entry is None or name is None:
             return
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}", str(entry.get("name"))):
+            warn(self, tr("Hosts"), tr("Not a start's name: {ident}", ident=printable(str(entry.get("name")))[:60]))
+            return  # the other host chose it: never an option for sandbox-ai there
         if not entry.get("attachable"):
-            warn(self, tr("Attach"), tr("{start} cannot be attached (not a running session).", start=entry["name"]))
+            warn(self, tr("Attach"), tr("{start} cannot be attached (not a running session).",
+                                        start=printable(entry["name"])))
             return
-        self.in_terminal(self.sai.host_terminal(name, "attach", entry["name"]), f"{name}: {entry['name']}")
+        self.in_terminal(self.sai.host_terminal(name, "attach", entry["name"]), printable(f"{name}: {entry['name']}"))
 
     def start_action(self, action):
         entry, name = self.chosen_start(), self.host()
         if entry is None or name is None:
+            return
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}", str(entry.get("name"))):
+            warn(self, tr("Hosts"), tr("Not a start's name: {ident}", ident=printable(str(entry.get("name")))[:60]))
             return
         background(lambda: self.sai.host_run(name, action, entry["name"], timeout=180), owner=self,
                    source=self.action_buttons[action], timeout=210,
@@ -379,7 +439,9 @@ class HostsPage(QWidget):
         if error or (result and result[0] != 0):
             text = str(error) if error else (result[2] or result[1]).strip()[-500:]
             warn(self, tr("Hosts"), printable(text))
-        self.refresh_host()
+        elif result and (result[1] or "").strip():
+            self.status.setText(printable(result[1].strip()[-500:]))  # what sandbox-ai said (a narrowed scope, ...)
+        self.refresh_host(quiet=True)
 
     def answer(self, decision):
         rows = self.questions.selectionModel().selectedRows() if self.questions.selectionModel() else []
@@ -387,9 +449,24 @@ class HostsPage(QWidget):
         if not rows or name is None:
             return
         ident = self.questions.item(rows[0].row(), 0).data(Qt.ItemDataRole.UserRole)
-        background(lambda: self.sai.host_run(name, "approvals", decision, ident, "--scope", self.scope.currentData(),
-                                             timeout=60),
-                   owner=self, source=[self.allow_button, self.deny_button], timeout=90,
+        if not isinstance(ident, str) or not re.fullmatch(r"[0-9]{1,12}-[0-9]{1,10}-[0-9]{1,10}", ident):
+            warn(self, tr("Hosts"), tr("Not a question of sandbox-ai: {ident}", ident=printable(str(ident))[:60]))
+            return  # the other host chose it: never an option for sandbox-ai there
+        question = self.questions.item(rows[0].row(), 0).text()
+        sandbox = self.questions.item(rows[0].row(), 1).text() if self.questions.item(rows[0].row(), 1) else ""
+        scope = self.scope.currentData()  # read here, on the GUI thread, never in the worker
+        if decision == "allow" and not confirm(
+                self, tr("Allow this request?"), "\n".join([
+                    tr("Host: {host}", host=self.label(name)), tr("Sandbox: {sandbox}", sandbox=sandbox),
+                    tr("Asks to: {question}", question=question),
+                    tr("Scope: {scope}", scope=self.scope.currentText())]
+                    + ([tr("“Always” is remembered for this project: later runs get this without asking.")]
+                       if scope == "always" else [])),
+                tr("Allow"), destructive=scope == "always"):
+            return
+        # "Always" for a connection waits for the sandbox's certificate check (up to 30 s) on top of SSH.
+        background(lambda: self.sai.host_run(name, "approvals", decision, ident, "--scope", scope, timeout=100),
+                   owner=self, source=[self.allow_button, self.deny_button], timeout=130,
                    done=lambda result, error: self.acted(result, error))
 
     def set_telemetry(self, _index=None):

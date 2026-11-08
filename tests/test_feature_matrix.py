@@ -20,6 +20,12 @@ import threading
 import types
 
 import pytest
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import home_guard  # noqa: E402
+
+home_guard.ensure()  # tests write logins: never into the real HOME, also when conftest.py was not run
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -367,11 +373,11 @@ def host_port_is_podman_only(m):
     if m.backend == "bwrap":
         m.refused("--allow-host-port", "11434", match="--allow-host-port needs the Podman backend")
         return
-    run = m.run("--allow-host-port", "11434", "--allow-host-port", "3000")
+    run = m.run("--allow-host-port", "11434", "--allow-host-port", "3080")
     network_value = run.create[run.create.index("--network") + 1]
-    assert "-T,3000,-T,11434" in network_value and "-T,none" not in network_value
-    assert "tcp dport != { 3000, 11434 } return" in run.firewall
-    assert "127.0.0.1:3080 in the sandbox reaches port 3000" in run.err
+    assert "-T,3080,-T,11434" in network_value and "-T,none" not in network_value
+    assert "tcp dport != { 3080, 11434 } return" in run.firewall
+    assert "127.0.0.1:3080 in the sandbox reaches port 3080" in run.err
 
 
 @network
@@ -573,10 +579,10 @@ def git_login(m, url, secret="GITEA", token=TOKEN, user="alice"):
 def git_logins_reach_the_proxy_never_the_agent(m):
     """sandbox-ai git-logins: every run's proxy adds them; the agent's sandbox holds no token, no helper for it."""
     git_login(m, "http://localhost:3080")
-    plan = m.plan("--allow-host-port", "3000") if m.backend == "podman" else m.plan()
+    plan = m.plan("--allow-host-port", "3080") if m.backend == "podman" else m.plan()
     assert plan["git_logins"] == [{"url": "http://localhost:3080", "user": "alice"}]
-    run = m.run(*(["--allow-host-port", "3000"] if m.backend == "podman" else []))
-    assert run.proxy["git_tokens"] == [{"host": "localhost", "port": 3000, "user": "alice", "loopback": True,
+    run = m.run(*(["--allow-host-port", "3080"] if m.backend == "podman" else []))
+    assert run.proxy["git_tokens"] == [{"host": "localhost", "port": 3080, "user": "alice", "loopback": True,
                                         "token": TOKEN}]
     assert TOKEN not in json.dumps(run.config) and TOKEN not in run.err and TOKEN not in "\n".join(run.home_files)
     assert not any(key.startswith("SANDBOX_GIT_TOKEN") for key in run.env)
@@ -657,7 +663,7 @@ def token_proxy_refusals(m):
     # Plain http is for the host's loopback only (Podman); there the proxy adds the token to that port only.
     if m.backend == "podman":
         run = m.run("--token-proxy", "--git-token-env", "http://localhost:3080=GITEA")
-        assert run.proxy["git_tokens"] == [{"host": "localhost", "port": 3000, "user": "x-access-token",
+        assert run.proxy["git_tokens"] == [{"host": "localhost", "port": 3080, "user": "x-access-token",
                                             "loopback": True, "token": TOKEN}] and TOKEN not in json.dumps(run.env)
     else:
         m.refused("--token-proxy", "--git-token-env", "http://localhost:3080=GITEA", match="only the Podman backend")
@@ -677,7 +683,7 @@ def loopback_token_needs_podman_pasta(m):
         m.refused("--git-token-env", "http://localhost:3080=GITEA", match="only the Podman backend")
         return
     plan = m.plan("--git-token-env", "http://localhost:3080=GITEA")
-    assert plan["host_ports"] == [3000]  # implied --allow-host-port
+    assert plan["host_ports"] == [3080]  # implied --allow-host-port
     m.refused("--network", "lab", "--git-token-env", "http://localhost:3080=GITEA", match="only the Podman backend")
 
 

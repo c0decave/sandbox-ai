@@ -47,6 +47,50 @@ def tr(key, **values):
 
 
 TEXTS = {
+    # sandboxes: the other hosts' starts beside this account's own
+    'A command runs.': {
+        'en': 'A command runs.',
+        'de': 'Ein Befehl läuft.'},
+    'Not a question of sandbox-ai: {ident}': {
+        'en': 'Not a question of sandbox-ai: {ident}',
+        'de': 'Keine Frage von sandbox-ai: {ident}'},
+    "Not a start's name: {ident}": {
+        'en': "Not a start's name: {ident}",
+        'de': 'Kein Name eines Starts: {ident}'},
+    'this machine': {
+        'en': 'this machine',
+        'de': 'dieser Rechner'},
+    '{count} on other hosts': {
+        'en': '{count} on other hosts',
+        'de': '{count} auf anderen Hosts'},
+    'On {host}: this is changed on that host (sandbox-ai net, devices, limits there).': {
+        'en': 'On {host}: this is changed on that host (sandbox-ai net, devices, limits there).',
+        'de': 'Auf {host}: das wird auf jenem Host geändert (sandbox-ai net, devices, limits dort).'},
+    'Not while it is {state} on {host}.': {
+        'en': 'Not while it is {state} on {host}.',
+        'de': 'Nicht, solange es auf {host} {state} ist.'},
+    'End the selected start on {host} (sandbox-ai stop there)': {
+        'en': 'End the selected start on {host} (sandbox-ai stop there)',
+        'de': 'Den gewählten Start auf {host} beenden (dort sandbox-ai stop)'},
+    'On {host}: {text}': {
+        'en': 'On {host}: {text}',
+        'de': 'Auf {host}: {text}'},
+    'On {host}: delete session {name} and its HOME?': {
+        'en': 'On {host}: delete session {name} and its HOME?',
+        'de': 'Auf {host}: Session {name} und ihr HOME löschen?'},
+    'On {host}': {
+        'en': 'On {host}',
+        'de': 'Auf {host}'},
+    # hosts: the pane names the host it shows
+    'Host: {host}': {
+        'en': 'Host: {host}',
+        'de': 'Host: {host}'},
+    '{host}: asking…': {
+        'en': '{host}: asking…',
+        'de': '{host}: wird gefragt…'},
+    '{host}: no answer': {
+        'en': '{host}: no answer',
+        'de': '{host}: keine Antwort'},
     # extra preset directories (sandbox-ai presets dirs)
     'Add folder…': {
         'en': 'Add folder…',

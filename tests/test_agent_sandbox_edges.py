@@ -11,6 +11,11 @@ from unittest.mock import Mock
 
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import home_guard  # noqa: E402
+
+home_guard.ensure()  # tests write logins: never into the real HOME, also when conftest.py was not run
+
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "sandbox/agent_sandbox.py"
 RUNTIME = ROOT / "sandbox/runtime.py"

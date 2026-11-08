@@ -297,6 +297,39 @@ def test_sandboxes_and_system_pages_build(window, wait):
     assert wait(lambda: window.mcp.servers.rowCount() >= 1, 15)
 
 
+def test_sandboxes_lists_and_manages_the_other_hosts_starts(window, wait, monkeypatch):
+    """Beside this account's own: the starts of the hosts of `sandbox-ai hosts` (read over SSH in the background),
+    each row naming its host; pause, resume, stop, delete and attach run on that host (sandbox-ai there), each
+    confirmation naming it; what a run may reach stays with that host; a host that does not answer is said."""
+    page = window.sandboxes
+    there = backend.Instance("session", "ct1:web", "web", project="/srv/app", agent="codex", state="running",
+                             record={"attachable": True}, host="ct1")
+    monkeypatch.setattr(window.sai, "remote_hosts", lambda: ["ct1", "ct2"])
+    monkeypatch.setattr(window.sai, "host_instances",
+                        lambda name, timeout=60: [there] if name == "ct1" else (_ for _ in ()).throw(
+                            ValueError("ssh: connection timed out")))
+    ran, opened = [], []
+    monkeypatch.setattr(window.sai, "host_run", lambda name, *args, timeout=120: ran.append((name, args)) or (0, "", ""))
+    monkeypatch.setattr(window.sai, "host_terminal", lambda name, *args: ["ssh", "-tt", name, *args])
+    monkeypatch.setattr(page, "terminal", lambda argv, title, embedded=False: opened.append((argv, title)))
+    page.refresh_remote()
+    assert wait(lambda: page.table.rowCount() == 1, 15)
+    assert page.table.item(0, 1).text() == "web" and page.table.item(0, 8).text() == "ct1"
+    assert "1 on other hosts" in page.summary.text() and "ct2: no answer" in page.summary.text()
+    page.table.selectRow(0)
+    assert "On ct1" in page.detail.text()
+    assert page.stop_button.isEnabled() and page.session_buttons["pause"].isEnabled()
+    assert not page.session_buttons["resume"].isEnabled() and not any(b.isEnabled() for b in page.run_buttons)
+    page.session("attach")
+    assert opened == [(["ssh", "-tt", "ct1", "attach", "web"], "ct1: web")]
+    page.session("pause")
+    assert wait(lambda: ("ct1", ("pause", "web")) in ran, 15)
+    page.stop()
+    assert wait(lambda: ("ct1", ("stop", "web")) in ran, 15)
+    page.refresh()  # this account's own read again: the other hosts' rows stay
+    assert page.table.rowCount() == 1 and page.table.item(0, 8).text() == "ct1"
+
+
 # -- approvals --
 
 

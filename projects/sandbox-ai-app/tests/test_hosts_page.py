@@ -117,3 +117,65 @@ def test_versions_update_and_update_all(qapp, env, monkeypatch):
     page.list.setCurrentRow(0)
     page.update_host()  # this machine: not over SSH
     page.close()
+
+
+def test_a_chosen_host_never_shows_another_hosts_starts(qapp, env, monkeypatch):
+    """Chosen while this machine's starts are shown, a host over SSH (slow, or not answering) shows an empty pane
+    under its own name until it answers, never this machine's starts; a late answer for a host chosen before is
+    dropped; the pane says which host it shows."""
+    sai = backend.SandboxAI()
+    if not sai.hosts_supported():
+        pytest.skip("this sandbox-ai has no hosts.py")
+    sai.host_add("ct1", "admin@192.0.2.10", 22, "", "")
+    import sandbox_ai_app.hosts_page as hp
+    pending = []
+    monkeypatch.setattr(hp, "background", lambda function, *args, done, **kw: pending.append((function, args, done)))
+    starts = {"local": [{"name": "here", "agent": "claude", "state": "running", "workspace": "/w", "started": "x"}],
+              "ct1": [{"name": "there", "agent": "codex", "state": "running", "workspace": "/srv", "started": "y"}]}
+    failing = set()
+
+    def host_run(name, *args, timeout=120):
+        if name in failing:
+            return 255, "", "ssh: connect to host 192.0.2.10 port 22: Connection timed out"
+        if args[:1] == ("list",):
+            return 0, json.dumps(starts[name]), ""
+        return 0, json.dumps([] if args[0] == "approvals" else {}), ""
+    monkeypatch.setattr(sai, "host_run", host_run)
+
+    def finish(index=0):
+        function, args, done = pending.pop(index)
+        try:
+            result, error = function(*args), None
+        except Exception as exc:  # noqa: BLE001 - as background() hands it to done
+            result, error = None, exc
+        done(result, error)
+    page = HostsPage(sai, lambda argv, title: None)
+    page.list.setCurrentRow(0)
+    page.show()
+    finish()
+    assert page.starts.item(0, 0).text() == "here" and "this machine" in page.pane_title.text()
+    page.list.setCurrentRow(1)  # ct1: asked, its answer not there yet
+    assert page.starts.rowCount() == 0, "this machine's starts must not stand under ct1"
+    assert "ct1" in page.pane_title.text()
+    page.list.setCurrentRow(0)
+    page.list.setCurrentRow(1)
+    # Answers arrive in the order asked: ct1's first ask, this machine's, ct1's second: only the last one counts.
+    while len(pending) > 1:
+        finish()
+        assert page.starts.rowCount() == 0 or page.starts.item(0, 0).text() == "there"
+    finish()
+    assert page.starts.item(0, 0).text() == "there" and "1 starts" in page.pane_title.text()
+    failing.add("ct1")
+    page.refresh_host()
+    finish()
+    assert page.starts.rowCount() == 0 and "no answer" in page.pane_title.text()
+    # While shown, the page asks again by itself (one ask at a time), and stops when hidden.
+    assert page.timer.isActive()
+    failing.clear()
+    page.tick()
+    page.tick()
+    assert len(pending) == 1
+    finish()
+    assert page.starts.item(0, 0).text() == "there"
+    page.close()
+    assert not page.timer.isActive()

@@ -300,6 +300,11 @@ def logged_in():
       "--git-token-secret=http://localhost:3080=GITEA"]),
     ("POST", "/api/hosts/ct1/net/web", {"op": "revoke", "host_ports": [3000]},
      ["net", "revoke", "web", "--allow-host-port=3000"]),
+    # host wildcards as `net allow` takes them (*.DOMAIN.TLD), unchanged: the command refuses public suffixes
+    ("POST", "/api/hosts/ct1/net/web", {"op": "allow", "allow_host": ["*.example.org", "*.api.Example.co.uk"]},
+     ["net", "allow", "web", "--allow-host=*.example.org", "--allow-host=*.api.Example.co.uk"]),
+    ("POST", "/api/hosts/ct1/net/web", {"op": "revoke", "allow_host": ["*.example.org"]},
+     ["net", "revoke", "web", "--allow-host=*.example.org"]),
     ("GET", "/api/hosts/ct1/presets", None, ["presets", "list", "--json"]),
     ("GET", "/api/hosts/ct1/vpn", None, ["vpn", "list", "--json"]),
     ("POST", "/api/hosts/ct1/vpn", {"name": "home", "kind": "wireguard", "file": "/etc/wireguard/home.conf"},
@@ -362,6 +367,9 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     ("POST", "/api/hosts/ct1/net/--all", {"op": "allow", "dns": True}, 400),
     ("POST", "/api/hosts/ct1/net/web", {"op": "allow", "allow_host": ["-x"]}, 400),
     ("POST", "/api/hosts/ct1/net/web", {"op": "allow", "allow_host": ["a b"]}, 400),
+    *[("POST", "/api/hosts/ct1/net/web", {"op": "allow", "allow_host": [bad]}, 400)
+      for bad in ("*.org", "*", "*.", "**.example.org", "a.*.example.org", "*.-x.org", "*.example.org.",
+                  "*.example.123", "*.exa mple.org", "*example.org", "-*.example.org")],
     ("POST", "/api/hosts/ct1/net/web", {"op": "allow", "allow_tcp": ["192.0.2.9"]}, 400),
     ("POST", "/api/hosts/ct1/net/web", {"op": "allow", "host_ports": [0]}, 400),
     ("POST", "/api/hosts/ct1/net/web", {"op": "allow", "host_ports": ["3000"]}, 400),
@@ -578,7 +586,21 @@ def test_websocket_refuses_what_is_wrong(data, code):
     ws = w.WebSocket(pipe)
     with pytest.raises(ConnectionError):
         ws.receive()
-    assert pipe.out[:2] == b"\x88\x02" and struct.unpack(">H", pipe.out[2:4])[0] == code
+    assert pipe.out[0] == 0x88 and pipe.out[1] == len(pipe.out) - 2 <= 125
+    assert struct.unpack(">H", pipe.out[2:4])[0] == code
+
+
+def test_a_close_frame_carries_its_reason_within_a_control_frame():
+    """The reason is what the page shows: UTF-8, cut to the 123 bytes a close frame has room for (never in the middle
+    of a character), the code first."""
+    pipe = Pipe()
+    w.WebSocket(pipe).close(1008, "ä" * 100)
+    assert pipe.out[0] == 0x88 and pipe.out[1] == len(pipe.out) - 2 <= 125
+    assert struct.unpack(">H", pipe.out[2:4])[0] == 1008 and set(pipe.out[4:].decode()) == {"ä"}
+    pipe = Pipe(bytes([0x82, 0xFF]) + struct.pack(">Q", 1 << 40) + b"\0" * 4)
+    with pytest.raises(ConnectionError):
+        w.WebSocket(pipe).receive()
+    assert b"larger than 1 MiB" in pipe.out
 
 
 # --- the whole service over HTTPS -------------------------------------------------------------------------
@@ -909,6 +931,10 @@ def test_a_removed_or_reset_user_loses_its_sessions_at_once():
     assert svc.handle("GET", "/api/me", ok, b"", "192.0.2.1")[0] == 401
 
 
+# The close frame a terminal gets when its session ends: 1008, and why (the page shows it).
+SESSION_CLOSE = bytes([0x88, 2 + len(w.SESSION_ENDED.encode())]) + b"\x03\xf0" + w.SESSION_ENDED.encode()
+
+
 def test_an_open_terminal_ends_when_its_user_is_removed(server):
     """A terminal opened before `sandbox-ai web user remove` (or a logout, or the session's limits) does not run on:
     it is checked every few seconds and closed with 1008."""
@@ -923,14 +949,14 @@ def test_an_open_terminal_ends_when_its_user_is_removed(server):
     sock.settimeout(15)
     received = b""
     try:
-        while b"\x88\x02\x03\xf0" not in received:  # a close frame with 1008
+        while SESSION_CLOSE not in received:  # a close frame with 1008 and why
             chunk = sock.recv(4096)
             if not chunk:
                 break
             received += chunk
     except (ConnectionError, socket.timeout, ssl.SSLError):
         pass
-    assert b"\x88\x02\x03\xf0" in received, received[-100:]
+    assert SESSION_CLOSE in received, received[-100:]
     sock.close()
 
 
@@ -997,14 +1023,14 @@ def test_an_open_terminal_ends_when_its_session_is_idle(server):
     sock.settimeout(15)
     received = b""
     try:
-        while b"\x88\x02\x03\xf0" not in received:  # a close frame with 1008
+        while SESSION_CLOSE not in received:  # a close frame with 1008 and why
             chunk = sock.recv(4096)
             if not chunk:
                 break
             received += chunk
     except (ConnectionError, socket.timeout, ssl.SSLError):
         pass
-    assert b"\x88\x02\x03\xf0" in received, "the terminal outlived its idle session"
+    assert SESSION_CLOSE in received, "the terminal outlived its idle session"
     sock.close()
 
 
@@ -1236,10 +1262,352 @@ def test_an_mcp_server_is_attached_to_a_start(logged_in):
     assert logged_in("POST", "/api/hosts/local/mcp/demo/attach", {"start": "web"})[0] == 200
     assert logged_in.runner.calls[-1] == ("local", ["mcp", "attach", "demo", "web", "--json"])
     count = len(logged_in.runner.calls)
+    # A name with a leading "-" would be an option of mcp attach there.
     for path, data in (("/api/hosts/ct1/mcp/de mo/attach", {"start": "web"}), ("/api/hosts/ct1/mcp/demo/attach", {}),
+                       ("/api/hosts/ct1/mcp/-h/attach", {"start": "web"}),
+                       ("/api/hosts/ct1/mcp/--restart/attach", {"start": "web"}),
+                       ("/api/hosts/ct1/mcp/_x/attach", {"start": "web"}),
                        ("/api/hosts/ct1/mcp/demo/attach", {"start": "--all"}),
                        ("/api/hosts/ct1/mcp/demo/attach", {"start": "web", "restart": "yes"})):
         assert logged_in("POST", path, data)[0] == 400, (path, data)
     assert len(logged_in.runner.calls) == count, "nothing refused reaches a host"
     script = (ROOT / "sandbox/web/app.js").read_text()
     assert "attachControls" in script and "/attach`" in script and "Attach to…" in script
+
+
+# --- review findings: logins, sessions, the audit log, terminals, the service's connections -------------------
+
+def test_a_known_user_name_cannot_lock_its_user_out():
+    """Failed logins wait per address and per address with user; the wait of the user from every address keeps
+    the right password with its code from no one: else whoever knows the name keeps the account locked. While that
+    one waits, each failure locks its own address at once (one guess per address, not FREE)."""
+    secret = add_user()
+    clock = [1000.0]
+    svc = service(limiter=w.Limiter(free=3, first=30, maximum=900, clock=lambda: clock[0]))
+
+    def attempt(address, password="wrong password!!", offset=0):
+        body = json.dumps({"user": "admin", "password": password, "code": code(secret, offset)}).encode()
+        return svc.handle("POST", "/api/login", HEADERS, body, address)[0]
+    for _ in range(3):
+        assert attempt("198.51.100.66") == 401
+    assert attempt("198.51.100.66", "correct horse battery") == 429, "the guessing address waits"
+    assert svc.limiter.wait("user:admin") > 0, "and so does the user, from every address"
+    assert attempt("192.0.2.1", "correct horse battery") == 200, "yet its owner gets in from elsewhere"
+    for _ in range(3):  # the user waits again
+        assert attempt("198.51.100.7") == 401
+    assert attempt("198.51.100.8") == 401
+    assert attempt("198.51.100.8", "correct horse battery", offset=1) == 429, "one failure locked that address"
+    assert attempt("192.0.2.2", "correct horse battery", offset=1) == 200
+    events = [json.loads(line) for line in (w.state_dir() / "audit.jsonl").read_text().splitlines()]
+    assert [e["event"] for e in events].count("login") == 2
+    assert any(e.get("user_throttled") for e in events if e["event"] == "login-failed")
+
+
+def test_the_pages_polls_do_not_keep_its_session_alive():
+    """A tab left open polls every 5 s with X-Background: 1: that is no use of the page, its session still reaches
+    its idle limit. A request without it (the user's) counts."""
+    secret = add_user()
+    clock = [0.0]
+    svc = service(FakeRunner({("approvals", "list"): (0, "[]", "")}),
+                  sessions=w.Sessions(idle=60, lifetime=3600, clock=lambda: clock[0]))
+    _, headers, _ = login(svc, secret)
+    used = {**HEADERS, "Cookie": cookie_of(headers)}
+    polled = {**used, "X-Background": "1"}
+    path = "/api/hosts/local/approvals"
+    for _ in range(3):
+        clock[0] += 25
+        assert svc.handle("GET", path, used, b"", "192.0.2.1")[0] == 200, "the user's requests keep it"
+    for _ in range(2):
+        clock[0] += 25
+        assert svc.handle("GET", path, polled, b"", "192.0.2.1")[0] == 200
+    clock[0] += 25  # 75 s since the user's last request
+    assert svc.handle("GET", path, polled, b"", "192.0.2.1")[0] == 401
+    assert svc.handle("GET", path, used, b"", "192.0.2.1")[0] == 401, "gone"
+
+
+def test_the_audit_log_names_what_changed_but_no_secrets(logged_in):
+    """Secrets are left out by their field's name, not by a search for "key": a defaults change says which key."""
+    assert logged_in("POST", "/api/hosts/ct1/defaults", {"key": "telemetry", "value": "strict"})[0] == 200
+    logged_in("POST", "/api/hosts/ct1/llm", {"name": "a", "kind": "lmstudio", "url": "http://x", "api_key": "sk-1",
+                                             "token": "t-2", "password": "p-3", "code": "123456",
+                                             "client-secret": "c-4", "github_token": "g-5"})
+    text = (w.state_dir() / "audit.jsonl").read_text()
+    for secret in ("sk-1", "t-2", "p-3", "123456", "c-4", "g-5"):
+        assert secret not in text, secret
+    bodies = [json.loads(line)["body"] for line in text.splitlines() if json.loads(line)["event"] == "action"]
+    assert bodies[0] == {"key": "telemetry", "value": "strict"}
+    assert bodies[1]["name"] == "a" and bodies[1]["api_key"] == "***" and bodies[1]["github_token"] == "***"
+    assert w.redacted({"key": "mode", "monkey": 1, "keyboard": [{"Password": "x", "kind": "k"}]}) == {
+        "key": "mode", "monkey": 1, "keyboard": [{"Password": "***", "kind": "k"}]}
+
+
+def test_the_audit_log_says_what_a_terminal_starts():
+    """A start in a terminal is logged with its agent, workspace and options, not only its name."""
+    import urllib.parse
+    secret = add_user()
+    svc = service(terminal=lambda query: ("local", ["true"]))
+    _, headers, body = login(svc, secret)
+    query = {"host": "local", "csrf": body["csrf"], "kind": "start", "agent": "codex", "name": "n1",
+             "workspace": "/srv/app", "options": json.dumps(["--mode", "high", "--allow-pypi"])}
+    svc.websocket("/api/terminal?" + urllib.parse.urlencode(query), {**HEADERS, "Cookie": cookie_of(headers)},
+                  "192.0.2.1")
+    events = [json.loads(line) for line in (w.state_dir() / "audit.jsonl").read_text().splitlines()]
+    (event,) = [e for e in events if e["event"] == "terminal"]
+    assert {k: event.get(k) for k in ("user", "kind", "name", "agent", "workspace", "options")} == {
+        "user": "admin", "kind": "start", "name": "n1", "agent": "codex", "workspace": "/srv/app",
+        "options": ["--mode", "high", "--allow-pypi"]}
+
+
+def test_a_users_file_readable_by_others_is_a_clear_error_not_a_dropped_connection():
+    secret = add_user()
+    svc = service()
+    _, headers, body = login(svc, secret)
+    ok = {**HEADERS, "Cookie": cookie_of(headers), "X-CSRF-Token": body["csrf"]}
+    w.users_file().chmod(0o644)
+    for method, path, data in (("GET", "/api/me", b""), ("POST", "/api/login", json.dumps(
+            {"user": "admin", "password": "correct horse battery", "code": code(secret, 1)}).encode()),
+            ("POST", "/api/hosts/local/starts/web/stop", b"{}")):
+        status, _, out = svc.handle(method, path, ok, data, "192.0.2.1")
+        error = json.loads(out)["error"]
+        assert status == 503 and "cannot read its logins" in error and str(w.config_dir()) not in error, path
+    with pytest.raises(w.Refused) as refused:
+        svc.websocket("/api/terminal?host=local&kind=attach&name=web&csrf=" + body["csrf"], ok, "192.0.2.1")
+    assert refused.value.status == 503
+    events = [json.loads(line) for line in (w.state_dir() / "audit.jsonl").read_text().splitlines()]
+    assert any(e["event"] == "users-unreadable" and "readable by others" in e["why"] for e in events)
+
+
+def test_a_refused_terminal_says_why_in_its_close_frame(server, monkeypatch):
+    """Logged in from the page, but no terminal (too many open, a query that is not one): the WebSocket opens only to
+    close with 1008 and the reason, which the page shows (a refused handshake is 1006 and nothing more there). Not
+    logged in: no WebSocket at all."""
+    status, headers, body = https(server, "POST", "/api/login", {"user": "admin", "password": "correct horse battery",
+                                                                 "code": code(server["secret"])})
+    cookie, csrf = headers["Set-Cookie"].split(";")[0], json.loads(body)["csrf"]
+    monkeypatch.setattr(w, "TERMINALS_PER_SESSION", 0)
+    sock, head, rest, _ = websocket(server, f"host=local&kind=attach&name=web&csrf={csrf}", cookie)
+    assert head.startswith("HTTP/1.1 101"), head
+    reason = b"refused: at most 0 terminals at once"
+    sock.settimeout(10)
+    received = bytes(rest)
+    with contextlib.suppress(ConnectionError, socket.timeout, ssl.SSLError):
+        while reason not in received:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            received += chunk
+    assert bytes([0x88, 2 + len(reason)]) + b"\x03\xf0" + reason in received, received
+    sock.close()
+    sock, head, _, _ = websocket(server, f"host=local&kind=attach&name=web&csrf={csrf}", "x=y")
+    assert head.startswith("HTTP/1.1 401"), head
+    sock.close()
+
+
+def test_logins_are_throttled_by_the_socket_address_not_a_header(server):
+    """No X-Forwarded-For is believed (no trusted proxy is configured): a client cannot choose the address its
+    failures count for."""
+    for index in range(5):
+        status, _, _ = https(server, "POST", "/api/login", {"user": "admin", "password": "wrong password!!",
+                                                            "code": "000000"},
+                             headers={"X-Forwarded-For": f"203.0.113.{index}", "X-Real-IP": f"203.0.113.{index}"})
+        assert status == 401
+    status, _, _ = https(server, "POST", "/api/login", {"user": "admin", "password": "correct horse battery",
+                                                        "code": code(server["secret"])},
+                         headers={"X-Forwarded-For": "203.0.113.200"})
+    assert status == 429
+
+
+def test_the_service_serves_a_bounded_number_of_connections(server):
+    """Each connection is a thread: past the limit one more is closed at once (the accept loop never waits), and a
+    place that frees serves the next."""
+    srv = server["server"]
+    srv.limit = 2
+    silent = [socket.create_connection(("127.0.0.1", server["port"]), timeout=30) for _ in range(2)]
+    try:
+        deadline = time.monotonic() + 10
+        while srv.active < 2 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert srv.active == 2
+        with pytest.raises((ConnectionError, ssl.SSLError, http.client.HTTPException, OSError)):
+            https(server, "GET", "/")
+    finally:
+        for sock in silent:
+            sock.close()
+    deadline = time.monotonic() + 10
+    while srv.active and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert srv.active == 0
+    assert https(server, "GET", "/")[0] == 200
+
+
+def test_a_connection_without_a_session_is_kept_only_briefly(server, monkeypatch):
+    """An idle connection that never showed a session is closed after GUEST_KEEPALIVE seconds; one whose request
+    carried a session (or made one: a login) is kept KEEPALIVE seconds."""
+    monkeypatch.setattr(w, "GUEST_KEEPALIVE", 1)
+    origin = {"Origin": f"https://localhost:{server['port']}"}
+    guest = http.client.HTTPSConnection("localhost", server["port"], context=server["context"], timeout=30)
+    guest.request("GET", "/", headers=origin)
+    assert guest.getresponse().read() and guest.sock is not None
+    time.sleep(2.5)
+    with pytest.raises((ConnectionError, ssl.SSLError, http.client.HTTPException, OSError)):
+        guest.request("GET", "/", headers=origin)
+        guest.getresponse().read()
+    guest.close()
+    user = http.client.HTTPSConnection("localhost", server["port"], context=server["context"], timeout=30)
+    user.request("POST", "/api/login", body=json.dumps({"user": "admin", "password": "correct horse battery",
+                                                        "code": code(server["secret"])}),
+                 headers={**origin, "Content-Type": "application/json"})
+    response = user.getresponse()
+    response.read()
+    assert response.status == 200
+    cookie = response.getheader("Set-Cookie").split(";")[0]
+    time.sleep(2.5)
+    user.request("GET", "/api/me", headers={**origin, "Cookie": cookie})
+    response = user.getresponse()
+    assert response.status == 200 and json.loads(response.read())["user"] == "admin", "the same connection"
+    user.close()
+
+
+APPROVALS_DRIVER = r"""
+const fs = require("fs"), vm = require("vm");
+class Node {
+  constructor(tag) { this.tagName = tag; this.children = []; this.attributes = {}; this.listeners = {}; this.parent = null;
+    this.className = ""; this.text = ""; this.hidden = false; this.disabled = false; }
+  setAttribute(k, v) { this.attributes[k] = String(v); if (k === "id") this.id = String(v); }
+  getAttribute(k) { return this.attributes[k]; }
+  addEventListener(type, f) { (this.listeners[type] = this.listeners[type] || []).push(f); }
+  fire(type) { for (const f of this.listeners[type] || []) f({ target: this }); }
+  append(...nodes) { for (const n of nodes) { if (n.parent) n.remove(); n.parent = this; this.children.push(n); } }
+  prepend(n) { n.parent = this; this.children.unshift(n); }
+  remove() { if (this.parent) this.parent.children = this.parent.children.filter(c => c !== this); this.parent = null; }
+  removeChild(n) { n.remove(); return n; }
+  get firstChild() { return this.children[0] || null; }
+  get lastElementChild() { return this.children[this.children.length - 1]; }
+  get isConnected() { let n = this; while (n.parent) n = n.parent; return n === body; }
+  get textContent() { return this.tagName === "#text" ? this.text : this.children.map(c => c.textContent).join(""); }
+  all() { const out = []; const walk = n => { out.push(n); n.children.forEach(walk); }; walk(this); return out; }
+  querySelectorAll(sel) { return this.all().filter(n => n !== this && sel === ".badge" && (n.className || "").split(" ").includes("badge")); }
+}
+const body = new Node("body");
+const nav = new Node("button");
+const document = {
+  body, createElement: t => new Node(t),
+  createTextNode: t => { const n = new Node("#text"); n.text = t; return n; },
+  getElementById: id => body.all().find(n => n.id === id) || null,
+  querySelector: sel => (sel === 'nav button[data-page="approvals"]' ? nav : null), querySelectorAll: () => [],
+  documentElement: { style: { setProperty() {} } },
+};
+const calls = [];
+let answer = null;
+const fetch = async (path, opts) => {
+  calls.push({ method: opts.method, path, headers: opts.headers, body: opts.body });
+  const data = answer(opts.method, path, opts.body);
+  if (data instanceof Error) return { status: 502, ok: false, statusText: "Bad Gateway", json: async () => ({ error: data.message }) };
+  return { status: 200, ok: true, json: async () => data };
+};
+const context = vm.createContext({ document, Node, setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0,
+  clearInterval() {}, console, window: {}, location: { host: "x" }, localStorage: { getItem: () => null, setItem() {} }, fetch });
+vm.runInContext(fs.readFileSync(process.argv[2], "utf8").replace(/loadThemes\(\)\.then\(render\);\s*$/, ""), context);
+const settle = async () => { for (let i = 0; i < 20; i++) await new Promise(r => setImmediate(r)); };
+const rows = () => body.all().filter(n => n.attributes["data-id"]);
+const button = (row, text) => row.all().find(n => n.tagName === "button" && n.textContent === text);
+const toasts = () => (document.getElementById("toasts") || new Node("x")).children.map(t => t.textContent);
+(async () => {
+  const result = {};
+  const main = new Node("main"); main.setAttribute("id", "main"); body.append(main);
+  vm.runInContext('state.me = { user: "admin", csrf: "c" }; state.page = "approvals"; state.host = "local";', context);
+  const q = (id, question) => ({ id, run: "claude-web", sandbox: "claude-web", kind: "connect", question, always: "Allow always: pypi.org" });
+  let open = [q("1-1", "connect to pypi.org:443"), q("1-2", "look up example.org")];
+  answer = (method, path, sent) => {  // an answered question is no longer open
+    if (method === "GET") return open;
+    open = open.filter(x => !path.endsWith(`/${x.id}`));
+    return { output: `sandbox-ai approvals: ${sent}` };
+  };
+  context.__main = main;
+  await vm.runInContext("pages.approvals(__main)", context);
+  result.first = rows().map(r => r.attributes["data-id"]);
+  const kept = rows()[0], scope = kept.all().find(n => n.tagName === "select");
+  scope.value = "always";
+  open = [q("1-1", "connect to pypi.org:443"), q("1-3", "connect to 192.0.2.9:5432")];
+  await vm.runInContext("poll()", context); await settle();
+  result.polled = rows().map(r => r.attributes["data-id"]);
+  result.sameRow = rows()[0] === kept; result.sameScope = kept.all().includes(scope) && scope.value === "always";
+  result.background = calls.filter(c => c.method === "GET").map(c => c.headers["X-Background"] || null);
+  button(kept, "Allow").fire("click");
+  result.asked = kept.all().find(n => n.className === "confirm").textContent;
+  result.postedBeforeYes = calls.filter(c => c.method === "POST").length;
+  await vm.runInContext("poll()", context); await settle();
+  result.stillAsking = rows()[0] === kept && Boolean(button(kept, "Yes, allow"));
+  button(kept, "Yes, allow").fire("click"); await settle();
+  const post = calls.find(c => c.method === "POST");
+  result.post = [post.path, JSON.parse(post.body)];
+  result.toast = toasts().find(t => t.includes("sandbox-ai approvals:")) || null;
+  open = new Error("ssh: connect to host ct1 port 22: Connection refused");
+  await vm.runInContext("poll()", context); await settle();
+  const badge = nav.children.find(n => (n.className || "").includes("badge"));
+  result.badge = badge ? [badge.textContent, badge.getAttribute("aria-label")] : null;
+  result.count = vm.runInContext("state.approvals", context);
+  result.notice = main.all().filter(n => (n.className || "").includes("notice")).map(n => n.textContent);
+  result.rowsAfterError = rows().map(r => r.attributes["data-id"]);
+  result.close = [vm.runInContext('closeText({ code: 1008, reason: "refused: at most 8 terminals at once\u001b[2J" }, true)', context),
+    vm.runInContext('closeText({ code: 1006, reason: "" }, false)', context)];
+  console.log(JSON.stringify(result));
+})().catch(e => { console.error(e.stack); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_the_approvals_table_is_kept_between_polls(tmp_path):
+    """app.js in node with a small stand-in for the DOM: the rows are keyed by the question's id (a poll adds and
+    removes rows, the others stay with the scope chosen in them); Allow asks in the row first, naming the sandbox,
+    what it asks and the scope; the answer's output is a toast; the polls are background requests, and a failed one
+    shows "?" ("could not check"), never 0, and leaves the rows."""
+    driver = tmp_path / "approvals.js"
+    driver.write_text(APPROVALS_DRIVER)
+    run = subprocess.run(["node", str(driver), str(WEB / "app.js")], capture_output=True, text=True, timeout=60)
+    assert run.returncode == 0, run.stderr
+    result = json.loads(run.stdout)
+    assert result["first"] == ["1-1", "1-2"] and result["polled"] == ["1-1", "1-3"]
+    assert result["sameRow"] and result["sameScope"], "an unchanged row stays, with its scope"
+    assert result["background"] == [None, "1"], "the page's own load counts, the poll does not"
+    assert result["postedBeforeYes"] == 0 and result["stillAsking"]
+    asked = result["asked"]
+    for part in ("claude-web", "connect to pypi.org:443", "always (remembered for the project)", "Allow always: pypi.org"):
+        assert part in asked, (part, asked)
+    assert result["post"] == ["/api/hosts/local/approvals/1-1", {"decision": "allow", "scope": "always"}]
+    assert result["toast"] and '"scope":"always"' in result["toast"], "the command's output is shown"
+    assert result["badge"] == ["?", "could not check"] and result["count"] is None
+    assert any("Could not check" in text and "Connection refused" in text for text in result["notice"])
+    assert result["rowsAfterError"] == ["1-3"], "a failed check takes no row away"
+    assert "code 1008" in result["close"][0] and "at most 8 terminals" in result["close"][0]
+    assert "\u001b" not in result["close"][0] and "could not connect" in result["close"][1]
+
+
+def test_an_ended_terminal_keeps_its_tab_and_says_why():
+    """The tab of a terminal that ended stays until it is closed, with the close code and the service's reason; its
+    window listener goes with it. The page's polls are background requests."""
+    script = (WEB / "app.js").read_text()
+    handler = script.split("ws.onclose = (event) => {")[1].split("\n  };")[0]
+    assert "setTimeout" not in handler, "no tab vanishes on its own"
+    assert 'window.removeEventListener("resize", entry.fit)' in handler and "closeText(event, entry.opened)" in handler
+    assert "event.code" in script.split("function closeText")[1] and "event.reason" in script.split("function closeText")[1]
+    assert "function closeTerminal(entry)" in script and "onclick: () => closeTerminal(t)" in script
+    assert 'hostPath("/approvals"), undefined, { background: true }' in script
+    assert 'hostPath("/starts"), undefined, { background: Boolean(background) }' in script
+    assert 'refreshTerminalStarts(document.getElementById("main"), true)' in script
+    assert 'headers["X-Background"] = "1"' in script
+    approvals = script.split("const SCOPES")[1].split("pages.doctor")[0]
+    assert "confirm(" not in approvals and "innerHTML" not in approvals, "asked in the page, as text"
+
+
+def test_a_broken_handshake_from_anyone_gets_no_websocket(server):
+    """A wrong version or key is refused as plain HTTP before anything else is looked at: not logged in, nobody ever
+    gets a 101 (the switch to a WebSocket), not even to read a close frame."""
+    raw = socket.create_connection(("127.0.0.1", server["port"]), timeout=30)
+    with server["context"].wrap_socket(raw, server_hostname="localhost") as sock:
+        sock.sendall((f"GET /api/terminal?start=x HTTP/1.1\r\nHost: localhost:{server['port']}\r\n"
+                      f"Origin: https://localhost:{server['port']}\r\n"
+                      "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: not-base64!\r\n"
+                      "Sec-WebSocket-Version: 13\r\n\r\n").encode())
+        head = sock.recv(4096).decode(errors="replace")
+    assert head.startswith("HTTP/1.1 400") and "101" not in head.split("\r\n")[0]

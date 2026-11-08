@@ -8,6 +8,12 @@ import subprocess
 import threading
 
 import pytest
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import home_guard  # noqa: E402
+
+home_guard.ensure()  # tests write logins: never into the real HOME, also when conftest.py was not run
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("sandbox_wizard_test", ROOT / "sandbox/wizard.py")

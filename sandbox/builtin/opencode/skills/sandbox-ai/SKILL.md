@@ -204,7 +204,7 @@ and the system bundle point at it. Each request is logged on the host with heade
 | Publishing to npm, PyPI, crates.io, GitLab, GitHub | `--publish KIND` (after `sandbox-ai publish-logins add KIND --secret NAME`) | restart needed |
 | An API key | `--api-key HOST=NAME` (the key stays out of the sandbox) or `--secret-env NAME` (after `sandbox-ai secrets set NAME`) | restart needed |
 | More memory, CPUs, processes | `--memory SIZE`, `--cpus N`, `--pids N` | `sandbox-ai limits $SANDBOX_AI_RUN --memory 16g` (and `--cpus`, `--pids`) |
-| Another folder of the host | `--workspace DIR` (at `/workspaces/<name>`) or `--mount SRC:DEST:ro` | `sandbox-ai resume NAME --restart --workspace DIR` (restarts; the conversation goes on) |
+| Another folder of the host | `--workspace DIR` (at `/workspaces/<name>`) or `--mount SRC:DEST:ro` | `sandbox-ai workspace add $SANDBOX_AI_RUN DIR` (at `/workspaces/<name>`, no restart; `--ro` read-only; push its commits from the host), or `sandbox-ai resume NAME --restart --workspace DIR` |
 | Files kept in HOME | kept by default (`sandbox-ai resume NAME`); `--state-dir DIR` for one HOME across starts | restart needed |
 | A system package | extend the image: `sandbox-ai images extend AGENT --add-apt PKG`, then `sandbox-ai build AGENT` | restart needed |
 

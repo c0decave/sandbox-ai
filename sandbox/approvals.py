@@ -419,7 +419,10 @@ def resolve(name):
 def public_addresses(name, addresses):
     """The public ones of ADDRESSES; refuses when there are none (a name the agent controls may resolve to
     this host, the LAN or a VPN: those are allowed only explicitly, with sandbox-ai net allow)."""
-    public = [a for a in addresses if ipaddress.ip_address(a.split("%")[0]).is_global]
+    # Global and no NAT64 (a local translator turns those into any IPv4 address: the LAN, this host).
+    nat64 = (ipaddress.ip_network("64:ff9b::/96"), ipaddress.ip_network("64:ff9b:1::/48"))
+    public = [a for a in addresses if (lambda ip: ip.is_global and not (ip.version == 6 and any(ip in n for n in nat64))
+                                       )(ipaddress.ip_address(a.split("%")[0]))]
     if not public:
         raise ValueError(f"{shown(name)} resolves only to non-public addresses ({', '.join(addresses) or 'none'}); "
                          "allow them explicitly with sandbox-ai net allow --allow-tcp IP:PORT if you mean it")
@@ -625,7 +628,46 @@ def desktop_question(title, text, ident, actions=QUESTION_ACTIONS, answer_with=N
     return None
 
 
-def watch(directory, stop, notify=None, interval=1.0, burst=3, buttons=None):
+# Names answered by themselves below one wildcard in one run: more go to the human as any lookup does (the agent
+# chooses the names: without a cap it could grow the pins, the firewall sets and the host's lookups without end).
+WILDCARD_NAMES = 256
+
+
+def under_wildcard(question, record):
+    """The *.DOMAIN of the run (--allow-host at the start or `sandbox-ai net allow`) that QUESTION's name lies
+    below, or None: only lookups (kind dns) of a proper host name, and only while fewer than WILDCARD_NAMES names
+    below it were opened in this run."""
+    name = question.get("name") if question.get("kind") == "dns" else None
+    if not isinstance(name, str) or not HOST.fullmatch(name):
+        return None
+    for wildcard in net().run_wildcards(record):
+        if name.endswith(wildcard[1:]):
+            try:
+                opened = [host for host in net().remembered(record) if str(host).endswith(wildcard[1:])]
+            except (OSError, ValueError, KeyError):
+                return None  # not countable: asked of the human, never answered without a limit
+            return wildcard if len(opened) < WILDCARD_NAMES else None
+    return None
+
+
+def answer_wildcard(question, record, wildcard, answer_with=None, out=None):
+    """Answer the lookup QUESTION below WILDCARD on the host, at once: allowed for the run when the name lies inside
+    the administrator's ceiling and resolves to public addresses (answer() resolves, pins and checks them); denied
+    for the run otherwise, so the held lookup does not wait for nobody."""
+    answer_with = answer_with or answer
+    runs = {record.get("run", "run"): record}
+    ident, name = question.get("id"), question.get("name")
+    try:
+        if not policy_allows_host(name):
+            raise ValueError(f"{shown(name)} lies outside the administrator's policy (allow_hosts)")
+        return answer_with(ident, "allow", "run", runs=runs, out=out or (lambda line: None))
+    except (OSError, ValueError) as exc:
+        with contextlib.suppress(OSError, ValueError):
+            answer_with(ident, "deny", "run", runs=runs, out=lambda line: None)
+        return {"decision": "deny", "reason": f"{wildcard}: {exc}"}
+
+
+def watch(directory, stop, notify=None, interval=1.0, burst=3, buttons=None, wildcards=answer_wildcard):
     """Notify (notify-send) about every new question in DIRECTORY until STOP is set (the launcher runs this
     while its sandbox runs: the agent's terminal is busy with the agent). More than BURST new questions at
     once give one notification; browser requests are announced by serve_browser."""
@@ -649,7 +691,14 @@ def watch(directory, stop, notify=None, interval=1.0, burst=3, buttons=None):
                 question = json.loads(path.read_text())
             except (OSError, ValueError):
                 continue
-            if isinstance(question, dict) and question.get("kind") not in ("browser", "canary"):  # they notify themselves
+            if not isinstance(question, dict):
+                continue
+            record = {**run_record(directory), "directory": str(Path(directory).parent)}
+            wildcard = under_wildcard(question, record)
+            if wildcard is not None:  # --allow-host *.DOMAIN: answered here, asked of nobody
+                threading.Thread(target=wildcards, args=(question, record, wildcard), daemon=True).start()
+                continue
+            if question.get("kind") not in ("browser", "canary"):  # they notify themselves
                 fresh.append(question)
         seen &= {path.name for path in files}
         if len(fresh) > burst:

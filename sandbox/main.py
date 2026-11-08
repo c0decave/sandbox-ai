@@ -17,8 +17,9 @@
   sandbox-ai logs [DIR|--project PATH]                               blocked egress and file access, with suggestions
   sandbox-ai activity [RUN|--session NAME|--project PATH] [--follow]  what the agents did: prompts, tools, files, network
   sandbox-ai privacy-check [PATH ...]                                what the next push would publish that should stay private
-  sandbox-ai net list|show|allow|revoke|stop ...                     change what a running sandbox may reach; end one
+  sandbox-ai net list|show|allow|revoke|untaint ...                  change what a running sandbox may reach
   sandbox-ai devices list|add|remove [RUN] PATH|usb:VID:PID          hand devices to a running sandbox
+  sandbox-ai workspace list|add|remove [RUN] DIR [--ro]             hand a host directory to a running sandbox
   sandbox-ai limits [RUN] --memory|--cpus|--pids ...                 change a running sandbox's limits
   sandbox-ai approvals list|allow|deny|history|remembered|forget ... answer what running sandboxes ask
   sandbox-ai canaries list [RUN] | resume RUN                        decoy files of the runs, and what happened to them
@@ -60,7 +61,8 @@ PYTHON_COMMANDS = {"claude": ("agent_sandbox.py", "claude"), "codex": ("agent_sa
                    "activity": ("activity.py",),
                    "privacy-check": ("privacy.py", "check"), "net": ("net.py",),
                    "approvals": ("approvals.py",), "canaries": ("canary.py",), "secrets": ("secret_store.py",), "llm": ("llm.py",), "vpn": ("vpn.py",), "hosts": ("hosts.py",), "web": ("webui.py",), "defaults": ("defaults_cmd.py",), "team": ("team.py",), "presets": ("presets.py",), "demo-device": ("demo_device.py",), "git-logins": ("git_logins.py",), "publish-logins": ("publish_logins.py",), "identities": ("identities.py",), "completion": ("completion.py",), "__complete": ("completion.py", "__complete"),
-                   "images": ("images.py",), "devices": ("devices.py",), "limits": ("devices.py", "--limits")}
+                   "images": ("images.py",), "devices": ("devices.py",), "limits": ("devices.py", "--limits"),
+                   "workspace": ("workspaces.py",)}
 
 
 def version():

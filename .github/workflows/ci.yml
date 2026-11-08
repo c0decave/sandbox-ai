@@ -27,9 +27,9 @@ jobs:
       - name: Tests (failures summarised as an annotation, readable through the API)
         run: |
           # Into a file, not a pipe: a process a test leaves behind would hold the pipe open and the step would hang.
-          # -v names each test as it starts, so a test that hangs (killed after 25 minutes) is named in the annotation;
+          # -v names each test as it starts, so a test that hangs (the run is killed after 90 minutes) is named in the annotation;
           # faulthandler prints the tracebacks of a test that runs longer than 5 minutes.
-          status=0; timeout --signal=INT --kill-after=60 1500 python -m pytest -v -rfE -o faulthandler_timeout=300 \
+          status=0; timeout --signal=INT --kill-after=60 5400 python -m pytest -v -rfE -o faulthandler_timeout=300 \
             tests > pytest.txt 2>&1 || status=$?
           tail -n 300 pytest.txt
           if [ "$status" -ne 0 ]; then

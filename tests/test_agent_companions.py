@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.9 and 3.10: the same parser as a package
@@ -14,6 +15,11 @@ import pytest
 
 import test_feature_matrix as fm
 from test_feature_matrix import m  # noqa: F401  (fixture)
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import home_guard  # noqa: E402
+
+home_guard.ensure()  # tests write logins: never into the real HOME, also when conftest.py was not run
 
 ROOT = Path(__file__).resolve().parents[1]
 s = fm.s

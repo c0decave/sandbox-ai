@@ -457,3 +457,70 @@ def test_list_as_json_for_the_web_interface(run, monkeypatch):
     assert entry["id"] == "1-1-1" and entry["run"] == "claude-1" and entry["kind"] == "dns"
     assert "\x1b" not in entry["question"] and "pypi.org" in entry["question"] and "\\x1b" in entry["question"]
     assert entry["sandbox"].startswith("claude-1")
+
+
+# --- host wildcards: the launcher answers the lookups below them -------------------------------------------------
+
+
+def wildcard_run(tmp_path, wildcards=("*.example.org",), added=()):
+    directory = tmp_path / "run"
+    (directory / "approvals").mkdir(parents=True)
+    session = tmp_path / "session"
+    session.mkdir()
+    (session / "hosts").write_text("127.0.0.1 localhost\n")
+    record = {"run": "claude-1", "pid": os.getpid(), "workspace": str(tmp_path), "session_dir": str(session),
+              "allow_wildcards": list(wildcards)}
+    (directory / "run.json").write_text(json.dumps(record))
+    if added:
+        (directory / "wildcards.json").write_text(json.dumps(list(added)))
+    return {**record, "directory": str(directory)}
+
+
+def test_a_lookup_below_a_wildcard_is_matched_and_capped(tmp_path, monkeypatch):
+    record = wildcard_run(tmp_path, added=["*.added.example"])
+    dns = lambda name: {"kind": "dns", "name": name, "id": "1-2-3"}  # noqa: E731
+    assert ap.under_wildcard(dns("api.example.org"), record) == "*.example.org"
+    assert ap.under_wildcard(dns("x.added.example"), record) == "*.added.example"
+    assert ap.under_wildcard(dns("example.org"), record) is None  # not the domain itself
+    assert ap.under_wildcard(dns("evilexample.org"), record) is None
+    assert ap.under_wildcard({"kind": "connect", "name": "api.example.org"}, record) is None
+    assert ap.under_wildcard(dns("bad name.example.org"), record) is None
+    # The agent chooses the names: past the cap they are asked of the human, as any lookup.
+    monkeypatch.setattr(ap, "WILDCARD_NAMES", 3)
+    ap.net().update_hosts(record, {f"n{i}.example.org": [f"192.0.2.{i}"] for i in range(3)})
+    assert ap.under_wildcard(dns("n9.example.org"), record) is None
+    assert ap.under_wildcard(dns("x.added.example"), record) == "*.added.example"  # each wildcard its own
+
+
+def test_the_answer_below_a_wildcard_keeps_to_the_policy(tmp_path, monkeypatch):
+    record = wildcard_run(tmp_path)
+    answered = []
+    fake = lambda ident, decision, scope, runs=None, out=None: answered.append((ident, decision, scope)) or \
+        {"decision": decision}  # noqa: E731
+    monkeypatch.setattr(ap, "policy_allows_host", lambda name: True)
+    ap.answer_wildcard({"id": "1-2-3", "kind": "dns", "name": "api.example.org"}, record, "*.example.org", fake)
+    assert answered == [("1-2-3", "allow", "run")]
+    monkeypatch.setattr(ap, "policy_allows_host", lambda name: False)
+    result = ap.answer_wildcard({"id": "1-2-4", "kind": "dns", "name": "api.example.org"}, record, "*.example.org", fake)
+    assert answered[-1] == ("1-2-4", "deny", "run") and "policy" in result["reason"]  # the held lookup ends now
+
+
+def test_the_watch_answers_wildcard_lookups_itself_and_tells_nobody(tmp_path):
+    record = wildcard_run(tmp_path)
+    approvals = Path(record["directory"]) / "approvals"
+    (approvals / "1700000000-1-1.json").write_text(json.dumps({"id": "1700000000-1-1", "kind": "dns",
+                                                               "name": "api.example.org"}))
+    (approvals / "1700000000-1-2.json").write_text(json.dumps({"id": "1700000000-1-2", "kind": "dns",
+                                                               "name": "other.example"}))
+    stop, notes, auto = threading.Event(), [], []
+    thread = threading.Thread(target=ap.watch, args=(approvals, stop), kwargs={
+        "notify": lambda title, text: notes.append(text), "interval": 0.05,
+        "wildcards": lambda question, rec, wildcard: auto.append((question["name"], wildcard))})
+    thread.start()
+    deadline = time.monotonic() + 5
+    while (not auto or not notes) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    stop.set()
+    thread.join(5)
+    assert auto == [("api.example.org", "*.example.org")]
+    assert len(notes) == 1 and "other.example" in notes[0]  # only the other one is announced

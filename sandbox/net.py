@@ -8,7 +8,6 @@
                        [--git-token-env|--git-token-file|--git-token-secret URL=REF]   a Git login
                        [--allow-host-port PORT]            the host's 127.0.0.1:PORT, through a relay
   sandbox-ai net revoke [RUN] (the same options)       take back what `allow` gave
-  sandbox-ai net stop RUN [--wait SECONDS]             end a running sandbox: its launcher cleans up and exits
   sandbox-ai net untaint [RUN]                         take back the run's taint (untrusted content entered it)
 
 RUN is the name a sandbox shows to its agent as $SANDBOX_AI_RUN, or the name of its start (see `list`,
@@ -16,15 +15,15 @@ RUN is the name a sandbox shows to its agent as $SANDBOX_AI_RUN, or the name of 
 when only one sandbox runs, or only one for the current directory (not for `stop`). Changes last until
 the sandbox ends; to keep them, add the same options to its start command or its .sandbox-ai.json. Only
 you can make them: the agent cannot reach the control socket. Connections that are already open stay
-open. `stop` sends SIGTERM to the launcher after checking that the PID is still that launcher (yours,
-same start time, running agent_sandbox.py) and waits for it (30 s by default); sessions and MCP servers
-are stopped with `sandbox-ai session stop` and `sandbox-ai mcp stop`.
+open. A sandbox is ended with `sandbox-ai stop NAME` (any start: a run, a session, an MCP server);
+`sandbox-ai net stop RUN [--wait SECONDS]` is its older form for a run, kept for scripts and the app.
 
 Standard library only.
 """
 import argparse
 import calendar
 import contextlib
+import fcntl
 import hashlib
 import importlib.util
 import ipaddress
@@ -34,6 +33,7 @@ from pathlib import Path
 import shlex
 import shutil
 import signal
+import re
 import socket
 import stat
 import subprocess
@@ -71,13 +71,20 @@ def launcher():
     return _launcher
 
 
-def alive(pid):
+def alive(pid, start=None):
+    """PID still runs, and, when its START time was recorded (run.json's pid_start), it is still that process:
+    a PID reused by another process after the run ended no longer passes for the run. Unknown either way (no
+    /proc, a record of an older version) counts as alive: a live run's directory must never be removed."""
     try:
         os.kill(int(pid), 0)
     except ProcessLookupError:
         return False
     except (PermissionError, ValueError, TypeError):
         return True
+    if isinstance(start, int) and not isinstance(start, bool):
+        now = launcher().process_start(int(pid))
+        if now is not None and now != start:
+            return False
     return True
 
 
@@ -127,7 +134,7 @@ def running():
                 continue
             if not isinstance(record, dict):
                 continue
-            if not alive(record.get("pid")):
+            if not alive(record.get("pid"), record.get("pid_start")):
                 shutil.rmtree(entry, ignore_errors=True)
                 continue
             record["directory"] = str(entry)
@@ -177,12 +184,20 @@ def resolve(hosts):
 def request_for(args, op, resolver=resolve):
     """(request for the supervisor, {host: addresses} for /etc/hosts) from the command line."""
     l = launcher()
-    hosts = list(dict.fromkeys(args.allow_host + [h for preset in args.presets for h in l.PRESETS[preset]]))
+    wildcards = sorted({h for h in args.allow_host if h.startswith("*.")})
+    for wildcard in wildcards:
+        try:
+            l.RUNTIME.wildcard_suffix(wildcard)
+        except ValueError as exc:
+            raise ValueError(f"--allow-host {wildcard}: {exc}") from None
+    hosts = list(dict.fromkeys([h for h in args.allow_host if not h.startswith("*.")]
+                               + [h for preset in args.presets for h in l.PRESETS[preset]]))
     for host in hosts:
-        if len(host) > 253 or not all(part and len(part) <= 63 and part.replace("-", "").isalnum()
-                                      and not part.startswith("-") and not part.endswith("-")
+        # As the start checks it (ASCII labels only: a name in another script is given in its xn-- form), so that
+        # --keep never writes a name every later start refuses.
+        if len(host) > 253 or not all(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", part)
                                       for part in host.split(".")):
-            raise ValueError(f"invalid host name: {host!r}")
+            raise ValueError(f"invalid host name: {host!r} (a name outside ASCII in its xn-- form)")
     for value in args.allow:
         if "%" in value:
             raise ValueError(f"--allow does not accept an IPv6 scope ID: {value!r}")
@@ -206,10 +221,90 @@ def request_for(args, op, resolver=resolve):
             raise ValueError(f"--nameserver {server}: an IP address") from None
     if servers:
         request["dns"] = servers
+    if wildcards:
+        request["wildcards"] = wildcards  # not for the network change: control op "wildcards" (see change_wildcards)
     return request, names, hosts
 
 
-def ask(directory, request, timeout=15):
+def wildcards_file(record):
+    """The wildcards added during the run (run directory, outside the sandbox): approvals.watch reads them."""
+    return Path(record["directory"]) / "wildcards.json"
+
+
+def run_wildcards(record):
+    """Every *.DOMAIN of the run: the start's (run.json allow_wildcards) and those added since."""
+    found = [w for w in record.get("allow_wildcards") or [] if isinstance(w, str)]
+    try:
+        added = json.loads(wildcards_file(record).read_text())
+    except (OSError, ValueError):
+        added = []
+    found += [w for w in added if isinstance(w, str)] if isinstance(added, list) else []
+    return sorted(set(found))
+
+
+def change_wildcards(record, op, wildcards, apply=True):
+    """Add (allow) or take back (revoke) WILDCARDS during the run: the supervisor's DNS stub holds the lookups below
+    them, the launcher answers those on the host. Only for a run that asks questions. APPLY False only checks
+    (before anything of the command changes)."""
+    l = launcher()
+    started = set(record.get("allow_wildcards") or [])
+    if op == "allow":
+        try:
+            asks = json.loads((Path(record["session_dir"]) / "config.json").read_text()).get("ask")
+        except (OSError, ValueError, KeyError):
+            asks = None
+        if not asks:
+            raise ValueError("--allow-host *.DOMAIN needs a sandbox that asks (not one started with --ask off): each "
+                             "name below it is opened as its lookup is answered")
+        try:
+            resolv = (Path(record["session_dir"]) / "resolv.conf").read_text()
+        except (OSError, KeyError):
+            resolv = ""
+        if "nameserver 127.0.0.1" not in resolv:
+            raise ValueError("--allow-host *.DOMAIN: this sandbox resolves names past its DNS stub (started with --dns "
+                             "or --nameserver), so the names below it would resolve but stay closed; name the hosts "
+                             "one by one")
+        policy = l.load_policy()
+        ceiling = argparse.Namespace(policy={k: policy[k] for k in ("allow_within", "allow_hosts") if k in policy})
+        outside = [w for w in wildcards if not l.within_ceiling(ceiling, host=w)]
+        if outside:
+            raise ValueError(f"{', '.join(outside)} is not among the hosts the administrator's policy allows "
+                             "(allow_hosts)")
+    else:
+        fixed = sorted(set(wildcards) & started)
+        if fixed:
+            raise ValueError(f"{', '.join(fixed)} was given at the start: it stays until the run ends")
+        unknown = sorted(set(wildcards) - set(run_wildcards(record)))
+        if unknown:
+            raise ValueError(f"{', '.join(unknown)} was not allowed during this run")
+    if not apply:
+        return None
+    answer = ask(record["directory"], {"op": "wildcards", "add" if op == "allow" else "remove": wildcards})
+    now = sorted(f"*.{suffix}" for suffix in answer.get("wildcards", []))
+    temporary = wildcards_file(record).with_name(".wildcards.json")
+    temporary.write_text(json.dumps(now))
+    os.replace(temporary, wildcards_file(record))
+    return now
+
+
+# Longer than a firewall change may take in the sandbox (runtime.NFT_SECONDS, 30 s): a change the supervisor
+# applies late must not leave this command believing it failed, with names.json never written.
+ASK_SECONDS = 45
+
+
+def ask(directory, request, timeout=ASK_SECONDS):
+    """The supervisor's answer to REQUEST on the run's control socket; ValueError when it refuses, does not answer
+    (paused, or busy longer than TIMEOUT) or the socket fails."""
+    if (Path(directory) / "paused").exists():
+        raise ValueError("the sandbox is paused: resume it first (sandbox-ai resume NAME), then change it")
+    try:
+        return ask_socket(directory, request, timeout)
+    except (OSError, TimeoutError) as exc:  # socket.timeout is an OSError
+        raise ValueError(f"the sandbox did not answer ({getattr(exc, 'strerror', None) or exc or 'timed out'}); "
+                         "see sandbox-ai net show") from None
+
+
+def ask_socket(directory, request, timeout):
     path = Path(directory) / "control.sock"
     with socket.socket(socket.AF_UNIX) as client:
         client.settimeout(timeout)
@@ -314,7 +409,24 @@ def remembered(record):
 
 def update_hosts(record, names, remove=()):
     """Add NAMES ({host: addresses}) to the sandbox's /etc/hosts and drop what was added for the hosts in
-    REMOVE; the file is changed in place, so the sandbox sees it at once."""
+    REMOVE; the file is changed in place, so the sandbox sees it at once. Under the run's lock: answers to lookups
+    below a wildcard arrive in threads of their own, beside `net allow`."""
+    with hosts_lock(record):
+        return update_hosts_locked(record, names, remove)
+
+
+@contextlib.contextmanager
+def hosts_lock(record):
+    fd = os.open(Path(record["directory"]) / "names.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+                 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def update_hosts_locked(record, names, remove=()):
     hosts_file = Path(record["session_dir"]) / "hosts"
     added = remembered(record)
     dropped = {tuple(line) for host in remove for line in added.pop(host, {}).get("lines", [])}
@@ -364,7 +476,7 @@ def tainted_text(state):
         (f" (and {more} later source{'s' if more != 1 else ''})" if more > 0 else "")
 
 
-def show(result, out=print, names=None, run=None, as_json=False, logins=()):
+def show(result, out=print, names=None, run=None, as_json=False, logins=(), wildcards=()):
     """What was allowed during the run, grouped by kind; HTTPS addresses under the names they were allowed
     for (from `net allow --allow-host`, presets and approved lookups; never looked up anew: a name the
     agent chose may carry data)."""
@@ -383,6 +495,7 @@ def show(result, out=print, names=None, run=None, as_json=False, logins=()):
     git = [{"url": entry["url"], "user": entry.get("user")} for entry in logins]  # never the token
     if as_json:
         out(json.dumps({"run": run, "all_ports": nets, "dns": dns, **({"taint": taint} if taint is not None else {}),
+                        "host_wildcards": list(wildcards),
                         "git": git, "host_ports": relayed,
                         "https": [{"address": a, "names": sorted(by_address.get(a, []))} for a in https],
                         "tcp": [{"address": a, "port": p, "names": sorted(by_address.get(a, []))} for a, p in tcp]},
@@ -401,6 +514,10 @@ def show(result, out=print, names=None, run=None, as_json=False, logins=()):
         t.section("Git logins added during this run", out, note="the tokens stay in the run's session directory")
         t.table(["SERVER", "USER"], [[printable(entry["url"]), printable(str(entry.get("user") or ""))] for entry in git],
                 out)
+        out("")
+    if wildcards:
+        t.section("Host wildcards", out, note="every name below them is opened as it is looked up")
+        t.table(["WILDCARD"], [[printable(w)] for w in wildcards], out)
         out("")
     t.section(f"{printable(run) if run else 'this sandbox'}: allowed during this run", out,
               note=f"{total} destination{'s' if total != 1 else ''}, added with `sandbox-ai net allow` or approvals")
@@ -718,17 +835,21 @@ def parser():
     shown = commands.add_parser("show", help="what was allowed during the run")
     shown.add_argument("run", nargs="?")
     shown.add_argument("-j", "--json", action="store_true", help="as JSON, for scripts")
+    shown.add_argument("-k", "--keep", action="store_true",
+                       help="keep it all for the next starts: into the project's .sandbox-ai.json (trusted), as the "
+                            "options the run was given since its start (names, wildcards, addresses, DNS, host ports, "
+                            "devices, workspaces added; no Git logins)")
     untainted = commands.add_parser("untaint", help="take back the run's taint: the rules for tainted runs no longer "
                                                     "hold, until untrusted content enters it again")
     untainted.add_argument("run", nargs="?")
-    stopped = commands.add_parser("stop", help="end a running sandbox (not a session or MCP server)")
+    stopped = commands.add_parser("stop", help="older form of `sandbox-ai stop NAME` (a run only)")
     stopped.add_argument("run")
     stopped.add_argument("--wait", type=seconds, default=STOP_WAIT, metavar="SECONDS",
                          help=f"how long to wait for it to end (default {STOP_WAIT}; 0: do not wait)")
     for name in ("allow", "revoke"):
         command = commands.add_parser(name, help=f"{name} destinations while the sandbox runs")
         command.add_argument("run", nargs="?")
-        command.add_argument("-A", "--allow-host", action="append", default=[], metavar="HOST",
+        command.add_argument("-A", "--allow-host", action="append", default=[], metavar="HOST", type=str.lower,
                              help="pin HOST in the sandbox's /etc/hosts and allow TCP/443 to it")
         command.add_argument("-t", "--allow-tcp", action="append", default=[], metavar="IP:PORT")
         command.add_argument("-a", "--allow", action="append", default=[], metavar="IP_OR_CIDR",
@@ -776,7 +897,91 @@ def kept_options(args, ports):
     return tokens
 
 
-def keep_in_project(record, tokens, write=True):
+HOST_NAME = re.compile(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9][a-z0-9-]{0,62}")
+
+
+def running_options(record, result):
+    """(options, workspaces, notes): what the running sandbox RECORD was given during the run (RESULT: its `show`
+    state), as start options for its project file: the names allowed (net allow, presets, approved lookups) and the
+    host wildcards, addresses allowed without a name, TCP targets, networks, nameservers, host ports, devices, and the
+    workspaces added (`sandbox-ai workspace add`). Git logins are not kept (their tokens stay out of project files).
+    RESULT comes from the supervisor, which runs beside the agent: every value is checked again before it goes into
+    a file that is trusted at the next start, and each option is written with its own value."""
+    l, notes, tokens = launcher(), [], []
+
+    def address(value):
+        return str(ipaddress.ip_address(str(value).split("%")[0]))
+    names = remembered(record)
+    started = set(record.get("allow_wildcards") or [])
+    wildcards = [w for w in run_wildcards(record) if w not in started]
+    every = list(started) + wildcards
+    named = set()
+    for host in sorted(names):
+        entry = names[host]
+        named |= {bare(a) for a in (entry.get("addresses", []) if isinstance(entry, dict) else [])}
+        if not HOST_NAME.fullmatch(str(host)):
+            notes.append(f"{l.printable(str(host))[:100]}: not kept (not a host name)")
+        elif not any(str(host).endswith(w[1:]) for w in every):  # below a wildcard: the wildcard is kept, not each
+            tokens += ["--allow-host", host]
+    for wildcard in wildcards:
+        l.RUNTIME.wildcard_suffix(wildcard)
+        tokens += ["--allow-host", wildcard]
+    for value in sorted({bare(n) for n in result.get("https", [])} - named, key=address_sort):
+        if "/" not in value:  # a single address allowed by an approval: its port, not a whole network
+            value = address(value)
+            tokens += ["--allow-tcp", f"[{value}]:443" if ":" in value else f"{value}:443"]
+    for value, port in sorted({(bare(a), int(p)) for a, p in result.get("tcp", [])},
+                              key=lambda ap: (address_sort(ap[0]), ap[1])):
+        value = address(value)
+        if not 1 <= port <= 65535:
+            raise ValueError(f"the sandbox reported port {port}")
+        tokens += ["--allow-tcp", f"[{value}]:{port}" if ":" in value else f"{value}:{port}"]
+    for net in sorted({bare(n) for n in result.get("nets", [])}, key=address_sort):
+        tokens += ["--allow", str(ipaddress.ip_network(net, strict=False))]
+    servers = sorted({address(bare(n)) for n in result.get("dns", [])}, key=address_sort)
+    if servers and set(servers) == set(l.DEFAULT_NAMESERVERS):
+        tokens += ["--dns"]
+    else:
+        tokens += [token for server in servers for token in ("--nameserver", server)]
+    for port in sorted({int(p) for p in result.get("host_ports", []) if isinstance(p, int) and not isinstance(p, bool)}):
+        if not 1 <= port <= 65535:
+            raise ValueError(f"the sandbox reported port {port}")
+        tokens += ["--allow-host-port", str(port)]
+    try:
+        added = l.load_devices_module().added(record)
+    except (OSError, ValueError, KeyError):
+        added = []
+    for value in added:
+        if isinstance(value, str) and (value.startswith("/dev/") or value.startswith("usb:")) and value.isprintable():
+            tokens += ["--device", value]
+    workspaces = []
+    checks = record.get("workspace_checks") or {}
+    for entry in load_workspaces_module().added_workspaces(record):
+        if entry.get("mode") == "ro" and not checks.get("read_only"):
+            notes.append(f"{entry['host']} was added read-only: not kept (a project file has no read-only workspace "
+                         "of its own; start with --workspace-ro, or add it again with --ro)")
+            continue
+        if os.path.isabs(entry["host"]) and "," not in entry["host"] and entry["host"].isprintable():
+            workspaces.append(entry["host"])
+    if git_logins(record):
+        notes.append("Git logins added during the run are not kept (tokens never go into a project file): start with "
+                     "--git-token-env / --git-token-secret, or add one with sandbox-ai git-logins")
+    return tokens, workspaces, notes
+
+
+_workspaces_module = None
+
+
+def load_workspaces_module():
+    global _workspaces_module
+    if _workspaces_module is None:
+        spec = importlib.util.spec_from_file_location("sandbox_workspaces_for_net", HERE / "workspaces.py")
+        _workspaces_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_workspaces_module)
+    return _workspaces_module
+
+
+def keep_in_project(record, tokens, write=True, workspaces=()):
     """Add TOKENS (options) to the run's project file, WORKSPACE/.sandbox-ai.json, and trust the result: only while
     the file is exactly what you trusted (an agent's change is never trusted along), or a new one for the run's
     agent. Returns (path, [added options]); ValueError otherwise. WRITE False only checks (before the run changes:
@@ -786,6 +991,8 @@ def keep_in_project(record, tokens, write=True):
     if not workspace:
         raise ValueError("the run does not name its workspace (started by an older sandbox-ai): add the options "
                          "to .sandbox-ai.json yourself, then: sandbox-ai wizard trust FILE")
+    # The project file of the run's first workspace (/work), never one of its further workspaces: the one its
+    # start read (load_project_config), so that the next start of this project reads what is kept here.
     path = l.config_key(Path(workspace) / l.CONFIG_NAME)
     trusted = l.trusted_configs()
     if path.is_symlink():
@@ -812,10 +1019,18 @@ def keep_in_project(record, tokens, write=True):
     if not write:
         return path, []
     options, added = list(document.get("options", [])), []
+    listed = list(document.get("workspaces", []))
+    for workspace in workspaces:
+        if workspace not in listed and workspace != str(record.get("workspace")):
+            listed.append(workspace)
+            added += ["workspace", workspace]
+    if listed:
+        document["workspaces"] = listed
     index = 0
+    flags_alone = {"--dns"} | {f"--allow-{preset}" for preset in launcher().PRESETS}
     while index < len(tokens):
         flag = tokens[index]
-        takes_value = index + 1 < len(tokens) and not tokens[index + 1].startswith("--")
+        takes_value = flag not in flags_alone and index + 1 < len(tokens)
         pair = tokens[index:index + 2] if takes_value else [flag]
         present = any(options[i:i + len(pair)] == pair for i in range(len(options)))
         if not present:
@@ -885,10 +1100,25 @@ def main(argv, out=print, resolver=resolve):
             return 0
         record = choose(runs, args.run)
         if args.command == "stop":
+            if sys.stderr.isatty() and not os.environ.get("SANDBOX_AI_NO_DEPRECATION"):
+                print(f"note: sandbox-ai net stop is the older form; sandbox-ai stop "
+                      f"{launcher().printable(record.get('name') or record.get('run', args.run))} ends any start "
+                      "(also sessions and MCP servers)", file=sys.stderr)
             return stop(record, args.wait, out)
         if args.command == "show":
-            show(ask(record["directory"], {"op": "show"}), out, names=remembered(record),
-                 run=record.get("run", args.run), as_json=args.json, logins=git_logins(record))
+            result = ask(record["directory"], {"op": "show"})
+            show(result, out, names=remembered(record), run=record.get("run", args.run), as_json=args.json,
+                 logins=git_logins(record), wildcards=run_wildcards(record))
+            if getattr(args, "keep", False):
+                tokens, workspaces, notes = running_options(record, result)
+                path, added = keep_in_project(record, tokens, workspaces=workspaces)
+                said = (lambda line: print(line, file=sys.stderr)) if args.json else out  # the JSON stays JSON
+                for note in notes:
+                    said(f"note: {launcher().printable(note)}")
+                shown_added = " ".join(added)
+                said(f"{record.get('run', args.run)}: " + (f"kept in {launcher().printable(path)} (trusted): "
+                                                            f"{launcher().printable(shown_added)}" if added else
+                                                            f"{launcher().printable(path)} already has it all"))
             return 0
         if args.command == "untaint":
             answer = ask(record["directory"], {"op": "untaint"})
@@ -910,9 +1140,10 @@ def main(argv, out=print, resolver=resolve):
             if args.command == "allow":
                 notes = git_network(args, logins)
         request, names, hosts = request_for(args, args.command, resolver)
+        wildcards = request.pop("wildcards", [])
         ports = request.get("host_ports", [])
         network = request["nets"] or request["https"] or request["tcp"] or request.get("dns") or hosts or ports
-        if not (network or logins):
+        if not (network or logins or wildcards):
             raise ValueError(f"nothing to {args.command}: give --allow-host, --allow-tcp, --allow, --dns, "
                              "--allow-host-port, a preset or a --git-token-* login")
         if ports and args.command == "allow":
@@ -935,6 +1166,8 @@ def main(argv, out=print, resolver=resolve):
             refused = launcher().MODES.runtime_refusal(record.get("mode"), wanted, record.get("run", args.run))
             if refused:
                 raise ValueError(refused)
+        if wildcards:
+            change_wildcards(record, args.command, wildcards, apply=False)
         if args.command == "revoke" and hosts:
             # The addresses these names had when they were allowed, minus those another name allowed during
             # the run still needs (a CDN serves many names from one address).
@@ -969,6 +1202,11 @@ def main(argv, out=print, resolver=resolve):
             update_hosts(record, names)
         elif hosts:
             update_hosts(record, {}, remove=hosts)
+        if wildcards:
+            now = change_wildcards(record, args.command, wildcards)
+            out(f"{record.get('run', args.run)}: host wildcards: {', '.join(now) or 'none'}" + (
+                "; the names opened below them stay open for the run (revoke them by name)"
+                if args.command == "revoke" else "; each name below them is opened as it is looked up"))
         if logins:
             urls = {credential["url"] for _, credential in logins}
             kept = [entry for entry in git_logins(record) if entry["url"] not in urls]
@@ -980,7 +1218,8 @@ def main(argv, out=print, resolver=resolve):
             else:
                 write_git_logins(record, kept + [{"url": credential["url"], "user": credential["user"],
                                                   "token": tokens[credential["url"]]} for _, credential in logins])
-        show(result, out, names=remembered(record), run=record.get("run"), logins=git_logins(record))
+        show(result, out, names=remembered(record), run=record.get("run"), logins=git_logins(record),
+             wildcards=run_wildcards(record))
         for note in notes:
             out(f"note: {launcher().printable(note)}")
         if args.command == "allow":
@@ -1003,8 +1242,11 @@ def main(argv, out=print, resolver=resolve):
                 out(f"{record['run']}: allowed until the sandbox ends; to keep it, start with: {options} "
                     f"(or add --keep: into the project's .sandbox-ai.json)")
         return 0
-    except ValueError as exc:
-        print(f"sandbox-ai net: {exc}", file=sys.stderr)
+    except (ValueError, OSError) as exc:  # OSError: a run directory or socket gone meanwhile; never a traceback
+        where = getattr(exc, "filename", None)
+        text = f"{exc.strerror}: {where}" if getattr(exc, "strerror", None) and where else \
+            getattr(exc, "strerror", None) or exc
+        print(f"sandbox-ai net: {text}", file=sys.stderr)
         return 1
 
 

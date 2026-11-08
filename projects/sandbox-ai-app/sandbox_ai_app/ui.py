@@ -764,6 +764,7 @@ class LimitsDialog(QDialog):
 KIND_TITLES = {"run": N_("Run"), "session": N_("Session"), "mcp": N_("MCP server"), "unregistered": N_("Not registered")}
 STATE_TITLES = {"running": N_("running"), "paused": N_("paused"), "stopped": N_("stopped"), "damaged": N_("damaged"),
                 "starting": N_("starting")}
+REMOTE_SECONDS = 60  # between two looks at the other hosts' starts (over SSH)
 SESSION_ACTIONS = (("attach", N_("Attach")), ("attach-app", N_("Attach in the app")), ("pause", N_("Pause")),
                    ("resume", N_("Resume")), ("delete", N_("Delete")))
 
@@ -802,7 +803,7 @@ class SandboxesPage(QWidget):
         top.addWidget(refresh)
         layout.addLayout(top)
         self.table = table([tr("Kind"), tr("Name"), tr("Project"), tr("Agent"), tr("Backend"), tr("Started"),
-                            tr("State"), tr("Proxy")], stretch=2)
+                            tr("State"), tr("Proxy"), tr("Host"), tr("Memory")], stretch=2)
         self.table.itemSelectionChanged.connect(self.selection_changed)
         layout.addWidget(self.table, 1)
         below = QHBoxLayout()
@@ -853,7 +854,14 @@ class SandboxesPage(QWidget):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh_soon)
         self.timer.start(backend.setting("sandboxes_interval"))
+        # The other hosts' starts (sandbox-ai hosts), over SSH: read now and then in the background, never on the
+        # GUI thread; a host that does not answer is said in the summary and keeps its last rows.
+        self.remote, self.remote_problems, self.remote_reading = {}, {}, None
+        self.remote_timer = QTimer(self)
+        self.remote_timer.timeout.connect(self.refresh_remote)
+        self.remote_timer.start(REMOTE_SECONDS * 1000)
         self.refresh()
+        QTimer.singleShot(0, self.refresh_remote)
 
     # -- reading --
 
@@ -875,6 +883,45 @@ class SandboxesPage(QWidget):
         self.reading = None
         self.apply(result, error)
 
+    def refresh_remote(self):
+        if self.remote_reading is not None:
+            return
+        try:
+            hosts = self.sai.remote_hosts()
+        except Exception:  # noqa: BLE001 - no hosts list: nothing remote
+            hosts = []
+        for gone in set(self.remote) - set(hosts):
+            self.remote.pop(gone, None)
+        self.remote_problems = {name: text for name, text in self.remote_problems.items() if name in hosts}
+        if not hosts:
+            return
+
+        def read():
+            found = {}
+            for name in hosts:
+                try:
+                    found[name] = (self.sai.host_instances(name), None)
+                except Exception as exc:  # noqa: BLE001 - said in the summary
+                    found[name] = (None, str(exc))
+            return found
+        # A read, not work: no owner, so it neither greys out the buttons (busy()) nor holds up closing the window.
+        self.remote_reading = background(read, timeout=60 * len(hosts) + 30,
+                                         done=lambda result, error: alive(self) and self.remote_done(result, error))
+
+    def remote_done(self, result, error):
+        self.remote_reading = None
+        for name, (instances, problem) in (result or {}).items():
+            if instances is not None:
+                self.remote[name] = instances
+                self.remote_problems.pop(name, None)
+            else:
+                self.remote_problems[name] = problem
+        if error is not None:
+            self.remote_problems["hosts"] = str(error)
+        self.instances = {**{k: i for k, i in self.instances.items() if i.host == "local"},
+                          **{i.key: i for found in self.remote.values() for i in found}}
+        self.show_instances()
+
     def apply(self, result, error):
         if self.stoppable is None:
             try:
@@ -885,9 +932,10 @@ class SandboxesPage(QWidget):
             found, self.problems = [], [str(error)]
         else:
             found, self.problems = result
-        self.instances = {instance.key: instance for instance in found}
+        local = {instance.key: instance for instance in found}
+        self.instances = {**local, **{i.key: i for found_ in getattr(self, "remote", {}).values() for i in found_}}
         self.show_instances()
-        self.updated.emit(self.instances)
+        self.updated.emit(local)  # the other pages act on this account's own
 
     def set_project(self, path):
         self.project = path
@@ -905,15 +953,25 @@ class SandboxesPage(QWidget):
     def show_instances(self):
         shown = [i for i in self.instances.values() if not self.only_project.isChecked() or self.mine(i)]
         order = {"run": 0, "session": 1, "mcp": 2, "unregistered": 3}
-        shown.sort(key=lambda i: (not self.mine(i), order.get(i.kind, 9), str(i.name)))
-        rows, colors, tips = [], [], []
+        shown.sort(key=lambda i: (getattr(i, "host", "local") != "local", not self.mine(i), order.get(i.kind, 9),
+                                  str(getattr(i, "host", "")), str(i.name)))
+        rows, colors, tips, sorts = [], [], [], []
         for i in shown:
+            memory = backend.memory_share(i) if i.state in ("running", "paused") else None
+            sorts.append([None] * 9 + [memory[0] if memory else -1.0])  # by the share, not as text ("9 %" > "10 %")
             rows.append([tr(KIND_TITLES.get(i.kind, i.kind)), printable(i.name), printable(i.project), printable(i.agent),
                          printable(i.backend), local_time(i.started), tr(STATE_TITLES.get(i.state, i.state)) if i.state
-                         else "", "" if i.proxy is None else tr("on") if i.proxy else tr("off")])
-            colors.append({"running": "ok", "paused": "warn", "damaged": "bad", "starting": "warn"}.get(i.state))
+                         else "", "" if i.proxy is None else tr("on") if i.proxy else tr("off"),
+                         tr("this machine") if getattr(i, "host", "local") == "local" else printable(i.host),
+                         "" if memory is None else f"{memory[0]:.0f} %"])
+            color = {"running": "ok", "paused": "warn", "damaged": "bad", "starting": "warn"}.get(i.state)
+            if memory is not None and memory[0] >= 95:
+                color = "bad"  # the watch is about to end a process in it
+            elif memory is not None and memory[0] >= 85 and color != "bad":
+                color = "warn"
+            colors.append(color)
             tips.append(tr("Current project") if self.mine(i) else None)
-        fill(self.table, rows, colors, tooltips=tips, keys=[i.key for i in shown])
+        fill(self.table, rows, colors, tooltips=tips, sort=sorts, keys=[i.key for i in shown])
         if getattr(self, "wanted", "") and not selected_rows(self.table) and find_row(self.table, self.wanted) >= 0:
             self.table.selectRow(find_row(self.table, self.wanted))
         for row in range(self.table.rowCount()):
@@ -925,9 +983,15 @@ class SandboxesPage(QWidget):
                     font.setBold(True)
                     item.setFont(font)
         fit_columns(self.table)  # bold text is wider
-        running = [i for i in self.instances.values() if i.state in ("running", "paused", "starting")]
+        active = [i for i in self.instances.values() if i.state in ("running", "paused", "starting")]
+        running = [i for i in active if getattr(i, "host", "local") == "local"]
         here = [i for i in running if self.mine(i)]
         text = tr("{count} running on this account", count=len(running))
+        elsewhere = len(active) - len(running)
+        if getattr(self, "remote", None):
+            text += " · " + tr("{count} on other hosts", count=elsewhere)
+        for name, problem in sorted(getattr(self, "remote_problems", {}).items()):
+            text += " · " + tr("{host}: no answer", host=printable(name)) + f" ({printable(problem)[:120]})"
         if self.project:
             text += " · " + tr("{count} in the current project", count=len(here))
         if self.problems:
@@ -949,6 +1013,9 @@ class SandboxesPage(QWidget):
             self.state.set("sandboxes-selected", instance.key)
         if instance is None:
             self.detail.setText(tr("Select a row: the buttons below act on it."))
+        elif getattr(instance, "host", "local") != "local":
+            self.detail.setText(" · ".join([tr("On {host}", host=printable(instance.host)), printable(instance.name),
+                                            *([printable(instance.project)] if instance.project else [])]))
         else:
             parts = [tr("Run {run}", run=printable(instance.run)) if instance.run else tr("not in the run registry")]
             if instance.pid:
@@ -959,11 +1026,49 @@ class SandboxesPage(QWidget):
         self.update_buttons()
         self.load_devices()
 
+    def update_remote_buttons(self, instance):
+        """A start on another host: attach, pause, resume, stop and delete it over SSH (sandbox-ai there does it,
+        with its own checks); what it may reach, its devices and limits stay with that host's own commands."""
+        host = printable(instance.host)
+        elsewhere = tr("On {host}: this is changed on that host (sandbox-ai net, devices, limits there).", host=host)
+        for button in self.run_buttons:
+            set_enabled(button, False, elsewhere)
+        state, attachable = instance.state, bool((instance.record or {}).get("attachable"))
+        rules = {"attach": state == "running" and attachable, "attach-app": state == "running" and attachable,
+                 "pause": state == "running", "resume": state in ("paused", "stopped"),
+                 "delete": state == "stopped" and instance.kind == "session"}
+        for action, button in self.session_buttons.items():
+            why = None if rules.get(action) else tr("Not while it is {state} on {host}.",
+                                                    state=tr(STATE_TITLES.get(state, state)), host=host)
+            set_enabled(button, why is None, why)
+        stoppable = state in ("running", "paused")
+        set_enabled(self.stop_button, stoppable, None if stoppable else tr("It does not run."),
+                    tooltip=tr("End the selected start on {host} (sandbox-ai stop there)", host=host))
+
+    def remote_action(self, instance, action):
+        """ACTION (pause, resume, stop, delete) on the start INSTANCE of another host, as `sandbox-ai ACTION NAME`
+        there; the hosts' starts are read again after it."""
+        args = [action, instance.name] + (["--yes"] if action == "delete" else [])
+
+        def done(result, error):
+            self.command_done(f"{instance.host}: {action}", result, error)
+            self.refresh_remote()
+        background(lambda: self.sai.host_run(instance.host, *args, timeout=180), owner=self,
+                   source=[self.stop_button, *self.session_buttons.values()], timeout=210, done=done)
+
     def update_buttons(self):
-        if busy(self):
-            return  # a command runs: its buttons stay greyed out until it is done
         instance = self.current()
+        if busy(self):
+            # A command runs: its buttons stay greyed out until it is done; a row of another host never keeps
+            # the buttons of the row chosen before (they would act on this machine).
+            if instance is not None and getattr(instance, "host", "local") != "local":
+                for button in [*self.run_buttons, *self.session_buttons.values(), self.stop_button]:
+                    set_enabled(button, False, tr("A command runs."))
+            return
         none = tr("Select a row first.")
+        if instance is not None and getattr(instance, "host", "local") != "local":
+            self.update_remote_buttons(instance)
+            return
         kind = instance.kind if instance else None
         state = instance.state if instance else None
         run_why = (none if instance is None else
@@ -1009,7 +1114,13 @@ class SandboxesPage(QWidget):
             text = tr("Stop {what}? It ends; its HOME is kept and Resume starts it again.", what=what)
         elif instance.kind == "mcp":
             text = tr("Stop {what}? Agents that use it lose it until it is started again.", what=what)
+        remote = getattr(instance, "host", "local") != "local"
+        if remote:  # the host is named: the same name may run on this machine too
+            text = tr("On {host}: {text}", host=printable(instance.host), text=text)
         if not confirm(self, tr("Stop"), text, tr("Stop"), destructive=True):
+            return
+        if remote:
+            self.remote_action(instance, "stop")
             return
         if instance.kind == "session":
             call = (self.sai.call, "session", "stop", instance.name)
@@ -1031,7 +1142,7 @@ class SandboxesPage(QWidget):
     def load_devices(self):
         """The devices added to the selected sandbox during its run (in the background)."""
         instance = self.current()
-        run = instance.run if instance else None
+        run = instance.run if instance and getattr(instance, "host", "local") == "local" else None
         self.devices_token += 1
         token = self.devices_token
         if not run:
@@ -1152,6 +1263,21 @@ class SandboxesPage(QWidget):
 
     def session(self, action, instance=None):
         instance = instance or self.current()
+        if instance is not None and getattr(instance, "host", "local") != "local":
+            host = printable(instance.host)
+            if action in ("attach", "attach-app"):
+                try:
+                    self.terminal(self.sai.host_terminal(instance.host, "attach", instance.name),
+                                  f"{host}: {printable(instance.name)}", embedded=action == "attach-app")
+                except Exception as exc:  # noqa: BLE001 - shown, the window stays
+                    warn(self, tr("Not attached"), printable(exc))
+                return
+            if action == "delete" and not confirm(
+                    self, tr("Delete"), tr("On {host}: delete session {name} and its HOME?", host=host,
+                                           name=printable(instance.name)), tr("Delete"), destructive=True):
+                return
+            self.remote_action(instance, action)
+            return
         if instance is None or instance.kind != "session":
             QMessageBox.information(self, tr("Sessions"), tr("Select a session first."))
             return
@@ -3306,7 +3432,7 @@ class MainWindow(QMainWindow):
             action.setChecked(self.tabs.find(project_entry(path)["key"]) >= 0)
             action.triggered.connect(lambda _=False, p=path: self.set_project(p))
         waiting = [i for i in self.sandboxes.instances.values() if i.kind in ("session", "run")
-                   and self.tabs.find(i.key) < 0]
+                   and getattr(i, "host", "local") == "local" and self.tabs.find(i.key) < 0]
         if waiting:
             menu.addSection(tr("Sessions and sandboxes"))
             for instance in sorted(waiting, key=lambda i: (i.kind, str(i.name))):
@@ -3649,6 +3775,7 @@ class MainWindow(QMainWindow):
         self.approvals.timer.stop()
         self.connections.timer.stop()
         self.sandboxes.timer.stop()
+        self.sandboxes.remote_timer.stop()
         self.update_check.stop()
         if getattr(self, "notifier", None) is not None:
             self.notifier.close_all()  # the popups are windows of their own

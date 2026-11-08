@@ -35,7 +35,7 @@
 | `sandbox/runtime.py` | Runs inside the sandbox (the only file mounted there): bootstrap, guard, loggers, connection proxy, DNS stub, display, terminal relay, MCP ends |
 | `sandbox/modes.py` | Security modes, from `lax` to `paranoid` |
 | `sandbox/sessions.py`, `sandbox/starts.py`, `sandbox/home_review.py` | Background sessions with tmux and kept starts; the registry of every start (list, names, history, gc); the review of a kept HOME before it comes back |
-| `sandbox/net.py`, `sandbox/devices.py`, `sandbox/approvals.py` | Changes to a running sandbox (network, taint, stop; devices and limits); questions and their answers |
+| `sandbox/net.py`, `sandbox/devices.py`, `sandbox/workspaces.py`, `sandbox/approvals.py` | Changes to a running sandbox (network, taint, stop; devices and limits; workspaces added and taken back); questions and their answers |
 | `sandbox/privacy.py`, `sandbox/canary.py` | The privacy check of commits and pushes; decoy files with tokens made for each run |
 | `sandbox/secret_store.py`, `sandbox/git_logins.py`, `sandbox/publish_logins.py`, `sandbox/identities.py` | Secrets in the keyring or private files; logins the connection proxy adds on the wire; identities |
 | `sandbox/mcp.py`, `sandbox/mcp_rootfs.py`, `sandbox/mcp_demo.py`, `sandbox/agent_mcp.py` | MCP server sandboxes; catalog servers under Bubblewrap; built-in test server; an agent as another agent's helper |

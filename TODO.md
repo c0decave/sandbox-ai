@@ -106,17 +106,37 @@ records of 0.1.60 stay: if a run still grows, `memory.jsonl` names what.
 
 ## A workspace added to a running sandbox (requested 2026-11-07)
 
-Done: `sandbox-ai resume NAME [--restart] --workspace DIR` (a restart; the conversation goes on).
-Open, live without a restart (`sandbox-ai workspace add NAME DIR`): the sandbox's mounts are
-private (no propagation), so a later mount reaches it only through a staging directory mounted
-at the start with `bind-propagation=rslave` (Podman) and made `rshared` in rootless Podman's
-mount namespace; the launcher then binds DIR below it with `podman unshare mount --bind`, and
-Firejail's namespace (slave of the container's) receives it. Bubblewrap: the same with `nsenter`
-into its user and mount namespace. Needs: the checks of a start for DIR (private locations,
-policy) bound to the opened directory (`open_tree`/`move_mount` or `--bind-fd`, not a path a
-symlink swap can redirect), a way back (`workspace remove`: umount, busy files), macOS (podman
-machine: inside the VM), and live tests with real Podman (rootless and rootful) and Bubblewrap;
-none of that can run in the sandbox.
+Done: `sandbox-ai resume NAME [--restart] --workspace DIR` (a restart; the conversation goes on), and since
+0.1.76 without a restart: `sandbox-ai workspace add|remove|list [RUN] DIR [--ro] [--force]` (workspaces.py).
+Not the staging directory with `rslave` propagation first planned, but the way `devices add` already works: a
+helper of the user enters the sandbox's user namespace, clones DIR there (`open_tree`, refused unless the
+directory still has the device and inode that were checked: a symlink swap mounts nothing) and moves the clone
+onto `/workspaces/NAME` in each of the sandbox's mount namespaces, the agent's under Firejail included
+(`move_mount` with empty paths on descriptors opened `O_NOFOLLOW`, so a link the agent put there is refused).
+Read-only and nosuid/nodev through `mount_setattr` (5.12); a failure in one namespace is undone in the others.
+Every start has a small tmpfs at `/workspaces` (1 MiB, noexec) for the mount points: the root is read-only.
+The checks of a start come from `workspace_checks` in run.json (the start's workspaces, mounts and HOME, the
+host paths `host_sources` lists, private directories, stores); scope, private and package locations, planted
+links and the policy are checked as at a start. `remove` refuses while a sandbox process has its cwd, an open
+file or a mapping there (`--force` detaches lazily). A session keeps it in its options (`resume --restart` has it
+at the same place). The file log watches it (control op `watch`).
+
+Hardened after the review of 2026-11-07: only the sandbox's own mount namespaces are targets (never one the agent
+made), a strict unmount first (the kernel refuses while anything holds the tree), the cgroup frozen during the
+check, `--ro` adds are not kept for a restart, a directory holding a PATH directory is refused.
+
+Open:
+- Live tests with real Podman (rootless and rootful: rootful's user namespace is not the user's, so the helper
+  cannot enter it, as for `devices add`) and Bubblewrap; none of that can run in the sandbox.
+- A PID given out again between the scan of the sandbox's processes and the helper's open of its namespaces
+  (pidfds from the scan would close it); the file log keeps its watches on a removed workspace's host inodes.
+- `net.alive` compares start times from this PID namespace: a CLI run in another one would take a live run for
+  ended (not reachable by the agent).
+- The push check and the after-run privacy check know only the start's workspaces (a push from an added one to a
+  public remote is refused, fail-closed): push.json would need to be re-read by the checker, with the rules for
+  the new project.
+- macOS: inside the podman machine VM (stage 4 of macOS support).
+- The app and the web interface: a button for it.
 
 ## Every start: names, detach, keep, rebirth (2026-11-04)
 
@@ -284,7 +304,8 @@ Open:
 
 Low severity; each needs a larger change than a local fix. Fixed since: a
 project file's `--copy` of a credential file is an auth choice in
-`merge_config`, replaced by one on the command line.
+`merge_config`, replaced by one on the command line; the file logger walks with
+`os.fwalk` and adds each watch through the walked directory's descriptor (0.1.76).
 
 - **Claude write-back within one run.** Write-back now requires an existing
   host login, an unchanged host file and tokens that differ from the ones
@@ -298,9 +319,6 @@ project file's `--copy` of a credential file is an auth choice in
   interruptible. Session pods carry a `sandbox-ai.session` label and a
   restart removes only its own stale pod; one-off pods still use random names
   without a label.
-- **File logger.** Symlinked directories are skipped, but `os.walk` still
-  races with a swap below the top directory; walk with `openat` and
-  `O_NOFOLLOW|O_DIRECTORY` and add watches through `/proc/self/fd`.
 - **apt packages** in the images are not pinned; agent, uv and Node.js base
   can be pinned with `--pin`, `--uv` and `--node` (newest is the default).
 
@@ -313,12 +331,9 @@ the controlling terminal, risky workspaces (HOME, `/`, temp, the launcher),
 `--allow` scope IDs, relative paths in project and MCP files, session
 `agent_args`/backend from the project file, stale session and MCP pods,
 resize frames inside input frames, MCP servers frozen with a bwrap session,
-the wizard's origin default. Still open, low severity:
+the wizard's origin default; the run registry compares the launcher's recorded
+start time, not the PID alone (0.1.76). Still open, low severity:
 
-- **PID reuse.** Session and MCP status now also compare the start time
-  (field 22 of `/proc/PID/stat`), recorded with the PID; records of older
-  versions have none and fall back to PID plus command line. The run registry
-  (`sandbox-ai net`, `register_run`) still checks the PID alone.
 - **bwrap pause is best-effort.** Two SIGSTOP passes; a process that keeps
   forking can escape. A cgroup freezer would be exact.
 - **Xvfb outside Firejail.** It runs in the outer mount namespace where

@@ -218,7 +218,7 @@ DEFAULTS_KEYS = {"version", "subnet", "subnet6", "mode", "canaries", "keep_days"
 SESSION_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}"
 # The directory of a start: its first name, with a suffix when that directory is taken (sessions.new_key).
 START_ID = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}"
-__version__ = "0.1.75"
+__version__ = "0.1.76"
 CONFIG_NAME = ".sandbox-ai.json"
 RULES_NAME = "rules.json"  # ~/.config/sandbox-ai/rules.json: your own rules, for every start
 # Label on session pods: the session's tmux directory, so a stale pod can be told apart from someone else's.
@@ -504,7 +504,9 @@ def build_parser():
                    help="Network profile: " + "; ".join(f"{name}: {value['help']}" for name, value in PROFILES.items())
                         + "; repeatable")
     p.add_argument("--allow", action="append", default=[], metavar="IP_OR_CIDR", help="Allow destination on all IP protocols/ports; repeatable")
-    p.add_argument("--allow-host", action="append", default=[], metavar="HOST", help="Pin hostname and allow TCP/443; repeatable")
+    # Lower case: host names are case-insensitive, EXAMPLE.org and example.org are one host (one pin, one entry).
+    p.add_argument("--allow-host", action="append", default=[], metavar="HOST", type=str.lower,
+                   help="Pin hostname and allow TCP/443; repeatable")
     for preset, hosts in PRESETS.items():
         p.add_argument(f"--allow-{preset}", action="append_const", const=preset, dest="presets", default=[],
                        help=f"Allow {', '.join(hosts)} (TCP/443)")
@@ -1181,7 +1183,7 @@ def tool_dirs_state(a):
         literal = Path(os.path.normpath(entry))
         try:
             directory = literal.resolve()
-        except OSError:
+        except (OSError, RuntimeError):  # RuntimeError: a symlink loop (Python before 3.13)
             continue
         # As written (a link in the workspace may lead out of it: the agent can swap that link) or where it leads.
         if not any(path == w or w in path.parents for w in workspaces for path in (literal, directory)):
@@ -1207,7 +1209,7 @@ def tool_dirs_changed(before):
         target = files.get("", (None, None))[1]
         try:
             moved = not os.path.isdir(directory) or (target is not None and str(Path(directory).resolve()) != target)
-        except OSError:
+        except (OSError, RuntimeError):  # a symlink loop the agent made there: replaced, as said below
             moved = True
         if moved:
             notes.append(f"the agent replaced {directory}, which is on your PATH, (by a link or something else); "
@@ -1396,12 +1398,23 @@ def settle_network(a, hosts, resolve_names):
 
 
 def allowed_hosts(a):
+    """The names pinned at the start and allowed on TCP/443 (no wildcards: see host_wildcards)."""
     if a.offline:
         return []
     defaults = [host for agent in team(a) for host in PROVIDERS[agent]]
     return list(dict.fromkeys(([] if a.no_provider_defaults or a.local_config else defaults)
                               + (FRONTIER if a.frontier else [])
-                              + [host for preset in a.presets for host in PRESETS[preset]] + a.allow_host))
+                              + [host for preset in a.presets for host in PRESETS[preset]]
+                              + [host for host in a.allow_host if not host.startswith("*.")]))
+
+
+def host_wildcards(a):
+    """--allow-host *.DOMAIN: every name below DOMAIN (not DOMAIN itself), each pinned and opened when it is looked
+    up: the DNS stub holds the lookup, the launcher answers its question on the host (approvals.watch), the address
+    goes back at once. As "*.DOMAIN", sorted."""
+    if a.offline:
+        return []
+    return sorted({host for host in a.allow_host if host.startswith("*.")})
 
 
 def host_ports(a):
@@ -2330,6 +2343,12 @@ def merge_config(argv, a, document):
             "--", *(document.get("agent_args", []) if agent_args is None else agent_args)]
 
 
+# Every workspace after the first lies below WORKSPACES_DIR, a small tmpfs of the sandbox's own (the root file
+# system is read-only): `sandbox-ai workspace add` makes the mount point of a workspace added during the run there.
+WORKSPACES_DIR = "/workspaces"
+WORKSPACES_TMPFS = "rw,nosuid,nodev,noexec,size=1m,nr_inodes=4096,mode=0755"
+
+
 def workspace_targets(a):
     """[(host path, sandbox path)]: the first workspace is always /work."""
     targets, used = [(a.workspaces[0], "/work")], set()
@@ -2905,6 +2924,19 @@ def validate(a):
             raise ValueError(f"--allow does not accept an IPv6 scope ID: {value!r}")
         ipaddress.ip_network(value, strict=False)
     for host in a.allow_host:
+        if host.startswith("*."):
+            try:
+                RUNTIME.wildcard_suffix(host)
+            except ValueError as exc:
+                raise ValueError(f"--allow-host {host}: {exc}") from None
+            if not asking(a) and not a.egress_all_allow:
+                raise ValueError(f"--allow-host {host} needs the sandbox's questions (not with --ask off): each name "
+                                 "below it is opened as its lookup is answered")
+            if nameservers(a) and not a.egress_all_allow:
+                raise ValueError(f"--allow-host {host} with --dns or --nameserver: lookups would go past the sandbox's "
+                                 "DNS stub, the names below it would resolve but stay closed; name the hosts one by "
+                                 "one, or start without real DNS")
+            continue
         if len(host) > 253 or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", host) or any(
                 not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", part) for part in host.split(".")):
             raise ValueError(f"Invalid hostname: {host!r}")
@@ -3105,65 +3137,86 @@ def check_workspace_scope(workspace):
     check_package_location(workspace, "Workspace")
 
 
-def check_host_sources(a):
-    """Every host path the launcher reads, mounts or writes back to lies outside agent-writable trees."""
+def host_sources(a):
+    """[(host path, label)]: every host path the launcher reads, mounts or writes back to that must lie outside the
+    trees the agent can write (exposed_trees). Recorded in run.json, so that a workspace added during the run
+    (sandbox-ai workspace add) is held to them as well."""
+    found = []
     if a.copy_auth or auth_mode(a) == "auto":
         # CODEX_HOME, CLAUDE_CONFIG_DIR or XDG_* inside a workspace would let the agent plant a
         # symlink there that we would follow; Claude's file is also the write-back target.
         for source in auth_source_candidates(a.agent):
-            check_host_source(a, source, "Credential file (from CODEX_HOME, CLAUDE_CONFIG_DIR or XDG_DATA_HOME)")
+            found.append((source, "Credential file (from CODEX_HOME, CLAUDE_CONFIG_DIR or XDG_DATA_HOME)"))
     if a.agent == "opencode":
-        check_host_source(a, opencode_catalog(), "OpenCode model catalog (from XDG_CACHE_HOME)")
+        found.append((opencode_catalog(), "OpenCode model catalog (from XDG_CACHE_HOME)"))
     for path, option in [(a.local_config, "--local-config"), (a.auth_file, "--auth-file"),
                          (a.import_codex_auth, "--import-codex-auth")]:
         if path:
-            check_host_source(a, path, option)
+            found.append((path, option))
     for value in a.git_token_file:
         # A token file the agent could replace would hand it any host file as a "token".
-        check_host_source(a, git_token_credential(value, "file")["file"], "--git-token-file")
+        found.append((git_token_credential(value, "file")["file"], "--git-token-file"))
     if a.git_credentials:
-        check_host_source(a, a.git_credentials, "--git-credentials")
+        found.append((a.git_credentials, "--git-credentials"))
     # The control socket and the approvals live there; the agent must not reach them through a mount.
-    check_host_source(a, runs_dir(), "The run directory (XDG_RUNTIME_DIR, else XDG_STATE_HOME)")
+    found.append((runs_dir(), "The run directory (XDG_RUNTIME_DIR, else XDG_STATE_HOME)"))
     if privacy_rules_dir(a):
         # The agent must neither read the rules (they name what is private) nor change them.
-        check_host_source(a, privacy_rules_dir(a), "--privacy-rules")
+        found.append((privacy_rules_dir(a), "--privacy-rules"))
     # Rules the agent could rewrite would be no rules (and it should not learn them either).
-    check_host_source(a, user_rules_file(), "Your rules (XDG_CONFIG_HOME)")
+    found.append((user_rules_file(), "Your rules (XDG_CONFIG_HOME)"))
     # The preset this start comes from (--preset): an agent must not write what it is started with.
     preset = _presets_module.LOADED if _presets_module is not None else None
     if preset and preset.get("_origin") != "built-in":
-        check_host_source(a, preset["_path"], f"The preset {preset.get('id')} ({preset['_origin']})")
+        found.append((preset["_path"], f"The preset {preset.get('id')} ({preset['_origin']})"))
     for path in a.rules:
-        check_host_source(a, path, "--rules")
+        found.append((path, "--rules"))
     for value in a.copy:
         if ":" in value:
-            check_host_source(a, value.rsplit(":", 1)[0], "--copy")
+            found.append((value.rsplit(":", 1)[0], "--copy"))
     if kits_apply(a):
         kits = load_kits_module()
         for label, path in kits.sources(a):
-            check_host_source(a, path, f"Kit ({label})")
+            found.append((path, f"Kit ({label})"))
         # Approvals the agent could write would be no approvals.
-        check_host_source(a, kits.trust_file(), "Approved kit hooks (XDG_CONFIG_HOME)")
+        found.append((kits.trust_file(), "Approved kit hooks (XDG_CONFIG_HOME)"))
         if not a.no_default_kit:
-            check_host_source(a, kits.default_home(a.agent), "Default kit")
+            found.append((kits.default_home(a.agent), "Default kit"))
         if not a.no_memory:
-            check_host_source(a, kits.memory_store(a.workspaces[0], a.agent), "Project memory")
+            found.append((kits.memory_store(a.workspaces[0], a.agent), "Project memory"))
         if a.agent == "claude" and not a.no_plugins:
-            check_host_source(a, kits.plugin_store("claude"), "Plugin store")
-        # The other way round: a workspace, rw mount or --state-dir inside a store or kit would let the
-        # agent change what every sandbox gets (or what its own next run reads back).
-        stores = [(path, label) for path, label, used in [
-            (kits.default_home(a.agent), "the default kit", not a.no_default_kit),
-            (kits.kits_dir(), "the kits directory", bool(a.kit)),
-            (kits.state_root() / "memory", "the project memory", not a.no_memory),
-            (kits.plugin_store("claude"), "the plugin store", a.agent == "claude" and not a.no_plugins)] if used]
-        for tree in exposed_trees(a):
-            for path, label in stores:
-                path = Path(os.path.normpath(path.expanduser().absolute()))
-                if tree == path or path in tree.parents or tree == path.resolve() or path.resolve() in tree.parents:
-                    raise ValueError(f"{tree} lies inside {label} ({path}), which the agent would then change "
-                                     "for other sandboxes; choose another directory")
+            found.append((kits.plugin_store("claude"), "Plugin store"))
+    return found
+
+
+def host_stores(a):
+    """[(path, label)] of the stores no agent-writable tree may lie in either (every sandbox reads them)."""
+    if not kits_apply(a):
+        return []
+    kits = load_kits_module()
+    return [(path, label) for path, label, used in [
+        (kits.default_home(a.agent), "the default kit", not a.no_default_kit),
+        (kits.kits_dir(), "the kits directory", bool(a.kit)),
+        (kits.state_root() / "memory", "the project memory", not a.no_memory),
+        (kits.plugin_store("claude"), "the plugin store", a.agent == "claude" and not a.no_plugins)] if used]
+
+
+def check_stores(trees, stores):
+    """A workspace, rw mount or --state-dir inside a store or kit would let the agent change what every sandbox
+    gets (or what its own next run reads back)."""
+    for tree in trees:
+        for path, label in stores:
+            path = Path(os.path.normpath(Path(path).expanduser().absolute()))
+            if tree == path or path in tree.parents or tree == path.resolve() or path.resolve() in tree.parents:
+                raise ValueError(f"{tree} lies inside {label} ({path}), which the agent would then change "
+                                 "for other sandboxes; choose another directory")
+
+
+def check_host_sources(a):
+    """Every host path the launcher reads, mounts or writes back to lies outside agent-writable trees."""
+    for path, label in host_sources(a):
+        check_host_source(a, path, label)
+    check_stores(exposed_trees(a), host_stores(a))
     workspaces = [Path(w).expanduser().resolve() for w in a.workspaces]
     state = [a.state_dir.expanduser().resolve()] if a.state_dir else []
     mounts = [(value, *parse_mount(value)) for value in a.mount]
@@ -4468,7 +4521,22 @@ def sync_key(agent, home):
 
 def remember_sync(agent, home, digest):
     """Record that HOME and its source share the login with DIGEST (None forgets it); entries of
-    removed HOMEs are dropped."""
+    removed HOMEs are dropped. Under a lock of its own (two runs starting or ending at once must not drop each
+    other's entry; not claude_login_lock, which some callers hold already)."""
+    store = login_sync_store()
+    try:
+        store.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        lock = os.open(store.with_name("login-sync.lock"), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError:
+        return  # only a recovery aid
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        remember_sync_locked(agent, home, digest, store)
+    finally:
+        os.close(lock)
+
+
+def remember_sync_locked(agent, home, digest, store):
     known = load_login_sync()
     record = {key: value for key, value in known.items() if Path(key.partition(":")[2]).is_dir()}
     if digest is None:
@@ -4477,15 +4545,16 @@ def remember_sync(agent, home, digest):
         record.pop(sync_key(agent, home), None)
     else:
         record[sync_key(agent, home)] = digest
-    store = login_sync_store()
+    temporary = None
     try:
-        store.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         fd, temporary = tempfile.mkstemp(prefix=".login-sync-", dir=store.parent)
         with os.fdopen(fd, "w") as stream:
             json.dump(record, stream)
         os.replace(temporary, store)
     except OSError:
-        pass  # only a recovery aid
+        if temporary is not None:  # only a recovery aid, but no leftovers
+            with contextlib.suppress(OSError):
+                os.unlink(temporary)
 
 
 def claude_recover_writeback(home, pair):
@@ -5148,7 +5217,7 @@ def remembered_pins(a, names, resolve):
     pins = {}
     for name in names:
         found = resolved.get(name) or []
-        kept = [address for address in found if ipaddress.ip_address(address).is_global
+        kept = [address for address in found if RUNTIME.public_address(ipaddress.ip_address(address))
                 or (ceiling and within_ceiling(a, network=address))]
         if not found:
             notes.append(f"{name} (approved always) is not opened: it does not resolve now")
@@ -5665,9 +5734,12 @@ def register_run(a, run, session):
         # Left by a run that was killed (sessions and MCP servers keep their name): reuse it unless that
         # run is still alive.
         try:
-            pid = int(json.loads((directory / "run.json").read_text()).get("pid"))
+            earlier = json.loads((directory / "run.json").read_text())
+            pid = int(earlier.get("pid"))
             os.kill(pid, 0)
-            alive = pid != os.getpid()
+            # A PID given out again (another start time) is no earlier run of this name that still lives.
+            recorded, now = earlier.get("pid_start"), process_start(pid)
+            alive = pid != os.getpid() and not (isinstance(recorded, int) and now is not None and now != recorded)
         except (OSError, ValueError, TypeError, AttributeError):
             alive = False
         if alive:
@@ -5701,8 +5773,47 @@ def register_run(a, run, session):
         # The MCP servers this run reaches (--mcp, helpers included): sandbox-ai mcp list names whom each serves.
         "mcp_servers": [] if a.mcp_socket_dir else list(dict.fromkeys(a.mcp)),
         # The security mode: `sandbox-ai net allow` and `sandbox-ai approvals` keep to it (modes.py).
-        "mode": a.runtime_mode}))
+        "mode": a.runtime_mode,
+        # --allow-host *.DOMAIN: the launcher answers the lookups below them itself (approvals.watch).
+        "allow_wildcards": host_wildcards(a),
+        # The sandbox's cgroup is its own (the pod's; Bubblewrap's systemd scope), not the launcher's shared one:
+        # only then may `workspace remove` freeze it and count its processes.
+        "own_cgroup": a.backend == "podman" or bool(limits_prefix(a)),
+        # `sandbox-ai workspace add` holds a workspace added during the run to the checks of a start (workspaces.py).
+        **({} if a.mcp_socket_dir else {"workspace_checks": workspace_checks(a, session)})}))
     return directory
+
+
+def workspace_checks(a, session):
+    """What `sandbox-ai workspace add` checks a workspace added during the run against, as the start checked its
+    own: the workspaces (host, sandbox path, ro|rw), whether further ones are read-only, the trees no workspace may
+    overlap, the host paths none may hold (host_sources and the private directories) and the stores none may lie
+    in. Paths as given and resolved, so that a later lookup needs nothing of A."""
+    def both(path):
+        literal = Path(os.path.normpath(Path(path).expanduser().absolute()))
+        return list(dict.fromkeys([str(literal), str(literal.resolve())]))
+    trees = [Path(src) for src, _, _ in map(parse_mount, a.mount)]
+    trees += [p for p in (a.state_dir and a.state_dir.expanduser().resolve(), getattr(a, "sandbox_home", None)) if p]
+    held = [(path, label) for path, label in host_sources(a)]
+    held += [(exposed_registry(), "The registry of exposed directories (XDG_STATE_HOME)")]
+    held += [(host, "A folder an MCP image server mounts (mcp.json)")
+             for host in image_mount_hosts(getattr(a, "project_document", None))]
+    if a.llm:
+        llm = load_llm_module()
+        held += [(llm.store_path(), "The LLM endpoints file (XDG_CONFIG_HOME)"),
+                 (llm.ca_dir(), "The LLM endpoints' CAs (XDG_CONFIG_HOME)")]
+    private = [(path, option) for path, option in [
+        (a.log_dir, "--log-dir"), (a.gui_vnc, "--gui-vnc"), (a.tmux_socket_dir, "--tmux-socket-dir"),
+        (a.mcp_approvals_dir, "--mcp-approvals-dir"), (session, "The run's session directory"),
+        (getattr(a, "proxy_dir", None), "The proxy's directory")] if path]
+    targets = enumerate(workspace_targets(a))
+    return {"workspaces": [{"host": str(Path(src).expanduser().resolve()), "sandbox": dest,
+                            "mode": workspace_mode(a, index)} for index, (src, dest) in targets],
+            "read_only": bool(a.workspace_ro or getattr(a, "mode_other_workspaces_ro", False)),
+            "trees": [p for tree in trees for p in both(tree)],
+            "held": [[p, label] for path, label in held for p in both(path)],
+            "private": [[p, label] for path, label in private for p in both(path)],
+            "stores": [[str(path), label] for path, label in host_stores(a)]}
 
 
 def run_name(a):
@@ -6139,7 +6250,8 @@ def pod_commands(a, name, session, home):
            "--read-only", "--cap-drop=ALL", "--security-opt=seccomp=unconfined",
            "--security-opt=apparmor=unconfined", "--security-opt=label=disable",
            "--tmpfs=/run:rw,nosuid,nodev", f"--tmpfs=/tmp:rw,nosuid,nodev{tmpfs_size(enforced_limits(a)[0])}",
-           f"--tmpfs=/var/tmp:rw,nosuid,nodev{tmpfs_size(enforced_limits(a)[0])}", "--workdir=/work", "--interactive")
+           f"--tmpfs=/var/tmp:rw,nosuid,nodev{tmpfs_size(enforced_limits(a)[0])}",
+           f"--tmpfs={WORKSPACES_DIR}:{WORKSPACES_TMPFS}", "--workdir=/work", "--interactive")
     limits = enforced_limits(a)[0]
     if "memory" in limits:
         run += ["--memory", limits["memory"]]
@@ -6265,6 +6377,13 @@ def remove_stale_pod(a, pod, owner):
 # a build), before the kernel picks one. Files in the sandbox's /tmp and HOME (tmpfs) count as memory too.
 
 MEMORY_WARN, MEMORY_ACT, MEMORY_INTERVAL, MEMORY_GRACE = 0.85, 0.95, 2.0, 3.0
+# memory.high, set by the watch at this share of the limit: above it the kernel reclaims and slows the sandbox's
+# allocations down instead of letting it reach memory.max, where its OOM killer ends a process (a burst between two
+# looks of the watch). A sandbox held there stalls rather than dies, so the watch also relieves it when its
+# processes are stalled by memory (memory.pressure "full avg10", in percent) at MEMORY_STALL or more.
+MEMORY_HIGH, MEMORY_STALL = 0.92, 10.0
+MEMORY_STALL_PAUSE = 10.0  # seconds after a relief before a stall alone ends another process
+MEMORY_EVENTS = 200  # records kept in memory for the summary after the run (memory.jsonl keeps all)
 # The supervisor itself (named kthreadd for Firejail): its resident memory recorded from SUPERVISOR_RECORD (then at
 # each doubling), the human told once at SUPERVISOR_WARN; its own records (runtime.py MemoryGuard) are in the run's
 # control directory and are copied to the memory log when the run ends.
@@ -6311,6 +6430,23 @@ def memory_state(cgroup):
     return {"current": int((cgroup / "memory.current").read_text().strip()),
             "limit": int((cgroup / "memory.max").read_text().strip()),
             "oom_kill": events.get("oom_kill", 0), "anon": stat.get("anon", 0), "shmem": stat.get("shmem", 0)}
+
+
+def memory_stall(cgroup):
+    """The share of the last 10 s in which all of CGROUP's processes were stalled waiting for memory
+    (memory.pressure "full avg10", percent), or None without pressure information (no PSI)."""
+    try:
+        text = (Path(cgroup) / "memory.pressure").read_text()
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if line.startswith("full "):
+            fields = dict(part.split("=", 1) for part in line.split()[1:] if "=" in part)
+            try:
+                return float(fields.get("avg10", ""))
+            except ValueError:
+                return None
+    return None
 
 
 def cgroup_processes(cgroup):
@@ -6368,12 +6504,16 @@ class MemoryWatch:
         self.warn, self.act, self.interval, self.grace, self.clock, self.kill, self.proc = \
             warn, act, interval, grace, clock, kill, Path(proc)
         self.cgroup, self.protected, self.first_oom = None, set(), None
+        self.high_for = None  # the limit memory.high was set for (it follows `sandbox-ai limits --memory`)
+        self.ended_at = None  # when the watch last ended a process
         self.warned, self.peak, self.ended, self.ending, self.events = False, 0, [], {}, []
         self.stopping, self.thread, self.written = threading.Event(), None, 0.0
 
     def record(self, event, **fields):
         entry = {"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "event": event, "run": self.name, **fields}
         self.events.append(entry)
+        if len(self.events) > MEMORY_EVENTS:  # a long run under pressure: the first and the latest are told
+            del self.events[MEMORY_EVENTS // 2]
         if self.log is not None:
             with contextlib.suppress(OSError):
                 with open(self.log, "a", encoding="utf-8") as stream:
@@ -6404,7 +6544,8 @@ class MemoryWatch:
         try:
             state = memory_state(self.cgroup)
         except (OSError, ValueError):
-            return None  # the cgroup went: the sandbox ended
+            self.unthrottle()  # no limit any more (`sandbox-ai limits --memory none`), or the cgroup went
+            return None
         if self.first_oom is None:
             self.first_oom = state["oom_kill"]
         self.peak = max(self.peak, state["current"])
@@ -6425,9 +6566,36 @@ class MemoryWatch:
             self.share(state, self.warned)
             self.written = self.clock()
             self.watch_supervisor(state)
-        if ratio >= self.act:
+        self.throttle(state)
+        stall = memory_stall(self.cgroup) if ratio >= MEMORY_HIGH - 0.02 else None
+        # PSI's avg10 decays over ten seconds: after a relief, a stall alone does not end the next process yet.
+        recent = self.ended_at is not None and self.clock() - self.ended_at < MEMORY_STALL_PAUSE
+        if ratio >= self.act or (stall is not None and stall >= MEMORY_STALL and not recent):
+            if ratio < self.act:
+                self.record("memory-stall", used=state["current"], limit=state["limit"], stall=stall)
             self.relieve(state)
         return state
+
+    def unthrottle(self):
+        """The limit was lifted: memory.high goes with it (else the sandbox stayed slowed at 92 % of the old one)."""
+        if self.high_for is None:
+            return
+        with contextlib.suppress(OSError):
+            if (Path(self.cgroup) / "memory.max").read_text().strip() == "max":
+                (Path(self.cgroup) / "memory.high").write_text("max\n")
+                self.high_for = None
+
+    def throttle(self, state):
+        """memory.high at MEMORY_HIGH of the current limit (again when the limit changed); best effort: where the
+        cgroup file cannot be written, the watch alone acts, as before."""
+        if not state["limit"] or self.high_for == state["limit"]:
+            return
+        high = int(state["limit"] * MEMORY_HIGH)
+        try:
+            (Path(self.cgroup) / "memory.high").write_text(f"{high}\n")
+        except OSError as exc:  # recorded: then only the watch keeps the kernel's OOM killer away
+            self.record("memory-high", error=exc.strerror or str(exc), limit=state["limit"])
+        self.high_for = state["limit"]
 
     def supervisor_rss(self):
         """(pid, rss bytes) of the sandbox's supervisor (the largest process named SUPERVISOR_NAME), or None."""
@@ -6510,6 +6678,10 @@ class MemoryWatch:
         if self.kill is os.kill and hasattr(os, "pidfd_open"):
             with contextlib.suppress(OSError):
                 handle = os.pidfd_open(pid)
+            # Opened after the look at the cgroup: still the sandbox's process (not a PID given out again)?
+            if handle is not None and pid not in cgroup_processes(self.cgroup):
+                os.close(handle)
+                return
         try:
             if handle is not None:
                 signal.pidfd_send_signal(handle, signal.SIGTERM)
@@ -6520,6 +6692,7 @@ class MemoryWatch:
                 os.close(handle)
             return
         self.ending[pid] = (now, handle)
+        self.ended_at = now
         self.ended.append({"pid": pid, "name": name, "rss": rss})
         self.record("memory-relief", pid=pid, process=name, rss=rss, used=state["current"], limit=state["limit"])
 
@@ -6640,7 +6813,7 @@ def bwrap_command(a, session, home):
         elif p.exists():
             cmd += ["--ro-bind", path, path]
     cmd += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/run",
-            "--dir", "/var/tmp", "--dir", "/etc"]
+            "--dir", "/var/tmp", "--dir", "/etc", "--tmpfs", WORKSPACES_DIR]
     if a.gui or a.gui_wayland:
         cmd += ["--tmpfs", "/dev/shm"]
     for path in ("/etc/ssl", "/etc/pki", "/etc/ca-certificates", "/etc/firejail", "/etc/localtime", "/etc/ld.so.cache", "/etc/login.defs"):
@@ -7189,7 +7362,7 @@ def launch(argv):
                                              "nodes": list(grant["nodes"] or grant.get("pending") or [])}
                                             for grant in device_grants(a)],
                           "limits": enforced_limits(a)[0],
-                          "allow": a.allow, "https_hosts": allowed_hosts(a),
+                          "allow": a.allow, "https_hosts": allowed_hosts(a), "host_wildcards": host_wildcards(a),
                           "https_networks": host_networks(allowed_hosts(a)), "offline": a.offline,
                           "dangerously_skip_permissions": a.dangerously_skip_permissions,
                           "egress_all_allow": a.egress_all_allow, "nameservers": nameservers(a),
@@ -7337,6 +7510,7 @@ def launch(argv):
             a.proxy_dir = Path(tempfile.mkdtemp(prefix="agent-sandbox-proxy-"))
             cleanup.callback(shutil.rmtree, a.proxy_dir, True)
             write_proxy_files(a, a.proxy_dir, hosts, log_name)
+        a.sandbox_home = home  # run.json: a workspace added later must not overlap it
         a.control_dir = register_run(a, a.run_id, session)
         cleanup.callback(shutil.rmtree, a.control_dir, True)
         if a.canary_plan:
@@ -7372,7 +7546,7 @@ def launch(argv):
                **({"mode": mode} if mode["refuses"] or mode["approval_scope"] != "always" else {}),
                "ask_blocked": getattr(a, "blocked_approvals", {"hosts": [], "tcp": []}),
                "policy": getattr(a, "policy", {}),  # the supervisor holds run-time changes to it too
-               "pinned": [*hosts, *a.llm_pins], "watch": [*(dest for _, dest in workspace_targets(a)), "/root", "/tmp",
+               "pinned": [*hosts, *a.llm_pins], "wildcards": host_wildcards(a), "watch": [*(dest for _, dest in workspace_targets(a)), "/root", "/tmp",
                          *(parse_mount(m)[1] for m in a.mount)] if a.log_explicit else []}
         resolv, nsswitch = resolver_files(a)
         files = {"config.json": json.dumps(cfg), "hosts": hosts_file({**hosts, **a.llm_pins}),
@@ -7432,10 +7606,19 @@ def launch(argv):
             return status
         finally:
             watching.set()
-            for line in memory_watch.stop() if memory_watch is not None else []:
-                print(f"agent-sandbox: {printable(line)}", file=sys.stderr)
-            for note in tool_dirs_changed(tools):
-                print(f"agent-sandbox: warning: {printable(note)}", file=sys.stderr)
+            # Each step on its own: whatever the agent left behind must never skip the login write-back, the
+            # memory record or the privacy check after them.
+            try:
+                for line in memory_watch.stop() if memory_watch is not None else []:
+                    print(f"agent-sandbox: {printable(line)}", file=sys.stderr)
+            except Exception as exc:  # noqa: BLE001
+                print(f"agent-sandbox: memory watch: {printable(str(exc))}", file=sys.stderr)
+            try:
+                for note in tool_dirs_changed(tools):
+                    print(f"agent-sandbox: warning: {printable(note)}", file=sys.stderr)
+            except Exception as exc:  # noqa: BLE001 - the check could not finish: say so, as a change would be
+                print(f"agent-sandbox: warning: the PATH directories in the workspaces could not be checked "
+                      f"({printable(str(exc))}); check them before running anything from this shell", file=sys.stderr)
             # Each login on its own: one that fails never keeps another's refresh from the store, and the
             # agent's own exit status survives any of them.
             try:

@@ -1,4 +1,13 @@
+import os
+from pathlib import Path
+import sys
+
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import home_guard  # noqa: E402
+
+_REAL_LOGINS = {}
 
 
 def pytest_addoption(parser):
@@ -29,6 +38,14 @@ def pytest_collection_modifyitems(config, items):
 
 
 def pytest_configure(config):
+    """Before any test module is imported: the real logins are fingerprinted and HOME is moved to a temporary
+    directory for the session (home_guard), so no test can write over them. Live tests keep the real HOME (their
+    sandboxes need the real Podman storage and logins); their own fixtures keep them apart."""
+    if config.getoption("--agent-live"):
+        os.environ.setdefault(home_guard.MARKER, "live")
+    else:
+        _REAL_LOGINS.update(home_guard.fingerprint(home_guard.login_files()))
+        home_guard.ensure()
     config.addinivalue_line("markers", "agent_live: launches real sandboxes")
     config.addinivalue_line("markers", "agent_provider: makes a real authenticated model request")
     config.addinivalue_line("markers", "agent_network: downloads from the internet inside the sandbox")
@@ -71,3 +88,18 @@ def writable_tmp_path(request):
                     os.chmod(child, os.lstat(child).st_mode | 0o700)
                 except OSError:
                     pass
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """A run that changed a real login file fails, whatever else passed: the next request of an agent running these
+    tests would carry a fixture token."""
+    touched = home_guard.changed(_REAL_LOGINS) if _REAL_LOGINS else []
+    if touched:
+        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+        message = ("tests changed the real login files: " + ", ".join(touched) + " (a test wrote into the real HOME; "
+                   "only an agent refreshing its own login during the run would be harmless)")
+        if reporter is not None:
+            reporter.write_line(message, red=True, bold=True)
+        else:
+            print(message, file=sys.stderr)
+        session.exitstatus = 1

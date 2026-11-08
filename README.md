@@ -357,7 +357,7 @@ match the installed version.
 | `sandbox-ai list [--all] [--json]` | `sandbox-ai ps` | one table of every start: what runs or is paused, the starts whose HOME is kept, and the MCP server sandboxes ([every start](#every-start-names-detach-keep-resume)) |
 | `sandbox-ai list --history NAME [--json]`, `sandbox-ai rename OLD NEW` | | what happened to a start (start, exit with status, pause, resume, stop, rebirth, rename); give a start another name (its run id stays) |
 | `sandbox-ai attach\|pause\|resume\|stop\|delete NAME` | `sandbox-ai session …` | any start by its name or run id: attach this terminal (detach with Ctrl-b d or by closing it), freeze and thaw, end, remove a stopped one with its HOME |
-| `sandbox-ai resume NAME [--restart] --workspace DIR` / `--mount SRC:DEST[:ro\|rw]` | | start a kept start (again) with another workspace or mount added; the paths get every check of a new start, the agent continues its conversation and the addition stays for later starts. A running sandbox gets no new mounts: `--restart` stops it first |
+| `sandbox-ai resume NAME [--restart] --workspace DIR` / `--mount SRC:DEST[:ro\|rw]` | | start a kept start (again) with another workspace or mount added; the paths get every check of a new start, the agent continues its conversation and the addition stays for later starts. `--restart` stops a running one first; `sandbox-ai workspace add` adds a workspace without a restart |
 | `sandbox-ai resume NAME --review-home [--json]` | | what changed in a kept HOME's start files (shell, git, ssh, the agent's settings, hooks, plugins) since its last start; starts nothing ([every start](#every-start-names-detach-keep-resume)) |
 | `sandbox-ai gc [--older-than DAYS] [--dry-run] [--json]` | | remove leftovers; with DAYS also the stopped kept starts unused for that long, with their HOME |
 | `sandbox-ai session …` | `sandbox-session` (deprecated) | the same for sessions, in the older form |
@@ -371,8 +371,9 @@ match the installed version.
 | `sandbox-ai doctor [--backend podman\|bwrap\|both] [--plain] [--no-color] [--json]` | | a table by section (System, Engine, Agents, Project), in colour on a terminal (ok green, WARN orange, FAIL red; `--no-color` or `NO_COLOR` without; `--plain` one line per check); check the host: user, Python, user namespaces, Podman (rootless), pasta, subuid/subgid, images with agent versions, Bubblewrap tools, TIOCSTI, host logins (expiry only), the default kit and the kits with their skills, agents, commands and prompts, Claude plugins declared vs. installed, the memory of the project in the current directory, Git identity, project trust; each problem with the command that fixes it; exit 1 on a failure |
 | `sandbox-ai logs [DIR\|--project P] [--json]` | | summarize blocked egress and file access of a `--log-dir` and suggest the option for each blocked target (`--allow-pypi`, `--allow-host`, `--allow-tcp`, `--allow-host-port` …) |
 | `sandbox-ai activity [RUN\|--session NAME\|--project P\|--log-dir DIR] [-f] [--since T] [-k KIND] [--json]` | | what the agents did: prompts, replies, tool calls, commands, file changes, network, approvals, tokens ([agent activity](#agent-activity)) |
-| `sandbox-ai net list\|show\|allow\|revoke\|stop\|untaint …` | | change what a running sandbox may reach, or end it ([network changes](#changing-the-network-of-a-running-sandbox)) |
+| `sandbox-ai net list\|show\|allow\|revoke\|untaint …` | | change what a running sandbox may reach ([network changes](#changing-the-network-of-a-running-sandbox)); it ends with `sandbox-ai stop NAME` |
 | `sandbox-ai devices list\|add\|remove [RUN] PATH\|usb:VID:PID`, `sandbox-ai limits [RUN] …` | | devices and limits of a running sandbox ([hardware](#hardware-devices-and-gpus), [limits](#resource-limits)) |
+| `sandbox-ai workspace list\|add\|remove [RUN] DIR [--ro] [--force]` | | a host directory added to a running sandbox at `/workspaces/<name>`, with the checks of a start, and taken back ([workspaces and mounts](#workspaces-and-mounts)) |
 | `sandbox-ai approvals list\|allow\|deny\|history\|remembered\|forget …` | | answer what running sandboxes ask; what was allowed always ([approvals](#approvals-and-browser-requests)) |
 | `sandbox-ai canaries list [RUN]`, `sandbox-ai canaries resume RUN` | | the decoy files of the runs and what happened to them; continue a sandbox a canary paused ([canary files](#canary-files)) |
 | `sandbox-ai secrets list\|set\|delete\|backend` | | API keys and tokens in your system keyring ([secrets](#secrets)) |
@@ -742,6 +743,46 @@ all. Claude Code edits outside its working directory only after approval: pass
 ```bash
 ./sandbox-ai claude --workspace "$HOME/src/app,$HOME/src/shared-lib" --workspace "$HOME/notes"
 #   /work = app, /workspaces/shared-lib, /workspaces/notes
+```
+
+**A workspace added while the sandbox runs.** `sandbox-ai workspace add [RUN] DIR
+[--ro]` mounts DIR at `/workspaces/<name>` without a restart; `workspace list`
+shows the run's workspaces, `workspace remove [RUN] DIR|NAME` takes an added one
+away again. DIR gets the checks of `--workspace` at a start (no HOME, temporary
+or run directory, no private location, no link a sandbox may have planted, no
+overlap with the run's workspaces, mounts and HOME, none of the files the
+launcher reads inside it, the administrator's policy), and it is read-only with
+`--ro` and whenever `--workspace-ro` or the security mode keeps further
+workspaces read-only. Nothing runs in the sandbox for it: a helper of your user
+checks that the directory it opened is the one that was checked (device and
+inode, so a symlink swapped in meanwhile mounts nothing), enters the sandbox's
+user namespace and mounts a clone of it in each of the sandbox's mount
+namespaces, the agent's under Firejail included (Linux 5.2 or later; read-only
+needs 5.12), never into a namespace the agent made itself. A directory that
+holds one of your PATH directories (a `.venv/bin`) is refused: start with it
+instead, where the launcher checks those after the run. `remove` freezes the
+sandbox for a moment (where its cgroup is its own), refuses while a process
+there works in it or has a file open or mapped there, refuses while the agent
+holds a copy in a user and mount namespace of its own (`unshare`) that the
+mount tables show, and unmounts strictly, so the kernel refuses too while a
+process in the sandbox's own namespaces still holds the tree; `--force`
+detaches it anyway, and what is still open stays usable, also for writing,
+until it is closed. A copy the agent detached and keeps only through an open
+descriptor shows in no table: only a restart takes a workspace away for
+sure. Added to a session,
+the workspace is kept in its options, so `sandbox-ai resume NAME --restart`
+starts with it at the same place; one added with `--ro` is not kept (it would
+come back writable), unless the run keeps every further workspace read-only.
+The file log (`--log-dir`) watches it from then on; the push check and the
+privacy check after the run know only the start's workspaces, so a push of its
+commits to a public remote is refused (push from the host, or restart with it).
+Runs started by 0.1.75 or older have no place for it: restart them with
+`resume NAME --restart --workspace DIR`.
+
+```bash
+sandbox-ai workspace add claude-1a2b3c4d ~/src/shared-lib --ro
+#   added /home/me/src/shared-lib to claude-1a2b3c4d at /workspaces/shared-lib (ro)
+sandbox-ai workspace remove claude-1a2b3c4d shared-lib
 ```
 
 **Extra mounts:** `--mount SOURCE:DESTINATION:ro|rw`, repeatable. Sources must
@@ -1223,7 +1264,7 @@ stable ranges; its hosts stay DNS-pinned.
 | `-gl`, `--allow-gitlab` | `gitlab.com`, `registry.gitlab.com` |
 | `-ak`, `--allow-kernel-org` | `kernel.org`, `www.kernel.org`, `git.kernel.org`, `cdn.kernel.org`, `mirrors.kernel.org`, `lore.kernel.org` |
 | `-dd`, `--allow-duckduckgo` | `duckduckgo.com`, `html.duckduckgo.com`, `lite.duckduckgo.com`, `links.duckduckgo.com`, `api.duckduckgo.com` |
-| `-A`, `--allow-host NAME` | Resolve and pin a name; allow TCP/443. |
+| `-A`, `--allow-host NAME` | Resolve and pin a name; allow TCP/443. Names are case-insensitive (`Example.org` is `example.org`). `*.DOMAIN` allows every name below DOMAIN (see below). |
 | `-a`, `--allow IP_OR_CIDR` | All protocols and ports to that destination. |
 | `-t`, `--allow-tcp IP:PORT` | Exactly one TCP port on one address (IPv6: `[ADDR]:PORT`). |
 | `-P`, `--allow-host-port PORT` | Podman: `127.0.0.1:PORT` in the sandbox reaches the same port on the host's loopback (repeatable). |
@@ -1244,6 +1285,18 @@ services the host offers on its LAN addresses. `127.0.0.1` means the
 sandbox itself, except for ports opened with `--allow-host-port`. IP filtering
 cannot distinguish domains that share CDN addresses. Podman uses `pasta`,
 Bubblewrap `slirp4netns`; no ports are published.
+
+**Host wildcards.** `--allow-host '*.example.com'` (at the start, or `sandbox-ai net
+allow` during the run) allows every name below `example.com` (`api.example.com`,
+`a.b.example.com`), not `example.com` itself: give both if you want both. The
+names are not known in advance, so none is pinned at the start: when the agent
+looks one up, the DNS stub holds the lookup and files its question, the launcher
+answers it on the host at once (resolved there, only public addresses, inside
+the administrator's `allow_hosts`), and the stub hands the addresses back while
+the client still waits; from then on the name is pinned and open for the run, as
+an approved lookup is. A wildcard needs two labels below it (`*.com` is refused)
+and a sandbox that asks (not `--ask off`); `net revoke` takes a wildcard back,
+the names opened below it stay open for the run.
 
 **Services on your own host** (a local Git server, a database) cannot be
 reached with `--allow-tcp`: `pasta` gives the sandbox the host's own IP
@@ -1508,7 +1561,7 @@ sandbox-ai net revoke --allow-host pypi.org
 sandbox-ai net allow --dns                             # real DNS lookups (or --nameserver IP)
 sandbox-ai net allow --git-token-env http://localhost:3080=GITEA_TOKEN   # a Git login
 sandbox-ai net allow --allow-host-port 3080                               # the host's 127.0.0.1:3080
-sandbox-ai net stop claude-1a2b3c4d                    # end it; its launcher cleans up
+sandbox-ai stop claude-1a2b3c4d                        # end it; its launcher cleans up
 sandbox-ai net untaint claude-1a2b3c4d                 # take back the run's taint (see Rulesets)
 sandbox-ai net allow --allow-host api.osv.dev --keep   # and for the next starts too (.sandbox-ai.json)
 ```
@@ -1570,13 +1623,12 @@ not see a login added this way (`GH_TOKEN` is set at the start only), and the
 privacy check of pushes knows its token only by its shape. A run in the security mode `high` or `paranoid` is given nothing its
 mode refuses ([security modes](#security-modes)).
 
-`sandbox-ai net stop RUN` ends a sandbox from another terminal: it sends
-SIGTERM to the sandbox's launcher, which cleans up as after a normal exit,
-once it has checked that the PID still is that launcher (yours, with the
-recorded start time, running `agent_sandbox.py`), and waits up to
-`--wait SECONDS` (default 30) for it to end. It needs the run's name; sessions
-and MCP servers are stopped with `sandbox-ai session stop NAME` and
-`sandbox-ai mcp stop NAME`. `list` also finds sandboxes started with another
+`sandbox-ai stop NAME` ends a sandbox from another terminal, whatever kind of
+start it is (a run, a session, an MCP server). For a run it sends SIGTERM to
+the sandbox's launcher, which cleans up as after a normal exit, once it has
+checked that the PID still is that launcher (yours, with the recorded start
+time, running `agent_sandbox.py`), and waits up to `--wait SECONDS` (default
+30) for it to end. `sandbox-ai net stop RUN` is the older form of it for runs. `list` also finds sandboxes started with another
 `XDG_RUNTIME_DIR` (or none, e.g. from cron or `su`): it reads
 `/run/user/UID/sandbox-ai/runs` and `~/.local/state/sandbox-ai/runs` too.
 
@@ -3729,8 +3781,8 @@ question of kind `canary` (`sandbox-ai approvals allow ID` continues, `deny
 ID` stops; the notification has buttons); unanswered after 5 minutes the
 sandbox stays paused. A pause freezes the Podman pod or every process of the
 Bubblewrap sandbox; `sandbox-ai canaries resume RUN` (the run id or the
-start's name; `sandbox-ai resume NAME` works too) continues it, `sandbox-ai net stop RUN` ends
-it. A stop is what `sandbox-ai net stop` does.
+start's name; `sandbox-ai resume NAME` works too) continues it, `sandbox-ai stop NAME` ends
+it.
 
 **The canary log.** `sandbox-ai canaries log [RUN] [--json]` (in the app: Activity, tab Canaries; in the web
 interface: Canaries) lists every event with its time, canary, path and action, and who did it: for a token
@@ -3841,10 +3893,16 @@ see it):
 - at 85 % it tells you (a desktop notification, and `memory.jsonl` in the log
   directory) and the agent: `/sandbox/session/memory.json` gives used and
   limit, how much the files in its `/tmp` and HOME take, and advice;
-- at 95 % it ends the process with the most memory that is neither
-  sandbox-ai's own nor the agent itself (typically a test run or a build):
-  SIGTERM, then SIGKILL after 3 seconds; the agent sees its command fail
-  and the run goes on;
+- from the start it sets `memory.high` to 92 % of the limit: above it the
+  kernel reclaims and slows the sandbox's allocations down instead of letting
+  it reach the limit, where its OOM killer would end a process before the next
+  look (a burst of a few gigabytes within two seconds); it follows a limit
+  changed with `sandbox-ai limits --memory`;
+- at 95 %, or when its processes are stalled by memory (`memory.pressure`:
+  all of them waiting 10 % of the last 10 seconds), it ends the process with
+  the most memory that is neither sandbox-ai's own nor the agent itself
+  (typically a test run or a build): SIGTERM, then SIGKILL after 3 seconds;
+  the agent sees its command fail and the run goes on;
 - after the run it says what it ended, and whether the kernel ended processes
   anyway (then start with `--memory 16g`, or run fewer things at once).
 
@@ -3961,12 +4019,17 @@ sandbox-ai web serve --listen 0.0.0.0:8443 --hostname box.lan   # reachable from
   reverse proxy of yours.
 - **Login: password and TOTP.** The password is kept as a scrypt hash in
   `~/.config/sandbox-ai/web/users.json` (mode 0600), a TOTP code counts once.
-  Failed logins slow down per address and per user (doubling waits).
-- **Sessions** live in memory: 30 minutes without use, 12 hours at most. The
+  Failed logins slow down per address, and per address and user (doubling
+  waits); many failures for one user slow every address down that fails again,
+  but never lock the owner out: the right password and code still get in. Only
+  the connection's own address counts (`X-Forwarded-For` is never read).
+- **Sessions** live in memory: 30 minutes without use (the page's own polls do
+  not count as use, so a forgotten tab logs out), 12 hours at most. The
   cookie is `__Host-`, `HttpOnly`, `Secure`, `SameSite=Strict`. Every change
   needs the session's CSRF token, a same-origin request and JSON; the `Host`
   header must be one of the service's names (no DNS rebinding). The page runs
   with a strict Content Security Policy and shows server text only as text.
+  At most 64 connections at once; one without a session is kept 10 seconds.
 - **Every action is one sandbox-ai command**, with each argument quoted on its
   own, on this machine or over SSH: the browser cannot send a shell command.
   Terminals are a WebSocket into a pty running `sandbox-ai attach` or a start
@@ -4214,9 +4277,10 @@ See [Project configuration](#project-configuration-and-wizard) and
 | `sandbox-ai activity [RUN]` | `[-s NAME\|-p PATH\|-l DIR\|--home DIR] [-f] [--since TIME] [-k KIND[,KIND]] [-g TEXT] [-n N] [-v] [-j] [--runs]`: the agents' timeline (see [Agent activity](#agent-activity)) |
 | `sandbox-ai privacy-check [PATH ...]` | `[--rules-dir DIR] [--project NAME] [--all] [--json]`: what the next push of each repository would publish that should stay private; exit 1 for blocking findings, 2 when it cannot check |
 | `sandbox-ai net list\|show\|allow\|revoke [RUN] [--allow-host H] [--allow-tcp IP:PORT] [--allow NET] [--allow-PRESET] [--dns] [--nameserver IP] [--allow-host-port PORT] [--git-token-env\|--git-token-file\|--git-token-secret URL=REF]`, `allow ... --keep` | Change what a running sandbox may reach; `--keep` also writes it into the project's `.sandbox-ai.json` (see [Network policy](#changing-the-network-of-a-running-sandbox)) |
-| `sandbox-ai net stop RUN [--wait SECONDS]` | End a running sandbox (not a session or MCP server): SIGTERM to its checked launcher, which cleans up |
+| `sandbox-ai net stop RUN [--wait SECONDS]` | The older form of `sandbox-ai stop NAME` for a run: SIGTERM to its checked launcher, which cleans up |
 | `sandbox-ai net untaint [RUN]` | Take back the run's taint: the rules for tainted runs no longer hold, until untrusted content enters it again (see [Rulesets](#rulesets)) |
 | `sandbox-ai devices list\|add\|remove [RUN] PATH\|usb:VID:PID[:SERIAL]`, `sandbox-ai limits [RUN] [--memory SIZE] [--cpus N] [--pids N]` | Hand devices to a running sandbox, take them away; change its limits |
+| `sandbox-ai workspace list [RUN] [--json]`, `add [RUN] DIR [--ro]`, `remove [RUN] DIR\|NAME [--force]` | Mount a host directory into a running sandbox at `/workspaces/<name>` (the checks of `--workspace`; kept for a session's next start), take it away again |
 | `sandbox-ai approvals list\|history [RUN]`, `allow ID [--scope once\|run\|always]`, `deny ID`, `remembered`, `forget PROJECT ENTRY` | Answer the questions of running sandboxes; what was allowed always, per project, and forget one |
 | `sandbox-ai canaries list [RUN] [--tokens] [--json]`, `canaries log [RUN] [--json]`, `canaries resume RUN` | The [canary files](#canary-files) of the runs and what happened to them; every event with its process, tool call and model requests; continue a sandbox a canary paused |
 | `sandbox-ai secrets list\|set NAME [--from-env VAR]\|delete NAME\|backend` | Secrets in the system keyring, else private files |

@@ -75,7 +75,8 @@ def test_list_and_show(sandbox, tmp_path):
     assert json.loads("\n".join(lines))[0]["run"] == "codex-1234abcd"
     assert json.loads("\n".join(lines))[0]["name"] is None  # registered by an older version: no name
     status, lines = run_net(["show", "--json"])
-    assert json.loads("\n".join(lines)) == {"run": "codex-1234abcd", "all_ports": [], "dns": [], "git": [], "host_ports": [], "https": [], "tcp": []}
+    assert json.loads("\n".join(lines)) == {"run": "codex-1234abcd", "all_ports": [], "dns": [], "git": [], "host_ports": [],
+                                            "https": [], "tcp": [], "host_wildcards": []}
 
 
 def test_allow_host_reaches_firewall_proxy_and_hosts_in_place(sandbox):
@@ -268,7 +269,9 @@ def test_stop_refusals(child, monkeypatch, capsys):
     register(runs, "claude-other", pid=other.pid, pid_start=net.launcher().process_start(other.pid), started=now())
     register(runs, "web", pid=process.pid, pid_start=start, started=now(), session="web")
     register(runs, "mcp-ddg", pid=process.pid, pid_start=start, started=now())
-    expected = {"claude-reused": "not the launcher of claude-reused any more",
+    # A PID given out again after the run ended (another start time) is no running sandbox at all any more: its
+    # stale entry goes, so nothing is ever signalled (net.alive).
+    expected = {"claude-reused": "no running sandbox 'claude-reused'",
                 "claude-other": "does not run a sandbox-ai launcher",
                 "web": "use: sandbox-ai stop web",
                 "mcp-ddg": "use: sandbox-ai mcp stop ddg"}
@@ -1010,3 +1013,176 @@ def test_a_dead_nameserver_does_not_stall_the_dns_stub(tmp_path, monkeypatch):
         thread.join(5)
         for sock in (*clients, upstream, dead):
             sock.close()
+
+
+def test_one_host_in_any_case_is_allowed_once(tmp_path):
+    """Host names are case-insensitive: EXAMPLE.org and example.org are one pin and one allow-list entry, at the
+    start and during the run (and one --keep option)."""
+    args = net.parser().parse_args(["allow", "run-1", "--allow-host", "EXAMPLE.org", "-A", "example.ORG"])
+    assert args.allow_host == ["example.org", "example.org"]
+    l = net.launcher()
+    workspace = tmp_path / "w"
+    workspace.mkdir()
+    a = l.parse_args(["claude", "--workspace", str(workspace), "--allow-host", "Example.org",
+                      "--allow-host", "example.org", "--allow-host", "GitHub.com", "--allow-github"])
+    hosts = l.allowed_hosts(a)
+    assert hosts.count("example.org") == 1 and hosts.count("github.com") == 1 and "Example.org" not in hosts
+
+
+def test_a_reused_pid_is_no_running_sandbox(tmp_path, monkeypatch):
+    """run.json records the launcher's start time with its PID: a later process under the same PID (the run ended,
+    the PID was given out again) is not taken for the run, and its stale directory goes. A record without a start
+    time (an older version), or a start time that cannot be read, still counts as running."""
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    runs = net.launcher().runs_dir()
+    own = net.launcher().process_start(os.getpid())
+    for name, start in (("live", own), ("reused", own + 1), ("old", None)):
+        (runs / name).mkdir(parents=True)
+        record = {"run": name, "pid": os.getpid(), **({"pid_start": start} if start is not None else {})}
+        (runs / name / "run.json").write_text(json.dumps(record))
+    assert sorted(net.running()) == ["live", "old"] and not (runs / "reused").exists()
+    monkeypatch.setattr(net.launcher(), "process_start", lambda pid, proc=None: None)
+    assert net.alive(os.getpid(), own + 1)  # unknown: never removed
+
+
+def test_show_keep_persists_what_the_run_was_given_into_the_first_workspaces_project_file(sandbox, tmp_path,
+                                                                                          monkeypatch):
+    """`net show --keep`: everything opened during the run goes into the project file of the run's first workspace
+    (/work), the one its start read, never into a further workspace's own file; Git login tokens never do."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    l = net.launcher()
+    app, other = tmp_path / "app", tmp_path / "lib"
+    for directory in (app, other):
+        directory.mkdir()
+        (directory / ".sandbox-ai.json").write_text(json.dumps({"version": 1, "agent": "codex", "options": []}))
+        l.trust_config(directory / ".sandbox-ai.json")
+    record = json.loads((sandbox["run"] / "run.json").read_text())
+    record.update(directory=str(sandbox["run"]), allow_wildcards=["*.started.example"],
+                  workspace_checks={"workspaces": [{"host": str(app), "sandbox": "/work", "mode": "rw"}],
+                                    "read_only": False})
+    (sandbox["run"] / "run.json").write_text(json.dumps(record))
+    out = []
+    assert net.main(["allow", "codex-1234abcd", "--allow-host", "pypi.org", "--allow-tcp", "192.0.2.7:8443"],
+                    out=out.append, resolver=fake_resolver) == 0
+    (sandbox["run"] / "wildcards.json").write_text(json.dumps(["*.started.example", "*.added.example"]))
+    (sandbox["run"] / "workspaces.json").write_text(json.dumps({"version": 1, "workspaces": [
+        {"host": str(other), "sandbox": "/workspaces/lib", "mode": "rw", "state": "attached"},
+        {"host": str(tmp_path / "ro"), "sandbox": "/workspaces/ro", "mode": "ro", "state": "attached"}]}))
+    session = Path(record["session_dir"])
+    (session / l.RUNTIME_GIT_TOKENS).write_text(json.dumps({"logins": [{"url": "https://git.example", "user": "x",
+                                                                        "token": "fixture-secret"}]}))
+    lines = []
+    assert net.main(["show", "codex-1234abcd", "--keep"], out=lines.append) == 0
+    kept = json.loads((app / ".sandbox-ai.json").read_text())
+    options = kept["options"]
+    assert ["--allow-host", "pypi.org"] == options[options.index("pypi.org") - 1:options.index("pypi.org") + 1]
+    assert "*.added.example" in options and "*.started.example" not in options  # the start's own stay where they are
+    assert "192.0.2.7:8443" in options
+    assert kept["workspaces"] == [str(other)]  # the read-only one is not widened into a writable one
+    assert "fixture-secret" not in (app / ".sandbox-ai.json").read_text()
+    assert json.loads((other / ".sandbox-ai.json").read_text())["options"] == []  # a further workspace: untouched
+    assert l.trusted_configs()[str(l.config_key(app / ".sandbox-ai.json"))]  # still trusted after the write
+    assert any("read-only: not kept" in line for line in lines) and any("Git logins" in line for line in lines)
+    lines.clear()
+    assert net.main(["show", "codex-1234abcd", "--keep"], out=lines.append) == 0
+    assert "already has it all" in lines[-1]
+
+
+def test_the_start_reads_only_its_first_workspaces_project_file(tmp_path, monkeypatch):
+    """With several workspaces, the configuration is the first one's (the directory started in, or the first
+    --workspace): a further workspace's .sandbox-ai.json is never read, trusted or not."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    l = net.launcher()
+    first, further = tmp_path / "first", tmp_path / "further"
+    for directory, option in ((first, "--allow-pypi"), (further, "--egress-all-allow")):
+        directory.mkdir()
+        (directory / ".sandbox-ai.json").write_text(json.dumps({"version": 1, "agent": "claude", "options": [option]}))
+        l.trust_config(directory / ".sandbox-ai.json")
+    a = l.parse_args(["claude", "--workspace", f"{first},{further}"])
+    path, document = l.load_project_config(a)
+    assert path == l.config_key(first / ".sandbox-ai.json") and document["options"] == ["--allow-pypi"]
+    monkeypatch.chdir(first)  # no --workspace: the directory started in
+    path, _ = l.load_project_config(l.parse_args(["claude"]))
+    assert path == l.config_key(first / ".sandbox-ai.json")
+    b = l.parse_args(["claude", "--workspace", str(further), "--workspace", str(first)])
+    assert l.load_project_config(b)[0] == l.config_key(further / ".sandbox-ai.json")  # the first given wins
+
+
+def test_a_paused_or_silent_sandbox_gives_an_error_not_a_traceback(sandbox, tmp_path, capsys):
+    (sandbox["run"] / "paused").write_text("")
+    assert net.main(["show", "codex-1234abcd"], out=lambda line: None) == 1
+    assert "paused: resume it first" in capsys.readouterr().err
+    (sandbox["run"] / "paused").unlink()
+    silent = tmp_path / "silent"
+    silent.mkdir()
+    import socket as sockets
+    listener = sockets.socket(sockets.AF_UNIX)
+    short = Path(tempfile.mkdtemp(prefix="s-", dir="/tmp"))
+    try:
+        listener.bind(str(short / "control.sock"))
+        listener.listen(1)  # accepts, never answers (a frozen supervisor)
+        with pytest.raises(ValueError, match="did not answer"):
+            net.ask(short, {"op": "show"}, timeout=0.3)
+    finally:
+        listener.close()
+        shutil.rmtree(short, ignore_errors=True)
+
+
+def test_host_names_outside_ascii_are_refused_as_at_the_start():
+    args = net.parser().parse_args(["allow", "r", "--allow-host", "bücher.de"])
+    with pytest.raises(ValueError, match="xn--"):
+        net.request_for(args, "allow", resolver=fake_resolver)
+    args = net.parser().parse_args(["allow", "r", "--allow-host", "xn--bcher-kva.de"])
+    assert net.request_for(args, "allow", resolver=fake_resolver)[2] == ["xn--bcher-kva.de"]
+
+
+def test_concurrent_host_updates_keep_every_name(sandbox):
+    record = {**json.loads((sandbox["run"] / "run.json").read_text()), "directory": str(sandbox["run"])}
+    threads = [threading.Thread(target=net.update_hosts, args=(record, {f"n{i}.example.org": [f"192.0.2.{i}"]}))
+               for i in range(1, 30)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sorted(net.remembered(record)) == sorted(f"n{i}.example.org" for i in range(1, 30))
+    assert all(f"n{i}.example.org" in sandbox["hosts"].read_text() for i in range(1, 30))
+
+
+
+def test_show_names_the_wildcards_and_revoke_refuses_unknown_ones(sandbox, capsys):
+    record = json.loads((sandbox["run"] / "run.json").read_text())
+    (sandbox["run"] / "run.json").write_text(json.dumps({**record, "allow_wildcards": ["*.start.example"]}))
+    (sandbox["run"] / "wildcards.json").write_text(json.dumps(["*.added.example"]))
+    status, lines = run_net(["show"])
+    assert status == 0 and any("*.added.example" in line for line in lines) and \
+        any("*.start.example" in line for line in lines)
+    status, lines = run_net(["show", "--json"])
+    assert json.loads("\n".join(lines))["host_wildcards"] == ["*.added.example", "*.start.example"]
+    assert net.main(["revoke", "codex-1234abcd", "--allow-host", "*.never.example"], out=lambda line: None) == 1
+    assert "was not allowed during this run" in capsys.readouterr().err
+
+
+def test_wildcards_need_the_dns_stub_and_say_why_one_is_refused(sandbox, capsys):
+    record = json.loads((sandbox["run"] / "run.json").read_text())
+    session = Path(record["session_dir"])
+    (session / "config.json").write_text(json.dumps({"ask": True}))
+    (session / "resolv.conf").write_text("nameserver 1.1.1.1\n")  # started with --dns: the stub is bypassed
+    assert net.main(["allow", "codex-1234abcd", "--allow-host", "*.example.org"], out=lambda line: None) == 1
+    assert "past its DNS stub" in capsys.readouterr().err
+    assert net.main(["allow", "codex-1234abcd", "--allow-host", "*.github.io"], out=lambda line: None) == 1
+    assert "anyone can have" in capsys.readouterr().err  # the real reason, not "invalid"
+
+
+def test_keep_checks_what_the_supervisor_reports(sandbox):
+    """The supervisor runs beside the agent: a value it reports that is no address, network or port never goes into
+    the trusted project file."""
+    record = {**json.loads((sandbox["run"] / "run.json").read_text()), "directory": str(sandbox["run"])}
+    for bad in ({"nets": ["--egress-all-allow"]}, {"tcp": [["192.0.2.1", 70000]]}, {"dns": ["8.8.8.8 --x"]},
+                {"https": ["not-an-address"]}):
+        with pytest.raises(ValueError):
+            net.running_options(record, bad)
+    (sandbox["run"] / "wildcards.json").write_text(json.dumps(["*.example.org"]))
+    net.update_hosts(record, {"a.example.org": ["192.0.2.60"], "other.example": ["192.0.2.61"]})
+    tokens, _, _ = net.running_options(record, {"https": ["192.0.2.60/32", "192.0.2.61/32"]})
+    # The names below a wildcard are not kept one by one: the wildcard is.
+    assert "a.example.org" not in tokens and tokens.count("--allow-host") == 2 and "*.example.org" in tokens

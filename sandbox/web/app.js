@@ -5,7 +5,7 @@
 const state = {
   me: null, host: localStorage.getItem("sandbox-ai-host") || "local", hosts: [], page: "starts",
   themes: {}, theme: localStorage.getItem("sandbox-ai-theme") || "system", terminals: [], current: null,
-  approvals: 0, timer: null, asked: new Set(),
+  approvals: 0, approvalsError: null, timer: null, asked: new Set(),
 };
 const AGENTS = ["claude", "codex", "opencode"];
 const PAGES = [
@@ -37,8 +37,11 @@ class ApiError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
-async function api(method, path, body) {
+// OPTIONS.background: a request of the page's own polls (X-Background: 1), which does not count as the user's
+// activity: an open tab that nobody uses reaches its session's idle limit all the same.
+async function api(method, path, body, options) {
   const headers = {};
+  if (options && options.background) headers["X-Background"] = "1";
   if (method !== "GET") {
     headers["Content-Type"] = "application/json";
     if (state.me) headers["X-CSRF-Token"] = state.me.csrf;
@@ -239,28 +242,35 @@ async function render() {
 
 async function logout() {
   try { await api("POST", "/api/logout"); } catch (e) { /* the session is gone either way */ }
-  for (const t of state.terminals) t.ws.close();
+  for (const t of state.terminals) { t.dismissed = true; t.ws.close(); }
   state.terminals = []; state.me = null; clearInterval(state.timer); state.asked.clear();
   for (const item of document.querySelectorAll("#toasts .toast")) item.remove();
   render();
 }
 
+// Every 5 s, in the background (it keeps no session alive): the open questions of the chosen host (the badge; a
+// failed check shows "?", never 0, which would read as "nothing asks"), and the page's lists that follow them.
 async function poll() {
   if (!state.me) return;
+  const host = state.host;
+  let open;
   try {
-    const open = await api("GET", hostPath("/approvals"));
-    state.approvals = open.length;
-    const fresh = open.filter(q => !state.asked.has(`${state.host} ${q.id}`));
-    for (const q of fresh) state.asked.add(`${state.host} ${q.id}`);
+    open = await api("GET", hostPath("/approvals"), undefined, { background: true });
+    if (!Array.isArray(open)) throw new Error("not a list of questions");
+    state.approvals = open.length; state.approvalsError = null;
+    const fresh = open.filter(q => !state.asked.has(`${host} ${q.id}`));
+    for (const q of fresh) state.asked.add(`${host} ${q.id}`);
     if (fresh.length && state.page !== "approvals") announce(fresh);
-  } catch (e) { state.approvals = 0; }
+  } catch (e) { open = e; state.approvals = null; state.approvalsError = e.message || String(e); }
+  if (!state.me || state.host !== host) return;
   const button = document.querySelector('nav button[data-page="approvals"]');
   if (button) {
     for (const badge of button.querySelectorAll(".badge")) badge.remove();
-    if (state.approvals) button.append(el("span", { class: "badge", "aria-label": `${state.approvals} open` }, state.approvals));
+    if (state.approvals === null) button.append(el("span", { class: "badge unknown", title: `could not check: ${state.approvalsError}`, "aria-label": "could not check" }, "?"));
+    else if (state.approvals) button.append(el("span", { class: "badge", "aria-label": `${state.approvals} open` }, state.approvals));
   }
-  if (state.page === "approvals") pages.approvals(document.getElementById("main"), true);
-  if (state.page === "terminals") refreshTerminalStarts(document.getElementById("main"));
+  if (state.page === "approvals") pages.approvals(document.getElementById("main"), open).catch(() => {});
+  if (state.page === "terminals") refreshTerminalStarts(document.getElementById("main"), true);
 }
 
 // New questions: a warning toast (a canary that went off: an error, which stays), with the way to answer them.
@@ -404,21 +414,72 @@ function networkCard(main, name) {
   refresh();
 }
 
-pages.approvals = async (main, refresh) => {
-  const questions = await api("GET", hostPath("/approvals"));
-  if (state.page !== "approvals") return;
-  clear(main).append(el("h1", {}, `Approvals on ${state.host}`),
-    el("p", { class: "hint" }, "What the sandboxes ask. Without an answer within 60 seconds a question is refused."));
-  const rows = questions.map(q => {
-    const scope = el("select", { "aria-label": "Scope" }, ["once", "run", "always"].map(s => el("option", { value: s }, s)));
-    const answer = (decision) => async (event) => busy(event.target, async () => {
-      try { await api("POST", hostPath(`/approvals/${encodeURIComponent(q.id)}`), { decision, scope: scope.value }); pages.approvals(main); poll(); }
-      catch (e) { failed(`Could not ${decision} the question`)(e); }
-    });
-    return el("tr", {}, el("td", {}, q.question, q.always ? el("div", { class: "hint" }, q.always) : null), el("td", { class: "mono" }, q.sandbox || q.run),
-      el("td", { class: "actions" }, scope, el("button", { class: "primary", onclick: answer("allow") }, "Allow"), el("button", { class: "danger", onclick: answer("deny") }, "Deny")));
+// The open questions of the chosen host. The table is kept between the polls: its rows are keyed by the question's
+// id, a new question adds a row, an answered or expired one takes its row away, and every other row stays as it is
+// (the scope chosen in it, an Allow waiting for its confirmation, the pointer over it). Allow asks first, in the
+// row, naming the sandbox, what it asks for and the scope; the answer's output (sandbox-ai approvals) is a toast.
+const SCOPES = { once: "this once", run: "for the rest of this run", always: "always (remembered for the project)" };
+const approvalsView = { main: null, host: null, body: null, rows: new Map() };
+
+function approvalRow(q, view) {
+  const id = String(q.id), where = q.sandbox || q.run || state.host;
+  const scope = el("select", { "aria-label": "Scope" }, Object.keys(SCOPES).map(s => el("option", { value: s }, s)));
+  const actions = el("td", { class: "actions" });
+  const row = el("tr", { "data-id": id }, el("td", {}, q.question, q.always ? el("div", { class: "hint" }, q.always) : null),
+    el("td", { class: "mono" }, where), actions);
+  const answer = (decision) => async (event) => busy(event.target, async () => {
+    try {
+      const r = await api("POST", hostPath(`/approvals/${encodeURIComponent(q.id)}`), { decision, scope: scope.value });
+      toast("success", `${decision === "allow" ? "Allowed" : "Denied"} ${SCOPES[scope.value]}: ${where}`, (r && r.output) || q.question || "");
+      row.remove(); view.rows.delete(id);
+      poll();
+    } catch (e) { failed(`Could not ${decision} the question of ${where}`)(e); buttons(); }
   });
-  main.append(table(["Question", "Sandbox", ""], rows, "No open questions."));
+  const buttons = () => clear(actions).append(scope,
+    el("button", { class: "primary", onclick: () => askAllow() }, "Allow"),
+    el("button", { class: "danger", onclick: answer("deny") }, "Deny"));
+  const askAllow = () => clear(actions).append(
+    el("div", { class: "confirm", role: "group", "aria-label": "Confirm" },
+      `Allow ${where}: ${q.question || q.kind || "this"}, ${SCOPES[scope.value]}${scope.value === "always" && q.always ? ` (${q.always})` : ""}?`),
+    el("button", { class: "primary", onclick: answer("allow") }, "Yes, allow"),
+    el("button", { onclick: () => buttons() }, "Cancel"));
+  buttons();
+  return row;
+}
+
+// KNOWN: what poll() fetched already (the questions, or the Error of a failed check); else they are fetched here.
+pages.approvals = async (main, known) => {
+  const view = approvalsView, host = state.host;
+  if (known === undefined || view.main !== main || view.host !== host || !view.body || !view.body.isConnected) {
+    view.main = main; view.host = host; view.rows = new Map();
+    view.status = el("div"); view.body = el("tbody");
+    view.table = el("table", {}, el("thead", {}, el("tr", {}, ["Question", "Sandbox", ""].map(c => el("th", {}, c)))), view.body);
+    view.empty = el("p", { class: "hint" }, "No open questions.");
+    clear(main).append(el("h1", {}, `Approvals on ${host}`),
+      el("p", { class: "hint" }, "What the sandboxes ask. Without an answer within 60 seconds a question is refused."),
+      view.status, view.table, view.empty);
+    view.table.hidden = true; view.empty.hidden = true;
+  }
+  let questions = known;
+  if (questions === undefined) {
+    try { questions = await api("GET", hostPath("/approvals")); } catch (e) { questions = e; }
+  }
+  if (state.page !== "approvals" || state.host !== host || view.main !== main) return;
+  clear(view.status);
+  if (!Array.isArray(questions)) {  // the rows shown stay: a failed check is no answer to them
+    view.status.append(notice(`Could not check for questions: ${questions && questions.message ? questions.message : questions}`, "error"));
+    view.empty.hidden = true;
+    return;
+  }
+  const ids = new Set(questions.map(q => String(q.id)));
+  for (const [id, row] of view.rows) if (!ids.has(id)) { row.remove(); view.rows.delete(id); }
+  for (const q of questions) {
+    if (view.rows.has(String(q.id))) continue;
+    const row = approvalRow(q, view);
+    view.rows.set(String(q.id), row);
+    view.body.append(row);
+  }
+  view.table.hidden = !view.rows.size; view.empty.hidden = Boolean(view.rows.size);
 };
 
 pages.doctor = async (main) => {
@@ -833,13 +894,13 @@ function terminalKey(host, name) { return JSON.stringify([host, name]); }
 
 // Every start that runs on the chosen host, however it began (a terminal, the desktop app, this page, another
 // machine over SSH): one click attaches the ones in tmux, the others say why they cannot be attached.
-async function refreshTerminalStarts(main) {
+async function refreshTerminalStarts(main, background) {
   const box = main && main.querySelector(".terminal-starts");
   if (!box || box.dataset.loading) return;
   const host = state.host;
   box.dataset.loading = "1";
   let starts;
-  try { starts = await api("GET", hostPath("/starts")); }
+  try { starts = await api("GET", hostPath("/starts"), undefined, { background: Boolean(background) }); }
   catch (e) { starts = e; }
   finally { delete box.dataset.loading; }
   if (state.page !== "terminals" || state.host !== host || !box.isConnected) return;
@@ -877,12 +938,34 @@ pages.terminals = async (main) => {
     tabs.append(el("p", { class: "hint" }, window.Terminal ? "Open the terminal of a running start above, or start one on the page Starts and sessions." : "Terminals need xterm.js on the server: sandbox-ai web vendor"));
   }
   for (const t of state.terminals) {
-    tabs.append(el("button", { role: "tab", class: t === state.current ? "selected" : "", onclick: () => { state.current = t; show("terminals"); } }, t.title),
-      el("button", { "aria-label": `Close ${t.title}`, onclick: () => { t.ws.close(); } }, "×"));
+    tabs.append(el("button", { role: "tab", class: `${t === state.current ? "selected" : ""}${t.closed ? " ended" : ""}`, title: t.closed ? t.ended : null, onclick: () => { state.current = t; show("terminals"); } }, t.closed ? `${t.title} (ended)` : t.title),
+      el("button", { "aria-label": `Close ${t.title}`, title: "Close the tab (a start runs on)", onclick: () => closeTerminal(t) }, "×"));
     t.box.classList.toggle("hidden", t !== state.current);
   }
-  if (state.current) { state.current.fit(); state.current.term.focus(); }
+  if (state.current) { if (!state.current.closed) state.current.fit(); state.current.term.focus(); }
 };
+
+// Why a terminal's WebSocket closed, in words: the service puts its reason in the close frame (a refused terminal,
+// the session that ended, a message too big); 1006 is a connection refused before it opened or lost.
+const CLOSE_CODES = { 1000: "ended", 1005: "ended", 1001: "the service went away", 1002: "a protocol error", 1006: "the connection was refused or lost",
+  1008: "refused by the service", 1009: "a message too big", 1011: "an error of the service" };
+
+function closeText(event, opened) {
+  // the reason is the server's text: shown as text (toast) and, in the terminal, without control characters
+  const reason = String(event.reason || "").replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim();
+  const what = event.code === 1006 && !opened ? "could not connect (refused, or the session ended: reload the page)" : CLOSE_CODES[event.code] || "closed";
+  return `${what} (code ${event.code})${reason ? `: ${reason}` : ""}`;
+}
+
+// The tab of an ended terminal stays, with why it ended, until it is closed here; closing a running one detaches.
+function closeTerminal(entry) {
+  entry.dismissed = true;
+  if (!entry.closed) { entry.ws.close(); return; }  // onclose takes the tab away
+  state.terminals = state.terminals.filter(t => t !== entry);
+  if (state.current === entry) state.current = state.terminals[state.terminals.length - 1] || null;
+  entry.term.dispose(); entry.box.remove();
+  if (state.page === "terminals") show("terminals");
+}
 
 function openTerminal(params, title) {
   if (!window.Terminal) { toast("warning", "No terminals here", "Terminals need xterm.js on the server: sandbox-ai web vendor"); return; }
@@ -903,17 +986,19 @@ function openTerminal(params, title) {
   const ws = new WebSocket(`wss://${location.host}/api/terminal?${query}`);
   ws.binaryType = "arraybuffer";
   const encoder = new TextEncoder();
-  const entry = { title: `${state.host}: ${title}`, key, closed: false, term, ws, box, fit: () => { if (fit) { fit.fit(); if (ws.readyState === 1) ws.send(JSON.stringify({ resize: [term.cols, term.rows] })); } } };
+  const entry = { title: `${state.host}: ${title}`, key, closed: false, opened: false, dismissed: false, ended: "", term, ws, box, fit: () => { if (fit) { fit.fit(); if (ws.readyState === 1) ws.send(JSON.stringify({ resize: [term.cols, term.rows] })); } } };
+  ws.onopen = () => { entry.opened = true; };
   ws.onmessage = (event) => term.write(typeof event.data === "string" ? event.data : new Uint8Array(event.data));
-  ws.onclose = () => {
+  ws.onclose = (event) => {
     entry.closed = true;
-    term.write("\r\n[the terminal ended]\r\n");
-    setTimeout(() => {
-      state.terminals = state.terminals.filter(t => t !== entry);
-      if (state.current === entry) state.current = state.terminals[state.terminals.length - 1] || null;
-      term.dispose(); box.remove();
-      if (state.page === "terminals") show("terminals");
-    }, 1500);
+    window.removeEventListener("resize", entry.fit);
+    entry.ended = closeText(event, entry.opened);
+    if (entry.dismissed) { closeTerminal(entry); return; }
+    term.write(`\r\n[terminal: ${entry.ended}]\r\n`);
+    if (event.code !== 1000 && event.code !== 1005) toast(event.code === 1006 && entry.opened ? "warning" : "error", `Terminal ${entry.title}`, entry.ended);
+    // A refused WebSocket says nothing of why: if the session ended, the login is shown.
+    if (!entry.opened) api("GET", "/api/me", undefined, { background: true }).catch(() => {});
+    if (state.page === "terminals") show("terminals");
   };
   term.onData((data) => { if (ws.readyState === 1) ws.send(encoder.encode(data)); });
   term.onResize(({ cols, rows }) => { if (ws.readyState === 1) ws.send(JSON.stringify({ resize: [cols, rows] })); });

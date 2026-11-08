@@ -13,6 +13,7 @@ import hashlib
 import io
 import gzip
 import importlib.util
+import ipaddress
 import json
 from types import SimpleNamespace
 import os
@@ -36,6 +37,11 @@ except ModuleNotFoundError:  # Python 3.9 and 3.10: the same parser as a package
 from unittest.mock import Mock
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import home_guard  # noqa: E402
+
+home_guard.ensure()  # tests write logins: never into the real HOME, also when conftest.py was not run
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -994,7 +1000,11 @@ def test_start_loggers(scenario, tmp_path, monkeypatch):
     stop = s.start_loggers(None, (), who)
     assert not stop.is_set() and stop.seen == set() and len(stop.threads) == 4
     targets = {target.__name__: args for target, args in started}
-    assert targets["dns_logger"] == ({"api.openai.com"} if scenario == "happy" else set(), 53, stop, None, (), who, None, None)
+    assert targets["dns_logger"][:8] == ({"api.openai.com"} if scenario == "happy" else set(), 53, stop, None, (), who,
+                                         None, None)
+    # The host wildcards (none here): the start's from config.json, with those added during the run.
+    upstream_port, wildcards = targets["dns_logger"][8:]
+    assert upstream_port == 53 and wildcards() == set()
     assert targets["file_logger"] == (["/work"], stop)
     # The process log redacts the values of --env and --secret-env variables by value.
     assert "denied_loop" in targets and targets["process_logger"] == (
@@ -1085,6 +1095,137 @@ def test_dns_logger(scenario, tmp_path, monkeypatch):
     assert sock.sendto.called == (scenario != "sad")
 
 
+def wildcard_query(name=b"\x03api\x07example\x03com\x00", qtype=1):
+    return b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + name + qtype.to_bytes(2, "big") + b"\x00\x01"
+
+
+def test_dns_address_reply(scenario):
+    rt = s.RUNTIME
+    if scenario == "happy":
+        reply = rt.dns_address_reply(wildcard_query(), ["203.0.113.7", "2001:db8::1", "198.51.100.2"])
+        assert reply[:2] == b"\x12\x34" and int.from_bytes(reply[2:4], "big") == 0x8180 | 0x0100
+        assert int.from_bytes(reply[6:8], "big") == 2  # the A records only
+        record = b"\xc0\x0c\x00\x01\x00\x01" + (30).to_bytes(4, "big") + b"\x00\x04"
+        assert reply.endswith(record + bytes([203, 0, 113, 7]) + record + bytes([198, 51, 100, 2]))
+        aaaa = rt.dns_address_reply(wildcard_query(qtype=28), ["203.0.113.7", "2001:db8::1"])
+        assert int.from_bytes(aaaa[6:8], "big") == 1 and aaaa.endswith(socket.inet_pton(socket.AF_INET6, "2001:db8::1"))
+    elif scenario == "sad":
+        # Another type (MX), or a question cut short: no answer of ours, the caller sends its refusal.
+        assert rt.dns_address_reply(wildcard_query(qtype=15), ["203.0.113.7"]) is None
+        assert rt.dns_address_reply(b"\x12\x34" + b"\x00" * 10 + b"\x03api", ["203.0.113.7"]) is None
+    else:
+        # No address of the asked type: NOERROR without answers (NODATA), so the client takes the other type.
+        reply = rt.dns_address_reply(wildcard_query(qtype=28), ["203.0.113.7", "not an address"])
+        assert int.from_bytes(reply[2:4], "big") & 0xF == 0 and int.from_bytes(reply[6:8], "big") == 0
+
+
+def test_public_address(scenario):
+    rt = s.RUNTIME
+    ip = ipaddress.ip_address
+    if scenario == "happy":
+        assert rt.public_address(ip("203.0.114.9")) is not None and rt.public_address(ip("2606:4700::1111"))
+    elif scenario == "sad":
+        for value in ["10.0.0.1", "127.0.0.1", "192.168.1.1", "::1", "fd00::1", "169.254.1.1"]:
+            assert not rt.public_address(ip(value))
+    else:
+        # NAT64 counts as global to Python, but a local translator turns it into any IPv4 address.
+        assert ip("64:ff9b::7f00:1").is_global and not rt.public_address(ip("64:ff9b::7f00:1"))
+        assert not rt.public_address(ip("64:ff9b:1::a00:1"))
+
+
+def test_a_remembered_name_resolving_to_nat64_is_not_opened(tmp_path):
+    """NAT64 counts as global to Python, yet a local translator turns 64:ff9b::a00:1 into 10.0.0.1: a name approved
+    "always" that resolves there now is not opened at the next start."""
+    a = argparse.Namespace(policy={})
+    pins, notes = s.remembered_pins(a, ["api.example.org"], lambda names: {"api.example.org": ["64:ff9b::a00:1"]})
+    assert "api.example.org" not in pins and any("not public" in note for note in notes)
+
+
+def test_wildcard_suffix(scenario):
+    rt = s.RUNTIME
+    if scenario == "happy":
+        assert rt.wildcard_suffix("*.example.com") == "example.com" and rt.wildcard_suffix("*.A.Example.org") == "a.example.org"
+    elif scenario == "sad":
+        for value in ["*.com", "example.com", "*example.com", "*.*.example.com", "*.exa mple.com", "*.", None, "*.-a.com"]:
+            with pytest.raises(ValueError, match="host wildcard"):
+                rt.wildcard_suffix(value)
+    else:
+        # Below a public suffix or a hosting service anyone has names of their own: the agent could rent one.
+        for value in ["*.co.uk", "*.com.au", "*.github.io", "*.ec2.amazonaws.com", "*.herokuapp.com", "*.nip.io"]:
+            with pytest.raises(ValueError, match="anyone can have"):
+                rt.wildcard_suffix(value)
+        assert rt.wildcard_suffix("*.shop.co.uk") == "shop.co.uk"  # a company's own domain below one is fine
+
+
+def test_under_wildcard(scenario):
+    rt = s.RUNTIME
+    if scenario == "happy":
+        assert rt.under_wildcard("api.example.com", {"example.com"}) and rt.under_wildcard("a.b.example.com", {"example.com"})
+    elif scenario == "sad":
+        # Not the domain itself, not a name that merely ends the same way.
+        assert not rt.under_wildcard("example.com", {"example.com"}) and not rt.under_wildcard("evilexample.com", {"example.com"})
+    else:
+        assert rt.under_wildcard("API.Example.COM.", {"example.com"}) and not rt.under_wildcard("x.example.com", set())
+
+
+def test_change_wildcards(scenario, monkeypatch):
+    rt = s.RUNTIME
+    monkeypatch.setattr(rt, "WILDCARDS", set())
+    if scenario == "happy":
+        assert rt.change_wildcards({"add": ["*.example.com", "*.Example.org"]}) == ["example.com", "example.org"]
+        assert rt.change_wildcards({"remove": ["*.example.org"]}) == ["example.com"]
+    elif scenario == "sad":
+        for forbid, mode in ((["--allow-host"], None), ((), {"name": "high", "refuses": ["--allow-host"]})):
+            with pytest.raises(ValueError, match="refused for this run"):
+                rt.change_wildcards({"add": ["*.example.com"]}, forbid, mode)
+        assert rt.WILDCARDS == set()
+    else:
+        with pytest.raises(ValueError, match="host wildcard"):
+            rt.change_wildcards({"add": ["*.com"]})
+        assert rt.change_wildcards({"remove": ["*.example.com"]}, ["--allow-host"]) == []  # taking back is always allowed
+
+
+def test_host_wildcards(scenario, tmp_path):
+    (tmp_path / "w").mkdir()
+    extra = {"happy": ["--allow-host", "*.Example.com", "--allow-host", "api.example.org"], "sad": ["--offline"],
+             "edge": ["--allow-host", "*.example.com", "--allow-host", "*.EXAMPLE.com"]}[scenario]
+    a = s.parse_args(["claude", "--workspace", str(tmp_path / "w"), *extra])
+    if scenario == "sad":
+        assert s.host_wildcards(a) == []
+        return
+    assert s.host_wildcards(a) == ["*.example.com"]
+    assert not any(h.startswith("*.") for h in s.allowed_hosts(a))  # never resolved nor pinned as a name
+    if scenario == "happy":
+        assert "api.example.org" in s.allowed_hosts(a)
+
+
+def test_wildcard_lookups_are_held_and_answered_with_their_addresses(monkeypatch, tmp_path):
+    monkeypatch.setattr(sr, "LOG_DIR", tmp_path)
+    sock = Mock()
+    sent = threading.Event()
+    sock.sendto.side_effect = lambda data, peer: sent.set()
+    sock.recvfrom.side_effect = [(wildcard_query(), ("127.0.0.1", 5353)), StopLoop()]
+    monkeypatch.setattr(s.socket, "socket", lambda *a: sock)
+    broker = Mock()
+    broker.ask.return_value = {"decision": "allow", "scope": "run", "addresses": ["203.0.113.7"]}
+    with pytest.raises(StopLoop):
+        s.RUNTIME.dns_logger(set(), broker=broker, wildcards=lambda: {"example.com"})
+    assert sent.wait(5)
+    reply = sock.sendto.call_args[0][0]
+    assert int.from_bytes(reply[6:8], "big") == 1 and reply.endswith(bytes([203, 0, 113, 7]))
+    name, details = broker.ask.call_args[0]
+    assert name == "dns" and details["name"] == "api.example.com" and broker.ask.call_args[1] == {"wait": True}
+    assert not (tmp_path / "egress-denied.jsonl").exists()  # held, not refused
+    # Refused on the host (outside the policy, no public address): the client gets the refusal, not a hang.
+    sock.sendto.reset_mock()
+    sent.clear()
+    sock.recvfrom.side_effect = [(wildcard_query(), ("127.0.0.1", 5353)), StopLoop()]
+    broker.ask.return_value = {"decision": "deny", "scope": "run"}
+    with pytest.raises(StopLoop):
+        s.RUNTIME.dns_logger(set(), broker=broker, wildcards=lambda: {"example.com"})
+    assert sent.wait(5) and int.from_bytes(sock.sendto.call_args[0][0][2:4], "big") & 0xF == 3
+
+
 def test_file_logger(scenario, tmp_path, monkeypatch):
     import struct
     monkeypatch.setattr(sr, "LOG_DIR", tmp_path / "log")
@@ -1094,7 +1235,10 @@ def test_file_logger(scenario, tmp_path, monkeypatch):
     libc = Mock()
     libc.inotify_init1.return_value = -1 if scenario == "sad" else 7
     watched = []
-    libc.inotify_add_watch.side_effect = lambda fd, path, mask: watched.append(os.fsdecode(path)) or len(watched)
+    # Watches go through the walked directory's descriptor (/proc/self/fd/N), never a path a swap could redirect.
+    libc.inotify_add_watch.side_effect = lambda fd, path, mask: watched.append(
+        os.readlink(os.fsdecode(path)) if os.fsdecode(path).startswith("/proc/self/fd/") else "not by descriptor") \
+        or len(watched)
     monkeypatch.setattr(s.RUNTIME.ctypes, "CDLL", lambda *a, **kw: libc)
     def event(wd, mask, name):
         raw = name.encode() + b"\0" * (16 - len(name))
@@ -1122,6 +1266,63 @@ def test_file_logger(scenario, tmp_path, monkeypatch):
         assert records[2]["path"] == os.path.join("?", "late.txt")
     else:
         assert records == [{"time": records[0]["time"], "error": "inotify unavailable"}]
+
+
+def test_file_logger_watches_what_it_walked_never_through_a_link(tmp_path, monkeypatch):
+    """Each watch goes through the descriptor of the directory the walk opened (no link followed): a directory the
+    agent swaps for a link to elsewhere, or a link inside the tree, never adds a watch outside it."""
+    monkeypatch.setattr(sr, "LOG_DIR", tmp_path / "log")
+    (tmp_path / "log").mkdir()
+    root, outside = tmp_path / "work", tmp_path / "outside"
+    (root / "sub").mkdir(parents=True)
+    (outside / "secret").mkdir(parents=True)
+    (root / "link").symlink_to(outside, target_is_directory=True)
+    libc, watched = Mock(), []
+    libc.inotify_init1.return_value = 7
+    libc.inotify_add_watch.side_effect = lambda fd, path, mask: watched.append((os.readlink(os.fsdecode(path)), mask)) \
+        or len(watched)
+    monkeypatch.setattr(s.RUNTIME.ctypes, "CDLL", lambda *a, **kw: libc)
+    monkeypatch.setattr(s.os, "read", Mock(side_effect=StopLoop()))
+    with pytest.raises(StopLoop):
+        s.file_logger([str(root)])
+    assert sorted(path for path, _ in watched) == [str(root), str(root / "sub")]
+    # The descriptor's link must be followed (no IN_DONT_FOLLOW), and only a directory is taken (IN_ONLYDIR).
+    assert all(not mask & 0x02000000 and mask & 0x01000000 for _, mask in watched)
+
+
+def test_file_logger_follows_a_deep_tree_only_so_far(tmp_path, monkeypatch):
+    """A tree a thousand levels deep (built where nothing watches, then moved in) must not end the file log by a
+    RecursionError: it is followed FILE_DEPTH levels deep."""
+    monkeypatch.setattr(sr, "LOG_DIR", tmp_path / "log")
+    monkeypatch.setattr(s.RUNTIME, "FILE_DEPTH", 20)
+    (tmp_path / "log").mkdir()
+    root = tmp_path / "work"
+    deep = root
+    for _ in range(40):
+        deep = deep / "d"
+    deep.mkdir(parents=True)
+    libc, watched = Mock(), []
+    libc.inotify_init1.return_value = 7
+    libc.inotify_add_watch.side_effect = lambda fd, path, mask: watched.append(1) or len(watched)
+    monkeypatch.setattr(s.RUNTIME.ctypes, "CDLL", lambda *a, **kw: libc)
+    monkeypatch.setattr(s.os, "read", Mock(side_effect=StopLoop()))
+    with pytest.raises(StopLoop):
+        s.file_logger([str(root)])
+    assert 20 <= len(watched) <= 21
+
+
+def test_watch_budget(scenario, tmp_path):
+    rt = s.RUNTIME
+    limits = tmp_path / "sys/fs/inotify"
+    limits.mkdir(parents=True)
+    if scenario == "happy":
+        (limits / "max_user_watches").write_text("8192\n")
+        assert rt.watch_budget(tmp_path) == 4096  # half of the user's: the rest for their own programs
+    elif scenario == "sad":
+        assert rt.watch_budget(tmp_path) == rt.FILE_WATCHES // 8  # unknown: a modest share
+    else:
+        (limits / "max_user_watches").write_text("1048576\n")
+        assert rt.watch_budget(tmp_path) == rt.FILE_WATCHES
 
 
 def test_file_logger_forgets_old_paths(tmp_path, monkeypatch):
@@ -1582,7 +1783,7 @@ GIT_TOKEN = "0123456789abcdef" * 2 + "01234567"
 def test_git_token_credential(scenario):
     if scenario == "happy":
         assert s.git_token_credential("http://alice@localhost:3080=GITEA") == {
-            "url": "http://localhost:3080", "user": "alice", "host": "localhost", "port": 3000,
+            "url": "http://localhost:3080", "user": "alice", "host": "localhost", "port": 3080,
             "loopback": True, "env": "GITEA"}
         assert s.git_token_credential("https://Git.Example.org:443/=T")["url"] == "https://git.example.org"
     elif scenario == "sad":
@@ -1632,7 +1833,7 @@ def test_git_tokens(scenario, monkeypatch):
         args = s.parse_args(["claude", "--git-token-env", "http://localhost:3080=CONTRACT_GIT",
                              "--git-token-env", "https://git.example.org=CONTRACT_GIT"])
         # Loopback is reached through pasta's host forward, a remote host through its pinned name.
-        assert args.allow_host_port == ["3000"] and args.allow_host == ["git.example.org"]
+        assert args.allow_host_port == ["3080"] and args.allow_host == ["git.example.org"]
         assert [(c["url"], token) for c, token in s.git_tokens(args)] == [
             ("http://localhost:3080", GIT_TOKEN), ("https://git.example.org", GIT_TOKEN)]
         # The same entry from the command line and the project file counts once.
@@ -1711,7 +1912,7 @@ def test_token_files_in_launcher(scenario, tmp_path, monkeypatch):
         args = s.parse_args(["claude", "--workspace", str(work), "--git-token-file", f"http://localhost:3080={token}",
                              "--git-token-file", f"https://github.com={gh}"])
         s.validate(args)
-        assert args.allow_host_port == ["3000"] and "github" in args.presets
+        assert args.allow_host_port == ["3080"] and "github" in args.presets
         env = s.git_environment(args)
         assert env["SANDBOX_GIT_TOKEN_0"] == GIT_TOKEN and env["GH_TOKEN"] == TOKEN
     elif scenario == "sad":
@@ -1772,7 +1973,7 @@ def test_read_private_file(scenario, tmp_path):
 def test_git_server(scenario):
     if scenario == "happy":
         assert s.git_server("http://localhost:3080", "--x") == {
-            "url": "http://localhost:3080", "user": None, "host": "localhost", "port": 3000, "loopback": True}
+            "url": "http://localhost:3080", "user": None, "host": "localhost", "port": 3080, "loopback": True}
         assert s.git_server("https://alice@Git.Example.org:443/", "--x")["url"] == "https://git.example.org"
     elif scenario == "sad":
         for bad in ["http://git.example.org", "https://git.example.org/owner", "ftp://localhost", "https://a_b.org"]:
@@ -1845,7 +2046,7 @@ def test_git_credentials_file(scenario, tmp_path, monkeypatch, capsys):
         args = s.parse_args(["claude", "--workspace", str(work), "--git-credentials", str(path)])
         s.validate(args)
         # Each server is reached as with --git-token-*: loopback forward, GitHub preset, pinned name.
-        assert args.allow_host_port == ["3000"] and "github" in args.presets and args.allow_host == ["git.example.org"]
+        assert args.allow_host_port == ["3080"] and "github" in args.presets and args.allow_host == ["git.example.org"]
         entries, notes = s.git_credentials_file(args)
         assert notes == [] and [(c["url"], c["user"], c["line"], password) for c, password in entries] == [
             ("https://github.com", "x-access-token", 1, TOKEN), ("http://localhost:3080", "alice", 2, GIT_TOKEN),
@@ -1906,7 +2107,7 @@ def test_git_credentials_file(scenario, tmp_path, monkeypatch, capsys):
         assert plan["git_credentials"] == [
             {"url": "https://github.com", "user": "x-access-token", "env": "CONTRACT_GH"},
             {"url": "http://localhost:3080", "user": "first", "credentials": str(path), "line": 3}]
-        assert plan["host_ports"] == [3000] and f"{path} line 4 skipped" in err
+        assert plan["host_ports"] == [3080] and f"{path} line 4 skipped" in err
         assert not any(secret in out + err for secret in (TOKEN, GIT_TOKEN, "secret-second", "secret-gh", "broken-secret"))
 
 
@@ -2415,6 +2616,89 @@ def test_check_host_sources(scenario, tmp_path):
     with pytest.raises(ValueError, match="agent can change"):
         s.validate(s.parse_args(["codex", "--workspace", str(tmp_path / "work"),
                                  "--state-dir", str(tmp_path / "work/.state")]))
+
+
+def test_watch_added_workspace(scenario, tmp_path, monkeypatch):
+    rt = s.RUNTIME
+    monkeypatch.setattr(rt, "FILE_ROOTS_ADDED", [])
+    monkeypatch.setattr(rt, "FILE_LOGGING", threading.Event())
+    real = tmp_path / "lib"
+    real.mkdir()
+    monkeypatch.setattr(rt.os.path, "isdir", lambda path: path in ("/workspaces/lib", str(real)))
+    if scenario == "happy":
+        assert rt.watch_added_workspace("/workspaces/lib") is False  # no file log in this run
+        rt.FILE_LOGGING.set()
+        assert rt.watch_added_workspace("/workspaces/lib") is True
+        assert rt.FILE_ROOTS_ADDED == ["/workspaces/lib"]
+    elif scenario == "sad":
+        # Only the place an added workspace has: never another directory, nothing with a slash or "..".
+        for value in ["/root", "/workspaces/a/b", "/workspaces/..", "/workspaces/", None, str(real)]:
+            with pytest.raises(ValueError, match="watch"):
+                rt.watch_added_workspace(value)
+        assert rt.FILE_ROOTS_ADDED == []
+    else:
+        with pytest.raises(ValueError, match="no directory"):
+            rt.watch_added_workspace("/workspaces/missing")
+
+
+def test_host_sources(scenario, tmp_path):
+    (tmp_path / "outside/auth.json").parent.mkdir(exist_ok=True)
+    options = {"happy": [], "sad": ["--auth-file", str(tmp_path / "outside/auth.json")],
+               "edge": ["--local-config", str(tmp_path / "outside/local.json")]}[scenario]
+    found = s.host_sources(exposure_args(tmp_path, *options))
+    labels = [label for _, label in found]
+    # Always the run directory and your rules: a workspace added during the run is held to them as well.
+    assert any(label.startswith("The run directory") for label in labels) and "Your rules (XDG_CONFIG_HOME)" in labels
+    if scenario == "sad":
+        assert (str(tmp_path / "outside/auth.json"), "--auth-file") in [(str(p), l) for p, l in found]
+    if scenario == "edge":
+        assert "--local-config" in labels
+
+
+def test_host_stores(scenario, tmp_path):
+    options = {"happy": [], "sad": ["--no-default-kit", "--no-memory"], "edge": []}[scenario]
+    args = exposure_args(tmp_path, *options)
+    if scenario == "edge":
+        args.kit = ["review"]  # a chosen kit: the kits directory is a store too
+    stores = [label for _, label in s.host_stores(args)]
+    if scenario == "happy":
+        assert "the default kit" in stores and "the project memory" in stores and "the kits directory" not in stores
+    elif scenario == "sad":
+        assert "the default kit" not in stores and "the project memory" not in stores
+    else:
+        assert "the kits directory" in stores
+    assert "the plugin store" not in stores  # Claude's alone
+
+
+def test_check_stores(scenario, tmp_path):
+    store = tmp_path / "kits"
+    store.mkdir()
+    if scenario == "happy":
+        s.check_stores([tmp_path / "work"], [(store, "the kits directory")])
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="lies inside the kits directory"):
+            s.check_stores([store / "mine"], [(store, "the kits directory")])
+    else:
+        # A store reached through a link counts by its target.
+        (tmp_path / "link").symlink_to(store)
+        with pytest.raises(ValueError, match="the kits directory"):
+            s.check_stores([store], [(tmp_path / "link", "the kits directory")])
+
+
+def test_workspace_checks(scenario, tmp_path):
+    options = {"happy": [], "sad": ["--workspace-ro"], "edge": []}[scenario]
+    args = exposure_args(tmp_path, *options)
+    args.sandbox_home = tmp_path / "home" if scenario == "edge" else None
+    args.mode_other_workspaces_ro = False
+    checks = s.workspace_checks(args, tmp_path / "session")
+    assert checks["workspaces"] == [{"host": str(tmp_path / "work"), "sandbox": "/work",
+                                     "mode": "ro" if scenario == "sad" else "rw"}]
+    assert checks["read_only"] is (scenario == "sad")
+    # Every mount (read-only ones too) and the persistent HOME: a later workspace may overlap none.
+    assert {str(tmp_path / n) for n in ("rw", "ro", "state")} <= set(checks["trees"])
+    assert (str(tmp_path / "home") in checks["trees"]) is (scenario == "edge")
+    assert [str(tmp_path / "session"), "The run's session directory"] in checks["private"]
+    json.dumps(checks)
 
 
 def test_check_tiocsti(scenario, tmp_path, monkeypatch):
@@ -3881,6 +4165,34 @@ def test_remember_sync(scenario, tmp_path):
         assert s.load_login_sync() == {s.sync_key("codex", other): "d2"}
 
 
+def test_remember_sync_locked(scenario, tmp_path):
+    homes = [tmp_path / f"home{i}" for i in range(12)]
+    for home in homes:
+        home.mkdir()
+    store = s.login_sync_store()
+    store.parent.mkdir(parents=True, exist_ok=True)
+    if scenario == "happy":
+        s.remember_sync_locked("claude", homes[0], "d0", store)
+        assert s.load_login_sync() == {s.sync_key("claude", homes[0]): "d0"}
+    elif scenario == "sad":
+        # A store that cannot be written: nothing is left behind (no .login-sync-* leftovers).
+        store.parent.chmod(0o500)
+        try:
+            s.remember_sync_locked("claude", homes[0], "d0", store)
+        finally:
+            store.parent.chmod(0o700)
+        assert not list(store.parent.glob(".login-sync-*"))
+    else:
+        # Runs starting and ending at once: every HOME's entry is kept (remember_sync takes the lock).
+        threads = [threading.Thread(target=s.remember_sync, args=("claude", home, f"d{i}"))
+                   for i, home in enumerate(homes)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert s.load_login_sync() == {s.sync_key("claude", home): f"d{i}" for i, home in enumerate(homes)}
+
+
 def test_claude_recover_writeback_never_after_an_unshared_run(tmp_path):
     """Review finding: a --no-auth run on the HOME (another account) must not be taken for a missed
     write-back on the next start."""
@@ -4086,7 +4398,7 @@ def test_privacy_context(scenario, tmp_path, monkeypatch):
     assert str(Path.home()) in context["homes"]
     if scenario == "happy":
         assert context["addresses"] == ["192.168.50.10"]
-        assert context["servers"] == [{"host": "localhost", "port": 3000, "user": "alice"}]
+        assert context["servers"] == [{"host": "localhost", "port": 3080, "user": "alice"}]
         assert context["tokens"] == [GIT_TOKEN]
     elif scenario == "sad":
         assert context["addresses"] == context["servers"] == context["tokens"] == []
@@ -5525,13 +5837,22 @@ def test_register_run(scenario, tmp_path, monkeypatch):
         assert record["run"] == "claude-1234abcd" and record["workspace"] == str(tmp_path / "app")
         assert record["session_dir"] == str(tmp_path / "session") and record["proxy"]
         assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+        assert record["own_cgroup"] is True  # Podman: the pod's cgroup is the run's own
+        # sandbox-ai workspace add checks against what the start recorded.
+        assert record["workspace_checks"]["workspaces"] == [{"host": str(tmp_path / "app"), "sandbox": "/work",
+                                                              "mode": "rw"}]
     elif scenario == "sad":
         # A run of that name that still lives (another process) stops the start; a dead one is replaced.
         directory = s.register_run(a, "session-x", tmp_path / "session")
         record = json.loads((directory / "run.json").read_text())
-        (directory / "run.json").write_text(json.dumps({**record, "pid": os.getppid()}))
+        (directory / "run.json").write_text(json.dumps({**record, "pid": os.getppid(),
+                                                         "pid_start": s.process_start(os.getppid())}))
         with pytest.raises(ValueError, match="already running"):
             s.register_run(a, "session-x", tmp_path / "session")
+        # The same PID with another start time: given out again since, no run of that name lives.
+        (directory / "run.json").write_text(json.dumps({**record, "pid": os.getppid(),
+                                                         "pid_start": s.process_start(os.getppid()) + 1}))
+        assert s.register_run(a, "session-x", tmp_path / "session") == directory
         (directory / "run.json").write_text(json.dumps({**record, "pid": 2 ** 22 + 9}))
         (directory / "control.sock").write_text("stale")
         assert s.register_run(a, "session-x", tmp_path / "other") == directory and not (directory / "control.sock").exists()
@@ -6780,7 +7101,9 @@ def test_mounts_changed(scenario, tmp_path):
         folder.rmdir()
         folder.mkdir()
         (tmp_path / "keep").mkdir()  # the old inode must not come back
-        assert "replaced" in rt.mounts_changed(record) or os.stat(folder).st_ino == info.st_ino
+        # ext4 may hand the same inode out again at once: then nothing can tell the two apart, and nothing is said.
+        found = rt.mounts_changed(record)
+        assert os.stat(folder).st_ino == info.st_ino or "replaced" in found
 
 
 def test_image_mount_hosts(scenario, tmp_path, monkeypatch):
@@ -6828,6 +7151,23 @@ def test_tool_dirs_state(scenario, tmp_path, monkeypatch):
     else:
         monkeypatch.setenv("PATH", str(tmp_path / "missing"))
         assert s.tool_dirs_state(a) == {}
+
+
+def test_a_symlink_loop_in_a_tool_directory_is_a_change_not_a_crash(tmp_path, monkeypatch):
+    """The agent turns a PATH directory of the workspace into a symlink loop: the check after the run names it
+    (Path.resolve raises RuntimeError there before Python 3.13) instead of ending the launcher before the login
+    write-back and the privacy check."""
+    work = tmp_path / "proj"
+    venv, modules = work / ".venv" / "bin", work / "node_modules" / ".bin"
+    for directory in (venv, modules):
+        directory.mkdir(parents=True)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(venv), str(modules)]))
+    before = s.tool_dirs_state(argparse.Namespace(workspaces=[str(work)]))
+    shutil.rmtree(work / "node_modules")
+    (work / "node_modules").symlink_to(work / "node_modules")
+    notes = s.tool_dirs_changed(before)
+    assert any("replaced" in note and "node_modules" in note for note in notes)
+    assert s.tool_dirs_state(argparse.Namespace(workspaces=[str(work)]))  # a start with such a PATH still works
 
 
 def test_tool_dirs_changed(scenario, tmp_path, monkeypatch):
@@ -8951,6 +9291,18 @@ def test_cgroup_dir(scenario, tmp_path):
         fake_cgroup(root, "user.slice/libpod-abc.scope/container", limit=None)
         (proc / "42" / "cgroup").write_text("0::/user.slice/libpod-abc.scope/container\n")
         assert s.cgroup_dir(42, proc, root) == group
+
+
+def test_memory_stall(scenario, tmp_path):
+    if scenario == "happy":
+        (tmp_path / "memory.pressure").write_text("some avg10=12.50 avg60=3.00 avg300=1.00 total=9\n"
+                                                  "full avg10=4.25 avg60=1.00 avg300=0.20 total=4\n")
+        assert s.memory_stall(tmp_path) == 4.25  # all processes stalled, not just some
+    elif scenario == "sad":
+        assert s.memory_stall(tmp_path) is None  # no PSI (an older kernel, psi=0)
+    else:
+        (tmp_path / "memory.pressure").write_text("some avg10=1.00 avg60=0 avg300=0 total=1\nfull avg10=x\n")
+        assert s.memory_stall(tmp_path) is None
 
 
 def test_memory_state(scenario, tmp_path):

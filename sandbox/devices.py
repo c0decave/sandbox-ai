@@ -88,7 +88,29 @@ def cgroup_path(proc, pid):
     return None
 
 
-def sandbox_processes(record, proc=PROC):
+NS_GET_PARENT = 0xB702  # _IO(0xb7, 0x2): the parent of a user namespace
+
+
+def owner_is_us(proc, pid):
+    """The user namespace of PID is a child of this process's own: the one rootless Podman or Bubblewrap made, never
+    one the agent made inside it (its parent would be the sandbox's, not ours). False when it cannot be told."""
+    try:
+        fd = os.open(Path(proc) / str(pid) / "ns" / "user", os.O_RDONLY | os.O_CLOEXEC)
+    except OSError:
+        return False
+    try:
+        parent = fcntl.ioctl(fd, NS_GET_PARENT)
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+    try:
+        return os.fstat(parent).st_ino == os.stat("/proc/self/ns/user").st_ino
+    finally:
+        os.close(parent)
+
+
+def sandbox_processes(record, proc=PROC, owned=None):
     """{"pids", "mntns": {ns: pid}, "user": pid, "cgroup"} of the running sandbox RECORD (run.json): the processes
     whose /sandbox/session/config.json is this run's (the session directory is the run's own), and every process
     of the same pod (Podman: the pod's cgroup) or user namespace (Bubblewrap). None if it is not found."""
@@ -97,6 +119,11 @@ def sandbox_processes(record, proc=PROC):
         return None
     pids = sorted(int(entry.name) for entry in proc.iterdir() if entry.name.isdigit()) if proc.is_dir() else []
     anchors = [pid for pid in pids if read(proc / str(pid) / "root" / "sandbox" / "session" / "config.json") == want]
+    # A process the agent put into a user namespace of its own sees the same file: never the anchor (the helper
+    # would enter that namespace, where the agent holds every right and could undo read-only). Checked on the real
+    # /proc only; tests hand in OWNED.
+    owned = owned or ((lambda pid: owner_is_us(proc, pid)) if Path(proc) == PROC else (lambda pid: True))
+    anchors = [pid for pid in anchors if owned(pid)]
     if not anchors:
         return None
     anchor = anchors[0]
@@ -111,11 +138,13 @@ def sandbox_processes(record, proc=PROC):
         user = namespace(proc, anchor, "user")
         members = [pid for pid in pids if namespace(proc, pid, "user") == user]
         group = cgroup_path(proc, anchor)
-    mounts = {}
+    mounts, own_user = {}, namespace(proc, anchor, "user")
     for pid in members:
         ns = namespace(proc, pid, "mnt")
-        # Only the sandbox's own mount namespaces (the pod's infra container has no /sandbox).
-        if ns and ns not in mounts and (proc / str(pid) / "root" / "sandbox").is_dir():
+        # Only the sandbox's own mount namespaces (the pod's infra container has no /sandbox), of its own user
+        # namespace: never one the agent made itself.
+        if ns and ns not in mounts and (proc / str(pid) / "root" / "sandbox").is_dir() and \
+                namespace(proc, pid, "user") == own_user:
             mounts[ns] = pid
     return {"pids": members, "mntns": mounts, "user": anchor, "cgroup": group}
 

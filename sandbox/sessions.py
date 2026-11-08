@@ -896,12 +896,15 @@ def stop_locked(name, timeout):
     starts().record(display(name, data), "stop", name, current_run(name, data))
     # The supervisor forwards SIGTERM and runs the normal cleanup, including
     # pod removal and the Claude credential write-back. State stays on disk.
-    os.kill(data["pid"], signal.SIGTERM)
+    # It may end by itself between the look above and the signal: then there is nothing left to stop.
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(data["pid"], signal.SIGTERM)
     deadline = time.monotonic() + timeout
     while alive(name, data) and time.monotonic() < deadline:
         time.sleep(0.2)
     if alive(name, data):
-        os.kill(data["pid"], signal.SIGKILL)
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(data["pid"], signal.SIGKILL)
         time.sleep(0.5)
         try:
             clear_stale_pod(name, data)  # only this session's own, labelled pod

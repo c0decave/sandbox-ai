@@ -932,7 +932,13 @@ def start_loggers(broker=None, quiet=(), who=None, canaries=None, network=None):
     def denied_loop():
         while not stop.wait(1):
             poll_denied(stop.seen, who)
-    dns = (set(cfg["pinned"]), 53, stop, broker, quiet, who, canaries, network.nameservers if network else None)
+    starting = {wildcard_suffix(v) for v in cfg.get("wildcards", [])}
+
+    def wildcards():
+        with WILDCARDS_LOCK:
+            return starting | WILDCARDS
+    dns = (set(cfg["pinned"]), 53, stop, broker, quiet, who, canaries, network.nameservers if network else None, 53,
+           wildcards)
     loggers = [(denied_loop, ()), (dns_logger, dns), (process_logger, (stop, 0.5, Path("/proc"),
                                                                      [cfg.get("env", {})[k] for k in cfg.get("secret_names", [])
                                                                       if k in cfg.get("env", {})]))]
@@ -1024,6 +1030,98 @@ def dns_reply(query):
     return ".".join(labels).lower(), query[:2] + struct.pack("!HHHHH", flags, 1, 0, 0, 0) + query[12:end + 5]
 
 
+# NAT64 prefixes count as global to Python, yet a local translator turns them into any IPv4 address: the LAN, this
+# host. Never public here.
+NAT64 = (ipaddress.ip_network("64:ff9b::/96"), ipaddress.ip_network("64:ff9b:1::/48"))
+
+
+def public_address(ip):
+    """IP (an ipaddress object) is a public address a name may open: global, and no NAT64 translation of another."""
+    return ip.is_global and not (ip.version == 6 and any(ip in net for net in NAT64))
+
+
+def dns_address_reply(query, addresses, ttl=30):
+    """The answer to the single question of QUERY with ADDRESSES (those of its type: A or AAAA), id, RD bit and
+    question kept; no record of the asked type (an AAAA question for a name with IPv4 addresses only) is NOERROR
+    without answers, so the client takes the other type instead of giving up. None for other types."""
+    end = 12
+    while end < len(query) and query[end]:
+        end += 1 + query[end]
+    if end + 5 > len(query):
+        return None
+    qtype = struct.unpack("!H", query[end + 1:end + 3])[0]
+    if qtype not in (1, 28):
+        return None
+    family = socket.AF_INET if qtype == 1 else socket.AF_INET6
+    records = []
+    for address in addresses:
+        try:
+            packed = socket.inet_pton(family, address)
+        except (OSError, ValueError, TypeError):
+            continue
+        records.append(struct.pack("!HHHIH", 0xC00C, qtype, 1, ttl, len(packed)) + packed)
+    flags = 0x8180 | (struct.unpack("!H", query[2:4])[0] & 0x0100)
+    return query[:2] + struct.pack("!HHHHH", flags, 1, len(records), 0, 0) + query[12:end + 5] + b"".join(records)
+
+
+# Host wildcards (--allow-host *.DOMAIN): the suffixes, from the start (config.json "wildcards") and added during the
+# run (sandbox-ai net allow, control op "wildcards"). A lookup of a name below one waits for its question, which the
+# launcher answers on the host by itself; the answer's addresses go back at once.
+WILDCARDS = set()
+WILDCARDS_LOCK = threading.Lock()
+# Suffixes under which anyone can have a name of their own (a public suffix, a hosting or cloud service): a wildcard
+# at or below one would let the agent open any server it rents there, unasked. Two-label country domains
+# (co.uk, com.au, ...) are refused by their shape. Not the whole Public Suffix List: name such hosts one by one.
+SHARED_SUFFIXES = frozenset("""
+amazonaws.com cloudfront.net elasticbeanstalk.com awsapprunner.com on.aws lambda-url.on.aws
+azurewebsites.net azureedge.net azure-api.net azurestaticapps.net cloudapp.net cloudapp.azure.com blob.core.windows.net
+trafficmanager.net windows.net appspot.com googleusercontent.com googleapis.com run.app cloudfunctions.net web.app
+firebaseapp.com firebaseio.com withgoogle.com github.io githubusercontent.com gitlab.io pages.dev workers.dev
+r2.dev netlify.app netlify.com vercel.app now.sh herokuapp.com herokudns.com onrender.com fly.dev
+railway.app up.railway.app glitch.me repl.co replit.dev replit.app deno.dev ngrok.io ngrok-free.app ngrok.app
+loca.lt trycloudflare.com serveo.net surge.sh readthedocs.io blogspot.com wordpress.com wixsite.com
+squarespace.com tumblr.com myshopify.com webflow.io carrd.co neocities.org digitaloceanspaces.com ondigitalocean.app
+linodeobjects.com scw.cloud ovh.net duckdns.org no-ip.org ddns.net dyndns.org freedns.org sslip.io nip.io
+xip.io traefik.me localtest.me lvh.me
+""".split())
+COUNTRY_SECOND_LEVEL = re.compile(r"(?:co|com|net|org|gov|edu|ac|or|ne|go|gob|nic|mil|ltd|plc|sch|info|biz)\.[a-z]{2}")
+WILDCARD_SUFFIX = re.compile(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}")
+
+
+def wildcard_suffix(value):
+    """"example.com" of "*.example.com" (lower case); ValueError for anything else: a wildcard needs at least two
+    labels below it (*.com would open a whole top-level domain)."""
+    if not isinstance(value, str) or not value.startswith("*.") or not WILDCARD_SUFFIX.fullmatch(value[2:].lower()) \
+            or "." not in value[2:]:
+        raise ValueError(f"not a host wildcard *.DOMAIN.TLD: {printable_text(str(value), 100)!r}")
+    suffix = value[2:].lower()
+    shared = next((s for s in SHARED_SUFFIXES if suffix == s or suffix.endswith("." + s)), None)
+    if shared or COUNTRY_SECOND_LEVEL.fullmatch(suffix):
+        raise ValueError(f"not a host wildcard here: below {printable_text(shared or suffix, 100)} anyone can have a "
+                         "name of their own (a public suffix or hosting service), so the agent could open any server "
+                         "it rents there; give the hosts by name instead")
+    return suffix
+
+
+def under_wildcard(name, suffixes):
+    """NAME lies below one of SUFFIXES (a subdomain, not the domain itself: *.example.com is not example.com)."""
+    name = str(name).lower().rstrip(".")
+    return any(name.endswith("." + suffix) for suffix in suffixes)
+
+
+def change_wildcards(request, forbid=(), mode=None):
+    """Control op "wildcards": {"add": [...], "remove": [...]} of *.DOMAIN; the wildcards now. The administrator's
+    policy and a strict security mode refuse --allow-host here as at the start."""
+    add = [wildcard_suffix(v) for v in request.get("add", []) or []]
+    remove = [wildcard_suffix(v) for v in request.get("remove", []) or []]
+    if add and ("--allow-host" in forbid or "--allow-host" in ((mode or {}).get("refuses") or [])):
+        raise ValueError("--allow-host is refused for this run (the administrator's policy or its security mode)")
+    with WILDCARDS_LOCK:
+        WILDCARDS.update(add)
+        WILDCARDS.difference_update(remove)
+        return sorted(WILDCARDS)
+
+
 DNS_WORKERS = 8      # lookups the DNS stub forwards at once
 DNS_BACKOFF = 30.0   # seconds a nameserver that did not answer is skipped while another one is there to ask
 
@@ -1054,7 +1152,7 @@ def forward_dns(query, servers, timeout=2.0, port=53, failed=None):
 
 
 def dns_logger(pinned, port=53, stop=None, broker=None, quiet=(), who=None, canaries=None, forward=None,
-               upstream_port=53):
+               upstream_port=53, wildcards=None):
     # Unpinned names never get an address unless DNS was allowed during the run (FORWARD: the nameservers
     # `sandbox-ai net allow --dns` gave): then the stub asks them, and every name it forwards is logged
     # (dns.jsonl). Otherwise it records the attempt and, with approvals, files a question (the lookup is
@@ -1083,10 +1181,34 @@ def dns_logger(pinned, port=53, stop=None, broker=None, quiet=(), who=None, cana
             pass
         finally:
             workers.release()
+
+    def held(query, peer, name, reply, found):
+        """A name below an allowed wildcard: its question is answered on the host by the launcher (a second or
+        so); the addresses go back to the client, which still waits, instead of a refusal it would not retry."""
+        try:
+            answer = broker.ask("dns", {"name": name, "wildcard": True, **found}, wait=True) or {}
+            addresses = (answer.get("addresses") or []) if answer.get("decision") == "allow" else []
+            sock.sendto((dns_address_reply(query, addresses) if addresses else None) or reply, peer)
+        except (OSError, ValueError, RuntimeError, struct.error):
+            pass
+        finally:
+            workers.release()
     while stop is None or not stop.is_set():
         try:
             query, peer = sock.recvfrom(4096)
             name, reply = dns_reply(query)
+            if name not in pinned and broker is not None and wildcards is not None and \
+                    re.fullmatch(r"(?=.{1,253}$)(?:[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}",
+                                 name) and \
+                    under_wildcard(name, wildcards()) and not (canaries is not None and canaries.names.name(name)):
+                if workers.acquire(blocking=False):
+                    found = who.lookup("udp", peer[0], peer[1]) if who is not None else {}
+                    try:
+                        threading.Thread(target=held, args=(query, peer, name, reply, found), name="dns-wildcard",
+                                         daemon=True).start()
+                        continue
+                    except RuntimeError:
+                        workers.release()
             servers = forward() if forward is not None and name not in pinned else []
             if servers:
                 if not workers.acquire(blocking=False):
@@ -1113,6 +1235,38 @@ def dns_logger(pinned, port=53, stop=None, broker=None, quiet=(), who=None, cana
 
 
 FILE_PRUNE_SECONDS = 60.0
+FILE_DEPTH = 200  # directories below a watched root followed at most this deep
+# Watches the file log takes at most: inotify's limit is the host user's, shared with every program of theirs
+# (editors, file managers): half of it, at most 65536, so a run that makes directories without end never uses it up.
+FILE_WATCHES = 65536
+
+
+def watch_budget(proc=Path("/proc")):
+    try:
+        limit = int((Path(proc) / "sys/fs/inotify/max_user_watches").read_text().strip())
+    except (OSError, ValueError):
+        return FILE_WATCHES // 8
+    return max(1024, min(FILE_WATCHES, limit // 2))
+# Workspaces added during the run (sandbox-ai workspace add, through the control socket): watched from then on.
+FILE_ROOTS_ADDED = []
+FILE_ROOTS_LOCK = threading.Lock()
+FILE_LOGGING = threading.Event()
+ADDED_WORKSPACE = re.compile(r"/workspaces/[^/\0\n\r]{1,255}")
+
+
+def watch_added_workspace(path):
+    """Have the file log watch the workspace PATH (/workspaces/NAME, mounted during the run); True if the run keeps
+    a file log. ValueError for anything else: only the human reaches the control socket, still nothing but a
+    directory below /workspaces is taken."""
+    if not isinstance(path, str) or not ADDED_WORKSPACE.fullmatch(path) or os.path.basename(path) in (".", ".."):
+        raise ValueError("watch: a directory /workspaces/NAME")
+    if os.path.islink(path) or not os.path.isdir(path):
+        raise ValueError(f"watch: {path} is no directory in the sandbox")
+    if not FILE_LOGGING.is_set():
+        return False
+    with FILE_ROOTS_LOCK:
+        FILE_ROOTS_ADDED.append(path)
+    return True
 
 
 def live_watches(fd, proc=Path("/proc")):
@@ -1142,13 +1296,27 @@ def file_logger(roots, stop=None, prune_every=FILE_PRUNE_SECONDS):
     mask = sum(INOTIFY_EVENTS) | 0x02000000 | 0x04000000  # DONT_FOLLOW, EXCL_UNLINK
     paths = {}
     exhausted = []
+    budget = watch_budget()
+    # Through the directory's descriptor (/proc/self/fd/N, a link that must be followed): what is watched is the
+    # directory the walk opened, not whatever a path names by now (the agent may swap a directory for a link).
+    by_descriptor = (mask & ~0x02000000) | 0x01000000  # without DONT_FOLLOW, with ONLYDIR
+
     def watch(top):
         if os.path.islink(top):
-            return  # Swapped for a symlink: os.walk would follow it out of the watched tree.
-        for directory, dirs, _ in os.walk(top):
+            return  # Swapped for a symlink: never followed out of the watched tree.
+        # fwalk opens each directory without following links and checks it is the one it listed.
+        base = top.rstrip("/").count("/")
+        for directory, dirs, _, dir_fd in os.fwalk(top, follow_symlinks=False):
             if exhausted:
                 return
-            wd = libc.inotify_add_watch(fd, os.fsencode(directory), mask)
+            if len(paths) >= budget:  # the file log's own share of the user's watches
+                exhausted.append(directory)
+                log_event("files.jsonl", {"error": f"file log watch budget ({budget}) reached; later directories "
+                                                   "unwatched", "path": directory})
+                return
+            if directory.count("/") - base >= FILE_DEPTH:  # deeper is no project: never a recursion that ends the log
+                dirs.clear()
+            wd = libc.inotify_add_watch(fd, os.fsencode(f"/proc/self/fd/{dir_fd}"), by_descriptor)
             if wd < 0:
                 errno = ctypes.get_errno()
                 if errno == 28:  # ENOSPC: the host user's watch limit is shared
@@ -1160,8 +1328,14 @@ def file_logger(roots, stop=None, prune_every=FILE_PRUNE_SECONDS):
                 dirs.clear()
                 continue
             paths[wd] = directory
+    def watch_safely(top):
+        try:
+            watch(top)
+        except (OSError, RecursionError, ValueError) as exc:  # the log goes on with what it has
+            log_event("files.jsonl", {"error": f"not all directories watched: {type(exc).__name__}", "path": top})
     for root in roots:
-        watch(root)
+        watch_safely(root)
+    FILE_LOGGING.set()
     recent = {}
     memory_part("file watches", lambda: len(paths))
     memory_part("file recent", lambda: len(recent))
@@ -1180,10 +1354,17 @@ def file_logger(roots, stop=None, prune_every=FILE_PRUNE_SECONDS):
                                                "the run goes on without it"})
             paths.clear()
             recent.clear()
+            FILE_LOGGING.clear()  # workspace add must not say "watched" any more
             break
         if overflowed or time.monotonic() - pruned >= prune_every:
             prune()
             pruned, overflowed = time.monotonic(), False
+        if FILE_ROOTS_ADDED:
+            with FILE_ROOTS_LOCK:
+                added, FILE_ROOTS_ADDED[:] = list(FILE_ROOTS_ADDED), []
+            for root in added:
+                watch_safely(root)
+                log_event("files.jsonl", {"action": "watch", "path": root, "note": "workspace added during the run"})
         # After stop, queued events are still drained before returning.
         if stop is not None and not select.select([fd], [], [], 0.2)[0]:
             if stop.is_set():
@@ -1205,7 +1386,7 @@ def file_logger(roots, stop=None, prune_every=FILE_PRUNE_SECONDS):
             path = os.path.join(paths.get(wd, "?"), name)
             if event & 0x40000000:  # directory
                 if event & (0x100 | 0x80):
-                    watch(path)
+                    watch_safely(path)
                 if event & 0x18:
                     continue
             action = next((label for bit, label in INOTIFY_EVENTS.items() if event & bit), None)
@@ -5417,7 +5598,8 @@ def mode_refusal(mode, request):
 
 
 def control_server(path, network, stop=None, forbid=(), mode=None, taint=None):
-    """Serve `sandbox-ai net` requests (allow, revoke, show, untaint) on the Unix socket PATH until STOP is set.
+    """Serve `sandbox-ai net` requests (allow, revoke, show, untaint; watch: a workspace added during the run, for
+    the file log) on the Unix socket PATH until STOP is set.
     FORBID: the options the administrator's policy forbids, MODE: the run's strict security mode (or None); a
     run-time change must not do what they would. Checked here, not only by `sandbox-ai net`: a request written by
     hand reaches this socket too. TAINT: the run's taint, shown and taken back (untaint) here: only the human
@@ -5441,6 +5623,16 @@ def control_server(path, network, stop=None, forbid=(), mode=None, taint=None):
                         break
                     data += chunk
                 request = json.loads(data)
+                if request.get("op") == "wildcards":
+                    answer = {"ok": True, "wildcards": change_wildcards(request, forbid, mode)}
+                    with contextlib.suppress(OSError):
+                        connection.sendall((json.dumps(answer) + "\n").encode())
+                    continue
+                if request.get("op") == "watch":
+                    answer = {"ok": True, "watched": watch_added_workspace(request.get("path"))}
+                    with contextlib.suppress(OSError):
+                        connection.sendall((json.dumps(answer) + "\n").encode())
+                    continue
                 if request.get("op") == "allow":
                     for field, option in NET_OPTIONS:
                         if request.get(field) and (option in forbid or field == "dns" and "--nameserver" in forbid
@@ -5502,7 +5694,7 @@ class ApprovalBroker:
         # the proxy validated in this run (verified). PUBLIC and NAME_PORTS differ only in tests.
         self.hosts_file, self.no_inspect, self.verify_seconds = Path(hosts_file), list(no_inspect), verify_seconds
         self.name_ports = tuple(name_ports)
-        self.public = public or (lambda ip: ip.is_global)
+        self.public = public or public_address
         self.verified, self.proved = {}, threading.Condition()
         # The administrator's policy may cap the scope: an answer wider than that counts as the widest allowed.
         self.max_scope = max_scope if max_scope in SCOPES else "once"
@@ -5710,7 +5902,7 @@ class ApprovalBroker:
         elif kind == "dns":
             # Only public addresses: a name the agent controls must not open the LAN or this host.
             addresses = [str(ip) for ip in (ipaddress.ip_address(str(a)) for a in answer.get("addresses", []))
-                         if ip.is_global][:32]
+                         if public_address(ip)][:32]
             if addresses:
                 self.network.change({"op": "allow", "https": addresses})
 

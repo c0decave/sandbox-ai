@@ -810,3 +810,16 @@ def test_one_watcher_per_run(world, monkeypatch):
     d.watch_devices({**record, "pid": 2 ** 22 + 7}, threading.Event(),
                     watcher=types.SimpleNamespace(step=lambda: steps.append(1), close=lambda: None))
     assert steps == []
+
+
+def test_a_process_in_a_user_namespace_the_agent_made_is_never_the_anchor(world):
+    """The agent's own namespace sees the same config.json, and a low PID (the PID counter cycled) would make it the
+    anchor: the helper would enter a namespace the agent controls. Only a user namespace the launcher's engine made
+    counts, and only mount namespaces of the anchor's user namespace get anything."""
+    proc, record = world
+    fake_process(proc, 50, 9, 50, "/user.slice/user-1000.slice/user@1000.service/user.slice/libpod_pod_abc.slice/"
+                 "libpod-sup.scope", config='{"run": "mine"}')  # the agent's: lower PID, another user namespace
+    found = d.sandbox_processes(record, proc, owned=lambda pid: pid != 50)
+    assert found["user"] == 100 and 50 not in found["mntns"].values()
+    assert sorted(found["mntns"].values()) == [100, 101]
+    assert d.sandbox_processes(record, proc, owned=lambda pid: False) is None  # nothing proven: nothing found

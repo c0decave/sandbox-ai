@@ -2,13 +2,15 @@
 of Undo, a drop indicator in the theme's colours), folders and files from a file manager (workspace, mount, the
 folder of a part, a project, a preset), connecting by dragging from a port onto a node, and the (?) of the parts
 and nodes. The keyboard keeps working: Enter on a part adds it."""
+import gc
 import json
 import os
 
 import pytest
 
 QtWidgets = pytest.importorskip("PySide6.QtWidgets", reason="PySide6 is not installed")
-from PySide6.QtCore import QMimeData, QPoint, QPointF, Qt, QUrl  # noqa: E402
+from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, Qt, QUrl  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
 from PySide6.QtGui import QColor, QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent, QDropEvent  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from sandbox_ai_app import backend, board as B, help_view, presets, theme, widgets  # noqa: E402
@@ -34,8 +36,14 @@ def page(qapp, tmp_path, monkeypatch):
     view.show()
     qapp.processEvents()
     yield view
+    # Torn down here, on the GUI thread: a page left to the garbage collector keeps its timers firing at every
+    # processEvents of later tests, its checks start threads, and a QWidget freed off the GUI thread crashes.
+    view.check_timer.stop()
     view.close()
+    widgets.ThreadCall.wait_all(30)
     view.deleteLater()
+    QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    gc.collect()
 
 
 def palette_item(page, kind):

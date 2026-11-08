@@ -13,7 +13,8 @@ your browser asks once whether to trust it. It listens on 127.0.0.1:8443 unless 
 it from elsewhere: --listen 0.0.0.0:8443, or an SSH tunnel, or a reverse proxy of yours).
 
 Every login needs the password and a current TOTP code (a code is accepted once). Failed logins slow down per
-address and per user. A session lives 30 minutes without use and 12 hours at most, in memory only; its cookie is
+address, per address and user, and per user (that one never keeps the right password and code out). A session lives
+30 minutes without use (the page's background polls are none) and 12 hours at most, in memory only; its cookie is
 HttpOnly, Secure, SameSite=Strict. Every change needs the session's CSRF token and a same-origin request; the Host
 header must be one of the service's names. Every action is written to the audit log
 (~/.local/state/sandbox-ai/web/audit.jsonl). The browser gets JSON from a fixed set of actions, each run as
@@ -61,6 +62,7 @@ VENDOR_FILES = {"xterm.js": "text/javascript; charset=utf-8", "xterm.css": "text
 DEFAULT_LISTEN = "127.0.0.1:8443"
 USER_NAME = re.compile(r"[a-z][a-z0-9_.-]{0,31}")
 START_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}")
+MCP_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
 APPROVAL_ID = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}")  # never a leading "-": read as an option there
 AGENTS = ("claude", "codex", "opencode")
 MIN_PASSWORD = 12
@@ -73,6 +75,12 @@ TERMINALS_PER_SESSION = 8
 # A terminal's WebSocket: pinged every WS_PING seconds; a browser that sends nothing (not even the pong) for
 # WS_DEADLINE seconds is gone, and one that takes nothing of the output for that long is dropped.
 WS_PING, WS_DEADLINE = 30, 90
+# Connections served at once, each a thread of its own (open terminals among them): one more is closed at once.
+MAX_CONNECTIONS = 64
+# Seconds an idle HTTP connection is kept: KEEPALIVE once it carried a session, GUEST_KEEPALIVE before (one that
+# never logs in holds its thread a few seconds, not two minutes).
+KEEPALIVE, GUEST_KEEPALIVE = 120, 10
+SESSION_ENDED = "the session ended (logged out, idle too long, or its user changed): log in again"
 COOKIE = "__Host-sandbox-ai"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
@@ -225,6 +233,16 @@ def users_locked():
             save_users(users)
 
 
+def users_unreadable(exc):
+    """The answer when load_users() fails (users.json readable by others, or broken): a clear error for the browser,
+    the details in the audit log only (the browser of anyone gets this answer, the file's path is none of its
+    business)."""
+    with contextlib.suppress(OSError):
+        audit("users-unreadable", why=printable(exc)[:500])
+    return Refused(503, "the service cannot read its logins (users.json is readable by others or broken): "
+                        "see sandbox-ai web user list on the server")
+
+
 # --- the audit log ----------------------------------------------------------------------------------------
 
 def audit(event, **fields):
@@ -240,8 +258,8 @@ def audit(event, **fields):
 # --- logins: rate limits and sessions ---------------------------------------------------------------------
 
 class Limiter:
-    """Failed logins per key (an address, a user): after FREE failures each further try waits, doubling up to
-    MAXIMUM seconds; a success clears the key."""
+    """Failed logins per key (an address, an address with a user, a user): after FREE failures each further try
+    waits, doubling up to MAXIMUM seconds; a success clears the key."""
 
     def __init__(self, free=5, first=30, maximum=900, clock=time.monotonic):
         self.free, self.first, self.maximum, self.clock = free, first, maximum, clock
@@ -253,12 +271,13 @@ class Limiter:
         with self.lock:
             return max([0] + [max(0, until - now) for key in keys for _, until in [self.failures.get(key, (0, 0))]])
 
-    def failed(self, *keys):
+    def failed(self, *keys, at_least=0):
+        """One more failure for each of KEYS; AT_LEAST: the count it has at least now (FREE: it waits at once)."""
         now = self.clock()
         with self.lock:
             for key in keys:
                 count, _ = self.failures.get(key, (0, 0))
-                count += 1
+                count = max(count + 1, at_least)
                 delay = 0 if count < self.free else min(self.maximum, self.first * 2 ** (count - self.free))
                 self.failures[key] = (count, now + delay)
             if len(self.failures) > 10000:  # an address flood must not grow it without bound
@@ -347,6 +366,9 @@ def host_name(value):
 
 
 NET_HOST = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}))*")
+# A host wildcard as `sandbox-ai net allow` takes it: *.DOMAIN.TLD, at least two labels below the star (*.org would
+# open a whole top-level domain). The command refuses public and shared suffixes itself (runtime.wildcard_suffix).
+NET_WILDCARD = re.compile(r"\*\.(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z][A-Za-z0-9-]{0,62}")
 NET_TCP = re.compile(r"(?:[0-9]{1,3}(?:\.[0-9]{1,3}){3}|\[[0-9A-Fa-f:.]+\]):[0-9]{1,5}")
 NET_GIT_URL = re.compile(r"https?://(?:[A-Za-z0-9._-]{1,64}@)?(?:[A-Za-z0-9.-]{1,253}|\[::1\])(?::[0-9]{1,5})?/?")
 NET_REF = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
@@ -595,8 +617,9 @@ class Api:
         """As `sandbox-ai mcp attach NAME START [--restart]`: the MCP server connected to an agent start (kept for
         its later starts; a running one reaches it after a restart, done now with {"restart": true})."""
         name = params["name"]
-        if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", name):
-            raise Refused(400, "an MCP server's name is 1-32 letters, digits, '_' or '-'")
+        if not MCP_NAME.fullmatch(name):  # never a leading "-": read as an option of mcp attach
+            raise Refused(400, "an MCP server's name is 1-32 letters, digits, '_' or '-', starting with a letter or "
+                               "digit")
         start, restart = start_name(body.get("start")), body.get("restart", False)
         if not isinstance(restart, bool):
             raise Refused(400, "restart is true or false")
@@ -616,8 +639,8 @@ class Api:
             raise Refused(400, "op is allow or revoke")
         args = ["net", op, start_name(params["name"])]
         for value in strings(body.get("allow_host", []), "allow_host", 32):
-            if not NET_HOST.fullmatch(value):
-                raise Refused(400, f"not a host name: {printable(value)}")
+            if not (NET_HOST.fullmatch(value) or NET_WILDCARD.fullmatch(value)):
+                raise Refused(400, f"not a host name or *.DOMAIN.TLD: {printable(value)}")
             args.append(f"--allow-host={value}")
         for value in strings(body.get("allow_tcp", []), "allow_tcp", 32):
             if not NET_TCP.fullmatch(value):
@@ -904,7 +927,7 @@ class WebSocket:
             elif length == 127:
                 (length,) = struct.unpack(">Q", self.read_exact(8))
             if length > FRAME_LIMIT or len(message) + length > FRAME_LIMIT:
-                self.close(1009)
+                self.close(1009, f"a message larger than {FRAME_LIMIT >> 20} MiB")
                 raise ConnectionError("message too big")
             mask = self.read_exact(4)
             payload = unmask(self.read_exact(length), mask) if length else b""
@@ -948,9 +971,11 @@ class WebSocket:
             except (OSError, ValueError):
                 self.closed = True
 
-    def close(self, code=1000):
+    def close(self, code=1000, reason=""):
+        """A close frame with CODE and REASON, which the page shows (UTF-8, cut to the 123 bytes a frame has)."""
         if not self.closed:
-            self.send(struct.pack(">H", code), 8)
+            text = reason.encode()[:123].decode(errors="ignore").encode()
+            self.send(struct.pack(">H", code) + text, 8)
             self.closed = True
 
 
@@ -982,7 +1007,7 @@ def bridge(ws, argv, cols=100, rows=30, alive=None, every=2.0, clock=time.monoto
                 if ws.closed:
                     break
                 if gone():
-                    ws.close(1008)
+                    ws.close(1008, SESSION_ENDED)
                     break
                 if clock() - pinged[0] >= WS_PING:  # a browser that is still there answers (the read deadline)
                     pinged[0] = clock()
@@ -1010,7 +1035,7 @@ def bridge(ws, argv, cols=100, rows=30, alive=None, every=2.0, clock=time.monoto
             if kind == 8:
                 break
             if gone():
-                ws.close(1008)
+                ws.close(1008, SESSION_ENDED)
                 break
             if kind == 2:
                 os.write(master, payload)
@@ -1079,8 +1104,16 @@ class Service:
         path = urllib.parse.urlsplit(target).path
         if method == "GET" and not path.startswith("/api/"):
             return self.static(path, headers)
-        session = self.sessions.current(self.cookie(headers), load_users())
+        session = None
         try:
+            try:
+                users = load_users()
+            except ValueError as exc:
+                raise users_unreadable(exc) from None
+            # The page's polls (approvals, the running starts) say X-Background: 1. They are no use of the page by
+            # its user: a tab left open would otherwise keep its session from ever reaching its idle limit.
+            session = self.sessions.current(self.cookie(headers), users,
+                                            touch=(headers.get("X-Background") or "").strip() != "1")
             if method != "GET":
                 if not self.same_origin(headers):
                     raise Refused(403, "a change must come from this page")
@@ -1119,29 +1152,41 @@ class Service:
         user, password, code = data.get("user"), data.get("password"), data.get("code")
         if not all(isinstance(v, str) and 0 < len(v) <= 1024 for v in (user, password, code)):
             raise Refused(400, "user, password and code are needed")
-        keys = (f"address:{address}", f"user:{user}")
+        # ADDRESS is the socket's peer (Handler.answer): no X-Forwarded-For is read, there is no trusted proxy to
+        # take it from, and a header any client can send would let it choose the address it is throttled as.
+        local = (f"address:{address}", f"address-user:{address}|{user}")
         # One login check at a time: parallel tries all passed wait() before any failure was counted, so each got a
         # full password and TOTP check (thousands of codes per lockout). scrypt makes one check take ~0.1 s.
         with self.login_lock:
-            return self._login(user, password, code, keys, address)
+            return self._login(user, password, code, local, f"user:{user}", address)
 
-    def _login(self, user, password, code, keys, address):
-        wait = self.limiter.wait(*keys)
+    def _login(self, user, password, code, local, user_key, address):
+        """LOCAL: the keys of this address (and of this address with this user), whose wait is always kept; USER_KEY
+        throttles the user from every address. Only that one may not lock the user out: whoever knows the name could
+        keep it locked. While it waits, a try is still checked, but each failure then locks its address at once (one
+        guess per address and wait, not FREE), and the right password with its code gets in."""
+        wait = self.limiter.wait(*local)
         if wait:
             audit("login-throttled", user=printable(user)[:64], address=address)
             return self.error(429, f"too many failed logins: try again in {int(wait) + 1} seconds",
                               [("Retry-After", str(int(wait) + 1))])
-        with users_locked() as users:
-            record = users.get(user) if USER_NAME.fullmatch(user) else None
-            ok = check_password(password, (record or {}).get("password"))
-            counter = check_totp(record["totp"], code, record.get("totp_counter")) if ok else None
-            if ok and counter is not None:
-                record["totp_counter"] = counter
+        user_waits = self.limiter.wait(user_key) > 0
+        try:
+            with users_locked() as users:
+                record = users.get(user) if USER_NAME.fullmatch(user) else None
+                ok = check_password(password, (record or {}).get("password"))
+                counter = check_totp(record["totp"], code, record.get("totp_counter")) if ok else None
+                if ok and counter is not None:
+                    record["totp_counter"] = counter
+        except ValueError as exc:
+            raise users_unreadable(exc) from None
         if not ok or counter is None:
-            self.limiter.failed(*keys)
-            audit("login-failed", user=printable(user)[:64], address=address)
+            self.limiter.failed(*local, at_least=self.limiter.free if user_waits else 0)
+            self.limiter.failed(user_key)
+            audit("login-failed", user=printable(user)[:64], address=address, **({"user_throttled": True}
+                                                                                  if user_waits else {}))
             raise Refused(401, "wrong user, password or code")
-        self.limiter.succeeded(*keys)
+        self.limiter.succeeded(*local, user_key)
         token = self.sessions.new(user, address, user_fingerprint(record))
         audit("login", user=user, address=address)
         session = self.sessions.get(token)
@@ -1158,7 +1203,11 @@ class Service:
             raise Refused(421, "unknown host name")
         if not self.same_origin(headers):
             raise Refused(403, "a terminal must come from this page")
-        session = self.sessions.current(self.cookie(headers), load_users())
+        try:
+            users = load_users()
+        except ValueError as exc:
+            raise users_unreadable(exc) from None
+        session = self.sessions.current(self.cookie(headers), users)
         if session is None:
             raise Refused(401, "log in")
         query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(target).query))
@@ -1170,8 +1219,16 @@ class Service:
             raise Refused(400, printable(exc)) from None
         if session["terminals"] >= TERMINALS_PER_SESSION:
             raise Refused(429, f"at most {TERMINALS_PER_SESSION} terminals at once")
+        # What runs: a start's agent, workspace and options too (terminal_command checked them; strings only).
+        started = {}
+        if query.get("kind") == "start":
+            try:
+                options = redacted(json.loads(query.get("options") or "[]"))
+            except ValueError:
+                options = printable(query.get("options"))[:500]
+            started = {"agent": query.get("agent"), "workspace": query.get("workspace"), "options": options}
         audit("terminal", user=session["user"], address=address, host=host,
-              kind=query.get("kind"), name=query.get("name") or query.get("agent"))
+              kind=query.get("kind"), name=query.get("name") or query.get("agent"), **started)
         return argv, session
 
     @staticmethod
@@ -1209,10 +1266,24 @@ class Service:
         return self.json(status, {"error": message}, extra)
 
 
+# Fields whose values the audit log leaves out, by their exact name (lower case, "-" as "_"), and names ending in
+# "_" and one of SECRET_ENDINGS. Not a search for "key" in a name: a defaults change ({"key": "telemetry"}) and the
+# like must stay readable in the log.
+SECRET_FIELDS = {"password", "passphrase", "passwd", "code", "otp", "totp", "secret", "token", "csrf", "cookie",
+                 "authorization", "api_key", "apikey", "auth_key", "private_key", "secret_key", "access_token",
+                 "refresh_token", "client_secret", "session"}
+SECRET_ENDINGS = ("password", "secret", "token", "api_key", "private_key")
+
+
+def secret_field(name):
+    name = str(name).lower().replace("-", "_")
+    return name in SECRET_FIELDS or name.endswith(tuple("_" + ending for ending in SECRET_ENDINGS))
+
+
 def redacted(data):
-    """DATA for the audit log: values of keys that may hold secrets replaced."""
+    """DATA for the audit log: the values of fields that hold secrets (secret_field) replaced."""
     if isinstance(data, dict):
-        return {k: "***" if re.search(r"pass|secret|token|key|code", k, re.I) else redacted(v) for k, v in data.items()}
+        return {k: "***" if secret_field(k) else redacted(v) for k, v in data.items()}
     if isinstance(data, list):
         return [redacted(v) for v in data[:64]]
     return data if not isinstance(data, str) else data[:500]
@@ -1264,14 +1335,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version, sys_version = "sandbox-ai", ""
     service = None  # set by serve()
-    timeout = 120  # seconds an idle HTTP connection is kept (a terminal clears it: it may be quiet for long)
 
     def setup(self):
         handshake = getattr(self.request, "do_handshake", None)
         if handshake is not None:  # TLS, in this connection's thread, bounded: never the accept loop's
             self.request.settimeout(30)
             handshake()
+        # Seconds the idle connection is kept: GUEST_KEEPALIVE until a request shows a session (keep_alive); a
+        # terminal sets its own (WS_DEADLINE: it may be quiet for long, its browser answers the pings).
+        self.timeout = GUEST_KEEPALIVE
         super().setup()
+
+    def keep_alive(self, headers):
+        """KEEPALIVE seconds for the next request once this one carried a live session or made one (a login's
+        Set-Cookie with HEADERS), else GUEST_KEEPALIVE."""
+        tokens = [self.service.cookie(self.headers)] + [
+            value.split(";")[0].partition("=")[2] for key, value in headers
+            if key == "Set-Cookie" and value.startswith(COOKIE + "=")]
+        known = any(token and self.service.sessions.get(token, touch=False) for token in tokens)
+        with contextlib.suppress(OSError):
+            self.connection.settimeout(KEEPALIVE if known else GUEST_KEEPALIVE)
 
     def log_message(self, format, *args):  # noqa: A002 - the audit log has what matters
         pass
@@ -1301,7 +1384,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             return
         body = self.rfile.read(size) if size else b""
-        self.send(*self.service.handle(self.command, self.path, self.headers, body, self.client_address[0]))
+        status, headers, data = self.service.handle(self.command, self.path, self.headers, body,
+                                                    self.client_address[0])
+        self.send(status, headers, data)
+        self.keep_alive(headers)
 
     def do_GET(self):  # noqa: N802
         if (self.headers.get("Upgrade") or "").lower() == "websocket":
@@ -1311,22 +1397,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
     do_POST = do_DELETE = do_PUT = do_PATCH = answer  # noqa: N815
 
     def upgrade(self):
+        key = self.headers.get("Sec-WebSocket-Key") or ""
+        try:
+            good = self.headers.get("Sec-WebSocket-Version") == "13" and len(base64.b64decode(key, validate=True)) == 16
+        except ValueError:
+            good = False
+        if not good:  # a broken handshake, from anyone: a plain refusal, never a WebSocket
+            self.close_connection = True
+            self.send(*self.service.error(400, "a WebSocket version 13 handshake is needed"))
+            return
         try:
             argv, session = self.service.websocket(self.path, self.headers, self.client_address[0])
-            key = self.headers.get("Sec-WebSocket-Key") or ""
-            if self.headers.get("Sec-WebSocket-Version") != "13" or len(base64.b64decode(key, validate=True)) != 16:
-                raise Refused(400, "a WebSocket version 13 handshake is needed")
         except (Refused, ValueError) as exc:
-            self.send(*self.service.error(getattr(exc, "status", 400), str(exc)))
             self.close_connection = True
+            status = getattr(exc, "status", 400)
+            if status in (401, 403, 421, 503) or not isinstance(exc, Refused):
+                # No WebSocket for a browser that is not logged in, another page or name, a broken handshake.
+                self.send(*self.service.error(status, str(exc)))
+                return
+            # Logged in, from this page, but not this terminal (a query that is not one, too many terminals): the
+            # WebSocket opens only to say why in its close frame, as a browser shows a refused handshake as code
+            # 1006 and nothing more.
+            self.accept_websocket(key)
+            ws = WebSocket(Stream(self.rfile, self.wfile))
+            ws.close(1008, f"refused: {exc}")
+            with contextlib.suppress(OSError, ConnectionError, ValueError):
+                self.connection.settimeout(3)
+                ws.receive()  # the browser's answer to the close
             return
-        accept = base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
-        self.send_response(101)
-        self.send_header("Upgrade", "websocket")
-        self.send_header("Connection", "Upgrade")
-        self.send_header("Sec-WebSocket-Accept", accept)
-        self.end_headers()
-        self.wfile.flush()
+        self.accept_websocket(key)
         self.close_connection = True
         query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(self.path).query))
         size = [int(query[k]) if query.get(k, "").isdigit() else d for k, d in (("cols", 100), ("rows", 30))]
@@ -1340,11 +1439,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.connection.settimeout(WS_DEADLINE)
             with contextlib.suppress(OSError):
                 self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            bridge(WebSocket(Stream(self.rfile, self.wfile), hang_up=self.hang_up), argv, *size,
-                   alive=lambda: sessions.current(token, load_users(), touch=False) is session)
+
+            def alive():
+                try:
+                    users = load_users()
+                except ValueError:  # users.json became unreadable: no session holds any more
+                    return False
+                return sessions.current(token, users, touch=False) is session
+            bridge(WebSocket(Stream(self.rfile, self.wfile), hang_up=self.hang_up), argv, *size, alive=alive)
         finally:
             session["terminals"] -= 1
 
+    def accept_websocket(self, key):
+        accept = base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
+        self.send_response(101)
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", accept)
+        self.end_headers()
+        self.wfile.flush()
 
     def hang_up(self):
         with contextlib.suppress(OSError):
@@ -1371,10 +1484,38 @@ class Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 64
 
-    def __init__(self, address, context, ipv6=False):
+    def __init__(self, address, context, ipv6=False, limit=None):
         self.address_family = socket.AF_INET6 if ipv6 else socket.AF_INET
         self.context = context
+        self.limit = MAX_CONNECTIONS if limit is None else limit
+        self.active, self.active_lock = 0, threading.Lock()
         super().__init__(address, Handler)
+
+    def process_request(self, request, client_address):
+        """A thread for the connection, while fewer than LIMIT are served: else it is closed at once. The accept loop
+        never waits for a free place, and a flood of connections cannot start threads without bound."""
+        with self.active_lock:
+            full = self.active >= self.limit
+            if not full:
+                self.active += 1
+        if full:
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.finished()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.finished()
+
+    def finished(self):
+        with self.active_lock:
+            self.active -= 1
 
     def get_request(self):
         sock, address = super().get_request()

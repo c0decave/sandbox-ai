@@ -17,6 +17,11 @@ from types import SimpleNamespace
 
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import home_guard  # noqa: E402
+
+home_guard.ensure()  # tests write logins: never into the real HOME, also when conftest.py was not run
+
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = re.search(r'^__version__ = "([^"]+)"$', (ROOT / "sandbox/agent_sandbox.py").read_text(), re.M)[1]
 COMMANDS = ["sandbox-ai", "claude-sandbox", "codex-sandbox", "opencode-sandbox", "sandbox-session", "sandbox-mcp",

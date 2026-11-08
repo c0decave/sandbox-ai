@@ -6,7 +6,7 @@
 
 The scripts ask `sandbox-ai __complete WORDS...` for the candidates, so they always know the commands and options
 of the sandbox-ai that runs: every command and subcommand, each option and its choices (--mode, --telemetry,
---backend ...), and the names you have: starts (attach, stop, resume ...), running sandboxes (net, devices,
+--backend ...), and the names you have: starts (attach, stop, resume ...), running sandboxes (net, devices, workspace,
 canaries), hosts, MCP servers, LLM servers, VPN profiles, kits and secrets. Paths are left to the shell.
 
 Standard library only.
@@ -154,7 +154,8 @@ NAMED = {
     ("resume", None, "name"): start_names, ("stop", None, "name"): start_names,
     ("delete", None, "name"): start_names, ("rename", None, "old"): start_names,
     ("list", None, "history"): start_names,
-    ("net", "*", "run"): run_names, ("devices", "*", "run"): run_names, ("limits", None, "run"): run_names,
+    ("net", "*", "run"): run_names, ("devices", "*", "run"): run_names, ("workspace", "list", "run"): run_names,
+    ("limits", None, "run"): run_names,
     ("canaries", "*", "run"): run_names, ("activity", None, "run"): run_names,
     ("hosts", "*", "name"): host_names, ("mcp", "*", "name"): mcp_names, ("llm", "*", "name"): llm_names,
     ("vpn", "*", "name"): vpn_names, ("kits", "*", "name"): kit_names,

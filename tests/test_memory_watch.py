@@ -227,3 +227,80 @@ def test_no_supervisor_no_records(tmp_path, processes):
     assert w.supervisor_rss() is None
     w.watch_supervisor({"current": GIB, "limit": 8 * GIB})
     assert w.supervisor_records() == 0 and w.stop() == [] and not (tmp_path / "memory.jsonl").exists()
+
+
+def test_the_watch_throttles_before_the_limit_and_follows_a_new_one(tmp_path, processes):
+    """memory.high at MEMORY_HIGH of the limit: the kernel slows the sandbox down there instead of reaching
+    memory.max, where its OOM killer would end a process; set again when `sandbox-ai limits --memory` changes it."""
+    agent = child(hold_mib=10, program="claude")
+    processes.append(agent)
+    group = cgroup(tmp_path, [agent.pid], current=1 * GIB)
+    w = watch(group, log=tmp_path / "memory.jsonl")
+    w.tick()
+    assert int((group / "memory.high").read_text()) == int(8 * GIB * s.MEMORY_HIGH)
+    (group / "memory.max").write_text(f"{16 * GIB}\n")
+    w.tick()
+    assert int((group / "memory.high").read_text()) == int(16 * GIB * s.MEMORY_HIGH)
+    assert not (tmp_path / "memory.jsonl").exists()  # nothing to report when it works
+    (group / "memory.high").unlink()
+    (group / "memory.high").mkdir()  # cannot be written (as where the cgroup is not delegated)
+    (group / "memory.max").write_text(f"{4 * GIB}\n")
+    w.tick()
+    records = [json.loads(line) for line in (tmp_path / "memory.jsonl").read_text().splitlines()]
+    assert records[-1]["event"] == "memory-high" and records[-1]["error"]
+
+
+def test_a_sandbox_stalled_below_the_limit_is_relieved(tmp_path, processes):
+    """Held at memory.high a sandbox stalls instead of dying: when its processes stall on memory (PSI), the largest
+    one that is neither sandbox-ai's nor the agent's ends, as at MEMORY_ACT."""
+    agent = child(hold_mib=10, program="claude")
+    build = child("cc1plus", hold_mib=60)
+    processes += [agent, build]
+    group = cgroup(tmp_path, [agent.pid, build.pid], current=int(8 * GIB * 0.93))
+    (group / "memory.pressure").write_text("some avg10=2.00 avg60=1.00 avg300=0.50 total=100\n"
+                                           "full avg10=1.00 avg60=0.50 avg300=0.10 total=50\n")
+    w = watch(group, log=tmp_path / "memory.jsonl")
+    w.tick()
+    assert build.poll() is None  # a little pressure: nothing ends
+    (group / "memory.pressure").write_text("some avg10=80.00 avg60=40.00 avg300=9.00 total=900\n"
+                                           "full avg10=35.50 avg60=12.00 avg300=3.00 total=500\n")
+    w.tick()
+    build.wait(5)
+    assert build.returncode == -signal.SIGTERM and agent.poll() is None
+    events = [json.loads(line)["event"] for line in (tmp_path / "memory.jsonl").read_text().splitlines()]
+    assert "memory-stall" in events and "memory-relief" in events
+    assert s.memory_stall(tmp_path) is None  # no PSI: no stall known
+
+
+def test_a_lifted_limit_lifts_the_throttle(tmp_path, processes):
+    agent = child(hold_mib=10, program="claude")
+    processes.append(agent)
+    group = cgroup(tmp_path, [agent.pid], current=1 * GIB)
+    w = watch(group)
+    w.tick()
+    assert int((group / "memory.high").read_text()) == int(8 * GIB * s.MEMORY_HIGH)
+    (group / "memory.max").write_text("max\n")  # sandbox-ai limits --memory none
+    assert w.tick() is None
+    assert (group / "memory.high").read_text().strip() == "max"
+
+
+def test_after_a_relief_a_stall_alone_waits_before_the_next(tmp_path, processes):
+    """PSI's avg10 decays over ten seconds: right after ending a process the stall still shows, and must not end a
+    second one before the first one's memory is back."""
+    agent = child(hold_mib=10, program="claude")
+    first, second = child("cc1plus", hold_mib=60), child("ld", hold_mib=40)
+    processes += [agent, first, second]
+    group = cgroup(tmp_path, [agent.pid, first.pid, second.pid], current=int(8 * GIB * 0.93))
+    (group / "memory.pressure").write_text("some avg10=80.00 avg60=1 avg300=1 total=9\nfull avg10=40.00 avg60=1 "
+                                           "avg300=1 total=9\n")
+    now = [1000.0]
+    w = watch(group, clock=lambda: now[0])
+    w.tick()
+    first.wait(5)
+    now[0] += 2
+    w.tick()
+    assert second.poll() is None, "the stall still shows the first one: wait"
+    now[0] += s.MEMORY_STALL_PAUSE
+    w.tick()
+    second.wait(5)
+    assert second.returncode == -signal.SIGTERM

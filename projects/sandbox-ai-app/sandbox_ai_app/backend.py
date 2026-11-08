@@ -1258,6 +1258,28 @@ class SandboxAI:
             return self.call(*args, timeout=timeout)
         return self.call("hosts", "run", name, "--", *args, timeout=timeout)
 
+    def host_instances(self, name, timeout=60):
+        """The starts on host NAME (`sandbox-ai list --json` there, over SSH) as [Instance] with HOST set: what the
+        Sandboxes page lists beside this account's own."""
+        found = []
+        for entry in self.host_json(name, "list", "--json", timeout=timeout):
+            # The other host (and a sandbox on it) chooses these: only a start's name may come back as an argument
+            # (never one that reads as an option there).
+            if not isinstance(entry, dict) or not isinstance(entry.get("name"), str) or \
+                    not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}", entry["name"]):
+                continue
+            kind = entry.get("kind") if entry.get("kind") in ("session", "run", "mcp") else "run"
+            found.append(Instance(kind, f"{name}:{entry['name']}", entry["name"], run=None, project=str(
+                entry.get("workspace") or ""), agent=str(entry.get("agent") or ""), started=str(entry.get("started") or ""),
+                state=str(entry.get("state") or ""), record=entry, host=name))
+        return found
+
+    def remote_hosts(self):
+        """The names of the hosts of `sandbox-ai hosts` other than this machine ([] without hosts)."""
+        if not self.hosts_supported():
+            return []
+        return [e["name"] for e in self.host_entries() if e.get("kind") != "local" and e.get("name") != "local"]
+
     def host_json(self, name, *args, timeout=120):
         status, out, err = self.host_run(name, *args, timeout=timeout)
         try:
@@ -2283,14 +2305,33 @@ class Instance:
     RUN: its name in the run registry while it runs (what `sandbox-ai net`, `devices` and `limits` take)."""
 
     def __init__(self, kind, key, name, run=None, session=None, mcp=None, project="", agent="", backend="",
-                 started="", state="", proxy=None, pid=None, record=None, foreground=False):
+                 started="", state="", proxy=None, pid=None, record=None, foreground=False, host="local"):
         self.kind, self.key, self.name, self.run, self.session, self.mcp = kind, key, name, run, session, mcp
+        self.host = host  # "local" (this account) or the name of a host of `sandbox-ai hosts` (read over SSH)
         self.project, self.agent, self.backend, self.started, self.state = project, agent, backend, started, state
         self.proxy, self.pid, self.record = proxy, pid, record or {}
         self.foreground = foreground  # a kept start without tmux: nothing to attach to
 
     def __repr__(self):
         return f"Instance({self.kind!r}, {self.key!r}, state={self.state!r})"
+
+
+def memory_share(instance):
+    """(percent, used bytes, limit bytes) of a local running sandbox from the memory.json its launcher's memory
+    watch writes into the session directory (the sandbox sees it read-only), or None. Numbers only are taken."""
+    record = getattr(instance, "record", None) or {}
+    directory = record.get("session_dir") if isinstance(record, dict) else None
+    if getattr(instance, "host", "local") != "local" or not isinstance(directory, str):
+        return None
+    try:
+        with open(Path(directory) / "memory.json", "rb") as stream:
+            data = json.loads(stream.read(4096))
+        used, limit = int(data["used_bytes"]), int(data["limit_bytes"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if used < 0 or limit <= 0:
+        return None
+    return round(100 * used / limit, 1), used, limit
 
 
 def option_value(argv, name):
