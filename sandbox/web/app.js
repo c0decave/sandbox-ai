@@ -3464,9 +3464,19 @@ function sudoChoice(select) {
   return value === "sudo" ? true : value === "none" ? false : undefined;
 }
 
+// The host updated with this machine's copy (hosts update --from-here), asked first like an install: for a host that
+// cannot reach the release server, or before a release is published.
+function fromHereButton(name, output, sudo) {
+  return el("button", { title: t("hosts update --from-here: this machine's sandbox-ai, as the installation the host has (the user's own or the system's)"),
+    onclick: (ev) => confirmIn(ev.target.parentNode, t("Put this machine's sandbox-ai on {host}, as the installation it has there? It runs there with the rights of that installation.", { host: name }), t("Yes, update from here"), async () => {
+      output.append(notice(t("Updating {host}…", { host: name })));
+      try { await updateHost(name, output, typeof sudo === "function" ? sudo() : sudo, "", true); } catch (e) { output.append(notice(`${name}: ${e.message}`, "error")); }
+    }) }, t("Update from this machine's copy…"));
+}
+
 // One host's update: its own signed sandbox-ai update; a sudo that wants a password is asked in a terminal tab.
-async function updateHost(name, output, sudo, version) {
-  const body = Object.assign(sudo === undefined ? {} : { sudo }, version ? { version } : {});
+async function updateHost(name, output, sudo, version, fromHere) {
+  const body = Object.assign(sudo === undefined ? {} : { sudo }, version ? { version } : {}, fromHere ? { from_here: true, confirm: true } : {});
   const r = await api("POST", `/api/hosts/${encodeURIComponent(name)}/update`, body);
   output.append(...keyNotices(r));
   if (r.changed) output.append(notice(`${name}: ${r.before || "?"} → ${r.after}${r.sudo ? " (sudo)" : ""}`, "ok"));
@@ -3474,7 +3484,8 @@ async function updateHost(name, output, sudo, version) {
     say(t("{host}: not updated: {error}", { host: name, error: r.error }));
     output.append(el("div", { class: "notice error" }, t("{host}: not updated: {error}", { host: name, error: r.error }),
       r.needs_password && terminalsHere() ? el("button", { onclick: () => openTerminal({ host: name, kind: "update" }, t("update {host}", { host: name })) }, t("Update in a terminal (sudo asks there)")) : null,
-      r.needs_sudo ? el("button", { onclick: (ev) => busy(ev.target, () => updateHost(name, output, true).catch(failed(t("Could not update {host}", { host: name })))) }, t("Update with sudo")) : null));
+      r.needs_sudo ? el("button", { onclick: (ev) => busy(ev.target, () => updateHost(name, output, true).catch(failed(t("Could not update {host}", { host: name })))) }, t("Update with sudo")) : null,
+      !fromHere && /no published release/.test(r.error) ? fromHereButton(name, output, sudo) : null));
     if (r.needs_password) output.append(passwordHelp(name, ["sandbox-ai", "hosts", "update", name, "--sudo"]));
   } else output.append(notice(`${name}: ${t("{version}, up to date", { version: r.after || r.before })}${r.error ? ` (${r.error})` : ""}`, r.error ? "warn" : "ok"));
   for (const note of r.notes || []) output.append(notice(`${name}: ${note}`, "warn"));
@@ -3789,6 +3800,7 @@ pages.hosts = async (main) => {
           try { await updateHost(h.name, output, sudoChoice(updateSudo[h.name]), updateVersion[h.name].value.trim()); } catch (e) { output.append(notice(`${h.name}: ${e.message}`, "error")); }
           loadVersions(false);
         }) }, t("Update")),
+        h.kind === "local" ? null : fromHereButton(h.name, output, () => sudoChoice(updateSudo[h.name])),
         h.kind === "local" ? null : el("button", { "aria-label": t("Install sandbox-ai on {host}", { host: h.name }), onclick: () => installCard(main, h, afterInstall) }, t("Install…")),
         h.kind === "local" ? null : el("button", { onclick: () => hostEditCard(main, h) }, t("Edit…")),
         h.kind === "local" ? null : el("button", { class: "danger", onclick: (ev) => confirmIn(ev.target.parentNode, t("Remove {host} ({ssh}) from the list? Nothing changes on it; this service no longer manages it.", { host: h.name, ssh: h.ssh }), t("Yes, remove it"), async () => {

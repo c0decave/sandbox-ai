@@ -932,7 +932,8 @@ class Api:
         self.runner = runner or (lambda host, args, timeout=120, input=None:
                                  module("hosts").run(host, args, input=input, timeout=timeout))
         # hosts update and hosts list's status (several commands each; tests give their own)
-        self.updater = updater or (lambda host, version=None, sudo=None: module("hosts").update(host, version, sudo))
+        self.updater = updater or (lambda host, version=None, sudo=None, from_here=False:
+                                    module("hosts").update(host, version, sudo, from_here=from_here))
         self.statuses = statuses or (lambda names, refresh=False: module("hosts").statuses(names, refresh=refresh))
         self.approvals_fanout = FanOut(self.host_questions)
         self.starts_fanout = FanOut(self.host_starts)
@@ -1287,12 +1288,38 @@ class Api:
         runs it as sudo -n (a system installation); when sudo wants a password, "needs_password" says so and the
         page opens a terminal (kind=update), where sudo asks."""
         name = host_name(params["host"])
-        sudo, version = body.get("sudo"), body.get("version")
+        sudo, version, from_here = body.get("sudo"), body.get("version"), body.get("from_here", False)
         if sudo not in (None, True, False):
             raise Refused(400, "sudo is true, false or null (the host's setting)")
+        if from_here not in (True, False):
+            raise Refused(400, "from_here is true or false")
         hosts = module("hosts")
         if version is not None and not (isinstance(version, str) and hosts.VERSION.fullmatch(version)):
             raise Refused(400, "version is X.Y.Z")
+        if from_here:
+            # this machine's copy onto the host, as hosts install --from-here does: asked first like an install
+            if name == hosts.LOCAL:
+                raise Refused(400, "this machine updates with: sandbox-ai update")
+            if version is not None:
+                raise Refused(400, "from_here installs this machine's version; version is for the signed release")
+            entry = hosts_file().get(name)
+            if entry is None:
+                raise Refused(404, "no such host", code="no-host", params={"host": name})
+            target = f"{entry.get('ssh')}{':' + str(entry['port']) if entry.get('port') not in (None, 22) else ''}"
+            confirmed(body, "host-install", f"{name} ({target}): this machine's sandbox-ai, as the installation it "
+                                            "has there (the user's own or the system's)")
+            with self.install_lock:
+                if name in self.installing:
+                    raise Refused(409, f"sandbox-ai is being installed on {name}: wait for its end",
+                                  code="busy", params={"host": name})
+                self.installing[name] = time.monotonic()
+            try:
+                return self.updater(name, None, sudo, from_here=True)
+            except ValueError as exc:
+                raise Refused(400, printable(exc)) from None
+            finally:
+                with self.install_lock:
+                    self.installing.pop(name, None)
         try:
             return self.updater(name, version, sudo)
         except ValueError as exc:

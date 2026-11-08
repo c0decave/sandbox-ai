@@ -2389,8 +2389,8 @@ def test_the_hosts_update_and_their_versions(home):
     secret = add_user()
     asked, statuses = [], []
 
-    def updater(host, version=None, sudo=None):
-        asked.append((host, version, sudo))
+    def updater(host, version=None, sudo=None, from_here=False):
+        asked.append((host, version, sudo, True) if from_here else (host, version, sudo))
         if host == "gone":
             raise ValueError("no host gone; see: sandbox-ai hosts list")
         return {"name": host, "before": "0.1.60", "after": "0.1.66", "changed": True, "error": None}
@@ -2416,6 +2416,14 @@ def test_the_hosts_update_and_their_versions(home):
         assert call("POST", "/api/hosts/ct1/update", data)[0] == 400, data
     assert call("POST", "/api/hosts/gone/update", {})[0] == 404
     assert call("POST", "/api/hosts/x;y/update", {})[0] == 400
+    # from this machine's copy (hosts update --from-here): asked first like an install, never with a version
+    status, out = call("POST", "/api/hosts/ct1/update", {"from_here": True})
+    assert status == 400 and out.get("confirm") == "host-install" and "root@192.0.2.10" in out["error"]
+    assert call("POST", "/api/hosts/ct1/update", {"from_here": True, "confirm": True, "version": "0.1.67"})[0] == 400
+    assert call("POST", "/api/hosts/ct1/update", {"from_here": "yes", "confirm": True})[0] == 400
+    assert call("POST", "/api/hosts/local/update", {"from_here": True, "confirm": True})[0] == 400
+    assert call("POST", "/api/hosts/ct1/update", {"from_here": True, "confirm": True, "sudo": True})[0] == 200
+    assert asked[-1] == ("ct1", None, True, True)
     status, found = call("GET", "/api/hosts-status")
     assert status == 200 and found == {"ct1": {"version": "0.1.60", "available": "0.1.66", "update": True}}
     assert statuses[-1] == (["ct1"], False)
