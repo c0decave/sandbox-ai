@@ -36,7 +36,9 @@ Standard library only.
 """
 import argparse
 import concurrent.futures
+import contextlib
 import errno
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -47,6 +49,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 LOCAL = "local"
@@ -169,7 +172,60 @@ def entries(path=None):
             *({"name": name, "kind": "ssh", **entry} for name, entry in sorted(load(path).items()))]
 
 
-def ssh_base(entry, tty=False):
+# One SSH connection per host, shared by the commands that follow within a minute (the web interface and the app
+# poll every few seconds: each would pay a full handshake otherwise). The master is started on its own, detached
+# from every pipe (a master that ssh backgrounds itself keeps the first command's stderr open), and only in
+# XDG_RUNTIME_DIR (a socket there is the user's alone); SANDBOX_AI_SSH_MULTIPLEX=0 switches it off.
+CONTROL_PERSIST = 60
+_masters = {}
+_masters_lock = threading.Lock()
+
+
+def control_path(entry):
+    """The control socket for ENTRY's connection, or None (no XDG_RUNTIME_DIR, switched off, an odd path)."""
+    if os.environ.get("SANDBOX_AI_SSH_MULTIPLEX", "1") == "0" or not os.environ.get("XDG_RUNTIME_DIR"):
+        return None
+    base = Path(os.environ["XDG_RUNTIME_DIR"]) / "sandbox-ai" / "ssh"
+    key = hashlib.sha256(json.dumps([entry.get("ssh"), entry.get("port"), entry.get("identity"),
+                                     entry.get("command")]).encode()).hexdigest()[:24]
+    path = base / key
+    if len(str(path)) > 88 or re.search(r"[\s\"'%]", str(path)):
+        return None
+    try:
+        base.mkdir(mode=0o700, parents=True, exist_ok=True)
+        info = os.lstat(base)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            return None
+    except OSError:
+        return None
+    return path
+
+
+def ensure_master(entry, path, runner=subprocess.run):
+    """Start the shared connection for ENTRY at PATH unless one answers there; False if it could not be started
+    (the command then connects on its own, as without multiplexing)."""
+    with _masters_lock:
+        lock = _masters.setdefault(str(path), threading.Lock())
+    with lock:
+        base = ssh_base(entry, control=path)
+        check = [base[0], *base[1:-2], "-O", "check", "--", entry["ssh"]]
+        try:
+            if path.exists() and runner(check, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL, timeout=10).returncode == 0:
+                return True
+            with contextlib.suppress(FileNotFoundError):
+                if path.is_socket():
+                    path.unlink()  # a master that ended left it
+            plain = ssh_base(entry)
+            start = [plain[0], *plain[1:-2], "-o", f"ControlPath={path}", "-o", "ControlMaster=yes",
+                     "-o", f"ControlPersist={CONTROL_PERSIST}", "-f", "-N", "--", entry["ssh"]]
+            return runner(start, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                          timeout=CONNECT_TIMEOUT + 15).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+
+
+def ssh_base(entry, tty=False, control=None):
     """The ssh command line for ENTRY up to the remote command: no prompt, the host key strictly checked once
     known (the first key is learnt: accept-new), into sandbox-ai's own known_hosts as well."""
     known = known_hosts_file()
@@ -183,6 +239,9 @@ def ssh_base(entry, tty=False):
                "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4", "-p", str(entry["port"])]
     if entry.get("identity"):
         options += ["-o", "IdentitiesOnly=yes", "-i", os.path.expanduser(entry["identity"])]
+    if control is not None:
+        # Use the shared connection if it answers, else connect as usual (never become a master here).
+        options += ["-o", f"ControlPath={control}", "-o", "ControlMaster=no"]
     return ["ssh", "-tt" if tty else "-T", *options, "--", entry["ssh"]]
 
 
@@ -205,7 +264,7 @@ def remote_command(entry, args, sudo=None):
             f'else exec "$HOME/.local/bin/sandbox-ai" {quoted}; fi')
 
 
-def argv(name, args, tty=False, path=None, sudo=None):
+def argv(name, args, tty=False, path=None, sudo=None, control=None):
     """The command line that runs `sandbox-ai ARGS` on host NAME (LOCAL: this machine's sandbox-ai); SUDO: see
     remote_command."""
     if any(not isinstance(arg, str) or "\0" in arg for arg in args):
@@ -220,12 +279,18 @@ def argv(name, args, tty=False, path=None, sudo=None):
     if name not in hosts:
         raise ValueError(f"no host {printable(name)}; see: sandbox-ai hosts list")
     entry = hosts[name]
-    return [*ssh_base(entry, tty), remote_command(entry, args, sudo)]
+    return [*ssh_base(entry, tty, control=None if tty else control), remote_command(entry, args, sudo)]
 
 
 def run(name, args, input=None, timeout=120, path=None, runner=subprocess.run, sudo=None):
     """(exit status, stdout, stderr) of `sandbox-ai ARGS` on host NAME; 255 when SSH itself failed."""
-    command = argv(name, args, path=path, sudo=sudo)
+    control = None
+    if name != LOCAL and runner is subprocess.run:  # (tests give a runner of their own: one command each)
+        entry = load(path).get(name)
+        control = control_path(entry) if entry else None
+        if control is not None and not ensure_master(entry, control):
+            control = None
+    command = argv(name, args, path=path, sudo=sudo, control=control)
     try:
         done = runner(command, input=input, capture_output=True, text=True, timeout=timeout,
                       **({} if input is not None else {"stdin": subprocess.DEVNULL}))

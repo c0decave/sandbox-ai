@@ -24,6 +24,7 @@ which it will be.
 Standard library only.
 """
 import argparse
+import calendar
 import contextlib
 import fcntl
 import importlib.util
@@ -383,6 +384,34 @@ def what(question):
             host = None
         return f"open {shown(url, 1000)} in your browser" + (f" (host {shown(host, 253)})" if host else "")
     return shown(kind, 40)
+
+
+QUESTION_SECONDS = 60  # a question without its own "timeout" is refused after this long
+
+
+def question_times(question, now=None):
+    """{"timeout", "seconds_left"} of an open QUESTION: computed here, on its host, so another machine's clock
+    does not matter (the web and the app count down from seconds_left)."""
+    timeout = question.get("timeout")
+    timeout = timeout if isinstance(timeout, (int, float)) and 0 < timeout <= 86400 else QUESTION_SECONDS
+    try:
+        asked = calendar.timegm(time.strptime(str(question.get("time")), "%Y-%m-%dT%H:%M:%SZ"))
+    except (ValueError, OverflowError):
+        return {"timeout": timeout, "seconds_left": None}
+    left = asked + timeout - (time.time() if now is None else now)
+    return {"timeout": timeout, "seconds_left": max(0, int(left))}
+
+
+def widest_answer(question, record, widest="always"):
+    """The widest scope an "allow" of QUESTION keeps: the policy's, the run's security mode's, and the kind's own
+    (pushes, requests, tool calls and devices at most for the run; a name at least for the run)."""
+    caps = [widest if widest in SCOPES else "always"]
+    mode = record.get("mode") if isinstance(record, dict) and isinstance(record.get("mode"), dict) else {}
+    if mode.get("approval_scope") in SCOPES:
+        caps.append(mode["approval_scope"])
+    if question.get("kind") in ("push", "http", "mcp", "tool", "device"):
+        caps.append("run")
+    return min(caps, key=SCOPES.index)
 
 
 def origin(record):
@@ -841,9 +870,14 @@ def main(argv, out=print):
             return 0
         if args.command == "list" and args.json:
             # Everything the agent chose comes escaped (describe, origin), as in the table.
+            widest = policy_scope()
             out(json.dumps([{"id": shown(q.get("id")), "run": shown(name), "sandbox": origin(record),
                              "kind": shown(q.get("kind")), "time": shown(q.get("time")), "question": describe(q),
-                             "always": always(q).removeprefix("; ")}
+                             "always": always(q).removeprefix("; "), **question_times(q),
+                             "max_scope": widest_answer(q, record, widest),
+                             # a browser question: the page may be opened where the human is (the web, another host)
+                             **({"url": shown(q.get("url"), 2048)} if q.get("kind") == "browser"
+                                and isinstance(q.get("url"), str) else {})}
                             for name, record, q in questions()], indent=2))
             return 0
         if args.command == "list":

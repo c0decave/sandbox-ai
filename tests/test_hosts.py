@@ -5,7 +5,9 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
+import tempfile
 import sys
 
 import pytest
@@ -112,6 +114,7 @@ else:
 """)
     (home / ".local/bin/sandbox-ai").chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    monkeypatch.setenv("SANDBOX_AI_SSH_MULTIPLEX", "0")  # one stand-in ssh call per command (see the test below)
     return {"log": log, "home": home, "tmp": tmp_path}
 
 
@@ -476,3 +479,41 @@ def test_sandbox_ai_update_keeps_the_kind_of_installation():
     assert main.installation_mode(["--version", "0.1.67"], user, euid=1000) == ["--version", "0.1.67"]
     assert main.installation_mode([], "/home/u/lib/sandbox-ai/versions/1/sandbox", euid=1000) == []
     assert main.installation_mode([], "/srv/checkout/sandbox", euid=0) == []
+
+
+def test_commands_share_one_connection_per_host(tmp_path, monkeypatch):
+    """A master started detached from every pipe (-f -N, stdio /dev/null), in a private XDG_RUNTIME_DIR folder;
+    commands use it without ever becoming one; a terminal (attach) never goes through it; off with
+    SANDBOX_AI_SSH_MULTIPLEX=0 or without XDG_RUNTIME_DIR."""
+    entry = {"ssh": "user@ct1", "port": 22}
+    runtime = Path(tempfile.mkdtemp(prefix="r", dir="/tmp"))  # short: ssh adds a suffix to a socket path of <108
+    monkeypatch.setattr(h, "_masters", {})
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    monkeypatch.delenv("SANDBOX_AI_SSH_MULTIPLEX", raising=False)
+    path = h.control_path(entry)
+    assert path.parent == runtime / "sandbox-ai" / "ssh" and oct(path.parent.stat().st_mode & 0o777) == "0o700"
+    assert h.control_path({**entry, "port": 2222}) != path, "one connection per destination"
+    seen = []
+
+    def runner(argv, **kw):
+        seen.append((argv, kw))
+        return subprocess.CompletedProcess(argv, 0)
+    assert h.ensure_master(entry, path, runner=runner)
+    (start, options), = seen  # no socket yet: no check, a master
+    assert "ControlMaster=yes" in start and f"ControlPersist={h.CONTROL_PERSIST}" in start
+    assert "-f" in start and "-N" in start and start[-2:] == ["--", "user@ct1"]
+    assert "ControlMaster=no" not in start and start.count("-o") * 2 == len([a for a in start if a == "-o"]) * 2
+    assert all(options[k] is subprocess.DEVNULL for k in ("stdin", "stdout", "stderr")), "detached from every pipe"
+    base = h.ssh_base(entry, control=path)
+    assert base[base.index(f"ControlPath={path}") + 2] == "ControlMaster=no"
+    monkeypatch.setattr(h, "load", lambda path=None: {"ct1": entry})
+    assert f"ControlPath={path}" not in h.argv("ct1", ["attach", "x"], tty=True, control=path)
+    assert f"ControlPath={path}" in h.argv("ct1", ["list"], control=path)
+    monkeypatch.setenv("SANDBOX_AI_SSH_MULTIPLEX", "0")
+    assert h.control_path(entry) is None
+    monkeypatch.delenv("SANDBOX_AI_SSH_MULTIPLEX")
+    (runtime / "sandbox-ai" / "ssh").chmod(0o755)
+    assert h.control_path(entry) is None, "a folder others can read is not used"
+    monkeypatch.delenv("XDG_RUNTIME_DIR")
+    assert h.control_path(entry) is None
+    shutil.rmtree(runtime)
