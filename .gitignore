@@ -1,6 +1,9 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+# The test runs' own output (CI and release.yml write it into the checkout): never part of a bundle.
+pytest.txt
+tests.txt
 *.log
 .coverage*
 **/auth.json

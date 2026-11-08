@@ -6,5 +6,7 @@ dist/
 # xterm.js, downloaded and verified by scripts/vendor_xterm.py
 sandbox_ai_app/web/vendor/
 .pytest_cache/
+# The app job's test output (ci.yml)
+tests.txt
 # Claude Code state and agent worktrees
 .claude/
