@@ -435,6 +435,12 @@ def logged_in():
      ["approvals", "forget", "/home/u/src/web", "[2001:db8::1]:443"]),
     ("POST", "/api/hosts/ct1/secrets/GITEA_TOKEN", {"secret": "glpat-x", "confirm": True},
      ["secrets", "set", "GITEA_TOKEN"]),
+    # the Logins page's "Enter the token": stored under the name it suggests (or another), the token on standard
+    # input only, never in the arguments; the login then names it
+    ("POST", "/api/hosts/ct1/secrets/GIT_TOKEN_GIT_EXAMPLE_ORG", {"secret": "glpat-the-token-itself"},
+     ["secrets", "set", "GIT_TOKEN_GIT_EXAMPLE_ORG"]),
+    ("POST", "/api/hosts/ct1/secrets/TESTPYPI_TOKEN", {"secret": "pypi-" + "A" * 200},
+     ["secrets", "set", "TESTPYPI_TOKEN"]),
     ("DELETE", "/api/hosts/ct1/secrets/GITEA_TOKEN", {"confirm": True}, ["secrets", "delete", "GITEA_TOKEN"]),
     ("GET", "/api/hosts/ct1/secrets", None, ["secrets", "list"]),
     # a limit lower than the current one (here: none now) needs no confirmation
@@ -804,6 +810,7 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     ("POST", "/api/hosts/ct1/git-logins", {"url": "https://g.org", "secret": "T", "user": "-u", "confirm": True}, 400),
     ("POST", "/api/hosts/ct1/git-logins/remove", {"url": "https://git.example.org"}, 400),
     ("POST", "/api/hosts/ct1/git-logins/check", {"url": "--all"}, 400),
+    ("POST", "/api/hosts/ct1/publish-logins", {"kind": "pypi", "secret": "pypi-AgEIcHlwaS5vcmc-the-token-itself"}, 400),
     ("POST", "/api/hosts/ct1/publish-logins", {"kind": "docker", "secret": "T"}, 400),
     ("POST", "/api/hosts/ct1/publish-logins", {"kind": "npm", "secret": "T", "url": "https://npm.example.org/path"}, 400),
     ("POST", "/api/hosts/ct1/publish-logins", {"kind": "npm", "secret": "T", "url": "http://npm.example.org"}, 400),
@@ -3326,7 +3333,7 @@ const byId = (id) => document.getElementById(id);
   vm.runInContext('state.page = "secrets";', context);
   await vm.runInContext("pages.secrets(__main)", context); await settle();
   byId("secret-name").value = "GITEA_TOKEN"; byId("secret-value").value = "v1";
-  button(main, "Keep it").fire("click");
+  button(main, "Add").fire("click");
   result.secretAsk = confirmText(main);
   byId("secret-name").value = "OTHER";
   button(main, "Yes, replace it").fire("click"); await settle();
@@ -3336,7 +3343,7 @@ const byId = (id) => document.getElementById(id);
   let first = true;
   secretAnswer = (path, sent) => { if (first) { first = false; return { __status: 400, __error: 'NEW_ONE: a secret of that name exists: its value is replaced: send {"confirm": true}', __confirm: "secret-replace" }; } return { output: "kept" }; };
   byId("secret-name").value = "NEW_ONE"; byId("secret-value").value = "v2";
-  button(main, "Keep it").fire("click"); await settle();
+  button(main, "Add").fire("click"); await settle();
   result.reasked = confirmText(main);
   button(main, "Yes, replace it").fire("click"); await settle();
   result.secretPosts = posts();
@@ -4705,3 +4712,381 @@ def test_round_four_of_the_page(tmp_path):
     assert "Replace the LLM server gw on ct1?" in ask and before == 0 and result["llmReplacePost"] == [[True, True]]
     assert result["waited"] == [None, True] and result["waitedOurs"] == {"name": "ct1", "after": "0.1.80"}
     assert result["teams"] == [["Team review: review-codex"], ["Team review: review-claude"]], "list --json's teams"
+
+
+SECRET_FIELDS_DRIVER = FAKE_DOM + r"""
+// a working localStorage (the stand-in's keeps nothing), and one that throws (blocked site data)
+const store = {};
+context.localStorage.getItem = (k) => (k in store ? store[k] : null);
+context.localStorage.setItem = (k, v) => { store[k] = String(v); };
+const secretInputs = (root) => root.all().filter(n => n.tagName === "input" && (n.attributes.type === "password" || "data-secret-value" in n.attributes));
+const look = (input) => {
+  const toggle = input.parent && input.parent.children.find(n => n.tagName === "button" && (n.className || "").includes("secret-toggle"));
+  return { id: input.id, type: input.attributes.type, autocomplete: input.attributes.autocomplete, spellcheck: input.attributes.spellcheck,
+    value: input.value || "", toggle: toggle ? [toggle.textContent, toggle.attributes.type, toggle.attributes["aria-pressed"], toggle.attributes.title, toggle.attributes["aria-controls"]] : null };
+};
+const press = (input) => input.parent.children.find(n => (n.className || "").includes("secret-toggle")).fire("click");
+(async () => {
+  const result = {};
+  vm.runInContext('state.me = { user: "admin", csrf: "c" }; state.host = "ct1"; state.hosts = [{ name: "local", kind: "local" }, { name: "ct1", kind: "ssh", ssh: "root@ct1", port: 22 }];', context);
+  // every page of the page, each drawn from an empty answer: every secret field there has its toggle, shown at first
+  answer = (method, path) => (path.endsWith("/secrets") ? [{ name: "GITEA_TOKEN", store: "file" }] : []);
+  result.pages = {};
+  for (const name of vm.runInContext("Object.keys(pages)", context)) {
+    const page = new Node("main"); body.append(page); context.__page = page;
+    vm.runInContext(`state.page = ${JSON.stringify(name)};`, context);
+    try { await vm.runInContext(`pages[${JSON.stringify(name)}](__page)`, context); await settle(); } catch (e) { /* a page that wants more: its fields are not drawn */ }
+    const found = secretInputs(page).map(look);
+    if (found.length) result.pages[name] = found;
+    page.remove();
+  }
+  result.drawnPages = vm.runInContext("Object.keys(pages).length", context);
+  // the Secrets page: shown while typed; a press hides it (and is remembered for every such field); drawn again: hidden
+  const secrets = new Node("main"); body.append(secrets); context.__page = secrets;
+  vm.runInContext('state.page = "secrets";', context);
+  calls.length = 0;
+  await vm.runInContext("pages.secrets(__page)", context); await settle();
+  let value = secretInputs(secrets)[0];
+  value.value = "s3cr3t";
+  press(value);
+  result.pressed = [look(value), store["sandbox-ai-show-secret-values"]];
+  secrets.remove();
+  const again = new Node("main"); body.append(again); context.__page = again;
+  await vm.runInContext("pages.secrets(__page)", context); await settle();
+  value = secretInputs(again)[0];
+  result.remembered = look(value);
+  press(value);
+  result.pressedAgain = [look(value), store["sandbox-ai-show-secret-values"]];
+  result.requests = calls.map(c => [c.method, c.path]);
+  again.remove();
+  // the web login: hidden at first whatever the secret fields remember, its choice not remembered, no submit
+  store["sandbox-ai-show-secret-values"] = "1";
+  const login = vm.runInContext("loginView()", context); body.append(login);
+  const password = secretInputs(login)[0];
+  result.login = [look(password)];
+  press(password);
+  result.login.push(look(password), store["sandbox-ai-show-secret-values"]);
+  press(password);
+  result.login.push(look(password).type, store["sandbox-ai-show-secret-values"]);
+  login.remove();
+  // a browser that keeps nothing: shown, as the default
+  context.localStorage.getItem = () => { throw new Error("blocked"); };
+  context.localStorage.setItem = () => { throw new Error("blocked"); };
+  const blocked = new Node("main"); body.append(blocked); context.__page = blocked;
+  await vm.runInContext("pages.secrets(__page)", context); await settle();
+  value = secretInputs(blocked)[0];
+  result.blocked = [look(value).type];
+  press(value);
+  result.blocked.push(look(value).type);
+  console.log(JSON.stringify(result));
+})().catch(e => { console.error(e.stack); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_every_secret_value_field_has_show_value_shown_by_default(tmp_path):
+    """In node: every field the page builds where a secret's value (or the login's password) is typed has "Show
+    value" beside it (a toggle button with aria-pressed). A secret's value is shown while it is typed (type text,
+    no autofill, no spell check) unless this browser chose otherwise for all such fields; the web login's password
+    starts hidden and its choice is not remembered. A value already stored is never read back into the field."""
+    source = (WEB / "app.js").read_text()
+    # the only way the page makes a password field is secretInput (which sets the type itself)
+    assert 'type: "password"' not in source and "type: 'password'" not in source
+    assert source.count('setAttribute("type", shown ? "text" : "password")') == 1
+    result = run_driver(tmp_path, SECRET_FIELDS_DRIVER, "secret_fields")
+    assert result["drawnPages"] >= 15
+    shown = ["Show value", "button", "true", "Hide value"]
+    # every page drawn: the values typed in the page are a secret's (page Secrets) and a Git or publish login's
+    # token (page Logins, stored as a secret first); the LLM and VPN pages name a stored secret, never its value
+    field = lambda ident: {"id": ident, "type": "text", "autocomplete": "off", "spellcheck": "false", "value": "",
+                           "toggle": shown + [ident]}
+    assert result["pages"] == {"secrets": [field("secret-value")], "logins": [field("git-token"), field("publish-token")]}
+    hidden = ["Show value", "button", "false", "Show value", "secret-value"]
+    look, kept = result["pressed"]
+    assert look["type"] == "password" and look["autocomplete"] == "new-password" and look["toggle"] == hidden
+    assert look["value"] == "s3cr3t" and kept == "0", "hiding keeps what was typed; the choice is remembered"
+    assert result["remembered"]["type"] == "password" and result["remembered"]["toggle"] == hidden
+    assert result["remembered"]["value"] == ""
+    look, kept = result["pressedAgain"]
+    assert look["type"] == "text" and look["toggle"] == shown + ["secret-value"] and kept == "1"
+    assert all(method == "GET" and path == "/api/hosts/ct1/secrets" for method, path in result["requests"]), \
+        "only the names are asked for, never a value"
+    first, pressed, kept, back, kept_after = result["login"]
+    assert first["id"] == "password" and first["type"] == "password" and first["autocomplete"] == "current-password"
+    assert first["toggle"] == ["Show value", "button", "false", "Show value", "password"]
+    assert pressed["type"] == "text" and pressed["toggle"][2] == "true" and kept == "1" and back == "password"
+    assert kept_after == "1", "the login's toggle is not remembered for the secret fields"
+    assert result["blocked"] == ["text", "password"], "no storage: shown by default, the toggle still works"
+
+
+LOGIN_TOKENS_DRIVER = FAKE_DOM + r"""
+const byId = (id) => document.getElementById(id);
+const confirmText = (node) => { const c = node.all().find(n => n.className === "confirm"); return c ? c.textContent : null; };
+const posts = () => calls.filter(c => c.method !== "GET").map(c => [c.path, JSON.parse(c.body)]);
+const formOf = (id) => { let n = byId(id); while (n && n.className !== "form") n = n.parent; return n; };
+const fire = (id, type, value) => { const n = byId(id); if (value !== undefined) n.value = value; n.fire(type); };
+const toggleOf = (id) => byId(id).parent.children.find(n => (n.className || "").includes("secret-toggle"));
+context.URL = URL;  // the browser's, for the suggested name of a Git server's token
+(async () => {
+  const result = {};
+  vm.runInContext('state.me = { user: "admin", csrf: "c" }; state.host = "ct1"; state.page = "logins"; state.hosts = [{ name: "local", kind: "local" }, { name: "ct1", kind: "ssh", ssh: "root@ct1", port: 22 }];', context);
+  let secretAnswer = () => ({ output: "kept" });
+  answer = (method, path, sent) => {
+    if (method === "GET") return path.endsWith("/secrets") ? [{ name: "GITEA_TOKEN", store: "file" }, { name: "PYPI_TOKEN", store: "file" }] : path.endsWith("/identities") ? {} : [];
+    if (path.includes("/secrets/")) return secretAnswer(path, sent);
+    return { output: "added" };
+  };
+  vm.runInContext("show('logins')", context); await settle();
+  const TOKEN = "glpat-" + "x".repeat(300);
+  // Git: "Enter the token" at first, the name suggested from the server, the token shown while typed, no length limit
+  result.gitStart = [byId("git-source").value, byId("git-secret").value, byId("git-token").attributes.type,
+    toggleOf("git-token").attributes["aria-pressed"], "maxlength" in byId("git-token").attributes, byId("git-stored").hidden, byId("git-token").parent.hidden];
+  fire("git-url", "input", "https://git.example.org:3000/team/x.git");
+  result.gitSuggested = byId("git-secret").value;
+  const typed = byId("git-token"); typed.value = TOKEN; fire("git-user", "input", "");
+  const gitForm = () => formOf("git-url");  // drawn anew after each login added (show("logins"))
+  button(gitForm(), "Add…").fire("click");
+  result.gitAsk = [confirmText(gitForm()), posts().length];
+  button(gitForm(), "Yes, add it").fire("click"); await settle();
+  result.gitPosts = posts(); result.gitCleared = [typed.value, byId("git-token") !== typed && !byId("git-token").value];
+  // an edited name stays when the server changes; a pasted token as the name is refused here
+  calls.length = 0;
+  byId("git-user").value = "";
+  fire("git-secret", "input", "MY_GIT");
+  fire("git-url", "input", "https://gitlab.example.com");
+  result.gitEdited = byId("git-secret").value;
+  fire("git-secret", "input", "glpat-the-token");
+  byId("git-token").value = TOKEN;
+  button(gitForm(), "Add…").fire("click"); await settle();
+  result.badName = [posts().length, toasts().some(x => x.includes("Which name?"))];
+  // a secret of that name came meanwhile: the service's refusal is asked about, Yes stores it confirmed
+  let first = true;
+  secretAnswer = () => { if (first) { first = false; return { __status: 400, __error: 'NEW_GIT: a secret of that name exists: its value is replaced: send {"confirm": true}', __confirm: "secret-replace" }; } return { output: "kept" }; };
+  fire("git-secret", "input", "NEW_GIT");
+  byId("git-token").value = "tok-2";
+  button(gitForm(), "Add…").fire("click");
+  button(gitForm(), "Yes, add it").fire("click"); await settle();
+  result.reasked = confirmText(gitForm());
+  button(gitForm(), "Yes, do it").fire("click"); await settle();
+  result.reaskedPosts = posts();
+  // publish: the usual name of each kind; an existing one is asked about before it is replaced
+  calls.length = 0; secretAnswer = () => ({ output: "kept" });
+  result.kinds = {};
+  for (const kind of ["npm", "pypi", "testpypi", "crates", "gitlab", "github"]) { fire("publish-kind", "change", kind); result.kinds[kind] = byId("publish-secret").value; }
+  fire("publish-kind", "change", "pypi");
+  byId("publish-token").value = "pypi-the-token"; byId("publish-url").value = "";
+  const publishForm = () => formOf("publish-kind");
+  button(publishForm(), "Add").fire("click");
+  result.publishAsk = [confirmText(publishForm()), posts().length];
+  button(publishForm(), "Yes, replace it").fire("click"); await settle();
+  result.publishPosts = posts();
+  // "Use a stored secret": the host's names, nothing stored, the login names the one chosen
+  calls.length = 0;
+  fire("publish-source", "change", "stored");
+  result.storedShown = [byId("publish-token").parent.hidden, byId("publish-secret").hidden, byId("publish-stored").hidden,
+    byId("publish-stored").children.map(o => o.value)];
+  byId("publish-stored").value = "GITEA_TOKEN"; byId("publish-url").value = "";
+  fire("publish-kind", "change", "gitlab");
+  button(publishForm(), "Add").fire("click"); await settle();
+  result.storedPosts = posts();
+  result.hint = byId("git-secret-hint").textContent;
+  console.log(JSON.stringify(result));
+})().catch(e => { console.error(e.stack); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_a_login_token_is_typed_and_stored_as_a_secret_first(tmp_path):
+    """In node: a Git or publish login takes the token itself ("Enter the token", shown while typed, no length
+    limit) under a suggested secret name (GIT_TOKEN_<HOST>, PYPI_TOKEN...) that can be changed and is checked; the
+    page stores it with POST /secrets/NAME (secrets set NAME, the token on standard input) and only then adds the
+    login naming it; a secret that exists is asked about first. Or a stored secret of that host is chosen. The token
+    goes in no other request."""
+    result = run_driver(tmp_path, LOGIN_TOKENS_DRIVER, "login_tokens")
+    assert result["gitStart"] == ["token", "GIT_TOKEN", "text", "true", False, True, False]
+    assert result["gitSuggested"] == "GIT_TOKEN_GIT_EXAMPLE_ORG"
+    ask, before = result["gitAsk"]
+    assert "the Git login of the secret GIT_TOKEN_GIT_EXAMPLE_ORG?" in ask and before == 0
+    assert "The token is stored first as the secret GIT_TOKEN_GIT_EXAMPLE_ORG on ct1, for good." in ask
+    token = "glpat-" + "x" * 300
+    assert result["gitPosts"] == [
+        ["/api/hosts/ct1/secrets/GIT_TOKEN_GIT_EXAMPLE_ORG", {"secret": token}],
+        ["/api/hosts/ct1/git-logins", {"url": "https://git.example.org:3000/team/x.git", "secret": "GIT_TOKEN_GIT_EXAMPLE_ORG",
+                                       "user": "", "confirm": True}]]
+    assert result["gitCleared"] == ["", True], "the token is gone from the page once stored, the page drawn anew"
+    assert result["gitEdited"] == "MY_GIT", "a name the user chose is not overwritten"
+    assert result["badName"] == [0, True], "a token pasted as the name is refused before anything is sent"
+    assert result["reasked"].startswith("The service asks first: NEW_GIT: a secret of that name exists")
+    assert result["reaskedPosts"] == [
+        ["/api/hosts/ct1/secrets/NEW_GIT", {"secret": "tok-2"}], ["/api/hosts/ct1/secrets/NEW_GIT", {"secret": "tok-2", "confirm": True}],
+        ["/api/hosts/ct1/git-logins", {"url": "https://gitlab.example.com", "secret": "NEW_GIT", "user": "", "confirm": True}]]
+    assert result["kinds"] == {"npm": "NPM_TOKEN", "pypi": "PYPI_TOKEN", "testpypi": "TESTPYPI_TOKEN", "crates": "CARGO_TOKEN",
+                               "gitlab": "GITLAB_TOKEN", "github": "GITHUB_TOKEN"}
+    ask, before = result["publishAsk"]
+    assert ask.startswith("Replace the value of PYPI_TOKEN on ct1?") and before == 0
+    assert result["publishPosts"] == [["/api/hosts/ct1/secrets/PYPI_TOKEN", {"secret": "pypi-the-token", "confirm": True}],
+                                      ["/api/hosts/ct1/publish-logins", {"kind": "pypi", "secret": "PYPI_TOKEN", "url": ""}]]
+    assert result["storedShown"] == [True, True, False, ["GITEA_TOKEN", "PYPI_TOKEN"]]
+    assert result["storedPosts"] == [["/api/hosts/ct1/publish-logins", {"kind": "gitlab", "secret": "GITEA_TOKEN", "url": ""}]]
+    assert "A secret's name is what the token is stored under" in result["hint"]
+
+
+LLM_PAGE_DRIVER = FAKE_DOM + r"""
+const byId = (id) => document.getElementById(id);
+const confirmText = (node) => { const c = node.all().find(n => n.className === "confirm"); return c ? c.textContent : null; };
+const posts = () => calls.filter(c => c.method !== "GET").map(c => [c.path, JSON.parse(c.body)]);
+const paths = () => calls.map(c => `${c.method} ${c.path}`);
+const rowOf = (name) => main.all().find(n => n.tagName === "tr" && n.children[0] && n.children[0].textContent === name);
+const rowButtonIn = (row, text) => row.all().find(n => n.tagName === "button" && n.textContent === text);
+const LONG = "a-model-with-a-name-far-longer-than-the-table-shows-q8";
+(async () => {
+  const result = {};
+  vm.runInContext('state.me = { user: "admin", csrf: "c" }; state.host = "ct1"; state.page = "llm"; state.hosts = [{ name: "local", kind: "local" }, { name: "ct1", kind: "ssh", ssh: "root@ct1", port: 22 }];', context);
+  let addAnswer = () => ({ output: "ok" });
+  const shows = {
+    gw: { name: "gw", kind: "vllm", url: "https://gw.example.org", model: "qwen3", api_key_secret: "GW_KEY", headers: { "X-Org": "ORG_KEY" },
+          ca: null, vpn: "home", anthropic: true, insecure_http: false, models: ["qwen3", "zeta"], checked: null },
+    lan: { name: "lan", kind: "openai-compatible", url: "https://lan.example.org", model: null, api_key_secret: null, headers: {}, ca: "lan.pem",
+           vpn: null, anthropic: false, insecure_http: false, models: [], checked: null },
+  };
+  answer = (method, path) => {
+    if (method === "GET" && path.endsWith("/llm")) return [{ name: "gw", kind: "vllm", url: "https://gw.example.org", model: "qwen3" }, { name: "lan", kind: "openai-compatible", url: "https://lan.example.org" }];
+    if (path.endsWith("/llm/gw/models")) return [{ name: "zeta", loaded: false, size: 4294967296, type: "llm", arch: "qwen2", parameters: "7B", quantization: "Q4_K_M", context: 32768 },
+      { name: LONG, loaded: false }, { name: "qwen3", loaded: true, size: 8589934592 }];
+    if (path.endsWith("/llm/new1/models")) return [{ name: "m2", loaded: false }, { name: "m1", loaded: true }];
+    if (method === "GET") { const name = path.split("/").pop(); return shows[name] || { __status: 404, __error: "no such server" }; }
+    if (path.endsWith("/check")) return { ok: true, output: "fine" };
+    return addAnswer();
+  };
+  await vm.runInContext("pages.llm(__main)", context); await settle();
+  // (1) the models: only the columns with values, loaded first then by name, a long name cut, a filter
+  rowButtonIn(rowOf("gw"), "Models").fire("click"); await settle();
+  const modelTable = main.all().find(n => n.tagName === "table" && n.textContent.includes("Models of gw"));
+  result.columns = modelTable.all().filter(n => n.tagName === "th").map(n => n.textContent);
+  const modelRows = modelTable.all().filter(n => n.tagName === "tr" && n.attributes["data-model"]);
+  result.order = modelRows.map(r => r.attributes["data-model"]);
+  result.cells = modelRows.map(r => r.children.slice(0, -1).map(c => c.textContent));
+  result.sizes = vm.runInContext("[readableSize(8589934592), readableSize(4294967296)]", context);
+  result.cut = [modelRows[1].children[0].textContent.length, modelRows[1].children[0].attributes.title];
+  const filter = byId("llm-models-filter");
+  filter.value = "ZE"; filter.fire("input");
+  result.filtered = [modelRows.filter(r => !r.hidden).map(r => r.attributes["data-model"]), main.textContent.includes("1 of 3 models")];
+  filter.value = ""; filter.fire("input");
+  result.defaultMarked = modelRows[0].textContent.includes("the default") && !rowButtonIn(modelRows[0], "Use as default");
+  // "Copy NAME:MODEL": the browser does not allow the clipboard here, so the reference is shown in its place
+  rowButtonIn(modelRows[2], "Copy gw:zeta").fire("click"); await settle();
+  result.copied = modelRows[2].all().some(n => n.tagName === "code" && n.textContent === "gw:zeta");
+  // "Use as default": llm show's fields again, the model changed, --replace asked first
+  calls.length = 0;
+  rowButtonIn(modelRows[2], "Use as default").fire("click"); await settle();
+  result.useAsk = [confirmText(modelRows[2]), posts().length];
+  rowButtonIn(modelRows[2], "Yes, use it").fire("click"); await settle();
+  result.usePosts = posts();
+  // (2) Edit…: the form from llm show, saved with --replace (asked)
+  calls.length = 0;
+  rowButtonIn(rowOf("gw"), "Edit…").fire("click"); await settle();
+  result.edit = [byId("llm-name").value, byId("llm-kind").value, byId("llm-url").value, byId("llm-model").value, byId("llm-key-secret").value,
+    byId("llm-headers").value, byId("llm-vpn").value, byId("llm-anthropic").checked, byId("llm-replace").checked, byId("llm-form-title").textContent,
+    byId("llm-model-pick").children.map(o => o.value), byId("llm-model-pick").hidden];
+  byId("llm-model-pick").value = "zeta"; byId("llm-model-pick").fire("change");
+  result.picked = byId("llm-model").value;
+  rowButtonIn(main, "Save").fire("click");
+  result.editAsk = [confirmText(main), posts().length];
+  rowButtonIn(main, "Yes, replace it").fire("click"); await settle();
+  result.editPosts = posts();
+  // the CA of a server is named when an edit would drop it
+  calls.length = 0;
+  rowButtonIn(rowOf("lan"), "Edit…").fire("click"); await settle();
+  result.caNote = byId("llm-ca-note").textContent;
+  rowButtonIn(main, "Save").fire("click");
+  result.caAsk = confirmText(main);
+  rowButtonIn(main, "Cancel").fire("click");
+  rowButtonIn(main, "Stop editing").fire("click");
+  result.stopped = [byId("llm-name").value, byId("llm-form-title").textContent, rowButtonIn(main, "Add") ? "Add" : null];
+  // (4) the name checked while typed: the offending character named, a fixed name offered
+  const typeName = (value) => { byId("llm-name").value = value; byId("llm-name").fire("input"); return byId("llm-name-problem").textContent; };
+  result.names = [typeName("my server"), typeName("-x"), typeName("x".repeat(33)), typeName("lm.studio"), typeName("ok_name-1")];
+  typeName("my server");
+  rowButtonIn(byId("llm-name-problem"), "Use my-server").fire("click");
+  result.fixed = [byId("llm-name").value, byId("llm-name-problem").textContent, byId("llm-name").attributes["aria-invalid"] || null];
+  // a refused name or a refusal of the CLI: nothing sent / its message inline, every field kept
+  calls.length = 0;
+  typeName("bad.name"); byId("llm-url").value = "http://192.168.1.9:11434"; byId("llm-kind").value = "ollama";
+  for (const id of ["llm-model", "llm-key-secret", "llm-headers", "llm-ca", "llm-vpn"]) byId(id).value = "";
+  rowButtonIn(main, "Add").fire("click"); await settle();
+  result.badName = [posts().length, byId("llm-url").value, byId("llm-name").value];
+  typeName("new1");
+  addAnswer = () => ({ __status: 400, __error: "sandbox-ai llm: plain http to 192.168.1.9 needs a local address" });
+  rowButtonIn(main, "Add").fire("click"); await settle();
+  result.refused = [main.textContent.includes("plain http to 192.168.1.9 needs a local address"), byId("llm-name").value, byId("llm-url").value, byId("llm-kind").value];
+  // (3) Test connection: saved first (asked), then its models and its check, inline; the default-model select filled
+  addAnswer = () => ({ output: "ok" });
+  calls.length = 0;
+  rowButtonIn(main, "Test connection").fire("click");
+  result.testAsk = [confirmText(main), posts().length];
+  rowButtonIn(main, "Yes, save and test").fire("click"); await settle();
+  result.testCalls = paths().filter(p => !p.endsWith("/llm") || p.startsWith("POST"));
+  result.testPost = posts()[0];
+  result.tested = [byId("llm-test-result").textContent, byId("llm-model-pick").children.map(o => o.value), byId("llm-model-pick").hidden,
+    byId("llm-form-title").textContent, byId("llm-url").value];
+  calls.length = 0;
+  rowButtonIn(main, "Test connection").fire("click"); await settle();
+  result.retest = [confirmText(main), paths()];
+  console.log(JSON.stringify(result));
+})().catch(e => { console.error(e.stack); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_the_llm_page_models_edit_test_and_names(tmp_path):
+    """In node: the models of a server as a table (only the columns with values, loaded first then by name, long
+    names cut with the whole one in a title, a filter), "Use as default" (llm show's fields saved again with the
+    model, --replace asked first) and "Copy NAME:MODEL"; Edit… fills the form from llm show and saves with --replace;
+    Test connection saves first (asked) and lists the models and checks, filling the default-model select; the
+    name is checked while typed (the offending character, a fixed name); on any error every field stays."""
+    result = run_driver(tmp_path, LLM_PAGE_DRIVER, "llm_page")
+    assert result["columns"] == ["Name", "Loaded", "Type", "Params", "Quant", "Context", "Size", ""]
+    long = "a-model-with-a-name-far-longer-than-the-table-shows-q8"
+    assert result["order"] == ["qwen3", long, "zeta"], "loaded first, then by name"
+    eight, four = result["sizes"]
+    assert result["cells"][0] == ["qwen3", "yes", "", "", "", "", eight]
+    assert result["cells"][2] == ["zeta", "no", "llm · qwen2", "7B", "Q4_K_M", "32k", four]
+    assert result["cut"] == [48, long]
+    assert result["filtered"] == [["zeta"], True]
+    assert result["defaultMarked"], "the server's default model is named, without Use as default"
+    assert result["copied"]
+    ask, before = result["useAsk"]
+    assert ask.startswith("Make zeta the default model of gw on ct1?") and before == 0
+    assert result["usePosts"] == [["/api/hosts/ct1/llm", {"name": "gw", "kind": "vllm", "url": "https://gw.example.org", "model": "zeta",
+                                   "api_key_secret": "GW_KEY", "header_secrets": [{"header": "X-Org", "secret": "ORG_KEY"}],
+                                   "vpn": "home", "anthropic": True, "replace": True, "confirm": True}]]
+    assert result["edit"] == ["gw", "vllm", "https://gw.example.org", "qwen3", "GW_KEY", "X-Org=ORG_KEY", "home", True, True,
+                              "Change the server gw", ["", "qwen3", "zeta"], False]
+    assert result["picked"] == "zeta"
+    ask, before = result["editAsk"]
+    assert "Replace the LLM server gw on ct1?" in ask and before == 0
+    assert result["editPosts"] == [["/api/hosts/ct1/llm", {"name": "gw", "kind": "vllm", "url": "https://gw.example.org", "model": "zeta",
+                                    "api_key_secret": "GW_KEY", "header_secrets": [{"header": "X-Org", "secret": "ORG_KEY"}],
+                                    "vpn": "home", "anthropic": True, "replace": True, "confirm": True}]]
+    assert "lan.pem" in result["caNote"] and "Its CA certificate (lan.pem) is removed" in result["caAsk"]
+    assert result["stopped"] == ["", "Add a server", "Add"]
+    space, dash, long_name, dot, fine = result["names"]
+    assert "a space cannot be in an LLM server's name" in space and "Use my-server" in space
+    assert "starts with a letter or a digit, not “-”" in dash and "Use x" in dash
+    assert "at most 32 characters" in long_name and f"Use {'x' * 32}" in long_name
+    assert "“.” cannot be in an LLM server's name" in dot and "Use lm-studio" in dot
+    assert fine == ""
+    assert result["fixed"] == ["my-server", "", None]
+    assert result["badName"] == [0, "http://192.168.1.9:11434", "bad.name"], "nothing sent, nothing lost"
+    assert result["refused"] == [True, "new1", "http://192.168.1.9:11434", "ollama"], "the CLI's message inline, the form kept"
+    ask, before = result["testAsk"]
+    assert ask.startswith("Test new1: it is saved on ct1 first (sandbox-ai llm add)") and before == 0
+    assert result["testPost"] == ["/api/hosts/ct1/llm", {"name": "new1", "kind": "ollama", "url": "http://192.168.1.9:11434", "model": "",
+                                                         "confirm": True}]
+    assert result["testCalls"] == ["POST /api/hosts/ct1/llm", "GET /api/hosts/ct1/llm/new1/models", "POST /api/hosts/ct1/llm/new1/check"]
+    text, picks, hidden, title, kept = result["tested"]
+    assert "new1 answers: 2 model(s) listed." in text and "fine" in text
+    assert picks == ["", "m1", "m2"] and not hidden and title == "Change the server new1" and kept == "http://192.168.1.9:11434"
+    ask, again = result["retest"]
+    assert ask is None and again == ["GET /api/hosts/ct1/llm/new1/models", "POST /api/hosts/ct1/llm/new1/check"], \
+        "saved and unchanged: tested without saving again"

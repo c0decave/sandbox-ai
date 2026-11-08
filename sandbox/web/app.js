@@ -324,6 +324,39 @@ function rowButton(label, name, host, attrs) {
   return el("button", Object.assign({ "aria-label": t("{action} {name} on {host}", { action: label, name, host }) }, attrs || {}), label);
 }
 
+// A field where a secret's VALUE is typed (an API key, a token, a VPN key: kept on a host): shown while it is typed,
+// so a typo is seen before it is kept, with "Show value" beside it to hide it (someone looking on, a shared screen).
+// The choice is remembered in this browser for every such field (SECRET_SHOWN_STORE). Only what is typed now is ever
+// shown: a value already kept is never read back. ATTRS: the input's own (id, aria-describedby); OPTIONS.shown: how
+// it starts, without the remembered choice (the login's password: hidden), OPTIONS.remember false: not remembered.
+// Returns [input, the input and its button together]; the label's "for" names the input.
+const SECRET_SHOWN_STORE = "sandbox-ai-show-secret-values";
+function secretShownChoice() {
+  try { return localStorage.getItem(SECRET_SHOWN_STORE) !== "0"; } catch (e) { return true; }
+}
+function secretInput(attrs, options) {
+  const opts = Object.assign({ shown: undefined, remember: true, hiddenAutocomplete: "new-password" }, options || {});
+  const input = el("input", Object.assign({ "data-secret-value": true }, attrs || {}));
+  const toggle = el("button", { type: "button", class: "secret-toggle", "aria-controls": input.getAttribute("id") || null });
+  const set = (shown) => {
+    input.setAttribute("type", shown ? "text" : "password");
+    // shown: no autofill, no spelling marks, no capitals added; hidden: the browser's password handling
+    input.setAttribute("autocomplete", shown ? "off" : opts.hiddenAutocomplete);
+    input.setAttribute("spellcheck", "false"); input.setAttribute("autocapitalize", "off"); input.setAttribute("autocorrect", "off");
+    // the name stays "Show value" (pressed: shown), as a toggle button's should; the tooltip says what a press does
+    toggle.setAttribute("aria-pressed", shown ? "true" : "false");
+    toggle.setAttribute("title", shown ? t("Hide value") : t("Show value"));
+  };
+  toggle.textContent = t("Show value");
+  toggle.addEventListener("click", () => {
+    const shown = toggle.getAttribute("aria-pressed") !== "true";
+    set(shown);
+    if (opts.remember) { try { localStorage.setItem(SECRET_SHOWN_STORE, shown ? "1" : "0"); } catch (e) { /* this page only */ } }
+  });
+  set(opts.shown !== undefined ? opts.shown : opts.remember ? secretShownChoice() : true);
+  return [input, el("div", { class: "secret-field" }, input, toggle)];
+}
+
 // --- notifications: toasts in the theme's colours, top right ---------------------------------------------
 // Errors stay until they are closed; the others close after TOAST_SECONDS, not while the pointer or the focus is on
 // them. Each is told to screen readers once, through the page's one live region (say()), never by a role of its own.
@@ -454,7 +487,10 @@ function terminalTheme() {
 
 function loginView(message) {
   const user = el("input", { id: "user", autocomplete: "username", required: true, "aria-label": t("User") });
-  const password = el("input", { id: "password", type: "password", autocomplete: "current-password", required: true, "aria-label": t("Password") });
+  // the web login's own password, not a secret being kept on a host: hidden at first (the login page is often seen
+  // by others) and not remembered with the secret fields' choice; "Show value" beside it all the same
+  const [password, passwordField] = secretInput({ id: "password", required: true, "aria-label": t("Password") },
+    { shown: false, remember: false, hiddenAutocomplete: "current-password" });
   const code = el("input", { id: "code", inputmode: "numeric", autocomplete: "one-time-code", pattern: "[0-9]{6}", maxlength: 6, required: true, "aria-label": t("Code") });
   const status = el("div");
   if (message) status.append(notice(message, "error"));
@@ -477,7 +513,7 @@ function loginView(message) {
   status,
   el("div", { class: "form" },
     el("label", { for: "user" }, t("User")), user,
-    el("label", { for: "password" }, t("Password")), password,
+    el("label", { for: "password" }, t("Password")), passwordField,
     el("label", { for: "code" }, t("Code from your TOTP app")), code,
     el("label", { for: "language" }, t("Language")), languageSelect("language"),
     el("button", { class: "primary", type: "submit" }, t("Log in"))),
@@ -2736,14 +2772,79 @@ pages.vpn = async (main) => {
   main.append(el("h2", {}, t("New profile")), el("div", { class: "card" }, form));
 };
 
-// llm models --json: [{name, size, loaded, details}], as a table
-function modelsTable(server, models) {
-  const list = (Array.isArray(models) ? models : []).filter(m => m && typeof m === "object");
+// An LLM server's name as sandbox-ai llm takes it (llm.NAME): null when it is one (or empty: asked for when sent),
+// else what is wrong with it, naming the first character that cannot be there, and a name that would do (FIXED).
+const LLM_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
+function llmNameProblem(text) {
+  const value = String(text || "");
+  if (!value || LLM_NAME.test(value)) return null;
+  const fixed = value.replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^[^A-Za-z0-9]+/, "").slice(0, 32).replace(/[-_]+$/, "") || "llm";
+  const at = [...value].findIndex((c, i) => !/[A-Za-z0-9]/.test(c) && (i === 0 || !/[_-]/.test(c)));
+  const char = at < 0 ? "" : [...value][at];
+  const shown = char === " " ? t("a space") : `“${char}”`;
+  const message = at === 0 ? t("An LLM server's name starts with a letter or a digit, not {char}.", { char: shown })
+    : at > 0 ? t("{char} cannot be in an LLM server's name: letters, digits, _ and - (up to 32).", { char: shown })
+      : t("An LLM server's name is at most 32 characters.");
+  return { text: message, fixed };
+}
+
+// What `llm show NAME --json` says of a server, as the body of POST /llm (llm add NAME ... --replace): the rest as it
+// is, CHANGES on top. Its CA certificate is not in it: the host keeps only its own copy, which the page cannot name.
+function llmBodyOf(view, changes) {
+  const v = view && typeof view === "object" ? view : {};
+  const headers = v.headers && typeof v.headers === "object" ? Object.entries(v.headers).map(([header, secret]) => ({ header, secret })) : [];
+  const body = { name: v.name, kind: v.kind, url: v.url, model: v.model || "" };
+  if (v.api_key_secret) body.api_key_secret = v.api_key_secret;
+  if (headers.length) body.header_secrets = headers;
+  if (v.vpn) body.vpn = v.vpn;
+  if (v.anthropic) body.anthropic = true;
+  if (v.insecure_http) body.insecure_http = true;
+  return Object.assign(body, changes || {});
+}
+
+// llm models --json: [{name, size, loaded, details, type?, arch?, parameters?, quantization?, context?}] as a table:
+// only the columns some model has a value for; loaded first, then by name; a long name cut (the whole one in its
+// title); a filter. ACTIONS (the LLM page): {use(model, button, cell), copy(ref, button), current: its model, host}.
+const MODEL_NAME_WIDTH = 48;  // as llm models cuts it (llm.NAME_WIDTH)
+function modelsTable(server, models, actions) {
+  const list = (Array.isArray(models) ? models : []).filter(m => m && typeof m === "object" && typeof m.name === "string")
+    .sort((a, b) => ({ true: 0, false: 1 }[String(a.loaded)] ?? 2) - ({ true: 0, false: 1 }[String(b.loaded)] ?? 2) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   const loaded = { true: N_("yes"), false: N_("no") };
-  return el("div", {}, el("h3", {}, t("Models of {server}", { server })),
-    table([t("Name"), t("Size"), t("Loaded"), t("Details")], list.map(m => el("tr", {}, el("td", { class: "mono" }, String(m.name ?? "")),
-      el("td", {}, typeof m.size === "number" ? readableSize(m.size) : "?"), el("td", {}, loaded[String(m.loaded)] ? t(loaded[String(m.loaded)]) : "?"), el("td", {}, String(m.details || "")))),
-    t("The server lists no models.")));
+  const has = (value) => value !== undefined && value !== null && value !== "";
+  const contextOf = (n) => (n >= 1024 && n % 1024 === 0 ? `${n / 1024}k` : String(n));
+  const columns = [
+    ["loaded", N_("Loaded"), m => (loaded[String(m.loaded)] ? t(loaded[String(m.loaded)]) : "")],
+    ["type", N_("Type"), m => [m.type, m.arch].filter(has).join(" · "), m => has(m.type) || has(m.arch)],
+    ["parameters", N_("Params"), m => String(m.parameters ?? "")],
+    ["quantization", N_("Quant"), m => String(m.quantization ?? "")],
+    ["context", N_("Context"), m => (typeof m.context === "number" ? contextOf(m.context) : "")],
+    ["size", N_("Size"), m => (typeof m.size === "number" ? readableSize(m.size) : "")],
+  ].filter(([key, , , any]) => list.some(m => (any ? any(m) : has(m[key]))));
+  const rows = list.map(m => {
+    const cut = m.name.length > MODEL_NAME_WIDTH ? `${m.name.slice(0, MODEL_NAME_WIDTH - 1)}…` : m.name;
+    const cells = [el("td", { class: "mono", title: cut !== m.name ? m.name : null }, cut), ...columns.map(([key, , value]) => el("td", { class: key === "context" ? "mono" : null, title: key === "context" && typeof m.context === "number" ? String(m.context) : null }, value(m)))];
+    if (actions) {
+      const cell = el("td", { class: "actions" });
+      const ref = `${server}:${m.name}`;
+      if (m.name === actions.current) cell.append(el("span", { class: "hint" }, t("the default"), " "));
+      else cell.append(rowButton(t("Use as default"), ref, actions.host, { onclick: (ev) => actions.use(m.name, ev.target, cell) }), " ");
+      cell.append(el("button", { "aria-label": t("Copy {ref}", { ref }), title: ref, onclick: (ev) => actions.copy(ref, ev.target) }, t("Copy {ref}", { ref: `${server}:${cut}` })));
+      cells.push(cell);
+    }
+    return el("tr", { "data-model": m.name }, cells);
+  });
+  const filter = el("input", { type: "search", id: "llm-models-filter", class: "mono", placeholder: t("Filter"), "aria-label": t("Filter the models of {server}", { server }), autocomplete: "off" });
+  const count = el("span", { class: "hint" });
+  const apply = () => {
+    const words = String(filter.value || "").trim().toLowerCase();
+    let shownRows = 0;
+    for (const row of rows) { row.hidden = Boolean(words) && !row.getAttribute("data-model").toLowerCase().includes(words); if (!row.hidden) shownRows += 1; }
+    count.textContent = words ? t("{shown} of {all} models", { shown: shownRows, all: rows.length }) : t("{all} models", { all: rows.length });
+  };
+  filter.addEventListener("input", apply);
+  apply();
+  return el("div", {}, el("h3", {}, t("Models of {server}", { server })), rows.length > 1 ? el("div", { class: "row" }, filter, count) : null,
+    table([t("Name"), ...columns.map(([, label]) => t(label)), ...(actions ? [""] : [])], rows, t("The server lists no models."), t("Models of {server}", { server })));
 }
 
 pages.llm = async (main) => {
@@ -2753,71 +2854,197 @@ pages.llm = async (main) => {
   if (!live()) return;
   const output = el("div");
   const host = state.host;
-  // every request of a row goes to the row's host (the page's, as it was when it was drawn), never the host chosen since
-  const rows = (Array.isArray(list) ? list : []).filter(e => e && typeof e.name === "string").map(e => {
-    const agent = el("select", { "aria-label": t("Agent for the check of {name} on {host}", { name: e.name, host }) }, el("option", { value: "" }, t("every agent")), AGENTS.map(a => el("option", { value: a }, a)));
-    const actions = el("td", { class: "actions" });
-    const row = el("tr", {}, el("td", { class: "mono" }, e.name), el("td", {}, e.kind), el("td", { class: "mono" }, e.url), el("td", { class: "mono" }, e.model || ""), actions);
-    const remove = rowButton(t("Remove"), e.name, host, { class: "danger", onclick: () => confirmIn(actions, t("Remove the LLM server {name} on {host}? Starts with {option} cannot start until it is added again.", { name: e.name, host, option: `--llm ${e.name}` }), t("Yes, remove it"), async () => {
-      try { await api("DELETE", hostPath(`/llm/${encodeURIComponent(e.name)}`, host), { confirm: true }); show("llm"); } catch (err) { failed(t("Could not remove {name} on {host}", { name: e.name, host }))(err); }
-    }, { trigger: remove }) });
-    actions.append(agent,
-      rowButton(t("Check"), e.name, host, { onclick: (ev) => busy(ev.target, async () => {
-        clear(output);
-        try { const r = await api("POST", hostPath(`/llm/${encodeURIComponent(e.name)}/check`, host), agent.value ? { agent: agent.value } : {}); output.append(notice(r.ok ? t("the server works for it") : t("the check found problems"), r.ok ? "ok" : "error"), el("pre", {}, r.output)); }
-        catch (err) { output.append(errorNotice(err)); }
-      }) }),
-      rowButton(t("Models"), e.name, host, { onclick: (ev) => busy(ev.target, async () => {
-        clear(output);
-        try { output.append(modelsTable(e.name, await api("GET", hostPath(`/llm/${encodeURIComponent(e.name)}/models`, host)))); }
-        catch (err) { output.append(errorNotice(err)); }
-      }) }),
-      rowButton(t("Show"), e.name, host, { onclick: (ev) => busy(ev.target, async () => {
-        clear(output);
-        try { output.append(el("h3", {}, e.name), dataView(await api("GET", hostPath(`/llm/${encodeURIComponent(e.name)}`, host)))); }
-        catch (err) { output.append(errorNotice(err)); }
-      }) }),
-      remove);
-    return row;
+  const listBox = el("div");
+  let servers = [];
+  const path = (name, more) => hostPath(`/llm/${encodeURIComponent(name)}${more || ""}`, host);
+  // the list again (after a change made from the form), the form left as it is
+  const refreshList = async () => { try { drawList(await api("GET", hostPath("/llm", host))); } catch (e) { /* the list as it was */ } };
+  // Use as default: the server saved again with that model, the rest from llm show (llm-replace, asked first)
+  const useModel = (server) => async (model, trigger, holder) => busy(trigger, async () => {
+    let view;
+    try { view = await api("GET", path(server)); } catch (e) { output.append(errorNotice(e)); return; }
+    if (view && view.ca) { output.append(notice(t("{name} has a CA certificate of its own ({file}): a change from this page would remove it. Use Edit… and give its file again.", { name: server, file: String(view.ca) }), "warn")); return; }
+    const body = llmBodyOf(view, { model, replace: true });
+    const asks = [t("Make {model} the default model of {name} on {host}? The server is saved again with it (sandbox-ai llm add --replace), the rest as it is.", { model, name: server, host }),
+      body.insecure_http ? t("It still sends the prompts to {url} over plain http, unencrypted.", { url: body.url }) : null].filter(Boolean);
+    confirmIn(holder, asks.join(" "), t("Yes, use it"), async () => {
+      try { await api("POST", hostPath("/llm", host), Object.assign(body, { confirm: true })); toast("success", t("{model} is the default model of {name}", { model, name: server }), ""); await refreshList(); showModels(server, model); }
+      catch (e) { output.append(errorNotice(e)); }
+    }, { kind: "primary", trigger });
   });
-  main.append(table([t("Name"), t("Kind"), "URL", t("Model"), ""], rows, t("No LLM server yet.")), output);
-  const name = el("input", { id: "llm-name", placeholder: "lmstudio" });
+  const copyRef = async (ref, button) => {
+    let copied = false;
+    try { if (typeof navigator !== "undefined" && navigator.clipboard && typeof navigator.clipboard.writeText === "function") { await navigator.clipboard.writeText(ref); copied = true; } } catch (e) { copied = false; }
+    // not copied (the browser does not allow it here): the reference in the button's place, selected
+    if (copied) button.textContent = t("Copied");
+    else { const code = el("code", { class: "mono" }, ref); button.replaceWith(code); selectText(code); }
+    say(copied ? t("Copied: {command}", { command: ref }) : t("{ref} is selected: copy it with Ctrl+C", { ref }));
+  };
+  const showModels = async (server, current) => {
+    clear(output);
+    try { output.append(modelsTable(server, await api("GET", path(server, "/models")), { use: useModel(server), copy: copyRef, current, host })); }
+    catch (err) { output.append(errorNotice(err)); }
+  };
+  // every request of a row goes to the row's host (the page's, as it was when it was drawn), never the host chosen since
+  const drawList = (found) => {
+    servers = (Array.isArray(found) ? found : []).filter(e => e && typeof e.name === "string");
+    const rows = servers.map(e => {
+      const agent = el("select", { "aria-label": t("Agent for the check of {name} on {host}", { name: e.name, host }) }, el("option", { value: "" }, t("every agent")), AGENTS.map(a => el("option", { value: a }, a)));
+      const actions = el("td", { class: "actions" });
+      const row = el("tr", {}, el("td", { class: "mono" }, e.name), el("td", {}, e.kind), el("td", { class: "mono" }, e.url), el("td", { class: "mono" }, e.model || ""), actions);
+      const remove = rowButton(t("Remove"), e.name, host, { class: "danger", onclick: () => confirmIn(actions, t("Remove the LLM server {name} on {host}? Starts with {option} cannot start until it is added again.", { name: e.name, host, option: `--llm ${e.name}` }), t("Yes, remove it"), async () => {
+        try { await api("DELETE", path(e.name), { confirm: true }); show("llm"); } catch (err) { failed(t("Could not remove {name} on {host}", { name: e.name, host }))(err); }
+      }, { trigger: remove }) });
+      actions.append(agent,
+        rowButton(t("Check"), e.name, host, { onclick: (ev) => busy(ev.target, async () => {
+          clear(output);
+          try { const r = await api("POST", path(e.name, "/check"), agent.value ? { agent: agent.value } : {}); output.append(notice(r.ok ? t("the server works for it") : t("the check found problems"), r.ok ? "ok" : "error"), el("pre", {}, r.output)); }
+          catch (err) { output.append(errorNotice(err)); }
+        }) }),
+        rowButton(t("Models"), e.name, host, { onclick: (ev) => busy(ev.target, () => showModels(e.name, e.model || null)) }),
+        rowButton(t("Show"), e.name, host, { onclick: (ev) => busy(ev.target, async () => {
+          clear(output);
+          try { output.append(el("h3", {}, e.name), dataView(await api("GET", path(e.name)))); }
+          catch (err) { output.append(errorNotice(err)); }
+        }) }),
+        rowButton(t("Edit…"), e.name, host, { onclick: (ev) => busy(ev.target, () => editServer(e.name)) }),
+        remove);
+      return row;
+    });
+    clear(listBox).append(table([t("Name"), t("Kind"), "URL", t("Model"), ""], rows, t("No LLM server yet.")));
+  };
+  drawList(list);
+  main.append(listBox, output);
+
+  // the form: a new server, or (Edit…) one of the list prefilled from llm show and saved with --replace
+  const name = el("input", { id: "llm-name", placeholder: "lmstudio", autocomplete: "off", spellcheck: "false", "aria-describedby": "llm-name-problem" });
+  const nameProblem = el("div", { id: "llm-name-problem", class: "wide" });
   const kind = el("select", { id: "llm-kind" }, ["lmstudio", "ollama", "llamacpp", "vllm", "openai-compatible"].map(k => el("option", { value: k }, k)));
   const url = el("input", { id: "llm-url", class: "mono", placeholder: "http://192.168.1.20:1234" });
   const model = el("input", { id: "llm-model", class: "mono", placeholder: t("optional") });
+  const modelPick = el("select", { id: "llm-model-pick", class: "mono" });
+  const modelPickLabel = el("label", { for: "llm-model-pick" }, t("Default model (listed)"));
+  modelPick.hidden = true; modelPickLabel.hidden = true;
+  modelPick.addEventListener("change", () => { if (modelPick.value) model.value = modelPick.value; });
   // the NAME of the secret that holds the API key (sandbox-ai secrets there), never the key
   const keySecret = el("input", { id: "llm-key-secret", class: "mono", placeholder: t("optional, e.g. {name}", { name: "LMSTUDIO_KEY" }), pattern: "[A-Za-z_][A-Za-z0-9_]{0,63}", autocomplete: "off", "aria-describedby": "llm-hint" });
   const status = el("div", { class: "wide" });
+  const testBox = el("div", { class: "wide", id: "llm-test-result" });
   const headerSecrets = el("input", { id: "llm-headers", class: "mono", placeholder: "X-Gateway-Key=GW_KEY" }), ca = el("input", { id: "llm-ca", class: "mono", placeholder: "/home/you/ca.pem" });
+  const caNote = el("div", { class: "wide hint", id: "llm-ca-note" });
   const vpn = el("input", { id: "llm-vpn", class: "mono", placeholder: "home" });
   const anthropic = el("input", { id: "llm-anthropic", type: "checkbox" }), replace = el("input", { id: "llm-replace", type: "checkbox" }), insecure = el("input", { id: "llm-insecure", type: "checkbox" });
+  const heading = el("h2", { id: "llm-form-title" }, t("Add a server"));
   const addRow = el("div", { class: "row" });
-  addRow.append(el("button", { class: "primary", onclick: (ev) => {
+  let editing = null;  // {name, ca, saved}: the server the form changes (Edit…), as llm show said and as last saved
+  const checkName = () => {
+    clear(nameProblem);
+    const problem = llmNameProblem(name.value.trim());
+    if (problem) name.setAttribute("aria-invalid", "true"); else name.removeAttribute("aria-invalid");
+    if (problem) nameProblem.append(notice(problem.text, "error"), el("button", { onclick: () => { name.value = problem.fixed; checkName(); } }, t("Use {name}", { name: problem.fixed })));
+    return problem;
+  };
+  name.addEventListener("input", checkName);
+  // what the form says as the body of POST /llm, or null (what is wrong shown in STATUS, every field kept)
+  const formBody = () => {
     clear(status);
+    if (!name.value.trim()) { status.append(notice(t("Which name? Letters, digits, _ and - (up to 32), starting with a letter or a digit."), "error")); return null; }
+    const problem = checkName();
+    if (problem) { status.append(notice(problem.text, "error")); return null; }
     const secret = keySecret.value.trim();
-    if (secret && !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(secret)) { status.append(notice(t("A secret's name: letters, digits and _ (up to 64), not starting with a digit."), "error")); return; }
+    if (secret && !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(secret)) { status.append(notice(t("A secret's name: letters, digits and _ (up to 64), not starting with a digit."), "error")); return null; }
     const headers = wordsOf(headerSecrets.value).map(pair => { const [header, ...rest] = pair.split("="); return { header, secret: rest.join("=") }; });
     const body = Object.assign({ name: name.value.trim(), kind: kind.value, url: url.value.trim(), model: model.value.trim() }, secret ? { api_key_secret: secret } : {});
     const more = { header_secrets: headers.length ? headers : null, ca: textOf(ca), vpn: textOf(vpn), anthropic: anthropic.checked, replace: replace.checked, insecure_http: insecure.checked };
     for (const [key, value] of Object.entries(more)) if (value) body[key] = value;
+    return body;
+  };
+  // what is asked first: plain http outside the local networks, a server of that name replaced (and its CA dropped)
+  const asksOf = (body) => [body.insecure_http ? t("Send the prompts to {url} over plain http, unencrypted, from {host}? Whoever is on the way can read them, the answers and the key.", { url: body.url, host }) : null,
+    body.replace ? t("Replace the LLM server {name} on {host}? Every start that uses it sends its prompts (and its key) to {url} from then on.", { name: body.name, host, url: body.url }) : null,
+    body.replace && editing && editing.ca && editing.name === body.name && !body.ca ? t("Its CA certificate ({file}) is removed: give its file again to keep it.", { file: editing.ca }) : null].filter(Boolean);
+  const canon = (b) => JSON.stringify(Object.keys(b).filter(k => !["replace", "confirm"].includes(k) && b[k] !== undefined).sort().map(k => [k, b[k]]));
+  const same = (body) => Boolean(editing && editing.saved) && canon(body) === canon(editing.saved);
+  const setEditing = (view, saved) => {
+    editing = view ? { name: view.name, ca: view.ca || null, saved: saved || null } : null;
+    heading.textContent = editing ? t("Change the server {name}", { name: editing.name }) : t("Add a server");
+    save.textContent = editing ? t("Save") : t("Add");
+    cancelEdit.hidden = !editing;
+    clear(caNote);
+    if (editing && editing.ca) caNote.append(t("It has a CA certificate of its own ({file}): give its file again here, or saving removes it.", { file: editing.ca }));
+  };
+  const editServer = async (server) => {
+    let view;
+    try { view = await api("GET", path(server)); } catch (e) { clear(output).append(errorNotice(e)); return; }
+    if (!view || typeof view !== "object" || typeof view.name !== "string") { clear(output).append(notice(t("{name}: llm show said nothing usable.", { name: server }), "error")); return; }
+    const body = llmBodyOf(view);
+    name.value = view.name; kind.value = view.kind || "openai-compatible"; url.value = view.url || ""; model.value = view.model || "";
+    keySecret.value = view.api_key_secret || ""; headerSecrets.value = (body.header_secrets || []).map(h => `${h.header}=${h.secret}`).join(" ");
+    ca.value = ""; vpn.value = view.vpn || ""; anthropic.checked = Boolean(view.anthropic); insecure.checked = Boolean(view.insecure_http); replace.checked = true;
+    fillModels(Array.isArray(view.models) ? view.models.map(m => ({ name: m })) : []);
+    clear(status); clear(testBox); checkName();
+    setEditing(view, Object.assign(body, { replace: true }));
+    if (typeof url.focus === "function") url.focus();
+  };
+  // the Default-model select, from what a test (or llm show's last check) listed
+  const fillModels = (models) => {
+    const names = (Array.isArray(models) ? models : []).filter(m => m && typeof m.name === "string")
+      .sort((a, b) => ({ true: 0, false: 1 }[String(a.loaded)] ?? 2) - ({ true: 0, false: 1 }[String(b.loaded)] ?? 2) || (a.name < b.name ? -1 : 1)).map(m => m.name);
+    clear(modelPick).append(el("option", { value: "" }, t("a listed model…")), ...names.map(n => el("option", { value: n, selected: n === model.value.trim() }, n)));
+    modelPick.value = names.includes(model.value.trim()) ? model.value.trim() : "";
+    modelPick.hidden = !names.length; modelPickLabel.hidden = !names.length;
+  };
+  const save = el("button", { class: "primary", onclick: (ev) => {
+    const body = formBody();
+    if (!body) return;
     const send = (confirm) => busy(ev.target, async () => { try { await api("POST", hostPath("/llm", host), Object.assign({}, body, confirm ? { confirm: true } : {})); show("llm"); } catch (e) { status.append(errorNotice(e)); } });
-    // what is asked first: plain http outside the local networks, a server of that name replaced (asked together)
-    const asks = [body.insecure_http ? t("Send the prompts to {url} over plain http, unencrypted, from {host}? Whoever is on the way can read them, the answers and the key.", { url: body.url, host }) : null,
-      body.replace ? t("Replace the LLM server {name} on {host}? Every start that uses it sends its prompts (and its key) to {url} from then on.", { name: body.name, host, url: body.url }) : null].filter(Boolean);
+    const asks = asksOf(body);
     if (!asks.length) { send(false); return; }
     confirmIn(addRow, asks.join(" "), body.replace ? t("Yes, replace it") : t("Yes, add it"), () => send(true), { kind: "primary", trigger: ev.target });
-  } }, t("Add")));
-  main.append(el("h2", {}, t("Add a server")), el("div", { class: "card" }, el("div", { class: "form" },
-    el("label", { for: "llm-name" }, t("Name")), name, el("label", { for: "llm-kind" }, t("Kind")), kind,
-    el("label", { for: "llm-url" }, "URL"), url, el("label", { for: "llm-model" }, t("Model")), model,
+  } }, t("Add"));
+  // Test connection: sandbox-ai lists a server's models only once it is saved (llm models, llm check), so a new or
+  // changed form is saved first (asked, with what saving asks); the result below, the form kept as it is
+  const test = el("button", { onclick: (ev) => {
+    const body = formBody();
+    if (!body) return;
+    const run = async (saveFirst) => {
+      clear(testBox).append(el("p", { class: "hint" }, t("Testing {name}…", { name: body.name })));
+      if (saveFirst) {
+        try { await api("POST", hostPath("/llm", host), Object.assign({}, body, { confirm: true })); }
+        catch (e) { clear(testBox).append(errorNotice(e, t("Not saved"))); return; }
+        replace.checked = true;
+        setEditing({ name: body.name, ca: body.ca ? `${body.name}.pem` : null }, Object.assign({}, body, { replace: true, ca: undefined }));
+        await refreshList();
+      }
+      let models = null, modelsError = null, check = null;
+      try { models = await api("GET", path(body.name, "/models")); } catch (e) { modelsError = e; }
+      try { check = await api("POST", path(body.name, "/check"), {}); } catch (e) { check = { ok: false, output: errorText(e) }; }
+      const listed = (Array.isArray(models) ? models : []).filter(m => m && typeof m.name === "string");
+      clear(testBox).append(notice(check && check.ok ? t("{name} answers: {count} model(s) listed.", { name: body.name, count: listed.length }) : t("The test of {name} found problems.", { name: body.name }), check && check.ok ? "ok" : "error"),
+        ...[modelsError ? errorNotice(modelsError) : null, check && check.output ? el("pre", {}, String(check.output)) : null].filter(Boolean));
+      fillModels(listed);
+    };
+    if (same(body)) { busy(ev.target, () => run(false)); return; }
+    const asks = [t("Test {name}: it is saved on {host} first (sandbox-ai llm add), then its models are listed and it is checked.", { name: body.name, host }), ...asksOf(body)];
+    confirmIn(addRow, asks.join(" "), t("Yes, save and test"), () => run(true), { kind: "primary", trigger: ev.target });
+  } }, t("Test connection"));
+  const cancelEdit = el("button", { onclick: () => {
+    for (const input of [name, url, model, keySecret, headerSecrets, ca, vpn]) input.value = "";
+    for (const box of [anthropic, replace, insecure]) box.checked = false;
+    clear(status); clear(testBox); fillModels([]); checkName(); setEditing(null);
+  } }, t("Stop editing"));
+  cancelEdit.hidden = true;
+  addRow.append(save, test, cancelEdit);
+  main.append(heading, el("div", { class: "card" }, el("div", { class: "form" },
+    el("label", { for: "llm-name" }, t("Name")), name, nameProblem, el("label", { for: "llm-kind" }, t("Kind")), kind,
+    el("label", { for: "llm-url" }, "URL"), url, el("label", { for: "llm-model" }, t("Model")), model, modelPickLabel, modelPick,
     el("label", { for: "llm-key-secret" }, t("API key: secret (its name)")), keySecret,
-    el("label", { for: "llm-headers" }, t("Headers from secrets (HEADER=SECRET)")), headerSecrets, el("label", { for: "llm-ca" }, t("CA certificate")), ca,
+    el("label", { for: "llm-headers" }, t("Headers from secrets (HEADER=SECRET)")), headerSecrets, el("label", { for: "llm-ca" }, t("CA certificate")), ca, caNote,
     el("label", { for: "llm-vpn" }, t("VPN profile")), vpn, el("label", { for: "llm-anthropic" }, t("Also the Anthropic Messages API")), anthropic,
     el("label", { for: "llm-replace" }, t("Replace one of that name")), replace, el("label", { for: "llm-insecure" }, t("Plain http outside the local networks")), insecure,
-    el("span"), addRow, status),
+    el("span"), addRow, status, testBox),
     el("p", { class: "hint", id: "llm-hint" }, t("Then start an agent with {option} (Options of a new start). A server that wants a key: keep it on the page Secrets of that host, and name that secret here.", { option: "--llm NAME" }), " ",
       el("button", { onclick: () => show("secrets") }, t("Open Secrets")))));
-
 };
 
 // Kits (sandbox-ai kits on that host): what each brings, and adding to a kit of yours. sandbox-ai's own kits are
@@ -3152,7 +3379,8 @@ pages.settings = async (main) => {
 };
 
 // The secrets of a host (sandbox-ai secrets there): names and where each is kept, never a value. A value is typed
-// into a password field, sent once and cleared; the service hands it to `secrets set` on its standard input.
+// into a field shown while it is typed (secretInput: "Show value" hides it), sent once and cleared; the service hands
+// it to `secrets set` on its standard input. Add stores a new name; a name that exists is asked about first.
 pages.secrets = async (main) => {
   const host = state.host;
   main.append(el("h1", {}, t("Secrets on {host}", { host })), el("p", { class: "hint" }, t("Loading…")));
@@ -3173,16 +3401,16 @@ pages.secrets = async (main) => {
   });
   main.append(table([t("Name"), t("Kept in"), ""], rows, t("No secrets on this host."), t("Secrets on {host}", { host })));
   const name = el("input", { id: "secret-name", class: "mono", placeholder: "GITEA_TOKEN", pattern: "[A-Za-z_][A-Za-z0-9_]{0,63}", autocomplete: "off" });
-  const value = el("input", { id: "secret-value", type: "password", autocomplete: "new-password", "aria-describedby": "secret-hint" });
+  const [value, valueField] = secretInput({ id: "secret-value", class: "mono", "aria-describedby": "secret-hint" });
   const status = el("div", { class: "wide" });
   const actions = el("div", { class: "row" });
-  // WANTED: the name as it was when the user pressed Keep it (and was asked, if asked): what is sent is what was named
+  // WANTED: the name as it was when the user pressed Add (and was asked, if asked): what is sent is what was named
   const send = async (wanted, confirm) => {
     clear(status);
     try {
       const r = await api("POST", hostPath(`/secrets/${encodeURIComponent(wanted)}`, host), Object.assign({ secret: value.value }, confirm ? { confirm: true } : {}));
       value.value = "";
-      toast("success", t("{name} kept on {host}", { name: wanted, host }), (r && r.output) || "");
+      toast("success", t("{name} stored on {host}", { name: wanted, host }), (r && r.output) || "");
       show("secrets");
     } catch (e) {
       // a secret of that name came meanwhile (another tab, the command line): asked now, the value kept for the Yes
@@ -3192,7 +3420,7 @@ pages.secrets = async (main) => {
   };
   const askReplace = (wanted, text) => confirmIn(actions, text, t("Yes, replace it"), () => {
     if (name.value.trim() !== wanted) {  // the name was changed while the question was open: not what was asked
-      status.append(notice(t("The name is {now} now, not {asked} as asked: nothing was sent. Press Keep it again.", { now: name.value.trim(), asked: wanted }), "warn"));
+      status.append(notice(t("The name is {now} now, not {asked} as asked: nothing was sent. Press Add again.", { now: name.value.trim(), asked: wanted }), "warn"));
       return undefined;
     }
     return send(wanted, true);
@@ -3201,15 +3429,15 @@ pages.secrets = async (main) => {
     clear(status);
     const wanted = name.value.trim();
     if (!/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(wanted)) { toast("warning", t("Which name?"), t("Letters, digits and _ (up to 64), not starting with a digit.")); return; }
-    if (!value.value) { toast("warning", t("Which value?"), t("Type the value into the password field.")); return; }
+    if (!value.value) { toast("warning", t("Which value?"), t("Type the value into the field Value.")); return; }
     if (names.some(x => x.name === wanted)) { askReplace(wanted, t("Replace the value of {name} on {host}? The old one is gone.", { name: wanted, host })); return; }
     send(wanted, false);
-  } }, t("Keep it"));
+  } }, t("Add"));
   actions.append(keep);
   main.append(el("h2", {}, t("Set a secret")), el("div", { class: "card" }, el("div", { class: "form" },
-    el("label", { for: "secret-name" }, t("Name")), name, el("label", { for: "secret-value" }, t("Value")), value, status,
+    el("label", { for: "secret-name" }, t("Name")), name, el("label", { for: "secret-value" }, t("Value")), valueField, status,
     el("span"), actions),
-  el("p", { class: "hint", id: "secret-hint" }, t("Sent once to that host's sandbox-ai, on its standard input: never shown, logged or sent back."))));
+  el("p", { class: "hint", id: "secret-hint" }, t("Shown here only while you type it (Show value hides it). Stored on that host for good, until you delete it: sent to its sandbox-ai on its standard input, never logged or sent back; a value already stored is never shown."))));
 };
 
 // The version of a host's sandbox-ai and whether an update is there (hosts list's status; null: not asked yet).
@@ -3980,12 +4208,13 @@ pages.mcp = async (main) => {
     addStatus, el("span"), addRow)));
 };
 
-// Logins (sandbox-ai login, plugins, git-logins, publish-logins, identities): the tokens stay secrets of that host,
-// named here, never shown or sent.
+// Logins (sandbox-ai login, plugins, git-logins, publish-logins, identities): the tokens stay secrets of that host.
+// A Git or publish login's token is typed here (stored as a secret first: tokenSource) or a stored secret is chosen;
+// a token already stored is never shown or sent back.
 pages.logins = async (main) => {
   const host = state.host;
   main.append(el("h1", {}, t("Logins on {host}", { host })));
-  main.append(el("p", { class: "hint" }, t("Tokens stay in that host's secrets: here they are named, never shown."), " ", el("button", { onclick: () => show("secrets") }, t("Open Secrets"))));
+  main.append(el("p", { class: "hint" }, t("Tokens are kept in that host's secrets, for good: a token typed here is stored there first, one already stored is never shown."), " ", el("button", { onclick: () => show("secrets") }, t("Open Secrets"))));
   // the agents' own logins and Claude's plugins: interactive, in a terminal
   const agentRows = AGENTS.map(agent => {
     const actions = el("td", { class: "actions" });
@@ -4016,6 +4245,62 @@ pages.logins = async (main) => {
     return button;
   };
   const check = (path, body) => async (event) => { const box = event.target.parentNode.parentNode.querySelector(".check-result") || event.target.parentNode; await busy(event.target, async () => { try { checkResult(box, await api("POST", hostPath(path, host), body())); } catch (e) { clear(box).append(errorNotice(e)); } }); };
+  // the names of that host's secrets (secrets list), for "Use a stored secret" and to ask before one is replaced
+  let secretNames = [], secretsError = null;
+  try { const list = await api("GET", hostPath("/secrets", host)); secretNames = (Array.isArray(list) ? list : []).filter(x => x && typeof x.name === "string").map(x => x.name); }
+  catch (e) { secretsError = e; }
+  if (!live()) return;
+  // The token of a login (git-logins, publish-logins take a secret's NAME): typed here, stored first as a secret of
+  // that host under a name it suggests (SUGGEST(); editable), as the page Secrets does (secrets set NAME, the token on
+  // its standard input, never in a command line, a log or an answer), or a secret already stored there. PREFIX: the
+  // fields' ids. ready(row, trigger, go): checks the fields, asks before a stored secret is replaced, then go(name,
+  // replace): replace null for a stored secret, else whether the replacement was confirmed. store(row, name,
+  // replace, then): stores a typed token (asks again when one of that name came meanwhile), then then().
+  const tokenSource = (prefix, suggest) => {
+    const source = el("select", { id: `${prefix}-source`, value: "token" }, el("option", { value: "token" }, t("Enter the token")), el("option", { value: "stored" }, t("Use a stored secret")));
+    const [token, tokenField] = secretInput({ id: `${prefix}-token`, class: "mono", "aria-describedby": `${prefix}-secret-hint` });
+    const name = el("input", { id: `${prefix}-secret`, class: "mono", value: suggest(), pattern: "[A-Za-z_][A-Za-z0-9_]{0,63}", autocomplete: "off", spellcheck: "false", "aria-describedby": `${prefix}-secret-hint` });
+    let edited = false;
+    name.addEventListener("input", () => { edited = name.value.trim() !== "" && name.value.trim() !== suggest(); });
+    const stored = el("select", { id: `${prefix}-stored`, class: "mono" }, secretNames.length ? secretNames.map(n => el("option", { value: n }, n))
+      : el("option", { value: "", disabled: true, selected: true }, secretsError ? t("the secrets of {host} could not be listed", { host }) : t("no secrets on {host} yet", { host })));
+    const tokenLabel = el("label", { for: `${prefix}-token` }, t("Token")), nameLabel = el("label", { for: `${prefix}-secret` }, t("Stored as the secret"));
+    const storedLabel = el("label", { for: `${prefix}-stored` }, t("Stored secret"));
+    const hint = el("p", { class: "hint wide", id: `${prefix}-secret-hint` }, t("A secret's name is what the token is stored under on that host, for good (page Secrets): logins and starts name it, never the token itself."));
+    const redraw = () => {
+      const typed = source.value === "token";
+      for (const n of [tokenLabel, tokenField, nameLabel, name]) n.hidden = !typed;
+      for (const n of [storedLabel, stored]) n.hidden = typed;
+    };
+    source.addEventListener("change", redraw);
+    redraw();
+    const refresh = () => { if (!edited) name.value = suggest(); };
+    const ready = (row, trigger, go) => {
+      if (source.value === "stored") {
+        if (!stored.value) { toast("warning", t("Which secret?"), t("Choose a stored secret, or enter the token.")); return; }
+        go(stored.value, null); return;
+      }
+      const wanted = name.value.trim();
+      if (!/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(wanted)) { toast("warning", t("Which name?"), t("Letters, digits and _ (up to 64), not starting with a digit.")); return; }
+      if (!token.value) { toast("warning", t("Which token?"), t("Enter the token, or use a stored secret.")); return; }
+      if (secretNames.includes(wanted)) { confirmIn(row, t("Replace the value of {name} on {host}? The old one is gone.", { name: wanted, host }), t("Yes, replace it"), () => go(wanted, true), { trigger }); return; }
+      go(wanted, false);
+    };
+    const store = async (row, wanted, replace, then) => {
+      if (replace === null) return then();
+      try { await api("POST", hostPath(`/secrets/${encodeURIComponent(wanted)}`, host), Object.assign({ secret: token.value }, replace ? { confirm: true } : {})); }
+      catch (e) {
+        // a secret of that name came meanwhile (another tab, the command line): asked now, the token kept for the Yes
+        if (!replace && confirmable(e)) { askRefused(row, e, () => store(row, wanted, true, then)); return undefined; }
+        token.value = ""; failed(t("Could not store the token as {name} on {host}", { name: wanted, host }))(e); return undefined;
+      }
+      token.value = "";
+      if (!secretNames.includes(wanted)) secretNames.push(wanted);
+      return then();
+    };
+    const fields = [el("label", { for: `${prefix}-source` }, t("Token from")), source, tokenLabel, tokenField, nameLabel, name, storedLabel, stored, hint];
+    return { fields, ready, store, refresh, typed: () => source.value === "token" };
+  };
 
   await section(t("Git logins (every sandbox's proxy)"), "/git-logins", (box, list) => {
     const rows = (Array.isArray(list) ? list : []).filter(x => x && x.url).map(x => {
@@ -4024,15 +4309,18 @@ pages.logins = async (main) => {
       return el("tr", {}, el("td", { class: "mono" }, x.url), el("td", { class: "mono" }, x.user || ""), el("td", { class: "mono" }, x.secret || ""), actions);
     });
     const url = el("input", { id: "git-url", class: "mono", placeholder: "https://git.example.org" }), user = el("input", { id: "git-user", class: "mono", placeholder: "x-access-token" });
-    const secret = el("input", { id: "git-secret", class: "mono", placeholder: "GITEA_TOKEN" });
+    const token = tokenSource("git", () => gitTokenName(url.value));
+    url.addEventListener("input", token.refresh);
     const row = el("div", { class: "row" }), result = el("div", { class: "wide check-result" });
-    const add = (event) => {
-      const body = { url: url.value.trim(), secret: secret.value.trim(), user: user.value.trim() };
-      confirmIn(row, t("Give every sandbox on {host} that reaches {url} the Git login of the secret {secret}? The connection proxy adds it; the token never enters a sandbox.", { host, url: body.url, secret: body.secret }), t("Yes, add it"), () => sendAsking(row, "POST", hostPath("/git-logins", host), Object.assign(body, { confirm: true }), () => show("logins")), { kind: "primary", trigger: event.target });
-    };
+    const add = (event) => token.ready(row, event.target, (secret, replace) => {
+      const body = { url: url.value.trim(), secret, user: user.value.trim() };
+      const question = t("Give every sandbox on {host} that reaches {url} the Git login of the secret {secret}? The connection proxy adds it; the token never enters a sandbox.", { host, url: body.url, secret });
+      confirmIn(row, replace === null ? question : `${question} ${t("The token is stored first as the secret {secret} on {host}, for good.", { secret, host })}`, t("Yes, add it"),
+        () => token.store(row, secret, replace, () => sendAsking(row, "POST", hostPath("/git-logins", host), Object.assign(body, { confirm: true }), () => show("logins"))), { kind: "primary", trigger: event.target });
+    });
     row.append(el("button", { class: "primary", onclick: add }, t("Add…")), el("button", { onclick: check("/git-logins/check", () => ({ url: url.value.trim() })) }, t("Check")));
     clear(box).append(table([t("Server"), t("User"), t("Secret"), ""], rows, t("No Git logins on this host.")), el("div", { class: "card" }, el("div", { class: "form" },
-      el("label", { for: "git-url" }, t("Server")), url, el("label", { for: "git-user" }, t("User")), user, el("label", { for: "git-secret" }, t("Secret (its name)")), secret, el("span"), row, result)));
+      el("label", { for: "git-url" }, t("Server")), url, el("label", { for: "git-user" }, t("User")), user, ...token.fields, el("span"), row, result)));
   });
 
   await section(t("Publish logins (with --publish only)"), "/publish-logins", (box, list) => {
@@ -4042,13 +4330,17 @@ pages.logins = async (main) => {
       return el("tr", {}, el("td", { class: "mono" }, x.kind), el("td", { class: "mono" }, x.host || ""), el("td", { class: "mono" }, x.secret || ""), actions);
     });
     const kind = el("select", { id: "publish-kind" }, PUBLISH_KINDS.map(k => el("option", { value: k }, k)));
-    const secret = el("input", { id: "publish-secret", class: "mono", placeholder: "PYPI_TOKEN" }), url = el("input", { id: "publish-url", class: "mono", placeholder: "https://npm.example.org" });
+    const url = el("input", { id: "publish-url", class: "mono", placeholder: "https://npm.example.org" });
+    const token = tokenSource("publish", () => PUBLISH_TOKEN_NAMES[kind.value] || "PUBLISH_TOKEN");
+    kind.addEventListener("change", token.refresh);
     const row = el("div", { class: "row" }), result = el("div", { class: "wide check-result" });
-    row.append(el("button", { class: "primary", onclick: (event) => busy(event.target, () => sendAsking(row, "POST", hostPath("/publish-logins", host), { kind: kind.value, secret: secret.value.trim(), url: url.value.trim() }, () => show("logins"), event.target)) }, t("Add")),
+    const add = (event) => token.ready(row, event.target, (secret, replace) => busy(event.target, () => token.store(row, secret, replace,
+      () => sendAsking(row, "POST", hostPath("/publish-logins", host), { kind: kind.value, secret, url: url.value.trim() }, () => show("logins"), event.target))));
+    row.append(el("button", { class: "primary", onclick: add }, t("Add")),
       el("button", { onclick: check("/publish-logins/check", () => ({ kind: kind.value })) }, t("Check")),
       el("button", { onclick: (event) => busy(event.target, async () => { try { clear(result).append(outputBlock(await api("GET", hostPath("/publish-logins/kinds", host)))); } catch (e) { clear(result).append(errorNotice(e)); } }) }, t("What each kind opens")));
     clear(box).append(table([t("Kind"), t("Host"), t("Secret"), ""], rows, t("No publish logins on this host.")), el("div", { class: "card" }, el("div", { class: "form" },
-      el("label", { for: "publish-kind" }, t("Kind")), kind, el("label", { for: "publish-secret" }, t("Secret (its name)")), secret, el("label", { for: "publish-url" }, t("Another server (optional)")), url, el("span"), row, result)));
+      el("label", { for: "publish-kind" }, t("Kind")), kind, ...token.fields, el("label", { for: "publish-url" }, t("Another server (optional)")), url, el("span"), row, result)));
   });
 
   await section(t("Identities (--identity NAME)"), "/identities", (box, found) => {
@@ -4091,6 +4383,15 @@ pages.logins = async (main) => {
   });
 };
 const PUBLISH_KINDS = ["npm", "pypi", "testpypi", "crates", "gitlab", "github"];
+// The name a typed token of a publish login is stored under unless changed (the usual ones of each registry).
+const PUBLISH_TOKEN_NAMES = { npm: "NPM_TOKEN", pypi: "PYPI_TOKEN", testpypi: "TESTPYPI_TOKEN", crates: "CARGO_TOKEN", gitlab: "GITLAB_TOKEN", github: "GITHUB_TOKEN" };
+// ... and of a Git login: GIT_TOKEN_<HOST> of its server (git.example.org: GIT_TOKEN_GIT_EXAMPLE_ORG), up to 64.
+function gitTokenName(address) {
+  let hostname = "";
+  try { hostname = new URL(String(address || "").trim()).hostname; } catch (e) { hostname = ""; }
+  const part = hostname.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  return part ? `GIT_TOKEN_${part}`.slice(0, 64).replace(/_+$/, "") : "GIT_TOKEN";
+}
 
 // Presets (sandbox-ai presets): what each sets, what is missing before it starts, and the extra directories.
 pages.presets = async (main) => {

@@ -204,7 +204,7 @@ NOT_WORDS = {
     "HTTPS (TCP/443)", "IP:PORT (TCP)", "CPUs", "SSH", "URL", "ok",
     # examples in the placeholders of the CLI's other commands, and names of programs
     "files", "Podman", "Bubblewrap", "sandbox-ai-home", "TOR_BRIDGES", "de,nl", "proton", "X-Gateway-Key=GW_KEY",
-    "PreToolUse", "Bash|Write", "hub:binwalk", "VT_API_KEY", "egm", "x-access-token", "PYPI_TOKEN", "work", "Ann Example",
+    "PreToolUse", "Bash|Write", "hub:binwalk", "VT_API_KEY", "egm", "x-access-token", "work", "Ann Example",
     "GH_WORK",
     # examples of the start form, the teams, the kits' marketplaces and the images (names, a Containerfile line)
     "my-plugins", "review", "ffmpeg jq", "RUN apt-get update && apt-get install -y --no-install-recommends tree", "data",
