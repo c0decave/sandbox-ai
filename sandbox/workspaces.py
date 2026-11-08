@@ -628,10 +628,12 @@ def judged(record, real, read_only=False):
     # A start lets a workspace hold the project's own .venv/bin or node_modules/.bin on your PATH, and checks what
     # the agent changed there after the run (tool_dirs_state); for a workspace added later nothing would.
     for directory in l.private_locations()[1]:
-        if directory == real or real in directory.parents:
-            raise ValueError(f"{shown(real)} holds {shown(directory)}, a directory on your PATH: programs the agent "
-                             "puts there would run on the host. Start with it as a workspace instead (the start checks "
-                             "it after the run), or take it off your PATH")
+        if (directory == real or real in directory.parents) and not read_only:
+            # You decide what a sandbox gets: given, with what it means (a start would check it after the run).
+            print(f"sandbox-ai workspace: warning: {shown(real)} holds {shown(directory)}, a directory on your PATH: "
+                  "programs the agent puts there run on this host; nothing checks them after the run",
+                  file=sys.stderr)
+            break
     for entry in checks.get("workspaces", []) + present_workspaces(record):
         other = Path(entry["host"])
         if overlaps(real, other):

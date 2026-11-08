@@ -2617,10 +2617,11 @@ def test_check_host_sources(scenario, tmp_path):
         for options in cases:
             with pytest.raises(ValueError, match="agent can change"):
                 s.validate(exposure_args(tmp_path, *options))
-        # Security review round 3: --log-dir and --gui-vnc (bound rw) never in a private location or socket folder.
+        # --log-dir and --gui-vnc (bound rw) never in sandbox-ai's own folders; a private location of yours (~/.ssh)
+        # is your choice: given, with a warning.
         for option in ("--log-dir", "--gui-vnc"):
-            with pytest.raises(ValueError, match=f"{option} .*lies in"):
-                s.validate(exposure_args(tmp_path, option, str(Path.home() / ".ssh" / "out")))
+            with pytest.raises(ValueError, match=f"{option} .*sandbox-ai's own folder"):
+                s.validate(exposure_args(tmp_path, option, str(Path.home() / ".local/state/sandbox-ai/runs/x")))
         return
     # The persistent HOME must not lie in a workspace, where it could be committed or swapped.
     (tmp_path / "work").mkdir()
@@ -3439,9 +3440,10 @@ def test_check_output_dir(scenario, tmp_path, monkeypatch):
     elif scenario == "sad":
         with pytest.raises(ValueError, match="--gui-vnc .*a socket there"):
             s.check_output_dir(run / "bus", "--gui-vnc")
-        for private in (state, state / "sandbox-ai" / "logs", state / "sandbox-ai" / "runs", Path.home() / ".ssh"):
+        for private in (state, state / "sandbox-ai" / "logs", state / "sandbox-ai" / "runs"):
             with pytest.raises(ValueError, match="--log-dir .*(lies in|contains)"):
                 s.check_output_dir(private, "--log-dir")
+        s.check_output_dir(Path.home() / ".ssh", "--log-dir")  # yours to give: a warning, not a refusal
     else:
         table = tmp_path / "mountinfo"
         table.write_text(f"22 1 0:21 / / rw - ext4 /dev/sda1 rw\n40 22 0:5 / {tmp_path}/chroot/proc rw - proc "
@@ -3488,13 +3490,13 @@ def test_auth_source_candidates(scenario, tmp_path, monkeypatch):
                                                       tmp_path / ".claude/.claude.json", tmp_path / ".claude.json"]
         # The login store feeds every sandbox: a workspace that contains it is refused.
         (tmp_path / ".local/share").mkdir(parents=True)
-        with pytest.raises(ValueError, match="agent can change|lies in "):
+        with pytest.raises(ValueError, match="agent can change|lies in |sandbox-ai's own folder"):
             s.validate(s.parse_args(["claude", "--workspace", str(tmp_path / ".local")]))
     elif scenario == "sad":
         monkeypatch.setenv("CODEX_HOME", str(tmp_path / "work/.codex"))
         assert s.auth_source_candidates("codex") == [store / "codex/.codex/auth.json", tmp_path / "work/.codex/auth.json"]
         # A credential directory inside the workspace is refused before anything is read.
-        with pytest.raises(ValueError, match="agent can change|lies in "):
+        with pytest.raises(ValueError, match="agent can change|lies in |sandbox-ai's own folder"):
             s.validate(s.parse_args(["codex", "--workspace", str(tmp_path / "work")]))
     else:
         # Set but empty counts as unset (XDG): never a path relative to the current directory.
@@ -7097,6 +7099,24 @@ def test_private_locations(scenario, tmp_path, monkeypatch):
         assert tmp_path / "cache" / "sandbox-ai" in s.private_locations()[0]
 
 
+def test_sandbox_ai_folders(scenario, tmp_path, monkeypatch):
+    monkeypatch.setattr(s.Path, "home", classmethod(lambda cls: tmp_path))
+    for name in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+        monkeypatch.delenv(name, raising=False)
+    if scenario == "happy":
+        assert set(s.sandbox_ai_folders()) == {tmp_path / ".config/sandbox-ai", tmp_path / ".local/share/sandbox-ai",
+                                                tmp_path / ".local/state/sandbox-ai", tmp_path / ".cache/sandbox-ai"}
+    elif scenario == "sad":
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+        assert tmp_path / "cfg/sandbox-ai" in s.sandbox_ai_folders()
+        assert tmp_path / ".config/sandbox-ai" not in s.sandbox_ai_folders()
+    else:
+        (tmp_path / "real").mkdir()
+        (tmp_path / "link").symlink_to(tmp_path / "real")
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "link"))
+        assert tmp_path / "real/sandbox-ai" in s.sandbox_ai_folders(), "resolved"
+
+
 def test_check_private_location(scenario, tmp_path, monkeypatch):
     home = tmp_path / "home"
     monkeypatch.setattr(s.Path, "home", classmethod(lambda cls: home))
@@ -7104,13 +7124,19 @@ def test_check_private_location(scenario, tmp_path, monkeypatch):
     for name in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"):
         monkeypatch.delenv(name, raising=False)
     if scenario == "happy":
-        with pytest.raises(ValueError, match="lies in .*cargo"):
-            s.check_private_location(home / ".cargo" / "bin" / "x", "--mount")
+        # You decide: a private location is given, with a warning that says what it means.
+        warned = []
+        text = s.check_private_location(home / ".cargo" / "bin" / "x", "--mount", warned.append)
+        assert warned == [text] and "lies in" in text and ".cargo" in text and "runs on this host" in text
+        assert s.check_private_location(home / ".config" / "axross", "--mount", warned.append) is not None
     elif scenario == "sad":
         s.check_private_location(home / "proj", "Workspace")  # contains its own activated .venv/bin: fine
     else:
-        with pytest.raises(ValueError, match="contains .*home/\\."):
+        # Only sandbox-ai's own folders stay refused: a sandbox given them could change sandbox-ai itself.
+        with pytest.raises(ValueError, match="sandbox-ai's own folder"):
             s.check_private_location(home, "--state-dir")
+        with pytest.raises(ValueError, match="sandbox-ai's own folder"):
+            s.check_private_location(home / ".config" / "sandbox-ai" / "x", "Workspace")
         # Review finding: the packages' copies in the cache run on the host (an rw mount of them is refused).
         monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
         for path in (home / ".cache" / "sandbox-ai", home / ".cache" / "sandbox-ai" / "pyz" / "1.0-abc", home / ".cache"):
@@ -7184,8 +7210,7 @@ def test_project_tool_dir(scenario, tmp_path, monkeypatch):
         monkeypatch.setattr(s.Path, "home", classmethod(lambda cls: home))
         monkeypatch.setenv("PATH", f"{home}/.cargo/bin")
         assert not s.project_tool_dir(home / ".cargo" / "bin", home / ".cargo")
-        with pytest.raises(ValueError, match="contains .*cargo"):
-            s.check_private_location(home / ".cargo", "Workspace")
+        assert "contains" in s.check_private_location(home / ".cargo", "Workspace", lambda line: None)
     else:
         monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path / "proj" / "env"))
         assert s.project_tool_dir(tmp_path / "proj" / "env" / "bin", tmp_path / "proj")
@@ -7229,8 +7254,11 @@ def test_private_directories_are_no_workspaces(tmp_path, monkeypatch):
     (home / ".config" / "systemd").mkdir(parents=True)
     monkeypatch.setattr(s.Path, "home", classmethod(lambda cls: home))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
-    with pytest.raises(ValueError, match="lies in .*\\.config"):
-        s.check_workspace_scope(home / ".config" / "systemd")
+    # You decide what a sandbox gets: ~/.config/systemd is given (with a warning naming what it means); only a
+    # folder that holds or lies in sandbox-ai's own (~/.config itself holds ~/.config/sandbox-ai) is refused.
+    s.check_workspace_scope(home / ".config" / "systemd")
+    with pytest.raises(ValueError, match="sandbox-ai's own folder"):
+        s.check_workspace_scope(home / ".config")
     s.check_workspace_scope(home / "src" / "app")  # a project directory in HOME is fine
 
 

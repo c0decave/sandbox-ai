@@ -1315,17 +1315,42 @@ def check_package_location(path, option, packages=None):
                              f"{label}: the agent could rewrite it and run code on the host at the next start.{move}")
 
 
-def check_private_location(path, option):
-    """Refuse an agent-writable host tree PATH (resolved) in or over a private location."""
+def sandbox_ai_folders():
+    """sandbox-ai's own folders (its configuration and trust store, its state, sessions and approvals, its logins
+    and installed versions, its packages' copies): a sandbox given one of them could change sandbox-ai itself."""
+    home = Path.home()
+    found = []
+    for variable, default in (("XDG_CONFIG_HOME", ".config"), ("XDG_DATA_HOME", ".local/share"),
+                              ("XDG_STATE_HOME", ".local/state"), ("XDG_CACHE_HOME", ".cache")):
+        try:
+            found.append((Path(os.environ.get(variable) or home / default).expanduser() / "sandbox-ai").resolve())
+        except OSError:
+            continue
+    return found
+
+
+def check_private_location(path, option, warn=None):
+    """A host tree PATH (resolved) in or over a private location (settings, keys, autostart entries, programs on your
+    PATH): you decide what a sandbox gets, so it is given, with a warning (WARN(text), default: stderr) that names
+    what is there. Refused only in or over sandbox-ai's own folders (sandbox_ai_folders): there a sandbox could
+    change sandbox-ai itself - its trust store, its approvals, its policy. The warning, or None."""
     if own_home(path):
-        return
+        return None
+    for own in sandbox_ai_folders():
+        if path == own or own in path.parents or path in own.parents:
+            raise ValueError(f"{option} {path} {'lies in' if own in path.parents or path == own else 'contains'} "
+                             f"{own}, sandbox-ai's own folder: a sandbox given it could change sandbox-ai itself "
+                             "(its trust store, approvals and policy). Give a folder beside it.")
     fixed, program_dirs = private_locations()
     for private in fixed + program_dirs:
         inside = path == private or private in path.parents
         if inside or (path in private.parents and not project_tool_dir(private, path)):
-            raise ValueError(f"{option} {path} {'lies in' if inside else 'contains'} {private}: settings, keys, "
-                             "autostart entries or programs on your PATH there run on the host. Use a project "
-                             "directory.")
+            text = (f"{option} {path} {'lies in' if inside else 'contains'} {private}: the agent sees what is there "
+                    "(settings, keys), and where it may write, what it puts there (autostart entries, programs on your "
+                    "PATH) runs on this host")
+            (warn or (lambda line: print(f"agent-sandbox: warning: {printable(line)}", file=sys.stderr)))(text)
+            return text
+    return None
 
 
 def parse_args(argv):

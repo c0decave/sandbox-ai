@@ -499,12 +499,14 @@ def test_the_sandbox_is_frozen_while_its_use_is_checked(tmp_path):
     assert w.own_cgroup({"backend": "podman"}, found) == "/user.slice/pod"
 
 
-def test_a_workspace_holding_a_path_directory_is_refused(run, monkeypatch):
+def test_a_workspace_holding_a_path_directory_is_given_with_a_warning(run, monkeypatch, capsys):
+    """You decide what a sandbox gets: a folder holding a directory on your PATH is given, and the warning says
+    that programs the agent puts there run on this host."""
     record, tmp = run
     tools = Path(make(tmp / "proj" / ".venv" / "bin"))
     monkeypatch.setattr(L, "private_locations", lambda: ([], [tools]))
-    with pytest.raises(ValueError, match="directory on your PATH"):
-        w.judged(record, tmp / "proj")
+    assert w.judged(record, tmp / "proj") == "rw"
+    assert "directory on your PATH" in capsys.readouterr().err
     assert w.judged(record, Path(make(tmp / "other-proj"))) == "rw"
 
 
