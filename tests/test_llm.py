@@ -115,6 +115,21 @@ def test_add_list_show_remove(tmp_path):
     assert run("list")[1].startswith("no LLM endpoints")
 
 
+def test_list_json_is_pure_json_with_a_damaged_entry(capsys):
+    """An unusable stored endpoint is noted on stderr with --json: stdout stays the JSON array the app and the web
+    parse (the text listing keeps the note in its own lines)."""
+    assert run("add", "gpu", "--kind", "ollama", "--url", "http://127.0.0.1:11434")[0] == 0
+    store = json.loads(llm.store_path().read_text())
+    store["endpoints"]["bad"] = {"kind": "nope", "url": 5}
+    llm.save_store(store)
+    capsys.readouterr()
+    status, out = run("list", "--json")
+    assert status == 0 and [e["name"] for e in json.loads(out)] == ["gpu"]
+    assert "bad: unusable" in capsys.readouterr().err
+    status, out = run("list")
+    assert status == 0 and "bad: unusable" in out and "gpu  ollama" in out
+
+
 @pytest.mark.parametrize("argv, match", [
     (["--url", "http://203.0.113.5:8000"], "plain http to 203.0.113.5"),
     (["--url", "https://x.example", "--insecure-http"], "for plain http URLs"),

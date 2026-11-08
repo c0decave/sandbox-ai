@@ -135,6 +135,29 @@ def test_entries_say_what_belongs_together(tmp_path):
     assert helper["helper_of"] == "claude-1234abcd" and helper["pod"] is None and helper["companions"] == []
 
 
+def test_entries_survive_damaged_grouping_fields(tmp_path):
+    """A damaged run.json never fails the listing: each grouping field is checked and a bad value left out (helper_of
+    to a run that is gone, to itself or round in a circle; companions that are no list or no known agent)."""
+    register("claude-aaaa0001", companions=5, pod=7, helper_of="gone-run", mcp_servers=["team-ok", "team-B@D", 3])
+    register("codex-aaaa0002", companions=["codex", "nobody", 3, "opencode", "opencode"], pod="",
+             helper_of="codex-aaaa0002")
+    register("claude-aaaa0003", helper_of="claude-aaaa0004", teams="x")
+    register("claude-aaaa0004", helper_of="claude-aaaa0003", mcp_servers="team-x")
+    register("claude-aaaa0005", helper_of="claude-aaaa0003", companions={"a": 1})
+    damaged = register("claude-aaaa0006")  # its id is no string: not listed
+    (damaged / "run.json").write_text(json.dumps({"run": 5, "pid": os.getpid(), "started": "2026-11-03T08:00:00Z"}))
+    register("claude-aaaa0007", helper_of=["claude-aaaa0001"])
+    found = {e["name"]: e for e in listed()}
+    assert set(found) == {f"claude-aaaa000{i}" for i in (1, 3, 4, 5, 7)} | {"codex-aaaa0002"}
+    first, second = found["claude-aaaa0001"], found["codex-aaaa0002"]
+    assert (first["companions"], first["pod"], first["helper_of"], first["teams"]) == ([], None, None, ["ok"])
+    assert (second["companions"], second["pod"], second["helper_of"]) == (["codex", "opencode"], None, None)
+    assert found["claude-aaaa0003"]["helper_of"] is None and found["claude-aaaa0004"]["helper_of"] is None
+    assert found["claude-aaaa0004"]["teams"] == [] and found["claude-aaaa0005"]["companions"] == []
+    assert found["claude-aaaa0005"]["helper_of"] == "claude-aaaa0003"  # leads into the circle, is not on it
+    assert found["claude-aaaa0007"]["helper_of"] is None
+
+
 def test_entries_say_why_nothing_can_be_attached(scenario, tmp_path):
     """attach_why: one word for the desktop app and the web page, null exactly when attachable."""
     def foreground_start(key, pid, paused=False):  # a kept start in the foreground (--no-tmux): its own launcher

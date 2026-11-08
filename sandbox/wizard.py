@@ -1132,7 +1132,7 @@ def load_existing(p, target):
     if problem:
         p.out(f"{l.printable(target)}: {problem}; create a new one instead (sandbox-ai wizard new)")
         return None
-    trusted = l.trusted_configs().get(str(l.config_key(target)))
+    trusted = trusted_store().get(str(l.config_key(target)))
     if trusted != hashlib.sha256(data).hexdigest():
         state = "changed since it was trusted" if trusted else "not trusted"
         p.out(f"Warning: {l.printable(target)} is {state}. The agent can write this file; review every option:")
@@ -1456,12 +1456,44 @@ def trust(path, yes=False, prompt=None, out=print, digest=None):
     return 0
 
 
+def trusted_store(note=None):
+    """{path: digest} of the trusted list, damaged entries left out (the file may have been edited by hand or
+    damaged: no object, a key or digest that is no string): NOTE(text) is told of each one skipped."""
+    store = launcher().trusted_configs()
+    note = note or (lambda line: print(line, file=sys.stderr))
+    if not isinstance(store, dict):
+        note("sandbox-wizard: the trusted list is damaged (no JSON object); nothing in it is trusted")
+        return {}
+    found = {}
+    for key, digest in store.items():
+        if isinstance(key, str) and isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest):
+            found[key] = digest
+        else:
+            note(f"sandbox-wizard: skipped a damaged entry of the trusted list: {launcher().printable(key)}")
+    return found
+
+
 def show(path, as_json=False, out=print):
-    """What trusting PATH would trust, nothing trusted: {"path", "digest", "document", "trusted", "problem"} with
-    --json (document null when it is no JSON; trusted: whether the trusted list has exactly this digest)."""
-    path, data, document, problem = review(path)
+    """What trusting PATH would trust, nothing trusted: {"path", "digest", "document", "trusted", "trusted_digest",
+    "problem"} with --json (document null when it is no JSON; trusted: whether the trusted list has exactly this
+    digest). When PATH cannot be read (missing, a symlink, not a regular file, too big) the same object comes with
+    "error" (and "problem") set to why, digest and document null, and the exit status is 1."""
+    try:
+        path, data, document, problem = review(path)
+    except (OSError, ValueError) as exc:
+        if not as_json:
+            raise
+        key = str(Path(path).expanduser().absolute())
+        try:
+            key = str(launcher().config_key(path))
+        except (OSError, ValueError, RuntimeError):
+            pass
+        why = launcher().printable(exc)
+        out(json.dumps({"path": key, "digest": None, "document": None, "trusted": False,
+                        "trusted_digest": trusted_store().get(key), "problem": why, "error": why}, indent=2))
+        return 1
     digest = hashlib.sha256(data).hexdigest()
-    known = launcher().trusted_configs().get(str(path))
+    known = trusted_store().get(str(path))
     found = {"path": str(path), "digest": digest, "document": document, "trusted": known == digest,
              "trusted_digest": known, "problem": problem}
     if as_json:
@@ -1478,7 +1510,7 @@ def trusted_list(as_json=False, out=print):
     """The trusted project configurations: [{"path", "digest", "state"}], state trusted (the file is that now),
     changed, missing or unreadable."""
     found = []
-    for key, digest in sorted(launcher().trusted_configs().items()):
+    for key, digest in sorted(trusted_store().items()):
         try:
             now = hashlib.sha256(launcher().read_config_bytes(key)).hexdigest()
             state = "trusted" if now == digest else "changed"

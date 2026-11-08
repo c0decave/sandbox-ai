@@ -419,6 +419,52 @@ def attach_why(entry):
     return "paused" if entry.get("state") == "paused" else "foreground"
 
 
+POD_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+TEAM_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,19}")  # team.py's TEAM_NAME
+
+
+def grouping(entry, records):
+    """The grouping fields of ENTRY (pod, companions, helper_of, teams) from its run's record in RECORDS. A
+    run.json is read from disk and may be damaged: each field is checked and a bad value is left out (None, [])
+    instead of failing the listing. helper_of names another run that runs now; companions are known agents."""
+    run = entry.get("run")
+    record_ = records.get(run) if isinstance(run, str) else None
+    record_ = record_ if isinstance(record_, dict) else {}
+    pod = record_.get("pod")
+    companions = record_.get("companions")
+    agents = getattr(launcher(), "AUTH_TARGETS", None) or ("claude", "codex", "opencode")
+    companions = list(dict.fromkeys(c for c in companions if isinstance(c, str) and c in agents)) \
+        if isinstance(companions, list) else []
+    helper_of = record_.get("helper_of")
+    if not (isinstance(helper_of, str) and helper_of != run and isinstance(records.get(helper_of), dict)):
+        helper_of = None
+    names = []
+    for key in ("mcp", "mcp_running"):
+        value = entry.get(key)
+        names += value if isinstance(value, list) else []
+    teams = sorted({n[len("team-"):] for n in names
+                    if isinstance(n, str) and n.startswith("team-") and TEAM_NAME.fullmatch(n[len("team-"):])})
+    return {"pod": pod if isinstance(pod, str) and POD_NAME.fullmatch(pod) else None, "companions": companions,
+            "helper_of": helper_of, "teams": teams}
+
+
+def break_helper_cycles(found):
+    """Drop helper_of of the entries on a circle (A helps B helps A): no front end has to follow a cycle. An entry
+    that only leads into one keeps its own."""
+    by_run = {entry.get("run"): entry for entry in found if isinstance(entry.get("run"), str)}
+    for entry in found:
+        seen, current = set(), entry.get("helper_of")
+        while current is not None and current not in seen:
+            if current == entry.get("run"):
+                entry["cyclic"] = True
+                break
+            seen.add(current)
+            current = (by_run.get(current) or {}).get("helper_of")
+    for entry in found:
+        if entry.pop("cyclic", False):
+            entry["helper_of"] = None
+
+
 def entries(include_all=False, prune=True):
     """Every start this registry knows, as a list of entries (dicts, see list --json): the running sandboxes,
     the start directories and the MCP servers; with INCLUDE_ALL also the MCP servers that do not run."""
@@ -429,6 +475,8 @@ def entries(include_all=False, prune=True):
     plain = []
     records = module("net").running()
     for run, record_ in records.items():
+        if not isinstance(run, str) or not isinstance(record_, dict):
+            continue  # a damaged run.json ("run": 5): not one of ours to list
         session = starts.get(text(record_.get("start")) or "") or legacy.get(run)
         if session is not None:
             session["run"], session["run_dir"], session["mode"] = run, record_.get("directory"), mode_of(record_)
@@ -456,12 +504,8 @@ def entries(include_all=False, prune=True):
     # What belongs together (the app and the web group by it): a running start's pod (Podman), the agents --with in
     # its sandbox, whose helper it is, and the teams it belongs to (its team-NAME board servers).
     for entry in found:
-        record_ = records.get(entry.get("run") or "") or {}
-        names = list(entry.get("mcp") or []) + list(entry.get("mcp_running") or [])
-        entry["pod"] = text(record_.get("pod")) if record_.get("pod") else None
-        entry["companions"] = [text(c) for c in record_.get("companions") or [] if isinstance(c, str)]
-        entry["helper_of"] = text(record_.get("helper_of")) if isinstance(record_.get("helper_of"), str) else None
-        entry["teams"] = sorted({n[len("team-"):] for n in names if isinstance(n, str) and n.startswith("team-")})
+        entry.update(grouping(entry, records))
+    break_helper_cycles(found)
     # Whom each MCP server serves: the starts that reach it, or will at their next start (sandbox-ai mcp attach).
     for name, server in servers.items():
         server["serves"] = [entry["name"] for entry in found if entry.get("kind") != "mcp"

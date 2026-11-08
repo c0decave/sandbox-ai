@@ -336,6 +336,26 @@ def test_privacy_check_command(tmp_path, capsys):
     assert "old.txt:1 (not staged) [codename]" in capsys.readouterr().out
 
 
+def test_privacy_check_json_names_what_was_not_checked(tmp_path, capsys):
+    """--json with rules that cannot be loaded (or no repository): the repository is in the JSON array, "checked":
+    false and "refused" naming why, exit status 2, so no front end mistakes it for "nothing found"; a checked one
+    says "checked": true, "refused": null."""
+    repo = published_repo(tmp_path)
+    broken = tmp_path / "broken"
+    broken.mkdir()
+    (broken / "global.rules.json").write_text("{")
+    capsys.readouterr()
+    assert p.main(["check", "--json", "--rules-dir", str(broken), str(repo)]) == 2
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert len(result) == 1 and result[0]["repository"] == str(repo) and result[0]["checked"] is False
+    assert "invalid JSON" in result[0]["refused"] and result[0]["findings"] == [] and "REFUSED" in captured.err
+    assert p.main(["check", "--json", str(repo), str(tmp_path / "missing")]) == 2
+    first, second = json.loads(capsys.readouterr().out)
+    assert (first["checked"], first["refused"], second["checked"]) == (True, None, False)
+    assert "not a Git repository" in second["refused"]
+
+
 def test_module_parses_as_python_3_9():
     """The launcher supports Python 3.9; the engine also runs inside the agent's image."""
     import ast

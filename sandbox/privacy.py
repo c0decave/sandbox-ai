@@ -20,7 +20,9 @@ in the work tree and untracked files git does not ignore.
   sandbox-ai privacy-check [PATH ...] [--rules-dir DIR] [--all] [--json]
 
 Exit codes: 0 clean or warnings only, 1 blocking findings, 2 refused (unreadable rules, not a
-repository). A rule set that cannot be read is a refusal, never a pass.
+repository). A rule set that cannot be read is a refusal, never a pass. --json writes one object per
+repository: {"repository", "checked", "refused", "rules", "scanned", "notes", "findings"}; a refused one has
+"checked": false, "refused": why, and no findings (it was not checked, nothing was found).
 
 The launcher also runs the check after every run (see --privacy-check) and gives the agent
 pre-commit and pre-push hooks with the built-in and derived rules; this file is their engine
@@ -1169,12 +1171,16 @@ def check_command(argv):
         except RulesUnavailable as exc:
             print(f"sandbox-ai privacy-check: REFUSED: {exc}", file=sys.stderr)
             status = max(status, EXIT_REFUSED)
+            if args.json:  # in the JSON too: no front end may take a repository not checked for "nothing found"
+                results.append({"repository": str(path), "checked": False, "refused": str(exc), "rules": [],
+                                "scanned": 0, "notes": notes, "findings": []})
             continue
         report.notes[:0] = notes
         if report.blocking:
             status = max(status, EXIT_FINDINGS)
         if args.json:
-            results.append({"repository": str(path), "rules": rules.sources, "scanned": report.scanned,
+            results.append({"repository": str(path), "checked": True, "refused": None, "rules": rules.sources,
+                            "scanned": report.scanned,
                             "notes": report.notes,
                             "findings": [{"where": f.where, "path": f.path, "id": f.pattern.id,
                                           "severity": f.pattern.severity, "reason": f.pattern.reason,

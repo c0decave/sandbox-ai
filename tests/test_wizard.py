@@ -1129,3 +1129,47 @@ def test_trust_digest_refuses_hidden_characters_and_list_names_the_state(tmp_pat
         w.cli(["trust", str(good), "--list"])
     with pytest.raises(SystemExit):
         w.cli(["trust", str(good), "--show", "--digest", "0" * 64])
+
+
+def test_trust_show_json_says_why_on_errors(tmp_path, capsys):
+    """trust --show --json of a file that cannot be read: the same object with "error" (and "problem") set, digest
+    and document null, exit status 1, so a front end never mistakes it for a reviewable file."""
+    missing = tmp_path / "gone.json"
+    assert w.cli(["trust", str(missing), "--show", "--json"]) == 1
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["path"] == str(missing) and shown["digest"] is None and shown["document"] is None
+    assert shown["trusted"] is False and shown["error"] and shown["problem"] == shown["error"]
+    (tmp_path / "real.json").write_text("{}")
+    (tmp_path / "link.json").symlink_to(tmp_path / "real.json")
+    assert w.cli(["trust", str(tmp_path / "link.json"), "--show", "--json"]) == 1
+    assert "symlink" in json.loads(capsys.readouterr().out)["error"]
+    with pytest.raises(OSError):  # without --json the error goes the usual way (sandbox-wizard: ... on stderr)
+        w.cli(["trust", str(missing), "--show"])
+
+
+@pytest.mark.parametrize("store", [["a", "b"], "text", 5, None])
+def test_trust_list_tolerates_a_damaged_trusted_list(store, tmp_path, capsys):
+    """A trusted list that holds no JSON object: --list says so on stderr and lists nothing; --show still works."""
+    w.launcher().config_store().parent.mkdir(parents=True, exist_ok=True)
+    w.launcher().config_store().write_text(json.dumps(store))
+    assert w.cli(["trust", "--list", "--json"]) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == [] and "damaged" in captured.err
+    assert w.cli(["trust", "--list"]) == 0 and "No trusted project configurations" in capsys.readouterr().out
+    (tmp_path / "p.json").write_text("{}")
+    assert w.cli(["trust", str(tmp_path / "p.json"), "--show", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["trusted"] is False
+
+
+def test_trust_list_skips_damaged_entries(tmp_path, capsys):
+    good = tmp_path / "a.json"
+    good.write_text("{}")
+    w.launcher().trust_config(good)
+    store = json.loads(w.launcher().config_store().read_text())
+    store.update({"/x/bad.json": 5, "/x/worse.json": ["d"], "/x/short.json": "abc"})
+    w.launcher().config_store().write_text(json.dumps(store))
+    capsys.readouterr()
+    assert w.cli(["trust", "--list", "--json"]) == 0
+    captured = capsys.readouterr()
+    assert [e["path"] for e in json.loads(captured.out)] == [str(good)]
+    assert captured.err.count("skipped a damaged entry") == 3

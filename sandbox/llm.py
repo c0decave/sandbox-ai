@@ -1199,8 +1199,12 @@ def main(argv, out=print, get=None):
             for name in sorted(store["endpoints"]):
                 try:
                     endpoints.append(check_record(name, store["endpoints"][name]))
-                except ValueError as exc:
-                    out(printable(f"{name}: unusable ({exc})"))
+                except ValueError as exc:  # with --json on stderr: stdout stays one JSON array
+                    note = printable(f"{name}: unusable ({exc})")
+                    if args.json:
+                        print(note, file=sys.stderr)
+                    else:
+                        out(note)
             if args.json:
                 out(json.dumps([public_view(e) for e in endpoints], indent=2))
             for e in [] if args.json else endpoints:
