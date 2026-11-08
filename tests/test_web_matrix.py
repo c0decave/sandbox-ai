@@ -533,6 +533,75 @@ def test_a_terminal_query_that_is_not_one_is_refused_before_anything_runs(web, h
     assert web.processes.log == []
 
 
+# -- a host's install: this machine's sandbox-ai, which reaches the host over SSH --
+
+INSTALL_CASES = [
+    ({"mode": "user"}, ["--user", "--from-here"]),
+    ({"mode": "user", "source": "download", "version": "0.1.80"}, ["--user", "--download", "--version=0.1.80"]),
+    ({"mode": "system", "sudo": True}, ["--system", "--sudo", "--from-here"]),
+    ({"mode": "system", "sudo": False, "prefix": "/opt/sai"}, ["--system", "--prefix=/opt/sai", "--no-sudo",
+                                                               "--from-here"]),
+    ({"mode": "system", "source": "download"}, ["--system", "--download"]),
+]
+
+
+@pytest.mark.parametrize("state", STATES)
+@pytest.mark.parametrize("sent,args", INSTALL_CASES, ids=[" ".join(a) for _, a in INSTALL_CASES])
+def test_a_host_install_in_every_login_state(web, state, sent, args):
+    """POST /api/hosts/ct1/install: with a full login and its confirmation, `sandbox-ai hosts install ct1 ...
+    --json` on this machine (never on ct1 itself, which may have no sandbox-ai), with room for its steps; GET
+    /api/hosts/ct1/install says how it went. Nothing runs without a full login."""
+    headers = web.headers(state)
+    status, _, data = web.request("POST", "/api/hosts/ct1/install", {**sent, "confirm": True}, headers)
+    assert status == expected_status(state, "POST"), data
+    if status != 200:
+        assert web.processes.log == []
+    else:
+        assert web.processes.args() == [("local", ["hosts", "install", "ct1", *args, "--json"])]
+        assert web.processes.log[0]["timeout"] >= 1800 and web.processes.log[0]["input"] is None
+        assert json.loads(data) == {"ran": ["hosts", "install", "ct1", *args, "--json"]}
+        status, _, data = web.request("GET", "/api/hosts/ct1/install", None, headers)
+        assert status == 200 and json.loads(data)["last"]["result"] == {"ran": ["hosts", "install", "ct1", *args,
+                                                                                 "--json"]}
+    status, _, data = web.request("GET", "/api/hosts/ct1/install", None, headers)
+    assert status == expected_status(state, "GET"), data
+    web.assert_nothing_leaked()
+
+
+def test_a_host_install_needs_its_confirmation_and_never_runs_on_this_machine(web):
+    headers = web.headers("full")
+    for body, status in (({"mode": "user"}, 400), ({"mode": "user", "confirm": "true"}, 400),
+                         ({"mode": "system", "prefix": "/a/../b", "confirm": True}, 400),
+                         ({"mode": "user", "version": "0.1.80", "confirm": True}, 400),
+                         ({"mode": "admin", "confirm": True}, 400)):
+        assert web.request("POST", "/api/hosts/ct1/install", body, headers)[0] == status, body
+    assert web.request("POST", "/api/hosts/local/install", {"mode": "user", "confirm": True}, headers)[0] == 400
+    assert web.processes.log == []
+
+
+@pytest.mark.parametrize("state", STATES)
+def test_the_install_terminal_in_every_login_state(web, state):
+    """The terminal where sudo asks for its password: this machine's hosts install (no --json), in a tty; its query
+    carries the page's confirmation."""
+    import urllib.parse
+    headers = web.headers(state)
+    sent = {"Host": HOST, "Origin": ORIGIN, **headers}
+    query = {"host": "ct1", "csrf": headers.get("X-CSRF-Token", "none"), "kind": "install", "mode": "system",
+             "prefix": "/opt/sai", "sudo": "1", "source": "here", "confirm": "1"}
+    if state != "full":
+        with pytest.raises(w.Refused):
+            web.svc.websocket("/api/terminal?" + urllib.parse.urlencode(query), sent, "192.0.2.1")
+        return
+    argv, _ = web.svc.websocket("/api/terminal?" + urllib.parse.urlencode(query), sent, "192.0.2.1")
+    assert sandbox_args(argv) == ("local", None, ["hosts", "install", "ct1", "--system", "--prefix=/opt/sai", "--sudo",
+                                                  "--from-here"])
+    for change in ({"confirm": ""}, {"prefix": "/opt/../x"}, {"host": "local"}):
+        with pytest.raises(w.Refused) as refused:
+            web.svc.websocket("/api/terminal?" + urllib.parse.urlencode({**query, **change}), sent, "192.0.2.1")
+        assert refused.value.status == 400, change
+    assert web.processes.log == []
+
+
 # -- answers, starts and stops: the exact command on each host, for each agent's sandbox --
 
 @pytest.mark.parametrize("agent", AGENTS)
@@ -626,6 +695,8 @@ def test_every_call_of_the_page_is_in_the_matrix():
     # Tested on their own in test_web.py: a host's update runs through the updater (not one command), and an MCP
     # server attached to a start (test_an_mcp_server_is_attached_to_a_start).
     covered |= {("POST", "/api/hosts/X/update"), ("POST", "/api/hosts/X/mcp/X/attach")}
+    # test_a_host_install_in_every_login_state (run by this machine's sandbox-ai, about the host)
+    covered |= {("POST", "/api/hosts/X/install"), ("GET", "/api/hosts/X/install")}
     assert calls and calls <= covered, sorted(calls - covered)
     assert "new WebSocket(`wss://${location.host}/api/terminal?" in script
 

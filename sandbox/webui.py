@@ -772,6 +772,9 @@ class Api:
         self.statuses = statuses or (lambda names, refresh=False: module("hosts").statuses(names, refresh=refresh))
         self.approvals_fanout = FanOut(self.host_questions)
         self.starts_fanout = FanOut(self.host_starts)
+        # hosts install: at most one per host at a time; the last result of each kept (a page whose request was cut
+        # off before the install ended - a browser gives up on an answer after some minutes - asks for it)
+        self.install_lock, self.installing, self.installed = threading.Lock(), {}, {}
         H = r"/api/hosts/(?P<host>[^/]+)"
         # (method, path, handler, the NEEDS_CONFIRM actions it may need)
         self.routes = [
@@ -788,6 +791,7 @@ class Api:
             ("POST", H + r"/test", self.test_host, ()),
             ("POST", H + r"/update", self.update_host, ()),
             ("POST", H + r"/install", self.install_host, ("host-install",)),
+            ("GET", H + r"/install", self.install_status, ()),
             ("GET", H + r"/starts", self.starts, ()),
             ("POST", H + r"/starts/(?P<name>[^/]+)/(?P<action>pause|resume|stop|delete)", self.start_action,
              ("start-stop", "start-delete")),
@@ -1050,16 +1054,44 @@ class Api:
         if entry is None:
             raise Refused(404, "no such host")
         confirmed(body, "host-install", f"{name} ({entry.get('ssh')}): {install_words(choice, entry)}")
-        status, out, err = self.run(hosts.LOCAL, install_argv(name, choice), install_route_timeout())
+        with self.install_lock:
+            if name in self.installing:
+                since = round(time.monotonic() - self.installing[name])
+                raise Refused(409, f"sandbox-ai is being installed on {name} (for {since} s): wait for its end")
+            self.installing[name] = time.monotonic()
+        result, error = None, None
         try:
-            result = json.loads(out)
-        except ValueError:
-            result = None
-        if not isinstance(result, dict):
-            raise Refused(502, f"sandbox-ai hosts install {name}: exit status {status}: "
-                               f"{printable((err or out).strip()[-600:])}")
-        self.forget_host(name)
+            status, out, err = self.run(hosts.LOCAL, install_argv(name, choice), install_route_timeout())
+            try:
+                result = json.loads(out)
+            except ValueError:
+                result = None
+            if not isinstance(result, dict):
+                result = None
+                raise Refused(502, f"sandbox-ai hosts install {name}: exit status {status}: "
+                                   f"{printable((err or out).strip()[-600:])}")
+        except Refused as exc:
+            error = str(exc)
+            raise
+        finally:
+            with self.install_lock:
+                self.installing.pop(name, None)
+                self.installed[name] = {"result": result, "error": error, "ended": time.time(), "choice": choice}
+            self.forget_host(name)
         return result
+
+    def install_status(self, params, body):
+        """Whether sandbox-ai is being installed on the host now ({"running": true, "seconds": how long}) and how
+        its last install here ended ({"last": {"result", "error", "ago", "choice"}} or null): for a page whose own
+        request was cut off, or that was opened meanwhile."""
+        name = host_name(params["host"])
+        with self.install_lock:
+            started, last = self.installing.get(name), self.installed.get(name)
+        return {"running": started is not None,
+                "seconds": round(time.monotonic() - started) if started is not None else None,
+                "last": None if last is None else {"result": last["result"], "error": last["error"],
+                                                   "ago": round(max(0.0, time.time() - last["ended"])),
+                                                   "choice": last["choice"]}}
 
     # starts and sessions
     def starts(self, params, body):
@@ -1812,6 +1844,8 @@ def terminal_command(query):
             raise Refused(400, "this machine installs with install.sh itself")
         if host not in hosts_file():
             raise Refused(404, "no such host")
+        if query.get("confirm") != "1":  # asked in the page first, as the install route asks (host-install)
+            raise Refused(400, f"{NEEDS_CONFIRM['host-install']}: confirm=1", confirm="host-install")
         sudo = {"1": True, "0": False, None: None, "": None}.get(query.get("sudo"), "bad")
         if sudo == "bad":
             raise Refused(400, "sudo is 1, 0 or not given")

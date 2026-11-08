@@ -775,8 +775,8 @@ function startRow(s, starts, main, all) {
   const mcpNote = mcp ? ((s.serves || []).length ? t("serves {starts}", { starts: s.serves.join(", ") }) : t("serves no start yet"))
     : (s.mcp || []).length ? `MCP: ${s.mcp.join(", ")}` : "";
   const asks = startAsks(s) ? el("button", { class: "badge asking small", title: t("a question of this start waits in Approvals"), onclick: () => show("approvals") }, t("asking")) : null;
-  return el("tr", { "data-name": s.name, "data-host": host }, all ? el("td", { class: "mono" }, host) : null,
-    el("td", { class: "mono" }, s.name, asks ? " " : null, asks, el("span", { class: "stale-note hint" })), el("td", {}, s.agent || s.kind || ""), statusCell(s.state),
+  return el("tr", { "data-name": s.name, "data-host": host }, hostMarkerCell(host),
+    el("td", { class: "mono start-name" }, el("span", { class: "tree-slot" }), s.name, asks ? " " : null, asks, el("span", { class: "stale-note hint" })), el("td", {}, s.agent || s.kind || ""), statusCell(s.state),
     el("td", { class: "mono" }, s.workspace || "", mcpNote ? el("div", { class: "hint" }, mcpNote) : null), el("td", {}, s.home || ""), el("td", {}, (s.started || "").replace("T", " ").replace("Z", "")), actions);
 }
 
@@ -884,9 +884,249 @@ function updateStartRows(view, starts, main, stale) {
     if (entry) entry.row.replaceWith(row); else view.body.append(row);
     view.rows.set(startKey(s), { signature, row, start: s, stale: false });
   }
-  const order = [...starts.map(s => view.rows.get(startKey(s)).row), ...[...view.rows.values()].filter(e => e.stale).map(e => e.row)];
-  if (order.some((row, i) => view.body.children[i] !== row)) view.body.append(...order);
+  layoutStarts(view, main, [...starts.map(s => view.rows.get(startKey(s))), ...[...view.rows.values()].filter(e => e.stale)]);
+}
+
+// --- the starts, grouped: by host (a header row each: where it is, its counts, whether it answers), and in a host
+// each start with what belongs to it below it, indented (the MCP server sandboxes it reaches, its helpers and
+// companions when the listing names them, its Podman pod). Hosts and starts fold and unfold; what was chosen is kept
+// across the polls and in this browser (keyed by host and start id).
+const OPEN_KEY = "sandbox-ai-starts-open";
+const OPEN_KEPT = 400;  // choices kept at most (the oldest go first)
+const openChoices = { map: null };
+
+function openMap() {
+  if (openChoices.map === null) {
+    openChoices.map = {};
+    try {
+      const kept = JSON.parse(localStorage.getItem(OPEN_KEY) || "{}");
+      if (kept && typeof kept === "object" && !Array.isArray(kept)) for (const [key, value] of Object.entries(kept)) if (typeof value === "boolean") openChoices.map[key] = value;
+    } catch (e) { /* not kept in this browser: open, as by default */ }
+  }
+  return openChoices.map;
+}
+
+// Whether the host or start KEY ("h HOST", "s HOST ID") is unfolded: as chosen, else unfolded.
+function isOpen(key) { const map = openMap(); return Object.prototype.hasOwnProperty.call(map, key) ? map[key] : true; }
+
+function setOpen(key, open) {
+  const map = openMap();
+  delete map[key];
+  map[key] = Boolean(open);
+  const keys = Object.keys(map);
+  for (const old of keys.slice(0, Math.max(0, keys.length - OPEN_KEPT))) delete map[old];
+  try { localStorage.setItem(OPEN_KEY, JSON.stringify(map)); } catch (e) { /* this page only */ }
+}
+
+const hostOpenKey = (host) => `h ${host}`;
+const startOpenKey = (s) => `s ${startKey(s)}`;
+
+// The host's entry of the hosts list (state.hosts), or null.
+function hostEntry(host) { return state.hosts.find(h => h.name === host) || null; }
+
+// Where HOST is, in words: this machine, or a host of the list reached over SSH.
+function hostWhere(host) {
+  const h = hostEntry(host);
+  if (host === "local" || (h && h.kind === "local")) return t("this machine");
+  return h && h.ssh ? t("remote, over SSH: {ssh}", { ssh: `${h.ssh}${h.port && h.port !== 22 ? ":" + h.port : ""}` }) : t("remote, over SSH");
+}
+
+// The host of a row, on every row: its name, and for another machine that it is remote.
+function hostMarkerCell(host) {
+  const local = host === "local" || (hostEntry(host) || {}).kind === "local";
+  return el("td", { class: "mono host-cell" }, el("span", { class: `host-marker ${local ? "local" : "remote"}`, title: hostWhere(host) }, host,
+    local ? null : el("span", { class: "host-where" }, ` · ${t("remote")}`)));
+}
+
+// The MCP server names start S reaches or names (list --json: "mcp", what it starts with; "mcp_running", what its
+// run reaches now).
+function mcpNamesOf(s) {
+  return [...new Set([...(Array.isArray(s.mcp) ? s.mcp : []), ...(Array.isArray(s.mcp_running) ? s.mcp_running : [])].filter(n => typeof n === "string" && n))];
+}
+
+// The starts of one host as a tree, one level deep: {roots, children: Map(key -> [start]), notes: Map(key ->
+// [text])}. An MCP server sandbox goes below the first start it serves ("serves"); a start that names its lead
+// ("helper_of", "companion_of", "parent", "lead": its name, id or run) below that one; a lead's helper's own helper
+// below the lead too. What a start names but is not listed (an MCP server that does not run, its pod, its
+// companions) is a note below it.
+const START_PARENT_KEYS = ["helper_of", "companion_of", "parent", "lead"];
+
+function startTree(starts) {
+  const byRef = new Map();
+  for (const s of starts) if (s.kind !== "mcp") for (const ref of [s.name, s.id, s.run]) if (typeof ref === "string" && ref && !byRef.has(ref)) byRef.set(ref, s);
+  const parentOf = new Map();
+  for (const s of starts) {
+    const refs = s.kind === "mcp" ? (Array.isArray(s.serves) ? s.serves : []) : START_PARENT_KEYS.map(key => s[key]);
+    const parent = refs.map(ref => (typeof ref === "string" ? byRef.get(ref) : undefined)).find(p => p && p !== s);
+    if (parent) parentOf.set(s, parent);
+  }
+  // the start at the top of S's chain; in a cycle (two naming each other) each one stands on its own
+  const topOf = (s) => {
+    const seen = new Set([s]);
+    let at = s;
+    while (parentOf.has(at)) {
+      const next = parentOf.get(at);
+      if (seen.has(next)) return s;
+      seen.add(next); at = next;
+    }
+    return at;
+  };
+  const roots = [], children = new Map(), notes = new Map();
+  const rootOf = new Map(starts.map(s => [s, topOf(s)]));
+  for (const s of starts) {
+    const root = rootOf.get(s);
+    if (root === s) { roots.push(s); continue; }
+    const key = startKey(root);
+    if (!children.has(key)) children.set(key, []);
+    children.get(key).push(s);
+  }
+  const servers = new Map(starts.filter(s => s.kind === "mcp").map(s => [String(s.name).replace(/^mcp-/, ""), s]));
+  for (const s of roots) {
+    const lines = [];
+    if (s.kind !== "mcp") {
+      for (const name of mcpNamesOf(s)) {
+        const server = servers.get(name);
+        if (!server) lines.push(t("MCP server {server}: not running now (it starts with {name})", { server: name, name: s.name }));
+        else if (rootOf.get(server) !== s) lines.push(t("MCP server {server}: shown below {start}", { server: name, start: rootOf.get(server).name }));
+      }
+      if (typeof s.pod === "string" && s.pod) lines.push(t("Podman pod: {pod}", { pod: s.pod }));
+      else if (s.backend === "podman" && s.run && (s.state === "running" || s.state === "paused")) lines.push(t("Podman: its run {run}", { run: s.run }));
+      const companions = (Array.isArray(s.companions) ? s.companions : []).filter(c => typeof c === "string" && c);
+      if (companions.length) lines.push(t("With: {companions}", { companions: companions.join(", ") }));
+      if (typeof s.team === "string" && s.team) {
+        const members = (Array.isArray(s.members) ? s.members : []).filter(m => typeof m === "string" && m);
+        lines.push(members.length ? t("Team {team}: {members}", { team: s.team, members: members.join(", ") }) : t("Team {team}", { team: s.team }));
+      }
+    }
+    if (lines.length) notes.set(startKey(s), lines);
+  }
+  return { roots, children, notes };
+}
+
+// A fold button for KEY (a host's or a start's): a click folds or unfolds it, then ONTOGGLE lays the table out anew.
+// showFold() says its state (aria-expanded) and what it folds; the button stays (the focus with it).
+function foldButton(key, onToggle) {
+  return el("button", { class: "small fold", onclick: () => { setOpen(key, !isOpen(key)); onToggle(); } });
+}
+
+function showFold(button, open, label, count) {
+  button.setAttribute("aria-expanded", open ? "true" : "false");
+  button.setAttribute("aria-label", label);
+  button.setAttribute("title", label);
+  button.disabled = false;
+  clear(button).append(el("span", { "aria-hidden": "true" }, open ? "▾" : "▸"));
+  if (count) button.append(` ${count}`);
+}
+
+// How a host answers, for its header: answering (as of the last listing), or not, with when it was last seen.
+function hostAnswerText(view, host) {
+  const error = (view.errors || {})[host];
+  const seen = view.seen[host];
+  const seconds = seen ? Math.max(0, Math.round((Date.now() - seen) / 1000)) : null;
+  if (!error) return { text: seconds === null ? t("answering") : seconds < 2 ? t("answering") : t("answering (listed {seconds} s ago)", { seconds }), kind: "ok" };
+  return { text: seconds === null ? t("not answering, not seen yet") : t("not answering: last seen {seconds} s ago", { seconds }), kind: "fail", error };
+}
+
+// The counts of a host's starts: how many, and how many run, are paused, stopped.
+function hostCountText(starts) {
+  const count = (value) => starts.filter(s => s.state === value).length;
+  const parts = [t("{count} start(s)", { count: starts.length })];
+  for (const [value, word] of [["running", N_("{count} running")], ["paused", N_("{count} paused")], ["stopped", N_("{count} stopped")]]) if (count(value)) parts.push(t(word, { count: count(value) }));
+  return parts.join(", ");
+}
+
+const ANSWER_CLASS = { ok: "host-answer status-ok", fail: "host-answer status-fail" };
+const COLUMNS = 8;  // the starts table's columns (its host, name, agent, state, workspace, HOME, started, actions)
+
+// The header row of HOST (kept between the polls, with its fold button).
+function hostHeader(view, host, starts, main) {
+  let group = view.groups.get(host);
+  if (!group) {
+    const local = host === "local" || (hostEntry(host) || {}).kind === "local";
+    group = { fold: foldButton(hostOpenKey(host), () => layoutStarts(view, main)), where: el("span", { class: `host-marker ${local ? "local" : "remote"}` }),
+      counts: el("span", { class: "host-counts" }), answer: el("span", { class: "host-answer" }) };
+    group.row = el("tr", { class: "host-group", "data-group": host }, el("td", { colspan: COLUMNS },
+      group.fold, " ", el("strong", { class: "mono" }, host), " ", group.where, " ", group.counts, " ", group.answer));
+    view.groups.set(host, group);
+  }
+  const open = isOpen(hostOpenKey(host));
+  const answer = hostAnswerText(view, host);
+  showFold(group.fold, open, open ? t("Collapse the starts of {host}", { host }) : t("Expand the starts of {host}", { host }));
+  group.where.textContent = hostWhere(host);
+  group.counts.textContent = hostCountText(starts);
+  group.answer.textContent = answer.text;
+  group.answer.className = ANSWER_CLASS[answer.kind];
+  if (answer.error) group.answer.setAttribute("title", String(answer.error)); else group.answer.removeAttribute("title");
+  return group.row;
+}
+
+// The rows of ENTRIES ({row, start, stale}; the listing's order, the stale ones last) in the table: by host, each
+// start followed by what belongs to it; what is folded is hidden. Without ENTRIES: the last ones, laid out anew (a
+// fold changed).
+function layoutStarts(view, main, entries) {
+  if (entries) view.order = entries;
+  const list = (view.order || []).filter(entry => view.rows.get(startKey(entry.start)) === entry);
+  const hosts = [...new Set(list.map(entry => entry.start.host))];
+  const known = state.hosts.map(h => h.name);
+  hosts.sort((a, b) => (known.includes(a) ? known.indexOf(a) : known.length) - (known.includes(b) ? known.indexOf(b) : known.length) || a.localeCompare(b));
+  const order = [];
+  const notes = new Map();
+  for (const host of hosts) {
+    const here = list.filter(entry => entry.start.host === host);
+    const byKey = new Map(here.map(entry => [startKey(entry.start), entry]));
+    const tree = startTree(here.map(entry => entry.start));
+    const hostOpen = isOpen(hostOpenKey(host));
+    order.push(hostHeader(view, host, here.map(entry => entry.start), main));
+    for (const root of tree.roots) {
+      const entry = byKey.get(startKey(root));
+      const kids = tree.children.get(startKey(root)) || [];
+      const lines = tree.notes.get(startKey(root)) || [];
+      const open = isOpen(startOpenKey(root));
+      entry.row.hidden = !hostOpen;
+      entry.row.classList.remove("related");
+      const slot = entry.row.querySelector(".tree-slot");
+      if (slot) {
+        const count = kids.length + lines.length;
+        let fold = slot.querySelector(".fold");
+        if (!count) clear(slot);
+        else {
+          if (!fold) { fold = foldButton(startOpenKey(root), () => layoutStarts(view, main)); clear(slot).append(fold, " "); }
+          showFold(fold, open, open ? t("Collapse what belongs to {name} on {host}", { name: root.name, host }) : t("Expand what belongs to {name} on {host} ({count})", { name: root.name, host, count }), count);
+        }
+      }
+      order.push(entry.row);
+      for (const kid of kids) {
+        const child = byKey.get(startKey(kid));
+        child.row.hidden = !hostOpen || !open;
+        child.row.classList.add("related");
+        const kidSlot = child.row.querySelector(".tree-slot");
+        if (kidSlot && !kidSlot.querySelector(".tree-branch")) clear(kidSlot).append(el("span", { class: "tree-branch", "aria-hidden": "true" }, "↳ "));
+        order.push(child.row);
+      }
+      if (lines.length) {
+        const key = startKey(root);
+        const kept = (view.notes || new Map()).get(key);
+        const row = kept && kept.text === JSON.stringify(lines) ? kept.row
+          : el("tr", { class: "related related-note", "data-for": key }, el("td", {}, ""), el("td", { colspan: COLUMNS - 1 },
+            el("span", { class: "tree-branch", "aria-hidden": "true" }, "↳ "), lines.map((line, i) => el("span", { class: "hint note-line" }, i ? " · " : "", line))));
+        row.hidden = !hostOpen || !open;
+        notes.set(key, { row, text: JSON.stringify(lines) });
+        order.push(row);
+      }
+    }
+  }
+  for (const [host, group] of view.groups) if (!hosts.includes(host)) { group.row.remove(); view.groups.delete(host); }
+  for (const [key, kept] of view.notes || new Map()) if (!notes.has(key) || notes.get(key).row !== kept.row) kept.row.remove();
+  view.notes = notes;
+  if (order.some((row, i) => view.body.children[i] !== row) || view.body.children.length !== order.length) view.body.append(...order);
   view.table.hidden = !view.rows.size; view.empty.hidden = Boolean(view.rows.size);
+  if (view.folds) for (const button of view.folds) button.disabled = !view.rows.size;
+}
+
+// Unfold (OPEN) or fold every host and start shown.
+function foldAll(view, main, open) {
+  for (const entry of view.rows.values()) { setOpen(hostOpenKey(entry.start.host), open); setOpen(startOpenKey(entry.start), open); }
+  layoutStarts(view, main);
 }
 
 // What a listing found (an Error, a host's list, or {starts, errors, seen} of every host) into the kept table.
@@ -907,9 +1147,13 @@ function applyStarts(view, found, main) {
   if (starts === null) {
     const why = found && found.message ? found.message : t("not a list of starts");
     view.status.append(notice(t("Could not list the starts: {error}", { error: why }), "error"));
-    for (const entry of view.rows.values()) markRowStale(view, entry);
+    view.errors = {};
+    for (const entry of view.rows.values()) { markRowStale(view, entry); view.errors[entry.start.host] = why; }
+    if (view.host !== "all") view.errors[view.host] = why;
+    layoutStarts(view, main);
     return;
   }
+  view.errors = errors;
   for (const [host, why] of Object.entries(errors)) view.status.append(notice(t("Could not list the starts of {host}: {error}", { host, error: why }), "error"));
   const stale = (host) => notAsked(errors, host);
   updateStartRows(view, starts, main, stale);
@@ -961,9 +1205,12 @@ pages.starts = async (main) => {
   if (state.page !== "starts" || state.startsHost !== host) return;
   const view = startsView;
   view.main = main; view.host = host; view.rows = new Map(); view.loading = false; view.again = false; view.seen = {};
+  view.groups = new Map(); view.notes = new Map(); view.order = []; view.errors = {};
   view.status = el("div"); view.body = el("tbody");
-  view.table = el("table", {}, el("caption", { class: "sr-only" }, all ? t("Starts on every host") : t("Starts on {host}", { host })),
-    el("thead", {}, el("tr", {}, [all ? t("Host") : null, t("Name"), t("Agent"), t("State"), t("Workspace"), "HOME", t("Started"), ""].filter(c => c !== null).map(c => el("th", {}, c)))), view.body);
+  view.table = el("table", { class: "starts" }, el("caption", { class: "sr-only" }, all ? t("Starts on every host") : t("Starts on {host}", { host })),
+    el("thead", {}, el("tr", {}, [t("Host"), t("Name"), t("Agent"), t("State"), t("Workspace"), "HOME", t("Started"), ""].map(c => el("th", {}, c)))), view.body);
+  view.folds = [el("button", { class: "small", onclick: () => foldAll(view, main, true) }, t("Expand all")),
+    el("button", { class: "small", onclick: () => foldAll(view, main, false) }, t("Collapse all"))];
   const listed = all ? (found && Array.isArray(found.starts) ? found.starts : []) : (Array.isArray(found) ? found : []);
   view.empty = !listed.length && state.hosts.length <= 1 && (all || host === "local") ? firstRunCard()
     : el("p", { class: "hint" }, all ? t("Nothing runs or is kept on any host.") : t("Nothing runs or is kept on this host."));
@@ -973,8 +1220,8 @@ pages.starts = async (main) => {
     show("starts");
   } }, el("option", { value: "all", selected: all }, t("all hosts")), state.hosts.map(h => el("option", { value: h.name, selected: h.name === host }, h.name)));
   const tools = el("div", { class: "row" }, el("label", { for: "starts-host" }, t("Host")), chooser,
-    all ? null : el("button", { onclick: () => gcCard(main, host) }, t("Clean up…")));
-  clear(main).append(el("h1", {}, title()), tools, view.status, view.table, view.empty);
+    all ? null : el("button", { onclick: () => gcCard(main, host) }, t("Clean up…")), ...view.folds);
+  clear(main).append(el("h1", {}, title()), tools, view.status, el("div", { class: "table-scroll" }, view.table), view.empty);
   applyStarts(view, found, main);
   // a new start: in a terminal of the page, detachable like every start (Ctrl-b d)
   const target = all ? state.host : host;
@@ -1817,8 +2064,8 @@ function doctorView(results, options) {
       DOCTOR_GROUPS.filter(([key]) => rest.some(c => c.group === key)).map(([key, title]) => el("section", { class: "doctor-group", "data-group": key },
         el(sub, {}, t(title)), el("ul", { class: "doctor-checks compact" }, rest.filter(c => c.group === key).map(doctorItem)))));
   };
-  view.append(folded("ok", fine === 1 ? t("1 check is fine") : t("{count} checks are fine", { count: fine })),
-    folded("skip", skipped === 1 ? t("1 check was not made here") : t("{count} checks were not made here", { count: skipped })));
+  for (const part of [folded("ok", fine === 1 ? t("1 check is fine") : t("{count} checks are fine", { count: fine })),
+    folded("skip", skipped === 1 ? t("1 check was not made here") : t("{count} checks were not made here", { count: skipped }))]) if (part) view.append(part);
   return view;
 }
 
@@ -2365,7 +2612,7 @@ function installCard(main, h, onDone) {
     howNote.textContent = system ? "" : t("for the SSH user: no sudo, nothing outside its HOME");
   };
   form.mode.addEventListener("change", sync); form.source.addEventListener("change", sync);
-  const status = el("div", { class: "wide", "aria-live": "polite" });
+  const status = el("div", { class: "wide", id: "install-status", "aria-live": "polite" });
   const buttons = el("div", { class: "row" });
   const install = el("button", { class: "primary", disabled: Boolean(state.installing[h.name]), onclick: () => {
     clear(status);
@@ -2388,6 +2635,17 @@ function installCard(main, h, onDone) {
   sync();
   main.append(card);
   focusFirst(card);
+  // one that runs already (from another page or tab), or how the last one here ended
+  if (!state.installing[h.name]) api("GET", `/api/hosts/${encodeURIComponent(h.name)}/install`, undefined, { background: true }).then((found) => {
+    if (!card.isConnected || !found || typeof found !== "object") return;
+    if (found.running) {
+      install.disabled = true; install.textContent = t("Installing…");
+      status.append(notice(t("sandbox-ai is being installed on {host} (for {seconds} s, from another page): wait for its end.", { host: h.name, seconds: found.seconds ?? "?" }), "warn"));
+    } else if (found.last && found.last.result && typeof found.last.result === "object") {
+      status.append(el("p", { class: "hint" }, t("The last install here, {minutes} min ago:", { minutes: Math.round((Number(found.last.ago) || 0) / 60) })),
+        ...installResult(h.name, found.last.choice || {}, found.last.result, root));
+    }
+  }).catch(() => { /* an older service: nothing to say */ });
   return card;
 }
 
@@ -2402,8 +2660,13 @@ async function runInstall(h, body, status, button, onDone) {
   let r = null;
   try { r = await api("POST", `/api/hosts/${encodeURIComponent(name)}/install`, Object.assign({}, body, { confirm: true })); }
   catch (e) {
-    clear(status).append(notice(t("{host}: not installed: {error}", { host: name, error: e.message }), "error"));
-    toast("error", t("Could not install on {host}", { host: name }), e.message);
+    // the answer was cut off (a browser gives up on one after some minutes; the network): the install goes on
+    // there, and the service keeps how it ended
+    if (!(e instanceof ApiError)) r = await waitForInstall(name, status, e);
+    else {
+      clear(status).append(notice(t("{host}: not installed: {error}", { host: name, error: e.message }), "error"));
+      toast("error", t("Could not install on {host}", { host: name }), e.message);
+    }
   } finally {
     delete state.installing[name];
     if (button) { button.disabled = false; button.textContent = t("Install"); }
@@ -2414,6 +2677,26 @@ async function runInstall(h, body, status, button, onDone) {
   else toast("success", t("sandbox-ai installed on {host}", { host: name }), `${r.before || t("none")} → ${r.after || "?"}`);
   if (onDone) onDone(r);
   return r;
+}
+
+// The install on NAME whose answer did not come (WHY): asked of the service until it ended there (GET …/install
+// every 10 s, for at most 40 minutes), its result then, or null.
+async function waitForInstall(name, status, why) {
+  clear(status).append(el("div", { class: "notice warn", role: "status" }, t("The answer of the install on {host} did not come ({error}); it may still run there: asking the service how it goes…", { host: name, error: why && why.message ? why.message : String(why) })));
+  for (let tries = 0; tries < 240; tries++) {
+    await new Promise(resolve => setTimeout(resolve, 10000));
+    let found = null;
+    try { found = await api("GET", `/api/hosts/${encodeURIComponent(name)}/install`, undefined, { background: true }); } catch (e) { continue; }
+    if (found && found.running) continue;
+    const last = found && found.last;
+    if (last && last.result && typeof last.result === "object") return last.result;
+    const error = last && last.error ? last.error : t("the service knows of no install there (it was restarted?)");
+    clear(status).append(notice(t("{host}: not installed: {error}", { host: name, error }), "error"));
+    toast("error", t("Could not install on {host}", { host: name }), error);
+    return null;
+  }
+  clear(status).append(notice(t("No end of the install on {host} in 40 minutes: check its version (Check versions).", { host: name }), "warn"));
+  return null;
 }
 
 // What an install answered: before → after, how, its notes, what to do when sudo wants a password, its output.
@@ -2440,6 +2723,7 @@ function installQuery(body) {
   if (body.prefix) query.prefix = body.prefix;
   if (body.version) query.version = body.version;
   if (body.sudo === true || body.sudo === false) query.sudo = body.sudo ? "1" : "0";
+  query.confirm = "1";  // asked in the page already (the install's own confirmation)
   return query;
 }
 

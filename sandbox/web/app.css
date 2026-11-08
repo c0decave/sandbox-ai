@@ -184,3 +184,29 @@ pre.doctor-text { max-height: 40em; overflow-wrap: anywhere; }
 .install-output summary { cursor: pointer; color: var(--secondary); }
 .install-output pre { max-height: 24em; }
 #host-install-card .form [hidden] { display: none; }
+/* The starts, grouped: a header row per host (where it is, its counts, whether it answers), each start with what
+   belongs to it indented below it; the host on every row; folded rows are hidden ([hidden]). */
+.table-scroll { overflow-x: auto; max-width: 100%; }
+tr.host-group td { background: var(--alternate); border-top: 2px solid var(--border); padding: 6px 10px; }
+tr.host-group td > * { vertical-align: middle; }
+tr.host-group .host-counts { color: var(--text); }
+tr.host-group .host-answer { font-weight: 600; }
+.host-cell { white-space: nowrap; }
+.host-marker { white-space: nowrap; }
+.note-line { overflow-wrap: anywhere; }
+.host-marker.remote { color: var(--accent); }
+.host-marker.local { color: var(--secondary); }
+.host-where { font-family: var(--font); font-size: .85em; }
+button.fold { min-width: 2.2em; font-family: var(--mono); }
+tr.related td.start-name { padding-left: 30px; }
+tr.related td:first-child { border-left: 3px solid var(--border); }
+tr.related-note td { padding-top: 2px; padding-bottom: 6px; }
+tr.related-note td:nth-child(2) { padding-left: 30px; overflow-wrap: anywhere; }
+.tree-branch { color: var(--secondary); }
+@media (max-width: 760px) {
+  .doctor-head { flex-direction: column; align-items: flex-start; }
+  .command-block { flex-direction: column; align-items: stretch; }
+  .command-block button { align-self: flex-start; }
+  #host-install-card .form { grid-template-columns: 1fr; }
+  #host-install-card .form .wide { grid-column: 1; }
+}

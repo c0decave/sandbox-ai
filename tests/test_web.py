@@ -607,6 +607,30 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     ("POST", "/api/hosts/ct1/secrets/X", {"secret": "x" * 8193, "confirm": True}, 400),
     ("POST", "/api/hosts/ct1/secrets/X", {"secret": 42, "confirm": True}, 400),
     ("DELETE", "/api/hosts/ct1/secrets/a%20b", {"confirm": True}, 400),
+    # a host's install: every choice checked before the command line is made
+    ("POST", "/api/hosts/ct1/install", {"mode": "system", "prefix": "/opt/../etc", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/install", {"mode": "system", "prefix": "/opt/./x", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/install", {"mode": "system", "prefix": "opt/sai", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/install", {"mode": "system", "prefix": "/opt/x;id", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/install", {"mode": "system", "prefix": "/opt//x", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/install", {"mode": "system", "prefix": "--help", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/install", {"mode": "system", "prefix": ["/opt"], "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/install", {"mode": "user", "prefix": "/opt/sai", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/install", {"mode": "user", "version": "0.1.80", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/install", {"mode": "user", "source": "here", "version": "0.1.80", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/install", {"mode": "user", "source": "download", "version": "1.2; id", "confirm": True},
+     400),
+    ("POST", "/api/hosts/ct1/install", {"mode": "root", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/install", {"mode": "--system", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/install", {"mode": ["system"], "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/install", {"mode": "system", "sudo": "yes", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/install", {"mode": "user", "sudo": True, "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/install", {"mode": "user", "source": "ftp", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/install", {"mode": "user", "as": "root", "confirm": True}, 400),
+    ("POST", "/api/hosts/local/install", {"mode": "user", "confirm": True}, 400),
+    ("POST", "/api/hosts/x;y/install", {"mode": "user", "confirm": True}, 400),
+    ("POST", "/api/hosts/nowhere/install", {"mode": "user", "confirm": True}, 404),
+    ("DELETE", "/api/hosts/ct1/install", {"confirm": True}, 405),
 ])
 def test_what_is_refused_never_reaches_a_host(logged_in, method, path, data, status):
     assert logged_in(method, path, data)[0] == status
@@ -1458,7 +1482,12 @@ CONFIRM_CASES = {
     "mcp-restart": ("POST", "/api/hosts/ct1/mcp/files/attach", {"start": "web", "restart": True},
                     ["mcp", "attach", "files", "web", "--json", "--restart"]),
     "host-edit": ("POST", "/api/hosts/ct1", {"ssh": "admin@192.0.2.99"}, None),
+    # run by this machine's sandbox-ai (it reaches the host over SSH)
+    "host-install": ("POST", "/api/hosts/ct1/install", {"mode": "system", "prefix": "/opt/sai"},
+                     ["hosts", "install", "ct1", "--system", "--prefix=/opt/sai", "--from-here", "--json"]),
 }
+# The actions whose command runs on this machine, not on the host they are about.
+RUN_HERE = {"host-install"}
 READS = (["defaults", "show", "--json"], ["limits", "web", "--show", "--json"], ["secrets", "list"])
 # The POST routes that end, remove or weaken nothing (each of the others names its NEEDS_CONFIRM actions): a new route
 # has to be put here or in the table, deliberately.
@@ -1520,7 +1549,8 @@ def test_what_ends_removes_or_weakens_needs_its_confirmation_on_the_server(confi
     elif args is None:
         assert w.module("hosts").load() == {} and confirming.runner.calls == []
     else:
-        assert confirming.runner.calls == [("ct1", args)], "confirmed: no read first, the one command"
+        where = "local" if action in RUN_HERE else "ct1"
+        assert confirming.runner.calls == [(where, args)], "confirmed: no read first, the one command"
 
 
 def test_what_weakens_nothing_needs_no_confirmation(confirming):
@@ -2028,6 +2058,117 @@ def test_the_update_terminal(home, monkeypatch):
     for query in ({"host": "local", "kind": "update"}, {"host": "ct1", "kind": "update", "version": "x"}):
         with pytest.raises(w.Refused):
             w.terminal_command(query)
+
+
+INSTALLS = [
+    # (what the page sends, the arguments of this machine's sandbox-ai)
+    ({"mode": "user"}, ["--user", "--from-here"]),
+    ({"mode": "user", "source": "download"}, ["--user", "--download"]),
+    ({"mode": "user", "source": "download", "version": "0.1.80"}, ["--user", "--download", "--version=0.1.80"]),
+    ({"mode": "user", "sudo": False}, ["--user", "--no-sudo", "--from-here"]),
+    ({"mode": "system"}, ["--system", "--from-here"]),
+    ({"mode": "system", "sudo": True}, ["--system", "--sudo", "--from-here"]),
+    ({"mode": "system", "sudo": False}, ["--system", "--no-sudo", "--from-here"]),
+    ({"mode": "system", "sudo": None, "prefix": "/opt/sandbox-ai"}, ["--system", "--prefix=/opt/sandbox-ai", "--from-here"]),
+    ({"mode": "system", "prefix": "/usr/local", "sudo": True, "source": "download", "version": "0.1.79"},
+     ["--system", "--prefix=/usr/local", "--sudo", "--download", "--version=0.1.79"]),
+    ({"mode": "system", "prefix": "", "version": "", "source": ""}, ["--system", "--from-here"]),
+    ({}, ["--from-here"]),  # the host decides: for every user when the SSH user is root, else for that user
+]
+
+
+@pytest.mark.parametrize("sent, args", INSTALLS, ids=[" ".join(a) for _, a in INSTALLS])
+def test_a_host_install_is_one_fixed_command_on_this_machine(home, sent, args):
+    """sandbox-ai hosts install NAME, run by this machine's sandbox-ai (it copies itself, or install.sh, there over
+    SSH): each choice as its option, with room for its steps (up to 15 minutes each); its answer as it came."""
+    hosts = w.module("hosts")
+    hosts.save({"ct1": hosts.check("ct1", {"ssh": "admin@192.0.2.10"})})
+    secret = add_user()
+    seen = []
+    answer = {"name": "ct1", "before": None, "after": "0.1.80", "changed": True, "mode": sent.get("mode") or "user",
+              "prefix": None, "sudo": False, "root": False, "source": sent.get("source") or "here", "error": None,
+              "needs_password": False, "output": "", "notes": []}
+
+    def runner(host, argv, timeout=120, input=None):
+        seen.append((host, argv, timeout))
+        return 0, json.dumps(answer), ""
+    svc = w.Service({"localhost:8443"}, api=w.Api(runner))
+    _, headers, body = login(svc, secret)
+    ok = {**HEADERS, "Cookie": cookie_of(headers), "X-CSRF-Token": body["csrf"]}
+    status, _, out = svc.handle("POST", "/api/hosts/ct1/install", ok, json.dumps({**sent, "confirm": True}).encode(),
+                                "192.0.2.1")
+    assert status == 200 and json.loads(out) == answer, out
+    assert seen == [("local", ["hosts", "install", "ct1", *args, "--json"], w.install_route_timeout())]
+    assert w.install_route_timeout() >= 2 * 900, "the copy and install.sh may each take 15 minutes"
+
+
+def test_a_host_install_runs_once_at_a_time_and_says_how_it_ended(home):
+    """A second install while one runs is refused (409); GET …/install says whether one runs and how the last one
+    ended (a page whose own answer was cut off asks it); sudo that wants a password comes back as needs_password,
+    and the terminal that asks for it runs hosts install there, asked first as the route is."""
+    hosts = w.module("hosts")
+    hosts.save({"ct1": hosts.check("ct1", {"ssh": "admin@192.0.2.10"})})
+    secret = add_user()
+    wanted = {"name": "ct1", "before": None, "after": None, "changed": False, "mode": "system", "prefix": "/usr/local",
+              "sudo": True, "root": False, "source": "here", "needs_password": True, "output": "", "notes": [],
+              "error": "sudo on ct1 wants a password: install it in a terminal (sandbox-ai hosts install ct1 --system "
+                       "there), or allow sudo without one"}
+    runner = FakeRunner({("hosts", "install"): (1, json.dumps(wanted), "")})
+    api = w.Api(runner)
+    svc = w.Service({"localhost:8443"}, api=api)
+    _, headers, body = login(svc, secret)
+    ok = {**HEADERS, "Cookie": cookie_of(headers), "X-CSRF-Token": body["csrf"]}
+
+    def call(method, path, data=None):
+        status, _, out = svc.handle(method, path, ok, json.dumps(data).encode() if data is not None else b"",
+                                    "192.0.2.1")
+        return status, json.loads(out)
+    assert call("GET", "/api/hosts/ct1/install") == (200, {"running": False, "seconds": None, "last": None})
+    api.installing["ct1"] = time.monotonic() - 5
+    status, out = call("POST", "/api/hosts/ct1/install", {"mode": "system", "confirm": True})
+    assert status == 409 and "being installed on ct1" in out["error"] and runner.calls == []
+    status, out = call("GET", "/api/hosts/ct1/install")
+    assert status == 200 and out["running"] and out["seconds"] >= 5
+    del api.installing["ct1"]
+    # unconfirmed: refused, naming why and how
+    status, out = call("POST", "/api/hosts/ct1/install", {"mode": "system"})
+    assert status == 400 and out["confirm"] == "host-install" and "ct1 (admin@192.0.2.10): for every user in " \
+        "/usr/local, with sudo, from this machine's copy" in out["error"] and runner.calls == []
+    status, out = call("POST", "/api/hosts/ct1/install", {"mode": "system", "confirm": True})
+    assert status == 200 and out == wanted and out["needs_password"]
+    assert runner.calls == [("local", ["hosts", "install", "ct1", "--system", "--from-here", "--json"])]
+    status, out = call("GET", "/api/hosts/ct1/install")
+    assert status == 200 and not out["running"] and out["last"]["result"] == wanted and out["last"]["error"] is None
+    assert out["last"]["choice"] == {"mode": "system", "prefix": None, "sudo": None, "source": "here", "version": None}
+    # an answer that is no install's: a 502 with what it said, kept for the page that asks afterwards
+    runner.answers[("hosts", "install")] = (2, "", "usage: sandbox-ai hosts [-h] {list,add,remove,test,update}")
+    status, out = call("POST", "/api/hosts/ct1/install", {"mode": "user", "confirm": True})
+    assert status == 502 and "usage:" in out["error"]
+    assert "usage:" in call("GET", "/api/hosts/ct1/install")[1]["last"]["error"]
+    # the terminal where sudo asks: hosts install without --json, in a tty; confirmed like the route
+    query = {"host": "ct1", "kind": "install", "mode": "system", "prefix": "/opt/sai", "sudo": "1", "source": "here",
+             "confirm": "1"}
+    host, argv = w.terminal_command(query)
+    assert host == "ct1" and argv[:3] == [sys.executable, "-I", str(ROOT / "sandbox" / "main.py")]
+    assert argv[3:] == ["hosts", "install", "ct1", "--system", "--prefix=/opt/sai", "--sudo", "--from-here"]
+    assert w.terminal_command({**query, "source": "download", "version": "0.1.80", "sudo": "0"})[1][3:] == [
+        "hosts", "install", "ct1", "--system", "--prefix=/opt/sai", "--no-sudo", "--download", "--version=0.1.80"]
+    for change in ({"confirm": None}, {"confirm": "yes"}, {"host": "local"}, {"host": "nowhere"}, {"sudo": "yes"},
+                   {"prefix": "/opt/../etc"}, {"mode": "root"}, {"version": "0.1.80"}, {"mode": "user"}):
+        with pytest.raises(w.Refused):
+            w.terminal_command({k: v for k, v in {**query, **change}.items() if v is not None})
+
+
+def test_an_older_doctor_answers_with_text(logged_in):
+    """A host whose sandbox-ai has no doctor --json yet: its plain doctor, as text (the page shows it as it is); a
+    doctor that answers nothing at all is a 502 with why."""
+    logged_in.runner.answers[("doctor", "--json")] = (2, "", "sandbox-ai: error: unrecognized arguments: --json")
+    logged_in.runner.answers[("doctor",)] = (1, "FAIL  Podman  not found\n      -> install podman\n", "")
+    status, out = logged_in("GET", "/api/hosts/ct1/doctor")
+    assert status == 200 and out == "FAIL  Podman  not found\n      -> install podman"
+    assert [args for _, args in logged_in.runner.calls] == [["doctor", "--json"], ["doctor"]]
+    logged_in.runner.answers[("doctor",)] = (2, "", "no doctor here")
+    assert logged_in("GET", "/api/hosts/ct1/doctor")[0] == 502
 
 
 def test_the_hosts_page_updates_and_shows_versions():
@@ -2822,7 +2963,7 @@ def test_prompts_stale_rows_queued_refreshes_retired_cards_and_the_fleet(tmp_pat
     # W11: the card of a start that stopped is switched off (its Close stays)
     assert result["cardRetired"] == [True, True, True] and result["gone"]
     # the fleet: the host in a column of its own, the asking badge, a failing host's rows greyed
-    assert result["fleet"] == [["local", "local"], ["ct1", "ct1"]]
+    assert result["fleet"] == [["local", "local"], ["ct1", "ct1 · remote"]], "the host on every row, a remote one says so"
     assert result["badge"] == [True, False] and result["fleetAddress"] == "#starts@all"
     assert result["fleetStale"] == ["", "stale", True]
     for part in ("First steps", "1 problem(s), 1 warning(s)", "Add a host", "Start one below"):
@@ -2892,10 +3033,10 @@ const byId = (id) => document.getElementById(id);
   vm.runInContext('state.page = "starts"; state.startsHost = "ct1";', context);
   await vm.runInContext("pages.starts(__main)", context); await settle();
   result.labels = rowOf("web").all().filter(n => n.tagName === "button").map(b => b.getAttribute("aria-label"));
-  result.state = rowOf("web").children[2].textContent;
+  result.state = rowOf("web").children[3].textContent;
   vm.runInContext('setLanguage("de")', context);
   await vm.runInContext("pages.starts(__main)", context); await settle();
-  result.german = [rowOf("web").children[2].textContent, rowOf("web").all().find(n => n.tagName === "button" && n.textContent === "Stoppen").getAttribute("aria-label")];
+  result.german = [rowOf("web").children[3].textContent, rowOf("web").all().find(n => n.tagName === "button" && n.textContent === "Stoppen").getAttribute("aria-label")];
   vm.runInContext('setLanguage("en")', context);
   await vm.runInContext("pages.starts(__main)", context); await settle();
   // attaching an MCP server is asked first, with what was chosen then
@@ -3025,7 +3166,7 @@ def test_confirmations_are_bound_to_what_was_asked_and_the_page_reads_well(tmp_p
     assert has_new and old_gone and card_live and heading == "Network of web-2 on ct1", result["renamed"]
     assert paths == ["/api/hosts/ct1/net/web-2"], "the card's requests name the start as it is called now"
     assert result["focus"] == ["h1", "-1", "Doctor on ct1"]
-    assert result["doctorState"] == "warn"
+    assert result["doctorState"] == "! Warning", "its status as an icon and a word"
     assert result["hosts"] == [["local", "2 (1 running)", "0"], ["ct1", "?", "3"]]
     assert result["activityBackground"] == ["1"]
     assert result["llmBad"] == [0, True] and result["llmSecrets"]
@@ -3114,3 +3255,324 @@ def test_a_broken_handshake_from_anyone_gets_no_websocket(server):
                       "Sec-WebSocket-Version: 13\r\n\r\n").encode())
         head = sock.recv(4096).decode(errors="replace")
     assert head.startswith("HTTP/1.1 400") and "101" not in head.split("\r\n")[0]
+
+
+# --- the doctor for a human, a host's install, the starts grouped (node, the stand-in DOM above) ----------------
+
+DOCTOR_DRIVER = FAKE_DOM + r"""
+const byClass = (node, cls) => node.all().filter(n => (n.className || "").split(" ").includes(cls));
+(async () => {
+  const result = {};
+  vm.runInContext('state.me = { user: "admin", csrf: "c" }; state.host = "ct1";', context);
+  result.groupOf = vm.runInContext('["Login claude", "Podman", "Image codex", "systemd user session", "Workspace /x", "Kits"].map(doctorGroupOf)', context);
+  result.commands = vm.runInContext(`[
+    "Run: \x60podman system migrate\x60, then try again.", "sandbox-ai build claude", "sudo modprobe tun (or reboot)",
+    "Log in again with the agent itself.", "run: loginctl enable-linger you; then log in again", "try: sysctl -w x=1, or ask an admin",
+    "apt install podman.", ""].map(doctorCommand)`, context);
+  const checks = [
+    { status: "ok", check: "Python", detail: "3.12" },
+    { status: "warn", check: "Login claude", detail: "expired 2 days ago", hint: "Log in again with the agent itself." },
+    { status: "fail", check: "Podman", detail: "not found on PATH", hint: "Run: \x60sudo apt install podman\x60 (Debian, Ubuntu)." },
+    { status: "ok", check: "Bubblewrap", detail: "0.9", group: "Engine" },
+    { status: "skip", check: "Project", detail: "no project here", group: "Project" },
+    { status: "fail", check: "a check of a newer doctor", detail: "a very long detail ".repeat(20), hint: "sandbox-ai build claude", group: "Agents" },
+    { status: "bogus", check: 42 }, "not a check", null];
+  context.__checks = checks;
+  const view = vm.runInContext("doctorView(__checks, { level: 2, host: 'ct1' })", context);
+  result.summary = byClass(view, "doctor-summary")[0].textContent;
+  // the areas with problems and warnings, open, in the doctor's order; in each, problems first
+  const openGroups = view.children.filter(n => n.tagName === "section");
+  result.open = openGroups.map(g => [g.attributes["data-group"], byClass(g, "doctor-check").map(c => [c.attributes["data-status"], byClass(c, "doctor-name")[0].textContent])]);
+  result.headings = openGroups.map(g => g.children[0].tagName);
+  const podman = openGroups.flatMap(g => byClass(g, "doctor-check")).find(c => c.textContent.includes("Podman"));
+  result.podman = [byClass(podman, "doctor-state")[0].textContent, byClass(podman, "doctor-detail")[0].textContent,
+    byClass(podman, "doctor-hint").map(n => n.textContent), byClass(podman, "command-block").map(b => b.all().find(n => n.tagName === "code").textContent)];
+  const newer = openGroups.flatMap(g => byClass(g, "doctor-check")).find(c => c.textContent.includes("a newer doctor"));
+  result.bareCommand = [byClass(newer, "doctor-hint").length, byClass(newer, "command-block").length];
+  const login = openGroups.flatMap(g => byClass(g, "doctor-check")).find(c => c.textContent.includes("Login claude"));
+  result.advice = [byClass(login, "doctor-hint")[0].textContent, byClass(login, "command-block").length];
+  // the fine ones and those not checked: folded away (closed details), by area
+  result.folded = view.children.filter(n => n.tagName === "details").map(d => [d.attributes["data-status"], "open" in d.attributes,
+    d.children[0].textContent, d.children.slice(1).map(g => g.attributes["data-group"]), byClass(d, "doctor-check").length]);
+  // Copy: the clipboard, else the command selected
+  const copied = [];
+  vm.runInContext("globalThis.navigator = { clipboard: { writeText: async (text) => { __copied.push(text); } } };", Object.assign(context, { __copied: copied }));
+  const copy = byClass(podman, "command-block")[0].all().find(n => n.tagName === "button");
+  result.copyLabel = copy.getAttribute("aria-label");
+  copy.fire("click"); await settle();
+  result.copied = [copied, copy.textContent, live.textContent];
+  vm.runInContext("globalThis.navigator = {};", context);
+  copy.fire("click"); await settle();
+  result.selected = copy.textContent;
+  // all fine: the summary says so, nothing open
+  context.__fine = [{ status: "ok", check: "Python" }, { status: "ok", check: "Podman" }];
+  const fine = vm.runInContext("doctorView(__fine, { level: 3 })", context);
+  result.fine = [byClass(fine, "doctor-summary")[0].textContent, fine.children.filter(n => n.tagName === "section").length,
+    fine.children.filter(n => n.tagName === "details").map(d => d.children[0].textContent)];
+  // an older sandbox-ai's text: as it is, with a note
+  const text = vm.runInContext('doctorView("ok    Python   3.12\\nFAIL  Podman   not found", { host: "old1" })', context);
+  result.text = [text.all().find(n => n.tagName === "pre").textContent, byClass(text, "notice")[0].textContent];
+  // the doctor page and a host's test: the same view
+  answer = (method, path) => (path.endsWith("/doctor") ? checks.slice(0, 3) : path.endsWith("/test") ? { version: "sandbox-ai 0.1.80", doctor: "FAIL  Podman" } : path === "/api/hosts-status" ? {} : path === "/api/hosts-activity" ? {} : {});
+  vm.runInContext('state.page = "doctor";', context);
+  await vm.runInContext("pages.doctor(__main)", context); await settle();
+  result.page = [byClass(main, "doctor").length, main.all().filter(n => n.tagName === "table").length];
+  vm.runInContext('state.page = "hosts"; state.hosts = [{ name: "local", kind: "local" }, { name: "ct1", kind: "ssh", ssh: "admin@ct1" }]; clear(__main);', context);
+  await vm.runInContext("pages.hosts(__main)", context); await settle();
+  const test = main.all().find(n => n.tagName === "button" && n.textContent === "Test" && n.parent.parent.children[0].textContent === "ct1");
+  test.fire("click"); await settle();
+  result.hostTest = [byClass(main, "doctor").length, main.all().some(n => n.tagName === "pre" && n.textContent === "FAIL  Podman")];
+  console.log(JSON.stringify(result));
+})().catch(e => { console.error(e.stack); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_the_doctor_is_readable_by_area_with_its_commands_to_copy(tmp_path):
+    """One view for the doctor page and a host's test: by area, problems and warnings first and open, each with its
+    status as an icon and a word, what was found, the advice, the fix command in a block of its own with Copy; the
+    fine ones folded away; an older sandbox-ai's text as it is, with a note."""
+    result = run_driver(tmp_path, DOCTOR_DRIVER, "doctor")
+    assert result["groupOf"] == ["Agents", "Engine", "Engine", "System", "Project", "Agents"]
+    assert result["commands"] == ["podman system migrate", "sandbox-ai build claude", "sudo modprobe tun", "",
+                                  "loginctl enable-linger you", "sysctl -w x=1", "apt install podman", ""]
+    assert result["summary"] == "2 problem(s), 1 warning(s), 2 fine: each says how to fix it. 2 not checked."
+    assert result["open"] == [["Engine", [["fail", "Podman"]]],
+                              ["Agents", [["fail", "a check of a newer doctor"], ["warn", "Login claude"]]]]
+    assert result["headings"] == ["h2", "h2"]
+    state, detail, hint, command = result["podman"]
+    assert state == "✘ Problem" and detail == "not found on PATH"
+    assert hint == ["What to do: Run: `sudo apt install podman` (Debian, Ubuntu)."] and command == ["sudo apt install podman"]
+    assert result["bareCommand"] == [0, 1], "a hint that is only its command: the command block alone"
+    assert result["advice"] == ["What to do: Log in again with the agent itself.", 0], "advice in words: no command"
+    assert result["folded"] == [["ok", False, "2 checks are fine", ["System", "Engine"], 2],
+                                ["skip", False, "2 checks were not made here", ["Project"], 2]]
+    assert result["copyLabel"] == "Copy the command sudo apt install podman"
+    assert result["copied"] == [["sudo apt install podman"], "Copied", "Copied: sudo apt install podman"]
+    assert result["selected"] == "Selected: copy it with Ctrl+C", "no clipboard: the command is selected to copy"
+    assert result["fine"] == ["Everything needed is in place: 2 checks are fine.", 0, ["2 checks are fine"]]
+    pre, note = result["text"]
+    assert pre == "ok    Python   3.12\nFAIL  Podman   not found" and "old1 answered with text" in note
+    assert result["page"] == [1, 0], "the doctor page: the view, no table"
+    assert result["hostTest"] == [1, True], "a host's test: the same view, an older one's text as it is"
+    css = (WEB / "app.css").read_text()
+    for rule in (".doctor-check {", "overflow-wrap: anywhere", ".command-block code", "white-space: pre-wrap",
+                 "@media (max-width: 760px)"):
+        assert rule in css, rule
+
+
+INSTALL_DRIVER = FAKE_DOM + r"""
+const byId = (id) => document.getElementById(id);
+const confirmText = (node) => { const c = node.all().find(n => n.className === "confirm"); return c ? c.textContent : null; };
+const posts = () => calls.filter(c => c.method === "POST").map(c => [c.path, JSON.parse(c.body)]);
+(async () => {
+  const result = {};
+  vm.runInContext('state.me = { user: "admin", csrf: "c", version: "0.1.80" }; state.page = "hosts"; state.hosts = [{ name: "local", kind: "local" }, { name: "ct1", kind: "ssh", ssh: "admin@ct1" }, { name: "ct2", kind: "ssh", ssh: "root@ct2", update_sudo: true }];', context);
+  let installed = { name: "ct1", before: null, after: "0.1.80", changed: true, mode: "system", prefix: "/opt/sai", sudo: true, root: false, source: "here", error: null, needs_password: false, output: "install.sh: done", notes: ["a note"] };
+  answer = (method, path) => (method === "GET" && path.endsWith("/install") ? { running: false, seconds: null, last: null } : path.endsWith("/install") ? installed : path.endsWith("/update") ? updated : {});
+  let updated = {};
+  // for every user, with sudo, from this machine's copy: the question names the host, for whom and how
+  const card = vm.runInContext("installCard(__main, state.hosts[1])", context); await settle();
+  byId("install-source").value = "here";  // a browser's select: its selected option
+  byId("install-mode").value = "system"; byId("install-mode").fire("change");
+  result.shown = [byId("install-prefix").hidden, byId("install-version").hidden, byId("install-sudo").disabled];
+  byId("install-prefix").value = "/opt/../etc";
+  const install = card.all().find(n => n.tagName === "button" && n.textContent === "Install");
+  install.fire("click");
+  result.badPrefix = [card.textContent.includes("no . or .. parts"), posts().length, confirmText(card)];
+  byId("install-prefix").value = "/opt/sai"; byId("install-sudo").value = "sudo";
+  install.fire("click");
+  result.ask = [confirmText(card), posts().length];
+  card.all().find(n => n.tagName === "button" && n.textContent === "Yes, install it").fire("click"); await settle();
+  result.post = posts();
+  result.done = [card.textContent.includes("ct1: sandbox-ai none → 0.1.80, installed for every user in /opt/sai, with sudo."),
+    card.textContent.includes("ct1: a note"), card.all().some(n => n.tagName === "details" && n.textContent.includes("install.sh: done")),
+    toasts().some(t => t.includes("sandbox-ai installed on ct1"))];
+  // sudo there wants a password: no terminals here, the exact command to run
+  calls.length = 0;
+  installed = Object.assign({}, installed, { after: null, changed: false, needs_password: true, error: "sudo on ct1 wants a password" });
+  byId("install-sudo").value = "none";
+  install.fire("click");
+  result.askNoSudo = confirmText(card);
+  card.all().find(n => n.tagName === "button" && n.textContent === "Yes, install it").fire("click"); await settle();
+  result.postNoSudo = posts()[0][1];
+  installed.needs_password = true;
+  byId("install-sudo").value = "sudo"; byId("install-source").value = "download"; byId("install-source").fire("change");
+  byId("install-version").value = "0.1.79";
+  result.versionShown = !byId("install-version").hidden;
+  calls.length = 0;
+  install.fire("click");
+  card.all().find(n => n.tagName === "button" && n.textContent === "Yes, install it").fire("click"); await settle();
+  result.postDownload = posts()[0][1];
+  const help = card.all().find(n => (n.className || "").includes("password-help"));
+  result.password = [help.all().find(n => n.tagName === "code").textContent, card.all().some(n => n.tagName === "button" && n.textContent === "Install in a terminal (sudo asks there)")];
+  result.query = vm.runInContext('installQuery({ mode: "system", prefix: "/opt/sai", sudo: true, source: "download", version: "0.1.79" })', context);
+  // the SSH user is root: for every user as root, no sudo to choose
+  calls.length = 0;
+  installed = Object.assign({}, installed, { name: "ct2", needs_password: false, error: null, root: true, sudo: false, after: "0.1.80" });
+  const rootCard = vm.runInContext("installCard(__main, state.hosts[2])", context); await settle();
+  result.rootForm = [byId("install-mode").value === undefined ? null : byId("install-mode").value, byId("install-sudo").disabled, rootCard.textContent.includes("is root: an installation for every user needs no sudo")];
+  byId("install-mode").value = "system"; byId("install-source").value = "here"; byId("install-prefix").value = "/usr/local";
+  const rootInstall = rootCard.all().find(n => n.tagName === "button" && n.textContent === "Install");
+  rootInstall.fire("click");
+  result.rootAsk = confirmText(rootCard);
+  rootCard.all().find(n => n.tagName === "button" && n.textContent === "Yes, install it").fire("click"); await settle();
+  result.rootPost = posts()[0];
+  // the update: as the host's setting, with sudo or without; a password: the exact command
+  calls.length = 0;
+  updated = { name: "ct1", before: "0.1.70", after: null, error: "sudo on ct1 wants a password", needs_password: true, notes: [] };
+  const output = new Node("div");
+  context.__output = output;
+  await vm.runInContext('updateHost("ct1", __output, sudoChoice({ value: "sudo" }))', context);
+  await vm.runInContext('updateHost("ct1", __output, sudoChoice({ value: "none" }))', context);
+  await vm.runInContext('updateHost("ct1", __output, sudoChoice({ value: "" }))', context);
+  result.updates = posts().map(p => p[1]);
+  result.updatePassword = output.all().find(n => (n.className || "").includes("password-help")).all().find(n => n.tagName === "code").textContent;
+  // the hosts page: a host without sandbox-ai offers the install in its version cell
+  answer = (method, path) => (path === "/api/hosts-status" ? { ct1: { error: "bash: sandbox-ai: command not found (exit status 127)" }, ct2: { version: "0.1.80", update: false } } : path === "/api/hosts-activity" ? {} : {});
+  vm.runInContext("clear(__main)", context);
+  await vm.runInContext("pages.hosts(__main)", context); await settle();
+  const rows = main.all().filter(n => n.tagName === "tr");
+  const version = (name) => rows.find(r => r.children[0] && r.children[0].textContent === name).children[2];
+  result.missing = [version("ct1").textContent, version("ct2").textContent];
+  result.sudoSelects = main.all().filter(n => n.tagName === "select" && (n.getAttribute("aria-label") || "").startsWith("sudo for the update")).map(s => s.children[0].textContent);
+  console.log(JSON.stringify(result));
+})().catch(e => { console.error(e.stack); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_a_hosts_install_is_chosen_asked_and_sent_as_chosen(tmp_path):
+    """The Install… form: for the SSH user or every user (a prefix), as root when the SSH user is root, with sudo or
+    without, from this machine's copy or the signed release (a version); checked before it asks, asked naming the
+    host and how, sent as asked; its answer (before → after, notes, the output folded); sudo that wants a password:
+    the exact command. The update's sudo choice, and a host without sandbox-ai offering the install."""
+    result = run_driver(tmp_path, INSTALL_DRIVER, "install")
+    assert result["shown"] == [False, True, False], "a prefix for every user; a version only for a download"
+    assert result["badPrefix"] == [True, 0, None], "checked before anything is asked or sent"
+    ask, before = result["ask"]
+    assert ask == "Install sandbox-ai on ct1 (admin@ct1) for every user in /opt/sai, with sudo; from this machine's copy?"
+    assert before == 0
+    assert result["post"] == [["/api/hosts/ct1/install", {"mode": "system", "source": "here", "prefix": "/opt/sai",
+                                                          "sudo": True, "confirm": True}]]
+    assert result["done"] == [True, True, True, True]
+    assert "for every user in /opt/sai, without sudo" in result["askNoSudo"]
+    assert result["postNoSudo"] == {"mode": "system", "source": "here", "prefix": "/opt/sai", "sudo": False,
+                                    "confirm": True}
+    assert result["versionShown"]
+    assert result["postDownload"] == {"mode": "system", "source": "download", "prefix": "/opt/sai", "sudo": True,
+                                      "version": "0.1.79", "confirm": True}
+    assert result["password"] == ["sandbox-ai hosts install ct1 --system --prefix=/opt/sai --download --version=0.1.79",
+                                  False], "no terminals in this page: the command to run, no terminal button"
+    assert result["query"] == {"mode": "system", "source": "download", "prefix": "/opt/sai", "version": "0.1.79",
+                               "sudo": "1", "confirm": "1"}
+    assert result["rootForm"][1:] == [True, True]
+    assert "as root (the SSH user is root)" in result["rootAsk"] and "ct2 (root@ct2)" in result["rootAsk"]
+    assert result["rootPost"] == ["/api/hosts/ct2/install", {"mode": "system", "source": "here", "prefix": "/usr/local",
+                                                            "confirm": True}], "as root: no sudo sent"
+    assert result["updates"] == [{"sudo": True}, {"sudo": False}, {}]
+    assert result["updatePassword"] == "sandbox-ai hosts update ct1 --sudo"
+    missing, current = result["missing"]
+    assert missing == "not installed Install…" and current == "0.1.80, up to date"
+    assert result["sudoSelects"] == ["as set: without sudo", "as set: with sudo"]
+
+
+GROUPED_DRIVER = FAKE_DOM + r"""
+const rowOf = (name) => body.all().find(n => n.attributes["data-name"] === name);
+const tbody = () => main.all().find(n => n.tagName === "tbody");
+const rowsShown = () => tbody().children.map(r => [r.attributes["data-group"] ? `[${r.attributes["data-group"]}]` : r.attributes["data-name"] || `note ${r.attributes["data-for"]}`, r.hidden ? "hidden" : "shown", (r.className || "").includes("related") ? "related" : ""]);
+const foldOf = (r) => r.all().find(n => (n.className || "").split(" ").includes("fold"));
+(async () => {
+  const result = {};
+  const stored = {};
+  vm.runInContext('localStorage.getItem = (k) => (__stored[k] === undefined ? null : __stored[k]); localStorage.setItem = (k, v) => { __stored[k] = String(v); };', Object.assign(context, { __stored: stored }));
+  vm.runInContext('state.me = { user: "admin", csrf: "c" }; state.page = "starts"; state.host = "ct1"; state.startsHost = "ct1"; state.hosts = [{ name: "local", kind: "local" }, { name: "ct1", kind: "ssh", ssh: "admin@ct1", port: 2222 }];', context);
+  let starts = [
+    { id: "s-web", name: "web", agent: "claude", kind: "session", state: "running", keep: true, home: "kept", directory: "/d", attachable: true, run: "claude-1", backend: "podman", mcp: ["files", "gone"], mcp_running: ["files"] },
+    { id: "mcp-files", name: "mcp-files", kind: "mcp", state: "running", serves: ["web", "api"] },
+    { id: "s-help", name: "web-helper", agent: "codex", kind: "run", state: "running", helper_of: "claude-1" },
+    { id: "s-api", name: "api", agent: "codex", kind: "session", state: "stopped", keep: true, home: "kept", directory: "/e", mcp: ["files"] },
+    { id: "mcp-lone", name: "mcp-lone", kind: "mcp", state: "running", serves: [] }];
+  answer = (method, path) => (path.endsWith("/starts") ? starts : path.endsWith("/presets") ? [] : { output: "ok" });
+  await vm.runInContext("pages.starts(__main)", context); await settle();
+  result.first = rowsShown();
+  const header = tbody().children[0];
+  result.header = [header.textContent, foldOf(header).getAttribute("aria-expanded")];
+  result.markers = ["web", "mcp-files", "api"].map(n => rowOf(n).children[0].textContent);
+  result.note = tbody().children.find(r => r.attributes["data-for"]).textContent;
+  const web = rowOf("web"), webFold = foldOf(web);
+  result.webFold = [webFold.getAttribute("aria-expanded"), webFold.getAttribute("aria-label"), webFold.textContent];
+  // collapse web: what belongs to it is hidden, kept in this browser by host and start id
+  webFold.fire("click");
+  result.collapsed = [rowsShown(), webFold.getAttribute("aria-expanded"), foldOf(web) === webFold, JSON.parse(stored["sandbox-ai-starts-open"])];
+  // a poll: the same rows, still collapsed
+  starts = starts.map(s => (s.name === "api" ? Object.assign({}, s, { state: "running" }) : s));
+  await vm.runInContext("refreshStarts(__main)", context); await settle();
+  result.polled = [rowsShown(), rowOf("web") === web, foldOf(rowOf("web")).getAttribute("aria-expanded")];
+  // the page drawn anew, in a new page load (what this browser kept): still collapsed
+  vm.runInContext("openChoices.map = null; clear(__main);", context);
+  await vm.runInContext("pages.starts(__main)", context); await settle();
+  result.reloaded = rowsShown();
+  // the host folded: only its header; Expand all / Collapse all
+  foldOf(tbody().children[0]).fire("click");
+  result.hostFolded = [rowsShown(), foldOf(tbody().children[0]).getAttribute("aria-expanded")];
+  main.all().find(n => n.tagName === "button" && n.textContent === "Expand all").fire("click");
+  result.expandAll = [rowsShown(), main.all().filter(n => (n.className || "").split(" ").includes("fold")).map(b => b.getAttribute("aria-expanded"))];
+  main.all().find(n => n.tagName === "button" && n.textContent === "Collapse all").fire("click");
+  result.collapseAll = rowsShown();
+  main.all().find(n => n.tagName === "button" && n.textContent === "Expand all").fire("click");
+  // the host stopped answering: its rows as last seen, its header says so
+  starts = new Error("ssh: connect to host ct1 port 2222: No route to host");
+  vm.runInContext("__now += 9000;", context);
+  await vm.runInContext("refreshStarts(__main)", context); await settle();
+  result.stale = [tbody().children[0].textContent, rowOf("web").className, foldOf(rowOf("web")).disabled];
+  // every host: a header each, by the hosts list's order, the host on every row
+  vm.runInContext('state.startsHost = "all"; clear(__main);', context);
+  const fleet = { starts: [{ host: "ct1", id: "b", name: "b", agent: "codex", kind: "session", state: "paused" },
+    { host: "local", id: "a", name: "a", agent: "claude", kind: "session", state: "running" },
+    { host: "local", id: "mcp-x", name: "mcp-x", kind: "mcp", state: "running", serves: ["a"] }], errors: {}, age: { local: 3, ct1: 4 } };
+  answer = (method, path) => (path === "/api/starts" ? fleet : path.endsWith("/presets") ? [] : { output: "ok" });
+  await vm.runInContext("pages.starts(__main)", context); await settle();
+  result.fleet = [rowsShown(), tbody().children.filter(r => r.attributes["data-group"]).map(r => r.textContent)];
+  console.log(JSON.stringify(result));
+})().catch(e => { console.error(e.stack); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_the_starts_are_grouped_by_host_and_by_what_belongs_together(tmp_path):
+    """The starts by host (a header row: where, counts, whether it answers), each start with what belongs to it
+    indented below it (the MCP servers it reaches, its helper, what it names but is not listed); folding is kept
+    across the polls and in this browser (by host and start id), Expand all / Collapse all, aria-expanded."""
+    result = run_driver(tmp_path, GROUPED_DRIVER, "grouped")
+    assert result["first"] == [["[ct1]", "shown", ""], ["web", "shown", ""], ["mcp-files", "shown", "related"],
+                               ["web-helper", "shown", "related"], ["note ct1 s-web", "shown", "related"],
+                               ["api", "shown", ""], ["note ct1 s-api", "shown", "related"], ["mcp-lone", "shown", ""]]
+    header, expanded = result["header"]
+    assert expanded == "true"
+    for part in ("ct1", "remote, over SSH: admin@ct1:2222", "5 start(s), 4 running, 1 stopped", "answering"):
+        assert part in header, (part, header)
+    assert result["markers"] == ["ct1 · remote"] * 3, "the host on every row"
+    assert result["note"] == "↳ MCP server gone: not running now (it starts with web) · Podman: its run claude-1"
+    assert result["webFold"] == ["true", "Collapse what belongs to web on ct1", "▾ 4"], "2 rows and 2 notes"
+    rows, expanded, same, kept = result["collapsed"]
+    assert [r[:2] for r in rows] == [["[ct1]", "shown"], ["web", "shown"], ["mcp-files", "hidden"],
+                                     ["web-helper", "hidden"], ["note ct1 s-web", "hidden"], ["api", "shown"],
+                                     ["note ct1 s-api", "shown"], ["mcp-lone", "shown"]]
+    assert expanded == "false" and same, "the same button, the focus stays on it"
+    assert kept == {"s ct1 s-web": False}
+    rows, same, expanded = result["polled"]
+    assert rows == result["collapsed"][0] and same and expanded == "false", "a poll keeps what was folded"
+    assert result["reloaded"] == result["collapsed"][0], "and so does a new page load (this browser kept it)"
+    rows, expanded = result["hostFolded"]
+    assert [r[:2] for r in rows][0] == ["[ct1]", "shown"] and all(r[1] == "hidden" for r in rows[1:]) and expanded == "false"
+    rows, folds = result["expandAll"]
+    assert all(r[1] == "shown" for r in rows) and folds == ["true"] * len(folds) and len(folds) == 3
+    assert [r[1] for r in result["collapseAll"]] == ["shown"] + ["hidden"] * 7, "Collapse all: one line per host"
+    header, stale, fold_off = result["stale"]
+    assert "not answering: last seen 9 s ago" in header and stale == "stale" and fold_off is False
+    rows, headers = result["fleet"]
+    assert rows == [["[local]", "shown", ""], ["a", "shown", ""], ["mcp-x", "shown", "related"],
+                    ["[ct1]", "shown", ""], ["b", "shown", ""]]
+    assert "this machine" in headers[0] and "2 start(s), 2 running" in headers[0]
+    assert "1 start(s), 1 paused" in headers[1] and "answering" in headers[1]
