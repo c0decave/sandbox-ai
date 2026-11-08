@@ -40,6 +40,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 
 HERE = Path(__file__).resolve().parent
 
@@ -392,12 +393,17 @@ def url_host(url):
     scheme, sep, rest = url.partition("://")
     if not sep or scheme.lower() not in ("http", "https"):
         return None
+    rest = rest.lstrip("/\\")  # as a browser does: https:///a.example and https://\\a.example open a.example
     authority = re.split(r"[/?#\\]", rest, maxsplit=1)[0]
     authority = authority.rpartition("@")[2]  # after a user part (URL refuses those: this is where it would go)
     if authority.startswith("["):
         host = authority[:authority.find("]") + 1] if "]" in authority else ""
     else:
         host = authority.rsplit(":", 1)[0] if authority.count(":") == 1 else authority
+    # As a browser reads it: percent-encoding decoded (https://github.com%2eevil.example/ opens
+    # github.com.evil.example) and the ideographic and fullwidth full stops taken as dots.
+    host = urllib.parse.unquote(host, errors="replace")
+    host = re.sub("[\u3002\uff0e\uff61]", ".", host)
     return host.lower() or None
 
 

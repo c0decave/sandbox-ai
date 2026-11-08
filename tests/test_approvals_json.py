@@ -105,3 +105,11 @@ def test_dns_allow_under_a_once_cap_is_refused_not_widened(monkeypatch, tmp_path
     with pytest.raises(ValueError, match="pinned for the run"):
         ap.answer("1-1-1", "allow", "once", resolver=lambda name: ["151.101.0.223"], out=lambda line: None)
     assert ap.answer("1-1-1", "deny", "run", out=lambda line: None)["decision"] == "deny", "a deny still works"
+
+
+def test_the_host_shown_is_the_one_a_browser_opens():
+    assert ap.url_host("https://github.com%2eevil.example/login") == "github.com.evil.example"
+    assert ap.url_host("https://github.com\u3002evil.example/") == "github.com.evil.example"
+    assert ap.url_host("https://Login.Example.org:8443/x") == "login.example.org"
+    assert ap.url_host("https://a.example\\.b.example/") == "a.example"
+    assert ap.url_host("https:///evil.example/") == ap.url_host("https://\\evil.example/") == "evil.example"

@@ -624,7 +624,7 @@ kind = ("-O " + args[args.index("-O") + 1] if "-O" in args else "master" if "Con
 open({str(log)!r}, "a").write(kind + "\\n")
 if kind == "-O check":
     sys.exit(0 if os.path.exists(path) else 255)
-if kind == "-O exit":
+if kind in ("-O exit", "-O stop"):
     os.unlink(path)
     sys.exit(0)
 if kind == "master":
@@ -634,6 +634,9 @@ if kind == "master":
     sys.exit(0)
 if kind == "shared" and mode == "dead":
     print("mux_client_request_session: read from master failed: Broken pipe", file=sys.stderr)
+    sys.exit(255)
+if kind == "shared" and mode == "lost":
+    print("Connection to ct1 closed by remote host.", file=sys.stderr)
     sys.exit(255)
 if kind == "shared" and mode == "hang":
     time.sleep(30)
@@ -660,18 +663,23 @@ def test_master_start_is_spent_out_of_the_timeout(mux):
 
 
 def test_dead_master_is_left_for_a_connection_of_its_own(mux):
-    """A master whose TCP connection died answers -O check: a command through it that fails as ssh (255) or gets
-    no answer is tried once more without it, and the master is asked to exit."""
+    """A master whose TCP connection died answers -O check: it is asked to stop taking sessions (-O stop: what runs
+    through it goes on), and the command runs once more on a connection of its own only when it never reached the
+    host (the master refused the session); a command that may have run (lost on the way, no answer) never twice."""
     assert h.run("ct1", ["list"], timeout=10)[:2] == (0, "ran list\n")
     assert mux["log"].read_text().splitlines() == ["master", "shared"]
     mux["mode"].write_text("dead")
     assert h.run("ct1", ["list"], timeout=10)[:2] == (0, "ran list\n")
-    assert mux["log"].read_text().splitlines()[2:] == ["-O check", "shared", "-O exit", "own"]
-    mux["mode"].write_text("hang")
-    mux["log"].write_text("")
-    began = time.monotonic()
-    assert h.run("ct1", ["list"], timeout=2)[:2] == (0, "ran list\n") and time.monotonic() - began < 6
-    assert mux["log"].read_text().splitlines() == ["master", "shared", "-O exit", "own"]
+    assert mux["log"].read_text().splitlines()[2:] == ["-O check", "shared", "-O stop", "own"]
+    assert "-O exit" not in mux["log"].read_text(), "never ends the other sessions on that host"
+    for mode, status in (("lost", 255), ("hang", 124)):
+        mux["mode"].write_text("ok")
+        assert h.run("ct1", ["list"], timeout=10)[0] == 0  # a new master
+        mux["mode"].write_text(mode)
+        mux["log"].write_text("")
+        began = time.monotonic()
+        assert h.run("ct1", ["list"], timeout=2)[0] == status and time.monotonic() - began < 8
+        assert mux["log"].read_text().splitlines()[-2:] == ["shared", "-O stop"], "not run a second time"
 
 
 def test_remove_and_changed_settings_end_the_shared_connection(mux, monkeypatch):

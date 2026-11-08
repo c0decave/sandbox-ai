@@ -3322,6 +3322,7 @@ def check_host_sources(a):
         check_planted(a.state_dir, "--state-dir", before)
         check_private_location(a.state_dir.expanduser().resolve(), "--state-dir")
         check_socket_location(a.state_dir.expanduser().resolve(), "--state-dir")
+        check_kernel_mounts(a.state_dir.expanduser().resolve(), "--state-dir")
         check_package_location(a.state_dir.expanduser().resolve(), "--state-dir")
     if a.log_dir:
         check_planted(a.log_dir, "--log-dir", before)

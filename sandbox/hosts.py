@@ -329,16 +329,17 @@ def ensure_master(entry, path, runner=subprocess.run, deadline=None):
         os.close(fd)  # (and with it the lock)
 
 
-def stop_master(entry, path=None, runner=subprocess.run, timeout=5):
-    """Ask the shared connection for ENTRY (at PATH, else its usual place) to exit: best effort, at most TIMEOUT
-    seconds. For a host that was removed or whose connection settings (CONNECTION) changed, and for a master whose
-    connection died."""
+def stop_master(entry, path=None, runner=subprocess.run, timeout=5, how="exit"):
+    """Ask the shared connection for ENTRY (at PATH, else its usual place) to exit (HOW "exit": its sessions end
+    too; for a host that was removed or whose connection settings changed) or to stop taking new sessions (HOW
+    "stop": the commands running through it go on; for a master that seems dead). Best effort, at most TIMEOUT
+    seconds."""
     path = path or control_path(entry)
     if path is None or not path.exists():
         return False
     try:
         base = ssh_base(entry, control=path)
-        return runner([base[0], *base[1:-2], "-O", "exit", "--", entry["ssh"]], stdin=subprocess.DEVNULL,
+        return runner([base[0], *base[1:-2], "-O", how, "--", entry["ssh"]], stdin=subprocess.DEVNULL,
                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout).returncode == 0
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return False
@@ -414,13 +415,21 @@ def run(name, args, input=None, timeout=120, path=None, runner=subprocess.run, s
     status, out, err, answered = run_once(name, args, input, deadline - time.monotonic(), timeout, path, runner,
                                           sudo, control)
     if control is not None and (status == 255 or status == 124 and not answered):
-        # Through a master whose connection died (it still answers -O check, locally): once more on a connection
-        # of its own, which at least gets the time to connect; the master is asked to exit.
-        stop_master(entry, control)
-        status, out, err, _ = run_once(name, args, input, max(deadline - time.monotonic(),
-                                                              min(timeout, CONNECT_TIMEOUT + 5)),
-                                       timeout, path, runner, sudo, None)
+        # The master may be dead (it still answers -O check, locally): it stops taking new sessions (-O stop, so
+        # the commands running through it on that host go on), and the next command makes a new one. The command
+        # runs once more on a connection of its own only when it never reached the host (the master refused the
+        # session): a command that may have run (a timeout, a connection lost on the way) is never run twice.
+        stop_master(entry, control, how="stop")
+        if status == 255 and not out and MUX_REFUSED.search(err or ""):
+            status, out, err, _ = run_once(name, args, input, max(deadline - time.monotonic(),
+                                                                  min(timeout, CONNECT_TIMEOUT + 5)),
+                                           timeout, path, runner, sudo, None)
     return status, out, err
+
+
+# What ssh says when the shared connection could not even open a session (nothing reached the remote host).
+MUX_REFUSED = re.compile(r"mux_client_\w+|Control ?[Ss]ocket|control socket|master (?:refused|is not running)|"
+                         r"Session open refused|muxclient|mux_master")
 
 
 def run_once(name, args, input, seconds, timeout, path, runner, sudo, control):
