@@ -2441,7 +2441,11 @@ local LLM, the OpenCode configuration goes to
 could replace with a symlink.
 
 A launcher then reads `.sandbox-ai.json` from the main workspace automatically;
-`--config FILE` selects another file and `--no-config` ignores it. Options with
+`--config FILE` selects another file and `--no-config` ignores it. **The directory you start in decides:** when
+it holds a `.sandbox-ai.json`, it is the project — the main workspace (`/work`) and the file that applies — and
+what `--workspace` names follows it as further workspaces (`/workspaces/NAME`); without a project file there,
+the first `--workspace` is the main workspace as before. Every start prints which folder `/work` is and which
+configuration applies. (Starts the app and the web interface build give their workspaces as they are.) Options with
 a value given on the command line override the file's, an auth choice
 (`--copy-auth`, `--no-auth`, `--auth-file`, `--import-codex-auth`, a `--copy`
 of a credential file) replaces the file's, and agent arguments after `--` replace the saved ones; a switch the file

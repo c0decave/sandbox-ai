@@ -1118,7 +1118,8 @@ def test_terminal_commands():
     assert host == "local" and argv[-2:] == ["attach", "web"]
     host, argv = w.terminal_command({"host": "local", "kind": "start", "agent": "codex", "name": "n1",
                                      "workspace": "/srv/app", "options": json.dumps(["--mode", "high"])})
-    assert argv[-7:] == ["codex", "--name", "n1", "--workspace", "/srv/app", "--mode", "high"]
+    # On this machine the chosen workspace is given as is (a project file in the service's directory never takes over).
+    assert argv[-8:] == ["codex", "--name", "n1", "--workspace", "/srv/app", "--workspaces-as-given", "--mode", "high"]
     for query in ({"host": "local", "kind": "shell"}, {"host": "local", "kind": "start", "agent": "bash"},
                   {"host": "local", "kind": "attach", "name": "--all"},
                   {"host": "local", "kind": "start", "agent": "claude", "workspace": "relative"},

@@ -10598,3 +10598,32 @@ def test_stores_and_other_starts_folders_are_refused_for_any_start(tmp_path, mon
                      str(data / "auth/.login-claude-a/home")]):
         with pytest.raises(ValueError, match="sandbox-ai's own folder|plugin store"):
             s.validate(s.parse_args(options))
+
+
+def test_project_directory(scenario, tmp_path, monkeypatch):
+    """The directory you are in decides, when it holds a project configuration: it is the project (/work and the
+    file that applies) and what --workspace names follows it. The mix-up of 2026-11-08: a start in the development
+    checkout with --workspace of the publishing copy gave that copy as /work, and its project file was never read."""
+    here, other = tmp_path / "project", tmp_path / "other"
+    (here / "sub").mkdir(parents=True)
+    other.mkdir()
+    (here / s.CONFIG_NAME).write_text('{"version": 1, "agent": "claude"}')
+    monkeypatch.chdir(here)
+    monkeypatch.setenv("PWD", str(here))
+    if scenario == "happy":
+        a = s.parse_args(["claude", "--workspace", str(other)])
+        assert a.cwd_project == str(here) and a.workspaces == [str(here), str(other)] and a.workspace == str(here)
+    elif scenario == "sad":
+        # Nothing takes a project over: no project file here, or the options say the workspaces are as given.
+        monkeypatch.chdir(here / "sub")
+        monkeypatch.setenv("PWD", str(here / "sub"))
+        assert s.parse_args(["claude", "--workspace", str(other)]).workspaces == [str(other)]
+        monkeypatch.chdir(here)
+        monkeypatch.setenv("PWD", str(here))
+        for extra in (["--workspaces-as-given"], ["--no-config"], ["--config", str(here / s.CONFIG_NAME)]):
+            assert s.parse_args(["claude", "--workspace", str(other), *extra]).workspaces == [str(other)], extra
+    else:
+        # Already the main workspace, or no --workspace at all: nothing changes, and it is never listed twice.
+        assert s.parse_args(["claude", "--workspace", f"{here},{other}"]).workspaces == [str(here), str(other)]
+        assert s.parse_args(["claude", "--workspace", str(here)]).cwd_project is None
+        assert s.parse_args(["claude"]).workspaces == [str(here)]

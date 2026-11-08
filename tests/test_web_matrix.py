@@ -620,8 +620,9 @@ def test_the_terminal_in_every_login_state_on_every_host(web, state, host, kind,
     if kind == "attach":
         assert args == ["attach", "web"]
     else:
-        assert args == [agent, "--name", f"{agent}-1", "--workspace", "/srv/project", "--preset", "development",
-                        "--allow-pypi", "--mode", "high"]
+        given = ["--workspaces-as-given"] if host == "local" else []  # a host's older sandbox-ai would not know it
+        assert args == [agent, "--name", f"{agent}-1", "--workspace", "/srv/project", *given, "--preset",
+                        "development", "--allow-pypi", "--mode", "high"]
     events = [json.loads(line) for line in (w.state_dir() / "audit.jsonl").read_text().splitlines()]
     assert [(e["event"], e["host"], e["kind"], e["name"]) for e in events if e["event"] == "terminal"] == [
         ("terminal", host, kind, "web" if kind == "attach" else f"{agent}-1")]

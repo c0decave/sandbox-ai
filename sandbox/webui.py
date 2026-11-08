@@ -2905,6 +2905,10 @@ def terminal_command(query):
             if not workspace.startswith(("/", "~")) or "\0" in workspace:
                 raise Refused(400, "the workspace is an absolute path (or ~/...)")
             args += ["--workspace", workspace]
+            if host == hosts.LOCAL:
+                # The workspace is the one chosen here: a project file in the web service's own working directory
+                # must not take the start over (sandbox-ai 0.1.78; a host's older sandbox-ai would not know it).
+                args.append("--workspaces-as-given")
         options = json.loads(query.get("options") or "[]")
         args += strings(options, "options")
         return host, hosts.argv(host, args, tty=True)

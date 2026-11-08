@@ -307,7 +307,7 @@ export const SandboxAiHooks = async ({ directory }) => ({
 # Options a project file may not set: internal ones, config selection itself,
 # workspace order (main workspace = where the file lives) and sessions.
 CONFIG_FORBIDDEN = ("--config", "--no-config", "--tmux-socket-dir", "--pod-name", "--mcp-socket-dir", "--helper-of",
-                    "--workspace", "--workspace-name",
+                    "--workspace", "--workspace-name", "--workspaces-as-given",
                     "--session", "--dry-run", "--mcp-approvals-dir", "--rules", "--mode", "--name", "--project-name",
                     "--start-id", "--")
 # Mutually exclusive auth choices: one given on the command line replaces the file's.
@@ -475,6 +475,9 @@ def build_parser():
     p.add_argument("--workspace-ro", action="store_true", help="Mount every workspace read-only")
     # NAME=DIR: the further workspace DIR (a --workspace) at /workspaces/NAME; what `workspace add --name` keeps.
     p.add_argument("--workspace-name", action="append", default=[], metavar="NAME=DIR", help=argparse.SUPPRESS)
+    # The workspaces are exactly as given: a project configuration in the working directory does not take over.
+    # Starts the app, the web interface and `resume` build pass it (their working directory is not the project).
+    p.add_argument("--workspaces-as-given", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--mount", action="append", default=[], metavar="SRC:DEST:ro|rw", help="Repeatable; DEST under /work, /mnt or /opt")
     p.add_argument("--device", action="append", default=[], metavar="PATH|usb:VID:PID[:SERIAL]",
                    help="Hand a host device to the agent: a character device under /dev (symlinks such as "
@@ -1559,6 +1562,26 @@ def check_given_path(path, option, writable, own=(), warn=None, refused=()):
     check_sockets_below(path, option, warn)
 
 
+def project_directory(a):
+    """The working directory when it holds a project configuration that is meant to apply - then it is the project
+    (its main workspace, and the file that applies) - else None. Not with --no-config, --config or
+    --workspaces-as-given, not without --workspace (then the working directory is the main workspace anyway), and
+    not when it already is the first workspace."""
+    if a.no_config or a.config or getattr(a, "workspaces_as_given", False) or not a.workspace:
+        return None
+    here = logical_cwd()
+    try:
+        if not (Path(here) / CONFIG_NAME).is_file():
+            return None
+    except OSError:
+        return None
+    first = a.workspaces[0] if a.workspaces else None
+    with contextlib.suppress(OSError):
+        if first and os.path.samefile(first, here):
+            return None  # it is the main workspace already
+    return here
+
+
 def parse_args(argv):
     # The separator belongs to this wrapper; everything afterwards is opaque.
     tail = []
@@ -1568,6 +1591,13 @@ def parse_args(argv):
     a = build_parser().parse_args(argv)
     # Commas are invalid in workspace paths, so they can separate entries.
     a.workspaces = [part for value in (a.workspace or [logical_cwd()]) for part in value.split(",")]
+    a.cwd_project = project_directory(a)
+    if a.cwd_project:
+        # The directory you are in holds a project configuration: it is the project (/work, and the file that
+        # applies), and what --workspace names comes after it. Without a project file here, --workspace decides as
+        # before. Starts built by the app, the web interface and `resume` pass --workspaces-as-given, so their own
+        # working directory can never take a project over.
+        a.workspaces = [a.cwd_project, *(w for w in a.workspaces if w != a.cwd_project)]
     a.subnet_origin = {}  # where a --subnet/--subnet6 came from when no option set it (defaults, policy)
     a.workspace = a.workspaces[0]
     a.gui = a.gui or bool(a.gui_vnc)
@@ -7897,6 +7927,14 @@ def launch(argv):
         return launch([argv[0], "--mode", floor, *rest])
     # The checked document is passed on; nothing re-reads the file later.
     a.project_config, a.project_document = (str(config_path) if config_path else None), document
+    if not a.dry_run and not a.probe and not a.mcp_socket_dir:
+        # Which folder the agent works in, and whose configuration applies: the mix-up this prevents is giving
+        # --workspace another checkout and getting that one as /work.
+        where = f"agent-sandbox: /work is {printable(a.workspaces[0])}"
+        if getattr(a, "cwd_project", None):
+            where += " (the project of this directory; what --workspace named follows it)"
+        where += f"; configuration: {printable(a.project_config) if a.project_config else 'none'}"
+        print(where, file=sys.stderr)
     apply_subnet_defaults(a, user_defaults, str(defaults_file()))
     a.canary_default = user_defaults.get("canaries")  # canary.categories(): after the options and the project file
     a.telemetry_default = user_defaults.get("telemetry")  # telemetry_level(): after the option
