@@ -559,3 +559,42 @@ def test_the_models_carry_the_date_their_server_gives():
     found = llm.discover("openai-compatible", lambda path: listing[path])
     assert [m["details"] for m in found] == ["2026-01-01", ""]
     assert llm.model_date(True) == "" and llm.model_date(-5) == ""
+
+
+def test_discover_url_lists_a_server_that_is_not_registered():
+    """The "test connection" of the app and the web: the models of a server by its whole URL (a path prefix and
+    https included), nothing stored, no key sent."""
+    asked = []
+
+    class FakeClient:
+        def __init__(self, endpoint):
+            self.endpoint = endpoint
+
+        def json(self, path):
+            asked.append((self.endpoint["url"] + path, self.endpoint["api_key_secret"]))
+            return {"data": [{"id": "m1"}, {"id": "m2"}]}
+    found = llm.discover_url("openai-compatible", "https://gpu.example:8443/v1x",
+                             client=FakeClient({"url": "https://gpu.example:8443/v1x", "api_key_secret": None}))
+    assert [m["name"] for m in found] == ["m1", "m2"]
+    assert asked[0] == ("https://gpu.example:8443/v1x/v1/models", None), "no key is sent"
+    with pytest.raises(ValueError, match="Unknown server type"):
+        llm.discover_url("nope", "http://127.0.0.1:1234")
+    with pytest.raises(ValueError, match="expected http"):
+        llm.discover_url("lmstudio", "127.0.0.1:1234")
+
+
+@pytest.mark.skipif(not shutil.which("openssl"), reason="needs openssl")
+def test_replace_keeps_the_ca_unless_no_ca_is_given(tmp_path):
+    """A front end can only send the CA's file once: --replace without --ca keeps the stored copy, --no-ca drops it."""
+    run_dir = tmp_path / "server-ca"
+    rt.create_ca(run_dir, tmp_path / "ca-out", bundles=())
+    assert run("add", "gpu", "--kind", "openai-compatible", "--url", "https://gpu.example",
+               "--ca", str(run_dir / "ca.pem"))[0] == 0
+    kept = llm.ca_dir() / "gpu.pem"
+    assert kept.is_file()
+    assert run("add", "gpu", "--kind", "openai-compatible", "--url", "https://gpu.example", "--model", "m1",
+               "--replace")[0] == 0
+    assert llm.load_store()["endpoints"]["gpu"].get("ca") == "gpu.pem" and kept.is_file(), "the CA stays"
+    assert run("add", "gpu", "--kind", "openai-compatible", "--url", "http://127.0.0.1:1234", "--replace",
+               "--no-ca")[0] == 0
+    assert not llm.load_store()["endpoints"]["gpu"].get("ca") and not kept.exists()

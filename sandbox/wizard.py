@@ -1561,7 +1561,10 @@ def cli(argv):
     models.add_argument("-H", "--host")
     models.add_argument("-l", "--llm", metavar="NAME", help="a server of sandbox-ai llm list (key, https, its CA)")
     models.add_argument("-p", "--port", type=int)
+    models.add_argument("-u", "--url", metavar="URL", help="http(s)://HOST[:PORT][/PREFIX] of a server not "
+                                                           "registered yet (with --kind)")
     models.add_argument("-s", "--sort", choices=["name", "size", "loaded"], default="loaded")
+    models.add_argument("-j", "--json", action="store_true", help="as JSON")
     a = parser.parse_args(argv)
     if a.command in (None, "new", "edit") or a.command == "trust" and not (a.show or a.list or a.digest):
         enable_line_editing()
@@ -1584,11 +1587,19 @@ def cli(argv):
     if a.command == "models":
         if a.llm:
             found = llm().endpoint_models(llm().endpoint(a.llm))
+        elif a.url:
+            # A server that is not registered yet, by its whole URL (https and a path prefix included): what the
+            # app's and the web's "Test connection" asks before anything is stored.
+            found = llm().discover_url(a.kind, a.url) if a.kind else parser.error("--url needs --kind")
         elif a.kind and a.host:
             found = discover(a.kind, a.host, a.port or SERVERS[a.kind][1], fetch=fetch_json)
         else:
-            parser.error("models needs --kind and --host, or --llm NAME")
-        for line in model_table(sort_models(found, a.sort)):
+            parser.error("models needs --kind with --host or --url, or --llm NAME")
+        found = sort_models(found, a.sort)
+        if a.json:
+            print(json.dumps(found, indent=2))
+            return 0
+        for line in model_table(found):
             print(line)
         return 0
     if a.command == "edit":

@@ -569,6 +569,17 @@ def model_table(models):
     return lines if models else [lines[0], "(no models found)"]
 
 
+def discover_url(kind, url, get=None, client=None):
+    """The models a server of KIND at URL lists, before it is registered anywhere (the "test connection" of the app
+    and the web): the URL is checked as `llm add` checks it, nothing is stored, no key is sent."""
+    if kind not in KINDS:
+        raise ValueError(f"Unknown server type: {printable(kind)}")
+    parsed = parse_url(url)
+    endpoint = {"name": "test", "kind": kind, "url": parsed["url"], "parsed": parsed, "api_key_secret": None,
+                "headers": {}, "ca": None, "vpn": None, "model": None, "anthropic": False, "insecure_http": False}
+    return discover(kind, (client or Client(endpoint, get)).json)
+
+
 def endpoint_models(endpoint, get=None, client=None):
     """The models the endpoint lists now, checked; remembered in the store for later starts."""
     client = client or Client(endpoint, get)
@@ -1173,7 +1184,13 @@ def add(args, out=print, get=None):
         write_private(ca_dir() / f"{args.name}.pem", text.encode())
         record["ca"] = f"{args.name}.pem"
     elif args.name in store["endpoints"]:
-        (ca_dir() / f"{args.name}.pem").unlink(missing_ok=True)
+        kept = store["endpoints"][args.name].get("ca") if isinstance(store["endpoints"][args.name], dict) else None
+        if kept and not args.no_ca:
+            # --replace without --ca keeps the CA that is stored (a front end cannot send the file again: the store
+            # holds only a copy of it). --no-ca drops it.
+            record["ca"] = kept
+        else:
+            (ca_dir() / f"{args.name}.pem").unlink(missing_ok=True)
     store["endpoints"][args.name] = record
     save_store(store)
     for line in describe(check_record(args.name, record)):
@@ -1204,6 +1221,8 @@ def main(argv, out=print, get=None):
     adding.add_argument("-i", "--insecure-http", action="store_true",
                         help="allow plain http to an address outside your local networks (unencrypted)")
     adding.add_argument("-r", "--replace", action="store_true", help="replace an endpoint of the same name")
+    adding.add_argument("--no-ca", action="store_true", help="with --replace: drop the CA it has (without --ca the "
+                                                             "stored one is kept)")
     listing = commands.add_parser("list", help="the endpoints")
     listing.add_argument("-j", "--json", action="store_true")
     showing = commands.add_parser("show", help="one endpoint")

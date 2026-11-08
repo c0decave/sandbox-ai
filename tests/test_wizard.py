@@ -106,11 +106,14 @@ def test_model_table(scenario):
     models = [] if scenario == "sad" else [{"name": "x" * (60 if scenario == "edge" else 3), "size": 2 ** 30,
                                             "loaded": True, "details": "8B"}]
     lines = w.model_table(models)
-    assert lines[0].split() == ["#", "NAME", "SIZE", "LOADED", "DETAILS"]
-    if scenario == "sad":
-        assert lines[1] == "(no models found)"
+    # Only the columns some model fills (a server that reports no sizes gets no SIZE column).
+    assert lines[0].split()[:2] == ["#", "NAME"]
+    if scenario == "sad":  # no models: the name column alone
+        assert lines[1] == "(no models found)" and lines[0].split() == ["#", "NAME"]
     else:
-        assert lines[1].split()[:4] == ["1", models[0]["name"], "1.1", "GB"] and "yes" in lines[1]
+        shown = models[0]["name"][:47] + "…" if scenario == "edge" else models[0]["name"]
+        assert lines[1].split()[:2] == ["1", shown] and "yes" in lines[1] and "1.1 GB" in lines[1]
+        assert "8B" in lines[1] and "SIZE" in lines[0] and "LOADED" in lines[0]
 
 
 def test_opencode_config(scenario):
