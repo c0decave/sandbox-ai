@@ -1028,3 +1028,21 @@ def test_the_mcp_catalog_ships_with_its_signature_and_rootfs(tmp_path):
     dist = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(dist)
     assert set(dist.MCP_CATALOG_FILES) >= {"projects/sandbox-ai-mcp/catalog.json.sig", "projects/sandbox-ai-mcp/rootfs.json"}
+
+
+def test_copying_an_upload_folder_never_runs_git_of_a_folder_above(tmp_path):
+    """Review 5 L4: `hosts install` uploads a tree without .git and install.sh ran `git ls-files` in it; git then
+    used a repository of a folder above (/tmp/.git, whose core.fsmonitor runs a command). Only the checkout's own
+    repository is asked; without one every file is copied."""
+    helper = installer_helper()
+    above = tmp_path / "above"
+    upload = above / "sandbox-ai-install.abc"
+    (upload / "sandbox").mkdir(parents=True)
+    (upload / "sandbox" / "x.py").write_text("x")
+    subprocess.run(["git", "init", "-q", str(above)], check=True)
+    marker = tmp_path / "ran"
+    subprocess.run(["git", "-C", str(above), "config", "core.fsmonitor", f"touch {marker}; false"], check=True)
+    target = tmp_path / "target"
+    target.mkdir()
+    helper.cmd_copy(str(upload), str(target))
+    assert (target / "sandbox" / "x.py").read_text() == "x" and not marker.exists()

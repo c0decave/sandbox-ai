@@ -1653,3 +1653,104 @@ def test_a_question_names_the_verified_server_and_the_host_header_as_a_claim(tmp
     assert "POST https://collector.attacker.example/" in text and "api.github.com (not verified)" in text
     record = json.loads(log.read_text().splitlines()[-1])
     assert record["url"].startswith("https://collector.attacker.example/") and record["host_header"] == "api.github.com"
+
+
+# --- review 5 lows: paths that read differently, SSH after a junk line, push options -------------------------
+
+
+@pytest.mark.parametrize("target, sent", [
+    ("/tenantA/v1/chat/completions", True),
+    ("/tenantB/v1/chat/completions", False),
+    ("/tenantB/x%2F..%2F..%2FtenantA/v1/chat/completions", False),
+    ("/tenantB/x\\..\\..\\tenantA/v1/chat/completions", False),
+    ("/tenantA/v1/x/../chat", False),
+])
+def test_a_path_servers_read_differently_gets_no_key_below_a_prefix(tmp_path, target, sent):
+    """Review 5 L1 (PoC poc4_grant_normalization.py): the prefix grant of --llm went by the normalised path, so
+    /tenantB/x%2F..%2F..%2FtenantA/... got tenant A's key while a raw-routing server served tenant B."""
+    entry = {"name": "gw", "scheme": "https", "host": "gateway.example.net", "port": 443, "prefix": "/tenantA/v1",
+             "placeholder": "PH", "key": "TENANT-A-REAL-KEY", "headers": [], "addresses": []}
+    server, _ = fronting_server(tmp_path, {"llm": [entry]})
+    upstream, _ = exchange_once(server, f"POST {target} HTTP/1.1\r\nHost: gateway.example.net\r\nContent-Length: "
+                                "0\r\n\r\n".encode(), "gateway.example.net")
+    assert (b"TENANT-A-REAL-KEY" in upstream) == sent
+
+
+def test_an_allow_rule_for_some_paths_never_allows_a_path_read_differently():
+    """Review 5 L1: an allow-list (--allow-http HOST GET /public/**) let /private/x%2F..%2F..%2Fpublic/y through;
+    an encoded slash alone (GitLab's group%2Fproject) is no ambiguity."""
+    rules = rt.Ruleset([{"name": "--allow-http", "version": 1, "http": [
+        {"id": "a1", "host": "api.example.net", "methods": ["GET"], "path": "/public/**", "decision": "allow"}]}])
+    decide = lambda target: rules.http(rt.Ruleset.request("api.example.net", "GET", target,  # noqa: E731
+                                                          [["Host", "api.example.net"]]))["decision"]
+    assert decide("/public/a") == "allow" and decide("/private/report") == "deny"
+    assert decide("/private/x%2F..%2F..%2Fpublic/y") == "deny" and decide("/public/../public/a") == "deny"
+    assert decide("/public/group%2Fproject") == "allow"
+    assert not rt.ambiguous_path("/api/v4/projects/group%2Fproject") and rt.ambiguous_path("/a/%252e%252e/b")
+
+
+def test_ssh_after_a_junk_line_is_refused_too(tmp_path):
+    """Review 5 L2 (PoC poc3_ssh_prefix.py): a client that sent "x\\r\\n" before its SSH banner was relayed as plain
+    TCP to a public Git host (Go's x/crypto/ssh servers skip such lines). Any early line counts, and the server's
+    banner too."""
+    assert rt.ssh_banner(b"SSH-2.0-x\r\n") and rt.ssh_banner(b"x\r\nSSH-2.0-OpenSSH_9.6\r\n")
+    assert not rt.ssh_banner(b"GET / HTTP/1.1\r\n") and not rt.ssh_banner(b"x" * 300 + b"\nSSH-2.0-late")
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(5)
+    port = listener.getsockname()[1]
+    received = []
+
+    def sshd():  # speaks first, as SSH servers do
+        with contextlib.suppress(OSError):
+            conn, _ = listener.accept()
+            conn.sendall(b"SSH-2.0-Go\r\n")
+            conn.settimeout(2)
+            data = b""
+            with contextlib.suppress(OSError):
+                while chunk := conn.recv(4096):
+                    data += chunk
+            received.append(data)
+            conn.close()
+    threading.Thread(target=sshd, daemon=True).start()
+    server, log = fronting_server(tmp_path, {"allow": {"loopback": [port]},
+                                             "ssh": {"block": True, "public_git": ["127.0.0.1"]}},
+                                  destination=lambda sock: ("127.0.0.1", port))
+    server.attribute = lambda record: None
+    pair = socket.socket()
+    pair.bind(("127.0.0.1", 0))
+    pair.listen(1)
+    client = socket.create_connection(pair.getsockname())
+    redirected, _ = pair.accept()
+    client.sendall(b"x\r\n")  # a junk line, its banner later
+    thread = threading.Thread(target=server.handle, args=(redirected,))
+    thread.start()
+    thread.join(10)
+    client.close()
+    listener.close()
+    assert not any(data for data in received)
+    assert '"protocol": "ssh"' in log.read_text() and "public Git host" in log.read_text()
+
+
+def test_push_options_go_to_the_privacy_check(tmp_path):
+    """Review 5 L3 (PoC poc5_push_options.py): the options of git push -o (published by GitLab as merge request
+    texts) were passed on unread; they go to the checker with the commands."""
+    server, _ = fronting_server(tmp_path, {})
+    seen = []
+    server.checker = object()
+    server.ask_checker = lambda request: (seen.append(request), {"ok": False, "message": "private"})[1]
+    old, new = "0" * 40, "1" * 40
+    body = (rt.pkt(f"{old} {new} refs/heads/feature\0report-status push-options\n".encode()) + b"0000"
+            + rt.pkt(b"merge_request.create") + rt.pkt(b"merge_request.description=PRIVATE") + b"0000"
+            + b"PACK\x00\x00\x00\x02")
+    request = (b"POST /a/public.git/git-receive-pack HTTP/1.1\r\nHost: gitlab.com\r\nContent-Type: "
+               b"application/x-git-receive-pack-request\r\nContent-Length: %d\r\n\r\n" % len(body)) + body
+    upstream, answer = exchange_once(server, request, "gitlab.com")
+    assert seen[0]["push_options"] == ["merge_request.create", "merge_request.description=PRIVATE"]
+    assert b"merge_request.description" not in upstream and b"refused by the sandbox-ai privacy check" in answer
+    # an options list that never ends cannot be checked: refused
+    seen.clear()
+    cut = body.split(b"PACK")[0][:-4]
+    upstream, answer = exchange_once(server, (b"POST /a/public.git/git-receive-pack HTTP/1.1\r\nHost: gitlab.com\r\n"
+                                              b"Content-Length: %d\r\n\r\n" % len(cut)) + cut, "gitlab.com")
+    assert seen == [] and upstream == b"" and answer.startswith(b"HTTP/1.1 200")  # refused, nothing passed on

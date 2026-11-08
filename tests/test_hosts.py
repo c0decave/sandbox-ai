@@ -986,3 +986,21 @@ def test_a_from_here_update_whose_sudo_wants_a_password_asks_in_the_terminal_fro
     assert h.cli(["update", "ct1", "--from-here"], lines.append) == 0
     assert calls == [("ct1", None, True, False), ("ct1", True, True, True)]
     assert any("0.1.78" in line for line in lines), lines
+
+
+def test_a_system_prefix_is_checked_from_the_root_down():
+    """Review 5 L5: only the owners of PREFIX, PREFIX/bin and PREFIX/lib were checked; a group- or world-writable
+    folder, one above PREFIX of another user, and lib/sandbox-ai itself went unseen."""
+    paths = [path for path, _ in h.prefix_paths("/opt/sai")]
+    assert paths == ["/", "/opt", "/opt/sai", "/opt/sai/bin", "/opt/sai/lib", "/opt/sai/lib/sandbox-ai"]
+    good = {"uid": "1000", **{f"folder{i}": "drwxr-xr-x 0" for i in range(len(paths))}}
+    assert h.prefix_problem("/opt/sai", good) is None
+    assert h.prefix_problem("/opt/sai", {**good, "folder2": "drwxr-xr-x 1000"}) is None  # the SSH user's own
+    assert "/opt belongs to the user 4321" in h.prefix_problem("/opt/sai", {**good, "folder1": "drwxr-xr-x 4321"})
+    assert "its group" in h.prefix_problem("/opt/sai", {**good, "folder3": "drwxrwxr-x 0"})
+    assert "others" in h.prefix_problem("/opt/sai", {**good, "folder5": "drwxr-xrwx 0"})
+    assert "others" in h.prefix_problem("/opt/sai", {**good, "folder1": "drwxrwxrwx 0"})
+    assert h.prefix_problem("/opt/sai", {**good, "folder1": "drwxrwxrwt 0"}) is None  # sticky above, as /tmp
+    assert "others" in h.prefix_problem("/opt/sai", {**good, "folder2": "drwxrwxrwt 0"})  # never PREFIX itself
+    script = h.probe_script("system", "/opt/sai")
+    assert "ls -ndL /opt/sai/lib/sandbox-ai" in script and "folder0=" in script

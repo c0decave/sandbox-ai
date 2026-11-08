@@ -7777,6 +7777,39 @@ def test_host_authority(scenario):
         assert rt.host_authority("[2001:DB8:0::1]:443") == ("2001:db8::1", 443)
 
 
+def test_ssh_banner(scenario):
+    """Review 5 L2: an SSH banner on any early line, not only the first."""
+    if scenario == "happy":
+        assert rt.ssh_banner(b"SSH-2.0-OpenSSH_9.6\r\n") and rt.ssh_banner(b"junk\r\nSSH-2.0-Go\r\n")
+    elif scenario == "sad":
+        assert not rt.ssh_banner(b"GET / HTTP/1.1\r\n") and not rt.ssh_banner(b"") and not rt.ssh_banner(None)
+    else:  # only the first 255 bytes count (as the protocol allows lines before the server's banner)
+        assert not rt.ssh_banner(b"x" * 300 + b"\nSSH-2.0-late")
+
+
+def test_ambiguous_path(scenario):
+    """Review 5 L1: a dot segment after decoding makes a path read differently by server."""
+    if scenario == "happy":
+        assert rt.ambiguous_path("/b/x%2F..%2F..%2Fa/v1") and rt.ambiguous_path("/b/x\\..\\a")
+    elif scenario == "sad":
+        assert not rt.ambiguous_path("/v1/chat/completions?x=..") and not rt.ambiguous_path("/api/v4/projects/g%2Fp")
+    else:  # double encoding, parameters and plain dot segments
+        assert rt.ambiguous_path("/a/%252e%252e/b") and rt.ambiguous_path("/a/..;/b") and rt.ambiguous_path("/a/./b")
+
+
+def test_pkt_sections(scenario):
+    """Review 5 L3: the commands and then the push options of a receive-pack request."""
+    data = rt.pkt(b"cmd") + b"0000" + rt.pkt(b"opt1") + rt.pkt(b"opt2") + b"0000" + b"PACK"
+    if scenario == "happy":
+        assert rt.pkt_sections(data, 2) == ([[b"cmd"], [b"opt1", b"opt2"]], True)
+    elif scenario == "sad":
+        assert rt.pkt_sections(data[:-10], 2) == ([[b"cmd"]], False)
+        with pytest.raises(ValueError):
+            rt.pkt_sections(b"zzzz", 1)
+    else:  # an empty options list is a flush alone
+        assert rt.pkt_sections(rt.pkt(b"cmd") + b"0000" + b"0000", 2) == ([[b"cmd"], []], True)
+
+
 def test_host_agrees(scenario):
     """Review 5 H1: the name decides; a port, when given, must be the connection's."""
     names = {"llm.example.org"}

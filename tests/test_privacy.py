@@ -584,3 +584,23 @@ def test_many_advertised_refs_do_not_break_the_check(tmp_path):
     verdict = p.push_verdict(config_for(repo), {"url": "https://github.com/a/b",
                                                  "commands": [[first, second, "refs/heads/main"]], "advertised": advertised})
     assert verdict["ok"], verdict
+
+
+@needs_git
+def test_push_options_are_checked_as_the_commits_are(tmp_path):
+    """Review 5 L3 (PoC poc5_push_options.py): the push check stopped at the commands' flush, so `git push -o
+    merge_request.description=...` published text the rules never saw. The options meet the privacy rules of a
+    public remote and the run's canaries on every remote."""
+    repo, (first,) = repo_with_commits(tmp_path, ("a.txt", "fine\n"))
+    url, zero = "https://gitlab.com/ada/x.git", "0" * 40
+    request = {"url": url, "commands": [[zero, first, "refs/heads/main"]]}
+    assert p.push_verdict(config_for(repo), request)["ok"]
+    leaking = {**request, "push_options": ["merge_request.create", f"merge_request.description=token {GH_TOKEN}"]}
+    verdict = p.push_verdict(config_for(repo), leaking)
+    assert not verdict["ok"] and "push option 2" in verdict["message"] and GH_TOKEN not in verdict["message"]
+    assert p.push_verdict(config_for(repo), {**leaking, "url": "https://git.home.example/x.git"})["ok"]  # own host
+    canary = "sandbox-ai-canary-0123456789abcdef"
+    config = {**config_for(repo), "canaries": [{"id": "aws", "tokens": [canary]}]}
+    verdict = p.push_verdict(config, {**request, "url": "https://git.home.example/x.git",
+                                      "push_options": [f"merge_request.title={canary}"]})
+    assert not verdict["ok"] and verdict["canary"] == ["aws"]

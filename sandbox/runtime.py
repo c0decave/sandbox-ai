@@ -2301,6 +2301,19 @@ def pkt_lines(data):
     return lines, False
 
 
+def pkt_sections(data, count):
+    """(sections, complete): the first COUNT flush-terminated lists of Git pkt-lines at the start of DATA (a
+    receive-pack request: its commands, then its push options); complete once all COUNT ended."""
+    sections, pos = [], 0
+    while len(sections) < count:
+        lines, complete = pkt_lines(data[pos:])
+        if not complete:
+            return sections, False
+        sections.append(lines)
+        pos += sum(len(line) + 4 for line in lines) + 4
+    return sections, True
+
+
 def push_commands(lines):
     """([(old, new, ref)], capabilities) of a receive-pack request's command lines."""
     commands, capabilities = [], set()
@@ -2572,6 +2585,13 @@ def response_framing(method, status, headers):
     return ("close",)
 
 
+def ssh_banner(data):
+    """DATA (a side's first bytes) carries an SSH banner: a line starting with "SSH-" in its first 255 bytes. Servers
+    skip lines before the client's banner (RFC 4253 allows them before the server's), so one junk line first is no
+    way past a refusal of SSH."""
+    return any(line.lstrip(b"\r").startswith(b"SSH-") for line in (data or b"")[:255].split(b"\n"))
+
+
 def host_matches(host, patterns):
     """True if HOST is one of PATTERNS (exact names, or *.domain for every name below domain)."""
     host = (host or "").lower().rstrip(".")
@@ -2596,6 +2616,22 @@ def normal_path(target):
     path = "/".join(segment.split(";", 1)[0] for segment in path.split("/"))
     path = posixpath.normpath("/" + re.sub(r"/+", "/", path).lstrip("/"))
     return "" if path == "/" else path.rstrip("/")
+
+
+def ambiguous_path(target):
+    """The raw path of request TARGET reads differently by server: decoded (as normal_path decodes it, %2F and a
+    backslash as slashes) it has a dot segment, so where it leads depends on whether a server resolves it before or
+    after decoding, or at all. normal_path takes the strictest reading, which is right for what refuses; what
+    grants (an --llm key below its path prefix, an allow rule for some paths, the push check's own path test) must
+    not go by it: a server that routes on the raw path (/tenantB/x%2F..%2F..%2FtenantA) serves another place than
+    the one granted. An encoded slash alone (GitLab's group%2Fproject) changes no place."""
+    path = target.split("?")[0].split("#")[0]
+    for _ in range(4):
+        decoded = urllib.parse.unquote(path)
+        if decoded == path:
+            break
+        path = decoded
+    return any(segment.split(";", 1)[0].strip() in (".", "..") for segment in path.replace("\\", "/").split("/"))
 
 
 def path_matches(pattern, path, ignore_case=False):
@@ -2695,7 +2731,7 @@ def host_header_problem(headers, scheme, port, names, shown=None):
 LLM_KEY_HEADERS = ("authorization", "x-api-key", "api-key")
 
 
-def llm_head(entries, scheme, origin, port, path, head):
+def llm_head(entries, scheme, origin, port, path, head, target=None):
     """--llm: (HEAD, endpoint name) with the endpoint's key where the agent sent the placeholder (or as a Bearer token
     where it sent no credentials) and its header secrets in place of the agent's own; (HEAD, None) unchanged for
     every other request. Only over the endpoint's scheme and port, to its verified name (HTTPS) or one of its
@@ -2708,8 +2744,8 @@ def llm_head(entries, scheme, origin, port, path, head):
         if scheme == "http" and origin.rsplit(":", 1)[0].strip("[]") not in entry["addresses"]:
             continue
         prefix = entry.get("prefix", "")
-        if prefix and path != prefix and not path.startswith(prefix + "/"):
-            continue
+        if prefix and (path != prefix and not path.startswith(prefix + "/") or ambiguous_path(target or path)):
+            continue  # below the prefix only as every server reads the path (ambiguous_path)
         lines = head[:-4].split(b"\r\n")
         own = {name.lower().encode() for name, _ in entry["headers"]}
         placeholder, key = entry["placeholder"].encode(), (entry.get("key") or "").encode()
@@ -3152,7 +3188,7 @@ class ProxyServer:
                 record["alpn"] = hello["alpn"]
             if hello and self.debug:
                 record["client_hello"] = {key: hello[key] for key in ("version", "versions", "ciphers", "extensions")}
-            if first.startswith(b"SSH-") and self.ssh_refused(address, port):
+            if ssh_banner(first) and self.ssh_refused(address, port):
                 self.refuse(client, {**record, "event": "denied", "protocol": "ssh",
                                      "reason": self.ssh_refused(address, port)})
                 return
@@ -3179,7 +3215,15 @@ class ProxyServer:
                         server_first = upstream.recv(256, socket.MSG_PEEK)
                 else:
                     return
-            if first.startswith(b"SSH-") or server_first.startswith(b"SSH-"):
+            spoken = LEADING_CRLF.sub(b"", first)
+            if first and not server_first and first[:1] != b"\x16" and not re.match(rb"[A-Z]{3,10} \S", spoken) \
+                    and self.ssh_refused(address, port) and select.select([upstream], [], [], PEEK_TIMEOUT)[0]:
+                # Where SSH is refused, the server's first bytes count too: an SSH server sends its banner at once,
+                # whatever the client sent first (a junk line before its own banner, which some servers skip).
+                upstream.settimeout(PEEK_TIMEOUT)
+                with contextlib.suppress(socket.timeout, OSError):
+                    server_first = upstream.recv(256, socket.MSG_PEEK)
+            if ssh_banner(first) or ssh_banner(server_first):
                 reason = self.ssh_refused(address, port)
                 if reason:
                     self.log({**record, "event": "denied", "protocol": "ssh", "reason": reason})
@@ -3217,7 +3261,7 @@ class ProxyServer:
                 counts = [0, 0]
                 relay(client, upstream, counts)
                 self.log({**record, "event": "tcp",
-                          "protocol": "ssh" if (first or server_first).startswith(b"SSH-") else None,
+                          "protocol": "ssh" if ssh_banner(first) or ssh_banner(server_first) else None,
                           "bytes_out": counts[0], "bytes_in": counts[1], "ms": int((time.monotonic() - started) * 1000)})
         except Exception as exc:  # noqa: BLE001 - one broken connection must not stop the proxy
             self.log({**record, "event": "error", "error": f"{type(exc).__name__}: {exc}"})
@@ -3578,7 +3622,8 @@ class ProxyServer:
                 pending, captured = [], Capture(limit)
                 content_type = (header(headers, "content-type") or "").split(";")[0].strip().lower()
                 if (method.upper() == "POST" and path.endswith("git-receive-pack")) or \
-                        content_type == "application/x-git-receive-pack-request":
+                        content_type == "application/x-git-receive-pack-request" or \
+                        (ambiguous_path(target) and "receive-pack" in urllib.parse.unquote(target).lower()):
                     verdict, commands, capabilities = self.check_push(checked, headers, parts, pending, captured,
                                                                       record)
                     entry["push"] = verdict
@@ -3601,7 +3646,7 @@ class ProxyServer:
                     entry["token_added"] = True
                 port = int(str(record.get("destination", "")).rsplit(":", 1)[-1] or 0)
                 before = head
-                head, llm = llm_head(self.config.get("llm"), scheme, origin, port, path, head)
+                head, llm = llm_head(self.config.get("llm"), scheme, origin, port, path, head, target)
                 if llm:
                     entry["llm"] = llm  # its key went in on the wire; the log keeps the agent's headers
                 llm_added = bool(llm) and head != before
@@ -3755,6 +3800,7 @@ class ProxyServer:
         """(verdict, commands, capabilities) of a receive-pack request; reads the command lines into PENDING.
         RECORD: the connection's record, whose process a question names."""
         repository = url.rsplit("/git-receive-pack", 1)[0]
+        parts = iter(parts)  # the commands, then (git push -o) the options: read on from where the first stopped
         gzip = (header(headers, "content-encoding") or "").lower() in ("gzip", "x-gzip")
         inflater, payload = zlib.decompressobj(47) if gzip else None, b""
         complete, lines = False, []
@@ -3773,13 +3819,29 @@ class ProxyServer:
             if not lines:
                 return {"ok": True, "message": "probe request"}, None, set()
             commands, capabilities = push_commands(lines)
+            options = None
+            if "push-options" in capabilities:
+                # git push -o: what follows the commands is published too (GitLab makes merge request titles
+                # and descriptions of them), so it is checked as the commits are.
+                sections, complete = pkt_sections(payload, 2)
+                for raw, data in parts if not complete else ():
+                    pending.append(raw)
+                    captured.add(data)
+                    payload += inflater.decompress(data) if inflater else data
+                    sections, complete = pkt_sections(payload, 2)
+                    if complete or len(payload) > COMMANDS_LIMIT:
+                        break
+                if not complete:
+                    raise ValueError("the push's options did not end")
+                options = [line.rstrip(b"\n").decode("utf-8", "replace") for line in sections[1]]
         except (ValueError, zlib.error) as exc:
             return {"ok": False, "message": f"the push cannot be checked: {exc}"}, None, set()
         if self.checker is None:
             return {"ok": True, "message": "privacy check off"}, commands, capabilities
         with self.lock:
             advertised = sorted(self.adverts.get(repository, ()))
-        request = {"url": repository, "commands": [list(c) for c in commands], "advertised": advertised}
+        request = {"url": repository, "commands": [list(c) for c in commands], "advertised": advertised,
+                   **({"push_options": options} if options else {})}
         try:
             with self.check_lock:
                 verdict = self.ask_checker(request)
@@ -5044,8 +5106,11 @@ class Ruleset:
         paths = [normal_path(target)] + [normal_path(value.strip()) for name, value in headers
                                          if name.lower() in PATH_OVERRIDES]
         paths = list(dict.fromkeys(reading for path in paths for reading in cls.readings(path)))
+        ambiguous = ambiguous_path(target) or any(ambiguous_path(value.strip()) for name, value in headers
+                                                  if name.lower() in PATH_OVERRIDES)
         return {"server": server, "claimed": claimed, "literal": literal, "names": names, "address": address,
-                "methods": methods, "paths": paths, "query": query, "headers": fields, "body": AMBIGUOUS}
+                "methods": methods, "paths": paths, "query": query, "headers": fields, "body": AMBIGUOUS,
+                "ambiguous": ambiguous}
 
     @staticmethod
     def readings(path):
@@ -5110,7 +5175,12 @@ class Ruleset:
         return self.host(rule["host"], facts["names"]) or facts["address"] in rule["addresses"]
 
     def route(self, rule, facts, methods):
-        """Method and path of the request FACTS against RULE (True, False or None)."""
+        """Method and path of the request FACTS against RULE (True, False or None). A path that servers read
+        differently (ambiguous_path) is never known to match an allow rule for some paths only: None."""
+        if facts.get("ambiguous") and rule["decision"] == "allow" and \
+                not all(pattern in ("/**", "**") for pattern in rule["path"]):
+            return None if self.every("*" in rule["methods"] or method in rule["methods"] for method in methods) \
+                is not False else False
         return self.all_of([
             self.every("*" in rule["methods"] or method in rule["methods"] for method in methods),
             self.every(self.any_of(True if path_matches(pattern, path) else None

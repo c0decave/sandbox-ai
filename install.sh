@@ -598,8 +598,13 @@ def cmd_copy(checkout, target):
     """A checkout: tracked and new, not ignored files; without git everything except caches and VCS data."""
     import subprocess
     try:
+        # Only a checkout's own repository: git would otherwise look in the folders above (an upload folder in
+        # /tmp under a planted /tmp/.git, whose core.fsmonitor runs a command), and never past it.
+        if not os.path.exists(os.path.join(checkout, ".git")):
+            raise OSError("not a git checkout")
+        env = {**os.environ, "GIT_CEILING_DIRECTORIES": os.path.dirname(os.path.abspath(checkout))}
         names = subprocess.run(["git", "-C", checkout, "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-                               capture_output=True, check=True, text=True).stdout.split("\0")
+                               capture_output=True, check=True, text=True, env=env).stdout.split("\0")
         names = sorted({n for n in names if n and not n.startswith((".claude/", ".git/"))
                         and os.path.isfile(os.path.join(checkout, n))})
     except (OSError, subprocess.CalledProcessError):

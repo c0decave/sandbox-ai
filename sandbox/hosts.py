@@ -1082,19 +1082,48 @@ PROBE = ('printf "uid=%s\\n" "$(id -u)"; for tool in bash tar gzip python3; do c
          '"$HOME/.local/bin/sandbox-ai" --version 2>/dev/null); printf "installed=%s\\n" "$v"')
 
 
+def prefix_paths(prefix):
+    """The folders a system installation under PREFIX depends on, from / down: every one above PREFIX, PREFIX, its
+    bin, lib and lib/sandbox-ai. Whoever may change one of them may change what is installed for every user."""
+    parts = [part for part in prefix.split("/") if part]
+    above = ["/"] + ["/" + "/".join(parts[:index]) for index in range(1, len(parts))]
+    own = "/" + "/".join(parts) if parts else "/"
+    return [(path, "above") for path in above if path != own] + [
+        (own, ""), (own.rstrip("/") + "/bin", "/bin"), (own.rstrip("/") + "/lib", "/lib"),
+        (own.rstrip("/") + "/lib/sandbox-ai", "/lib/sandbox-ai")]
+
+
+def prefix_problem(prefix, facts):
+    """Why the folders of a system installation under PREFIX are no safe place (FACTS: what probe_script reported,
+    with "uid", the SSH user's), or None: each must belong to root or the SSH user, and none may be writable by a
+    group or by others (a folder above PREFIX may be, with the sticky bit, as /tmp: nobody can replace another's
+    entry there)."""
+    for index, (path, what) in enumerate(prefix_paths(prefix)):
+        value = facts.get(f"folder{index}")
+        if value is None:
+            continue
+        perms, _, owner = value.strip().partition(" ")
+        if owner not in ("0", facts.get("uid")):
+            return f"{path} belongs to the user {owner}, neither root nor the SSH user"
+        sticky = perms[9:10] in ("t", "T")
+        if len(perms) >= 10 and (perms[5] == "w" or perms[8] == "w") and not (what == "above" and sticky):
+            return f"{path} ({perms}) may be changed by {'others' if perms[8] == 'w' else 'its group'}"
+    return None
+
+
 def probe_script(mode=None, prefix=None):
     """PROBE for an installation in MODE (system: under PREFIX, default /usr/local; None: not decided yet, system
-    when the SSH user is root): the owners of PREFIX, PREFIX/bin and PREFIX/lib are reported (prefix_uid=, bin_uid=,
-    lib_uid=; nothing for one that does not exist), and for system the version is asked of PREFIX/bin/sandbox-ai
-    first (the copy that installation replaces, not another one on PATH)."""
+    when the SSH user is root): the mode and owner of every folder prefix_paths names are reported (folderN=PERMS
+    UID, by ls -ndL; nothing for one that does not exist), and for system the version is asked of
+    PREFIX/bin/sandbox-ai first (the copy that installation replaces, not another one on PATH)."""
     if mode == "user":
         return PROBE
     if prefix is not None and (not re.fullmatch(r"/[A-Za-z0-9._/-]{0,200}", prefix) or ".." in prefix):
         raise ValueError("--prefix is an absolute path of letters, digits, . _ - and /")
     base = shlex.quote(prefix or "/usr/local")
-    owners = "; ".join(f'if [ -e {base}{tail} ]; then printf "{key}=%s\\n" "$(ls -nd {base}{tail} | '
-                       "awk '{print $3}')\"; fi" for key, tail in (("prefix_uid", ""), ("bin_uid", "/bin"),
-                                                                    ("lib_uid", "/lib")))
+    owners = "; ".join(f'if [ -e {shlex.quote(path)} ]; then printf "folder{index}=%s\\n" "$(ls -ndL '
+                       f"{shlex.quote(path)} | awk '{{print $1, $3}}')\"; fi"
+                       for index, (path, _) in enumerate(prefix_paths(prefix or "/usr/local")))
     first = (f'w=$({base}/bin/sandbox-ai --version 2>/dev/null); if [ -n "$w" ]; then printf "installed=%s\\n" '
              '"$w"; fi')
     return f"{owners}; {first + '; ' if mode == 'system' else ''}{PROBE}"
@@ -1200,13 +1229,11 @@ def install(name, mode=None, prefix=None, sudo=None, source="here", version=None
         result["error"] = f"{name} has no sudo, and the SSH user is no root: install for the user (--user)"
         return result
     if mode == "system":
-        for key, what in (("prefix_uid", ""), ("bin_uid", "/bin"), ("lib_uid", "/lib")):
-            owner = facts.get(key)
-            if owner is not None and owner not in ("0", facts.get("uid")):
-                result["error"] = (f"{printable(result['prefix'] + what)} on {name} belongs to the user {printable(owner)}, "
-                                   "neither root nor the SSH user: that user could change what is installed there for "
-                                   "every user; choose another --prefix, or install for the user (--user)")
-                return result
+        problem = prefix_problem(result["prefix"], facts)
+        if problem:
+            result["error"] = (f"{printable(problem)} on {name}: that user could change what is installed there for "
+                               "every user; choose another --prefix, or install for the user (--user)")
+            return result
     result["sudo"] = use_sudo
     if dry_run:
         result["planned"] = True

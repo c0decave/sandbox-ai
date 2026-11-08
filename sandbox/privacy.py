@@ -1006,6 +1006,7 @@ def push_verdict(config, request):
     if not public and not canary_rules(config).patterns:
         return {"ok": True, "message": "not a public remote"}
     verdict = push_findings(config, request, url, public)
+    verdict = with_push_options(config, request, url, public, verdict)
     canaries = verdict.pop("canaries", [])
     if not canaries:
         return verdict
@@ -1013,6 +1014,32 @@ def push_verdict(config, request):
         return {"ok": False, "canary": canaries, "message": f"this push to {remote_host(url)} carries canary tokens "
                 "(decoy credentials planted in this sandbox: " + ", ".join(canaries) + "); it is refused"}
     return {**verdict, "canary": canaries}
+
+
+def with_push_options(config, request, url, public, verdict):
+    """VERDICT of the commits with the push options (git push -o) checked as well: a forge publishes them (GitLab's
+    merge_request.title and .description). For a public remote they meet the built-in privacy rules, for every
+    remote the run's canaries."""
+    options = [str(option) for option in request.get("push_options") or [] if isinstance(option, str)][:100]
+    if not options:
+        return verdict
+    rules = (builtin_rules() if public else Rules()).add(canary_rules(config))
+    report = Report("push options")
+    report.add(scan_text("\n".join(options), rules, "", lambda number: f"push option {number}"))
+    found = [f for f in report.findings if f.pattern.id.startswith(CANARY_PREFIX)]
+    canaries = sorted(set(verdict.get("canaries", [])) | {f.pattern.id[len(CANARY_PREFIX):] for f in found})
+    report.findings = [f for f in report.findings if f not in found]
+    verdict = {**verdict, "canaries": canaries}
+    if not public or not report.findings:
+        return verdict
+    lines = [f"push options: {line}" for line in format_report(report, rules)]
+    if report.blocking:
+        return {"ok": False, "canaries": canaries, "message": "\n".join(
+            [f"this push to {remote_host(url)} would publish what must stay private in its push options:", *lines,
+             "Leave these out of git push -o, or ask the user whether they are meant to be published."])}
+    message = verdict.get("message", "")
+    return {**verdict, "warnings": True,
+            "message": "\n".join(([] if message in ("clean", "") else [message]) + lines)}
 
 
 def push_findings(config, request, url, public):
