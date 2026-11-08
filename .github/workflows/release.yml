@@ -102,6 +102,8 @@ jobs:
           name: dist
           path: dist/
       - name: Build (the end of its output as an annotation when it fails, readable through the API)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}  # only the API's rate limit, when a download falls back to it
         run: |
           status=0; scripts/build_appimage.sh --bundle dist/sandbox-ai-bundle-*.tar.gz --out packages > build.log 2>&1 || status=$?
           tail -n 200 build.log
@@ -177,6 +179,8 @@ jobs:
           name: dist
           path: dist/
       - name: Build (the end of its output as an annotation when it fails, readable through the API)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}  # only the API's rate limit, when a download falls back to it
         run: |
           status=0; scripts/build_macos_app.sh --bundle dist/sandbox-ai-bundle-*.tar.gz --out packages > build.log 2>&1 || status=$?
           tail -n 200 build.log

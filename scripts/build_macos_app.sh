@@ -41,6 +41,28 @@ esac
 
 sha256_of() { shasum -a 256 -- "$1" | cut -d' ' -f1; }
 
+# A release file of github.com through its API, when GitHub's /releases/download/ path fails (it answered 504 to
+# every download for hours on 2026-11-08, on CI runners as elsewhere): the same file by another route, and the
+# SHA-256 pin alone decides, as for any download. GITHUB_TOKEN (the workflow's read token) only lifts the API's
+# rate limit; it never goes on to the download host the API redirects to.
+github_asset() {
+  local url=$1 out=$2 owner repo tag name id
+  [[ $url =~ ^https://github\.com/([^/]+)/([^/]+)/releases/download/([^/]+)/([^/]+)$ ]] || return 1
+  owner=${BASH_REMATCH[1]} repo=${BASH_REMATCH[2]} tag=${BASH_REMATCH[3]} name=${BASH_REMATCH[4]}
+  name=$(python3 -I -c 'import sys, urllib.parse; print(urllib.parse.unquote(sys.argv[1]))' "$name") || return 1
+  local auth=()
+  [[ -n ${GITHUB_TOKEN:-} ]] && auth=(-H "Authorization: Bearer $GITHUB_TOKEN")
+  id=$(curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -H "Accept: application/vnd.github+json" \
+         ${auth[@]+"${auth[@]}"} -- "https://api.github.com/repos/$owner/$repo/releases/tags/$tag" \
+       | python3 -I -c 'import json, sys
+print(next((str(a["id"]) for a in json.load(sys.stdin).get("assets", []) if a.get("name") == sys.argv[1]), ""))' \
+         "$name") || return 1
+  [[ $id =~ ^[0-9]+$ ]] || return 1
+  note "downloading $name through the GitHub API (asset $id)"
+  curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -H "Accept: application/octet-stream" \
+    ${auth[@]+"${auth[@]}"} -o "$out" -- "https://api.github.com/repos/$owner/$repo/releases/assets/$id"
+}
+
 fetch() {
   local url=$1 name=$2 want=$3 file="$downloads/$2" got
   mkdir -p -- "$downloads"
@@ -50,6 +72,7 @@ fetch() {
   rm -f -- "$file" "$file.part"
   note "downloading $url"
   curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -o "$file.part" -- "$url" \
+    || github_asset "$url" "$file.part" \
     || die "download failed: $url"
   got=$(sha256_of "$file.part")
   if [[ $got != "$want" ]]; then

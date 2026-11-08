@@ -97,9 +97,14 @@ def test_pyside6_is_pinned_by_hash_and_old_enough():
 def test_the_build_scripts_download_only_through_the_checked_fetch():
     for script in BUILD_SCRIPTS[:2]:
         text = script.read_text()
-        assert text.count("curl ") == 1, f"{script.name}: one curl, inside fetch()"
         fetch = re.search(r"^fetch\(\) \{\n(.*?)^\}", text, re.M | re.S)[1]
         assert "curl " in fetch and "--proto '=https'" in fetch and "refused" in fetch
+        # The one fallback (GitHub's API, when its /releases/download/ path fails) runs inside fetch() only and
+        # writes the same .part file, so fetch's SHA-256 pin still decides; no other curl anywhere.
+        fallback = re.search(r"^github_asset\(\) \{\n(.*?)^\}", text, re.M | re.S)[1]
+        assert text.count("curl ") == fetch.count("curl ") + fallback.count("curl "), f"{script.name}: curl elsewhere"
+        assert all("--proto '=https'" in line for line in fallback.splitlines() if "curl " in line)
+        assert text.count("github_asset ") == 1 and 'github_asset "$url" "$file.part"' in fetch
         for call in re.findall(r"\$\(fetch ([^)]*)\)", text):
             assert re.fullmatch(r'"\$[A-Z_]+_BASE/[^"]+" "\$\w+" "\$\w+_sha"', call), call
         assert "--require-hashes" in text and "requirements-app.txt" in text
