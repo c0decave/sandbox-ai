@@ -1105,7 +1105,10 @@ def test_the_start_reads_only_its_first_workspaces_project_file(tmp_path, monkey
     path, _ = l.load_project_config(l.parse_args(["claude"]))
     assert path == l.config_key(first / ".sandbox-ai.json")
     b = l.parse_args(["claude", "--workspace", str(further), "--workspace", str(first)])
-    assert l.load_project_config(b)[0] == l.config_key(further / ".sandbox-ai.json")  # the first given wins
+    assert l.load_project_config(b)[0] == l.config_key(first / ".sandbox-ai.json")  # the directory started in wins
+    monkeypatch.chdir(tmp_path)  # started where no project file is: the first given wins
+    b = l.parse_args(["claude", "--workspace", str(further), "--workspace", str(first)])
+    assert l.load_project_config(b)[0] == l.config_key(further / ".sandbox-ai.json")
 
 
 def test_a_paused_or_silent_sandbox_gives_an_error_not_a_traceback(sandbox, tmp_path, capsys):
