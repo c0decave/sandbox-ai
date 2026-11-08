@@ -296,6 +296,16 @@ def logged_in():
     ("POST", "/api/hosts/ct1/llm/lmstudio/check", {"agent": "opencode"}, ["llm", "check", "lmstudio", "--agent",
                                                                            "opencode"]),
     ("GET", "/api/hosts/ct1/llm/lmstudio/models", None, ["llm", "models", "lmstudio", "--json"]),
+    ("POST", "/api/hosts/ct1/llm", {"name": "gw", "kind": "openai-compatible", "url": "https://gw.example.org",
+                                    "api_key_secret": "GW_KEY"},
+     ["llm", "add", "gw", "--kind", "openai-compatible", "--url", "https://gw.example.org", "--api-key-secret=GW_KEY"]),
+    # "_" in DNS names as they have it in practice (SRV-like and service names)
+    ("POST", "/api/hosts/ct1/net/web", {"op": "allow", "allow_host": ["_sip._tcp.example.org", "my_host.lan"],
+                                        "confirm": True},
+     ["net", "allow", "web", "--allow-host=_sip._tcp.example.org", "--allow-host=my_host.lan"]),
+    ("POST", "/api/hosts/ct1/remembered/forget", {"project": "/home/u/src/web", "entry": "_svc.my_host.lan:8443",
+                                                  "confirm": True},
+     ["approvals", "forget", "/home/u/src/web", "_svc.my_host.lan:8443"]),
     ("DELETE", "/api/hosts/ct1/llm/lmstudio", {"confirm": True}, ["llm", "remove", "lmstudio"]),
     ("GET", "/api/hosts/ct1/defaults", None, ["defaults", "show", "--json"]),
     ("POST", "/api/hosts/ct1/defaults", {"key": "telemetry", "value": "strict"},
@@ -370,16 +380,17 @@ def logged_in():
     ("POST", "/api/hosts/ct1/kits", {"name": "team", "agents": ["claude", "codex"]},
      ["kits", "new", "--agent=claude", "--agent=codex", "--", "team"]),
     ("POST", "/api/hosts/ct1/kits/team/add-skill", {"path": "/home/u/skills/review", "as": "review2",
-                                                    "agents": ["claude"]},
+                                                    "agents": ["claude"], "confirm": True},
      ["kits", "add-skill", "--as=review2", "--agent=claude", "--", "team", "/home/u/skills/review"]),
     ("POST", "/api/hosts/ct1/kits/team/new-skill", {"skill": "notes", "description": "-when writing notes"},
      ["kits", "new-skill", "--description=-when writing notes", "--", "team", "notes"]),
     ("POST", "/api/hosts/ct1/kits/team/add-plugin", {"plugin": "egm@sandbox-ai", "agent": "claude",
-                                                     "source": "sandbox-ai"},
+                                                     "source": "sandbox-ai", "confirm": True},
      ["kits", "add-plugin", "--agent=claude", "--source=sandbox-ai", "--", "team", "egm@sandbox-ai"]),
-    ("POST", "/api/hosts/ct1/kits/team/add-plugin", {"plugin": "@scope/pkg@1.2", "agent": "opencode"},
+    ("POST", "/api/hosts/ct1/kits/team/add-plugin", {"plugin": "@scope/pkg@1.2", "agent": "opencode", "confirm": True},
      ["kits", "add-plugin", "--agent=opencode", "--", "team", "@scope/pkg@1.2"]),
-    ("POST", "/api/hosts/ct1/kits/team/add-marketplace", {"marketplace": "tools", "source": "owner/repo"},
+    ("POST", "/api/hosts/ct1/kits/team/add-marketplace", {"marketplace": "tools", "source": "owner/repo",
+                                                          "confirm": True},
      ["kits", "add-marketplace", "--", "team", "tools", "owner/repo"]),
     ("POST", "/api/hosts/ct1/kits/team/remove-skill", {"skill": "notes", "agents": ["codex"], "confirm": True},
      ["kits", "remove-skill", "--agent=codex", "--", "team", "notes"]),
@@ -439,7 +450,6 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     ("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": []}, 400),
     ("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": ["none"]}, 400),
     ("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": "none"}, 400),
-    ("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": ["passwords"]}, 400),
     ("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": 3}, 400),
     ("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": False}, 400),
     ("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": False, "confirm": 1}, 400),
@@ -459,6 +469,19 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     ("POST", "/api/hosts/ct1/llm", {"name": "a", "kind": "lmstudio", "url": "http://x", "model": "-x"}, 400),
     ("POST", "/api/hosts/ct1/llm/a/check", {"agent": "bash"}, 400),
     ("POST", "/api/hosts/ct1/defaults", {"key": "--x", "value": 1}, 400),
+    # only the keys of defaults.json (agent_sandbox.DEFAULTS_KEYS), not even with a confirmation
+    ("POST", "/api/hosts/ct1/defaults", {"key": "version", "value": 2, "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/defaults", {"key": "made_up", "value": 1, "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/net/web", {"op": "allow", "allow_host": ["-_x.org"], "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/remembered/forget", {"project": "/a", "entry": "-_x.org", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/llm", {"name": "a", "kind": "lmstudio", "url": "http://x", "api_key_secret": "sk-x"}, 400),
+    ("POST", "/api/hosts/ct1/llm", {"name": "a", "kind": "lmstudio", "url": "http://x",
+                                    "api_key_secret": "--header-secret"}, 400),
+    ("POST", "/api/hosts/ct1/mcp/files/attach", {"start": "web"}, 400),
+    ("POST", "/api/hosts/ct1/mcp/files/attach", {"start": "web", "restart": True}, 400),
+    ("POST", "/api/hosts/ct1/kits/team/add-plugin", {"plugin": "egm@sandbox-ai"}, 400),
+    ("POST", "/api/hosts/ct1/kits/team/add-skill", {"path": "/x", "create": True}, 400),
+    ("POST", "/api/hosts/ct1/kits/team/add-marketplace", {"marketplace": "tools", "source": "o/r"}, 400),
     ("POST", "/api/hosts/ct1/net/web", {"op": "allow"}, 400),  # nothing to change
     ("POST", "/api/hosts/ct1/net/web", {"op": "drop", "dns": True}, 400),
     ("POST", "/api/hosts/ct1/net/--all", {"op": "allow", "dns": True}, 400),
@@ -554,8 +577,13 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     ("POST", "/api/hosts/ct1/gc", {"older_than": -1, "confirm": True}, 400),
     ("POST", "/api/hosts/ct1/gc", {"older_than": "--dry-run", "confirm": True}, 400),
     ("POST", "/api/hosts/ct1/gc", {"older_than": True, "confirm": True}, 400),
-    ("GET", "/api/hosts/ct1/gc/-1", None, 404),
-    ("GET", "/api/hosts/ct1/gc/123456", None, 404),
+    ("GET", "/api/hosts/ct1/gc/-1", None, 400),
+    ("GET", "/api/hosts/ct1/gc/123456", None, 400),
+    ("GET", "/api/hosts/ct1/gc/1.5", None, 400),
+    ("GET", "/api/hosts/ct1/gc/%D9%A3", None, 400),  # an Arabic-Indic 3 is a digit to str.isdigit, not a number here
+    ("POST", "/api/hosts/ct1/gc", {"older_than": "1.5", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/gc", {"older_than": 1, "confirm": True, "expected": ["web"]}, 400),
+    ("POST", "/api/hosts/ct1/gc", {"older_than": 1, "confirm": True, "expected": {"removed": [3]}}, 400),
     ("DELETE", "/api/hosts/ct1/secrets/GITEA_TOKEN", {}, 400),
     ("POST", "/api/hosts/ct1/remembered/forget", {"project": "/home/u/src/web", "entry": "pypi.org"}, 400),
     ("POST", "/api/hosts/ct1/remembered/forget", {"project": "relative", "entry": "pypi.org", "confirm": True}, 400),
@@ -637,7 +665,7 @@ def test_adding_to_a_new_kit_creates_it_first(logged_in):
     # When creating fails, nothing more runs.
     logged_in.runner.answers[("kits", "new")] = (1, "", "sandbox-ai kits: no space left on device")
     del logged_in.runner.calls[:]
-    status, out = logged_in("POST", "/api/hosts/ct1/kits/other/add-skill", {"path": "/x", "create": True})
+    status, out = logged_in("POST", "/api/hosts/ct1/kits/other/add-skill", {"path": "/x", "create": True, "confirm": True})
     assert status == 502 and "no space left" in out["error"]
     assert [args[1] for _, args in logged_in.runner.calls] == ["list", "new"]
 
@@ -661,7 +689,7 @@ def test_kits_end_to_end_through_the_real_command(tmp_path, monkeypatch):
     (skill / "SKILL.md").write_text("---\nname: review\ndescription: reviews\n---\n")
     (skill / "secret").symlink_to("/etc/hostname")
     out = api.dispatch("POST", "/api/hosts/local/kits/team/add-skill", {"path": str(skill), "create": True,
-                                                                         "agents": ["claude"]})["output"]
+                                                                         "agents": ["claude"], "confirm": True})["output"]
     assert "kit team: created" in out and "skill review copied for claude" in out and "symlink" in out
     kit = home / ".local" / "share" / "sandbox-ai" / "kits" / "team"
     assert (kit / "claude" / "skills" / "review" / "SKILL.md").is_file()
@@ -672,7 +700,8 @@ def test_kits_end_to_end_through_the_real_command(tmp_path, monkeypatch):
     names = {k["name"]: k for k in api.dispatch("GET", "/api/hosts/local/kits", {})["kits"]}
     assert names["team"]["kind"] == "user" and names["team"]["agents"]["claude"]["skills"] == ["notes", "review"]
     with pytest.raises(w.Refused) as refused:
-        api.dispatch("POST", "/api/hosts/local/kits/team/add-skill", {"path": str(tmp_path / "missing")})
+        api.dispatch("POST", "/api/hosts/local/kits/team/add-skill", {"path": str(tmp_path / "missing"),
+                                                                       "confirm": True})
     assert refused.value.status == 502 and "does not exist" in str(refused.value)
     api.dispatch("DELETE", "/api/hosts/local/kits/team", {"confirm": True})
     assert not kit.exists()
@@ -1021,7 +1050,9 @@ def test_the_page_shows_results_and_errors_as_toasts_not_alerts():
     css = (WEB / "app.css").read_text()
     assert "alert(" not in script, "errors and results are toasts in the theme, not the browser's dialog"
     assert "window.confirm" not in script and " confirm(`" not in script, "confirmations are asked in the page"
-    assert "function toast(level, title, text, options)" in script and 'role: level === "error" ? "alert" : "status"' in script
+    assert "function toast(level, title, text, options)" in script
+    toast = script.split("function toast(")[1].split("\n}")[0]
+    assert "role:" not in toast and "say(" in toast, "told through the page's one live region, not a role of its own"
     assert ".innerHTML" not in script and "insertAdjacentHTML" not in script and "outerHTML" not in script
     for level, colour in (("success", "--ok"), ("warning", "--warn"), ("error", "--bad")):
         assert f".toast.{level} {{ --level: var({colour});" in css, level
@@ -1057,12 +1088,14 @@ class Node {
   remove() { if (this.parent) this.parent.children = this.parent.children.filter(c => c !== this); this.parent = null; }
   get lastElementChild() { return this.children[this.children.length - 1]; }
   get textContent() { return this.tagName === "#text" ? this.text : this.children.map(c => c.textContent).join(""); }
+  set textContent(v) { this.children = []; if (String(v) !== "") { const t = new Node("#text"); t.text = String(v); this.append(t); } }
   find(cls) { if ((this.className || "").split(" ").includes(cls)) return this;
     for (const c of this.children) { const f = c.find && c.find(cls); if (f) return f; } return null; }
   findTag(tag) { if (this.tagName === tag) return this;
     for (const c of this.children) { const f = c.findTag && c.findTag(tag); if (f) return f; } return null; }
 }
 const body = new Node("body");
+const live = new Node("div"); live.setAttribute("id", "live"); body.append(live);
 const all = () => { const out = []; const walk = n => { out.push(n); n.children.forEach(walk); }; walk(body); return out; };
 const document = {
   body, createElement: t => new Node(t),
@@ -1082,11 +1115,12 @@ vm.runInContext(source, context);
 const box = () => document.getElementById("toasts");
 const result = {};
 const t1 = context.toast("warning", "<b>asks</b>", "<img src=x onerror=alert(1)>", { action: ["Open approvals", () => { result.acted = true; }] });
-result.warning = { role: t1.getAttribute("role"), cls: t1.className, title: t1.find("title").textContent,
+result.said = live.textContent;
+result.warning = { role: t1.getAttribute("role") || null, cls: t1.className, title: t1.find("title").textContent,
   text: t1.find("text").textContent, textNodes: t1.find("text").children.map(c => c.tagName),
   label: t1.find("sr-only").textContent, glyphHidden: t1.find("glyph").getAttribute("aria-hidden") };
 const e1 = context.toast("error", "failed", "exit status 1");
-result.error = { role: e1.getAttribute("role"), first: box().children[0] === e1 };
+result.error = { role: e1.getAttribute("role") || null, first: box().children[0] === e1, said: live.textContent };
 result.unknown = context.toast("nonsense", "x", "").className;
 advance(4000);
 t1.fire("mouseenter"); advance(8000); result.keptWhileHovered = box().children.includes(t1);
@@ -1108,7 +1142,8 @@ console.log(JSON.stringify(result));
 
 @pytest.mark.skipif(not shutil.which("node"), reason="needs node")
 def test_toasts_in_the_page(tmp_path):
-    """app.js's toast() in node with a small stand-in for the DOM: roles, plain text, closing on its own (not
+    """app.js's toast() in node with a small stand-in for the DOM: told through the one live region, plain text,
+    closing on its own (not
     errors, not under the pointer), the close button, the action, at most four, and the badge's sign colour."""
     driver = tmp_path / "toasts.js"
     driver.write_text(TOAST_DRIVER)
@@ -1116,10 +1151,12 @@ def test_toasts_in_the_page(tmp_path):
                          text=True, timeout=60)
     assert run.returncode == 0, run.stderr
     result = json.loads(run.stdout)
-    assert result["warning"] == {"role": "status", "cls": "toast warning", "title": "<b>asks</b>",
+    assert result["said"] == "Warning: <b>asks</b>. <img src=x onerror=alert(1)>", "said once, as text"
+    assert result["warning"] == {"role": None, "cls": "toast warning", "title": "<b>asks</b>",
                                  "text": "<img src=x onerror=alert(1)>", "textNodes": ["#text"],
                                  "label": "Warning: ", "glyphHidden": "true"}, "plain text, never markup"
-    assert result["error"] == {"role": "alert", "first": True} and result["unknown"] == "toast info"
+    assert result["error"] == {"role": None, "first": True, "said": "Error: failed. exit status 1"}
+    assert result["unknown"] == "toast info"
     assert result["keptWhileHovered"] and result["closedAfter"], "closes after 8 s, not while under the pointer"
     assert result["errorStays"] and result["closedByButton"], "an error stays until it is closed"
     assert result["acted"] and result["actionClosed"]
@@ -1414,13 +1451,20 @@ CONFIRM_CASES = {
     "secret-delete": ("DELETE", "/api/hosts/ct1/secrets/GITEA_TOKEN", {}, ["secrets", "delete", "GITEA_TOKEN"]),
     "secret-replace": ("POST", "/api/hosts/ct1/secrets/GITEA_TOKEN", {"secret": "glpat-new"},
                        ["secrets", "set", "GITEA_TOKEN"]),
+    "kit-add": ("POST", "/api/hosts/ct1/kits/team/add-plugin", {"plugin": "egm@sandbox-ai"},
+                ["kits", "add-plugin", "--", "team", "egm@sandbox-ai"]),
+    "mcp-attach": ("POST", "/api/hosts/ct1/mcp/files/attach", {"start": "web"},
+                   ["mcp", "attach", "files", "web", "--json"]),
+    "mcp-restart": ("POST", "/api/hosts/ct1/mcp/files/attach", {"start": "web", "restart": True},
+                    ["mcp", "attach", "files", "web", "--json", "--restart"]),
+    "host-edit": ("POST", "/api/hosts/ct1", {"ssh": "admin@192.0.2.99"}, None),
 }
 READS = (["defaults", "show", "--json"], ["limits", "web", "--show", "--json"], ["secrets", "list"])
 # The POST routes that end, remove or weaken nothing (each of the others names its NEEDS_CONFIRM actions): a new route
 # has to be put here or in the table, deliberately.
-SAFE_POSTS = {r"/api/hosts", r"/api/hosts-status", r"/api/hosts/(?P<host>[^/]+)", r"/api/hosts/(?P<host>[^/]+)/test",
+SAFE_POSTS = {r"/api/hosts", r"/api/hosts-status", r"/api/hosts/(?P<host>[^/]+)/test",
               r"/api/hosts/(?P<host>[^/]+)/update", r"/api/hosts/(?P<host>[^/]+)/starts/(?P<name>[^/]+)/rename",
-              r"/api/hosts/(?P<host>[^/]+)/mcp/(?P<name>[^/]+)/attach", r"/api/hosts/(?P<host>[^/]+)/llm",
+              r"/api/hosts/(?P<host>[^/]+)/llm",
               r"/api/hosts/(?P<host>[^/]+)/llm/(?P<name>[^/]+)/check", r"/api/hosts/(?P<host>[^/]+)/vpn",
               r"/api/hosts/(?P<host>[^/]+)/vpn/(?P<name>[^/]+)/check", r"/api/hosts/(?P<host>[^/]+)/kits",
               r"/api/hosts/(?P<host>[^/]+)/devices/(?P<name>[^/]+)/remove"}
@@ -1465,12 +1509,15 @@ def test_what_ends_removes_or_weakens_needs_its_confirmation_on_the_server(confi
     for refused in (body, {**body, "confirm": "true"}, {**body, "confirm": 1}):
         status, out = confirming(method, path, refused)
         assert status == 400 and '{"confirm": true}' in out["error"] and w.NEEDS_CONFIRM[action] in out["error"], out
+        assert out["confirm"] == action, "the refusal names what it needs: a page out of date asks for exactly that"
     assert [args for _, args in confirming.runner.calls if args not in READS] == [], "nothing changed on a host"
     assert {name for name in w.module("hosts").load()} == {"ct1"}
     confirming.runner.calls.clear()
     status, out = confirming(method, path, {**body, "confirm": True})
     assert status == 200, out
-    if args is None:
+    if action == "host-edit":
+        assert w.module("hosts").load()["ct1"]["ssh"] == "admin@192.0.2.99" and confirming.runner.calls == []
+    elif args is None:
         assert w.module("hosts").load() == {} and confirming.runner.calls == []
     else:
         assert confirming.runner.calls == [("ct1", args)], "confirmed: no read first, the one command"
@@ -1488,7 +1535,7 @@ def test_what_weakens_nothing_needs_no_confirmation(confirming):
                        ("/api/hosts/ct1/defaults", {"key": "mode", "value": None}),
                        ("/api/hosts/ct1/defaults", {"key": "telemetry", "value": "strict"}),
                        ("/api/hosts/ct1/defaults", {"key": "canaries", "value": "all"}),
-                       ("/api/hosts/ct1/defaults", {"key": "keep_days", "value": 30}),
+                       ("/api/hosts/ct1/defaults", {"key": "keep_days", "value": None}),
                        ("/api/hosts/ct1/net/web", {"op": "revoke", "dns": True}),
                        ("/api/hosts/ct1/secrets/NEW_TOKEN", {"secret": "v1"})):
         status, out = confirming("POST", path, body)
@@ -1506,10 +1553,20 @@ def test_what_weakens_nothing_needs_no_confirmation(confirming):
     ({"canaries": ["credentials", "home", "workspace"]}, "canaries", None, True),
     ({"canaries": False}, "canaries", ["home"], False), ({"canaries": "all"}, "canaries", "credentials,home", True),
     ({}, "canaries", ["credentials", "home"], False), ({}, "canaries", ["workspace", "home", "credentials"], False),
+    # keep_days: kept starts removed sooner (or at all, where none was set); unset keeps them
+    ({}, "keep_days", 30, True), ({"keep_days": 30}, "keep_days", 7, True), ({"keep_days": 7}, "keep_days", 30, False),
+    ({"keep_days": 7}, "keep_days", 7, False), ({"keep_days": 7}, "keep_days", None, False),
+    # preset_dirs: another place a start reads presets from; fewer of them is not
+    ({}, "preset_dirs", ["/home/u/presets"], True), ({"preset_dirs": ["/a"]}, "preset_dirs", ["/a", "/b"], True),
+    ({"preset_dirs": ["/a", "/b"]}, "preset_dirs", ["/a"], False), ({"preset_dirs": ["/a"]}, "preset_dirs", None, False),
+    # the subnet: any change of the network of every later start
+    ({}, "subnet", "10.9.0.0/24", True), ({"subnet": "10.9.0.0/24"}, "subnet", None, True),
+    ({"subnet": "10.9.0.0/24"}, "subnet", "10.9.0.0/24", False),
 ])
 def test_a_default_is_lowered_by_any_step_down_from_what_the_host_has(logged_in, now, key, value, lowers):
     """W3: compared with `defaults show` on that host: mode lax < low < medium < high < paranoid, telemetry on < off <
-    strict, canaries as a set (fewer categories, [] or none: no canary files); unset is the default."""
+    strict, canaries as a set (fewer categories, [] or none: no canary files), keep_days lower or new, more
+    preset_dirs, another subnet; unset is the default."""
     logged_in.runner.answers[("defaults", "show")] = (0, json.dumps({"values": now, "canary_categories": [
         "credentials", "home", "workspace"], "canary_default": ["credentials", "home"]}), "")
     status, out = logged_in("POST", "/api/hosts/ct1/defaults", {"key": key, "value": value})
@@ -1581,18 +1638,209 @@ def test_a_host_still_being_asked_is_not_asked_again_and_its_last_list_stands_in
     assert asked.count("slow") == 3, "asked again once it answered"
 
 
-def test_a_host_is_edited_as_hosts_add_checks_it(logged_in):
+def test_a_host_is_edited_as_hosts_add_checks_it(logged_in, home):
+    """Where and how the commands run (ssh, port, key, command, sudo) changes only confirmed; the key is a regular
+    file below the service user's HOME, a command never an option; what the fan-outs kept of the host goes."""
     hosts = w.module("hosts")
     hosts.save({"ct1": hosts.check("ct1", {"ssh": "root@192.0.2.10", "port": 2222, "description": "old"})})
-    status, out = logged_in("POST", "/api/hosts/ct1", {"ssh": "admin@192.0.2.11", "port": 22, "description": "",
-                                                       "update_sudo": True})
+    api = logged_in.svc.api
+    api.approvals_fanout.last["ct1"] = {"result": [{"id": "1"}], "at": time.monotonic(), "seen": time.time()}
+    api.starts_fanout.last["ct1"] = {"result": [], "at": time.monotonic(), "seen": time.time()}
+    change = {"ssh": "admin@192.0.2.11", "port": 22, "description": "", "update_sudo": True}
+    status, out = logged_in("POST", "/api/hosts/ct1", change)
+    assert status == 400 and out["confirm"] == "host-edit" and 'port 2222 -> 22' in out["error"], out
+    assert hosts.load()["ct1"]["ssh"] == "root@192.0.2.10" and "ct1" in api.approvals_fanout.last
+    status, out = logged_in("POST", "/api/hosts/ct1", {**change, "confirm": True})
     assert status == 200 and hosts.load()["ct1"] == {"ssh": "admin@192.0.2.11", "port": 22, "description": "",
                                                      "update_sudo": True}, out
+    assert "ct1" not in api.approvals_fanout.last and "ct1" not in api.starts_fanout.last, "the old host's lists go"
+    assert logged_in("POST", "/api/hosts/ct1", {"description": "the rack"})[0] == 200, "a description: no question"
+    (home / "home/.ssh").mkdir(parents=True, exist_ok=True)
+    os.symlink("/etc/hostname", home / "home/.ssh/link")
     for bad in ({"ssh": "-oProxyCommand=id"}, {"port": 0}, {"identity": "relative/key"}, {"update_sudo": "yes"},
-                {"description": "two\nlines"}, {"shell": "/bin/sh"}, {"command": "sandbox-ai; id"}):
-        assert logged_in("POST", "/api/hosts/ct1", bad)[0] == 400, bad
-    assert logged_in("POST", "/api/hosts/nowhere", {"port": 22})[0] == 404
+                {"description": "two\nlines"}, {"shell": "/bin/sh"}, {"command": "sandbox-ai; id"},
+                {"command": "-oProxyCommand=id"}, {"identity": "/etc/ssh/ssh_host_ed25519_key"},
+                {"identity": str(home / "home/.ssh")}, {"identity": str(home / "home/.ssh/link")},
+                {"identity": str(home / "home/.ssh/missing")}, {"identity": "~/../../etc/shadow"}):
+        assert logged_in("POST", "/api/hosts/ct1", {**bad, "confirm": True})[0] == 400, bad
+    key = private_key(home / "home/.ssh/id_ct1", 0o600)
+    assert logged_in("POST", "/api/hosts/ct1", {"identity": str(key), "confirm": True})[0] == 200
+    assert logged_in("POST", "/api/hosts/nowhere", {"port": 22, "confirm": True})[0] == 404
     assert hosts.load()["ct1"]["ssh"] == "admin@192.0.2.11" and logged_in.runner.calls == []
+
+
+def test_a_host_edit_waits_for_the_lock_of_hosts_json(logged_in):
+    """The read-modify-write of hosts.json holds its lock (the one `sandbox-ai hosts` takes): a change made under it
+    by another writer is not lost."""
+    hosts = w.module("hosts")
+    hosts.save({"ct1": hosts.check("ct1", {"ssh": "root@192.0.2.10"})})
+    held, release = threading.Event(), threading.Event()
+
+    def other_writer():
+        with hosts.hosts_file_lock():
+            held.set()
+            release.wait(5)
+            hosts.save({**hosts.load(), "ct2": hosts.check("ct2", {"ssh": "root@192.0.2.12"})})
+    writer = threading.Thread(target=other_writer)
+    writer.start()
+    held.wait(5)
+    threading.Timer(0.5, release.set).start()
+    started = time.monotonic()
+    assert logged_in("POST", "/api/hosts/ct1", {"port": 2200, "confirm": True})[0] == 200
+    writer.join(5)
+    assert time.monotonic() - started >= 0.4, "the edit waited for the other writer"
+    assert set(hosts.load()) == {"ct1", "ct2"} and hosts.load()["ct1"]["port"] == 2200, "neither change is lost"
+
+
+def test_a_damaged_hosts_file_is_a_clear_error_where_it_is_needed(home):
+    """A hosts.json that cannot be read is a JSON answer with why (500), never a dropped connection: the host list,
+    the versions, a test, an edit, a removal, an add, and every remote host's action (hosts.run reads it)."""
+    secret = add_user()
+    svc = w.Service({"localhost:8443"}, api=w.Api())  # the real hosts.run: it reads hosts.json first
+    _, headers, body = login(svc, secret)
+    ok = {**HEADERS, "Cookie": cookie_of(headers), "X-CSRF-Token": body["csrf"]}
+    path = w.module("hosts").config_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json")
+    for method, route, data in (("GET", "/api/hosts", None), ("GET", "/api/hosts-status", None),
+                                ("POST", "/api/hosts-status", {}), ("POST", "/api/hosts/ct1/test", {}),
+                                ("GET", "/api/hosts/ct1/doctor", None), ("GET", "/api/hosts/ct1/starts", None),
+                                ("POST", "/api/hosts/ct1/starts/web/pause", {}),
+                                ("POST", "/api/hosts/ct1/update", {}),
+                                ("POST", "/api/hosts/ct1", {"port": 22, "confirm": True}),
+                                ("DELETE", "/api/hosts/ct1", {"confirm": True}),
+                                ("POST", "/api/hosts", {"name": "ct2", "ssh": "root@192.0.2.12"})):
+        status, _, out = svc.handle(method, route, ok, json.dumps(data).encode() if data is not None else b"",
+                                    "192.0.2.1")
+        error = json.loads(out)["error"]
+        assert status == 500 and "hosts.json" in error and "not valid JSON" in error, (method, route, error)
+    assert path.read_text() == "{not json", "nothing wrote over it"
+
+
+def test_a_second_question_while_a_host_is_asked_waits_for_it():
+    """Two questions at once (the page drawn and its poll, two tabs): the second one waits for the request in flight
+    (up to the host's limit) instead of naming an error for a host that answers; one host asked once."""
+    asked, release = [], threading.Event()
+
+    def ask(name):
+        asked.append(name)
+        release.wait(5)
+        return [{"id": f"{name}-1"}]
+    fan = w.FanOut(ask)
+    results = {}
+    first = threading.Thread(target=lambda: results.__setitem__("first", fan.gather(["a", "b"], 3)))
+    first.start()
+    for _ in range(100):
+        if len(fan.flight) == 2:
+            break
+        time.sleep(0.01)
+    second = threading.Thread(target=lambda: results.__setitem__("second", fan.gather(["a", "b"], 3)))
+    second.start()
+    time.sleep(0.3)
+    assert second.is_alive(), "it waits for the answer in flight"
+    release.set()
+    first.join(5)
+    second.join(5)
+    for which in ("first", "second"):
+        assert {name: info.get("result") for name, info in results[which].items()} == {
+            "a": [{"id": "a-1"}], "b": [{"id": "b-1"}]}, results[which]
+    assert sorted(asked) == ["a", "b"], "not asked twice"
+    # forgotten (the host's entry changed): what the old request answers later is not kept
+    fan.forget("a")
+    assert fan.cached("a") is None and fan.cached("b")["result"] == [{"id": "b-1"}]
+
+
+def test_gc_removes_only_what_its_preview_showed(logged_in):
+    """The page sends what the preview listed: a dry run comes first, and when it would now remove more (a start
+    that became old enough meanwhile), nothing is removed (409); fewer is fine."""
+    dry = {"removed": [{"name": "old", "id": "old-1"}], "leftovers": ["gone"], "histories": ["older"]}
+    logged_in.runner.answers[("gc", "--dry-run")] = (0, json.dumps(dry), "")
+    expected = {"removed": ["old-1"], "leftovers": ["gone"], "histories": ["older"]}
+    status, out = logged_in("POST", "/api/hosts/ct1/gc", {"older_than": 7, "confirm": True, "expected": expected})
+    assert status == 200, out
+    assert [args for _, args in logged_in.runner.calls] == [["gc", "--dry-run", "--json", "--older-than=7"],
+                                                            ["gc", "--json", "--older-than=7"]]
+    logged_in.runner.calls.clear()
+    dry["removed"].append({"name": "kept", "id": "kept-2"})
+    logged_in.runner.answers[("gc", "--dry-run")] = (0, json.dumps(dry), "")
+    status, out = logged_in("POST", "/api/hosts/ct1/gc", {"older_than": 7, "confirm": True, "expected": expected})
+    assert status == 409 and "removed kept-2" in out["error"] and "preview it again" in out["error"], out
+    assert [args for _, args in logged_in.runner.calls] == [["gc", "--dry-run", "--json", "--older-than=7"]]
+    logged_in.runner.calls.clear()
+    dry.update(removed=[], histories=[])
+    logged_in.runner.answers[("gc", "--dry-run")] = (0, json.dumps(dry), "")
+    status, out = logged_in("POST", "/api/hosts/ct1/gc", {"older_than": None, "confirm": True, "expected": expected})
+    assert status == 200 and logged_in.runner.calls[-1][1] == ["gc", "--json"]
+    status, out = logged_in("GET", "/api/hosts/ct1/gc/1.5")
+    assert status == 400 and "whole number of days" in out["error"]
+
+
+def test_typing_in_a_terminal_is_use_of_the_session_its_output_is_not():
+    """bridge() calls USED when the browser sends input (at most once a second), never for a resize or the output;
+    the service hands it the session's touch."""
+    class Socket:
+        def __init__(self, frames):
+            self.frames, self.closed, self.hang_up = list(frames), False, None
+
+        def receive(self):
+            if not self.frames:
+                raise ConnectionError("closed")
+            return self.frames.pop(0)
+
+        def send(self, payload, opcode=2):
+            pass
+
+        def close(self, code=1000, reason=""):
+            self.closed = True
+    clock, used = [100.0], []
+    frames = [(1, b'{"resize": [80, 24]}'), (2, b"a"), (2, b"b"), (1, b'{"resize": [90, 24]}'), (8, b"")]
+    w.bridge(Socket(frames), ["/bin/cat"], alive=lambda: True, clock=lambda: clock[0], used=lambda: used.append(1))
+    assert used == [1], "the first key counts, the next within the second and the resizes do not"
+    clock[0], used[:] = 100.0, []
+    w.bridge(Socket([(1, b'{"resize": [80, 24]}'), (8, b"")]), ["/bin/cat"], alive=lambda: True,
+             clock=lambda: clock[0], used=lambda: used.append(1))
+    assert used == []
+    source = (ROOT / "sandbox" / "webui.py").read_text()
+    assert "used=lambda: sessions.get(token, touch=True)" in source
+
+
+def test_the_hosts_page_gets_each_hosts_starts_and_questions_from_what_was_asked(logged_in):
+    """GET /api/hosts-activity: the counts the fan-outs keep (nothing asked for it); null before anything was;
+    GET /api/starts gives each host's age by the service's clock."""
+    hosts = w.module("hosts")
+    hosts.save({"ct1": hosts.check("ct1", {"ssh": "root@192.0.2.10"})})
+    logged_in.runner.answers[("list",)] = (0, json.dumps([{"name": "a", "state": "running"},
+                                                          {"name": "b", "state": "stopped"}]), "")
+    logged_in.runner.answers[("approvals", "list")] = (0, json.dumps([{"id": "1-1"}]), "")
+    status, out = logged_in("GET", "/api/hosts-activity")
+    assert status == 200 and out == {name: {"starts": None, "running": None, "questions": None, "age": None}
+                                     for name in ("local", "ct1")} and logged_in.runner.calls == []
+    status, starts = logged_in("GET", "/api/starts")
+    assert set(starts["age"]) == {"local", "ct1"} and all(0 <= age < 5 for age in starts["age"].values())
+    logged_in("GET", "/api/approvals")
+    count = len(logged_in.runner.calls)
+    status, out = logged_in("GET", "/api/hosts-activity")
+    assert out["ct1"]["starts"] == 2 and out["ct1"]["running"] == 1 and out["ct1"]["questions"] == 1
+    assert out["local"]["questions"] == 1 and out["ct1"]["age"] is not None and len(logged_in.runner.calls) == count
+
+
+def test_the_defaults_keys_are_the_launchers():
+    assert set(w.DEFAULT_KEYS) == w.module("agent_sandbox").DEFAULTS_KEYS - {"version"}
+
+
+def test_the_canary_categories_are_the_hosts_own(logged_in):
+    """A host whose sandbox-ai knows another category: compared with its own list (defaults show), not a fixed one."""
+    logged_in.runner.answers[("defaults", "show")] = (0, json.dumps({"values": {}, "canary_categories": [
+        "credentials", "home", "workspace", "browser"], "canary_default": ["credentials", "home"]}), "")
+    status, out = logged_in("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": ["credentials", "home",
+                                                                                            "browser"]})
+    assert status == 200, out
+    status, out = logged_in("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": ["passwords"]})
+    assert status == 400 and "browser" in out["error"], out
+    del logged_in.runner.answers[("defaults", "show")]
+    logged_in.runner.answers[("defaults", "show")] = (0, json.dumps({"values": {}}), "")  # an older host: the CLI's own
+    status, out = logged_in("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": ["credentials"]})
+    assert status == 400 and out["confirm"] == "defaults-lower" and "no home canary files" in out["error"], out
 
 
 def test_the_secrets_of_a_host_are_their_names_and_stores_only(logged_in):
@@ -1789,10 +2037,16 @@ def test_the_hosts_page_updates_and_shows_versions():
 
 
 def test_an_mcp_server_is_attached_to_a_start(logged_in):
-    status, out = logged_in("POST", "/api/hosts/ct1/mcp/demo/attach", {"start": "web", "restart": True})
+    status, out = logged_in("POST", "/api/hosts/ct1/mcp/demo/attach", {"start": "web", "restart": True,
+                                                                        "confirm": True})
     assert status == 200 and logged_in.runner.calls[-1] == ("ct1", ["mcp", "attach", "demo", "web", "--json",
                                                                     "--restart"])
-    assert logged_in("POST", "/api/hosts/local/mcp/demo/attach", {"start": "web"})[0] == 200
+    # attaching (and restarting) is asked first: the reason names the restart when there is one
+    status, out = logged_in("POST", "/api/hosts/ct1/mcp/demo/attach", {"start": "web", "restart": True})
+    assert status == 400 and out["confirm"] == "mcp-restart" and "demo to web" in out["error"]
+    status, out = logged_in("POST", "/api/hosts/ct1/mcp/demo/attach", {"start": "web"})
+    assert status == 400 and out["confirm"] == "mcp-attach"
+    assert logged_in("POST", "/api/hosts/local/mcp/demo/attach", {"start": "web", "confirm": True})[0] == 200
     assert logged_in.runner.calls[-1] == ("local", ["mcp", "attach", "demo", "web", "--json"])
     count = len(logged_in.runner.calls)
     # A name with a leading "-" would be an option of mcp attach there.
@@ -1801,7 +2055,7 @@ def test_an_mcp_server_is_attached_to_a_start(logged_in):
                        ("/api/hosts/ct1/mcp/--restart/attach", {"start": "web"}),
                        ("/api/hosts/ct1/mcp/_x/attach", {"start": "web"}),
                        ("/api/hosts/ct1/mcp/demo/attach", {"start": "--all"}),
-                       ("/api/hosts/ct1/mcp/demo/attach", {"start": "web", "restart": "yes"})):
+                       ("/api/hosts/ct1/mcp/demo/attach", {"start": "web", "restart": "yes", "confirm": True})):
         assert logged_in("POST", path, data)[0] == 400, (path, data)
     assert len(logged_in.runner.calls) == count, "nothing refused reaches a host"
     script = (ROOT / "sandbox/web/app.js").read_text()
@@ -2057,7 +2311,7 @@ const fetch = async (path, opts) => {
   const data = await answer(opts.method, path, opts.body);
   const headers = { get: (name) => (name === "X-Session-Idle-Left" && sessionLeft !== null ? String(sessionLeft) : name === "X-Session-Lifetime-Left" && sessionLeft !== null ? "40000" : null) };
   if (data instanceof Error) return { status: 502, ok: false, statusText: "Bad Gateway", headers, json: async () => ({ error: data.message }) };
-  if (data && data.__status) return { status: data.__status, ok: false, statusText: "", headers, json: async () => ({ error: "log in" }) };
+  if (data && data.__status) return { status: data.__status, ok: false, statusText: "", headers, json: async () => Object.assign({ error: data.__error || "log in" }, data.__confirm ? { confirm: data.__confirm } : {}) };
   return { status: 200, ok: true, headers, json: async () => data };
 };
 const context = vm.createContext({ document, Node, setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0,
@@ -2517,13 +2771,14 @@ const buttonsOf = (r) => r.all().filter(n => n.tagName === "button");
   // every host at once: a host column, the asking badge, a failing host's rows greyed
   vm.runInContext('state.startsHost = "all"; state.questions = [{ host: "ct1", id: "1-1", run: "r9" }];', context);
   let fleet = { starts: [{ host: "local", name: "a", agent: "claude", kind: "session", state: "running" },
-    { host: "ct1", name: "b", agent: "codex", kind: "session", state: "running", run: "r9" }], errors: {}, seen: { local: 1000, ct1: 1000 } };
+    { host: "ct1", name: "b", agent: "codex", kind: "session", state: "running", run: "r9" }], errors: {}, seen: { local: 5, ct1: 5 }, age: { local: 7, ct1: 7 } };
   answer = (method, path) => (path === "/api/starts" ? fleet : path.endsWith("/presets") ? [] : { output: "ok" });
   await vm.runInContext("pages.starts(__main)", context); await settle();
   result.fleet = ["a", "b"].map(n => [rowOf(n).attributes["data-host"], rowOf(n).children[0].textContent]);
   result.badge = [Boolean(rowOf("b").all().find(n => (n.className || "").includes("asking"))), Boolean(rowOf("a").all().find(n => (n.className || "").includes("asking")))];
   result.fleetAddress = vm.runInContext("addressFor('starts')", context);
-  fleet = { starts: [fleet.starts[0]], errors: { ct1: "no answer within 20 seconds" }, seen: { local: 1015 } };
+  // the service's own clock is far off (seen): only the ages it sends count, from when the answer came
+  fleet = { starts: [fleet.starts[0]], errors: { ct1: "no answer within 20 seconds" }, seen: { local: 99999999 }, age: { local: 0 } };
   vm.runInContext("__now = 1012000;", context);
   await vm.runInContext("refreshStarts(__main)", context); await settle();
   result.fleetStale = [rowOf("a").className, rowOf("b").className, rowOf("b").textContent.includes("(last seen 12 s ago)")];
@@ -2574,6 +2829,228 @@ def test_prompts_stale_rows_queued_refreshes_retired_cards_and_the_fleet(tmp_pat
         assert part in result["firstRun"], (part, result["firstRun"])
 
 
+ROUND3_DRIVER = FAKE_DOM + r"""
+const rowOf = (name) => body.all().find(n => n.attributes["data-name"] === name);
+const confirmText = (node) => { const c = node.all().find(n => n.className === "confirm"); return c ? c.textContent : null; };
+const posts = () => calls.filter(c => c.method !== "GET").map(c => [c.method, c.path, JSON.parse(c.body)]);
+const byId = (id) => document.getElementById(id);
+(async () => {
+  const result = {};
+  vm.runInContext('state.me = { user: "admin", csrf: "c", terminals: true }; state.host = "ct1"; state.hosts = [{ name: "local", kind: "local" }, { name: "ct1", kind: "ssh", ssh: "root@ct1", port: 22 }];', context);
+  // a malformed address is the default page, not an exception
+  result.address = vm.runInContext('location.hash = "#starts@%"; const a = addressOf(); location.hash = ""; [a.page, a.host]', context);
+
+  // secrets: Yes sends the name that was asked about, or nothing
+  let secretAnswer = null;
+  answer = (method, path, sent) => (method === "GET" ? [{ name: "GITEA_TOKEN", store: "file" }] : secretAnswer ? secretAnswer(path, sent) : { output: "ok" });
+  vm.runInContext('state.page = "secrets";', context);
+  await vm.runInContext("pages.secrets(__main)", context); await settle();
+  byId("secret-name").value = "GITEA_TOKEN"; byId("secret-value").value = "v1";
+  button(main, "Keep it").fire("click");
+  result.secretAsk = confirmText(main);
+  byId("secret-name").value = "OTHER";
+  button(main, "Yes, replace it").fire("click"); await settle();
+  result.secretChanged = [posts().length, main.textContent.includes("The name is OTHER now, not GITEA_TOKEN as asked: nothing was sent.")];
+  // a secret that came meanwhile: the service's refusal names its confirmation, and the page asks for it
+  calls.length = 0;
+  let first = true;
+  secretAnswer = (path, sent) => { if (first) { first = false; return { __status: 400, __error: 'NEW_ONE: a secret of that name exists: its value is replaced: send {"confirm": true}', __confirm: "secret-replace" }; } return { output: "kept" }; };
+  byId("secret-name").value = "NEW_ONE"; byId("secret-value").value = "v2";
+  button(main, "Keep it").fire("click"); await settle();
+  result.reasked = confirmText(main);
+  button(main, "Yes, replace it").fire("click"); await settle();
+  result.secretPosts = posts();
+
+  // gc: the previewed days and list, or nothing
+  calls.length = 0;
+  let gcAnswer = { output: "ok" };
+  answer = (method, path) => (method === "GET" ? { removed: [{ name: "old", id: "old-1", last_used: "2026-01-01T00:00:00Z" }], leftovers: ["gone"], histories: [] } : gcAnswer);
+  vm.runInContext('gcCard(__main, "ct1")', context);
+  byId("gc-days").value = "7";
+  button(main, "Preview").fire("click"); await settle();
+  button(main, "Remove these…").fire("click");
+  byId("gc-days").value = "8";
+  button(main, "Yes, remove them").fire("click"); await settle();
+  result.gcChanged = [posts().length, main.textContent.includes("The days were changed after the preview: nothing was removed.")];
+  byId("gc-days").value = "7";
+  button(main, "Preview").fire("click"); await settle();
+  button(main, "Remove these…").fire("click");
+  button(main, "Yes, remove them").fire("click"); await settle();
+  result.gcPost = posts();
+  gcAnswer = { __status: 409, __error: "the clean-up would now remove more than the preview showed (removed new-2): nothing was removed; preview it again" };
+  button(main, "Preview").fire("click"); await settle();
+  button(main, "Remove these…").fire("click");
+  button(main, "Yes, remove them").fire("click"); await settle();
+  result.gc409 = byId("gc-card").textContent.includes("would now remove more than the preview showed");
+  byId("gc-card").remove();
+
+  // the starts: buttons named with start and host, states in the page's language, cards that follow a rename
+  calls.length = 0;
+  let starts = [{ name: "web", id: "web-1", agent: "claude", kind: "session", state: "running", keep: true, home: "kept", directory: "/d", attachable: true },
+    { name: "mcp-files", id: "mcp-files", kind: "mcp", state: "running", serves: [] }];
+  answer = (method, path, sent) => (path === "/api/hosts/ct1/starts" ? starts : path.endsWith("/presets") ? [] : path.includes("/net/") && method === "GET" ? { https: [] } : { output: "ok", start: "web", attached: "at its next start" });
+  vm.runInContext('state.page = "starts"; state.startsHost = "ct1";', context);
+  await vm.runInContext("pages.starts(__main)", context); await settle();
+  result.labels = rowOf("web").all().filter(n => n.tagName === "button").map(b => b.getAttribute("aria-label"));
+  result.state = rowOf("web").children[2].textContent;
+  vm.runInContext('setLanguage("de")', context);
+  await vm.runInContext("pages.starts(__main)", context); await settle();
+  result.german = [rowOf("web").children[2].textContent, rowOf("web").all().find(n => n.tagName === "button" && n.textContent === "Stoppen").getAttribute("aria-label")];
+  vm.runInContext('setLanguage("en")', context);
+  await vm.runInContext("pages.starts(__main)", context); await settle();
+  // attaching an MCP server is asked first, with what was chosen then
+  rowOf("mcp-files").all().find(n => n.tagName === "select").value = "web";  // a browser's select: its first option
+  rowOf("mcp-files").all().find(n => n.tagName === "input").checked = false;
+  button(rowOf("mcp-files"), "Attach to…").fire("click");
+  result.attachAsk = confirmText(rowOf("mcp-files"));
+  result.attachBefore = posts().length;
+  button(rowOf("mcp-files"), "Yes, attach it").fire("click"); await settle();
+  result.attachPost = posts();
+  await vm.runInContext("pages.starts(__main)", context); await settle();
+  button(rowOf("web"), "Network…").fire("click"); await settle();
+  const card = byId("network-card");
+  starts = [Object.assign({}, starts[0], { name: "web-2" }), starts[1]];
+  await vm.runInContext("refreshStarts(__main, true)", context); await settle();
+  calls.length = 0;
+  button(card, "Refresh").fire("click"); await settle();
+  result.renamed = [Boolean(rowOf("web-2")), rowOf("web") === undefined, card.isConnected && !button(card, "Allow…").disabled,
+    card.children[0].textContent, calls.map(c => c.path)];
+
+  // another page: its heading has the focus
+  answer = (method, path) => (path.endsWith("/doctor") ? [{ status: "warn", check: "x", detail: "y" }] : {});
+  vm.runInContext('show("doctor")', context); await settle();
+  result.focus = [globalThis.focused && globalThis.focused.tagName, globalThis.focused && globalThis.focused.getAttribute("tabindex"), globalThis.focused && globalThis.focused.textContent];
+  result.doctorState = main.all().find(n => (n.className || "").includes("status-warn")).textContent;
+
+  // the hosts page: each host's starts and open questions, from what was asked before
+  answer = (method, path) => (path === "/api/hosts-activity" ? { local: { starts: 2, running: 1, questions: 0, age: 3 }, ct1: { starts: null, running: null, questions: 3, age: 1 } } : path === "/api/hosts-status" ? { ct1: null } : {});
+  vm.runInContext('state.page = "hosts"; clear(__main);', context);
+  await vm.runInContext("pages.hosts(__main)", context); await settle();
+  const hostRows = main.all().filter(n => n.tagName === "tr");
+  result.hosts = hostRows.slice(1).map(r => [r.children[0].textContent, r.children[3].textContent, r.children[4].textContent]);
+  result.activityBackground = calls.filter(c => c.path === "/api/hosts-activity").map(c => c.headers["X-Background"] || null);
+
+  // LLM: the API key's secret by name
+  calls.length = 0;
+  answer = (method, path) => (method === "GET" ? [] : { output: "ok" });
+  vm.runInContext('state.page = "llm"; clear(__main);', context);
+  await vm.runInContext("pages.llm(__main)", context); await settle();
+  byId("llm-name").value = "gw"; byId("llm-url").value = "https://gw.example.org"; byId("llm-key-secret").value = "sk-the-key";
+  byId("llm-model").value = ""; byId("llm-kind").value = "lmstudio";
+  button(main, "Add").fire("click"); await settle();
+  result.llmBad = [posts().length, main.textContent.includes("A secret's name")];
+  byId("llm-key-secret").value = "GW_KEY";
+  button(main, "Add").fire("click"); await settle();
+  result.llmPost = posts();
+  result.llmSecrets = Boolean(button(main, "Open Secrets"));
+
+  // kits: what widens every later start of a kit is asked first
+  calls.length = 0;
+  answer = (method, path) => (method === "GET" ? { kits: [{ name: "mine", kind: "user", agents: {} }] } : { output: "ok" });
+  vm.runInContext('state.page = "kits"; clear(__main);', context);
+  await vm.runInContext("pages.kits(__main)", context); await settle();
+  byId("kit-plugin").value = "egm@sandbox-ai"; byId("kit-plugin-source").value = ""; byId("kit-plugin-agent").value = "claude";
+  byId("kit-target").value = "mine";
+  button(main, "Add plugin").fire("click"); await settle();
+  result.kitAsk = [confirmText(main), posts().length];
+  button(main, "Yes, add it").fire("click"); await settle();
+  result.kitPost = posts();
+
+  // defaults: a stricter value the host refuses as lowering (it changed meanwhile): asked there
+  calls.length = 0;
+  let refuse = true;
+  answer = (method, path, sent) => (method === "GET" ? { values: { mode: "high" }, canary_categories: ["credentials", "home", "workspace"] }
+    : refuse ? (refuse = false, { __status: 400, __error: 'mode paranoid instead of x: this lowers the protection of every later start on that host: send {"confirm": true}', __confirm: "defaults-lower" }) : { output: "ok" });
+  vm.runInContext('state.page = "settings"; clear(__main);', context);
+  await vm.runInContext("pages.settings(__main)", context); await settle();
+  const mode = byId("mode");
+  mode.value = "paranoid"; mode.fire("change"); await settle();
+  result.defaultsAsk = confirmText(main);
+  button(main, "Yes, do it").fire("click"); await settle();
+  result.defaultsPosts = posts();
+
+  // the approvals page drawn while the poll asks: no second request
+  calls.length = 0;
+  vm.runInContext('state.page = "approvals"; state.polling = true;', context);
+  await vm.runInContext("pages.approvals(__main)", context); await settle();
+  result.approvalsWhilePolling = calls.length;
+  vm.runInContext("state.polling = false;", context);
+
+  // the host edit: where the commands go is asked first
+  calls.length = 0;
+  answer = (method, path) => (path === "/api/me" ? { user: "admin", csrf: "c" } : path === "/api/hosts" ? [{ name: "local", kind: "local" }, { name: "ct1", kind: "ssh", ssh: "root@ct1", port: 22 }]
+    : path === "/api/approvals" ? { questions: [], errors: {} } : path === "/api/policy" ? null : method === "GET" ? [] : { name: "ct1", warnings: [] });
+  vm.runInContext('state.page = "logs"; hostEditCard(__main, state.hosts[1]);', context);
+  byId("edit-port").value = "2222"; byId("edit-description").value = "rack";
+  button(byId("host-edit-card"), "Save").fire("click");
+  result.editAsk = [confirmText(byId("host-edit-card")), posts().length];
+  button(byId("host-edit-card"), "Yes, change it").fire("click"); await settle();
+  result.editPost = posts()[0];
+
+  // the session ended: the tab's title and a desktop notification (asked for before)
+  const notes = [];
+  context.__notes = notes;
+  vm.runInContext('localStorage.getItem = (k) => (k === "sandbox-ai-notify" ? "1" : null); window.Notification = function (title, opts) { __notes.push([title, opts.tag]); }; window.Notification.permission = "granted"; state.questions = []; sessionEnded();', context);
+  await settle();
+  result.ended = [document.title, notes];
+  console.log(JSON.stringify(result));
+})().catch(e => { console.error(e.stack); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_confirmations_are_bound_to_what_was_asked_and_the_page_reads_well(tmp_path):
+    """Round 3: Yes sends what the question named (a secret's name, the previewed days and list) or nothing; a refusal
+    that names its confirmation is asked in place; attach and kit additions are asked first; a malformed address
+    falls back; row buttons say what and where; states in the page's language; cards follow a rename; the heading
+    gets the focus on another page; the hosts' counts; the API key's secret; the session's end in the title."""
+    result = run_driver(tmp_path, ROUND3_DRIVER, "round3")
+    assert result["address"] == [None, None]
+    assert "Replace the value of GITEA_TOKEN on ct1?" in result["secretAsk"]
+    assert result["secretChanged"] == [0, True], "a name changed after the question: nothing sent"
+    assert result["reasked"].startswith("A secret NEW_ONE exists on ct1 now: replace its value?"), result["reasked"]
+    assert result["secretPosts"] == [["POST", "/api/hosts/ct1/secrets/NEW_ONE", {"secret": "v2"}],
+                                     ["POST", "/api/hosts/ct1/secrets/NEW_ONE", {"secret": "v2", "confirm": True}]]
+    assert result["gcChanged"] == [0, True]
+    assert result["gcPost"] == [["POST", "/api/hosts/ct1/gc", {"older_than": 7, "confirm": True, "expected": {
+        "removed": ["old-1"], "leftovers": ["gone"], "histories": []}}]]
+    assert result["gc409"]
+    assert result["labels"][:3] == ["Attach web on ct1", "Pause web on ct1", "Stop web on ct1"]
+    assert "History web on ct1" in result["labels"] and result["state"] == "running"
+    assert result["german"] == ["läuft", "Stoppen: web auf ct1"]
+    assert "Attach the MCP server files to web on ct1?" in result["attachAsk"] and result["attachBefore"] == 0
+    assert result["attachPost"] == [["POST", "/api/hosts/ct1/mcp/files/attach", {"start": "web", "restart": False,
+                                                                                "confirm": True}]]
+    has_new, old_gone, card_live, heading, paths = result["renamed"]
+    assert has_new and old_gone and card_live and heading == "Network of web-2 on ct1", result["renamed"]
+    assert paths == ["/api/hosts/ct1/net/web-2"], "the card's requests name the start as it is called now"
+    assert result["focus"] == ["h1", "-1", "Doctor on ct1"]
+    assert result["doctorState"] == "warn"
+    assert result["hosts"] == [["local", "2 (1 running)", "0"], ["ct1", "?", "3"]]
+    assert result["activityBackground"] == ["1"]
+    assert result["llmBad"] == [0, True] and result["llmSecrets"]
+    assert result["llmPost"] == [["POST", "/api/hosts/ct1/llm", {"name": "gw", "kind": "lmstudio",
+                                                                 "url": "https://gw.example.org", "model": "",
+                                                                 "api_key_secret": "GW_KEY"}]]
+    assert "Add egm@sandbox-ai to the kit mine on ct1?" in result["kitAsk"][0] and result["kitAsk"][1] == 0
+    assert result["kitPost"] == [["POST", "/api/hosts/ct1/kits/mine/add-plugin", {
+        "plugin": "egm@sandbox-ai", "agent": "claude", "source": "", "create": False, "confirm": True}]]
+    assert result["defaultsAsk"].startswith("The service asks first: mode paranoid")
+    assert result["defaultsPosts"] == [["POST", "/api/hosts/ct1/defaults", {"key": "mode", "value": "paranoid"}],
+                                       ["POST", "/api/hosts/ct1/defaults", {"key": "mode", "value": "paranoid",
+                                                                            "confirm": True}]]
+    assert result["approvalsWhilePolling"] == 0, "the poll's answer is drawn, not asked again"
+    ask, before = result["editAsk"]
+    assert "Change how this service reaches ct1 (port: 22 → 2222)" in ask and before == 0
+    assert result["editPost"] == ["POST", "/api/hosts/ct1", {"ssh": "root@ct1", "port": 2222, "identity": "",
+                                                             "command": "", "description": "rack",
+                                                             "update_sudo": False, "confirm": True}]
+    assert result["ended"] == ["(session ended) sandbox-ai", [["sandbox-ai: the session ended", "sandbox-ai-session"]]]
+    script = (WEB / "app.js").read_text()
+    render = script.split("async function render()")[1].split("\n}")[0]
+    assert render.rstrip().endswith("poll();\n  show(state.page);"), "the poll first, the page takes its answer"
+
+
 def test_the_page_never_uses_the_browsers_dialogs_or_markup_from_data():
     """Every confirmation is asked in the page (ask/confirmIn), never confirm(); nothing is set as markup."""
     import re
@@ -2590,8 +3067,8 @@ def test_the_page_never_uses_the_browsers_dialogs_or_markup_from_data():
 
 
 def test_the_page_is_reachable_and_announced_sensibly():
-    """#app is no live region (each new drawing would be read out); each toast has its own role, so their box is none
-    (a toast would be announced twice); the questions' count has its own; the nav says which page is current and the
+    """#app is no live region (each new drawing would be read out); a toast is told through the one live region
+    (say()), so neither it nor their box is one (a toast would be announced twice); the questions' count has its own; the nav says which page is current and the
     address keeps it and its host (#page@host); terminal tabs are tabs, their close button is outside the tablist;
     the boxes of open terminals outlive a new drawing of the frame; the tables have captions; a confirmation gives
     the focus back to what opened it."""

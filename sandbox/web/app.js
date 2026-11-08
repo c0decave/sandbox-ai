@@ -11,7 +11,7 @@ const state = {
   // (never shown again until their host stops listing them), the open ones of the last poll
   toastQuestions: new Map(), questionToast: null, answered: new Map(), questions: [],
   boxes: null, terminalCount: 0, polling: false, pollAgain: false, policy: null, session: null, loginMessage: null,
-  cards: [],
+  cards: [], shown: null,
 };
 const AGENTS = ["claude", "codex", "opencode"];
 const PAGES = [
@@ -41,8 +41,9 @@ function el(tag, attrs, ...children) {
 
 function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); return node; }
 
+// CONFIRM: the confirmation a refusal names (the service's NEEDS_CONFIRM action), else null.
 class ApiError extends Error {
-  constructor(status, message) { super(message); this.status = status; }
+  constructor(status, message, confirm) { super(message); this.status = status; this.confirm = confirm || null; }
 }
 
 // OPTIONS.background: a request of the page's own polls (X-Background: 1), which does not count as the user's
@@ -62,7 +63,7 @@ async function api(method, path, body, options) {
   try { data = await response.json(); } catch (e) { data = null; }
   noteSession(response);
   if (response.status === 401 && path !== "/api/login" && state.me) sessionEnded();
-  if (!response.ok) throw new ApiError(response.status, (data && data.error) || response.statusText);
+  if (!response.ok) throw new ApiError(response.status, (data && data.error) || response.statusText, data && typeof data.confirm === "string" ? data.confirm : null);
   return data;
 }
 
@@ -85,6 +86,16 @@ function sessionEnded() {
   state.loginMessage = `${t("The session ended (idle too long, logged out, or its user changed): log in again.")}${count ? " " + (count === 1 ? t("When it ended, 1 question was open: {hosts}.", { hosts }) : t("When it ended, {count} questions were open: {hosts}.", { count, hosts })) : ""}`;
   stopPage();
   render();
+  // told outside the page too: the tab's title, and a desktop notification when the user asked for those
+  ended();
+}
+
+function endedTitle() { return `(${t("session ended")}) sandbox-ai`; }
+
+function ended() {
+  document.title = endedTitle();
+  if (!notificationsOn()) return;
+  try { new window.Notification(t("sandbox-ai: the session ended"), { body: t("Log in again to answer the questions of the sandboxes."), tag: "sandbox-ai-session" }); } catch (e) { /* the login says it */ }
 }
 
 // The API path of SUFFIX on HOST (the chosen host unless given: a question names its own).
@@ -150,6 +161,18 @@ function focusCancel(node) {
   if (last && typeof last.focus === "function") last.focus();
 }
 
+// A refusal that names the confirmation it lacks (a 400 with one of the service's NEEDS_CONFIRM actions): the view was
+// out of date (another tab, the host changed meanwhile). askRefused() asks for it in CONTAINER as every confirmation
+// is, with the service's own reason; Yes sends it again, confirmed (RETRY).
+function confirmable(e) {
+  return e instanceof ApiError && e.status === 400 && typeof e.confirm === "string" && e.confirm && needsConfirm(e.confirm) ? e.confirm : null;
+}
+
+function askRefused(container, e, retry, options) {
+  const why = String((e && e.message) || "").replace(/:\s*send \{"confirm": true\}\s*$/, "");
+  return confirmIn(container, t("The service asks first: {why}", { why }), t("Yes, do it"), retry, options);
+}
+
 // Whether ACTION needs a confirmation (GET /api/policy: the service's own table); unknown yet: asked all the same.
 function needsConfirm(action) {
   const table = state.policy && state.policy.confirm;
@@ -165,7 +188,10 @@ function say(text) {
 // The page in the address, with its host where it shows one host's things (#approvals, #doctor@ct101, #starts@all):
 // a reload or a link keeps both.
 function addressOf() {
-  const text = decodeURIComponent(String((typeof location !== "undefined" && location.hash) || "").replace(/^#/, ""));
+  let text = "";
+  // a malformed address (#starts@%) is no page: the default one, never a blank page
+  try { text = decodeURIComponent(String((typeof location !== "undefined" && location.hash) || "").replace(/^#/, "")); }
+  catch (e) { return { page: null, host: null }; }
   const [page, host] = text.split("@");
   return { page: PAGES.some(([key]) => key === page) ? page : null, host: host || null };
 }
@@ -225,8 +251,9 @@ function readableSize(bytes) {
 function notice(text, kind) { return el("div", { class: `notice ${kind || ""}`, role: kind === "error" ? "alert" : "status" }, text); }
 
 // --- notifications: toasts in the theme's colours, top right ---------------------------------------------
-// Errors stay until they are closed (role "alert"); the others (role "status") close after TOAST_SECONDS, not
-// while the pointer or the focus is on them. Title and text are text nodes: what a sandbox chose is never markup.
+// Errors stay until they are closed; the others close after TOAST_SECONDS, not while the pointer or the focus is on
+// them. Each is told to screen readers once, through the page's one live region (say()), never by a role of its own.
+// Title and text are text nodes: what a sandbox chose is never markup.
 
 const TOAST_SECONDS = 8;
 const TOAST_MAX = 4;
@@ -240,7 +267,7 @@ function toast(level, title, text, options) {
   const [name, sign] = TOAST_LEVELS[level];
   const seconds = level === "error" ? 0 : (opts.seconds ?? TOAST_SECONDS);
   let timer = null;
-  const item = el("div", { class: `toast ${level}`, role: level === "error" ? "alert" : "status" });
+  const item = el("div", { class: `toast ${level}` });
   const dismiss = () => { clearTimeout(timer); item.remove(); };
   const closed = () => { dismiss(); if (opts.onClose) opts.onClose(); };  // by the user (OPTIONS.onClose)
   const start = () => { clearTimeout(timer); if (seconds > 0) timer = setTimeout(dismiss, seconds * 1000); };
@@ -258,6 +285,7 @@ function toast(level, title, text, options) {
   for (const type of ["mouseleave", "focusout"]) item.addEventListener(type, start);
   box.prepend(item);  // the newest on top
   while (box.children.length > TOAST_MAX) box.lastElementChild.remove();
+  say(`${t(name)}: ${String(title ?? "")}${body ? `. ${body.slice(0, 300)}` : ""}`);
   start();
   item.dismiss = dismiss;
   return item;
@@ -266,9 +294,17 @@ function toast(level, title, text, options) {
 // What failed, as an error toast: catch (e) { failed(t("Could not …", values))(e); }
 function failed(title) { return (e) => toast("error", title, e && e.message ? e.message : String(e)); }
 
+// The states and results the hosts name (list, doctor, devices), in the page's language; another one as it comes.
+const STATES = { ok: N_("state|ok"), warn: N_("state|warn"), fail: N_("state|fail"), skip: N_("state|skip"), running: N_("state|running"),
+  paused: N_("state|paused"), stopped: N_("state|stopped"), damaged: N_("state|damaged"), attached: N_("state|attached"), held: N_("state|held"), gone: N_("state|gone") };
+function stateText(value) {
+  if (value === undefined || value === null) return "";
+  return Object.prototype.hasOwnProperty.call(STATES, value) ? t(STATES[value]) : String(value);
+}
+
 function statusCell(value) {
   const kind = { ok: "ok", warn: "warn", fail: "fail", skip: "skip", running: "ok", paused: "warn", stopped: "muted" }[value] || "muted";
-  return el("td", { class: `status-${kind}` }, value === undefined || value === null ? "" : String(value));
+  return el("td", { class: `status-${kind}` }, stateText(value));
 }
 
 // CAPTION: what the table is, for screen readers (a table is announced by it).
@@ -387,7 +423,7 @@ async function render() {
   if (!state.me && !state.loginMessage) {
     try { state.me = await api("GET", "/api/me"); } catch (e) { state.me = null; }
   }
-  if (!state.me) { document.title = "sandbox-ai"; removeSessionBanner(); root.append(loginView(state.loginMessage)); return; }
+  if (!state.me) { document.title = state.loginMessage ? endedTitle() : "sandbox-ai"; removeSessionBanner(); root.append(loginView(state.loginMessage)); return; }
   state.loginMessage = null;
   try { state.hosts = await api("GET", "/api/hosts"); } catch (e) { state.hosts = [{ name: "local", kind: "local" }]; }
   try { state.policy = await api("GET", "/api/policy"); } catch (e) { state.policy = null; }  // without it: every prompt is asked
@@ -414,12 +450,13 @@ async function render() {
       el("span", { class: "hint" }, state.me.user),
       el("button", { onclick: logout }, t("Log out"))),
     nav, el("main", { id: "main" })));
-  show(state.page);
   clearInterval(state.timer);
   state.timer = setInterval(poll, 5000);
   clearInterval(state.tick);
   state.tick = setInterval(() => { tickApprovals(); tickSession(); }, 1000);
+  // the poll first: the approvals page drawn now takes its answer instead of asking the same once more
   poll();
+  show(state.page);
 }
 
 async function logout() {
@@ -433,7 +470,7 @@ function stopPage() {
   for (const entry of state.terminals) { entry.dismissed = true; entry.ws.close(); entry.box.remove(); }
   state.terminals = []; state.current = null; state.me = null; clearInterval(state.timer); clearInterval(state.tick);
   state.asked.clear(); state.toastQuestions.clear(); state.questionToast = null; state.answered.clear(); state.questions = [];
-  state.boxes = null; state.session = null; state.cards = [];
+  state.boxes = null; state.session = null; state.cards = []; state.shown = null;
   removeSessionBanner();
   for (const item of document.querySelectorAll("#toasts .toast")) item.remove();
 }
@@ -608,7 +645,11 @@ function notifyDesktop(questions) {
 
 function show(page) {
   if (!PAGES.some(([key]) => key === page)) page = "starts";
+  // another page (or host) than the one shown: its heading gets the focus once it is drawn (a screen reader reads
+  // where the user is now; the focus is not left on a button that is gone)
+  const moved = state.shown !== addressFor(page);
   state.page = page;
+  state.shown = addressFor(page);
   if (typeof location !== "undefined" && location.hash !== addressFor(page)) location.hash = addressFor(page);
   for (const button of document.querySelectorAll("nav button")) {
     const current = button.dataset.page === page;
@@ -619,7 +660,15 @@ function show(page) {
   if (!main) return;
   for (const entry of state.terminals) entry.box.classList.add("hidden");
   if (page !== "terminals") clear(main);
-  pages[page](main).catch(e => { clear(main); main.append(notice(e.message, "error")); });
+  pages[page](main).then(() => { if (moved && page !== "terminals" && state.page === page) focusHeading(main); },
+    e => { clear(main); main.append(notice(e.message, "error")); if (moved) focusHeading(main); });
+}
+
+function focusHeading(main) {
+  const heading = main && typeof main.querySelector === "function" ? main.querySelector("h1") : null;
+  if (!heading || typeof heading.focus !== "function") return;
+  heading.setAttribute("tabindex", "-1");
+  heading.focus();
 }
 
 if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
@@ -641,16 +690,23 @@ const pages = {};
 function attachControls(s, starts) {
   const server = s.name.replace(/^mcp-/, ""), host = s.host || state.host;
   const targets = starts.filter(other => other.kind !== "mcp" && other.directory && other.state !== "damaged" && (other.host || host) === host);
-  const choose = el("select", { "aria-label": t("Attach {server} to", { server }) }, targets.map(target => el("option", { value: target.name }, `${target.name} (${target.state})`)));
+  const choose = el("select", { "aria-label": t("Attach {server} to", { server }) }, targets.map(target => el("option", { value: target.name }, `${target.name} (${stateText(target.state)})`)));
   const restart = el("input", { type: "checkbox" });
-  const attach = el("button", { disabled: !targets.length, title: targets.length ? "" : t("no kept agent start on this host"), onclick: (ev) => busy(ev.target, async () => {
-    try {
-      const r = await api("POST", hostPath(`/mcp/${encodeURIComponent(server)}/attach`, host), { start: choose.value, restart: restart.checked });
-      toast(r.attached === "after a restart" ? "warning" : "success", `${server} → ${r.start}`, r.message);
-      show("starts");
-    } catch (e) { failed(t("Could not attach {server}", { server }))(e); }
-  }) }, t("Attach to…"));
-  return [attach, choose, el("label", { class: "hint", title: t("a running start cannot take a new MCP server while it runs: it is restarted, and the agent continues its conversation") }, restart, " ", t("restart if it runs"))];
+  const asking = el("span", { class: "inline-ask" });
+  // asked first, with what was chosen when asking: what Yes sends is what the question named
+  const attach = el("button", { disabled: !targets.length, title: targets.length ? "" : t("no kept agent start on this host"), onclick: () => {
+    const start = choose.value, again = restart.checked;
+    const text = again ? t("Attach the MCP server {server} to {start} on {host} and restart {start} now if it runs? What runs in it ends; the agent continues its conversation.", { server, start, host })
+      : t("Attach the MCP server {server} to {start} on {host}? It reaches it from its next start on.", { server, start, host });
+    confirmIn(asking, text, again ? t("Yes, attach and restart") : t("Yes, attach it"), async () => {
+      try {
+        const r = await api("POST", hostPath(`/mcp/${encodeURIComponent(server)}/attach`, host), { start, restart: again, confirm: true });
+        toast(r.attached === "after a restart" ? "warning" : "success", `${server} → ${r.start}`, r.message);
+        show("starts");
+      } catch (e) { failed(t("Could not attach {server}", { server }))(e); }
+    }, { kind: "primary", trigger: attach });
+  } }, t("Attach to…"));
+  return [attach, choose, el("label", { class: "hint", title: t("a running start cannot take a new MCP server while it runs: it is restarted, and the agent continues its conversation") }, restart, " ", t("restart if it runs")), asking];
 }
 
 // The starts of the chosen host, or of every host ("all": GET /api/starts, each with its host). The table is kept
@@ -661,14 +717,20 @@ function attachControls(s, starts) {
 const startsView = { main: null, host: null, body: null, rows: new Map(), loading: false, again: false, seen: {} };
 const START_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$/;
 
-function startKey(s) { return `${s.host} ${s.name}`; }
+// A start's identity: its id (list --json; it stays when the start is renamed), else its name (an older sandbox-ai).
+// Rows and cards are keyed by host and that: a rename keeps them, and their Network or Resources card attached.
+function startId(s) { return String(s.id || s.name); }
+function startKey(s) { return `${s.host} ${startId(s)}`; }
+
+// A row button's name for screen readers: what it does, to which start, on which host ("Stop web on ct101").
+function rowLabel(action, s) { return t("{action} {name} on {host}", { action, name: s.name, host: s.host }); }
 
 // Whether a question of the last poll comes from the run of start S.
 function startAsks(s) { return Boolean(s.run) && state.questions.some(q => q.host === s.host && q.run === s.run); }
 
 function startSignature(s, starts) {
   const targets = s.kind === "mcp" ? starts.filter(other => other.kind !== "mcp" && other.host === s.host).map(other => [other.name, other.state, Boolean(other.directory)]) : null;
-  return JSON.stringify([s.host, s.name, s.agent, s.kind, s.state, s.workspace, s.home, s.keep, s.started, s.attachable, s.directory ? 1 : 0, s.mcp, s.serves, targets, startAsks(s)]);
+  return JSON.stringify([s.host, s.name, s.agent, s.kind, s.state, s.workspace, s.home, s.keep, s.started, s.attachable, s.directory ? 1 : 0, s.mcp, s.serves, targets, startAsks(s), LANGUAGE]);
 }
 
 // What failed when a start's button was pressed (its action: pause, resume, stop, delete).
@@ -684,30 +746,30 @@ function startRow(s, starts, main, all) {
       if (state.page === "starts") refreshStarts(main, true);
     } catch (e) { failed(t(RUN_FAILED[action], { name: s.name, host }))(e); }
   });
-  const act = (label, action, extra) => el("button", Object.assign({ onclick: (event) => run(event.target, action) }, extra || {}), label);
+  const act = (label, action, extra) => el("button", Object.assign({ onclick: (event) => run(event.target, action), "aria-label": rowLabel(label, s) }, extra || {}), label);
   const mcp = s.kind === "mcp";
   const stopText = mcp ? t("Stop the MCP server {name} on {host}? The starts it serves lose it until it starts again.", { name: s.name, host })
     : t("Stop {name} on {host}? What runs in it ends; {home}", { name: s.name, host,
       home: s.keep ? t("its HOME is kept: Resume starts it again.") : s.home === "own" ? t("its HOME is a directory of its own, which stays.") : t("its HOME is not kept: it is discarded with the start.") });
-  const stop = el("button", { onclick: () => confirmIn(actions, stopText, t("Yes, stop it"), () => run(stop, "stop", { confirm: true }), { trigger: stop }) }, t("Stop"));
-  if (s.attachable) actions.append(el("button", { class: "primary", onclick: () => openTerminal({ kind: "attach", name: s.name, host }, `${s.name}`) }, t("Attach")));
+  const stop = el("button", { "aria-label": rowLabel(t("Stop"), s), onclick: () => confirmIn(actions, stopText, t("Yes, stop it"), () => run(stop, "stop", { confirm: true }), { trigger: stop }) }, t("Stop"));
+  if (s.attachable) actions.append(el("button", { class: "primary", "aria-label": rowLabel(t("Attach"), s), onclick: () => openTerminal({ kind: "attach", name: s.name, host }, `${s.name}`) }, t("Attach")));
   if (s.state === "running" && !mcp) actions.append(act(t("Pause"), "pause"), stop,
-    el("button", { onclick: () => networkCard(main, s.name, host) }, t("Network…")),
-    el("button", { title: t("workspaces, devices and resource limits while it runs"), onclick: () => resourcesCard(main, s.name, host) }, t("Resources…")));
+    el("button", { "aria-label": rowLabel(t("Network…"), s), onclick: () => networkCard(main, s) }, t("Network…")),
+    el("button", { "aria-label": rowLabel(t("Resources…"), s), title: t("workspaces, devices and resource limits while it runs"), onclick: () => resourcesCard(main, s) }, t("Resources…")));
   else if (s.state === "running" || (s.state === "paused" && mcp)) actions.append(stop);
   if (s.state === "paused" && !mcp) actions.append(act(t("Resume"), "resume"), stop);
   if (s.state === "stopped" && s.keep) {
-    const resume = el("button", { onclick: () => reviewThenResume(main, s, resume) }, t("Resume"));
-    const remove = el("button", { class: "danger", onclick: () => confirmIn(actions, t("Delete {name} on {host} with its kept HOME? What is in that HOME is gone for good.", { name: s.name, host }),
+    const resume = el("button", { "aria-label": rowLabel(t("Resume"), s), onclick: () => reviewThenResume(main, s, resume) }, t("Resume"));
+    const remove = el("button", { class: "danger", "aria-label": rowLabel(t("Delete"), s), onclick: () => confirmIn(actions, t("Delete {name} on {host} with its kept HOME? What is in that HOME is gone for good.", { name: s.name, host }),
       t("Yes, delete it"), () => run(remove, "delete", { confirm: true }), { trigger: remove }) }, t("Delete"));
     actions.append(resume, remove);
   }
   if (mcp) actions.append(...attachControls(s, starts));
   if (!mcp && s.state !== "damaged") {
-    const rename = el("button", { onclick: () => askRename(actions, s, main, rename) }, t("Rename…"));
+    const rename = el("button", { "aria-label": rowLabel(t("Rename…"), s), onclick: () => askRename(actions, s, main, rename) }, t("Rename…"));
     actions.append(rename);
   }
-  actions.append(el("button", { onclick: () => historyCard(main, s) }, t("History")));
+  actions.append(el("button", { "aria-label": rowLabel(t("History"), s), onclick: () => historyCard(main, s) }, t("History")));
   // which MCP servers a start reaches (or will at its next start), and whom a server serves
   const mcpNote = mcp ? ((s.serves || []).length ? t("serves {starts}", { starts: s.serves.join(", ") }) : t("serves no start yet"))
     : (s.mcp || []).length ? `MCP: ${s.mcp.join(", ")}` : "";
@@ -834,7 +896,9 @@ function applyStarts(view, found, main) {
   if (view.host === "all" && found && !(found instanceof Error) && Array.isArray(found.starts)) {
     starts = found.starts.filter(x => x && typeof x === "object" && typeof x.name === "string" && typeof x.host === "string");
     errors = found.errors && typeof found.errors === "object" ? found.errors : {};
-    for (const [host, when] of Object.entries(found.seen || {})) if (typeof when === "number" && !notAsked(errors, host)) view.seen[host] = when * 1000;
+    // how old each host's list is, by the service's clock, counted on here from now (never this browser's clock
+    // against the service's)
+    for (const [host, age] of Object.entries(found.age || {})) if (typeof age === "number" && Number.isFinite(age) && !notAsked(errors, host)) view.seen[host] = now - Math.max(0, age) * 1000;
   } else if (view.host !== "all" && Array.isArray(found)) {
     starts = found.filter(x => x && typeof x === "object" && typeof x.name === "string").map(x => Object.assign({}, x, { host: view.host }));
     view.seen[view.host] = now;
@@ -972,20 +1036,32 @@ function gcCard(main, host) {
   };
   const preview = async (event) => busy(event.target, async () => {
     clear(result); clear(actions);
+    // what the confirmation is about: the days of this preview and what it listed (not what the field says later)
+    const asked = days.value.trim(), previewed = older();
     let r;
-    try { r = older() === null ? await api("GET", hostPath("/gc", host)) : await api("GET", hostPath(`/gc/${encodeURIComponent(older())}`, host)); }
+    try { r = previewed === null ? await api("GET", hostPath("/gc", host)) : await api("GET", hostPath(`/gc/${encodeURIComponent(asked)}`, host)); }
     catch (e) { result.append(notice(e.message, "error")); return; }
-    const found = lines(r || {});
+    r = r && typeof r === "object" ? r : {};
+    const found = lines(r);
     const removing = (r.leftovers || []).length + (r.removed || []).length + (r.histories || []).length;
     result.append(found.length ? el("ul", {}, found.map(line => el("li", {}, line))) : el("p", { class: "hint" }, t("Nothing to remove.")));
     if (!removing) return;
+    // the service runs a dry run first and removes nothing when it would now remove more than this preview showed
+    const expected = { removed: (r.removed || []).map(e => String((e && (e.id || e.name)) || "")), leftovers: (r.leftovers || []).map(String), histories: (r.histories || []).map(String) };
     const go = el("button", { class: "danger", onclick: () => confirmIn(actions, t("Remove these from {host} for good? A kept start's HOME goes with it.", { host }), t("Yes, remove them"), async () => {
+      if (days.value.trim() !== asked) {
+        clear(result).append(notice(t("The days were changed after the preview: nothing was removed. Preview again."), "warn"));
+        return;
+      }
       try {
-        const done = await api("POST", hostPath("/gc", host), { older_than: older(), confirm: true });
+        const done = await api("POST", hostPath("/gc", host), { older_than: previewed, confirm: true, expected });
         clear(result).append(el("ul", {}, lines(done || {}).map(line => el("li", {}, line))));
         toast("success", t("Cleaned up {host}", { host }), "");
         if (state.page === "starts") refreshStarts(main, true);
-      } catch (e) { failed(t("Could not clean up {host}", { host }))(e); }
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 409) { clear(result).append(notice(e.message, "warn")); return; }
+        failed(t("Could not clean up {host}", { host }))(e);
+      }
     }, { trigger: go }) }, t("Remove these…"));
     actions.append(go);
   });
@@ -999,14 +1075,17 @@ function gcCard(main, host) {
 
 // A card about one running start (its network, its resources): switched off once the start stops or goes (a later
 // listing says so), with a notice and its Close.
-function registerCard(card, notes, host, name) {
+// REF: {host, id, name (a getter), rename(new)}: the card follows its start by host and id, so a rename (here or
+// elsewhere) keeps it attached, under the new name.
+function registerCard(card, notes, ref) {
   state.cards = state.cards.filter(entry => entry.card.isConnected && entry.card !== card);
-  const entry = { card, host, name, retired: false };
+  const entry = { card, ref, retired: false };
   entry.retire = (now) => {
     if (entry.retired) return;
     entry.retired = true;
     for (const control of controlsIn(card)) control.disabled = true;
-    clear(notes).append(notice(now ? t("{name} on {host} is {state} now: nothing here changes it any more.", { name, host, state: now }) : t("{name} on {host} is gone: nothing here changes it any more.", { name, host }), "warn"),
+    clear(notes).append(notice(now ? t("{name} on {host} is {state} now: nothing here changes it any more.", { name: ref.name, host: ref.host, state: stateText(now) })
+      : t("{name} on {host} is gone: nothing here changes it any more.", { name: ref.name, host: ref.host }), "warn"),
       el("button", { onclick: () => card.remove() }, t("Close")));
   };
   state.cards.push(entry);
@@ -1016,16 +1095,25 @@ function registerCard(card, notes, host, name) {
 function retireCards(starts, stale) {
   state.cards = state.cards.filter(entry => entry.card.isConnected);
   for (const entry of state.cards) {
-    if (stale(entry.host)) continue;
-    const s = starts.find(x => x.host === entry.host && x.name === entry.name);
+    if (stale(entry.ref.host)) continue;
+    const s = starts.find(x => x.host === entry.ref.host && startId(x) === entry.ref.id);
+    if (s && s.name !== entry.ref.name && !entry.retired) entry.ref.rename(s.name);
     if (!s || s.state !== "running") entry.retire(s ? s.state : null);
   }
 }
 
+// What a card keeps of its start: its host, its id, and its name, which a rename changes (NAME is read anew each
+// time; HEADING(name) gives the card's title).
+function cardRef(s, getName, setName, heading, title) {
+  return { host: s.host || state.host, id: startId(s), get name() { return getName(); },
+    rename: (fresh) => { setName(fresh); heading.textContent = title(); } };
+}
+
 // the network of a running start (sandbox-ai net allow|revoke|show|untaint on its host): what widens it is asked
 // first (it applies at once: real DNS, ports on the host, wildcards, Git logins)
-function networkCard(main, name, host) {
-  host = host || state.host;
+function networkCard(main, s) {
+  const host = s.host || state.host;
+  let name = s.name;  // a rename of the start changes it (cardRef): every request below names it as it is then
   const old = document.getElementById("network-card");
   if (old) old.remove();
   const field = (id, placeholder) => el("input", { id, placeholder, class: "mono" });
@@ -1089,10 +1177,13 @@ function networkCard(main, name, host) {
   };
   const send = async (op, request, confirm) => {
     try {
-      const r = await api("POST", hostPath(`/net/${encodeURIComponent(name)}`, host), Object.assign(request, confirm ? { confirm: true } : {}));
+      const r = await api("POST", hostPath(`/net/${encodeURIComponent(name)}`, host), Object.assign({}, request, confirm ? { confirm: true } : {}));
       toast("success", op === "allow" ? t("Allowed for {name} on {host}", { name, host }) : t("Revoked for {name} on {host}", { name, host }), (r && r.output) || "");
       await refresh();
-    } catch (e) { failed(t("Could not change the network of {name} on {host}", { name, host }))(e); }
+    } catch (e) {
+      if (!confirm && confirmable(e)) { askRefused(actions, e, () => send(op, request, true)); return; }
+      failed(t("Could not change the network of {name} on {host}", { name, host }))(e);
+    }
   };
   const actions = el("div", { class: "row" });
   // What an allow widens, in words, for its confirmation.
@@ -1111,7 +1202,9 @@ function networkCard(main, name, host) {
   actions.append(allow,
     el("button", { onclick: (event) => busy(event.target, () => send("revoke", body("revoke"), false)) }, t("Revoke")),
     el("button", { onclick: refresh }, t("Refresh")));
-  const card = el("div", { class: "card", id: "network-card" }, el("h2", {}, t("Network of {name} on {host}", { name, host })), notes,
+  const title = () => t("Network of {name} on {host}", { name, host });
+  const heading = el("h2", {}, title());
+  const card = el("div", { class: "card", id: "network-card" }, heading, notes,
     el("p", { class: "hint" }, t("Until the sandbox ends. Ports on the host go through a relay only you start; a Git login names where its token is, never the token.")),
     el("h3", {}, t("Allowed during this run")), shown,
     el("div", { class: "form" },
@@ -1123,7 +1216,7 @@ function networkCard(main, name, host) {
       el("label", { for: "net-git-kind" }, t("Git login: token in")), el("div", {}, gitKind, " ", gitRef),
       el("span"), actions));
   main.append(card);
-  registerCard(card, notes, host, name);
+  registerCard(card, notes, cardRef(s, () => name, (fresh) => { name = fresh; }, heading, title));
   refresh();
 }
 
@@ -1148,11 +1241,12 @@ function limitNumber(key, value) {
 // directories at /workspaces/NAME, devices, its resource limits. Each change runs that command there, with its
 // checks; what widens the sandbox (a writable directory, a device, a removal by force, a limit raised or taken away)
 // asks first, in place, naming the host. Failures are error toasts with the command's own message.
-function resourcesCard(main, name, host) {
-  host = host || state.host;
+function resourcesCard(main, s) {
+  const host = s.host || state.host;
+  let name = s.name;  // a rename of the start changes it, and WHERE with it (cardRef)
   const old = document.getElementById("resources-card");
   if (old) old.remove();
-  const where = t("{name} on {host}", { name, host });
+  let where = t("{name} on {host}", { name, host });
   const head = (columns) => el("thead", {}, el("tr", {}, columns.map(c => el("th", {}, c))));
   const notes = el("div");
 
@@ -1291,7 +1385,11 @@ function resourcesCard(main, name, host) {
     try {
       const r = await api("POST", hostPath(`/limits/${encodeURIComponent(name)}`, host), body);
       toast("success", t("Limits of {where}", { where }), (r && r.output) || "");
-    } catch (e) { failed(t("Could not change the limits of {where}", { where }))(e); }
+    } catch (e) {
+      // the limits changed since they were read here: the service asks, and so does the page
+      if (!body.confirm && confirmable(e)) { askRefused(limActions, e, () => sendLimits(Object.assign({}, body, { confirm: true })), { trigger: apply }); return; }
+      failed(t("Could not change the limits of {where}", { where }))(e);
+    }
     await loadLimits();
   };
   const LIMIT_NAMES = { memory: N_("memory"), cpus: N_("CPU"), pids: N_("process") };
@@ -1313,7 +1411,9 @@ function resourcesCard(main, name, host) {
   } }, t("Apply limits"));
   limActions.append(apply, el("button", { onclick: () => { loadWorkspaces(); loadDevices(); loadLimits(); } }, t("Refresh")));
 
-  const card = el("div", { class: "card", id: "resources-card" }, el("h2", {}, t("Workspaces, devices and limits of {where}", { where })), notes,
+  const title = () => t("Workspaces, devices and limits of {where}", { where });
+  const heading = el("h2", {}, title());
+  const card = el("div", { class: "card", id: "resources-card" }, heading, notes,
     el("p", { class: "hint" }, t("While it runs, without a restart; each change runs sandbox-ai workspace, devices or limits on that host, with its checks.")),
     el("h3", {}, t("Workspaces")), wsStatus, wsTable,
     el("div", { class: "form" }, el("label", { for: "ws-dir" }, t("Directory")), directory,
@@ -1328,7 +1428,7 @@ function resourcesCard(main, name, host) {
       el("label", { for: "lim-pids" }, t("Processes")), pids,
       el("span"), limActions));
   main.append(card);
-  registerCard(card, notes, host, name);
+  registerCard(card, notes, cardRef(s, () => name, (fresh) => { name = fresh; where = t("{name} on {host}", { name, host }); }, heading, title));
   loadWorkspaces();
   loadDevices();
   loadLimits();
@@ -1550,6 +1650,11 @@ pages.approvals = async (main, known) => {
     view.table.hidden = true; view.empty.hidden = true;
   }
   let found = known;
+  if (found === undefined && state.polling) {
+    // the page's poll is asking right now: its answer is drawn here when it comes (poll()), not asked twice
+    if (!view.rows.size) clear(view.status).append(el("p", { class: "hint" }, t("Loading…")));
+    return;
+  }
   if (found === undefined) {
     try {
       found = await api("GET", "/api/approvals");
@@ -1612,7 +1717,8 @@ pages.logs = async (main) => {
 pages.vpn = async (main) => {
   const profiles = await api("GET", hostPath("/vpn"));
   clear(main).append(el("h1", {}, t("VPN profiles on {host}", { host: state.host })),
-    el("p", { class: "hint" }, t("A profile names the secret that holds its key or password ({command} on that host): no key passes through this page.", { command: "sandbox-ai secrets set NAME" })));
+    el("p", { class: "hint" }, t("A profile names the secret that holds its key or password (kept on the page Secrets of that host): no key passes through this page."), " ",
+      el("button", { onclick: () => show("secrets") }, t("Open Secrets"))));
   const host = state.host;
   const rows = profiles.map(p => {
     const actions = el("td", { class: "actions" },
@@ -1690,16 +1796,22 @@ pages.llm = async (main) => {
   const kind = el("select", { id: "llm-kind" }, ["lmstudio", "ollama", "llamacpp", "vllm", "openai-compatible"].map(k => el("option", { value: k }, k)));
   const url = el("input", { id: "llm-url", class: "mono", placeholder: "http://192.168.1.20:1234" });
   const model = el("input", { id: "llm-model", class: "mono", placeholder: t("optional") });
+  // the NAME of the secret that holds the API key (sandbox-ai secrets there), never the key
+  const keySecret = el("input", { id: "llm-key-secret", class: "mono", placeholder: t("optional, e.g. {name}", { name: "LMSTUDIO_KEY" }), pattern: "[A-Za-z_][A-Za-z0-9_]{0,63}", autocomplete: "off", "aria-describedby": "llm-hint" });
   const status = el("div", { class: "wide" });
   main.append(el("h2", {}, t("Add a server")), el("div", { class: "card" }, el("div", { class: "form" },
     el("label", { for: "llm-name" }, t("Name")), name, el("label", { for: "llm-kind" }, t("Kind")), kind,
     el("label", { for: "llm-url" }, "URL"), url, el("label", { for: "llm-model" }, t("Model")), model,
+    el("label", { for: "llm-key-secret" }, t("API key: secret (its name)")), keySecret,
     el("span"), el("button", { class: "primary", onclick: (ev) => busy(ev.target, async () => {
       clear(status);
-      try { await api("POST", hostPath("/llm"), { name: name.value.trim(), kind: kind.value, url: url.value.trim(), model: model.value.trim() }); show("llm"); }
+      const secret = keySecret.value.trim();
+      if (secret && !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(secret)) { status.append(notice(t("A secret's name: letters, digits and _ (up to 64), not starting with a digit."), "error")); return; }
+      try { await api("POST", hostPath("/llm"), Object.assign({ name: name.value.trim(), kind: kind.value, url: url.value.trim(), model: model.value.trim() }, secret ? { api_key_secret: secret } : {})); show("llm"); }
       catch (e) { status.append(notice(e.message, "error")); }
     }) }, t("Add")), status),
-    el("p", { class: "hint" }, t("Then start an agent with {option} (Options of a new start). A key is set on the server: {secret}, then {add}.", { option: "--llm NAME", secret: "sandbox-ai secrets set NAME", add: "sandbox-ai llm add … --api-key-secret NAME" }))));
+    el("p", { class: "hint", id: "llm-hint" }, t("Then start an agent with {option} (Options of a new start). A server that wants a key: keep it on the page Secrets of that host, and name that secret here.", { option: "--llm NAME" }), " ",
+      el("button", { onclick: () => show("secrets") }, t("Open Secrets")))));
 
 };
 
@@ -1774,13 +1886,22 @@ pages.kits = async (main) => {
   target.addEventListener("change", updateTarget);
   updateTarget();
   const addStatus = el("div", { class: "wide" });
-  const send = (action, body, title) => async (ev) => busy(ev.target, async () => {
+  const addAsk = el("div", { class: "row wide" });
+  // add-skill, add-plugin, add-marketplace widen every later start of that kit: asked first, naming what and where
+  // (the values as they were when asking are the ones sent); a new skill (written here) is not
+  const WIDENS = { "add-skill": (b) => b.path, "add-plugin": (b) => b.plugin, "add-marketplace": (b) => b.marketplace };
+  const send = (action, body, title) => async (ev) => {
     clear(addStatus);
     const fresh = target.value === "";
     const name = fresh ? targetName.value.trim() : target.value;
-    try { result(title(name), await api("POST", hostPath(`/kits/${encodeURIComponent(name)}/${action}`), Object.assign(body(), { create: fresh }))); show("kits"); }
-    catch (e) { addStatus.append(notice(e.message, "error")); }
-  });
+    const request = Object.assign(body(), { create: fresh });
+    const go = () => busy(ev.target, async () => {
+      try { result(title(name), await api("POST", hostPath(`/kits/${encodeURIComponent(name)}/${action}`, host), Object.assign({}, request, WIDENS[action] ? { confirm: true } : {}))); show("kits"); }
+      catch (e) { addStatus.append(notice(e.message, "error")); }
+    });
+    if (!WIDENS[action] || !needsConfirm("kit-add")) { go(); return; }
+    confirmIn(addAsk, t("Add {what} to the kit {kit} on {host}? Every later start with that kit gets it.", { what: WIDENS[action](request) || "?", kit: name, host }), t("Yes, add it"), go, { kind: "primary", trigger: ev.target });
+  };
   const folder = el("input", { id: "kit-skill-path", class: "mono", placeholder: t("{path} (on that host, with SKILL.md)", { path: "/home/you/skills/review" }) });
   const folderAs = el("input", { id: "kit-skill-as", placeholder: t("the folder's name") });
   const skillName = el("input", { id: "kit-skill-name", placeholder: "release-notes", pattern: "[a-z0-9][a-z0-9-]{0,63}" });
@@ -1803,7 +1924,7 @@ pages.kits = async (main) => {
     el("label", { for: "kit-plugin" }, t("Plugin")), plugin, el("label", { for: "kit-plugin-agent" }, t("Agent")), pluginAgent,
     el("label", { for: "kit-plugin-source" }, t("Marketplace source")), pluginSource,
     el("span"), el("button", { class: "primary", onclick: send("add-plugin", () => ({ plugin: plugin.value.trim(), agent: pluginAgent.value, source: pluginSource.value.trim() }), n => t("Plugin added to {kit}", { kit: n })) }, t("Add plugin")),
-    addStatus),
+    addAsk, addStatus),
     el("p", { class: "hint" }, t("Use a kit with {option} (Options of a new start). Claude plugins are installed with {command} on that host.", { option: "--kit NAME", command: "sandbox-ai plugins claude" }))));
 
 };
@@ -1873,15 +1994,24 @@ pages.settings = async (main) => {
   const data = await api("GET", hostPath("/defaults"));
   const values = data.values || {};
   const status = el("div");
+  // true, or the error (shown, unless it is a refusal that asks for a confirmation: that is asked)
   const save = async (key, value, confirmed) => {
     clear(status);
     try { await api("POST", hostPath("/defaults", host), Object.assign({ key, value }, confirmed ? { confirm: true } : {})); status.append(notice(t("{key} saved on {host}", { key, host }), "ok")); return true; }
-    catch (e) { status.append(notice(e.message, "error")); return false; }
+    catch (e) { if (confirmed || !confirmable(e)) status.append(notice(e.message, "error")); return e; }
   };
-  // CONTROL changed: saved at once, or asked first (WEAKER) with ASKING in the place next to it
+  // CONTROL changed: saved at once, or asked first (WEAKER) with ASKING in the place next to it; the service may
+  // still ask (the host's value changed since the page read it): then that is asked there
   const change = (control, asking, weaker, text, key, value, revert, accept) => {
-    if (!weaker || !needsConfirm("defaults-lower")) { save(key, value).then(ok => (ok ? accept() : revert())); return; }
-    confirmIn(asking, text, t("Yes, lower it"), async () => { if (await save(key, value, true)) accept(); else revert(); }, { onCancel: revert, trigger: control });
+    if (!weaker || !needsConfirm("defaults-lower")) {
+      save(key, value).then(r => {
+        if (r === true) { accept(); return; }
+        if (!confirmable(r)) { revert(); return; }
+        askRefused(asking, r, async () => { if (await save(key, value, true) === true) accept(); else revert(); }, { onCancel: revert, trigger: control });
+      });
+      return;
+    }
+    confirmIn(asking, text, t("Yes, lower it"), async () => { if (await save(key, value, true) === true) accept(); else revert(); }, { onCancel: revert, trigger: control });
   };
   let telemetryNow = values.telemetry || "off", modeNow = values.mode || "medium";
   const telemetry = el("select", { id: "telemetry" },
@@ -1952,24 +2082,34 @@ pages.secrets = async (main) => {
   const value = el("input", { id: "secret-value", type: "password", autocomplete: "new-password", "aria-describedby": "secret-hint" });
   const status = el("div", { class: "wide" });
   const actions = el("div", { class: "row" });
-  const send = async (confirm) => {
+  // WANTED: the name as it was when the user pressed Keep it (and was asked, if asked): what is sent is what was named
+  const send = async (wanted, confirm) => {
     clear(status);
     try {
-      const r = await api("POST", hostPath(`/secrets/${encodeURIComponent(name.value.trim())}`, host), Object.assign({ secret: value.value }, confirm ? { confirm: true } : {}));
+      const r = await api("POST", hostPath(`/secrets/${encodeURIComponent(wanted)}`, host), Object.assign({ secret: value.value }, confirm ? { confirm: true } : {}));
       value.value = "";
-      toast("success", t("{name} kept on {host}", { name: name.value.trim(), host }), (r && r.output) || "");
+      toast("success", t("{name} kept on {host}", { name: wanted, host }), (r && r.output) || "");
       show("secrets");
-    } catch (e) { value.value = ""; status.append(notice(e.message, "error")); }
+    } catch (e) {
+      // a secret of that name came meanwhile (another tab, the command line): asked now, the value kept for the Yes
+      if (!confirm && confirmable(e)) { askReplace(wanted, t("A secret {name} exists on {host} now: replace its value? The old one is gone.", { name: wanted, host })); return; }
+      value.value = ""; status.append(notice(e.message, "error"));
+    }
   };
+  const askReplace = (wanted, text) => confirmIn(actions, text, t("Yes, replace it"), () => {
+    if (name.value.trim() !== wanted) {  // the name was changed while the question was open: not what was asked
+      status.append(notice(t("The name is {now} now, not {asked} as asked: nothing was sent. Press Keep it again.", { now: name.value.trim(), asked: wanted }), "warn"));
+      return undefined;
+    }
+    return send(wanted, true);
+  }, { trigger: keep });
   const keep = el("button", { class: "primary", onclick: () => {
+    clear(status);
     const wanted = name.value.trim();
     if (!/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(wanted)) { toast("warning", t("Which name?"), t("Letters, digits and _ (up to 64), not starting with a digit.")); return; }
     if (!value.value) { toast("warning", t("Which value?"), t("Type the value into the password field.")); return; }
-    if (names.some(x => x.name === wanted)) {
-      confirmIn(actions, t("Replace the value of {name} on {host}? The old one is gone.", { name: wanted, host }), t("Yes, replace it"), () => send(true), { trigger: keep });
-      return;
-    }
-    send(false);
+    if (names.some(x => x.name === wanted)) { askReplace(wanted, t("Replace the value of {name} on {host}? The old one is gone.", { name: wanted, host })); return; }
+    send(wanted, false);
   } }, t("Keep it"));
   actions.append(keep);
   main.append(el("h2", {}, t("Set a secret")), el("div", { class: "card" }, el("div", { class: "form" },
@@ -2018,22 +2158,36 @@ function hostEditCard(main, h) {
     command: el("input", { id: "edit-command", class: "mono", value: h.command || "", placeholder: t("sandbox-ai's path there (optional)") }),
     description: el("input", { id: "edit-description", value: h.description || "" }), update_sudo: el("input", { id: "edit-update-sudo", type: "checkbox", checked: Boolean(h.update_sudo) }) };
   const status = el("div", { class: "wide" });
+  const buttons = el("div", { class: "row" });
+  const saveHost = async (body, confirm) => {
+    clear(status);
+    try {
+      const r = await api("POST", `/api/hosts/${encodeURIComponent(h.name)}`, Object.assign({}, body, confirm ? { confirm: true } : {}));
+      toast("success", t("{host} saved", { host: h.name }), "");
+      for (const w of (r && r.warnings) || []) toast("warning", t("Keys of {host}", { host: h.name }), w);
+      render();
+    } catch (e) {
+      if (!confirm && confirmable(e)) { askRefused(buttons, e, () => saveHost(body, true), { trigger: save }); return; }
+      status.append(notice(e.message, "error"));
+    }
+  };
+  // where and how this service's commands run there: a change is asked first, naming it (what was typed then is sent)
+  const save = el("button", { class: "primary", onclick: () => {
+    const body = { ssh: fields.ssh.value.trim(), port: Number(fields.port.value || 22), identity: fields.identity.value.trim(), command: fields.command.value.trim(),
+      description: fields.description.value.trim(), update_sudo: Boolean(fields.update_sudo.checked) };
+    const was = { ssh: h.ssh || "", port: h.port || 22, identity: h.identity || "", command: h.command || "", update_sudo: Boolean(h.update_sudo) };
+    const moved = ["ssh", "port", "identity", "command", "update_sudo"].filter(key => body[key] !== was[key]);
+    if (!moved.length || !needsConfirm("host-edit")) { busy(save, () => saveHost(body, false)); return; }
+    const words = moved.map(key => `${key}: ${String(was[key]) || "-"} → ${String(body[key]) || "-"}`).join("; ");
+    confirmIn(buttons, t("Change how this service reaches {host} ({changes})? Its commands go there from now on.", { host: h.name, changes: words }), t("Yes, change it"), () => saveHost(body, true), { kind: "primary", trigger: save });
+  } }, t("Save"));
+  buttons.append(save, el("button", { onclick: () => card.remove() }, t("Cancel")));
   const card = el("div", { class: "card", id: "host-edit-card" }, el("h2", {}, t("Edit {host}", { host: h.name })), el("div", { class: "form" },
     el("label", { for: "edit-ssh" }, "SSH"), fields.ssh, el("label", { for: "edit-port" }, t("Port")), fields.port,
     el("label", { for: "edit-identity" }, t("Key")), fields.identity, el("label", { for: "edit-command" }, t("Command")), fields.command,
     el("label", { for: "edit-description" }, t("Description")), fields.description,
     el("label", { for: "edit-update-sudo" }, t("Update with sudo")), fields.update_sudo, status,
-    el("span"), el("div", { class: "row" }, el("button", { class: "primary", onclick: (ev) => busy(ev.target, async () => {
-      clear(status);
-      const body = { ssh: fields.ssh.value.trim(), port: Number(fields.port.value || 22), identity: fields.identity.value.trim(), command: fields.command.value.trim(),
-        description: fields.description.value.trim(), update_sudo: fields.update_sudo.checked };
-      try {
-        const r = await api("POST", `/api/hosts/${encodeURIComponent(h.name)}`, body);
-        toast("success", t("{host} saved", { host: h.name }), "");
-        for (const w of (r && r.warnings) || []) toast("warning", t("Keys of {host}", { host: h.name }), w);
-        render();
-      } catch (e) { status.append(notice(e.message, "error")); }
-    }) }, t("Save")), el("button", { onclick: () => card.remove() }, t("Cancel")))));
+    el("span"), buttons));
   main.append(card);
   focusFirst(card);
 }
@@ -2052,11 +2206,27 @@ pages.hosts = async (main) => {
     catch (e) { for (const cell of Object.values(versionCells)) cell.textContent = "?"; output.append(notice(t("Versions: {error}", { error: e.message }), "error")); }
   };
   const remote = state.hosts.filter(h => h.kind !== "local");
+  // the starts and the open questions of each host, as the fleet's last listings found them (nothing is asked for it)
+  const activityCells = {};
+  const loadActivity = async () => {
+    let found;
+    try { found = await api("GET", "/api/hosts-activity", undefined, { background: true }); } catch (e) { found = {}; }
+    for (const [name, [starts, questions]] of Object.entries(activityCells)) {
+      const a = found && typeof found[name] === "object" && found[name] ? found[name] : {};
+      starts.textContent = typeof a.starts === "number" ? t("{count} ({running} running)", { count: a.starts, running: a.running ?? 0 }) : "?";
+      questions.textContent = typeof a.questions === "number" ? String(a.questions) : "?";
+      questions.className = typeof a.questions === "number" && a.questions > 0 ? "status-warn" : "";
+      const title = typeof a.age === "number" ? t("as seen {seconds} s ago", { seconds: Math.round(a.age) }) : t("not asked yet: open Starts and sessions (all hosts) or Approvals");
+      starts.setAttribute("title", title); questions.setAttribute("title", title);
+    }
+  };
   const rows = state.hosts.map(h => {
     const version = el("td", { class: "mono" }, h.kind === "local" ? t("this machine") : "…");
     if (h.kind !== "local") versionCells[h.name] = version;
+    const startsCell = el("td", {}, "…"), questionsCell = el("td", {}, "…");
+    activityCells[h.name] = [startsCell, questionsCell];
     return el("tr", {}, el("td", { class: "mono" }, h.name), el("td", { class: "mono" }, h.kind === "local" ? t("this machine") : `${h.ssh}${h.port && h.port !== 22 ? ":" + h.port : ""}`),
-      version, el("td", {}, h.description || "", h.update_sudo ? el("span", { class: "hint" }, " ", t("(updates with sudo)")) : null), el("td", { class: "actions" },
+      version, startsCell, questionsCell, el("td", {}, h.description || "", h.update_sudo ? el("span", { class: "hint" }, " ", t("(updates with sudo)")) : null), el("td", { class: "actions" },
         el("button", { onclick: (ev) => busy(ev.target, async () => {
           clear(output);
           try {
@@ -2094,11 +2264,12 @@ pages.hosts = async (main) => {
     loadVersions(false);
   }) }, t("Update all"));
   const check = el("button", { disabled: !remote.length, onclick: (ev) => busy(ev.target, () => loadVersions(true)) }, t("Check versions"));
-  main.append(table([t("Name"), "SSH", "sandbox-ai", t("Description"), ""], rows),
+  main.append(table([t("Name"), "SSH", "sandbox-ai", t("Starts"), t("Open questions"), t("Description"), ""], rows, null, t("Hosts")),
     el("div", { class: "actions" }, updateAll, check, progress),
     el("p", { class: "hint" }, t("Update runs each host's own sandbox-ai update (signed, as install.sh installed it); a system installation updates with {sudo}, and when sudo wants a password a terminal tab asks for it. This machine updates with: {command}.", { sudo: "sudo -n", command: "sandbox-ai update" })),
     output);
   if (remote.length) loadVersions(false);
+  loadActivity();
   const fields = { name: el("input", { id: "host-name", placeholder: "ct101" }), ssh: el("input", { id: "host-ssh", class: "mono", placeholder: "user@192.168.1.101" }),
     port: el("input", { id: "host-port", type: "number", min: 1, max: 65535, placeholder: "22" }), identity: el("input", { id: "host-identity", class: "mono", placeholder: t("{path} (optional)", { path: "~/.ssh/id_ed25519" }) }),
     description: el("input", { id: "host-description", placeholder: "Proxmox CT 101" }), update_sudo: el("input", { id: "host-update-sudo", type: "checkbox" }) };

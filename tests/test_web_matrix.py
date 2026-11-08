@@ -240,11 +240,13 @@ ACTIONS = [
     ("POST", "/test", {}, [["--version"], ["doctor", "--json"]]),
     ("GET", "/kits", None, [["kits", "list", "--json"]]),
     ("POST", "/kits", {"name": "mv", "agents": ["claude"]}, [["kits", "new", "--agent=claude", "--", "mv"]]),
-    ("POST", "/kits/mv/add-skill", {"path": "/home/u/skills/review", "as": "", "agents": ["claude"], "create": False},
+    ("POST", "/kits/mv/add-skill", {"path": "/home/u/skills/review", "as": "", "agents": ["claude"], "create": False,
+                                    "confirm": True},
      [["kits", "add-skill", "--agent=claude", "--", "mv", "/home/u/skills/review"]]),
     ("POST", "/kits/mv/new-skill", {"skill": "notes", "description": "when noting", "agents": [], "create": False},
      [["kits", "new-skill", "--description=when noting", "--", "mv", "notes"]]),
-    ("POST", "/kits/mv/add-plugin", {"plugin": "egm@sandbox-ai", "agent": "claude", "source": "", "create": False},
+    ("POST", "/kits/mv/add-plugin", {"plugin": "egm@sandbox-ai", "agent": "claude", "source": "", "create": False,
+                                     "confirm": True},
      [["kits", "add-plugin", "--agent=claude", "--", "mv", "egm@sandbox-ai"]]),
     ("POST", "/kits/mv/remove-skill", {"skill": "notes", "agents": ["claude"], "confirm": True},
      [["kits", "remove-skill", "--agent=claude", "--", "mv", "notes"]]),
@@ -410,7 +412,8 @@ SESSION_CALLS = [
     ("GET", "/api/hosts", None),
     ("GET", "/api/policy", None),
     ("POST", "/api/hosts", {"name": "ct2", "ssh": "root@192.0.2.20", "port": 22}),
-    ("POST", "/api/hosts/ct1", {"description": "edited", "port": 2200}),
+    ("POST", "/api/hosts/ct1", {"description": "edited", "port": 2200, "confirm": True}),
+    ("GET", "/api/hosts-activity", None),
     ("DELETE", "/api/hosts/ct1", {"confirm": True}),
 ]
 
@@ -434,6 +437,8 @@ def test_the_session_and_hosts_endpoints_in_every_login_state(web, state, method
         assert web.request("GET", "/api/me", None, headers)[0] == 401, "the session is gone"
     elif path == "/api/policy":
         assert json.loads(data)["confirm"] == w.NEEDS_CONFIRM
+    elif path == "/api/hosts-activity":
+        assert set(json.loads(data)) == {"local", "ct1"}, "from what was asked before: nothing is asked for it"
     elif method == "GET":
         assert [h["name"] for h in json.loads(data)] == ["local", "ct1"]
     elif path == "/api/hosts/ct1" and method == "POST":

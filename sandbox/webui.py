@@ -14,8 +14,8 @@ it from elsewhere: --listen 0.0.0.0:8443, or an SSH tunnel, or a reverse proxy o
 
 Every login needs the password and a current TOTP code (a code is accepted once). Failed logins slow down per
 address, per address and user, and per user (that one never keeps the right password and code out). A session lives
-30 minutes without use (the page's background polls are none) and 12 hours at most, in memory only; its cookie is
-HttpOnly, Secure, SameSite=Strict. Every change needs the session's CSRF token and a same-origin request; the Host
+30 minutes without use (the page's background polls are none; typing in a terminal is use) and 12 hours at most, in
+memory only; its cookie is HttpOnly, Secure, SameSite=Strict. Every change needs the session's CSRF token and a same-origin request; the Host
 header must be one of the service's names. Every action is written to the audit log
 (~/.local/state/sandbox-ai/web/audit.jsonl). The browser gets JSON from a fixed set of actions, each run as
 `sandbox-ai ARGS` with its arguments quoted one by one (locally, or over SSH: hosts.py); nothing it sends becomes
@@ -52,6 +52,7 @@ import select
 import signal
 import socket
 import ssl
+import stat
 import struct
 import subprocess
 import sys
@@ -368,9 +369,12 @@ class Sessions:
 # --- what the browser may ask for ---------------------------------------------------------------------------
 
 class Refused(Exception):
-    def __init__(self, status, message):
+    """STATUS and MESSAGE for the browser; CONFIRM: the NEEDS_CONFIRM action the request lacks the confirmation of
+    (the answer names it, so a page whose view was out of date asks for exactly that)."""
+
+    def __init__(self, status, message, confirm=None):
         super().__init__(message)
-        self.status = status
+        self.status, self.confirm = status, confirm
 
 
 def host_name(value):
@@ -380,7 +384,9 @@ def host_name(value):
     return value
 
 
-NET_HOST = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}))*")
+# A host name: labels of letters, digits and "-", and "_" as DNS names have it in practice (_sip._tcp.example.org,
+# SRV-like and service names); never a leading "-" (read as an option).
+NET_HOST = re.compile(r"[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,62})(?:\.[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,62}))*")
 # A host wildcard as `sandbox-ai net allow` takes it: *.DOMAIN.TLD, at least two labels below the star (*.org would
 # open a whole top-level domain). The command refuses public and shared suffixes itself (runtime.wildcard_suffix).
 NET_WILDCARD = re.compile(r"\*\.(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z][A-Za-z0-9-]{0,62}")
@@ -415,7 +421,7 @@ STARTS_HOST_SECONDS = 20  # the same for the starts of every host (GET /api/star
 
 CANARY_RUN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,80}")
 # What `approvals remembered` lists for a project: a host name (or *.wildcard), IP:PORT, [IPv6]:PORT; never "-...".
-REMEMBERED_ENTRY = re.compile(r"(?:\*\.)?[A-Za-z0-9][A-Za-z0-9.-]{0,252}(?::[0-9]{1,5})?|\[[0-9A-Fa-f:.]{2,45}\]:[0-9]{1,5}")
+REMEMBERED_ENTRY = re.compile(r"(?:\*\.)?[A-Za-z0-9_][A-Za-z0-9_.-]{0,252}(?::[0-9]{1,5})?|\[[0-9A-Fa-f:.]{2,45}\]:[0-9]{1,5}")
 VPN_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 VPN_LOCATION = re.compile(r"[a-z]{2}(?:-[a-z0-9-]{1,20})?")
 VPN_LOGIN_SERVER = re.compile(r"https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?/?")
@@ -510,6 +516,13 @@ NEEDS_CONFIRM = {
     "llm-remove": "removing an LLM server stops the starts that use it from starting",
     "kit-delete": "deleting a kit removes its folder",
     "kit-remove": "removing a skill or plugin from a kit takes it from every later start with that kit",
+    "kit-add": "a skill, plugin or marketplace added to a kit is given to every later start with that kit",
+    "mcp-attach": "an attached MCP server is reached by that start from its next start on (kept for its later "
+                  "starts)",
+    "mcp-restart": "restarting a running start ends what runs in it now, so that it reaches the MCP server (the agent "
+                   "continues its conversation)",
+    "host-edit": "changing a host's SSH target, port, key, command or sudo setting changes where and how this "
+                 "service's commands run",
     "secret-delete": "deleting a secret takes it from every start, VPN profile and Git login that names it",
     "secret-replace": "a secret of that name exists: its value is replaced",
 }
@@ -517,6 +530,9 @@ NEEDS_CONFIRM = {
 MODE_ORDER = ("lax", "low", "medium", "high", "paranoid")
 TELEMETRY_ORDER = ("on", "off", "strict")
 DEFAULT_MODE, DEFAULT_TELEMETRY = "medium", "off"
+# The keys of defaults.json (agent_sandbox.DEFAULTS_KEYS but "version"; tests/test_web.py checks they agree): any
+# other key is refused before anything reaches a host.
+DEFAULT_KEYS = ("canaries", "keep_days", "mode", "preset_dirs", "subnet", "subnet6", "telemetry")
 
 
 def confirmed(body, action, detail=None):
@@ -526,7 +542,7 @@ def confirmed(body, action, detail=None):
         raise KeyError(action)  # a route asking for an action the table does not have: a bug, never a pass
     if body.get("confirm") is not True:
         why = f"{detail}: {NEEDS_CONFIRM[action]}" if detail else NEEDS_CONFIRM[action]
-        raise Refused(400, f"{why}: send {{\"confirm\": true}}")
+        raise Refused(400, f"{why}: send {{\"confirm\": true}}", confirm=action)
 
 
 def one_line(value, what, limit=1024):
@@ -545,8 +561,10 @@ def strings(value, what, limit=64):
 class FanOut:
     """One question to many hosts at once (their open questions, their starts), with at most one request in flight
     per host: a host that has not answered yet (an unreachable one takes its whole timeout) is not asked again on
-    top of it, and its last result (if it is at most KEEP seconds old) stands in meanwhile, with its age. ASK(name)
-    gives a host's result or raises (Refused: the message for the page)."""
+    top of it. A second question meanwhile (the page drawn and its poll at once, two tabs) gets that host's last
+    result (if it is at most KEEP seconds old) with its age, or else waits for the request in flight, up to its
+    limit: never an error only because another one asked first. ASK(name) gives a host's result or raises
+    (Refused: the message for the page)."""
 
     KEEP = 60
 
@@ -565,37 +583,60 @@ class FanOut:
             found = {"error": printable(f"{type(exc).__name__}: {exc}")[:600]}
         found.update(at=self.clock(), seen=self.wall())
         with self.lock:
-            self.last[name] = found
+            # A host forgotten meanwhile (its entry changed: forget()) keeps nothing of what the old one answered.
             if self.flight.get(name, (None,))[0] is future:
                 del self.flight[name]
+                self.last[name] = found
         future.set_result(found)
+
+    def forget(self, name):
+        """What is kept of NAME (its last result, the request in flight): its entry changed or went."""
+        with self.lock:
+            self.last.pop(name, None)
+            self.flight.pop(name, None)
+
+    def cached(self, name):
+        """NAME's last result with its age ({"result" | "error", "age", "seen", "asking"}), or None: nothing asked."""
+        with self.lock:
+            last, flight = self.last.get(name), self.flight.get(name)
+            if last is None:
+                return None
+            return {**last, "age": max(0.0, self.clock() - last["at"]), "asking": flight is not None}
+
+    def usable(self, last, now):
+        return last is not None and "result" in last and now - last["at"] <= self.KEEP
 
     def gather(self, names, seconds):
         """{host: {"result" | "error", "age": seconds since it was fetched, "seen": wall time, "asking": bool}}:
-        each of NAMES asked unless a request to it still runs; waits up to SECONDS (+5) for the ones asked now."""
-        started = []
+        each of NAMES asked unless a request to it still runs; waits up to SECONDS (+5) for the ones asked now, and
+        for one already in flight without a recent result up to what is left of its own SECONDS (+5)."""
+        waits = []  # (future, monotonic deadline)
         with self.lock:
+            now = self.clock()
             for name in names:
                 if name not in self.flight:
                     future = concurrent.futures.Future()
-                    self.flight[name] = (future, self.clock())
-                    started.append(future)
+                    self.flight[name] = (future, now)
+                    waits.append((future, now + seconds + 5))
                     threading.Thread(target=self.run, args=(name, future), daemon=True).start()
-        if started:
-            concurrent.futures.wait(started, timeout=seconds + 5)
+                elif not self.usable(self.last.get(name), now):
+                    future, since = self.flight[name]
+                    waits.append((future, since + seconds + 5))
+        for future, deadline in waits:
+            left = deadline - self.clock()
+            if left > 0:
+                concurrent.futures.wait([future], timeout=left)
         now, found = self.clock(), {}
         with self.lock:
             for name in names:
                 flight, last = self.flight.get(name), self.last.get(name)
                 if flight is None and last is not None:
                     found[name] = {**last, "age": max(0.0, now - last["at"]), "asking": False}
-                elif last is not None and "result" in last and now - last["at"] <= self.KEEP:
+                elif self.usable(last, now):
                     found[name] = {**last, "age": max(0.0, now - last["at"]), "asking": True}
                 else:
-                    asked_now = flight is not None and flight[0] in started
-                    found[name] = {"error": f"no answer within {seconds} seconds" if asked_now or flight is None
-                                   else f"no answer yet: still asking it (for {int(now - flight[1])} seconds)",
-                                   "age": 0.0, "asking": True, "seen": None}
+                    found[name] = {"error": f"no answer within {seconds} seconds", "age": 0.0, "asking": True,
+                                   "seen": None}
         return found
 
 
@@ -607,6 +648,45 @@ def host_names():
         return [hosts.LOCAL, *sorted(hosts.load())], {}
     except (OSError, ValueError) as exc:
         return [hosts.LOCAL], {"hosts.json": printable(exc)[:600]}
+
+
+def hosts_unreadable(exc):
+    return Refused(500, f"the list of hosts (hosts.json) cannot be read: {printable(exc)[:600]}")
+
+
+def hosts_file():
+    """{name: entry} of hosts.json; a damaged one is Refused (500) with why, never a dropped connection."""
+    try:
+        return module("hosts").load()
+    except (OSError, ValueError) as exc:
+        raise hosts_unreadable(exc) from None
+
+
+@contextlib.contextmanager
+def hosts_locked():
+    """hosts.json read, changed and written under its lock (hosts.hosts_file_lock: an flock on hosts.json.lock beside
+    it, which `sandbox-ai hosts` and the app take as well), so that two changes at once do not lose one of them;
+    one that waits too long for another writer is refused (409)."""
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(module("hosts").hosts_file_lock())
+        except ValueError as exc:
+            raise Refused(409, printable(exc)[:600]) from None
+        yield
+
+
+def identity_file(value):
+    """A host's key as the web takes it, beyond hosts.check (an absolute path below your HOME, links resolved): a
+    regular file that is there, never a link, a folder or a device (add and test make it private)."""
+    if value in (None, ""):
+        return value
+    try:
+        mode = os.lstat(os.path.expanduser(value)).st_mode
+    except (OSError, ValueError, TypeError):
+        raise Refused(400, f"no key file {printable(value)[:300]}") from None
+    if not stat.S_ISREG(mode):
+        raise Refused(400, f"{printable(value)[:300]} is not a regular file: give the key file itself")
+    return value
 
 
 class Api:
@@ -630,8 +710,9 @@ class Api:
             ("GET", r"/api/hosts", self.hosts, ()),
             ("POST", r"/api/hosts", self.add_host, ()),
             ("GET", r"/api/hosts-status", self.host_statuses, ()),
+            ("GET", r"/api/hosts-activity", self.host_activity, ()),
             ("POST", r"/api/hosts-status", lambda params, body: self.host_statuses({"refresh": "1"}, body), ()),
-            ("POST", H, self.edit_host, ()),
+            ("POST", H, self.edit_host, ("host-edit",)),
             ("DELETE", H, self.remove_host, ("host-remove",)),
             ("POST", H + r"/test", self.test_host, ()),
             ("POST", H + r"/update", self.update_host, ()),
@@ -642,9 +723,9 @@ class Api:
             ("GET", H + r"/starts/(?P<name>[^/]+)/history", self.history, ()),
             ("GET", H + r"/starts/(?P<name>[^/]+)/review", self.review_home, ()),
             ("GET", H + r"/gc", self.gc_preview, ()),
-            ("GET", H + r"/gc/(?P<days>[0-9]{1,5})", self.gc_preview, ()),
+            ("GET", H + r"/gc/(?P<days>[^/]+)", self.gc_preview, ()),
             ("POST", H + r"/gc", self.gc, ("gc",)),
-            ("POST", H + r"/mcp/(?P<name>[^/]+)/attach", self.mcp_attach, ()),
+            ("POST", H + r"/mcp/(?P<name>[^/]+)/attach", self.mcp_attach, ("mcp-attach", "mcp-restart")),
             ("GET", H + r"/approvals", self.approvals, ()),
             ("GET", H + r"/approvals-history", self.approvals_history, ()),
             ("GET", H + r"/approvals-history/(?P<run>[^/]+)", self.approvals_history, ()),
@@ -678,7 +759,7 @@ class Api:
             ("DELETE", H + r"/vpn/(?P<name>[^/]+)", self.vpn_remove, ("vpn-remove",)),
             ("GET", H + r"/kits", self.kits, ()),
             ("POST", H + r"/kits", self.kit_new, ()),
-            ("POST", H + r"/kits/(?P<name>[^/]+)/(?P<action>[a-z-]+)", self.kit_change, ("kit-remove",)),
+            ("POST", H + r"/kits/(?P<name>[^/]+)/(?P<action>[a-z-]+)", self.kit_change, ("kit-remove", "kit-add")),
             ("DELETE", H + r"/kits/(?P<name>[^/]+)", self.kit_delete, ("kit-delete",)),
             ("GET", H + r"/canaries", self.canaries, ()),
             ("GET", H + r"/canaries/(?P<run>[^/]+)", self.canaries, ()),
@@ -705,7 +786,11 @@ class Api:
                 "defaults": {"mode": DEFAULT_MODE, "telemetry": DEFAULT_TELEMETRY}}
 
     def run(self, host, args, timeout=120, input=None):
-        status, out, err = self.runner(host_name(host), list(args), timeout=timeout, input=input)
+        try:
+            status, out, err = self.runner(host_name(host), list(args), timeout=timeout, input=input)
+        except ValueError as exc:  # hosts.run: no such host, or hosts.json cannot be read
+            hosts_file()
+            raise Refused(404 if "no host" in str(exc) else 400, printable(exc)[:600]) from None
         return status, out, err
 
     def json_of(self, host, args, timeout=120):
@@ -725,14 +810,19 @@ class Api:
 
     # hosts (the list lives on the machine of the service)
     def hosts(self, params, body):
-        return module("hosts").entries()
+        try:
+            return module("hosts").entries()
+        except (OSError, ValueError) as exc:
+            raise hosts_unreadable(exc) from None
 
     def host_statuses(self, params, body):
         """{name: {"version", "kind", "available", "update", "error", ...} or null}: each host's sandbox-ai and
         whether an update is there, as hosts list finds it (kept 10 minutes; ?refresh=1 asks again)."""
-        hosts = module("hosts")
-        names = sorted(hosts.load())
-        found = self.statuses(names, refresh=params.get("refresh") == "1") if names else {}
+        names = sorted(hosts_file())
+        try:
+            found = self.statuses(names, refresh=params.get("refresh") == "1") if names else {}
+        except (OSError, ValueError) as exc:
+            raise hosts_unreadable(exc) from None
         return {name: ({key: value for key, value in info.items() if key not in ("ssh", "port")} if info else None)
                 for name, info in found.items()}
 
@@ -741,14 +831,17 @@ class Api:
         name = body.get("name")
         entry = {key: body[key] for key in ("ssh", "port", "identity", "description", "command", "update_sudo")
                  if body.get(key) not in (None, "")}
-        try:
-            checked = hosts.check(name, entry)
-            current = hosts.load()
-            if name in current:
-                raise ValueError(f"host {name} exists")
+        with hosts_locked():
+            current = hosts_file()
+            try:
+                checked = hosts.check(name, entry)
+                if name in current:
+                    raise ValueError(f"host {name} exists")
+            except ValueError as exc:
+                raise Refused(400, printable(exc)) from None
+            identity_file(checked.get("identity"))
             hosts.save({**current, name: checked})
-        except ValueError as exc:
-            raise Refused(400, printable(exc)) from None
+        self.forget_host(name)
         # A key file others can read (ssh refuses it): made private now, and then whether the host answers.
         fixed, warnings = hosts.protect_keys(checked)
         result = {"name": name, **checked, "fixed": fixed, "warnings": warnings}
@@ -760,48 +853,64 @@ class Api:
 
     def remove_host(self, params, body):
         hosts = module("hosts")
-        try:
-            current = hosts.load()
-        except ValueError as exc:
-            raise Refused(400, printable(exc)) from None
-        if params["host"] not in current:
-            raise Refused(404, "no such host")
-        confirmed(body, "host-remove", f"{params['host']} ({current[params['host']]['ssh']})")
-        removed = current.pop(params["host"])
-        hosts.save(current)
+        with hosts_locked():
+            current = hosts_file()
+            if params["host"] not in current:
+                raise Refused(404, "no such host")
+            confirmed(body, "host-remove", f"{params['host']} ({current[params['host']]['ssh']})")
+            removed = current.pop(params["host"])
+            hosts.save(current)
         hosts.forget_status(params["host"])
+        self.forget_host(params["host"])
         with contextlib.suppress(Exception):  # its shared SSH connection would serve commands for a minute more
             getattr(hosts, "stop_master", lambda entry: None)(removed)
         return {"removed": params["host"]}
 
+    def forget_host(self, name):
+        """What the fan-outs keep of NAME (its questions, its starts): it was added, changed or removed."""
+        self.approvals_fanout.forget(name)
+        self.starts_fanout.forget(name)
+
     def edit_host(self, params, body):
         """A host's settings changed (hosts.json on the machine of the service, as `sandbox-ai hosts add` writes
         it): what BODY gives replaces that setting ("" or null: left out, for identity, command and the
-        description), checked as hosts.check does; the name stays."""
+        description), checked as hosts.check does; the name stays. A change of where or how the commands run (ssh,
+        port, identity, command, update_sudo) needs {"confirm": true}; the key is a regular file below the HOME of
+        the service's user. Read, changed and written under the lock of hosts.json."""
         hosts = module("hosts")
         name = params["host"]
-        try:
-            current = hosts.load()
+        fields = ("ssh", "port", "identity", "description", "command", "update_sudo")
+        if set(body) - {*fields, "confirm"}:
+            raise Refused(400, "a host has ssh, port, identity, description, command and update_sudo")
+        with hosts_locked():
+            current = hosts_file()
             if name not in current:
                 raise Refused(404, "no such host")
             before = current[name]
             changed = dict(before)
-            for key in ("ssh", "port", "identity", "description", "command", "update_sudo"):
+            for key in fields:
                 if key not in body:
                     continue
                 if body[key] in (None, "") and key in ("identity", "command", "description"):
                     changed.pop(key, None)
                 else:
                     changed[key] = body[key]
-            if set(body) - {"ssh", "port", "identity", "description", "command", "update_sudo"}:
-                raise ValueError("a host has ssh, port, identity, description, command and update_sudo")
-            checked = hosts.check(name, changed)
+            try:
+                checked = hosts.check(name, changed)
+            except ValueError as exc:
+                raise Refused(400, printable(exc)) from None
+            if checked.get("identity") != before.get("identity"):
+                identity_file(checked.get("identity"))
+            moved = [key for key in ("ssh", "port", "identity", "command", "update_sudo")
+                     if before.get(key) != checked.get(key)]
+            if moved:
+                confirmed(body, "host-edit", f"{name}: " + ", ".join(
+                    f"{key} {json.dumps(before.get(key))} -> {json.dumps(checked.get(key))}" for key in moved))
             current[name] = checked
             hosts.save(current)
-        except ValueError as exc:
-            raise Refused(400, printable(exc)) from None
-        if any(before.get(key) != checked.get(key) for key in ("ssh", "port", "identity", "command")):
+        if moved:
             hosts.forget_status(name)
+            self.forget_host(name)
             with contextlib.suppress(Exception):  # its shared connection was made for what the entry said before
                 getattr(hosts, "stop_master", lambda entry: None)(before)
         fixed, warnings = hosts.protect_keys(checked)
@@ -815,7 +924,7 @@ class Api:
         local = name == hosts.LOCAL
         result = {"name": name, "ssh": None if local else False, "version": None, "doctor": None, "error": None,
                   "fixed": [], "warnings": []}
-        entry = None if local else hosts.load().get(name)
+        entry = None if local else hosts_file().get(name)
         if entry:
             result["fixed"], result["warnings"] = hosts.protect_keys(entry)
         status, out, err = self.run(name, ["--version"], 30)
@@ -851,6 +960,8 @@ class Api:
         try:
             return self.updater(name, version, sudo)
         except ValueError as exc:
+            if name != hosts.LOCAL:
+                hosts_file()  # a damaged hosts.json: that, as a 500 with why
             raise Refused(404 if "no host" in str(exc) else 400, printable(exc)) from None
 
     # starts and sessions
@@ -866,10 +977,12 @@ class Api:
     def all_starts(self, params, body):
         """The starts of every host, asked at once (at most one request in flight per host; a host still asking
         is given with its last list and how old that is): {"starts": [{"host", ...}], "errors": {host: why},
-        "seen": {host: when its list was read, Unix time}, "asking": [hosts still being asked]}."""
+        "seen": {host: when its list was read, Unix time}, "age": {host: seconds since then, by the service's
+        clock: the page counts on from when it got the answer, never comparing its clock with the service's},
+        "asking": [hosts still being asked]}."""
         names, errors = host_names()
         found = self.starts_fanout.gather(names, STARTS_HOST_SECONDS)
-        starts, seen, asking = [], {}, []
+        starts, seen, age, asking = [], {}, {}, []
         for name in names:
             info = found[name]
             if info.get("asking"):
@@ -880,7 +993,26 @@ class Api:
                 starts += [{**entry, "host": name} for entry in info["result"]]
             if info.get("seen") is not None:
                 seen[name] = round(info["seen"], 3)
-        return {"starts": starts, "errors": errors, "seen": seen, "asking": asking}
+                age[name] = round(info["age"], 3)
+        return {"starts": starts, "errors": errors, "seen": seen, "age": age, "asking": asking}
+
+    def host_activity(self, params, body):
+        """{host: {"starts", "running", "questions", "age"}} from what the fan-outs keep (GET /api/starts and the
+        page's poll of GET /api/approvals): nothing is asked for it. null where nothing is known yet (or the last try
+        failed); age: seconds since the older of the two was read."""
+        names, _ = host_names()
+        found = {}
+        for name in names:
+            starts, questions = self.starts_fanout.cached(name), self.approvals_fanout.cached(name)
+            listed = starts.get("result") if starts else None
+            asked = questions.get("result") if questions else None
+            ages = [info["age"] for info in (starts, questions) if info and ("result" in info)]
+            found[name] = {"starts": len(listed) if isinstance(listed, list) else None,
+                           "running": sum(1 for entry in listed if entry.get("state") == "running")
+                           if isinstance(listed, list) else None,
+                           "questions": len(asked) if isinstance(asked, list) else None,
+                           "age": round(max(ages), 3) if ages else None}
+        return found
 
     def start_action(self, params, body):
         """pause, resume, stop or delete a start; stop (it ends what runs, and a HOME that is not kept with it) and
@@ -909,20 +1041,47 @@ class Api:
     def gc_days(value):
         if value is None:
             return []
-        if isinstance(value, str) and value.isdigit():
+        if isinstance(value, str) and value.isascii() and value.isdigit() and len(value) <= 5:
             value = int(value)
         if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 36500:
-            raise Refused(400, "older_than is a number of days (0-36500), or null for the host's keep_days")
+            raise Refused(400, "older_than is a whole number of days (0-36500), or null for the host's keep_days")
         return [f"--older-than={value}"]
+
+    @staticmethod
+    def gc_plan(found):
+        """What a gc (--dry-run) result removes, as a set: ("removed", id), ("leftovers", name), ("histories", name)."""
+        found = found if isinstance(found, dict) else {}
+        plan = set()
+        for key in ("removed", "leftovers", "histories"):
+            for item in found.get(key) or []:
+                ident = (item.get("id") or item.get("name")) if isinstance(item, dict) else item
+                plan.add((key, str(ident)))
+        return plan
 
     def gc_preview(self, params, body):
         """sandbox-ai gc --dry-run --json [--older-than DAYS]: what a clean-up would remove (nothing is)."""
         return self.json_of(params["host"], ["gc", "--dry-run", "--json", *self.gc_days(params.get("days"))], 120)
 
     def gc(self, params, body):
-        """sandbox-ai gc --json [--older-than DAYS]: the clean-up itself (asked first: the page shows the preview)."""
+        """sandbox-ai gc --json [--older-than DAYS]: the clean-up itself (asked first: the page shows the preview).
+        With "expected" (what the preview showed: {"removed": [ids], "leftovers": [names], "histories": [names]})
+        a dry run comes first: when it would now remove anything the preview did not show, nothing is removed
+        (409), and the page shows the new preview."""
         days = self.gc_days(body.get("older_than"))
         confirmed(body, "gc")
+        expected = body.get("expected")
+        if expected is not None:
+            if not (isinstance(expected, dict) and set(expected) <= {"removed", "leftovers", "histories"}
+                    and all(isinstance(v, list) and len(v) <= 10000 and all(isinstance(i, str) for i in v)
+                            for v in expected.values())):
+                raise Refused(400, "expected is {removed: [ids], leftovers: [names], histories: [names]}")
+            shown = {(key, item) for key, items in expected.items() for item in items}
+            now = self.gc_plan(self.json_of(params["host"], ["gc", "--dry-run", "--json", *days], 120))
+            more = sorted(now - shown)
+            if more:
+                raise Refused(409, "the clean-up would now remove more than the preview showed (" + ", ".join(
+                    f"{key} {item}" for key, item in more[:10]) + (" ..." if len(more) > 10 else "")
+                              + "): nothing was removed; preview it again")
         return self.json_of(params["host"], ["gc", "--json", *days], 300)
 
     def review_home(self, params, body):
@@ -941,6 +1100,7 @@ class Api:
         start, restart = start_name(body.get("start")), body.get("restart", False)
         if not isinstance(restart, bool):
             raise Refused(400, "restart is true or false")
+        confirmed(body, "mcp-restart" if restart else "mcp-attach", f"{name} to {start}")
         return self.json_of(params["host"], ["mcp", "attach", name, start, "--json", *(["--restart"] if restart else [])],
                             timeout=300)
 
@@ -1228,6 +1388,8 @@ class Api:
             raise Refused(400, "create is true or false")
         if action.startswith("remove-"):
             confirmed(body, "kit-remove", f"{values[0]} from {name}")
+        elif action in ("add-skill", "add-plugin", "add-marketplace"):
+            confirmed(body, "kit-add", f"{' '.join(values[:1])} to {name}")
         first = ""
         if body.get("create") is True:
             status, out, err = self.run(params["host"], ["kits", "list", "--json"], 60)
@@ -1347,6 +1509,9 @@ class Api:
             if model.startswith("-"):
                 raise Refused(400, "a model does not start with '-'")
             args += ["--model", model]
+        key = body.get("api_key_secret")
+        if key not in (None, ""):  # the NAME of the secret (sandbox-ai secrets there) that holds the key, never a key
+            args.append(f"--api-key-secret={secret_name(key)}")
         return self.done(params["host"], args, 60)
 
     def llm_models(self, params, body):
@@ -1374,17 +1539,23 @@ class Api:
         return self.json_of(params["host"], ["defaults", "show", "--json"], 30)
 
     def set_default(self, params, body):
-        """defaults set KEY VALUE (as JSON) or unset KEY (null). Any step down in protection from what `defaults
-        show` says on that host now (read first, unless the request is confirmed) needs {"confirm": true}: the mode
-        (MODE_ORDER), the agents' telemetry (TELEMETRY_ORDER), fewer canary categories (false, [] or ["none"]: no
-        canary files). Unset is a change to sandbox-ai's own default, compared the same way."""
+        """defaults set KEY VALUE (as JSON) or unset KEY (null), for the keys the launcher knows (DEFAULT_KEYS; any
+        other is refused). Any step down in protection from what `defaults show` says on that host now (read first,
+        unless the request is confirmed) needs {"confirm": true}: the mode (MODE_ORDER), the agents' telemetry
+        (TELEMETRY_ORDER), fewer canary categories (false, [] or ["none"]: no canary files; the categories are the
+        host's own), a keep_days lower than now or one where there was none (kept starts are removed sooner), more
+        preset directories (they change what a start reads), another subnet. Unset is a change to sandbox-ai's own
+        default, compared the same way."""
         key, value = body.get("key"), body.get("value")
-        if not (isinstance(key, str) and re.fullmatch(r"[a-z_]{1,32}", key)):
-            raise Refused(400, "no such key")
-        if key in ("mode", "telemetry", "canaries") and body.get("confirm") is not True:
+        if key not in DEFAULT_KEYS:
+            raise Refused(400, f"no such key: the keys are {', '.join(DEFAULT_KEYS)}")
+        if key == "canaries" and value is not None and not (
+                value is False or isinstance(value, str)
+                or isinstance(value, list) and all(isinstance(item, str) for item in value)):
+            raise Refused(400, "canaries is false, a list of categories, all or none")
+        if body.get("confirm") is not True:
             weakest = {"mode": MODE_ORDER[0], "telemetry": TELEMETRY_ORDER[0]}.get(key)
-            if (weakest is not None and value == weakest or key == "canaries" and value is not None
-                    and not canary_set(value, ["credentials", "home", "workspace"])):
+            if weakest is not None and value == weakest or key == "canaries" and no_canaries(value):
                 confirmed(body, "defaults-lower", f"{key} {json.dumps(value)}")  # the weakest there is: not read first
             lowered = self.lowered_default(params["host"], key, value)
             if lowered:
@@ -1402,8 +1573,12 @@ class Api:
         shown = shown if isinstance(shown, dict) else {}
         values = shown.get("values") if isinstance(shown.get("values"), dict) else {}
         if key == "canaries":
-            categories = shown.get("canary_categories") or ["credentials", "home", "workspace"]
-            default = shown.get("canary_default") or ["credentials", "home"]
+            canary = module("canary")
+            listed = lambda v: isinstance(v, list) and all(isinstance(item, str) for item in v)  # noqa: E731
+            categories = shown["canary_categories"] if listed(shown.get("canary_categories")) and \
+                shown["canary_categories"] else list(canary.CATEGORIES)
+            default = shown["canary_default"] if listed(shown.get("canary_default")) else \
+                list(canary.DEFAULT_CATEGORIES)
             try:
                 before = canary_set(values.get("canaries", default), categories)
             except Refused:
@@ -1414,6 +1589,31 @@ class Api:
                 return None
             return ("canaries: no canary files at all" if not after else
                     f"canaries: no {' and '.join(fewer)} canary files any more")
+        before = values.get(key)
+        if key == "keep_days":
+            if value is None:
+                return None  # no keep_days: kept starts are never removed for their age
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 36500:
+                raise Refused(400, "keep_days is a whole number of days (1-36500)")
+            if isinstance(before, bool) or not isinstance(before, int):
+                return f"keep_days {value}: kept starts unused for {value} days are removed (there is no keep_days now)"
+            if value < before:
+                return f"keep_days {value} instead of {before}: kept starts are removed sooner"
+            return None
+        if key == "preset_dirs":
+            if value is None:
+                return None  # fewer places presets are read from
+            if not (isinstance(value, list) and all(isinstance(item, str) for item in value)):
+                raise Refused(400, "preset_dirs is a list of directories")
+            kept = set(before) if isinstance(before, list) else set()
+            added = [item for item in value if item not in kept]
+            if added:
+                return f"preset_dirs: later starts read presets from {', '.join(added)} too"
+            return None
+        if key in ("subnet", "subnet6"):
+            if value == before:
+                return None
+            return f"{key}: the network of every later start changes ({json.dumps(before)} -> {json.dumps(value)})"
         order = MODE_ORDER if key == "mode" else TELEMETRY_ORDER
         default = DEFAULT_MODE if key == "mode" else DEFAULT_TELEMETRY
         before, after = values.get(key, default), default if value is None else value
@@ -1424,6 +1624,17 @@ class Api:
         if order.index(after) < order.index(before):
             return f"{key} {after} instead of {before}"
         return None
+
+
+def no_canaries(value):
+    """Whether VALUE (as `defaults set canaries` takes it) names no canary category at all, whatever the host's
+    categories are: false, [], "none", ["none"]."""
+    if value is False:
+        return True
+    items = value.split(",") if isinstance(value, str) else value if isinstance(value, list) else None
+    if items is None or not all(isinstance(item, str) for item in items):
+        return False
+    return {item.strip() for item in items if item.strip()} <= {"none"}
 
 
 def canary_set(value, categories):
@@ -1574,10 +1785,11 @@ class WebSocket:
             self.closed = True
 
 
-def bridge(ws, argv, cols=100, rows=30, alive=None, every=2.0, clock=time.monotonic):
+def bridge(ws, argv, cols=100, rows=30, alive=None, every=2.0, clock=time.monotonic, used=None):
     """ARGV in a terminal of its own, its output to WS (binary frames), WS's binary frames to its input, and
     {"resize": [cols, rows]} as text frames; ends when either side does. The command's process group gets SIGHUP
-    at the end: an attach then simply detaches, the start runs on."""
+    at the end: an attach then simply detaches, the start runs on. USED() is called when the user types (at most
+    once a second): typing is use of the session, the output is not."""
     pid, master = pty.fork()
     if pid == 0:  # the child: the command, in the new terminal
         try:
@@ -1585,7 +1797,7 @@ def bridge(ws, argv, cols=100, rows=30, alive=None, every=2.0, clock=time.monoto
         finally:
             os._exit(127)
     set_size(master, cols, rows)
-    checked, pinged = [clock()], [clock()]
+    checked, pinged, typed = [clock()], [clock()], [None]
 
     def gone():
         """True once ALIVE says the session ended (logout, its idle or 12-hour limit, its user removed or reset):
@@ -1634,6 +1846,9 @@ def bridge(ws, argv, cols=100, rows=30, alive=None, every=2.0, clock=time.monoto
                 break
             if kind == 2:
                 os.write(master, payload)
+                if used is not None and payload and (typed[0] is None or clock() - typed[0] >= 1):
+                    typed[0] = clock()
+                    used()
             elif kind == 1:
                 with contextlib.suppress(ValueError, TypeError, KeyError):
                     message = json.loads(payload)
@@ -1753,7 +1968,12 @@ class Service:
         except Refused as exc:
             if method != "GET" and session is not None:
                 audit("refused", user=session["user"], address=address, method=method, path=path, why=str(exc))
-            return self.error(exc.status, str(exc))
+            return self.error(exc.status, str(exc), confirm=exc.confirm)
+        except (OSError, ValueError) as exc:  # what no route turned into a Refused: an answer all the same
+            why = printable(f"{type(exc).__name__}: {exc}")[:600]
+            with contextlib.suppress(OSError):
+                audit("failed", user=session and session["user"], address=address, method=method, path=path, why=why)
+            return self.error(500, f"the service could not do that: {why}")
 
     def login(self, data, address):
         user, password, code = data.get("user"), data.get("password"), data.get("code")
@@ -1869,8 +2089,9 @@ class Service:
         return status, [("Content-Type", "application/json"), ("Cache-Control", "no-store"), *extra], \
             json.dumps(data).encode()
 
-    def error(self, status, message, extra=()):
-        return self.json(status, {"error": message}, extra)
+    def error(self, status, message, extra=(), confirm=None):
+        """{"error": MESSAGE}, and "confirm": the NEEDS_CONFIRM action a refusal names (the page asks for it)."""
+        return self.json(status, {"error": message, **({"confirm": confirm} if confirm else {})}, extra)
 
 
 # Fields whose values the audit log leaves out, by their exact name (lower case, "-" as "_"), and names ending in
@@ -2053,7 +2274,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 except ValueError:  # users.json became unreadable: no session holds any more
                     return False
                 return sessions.current(token, users, touch=False) is session
-            bridge(WebSocket(Stream(self.rfile, self.wfile), hang_up=self.hang_up), argv, *size, alive=alive)
+            bridge(WebSocket(Stream(self.rfile, self.wfile), hang_up=self.hang_up), argv, *size, alive=alive,
+                   used=lambda: sessions.get(token, touch=True))
         finally:
             session["terminals"] -= 1
 
