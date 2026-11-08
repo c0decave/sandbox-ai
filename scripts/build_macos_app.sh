@@ -131,6 +131,8 @@ mv -- "${tops[0]}" "$resources/sandbox-ai"
   || die "$bundle lacks the app (projects/sandbox-ai-app): build dist/ from a checkout that has it"
 version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' "$resources/sandbox-ai/sandbox/agent_sandbox.py")
 [[ -n $version ]] || die "no version in the bundle"
+# Not packaging/: build inputs only (pins, requirements): on macOS's case-insensitive file system packaging/ and the marker PACKAGING are one name.
+rm -rf -- "$resources/sandbox-ai/packaging"
 printf 'macos-app\n' > "$resources/sandbox-ai/PACKAGING"
 find "$resources/sandbox-ai" -name '__pycache__' -type d -prune -exec rm -rf {} +
 # Compiled here: nothing is written into the app later (unchecked-hash: valid wherever the app is copied to).

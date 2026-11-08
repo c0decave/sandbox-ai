@@ -107,6 +107,27 @@ def test_the_pyz_is_reproducible(tmp_path, monkeypatch):
         assert {info.date_time for info in archive.infolist()} == {(2001, 9, 9, 1, 46, 40)}
 
 
+def test_no_two_names_differ_by_case_alone(tmp_path):
+    """macOS's file system does not tell PACKAGING from packaging/: a tree where both meet stopped the macOS app's
+    build ("PACKAGING: Is a directory") and would stop the .pyz there. The package trees leave packaging/ out."""
+    make_dist = load("make_dist")
+    pyz = make_pyz.build_pyz(make_dist.bundle(tmp_path, VERSION), tmp_path / "sandbox-ai.pyz", epoch=0)
+    with zipfile.ZipFile(pyz) as archive:
+        names = [n for n in archive.namelist() if n.startswith("tree/")]
+    paths = set()
+    for name in names:  # every path of the tree, directories included
+        parts = name.split("/")
+        paths |= {"/".join(parts[:i]) for i in range(2, len(parts) + 1)}
+    folded = {}
+    for path in paths:
+        folded.setdefault(path.lower(), set()).add(path)
+    assert not [group for group in folded.values() if len(group) > 1]
+    assert "tree/PACKAGING" in names and not any(n.startswith("tree/packaging/") for n in names)
+    for script in ("build_appimage.sh", "build_macos_app.sh"):
+        text = (ROOT / "scripts" / script).read_text()
+        assert text.index('/packaging"') < text.index('/PACKAGING"')  # removed before the marker is written
+
+
 def test_the_real_bundle_runs_as_a_pyz(tmp_path):
     """make_dist.py's bundle of this checkout, as sandbox-ai.pyz: --version, and version --verbose names it."""
     make_dist = load("make_dist")

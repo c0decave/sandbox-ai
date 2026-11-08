@@ -142,6 +142,8 @@ mv -- "${tops[0]}" "$tree/sandbox-ai"
   || die "$bundle lacks the app (projects/sandbox-ai-app): build dist/ from a checkout that has it"
 version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' "$tree/sandbox-ai/sandbox/agent_sandbox.py")
 [[ -n $version ]] || die "no version in the bundle"
+# Not packaging/: build inputs only (pins, requirements): on macOS's case-insensitive file system packaging/ and the marker PACKAGING are one name.
+rm -rf -- "$tree/sandbox-ai/packaging"
 printf 'appimage\n' > "$tree/sandbox-ai/PACKAGING"
 find "$tree/sandbox-ai" -name '__pycache__' -type d -prune -exec rm -rf {} +
 

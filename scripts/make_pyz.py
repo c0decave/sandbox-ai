@@ -137,6 +137,8 @@ def write_pyz(out, files, manifest_bytes, epoch, boot=None):
 
 def build_pyz(bundle, out, epoch=None):
     files, mtime = bundle_tree(bundle)
+    # Not packaging/: build inputs only (pins, requirements): on macOS's case-insensitive file system packaging/ and the marker PACKAGING are one name.
+    files = {name: entry for name, entry in files.items() if not name.startswith("packaging/")}
     files["PACKAGING"] = (b"pyz\n", 0o644)  # sandbox-ai update: "download the new .pyz", not install.sh
     if epoch is None:
         epoch = int(os.environ["SOURCE_DATE_EPOCH"]) if os.environ.get("SOURCE_DATE_EPOCH") else mtime
