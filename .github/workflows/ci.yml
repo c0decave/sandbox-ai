@@ -41,7 +41,7 @@ jobs:
             last=$(grep -E '^tests/.*::' pytest.txt | tail -n 3 | cut -c1-200)
             # Where a test that ran 5 minutes waited, or where the process crashed (faulthandler, every thread).
             # Frames of this repository only (tests, scripts, sandbox), never the idle MCP servers' accept loops.
-            dump=$(grep -E -A400 'Timeout \(|^Fatal Python error' pytest.txt | grep -E 'Timeout|Fatal|no Python frame|File "[^"]*/(tests|scripts|sandbox)/' | grep -v mcp_serve | head -40 | cut -c1-200)
+            dump=$(grep -E -A20000 'Timeout \(|^Fatal Python error' pytest.txt | grep -E 'Timeout|Fatal|no Python frame|File "[^"]*/(tests|scripts|sandbox)/' | grep -v mcp_serve | head -40 | cut -c1-200)
             text=$(printf 'exit %s\n%s\nlast tests:\n%s\n%s' "$status" "$failed" "$last" "$dump" | sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g')
             echo "::error title=pytest failed::$text"
           fi
