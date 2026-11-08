@@ -40,7 +40,16 @@ if [[ $extract == 1 ]]; then
   export APPIMAGE_EXTRACT_AND_RUN=1 TMPDIR="$work/tmp"
 fi
 failures=0
-fail() { echo "FAIL: $*" >&2; failures=$((failures + 1)); }
+fail() {
+  echo "FAIL: $*" >&2; failures=$((failures + 1))
+  # On GitHub Actions also as an annotation: the job's log lives on hosts not every reader reaches, the API's
+  # check-run annotations do not. Python, not sed (macOS's sed keeps one line only).
+  if [[ ${GITHUB_ACTIONS:-} == true ]]; then
+    printf '%s\n' "$*" | head -n 25 | cut -c1-300 | python3 -c 'import sys
+text = sys.stdin.read().rstrip("\n").replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+print("::error title=e2e_package " + sys.argv[1] + "::" + text)' "$kind" || true
+  fi
+}
 pass() { echo "ok: $*"; }
 now() { "$python" -c 'import time; print(time.monotonic())' 2>/dev/null || date +%s; }
 elapsed() { "$python" -c 'import sys; print(f"{float(sys.argv[2]) - float(sys.argv[1]):.2f} s")' "$1" "$(now)" 2>/dev/null || true; }

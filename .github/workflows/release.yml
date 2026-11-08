@@ -16,6 +16,11 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:  # builds and checks every package; publishes nothing (only a pushed tag does)
+    inputs:
+      quick:
+        description: "Skip the test suite (packages only; a pushed tag always runs it)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -34,6 +39,7 @@ jobs:
           python-version: "3.12"
       - run: "python -m pip install --require-hashes --only-binary :all: -r packaging/requirements-ci.txt"
       - name: Tests (failures summarised as an annotation, readable through the API)
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.quick) }}
         run: |
           # Into a file, not a pipe: a process a test leaves behind would hold the pipe open and the step would hang.
           status=0; python -m pytest -q -rfE tests > pytest.txt 2>&1 || status=$?
