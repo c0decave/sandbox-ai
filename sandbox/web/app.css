@@ -128,3 +128,11 @@ td.actions .confirm, .row .confirm { display: inline-block; white-space: normal;
   nav button { width: auto; white-space: nowrap; }
   header { grid-column: 1; }
 }
+td.countdown { white-space: nowrap; font-variant-numeric: tabular-nums; }
+td.countdown.warn { color: var(--warn); font-weight: 600; }
+td.countdown.bad { color: var(--bad); font-weight: 700; }
+.terminal-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+.terminal-bar .terminal-tabs { margin-bottom: 0; }
+.net-shown { margin-top: 8px; }
+#review-card details pre { max-height: 24em; }
+.inline-ask .confirm { display: inline-block; margin: 0 6px; }

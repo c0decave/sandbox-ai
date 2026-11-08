@@ -304,3 +304,44 @@ def test_after_a_relief_a_stall_alone_waits_before_the_next(tmp_path, processes)
     w.tick()
     second.wait(5)
     assert second.returncode == -signal.SIGTERM
+
+
+def test_a_smaller_limit_above_the_cgroup_binds_and_is_read_at_every_look(tmp_path, processes):
+    """A limit set on a parent (the pod's slice: `sandbox-ai limits` of 0.1.77 and older wrote there) holds the
+    sandbox as well: the watch goes by the smallest memory.max on the path up, read again at every look."""
+    agent = child(hold_mib=10, program="claude")
+    processes.append(agent)
+    group = cgroup(tmp_path, [agent.pid], current=3 * GIB)
+    parent = group.parent
+    w = watch(group)
+    assert w.tick()["limit"] == 8 * GIB
+    (parent / "memory.max").write_text(f"{4 * GIB}\n")
+    (parent / "memory.current").write_text(f"{int(3.5 * GIB)}\n")  # the pod's: the infra container too
+    state = w.tick()
+    assert state["limit"] == 4 * GIB and state["current"] == int(3.5 * GIB)
+    assert int((group / "memory.high").read_text()) == int(4 * GIB * s.MEMORY_HIGH)
+    (parent / "memory.max").write_text("max\n")  # lifted again
+    assert w.tick()["limit"] == 8 * GIB
+    (group / "memory.max").write_text("max\n")
+    (parent / "memory.max").write_text(f"{2 * GIB}\n")  # only the parent's: it still binds
+    assert w.tick()["limit"] == 2 * GIB
+
+
+def test_memory_high_set_back_to_max_is_set_again(tmp_path, processes):
+    """systemd writes a unit's properties again (a daemon-reload, `systemctl set-property`), which sets memory.high
+    back to max: the watch reads it at every look and sets it again; a value the kernel rounded is left alone."""
+    agent = child(hold_mib=10, program="claude")
+    processes.append(agent)
+    group = cgroup(tmp_path, [agent.pid], current=1 * GIB)
+    log = tmp_path / "memory.jsonl"
+    w = watch(group, log=log)
+    w.tick()
+    high = int(8 * GIB * s.MEMORY_HIGH)
+    assert int((group / "memory.high").read_text()) == high
+    (group / "memory.high").write_text(f"{high - high % 4096}\n")  # as the kernel shows it: pages
+    w.tick()
+    assert int((group / "memory.high").read_text()) == high - high % 4096  # not rewritten
+    (group / "memory.high").write_text("max\n")
+    w.tick()
+    assert int((group / "memory.high").read_text()) == high
+    assert [json.loads(line)["event"] for line in log.read_text().splitlines()] == ["memory-high-reset"]

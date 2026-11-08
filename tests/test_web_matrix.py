@@ -178,13 +178,18 @@ ACTIONS = [
     ("GET", "/starts", None, [["list", "--json"]]),
     ("POST", "/starts/web/pause", {}, [["pause", "web"]]),
     ("POST", "/starts/web/resume", {}, [["resume", "web"]]),
-    ("POST", "/starts/web/stop", {}, [["stop", "web"]]),
+    ("POST", "/starts/web/stop", {"confirm": True}, [["stop", "web"]]),
     ("POST", "/starts/web/delete", {"confirm": True}, [["delete", "web", "--yes"]]),
+    ("GET", "/starts/web/review", None, [["resume", "web", "--review-home", "--json"]]),
     ("GET", "/approvals", None, [["approvals", "list", "--json"]]),
     ("POST", "/approvals/1700000000-1-2", {"decision": "allow", "scope": "always"},
      [["approvals", "allow", "1700000000-1-2", "--scope", "always"]]),
     ("POST", "/approvals/1700000000-1-2", {"decision": "deny", "scope": "once"},
      [["approvals", "deny", "1700000000-1-2", "--scope", "once"]]),
+    ("POST", "/approvals/1700000000-1-2", {"decision": "deny", "scope": "always", "confirm": True},
+     [["approvals", "deny", "1700000000-1-2", "--scope", "always"]]),
+    ("POST", "/approvals/1700000000-1-2", {"decision": "allow", "scope": "run", "no_open": True},
+     [["approvals", "allow", "1700000000-1-2", "--scope", "run", "--no-open"]]),
     ("GET", "/doctor", None, [["doctor", "--json"]]),
     ("GET", "/logs", None, [["logs", "--json"]]),
     ("GET", "/llm", None, [["llm", "list", "--json"]]),
@@ -196,6 +201,7 @@ ACTIONS = [
     ("GET", "/defaults", None, [["defaults", "show", "--json"]]),
     ("POST", "/defaults", {"key": "telemetry", "value": "strict"}, [["defaults", "set", "telemetry", '"strict"']]),
     ("POST", "/defaults", {"key": "telemetry", "value": None}, [["defaults", "unset", "telemetry"]]),
+    ("POST", "/defaults", {"key": "mode", "value": "lax", "confirm": True}, [["defaults", "set", "mode", '"lax"']]),
     ("GET", "/net/web", None, [["net", "show", "web", "--json"]]),
     ("POST", "/net/web", {"op": "allow", "allow_host": ["pypi.org"], "allow_tcp": [], "host_ports": [3000],
                           "dns": False, "git_login": {"url": "https://github.com", "kind": "secret", "ref": "GH_PUSH"}},
@@ -214,6 +220,8 @@ ACTIONS = [
     ("POST", "/devices/web", {"device": "usb:2e8a:000a", "confirm": True}, [["devices", "add", "web", "usb:2e8a:000a"]]),
     ("POST", "/devices/web/remove", {"device": "2"}, [["devices", "remove", "web", "2"]]),
     ("POST", "/limits/web", {"memory": "4g", "cpus": "2"}, [["limits", "web", "--memory=4g", "--cpus=2"]]),
+    ("POST", "/limits/web", {"pids": "none", "confirm": True}, [["limits", "web", "--pids=none"]]),
+    ("GET", "/limits/web", None, [["limits", "web", "--show", "--json"]]),
     ("GET", "/presets", None, [["presets", "list", "--json"]]),
     ("GET", "/vpn", None, [["vpn", "list", "--json"]]),
     ("POST", "/vpn", {"name": "mv", "kind": "mullvad", "secret": "MULLVAD", "location": "se-sto"},
@@ -254,8 +262,9 @@ def expected_status(state, method):
 @pytest.mark.parametrize("host", HOSTS)
 @pytest.mark.parametrize("state", STATES)
 @pytest.mark.parametrize("method,path,body,commands", ACTIONS,
-                         ids=[f"{m} {p}" + (f" {b.get('decision') or b.get('op') or ''}".rstrip() if b else "")
-                              for m, p, b, _ in ACTIONS])
+                         ids=[f"{m} {p}" + (f" {b.get('decision') or b.get('op') or b.get('key') or ''}".rstrip()
+                                            + (f" {b.get('scope') or b.get('value') or ''}".rstrip() if b else "")
+                                            if b else "") for m, p, b, _ in ACTIONS])
 def test_every_action_in_every_login_state_on_every_host(web, state, host, method, path, body, commands):
     headers = web.headers(state)
     web.processes.answers[("--version",)] = (0, "sandbox-ai 0.1.52\n", "")
@@ -279,6 +288,53 @@ def test_every_action_in_every_login_state_on_every_host(web, state, host, metho
         assert actions == []
     if status in (403,) and state != "wrong-host":
         assert [e["event"] for e in events].count("refused") == 1, "a refused change of a session is audited"
+    web.assert_nothing_leaked()
+
+
+# -- the questions of every host at once --
+
+@pytest.mark.parametrize("state", STATES)
+def test_the_questions_of_every_host_in_every_login_state(web, state):
+    """GET /api/approvals: with a full login, `approvals list --json` on this machine and on ct1 (over SSH), each
+    question with its host; nothing runs without one."""
+    headers = web.headers(state)
+    web.processes.answers[("approvals", "list")] = (0, json.dumps([{"id": "1700000000-1-2", "kind": "dns",
+                                                                    "question": "look up pypi.org",
+                                                                    "seconds_left": 30}]), "")
+    status, out_headers, data = web.request("GET", "/api/approvals", None, headers)
+    assert status == expected_status(state, "GET"), data
+    assert out_headers["Cache-Control"] == "no-store"
+    if status != 200:
+        assert web.processes.log == []
+    else:
+        found = json.loads(data)
+        assert [q["host"] for q in found["questions"]] == list(HOSTS) and found["errors"] == {}, "in the hosts' order"
+        assert sorted(web.processes.args()) == sorted((host, ["approvals", "list", "--json"]) for host in HOSTS)
+        assert {e["target"] for e in web.processes.log if e["host"] == "ct1"} == {REMOTE["ssh"]}
+        assert all(e["timeout"] == w.APPROVALS_HOST_SECONDS for e in web.processes.log)
+    web.assert_nothing_leaked()
+
+
+def test_a_host_that_fails_is_named_and_the_others_are_listed(web):
+    headers = web.headers("full")
+    web.processes.answers[("approvals", "list")] = (0, json.dumps([{"id": "1-1", "question": "q"}]), "")
+    real = web.processes.__call__
+
+    class Failing(Processes):
+        def __call__(self, command, **kwargs):
+            if command[0] == "ssh":
+                self.log.append({"host": "ct1", "target": None, "args": [], "input": None, "timeout": None})
+                return subprocess.CompletedProcess(command, 255, "", "ssh: connect to host 192.0.2.10 port 2222: "
+                                                                       "No route to host")
+            return real(command, **kwargs)
+    failing = Failing()
+    hosts = w.module("hosts")
+    web.svc.api.runner = lambda host, args, timeout=120, input=None: hosts.run(host, args, input=input,
+                                                                               timeout=timeout, runner=failing)
+    status, _, data = web.request("GET", "/api/approvals", None, headers)
+    found = json.loads(data)
+    assert status == 200 and [q["host"] for q in found["questions"]] == ["local"]
+    assert list(found["errors"]) == ["ct1"] and "No route to host" in found["errors"]["ct1"]
     web.assert_nothing_leaked()
 
 
@@ -431,7 +487,7 @@ def test_a_start_its_question_answered_and_its_stop(web, host, agent):
     assert status == 200
     for action in ("stop", "delete"):
         status, _, data = web.request("POST", f"/api/hosts/{host}/starts/{name}/{action}",
-                                      {"confirm": True} if action == "delete" else {}, headers)
+                                      {"confirm": True}, headers)
         assert status == 200, data
     assert web.processes.args() == [(host, args) for args in (
         ["list", "--json"], ["approvals", "list", "--json"],
@@ -477,12 +533,14 @@ def test_every_call_of_the_page_is_in_the_matrix():
     script = (ROOT / "sandbox" / "web" / "app.js").read_text()
     calls = set()
     literal = r'`[^`]*`|"[^"]*"'
-    for method, path in re.findall(rf'api\("(GET|POST|DELETE)", (hostPath\((?:{literal})\)|{literal})', script):
+    for method, path in re.findall(rf'api\("(GET|POST|DELETE)", (hostPath\((?:{literal})(?:, [A-Za-z_.]+)?\)|{literal})',
+                                   script):
         prefix = "/api/hosts/X" if path.startswith("hostPath(") else ""
-        path = path[len("hostPath("):-1] if prefix else path
+        path = re.sub(r", [A-Za-z_.]+\)$", ")", path)[len("hostPath("):-1] if prefix else path
         calls.add((method, prefix + re.sub(r"\$\{[^}]*\}", "X", path.strip("\"`"))))
     covered = {(m, "/api/hosts/X" + re.sub(r"/(web|gpu|mv|1700000000-1-2)(?=/|$)", "/X", p)) for m, p, _, _ in ACTIONS}
     covered |= {(m, re.sub(r"/ct1$", "/X", p)) for m, p, _ in SESSION_CALLS} | {("POST", "/api/login")}
+    covered |= {("GET", "/api/approvals")}  # test_the_questions_of_every_host_in_every_login_state
     covered |= {("POST", "/api/hosts/X/starts/X/X")}  # ${action}: pause, resume, stop, delete above
     covered |= {("POST", "/api/hosts/X/kits/X/X"),  # ${action}: add-skill, new-skill, add-plugin above
                 ("POST", "/api/hosts/X/kits/X/remove-X")}  # remove-${kind}: remove-skill, remove-plugin above
@@ -542,7 +600,8 @@ def test_over_https_each_login_state_once(server):
         connection.close()
         return response.status, dict(response.getheaders()), data
     stop = "/api/hosts/local/starts/web/stop"
-    assert https("POST", stop, {})[0] == 401
+    sure = {"confirm": True}
+    assert https("POST", stop, sure)[0] == 401
     assert https("POST", "/api/login", {"user": "admin", "password": PASSWORD})[0] == 400
     code = w.totp(server["secret"], int(time.time() // 30))
     status, headers, data = https("POST", "/api/login", {"user": "admin", "password": PASSWORD, "code": code})
@@ -550,9 +609,10 @@ def test_over_https_each_login_state_once(server):
     cookie, csrf = headers["Set-Cookie"].split(";")[0], json.loads(data)["csrf"]
     for changed, wanted in (({"X-CSRF-Token": "x"}, 403), ({"Origin": "https://evil.example"}, 403),
                             ({"Host": "evil.example"}, 421), ({"Cookie": None}, 401)):
-        assert https("POST", stop, {}, {"Cookie": cookie, "X-CSRF-Token": csrf, **changed})[0] == wanted, changed
+        assert https("POST", stop, sure, {"Cookie": cookie, "X-CSRF-Token": csrf, **changed})[0] == wanted, changed
+    assert https("POST", stop, {}, {"Cookie": cookie, "X-CSRF-Token": csrf})[0] == 400, "a stop is confirmed"
     assert server["processes"].log == []
-    status, headers, data = https("POST", stop, {}, {"Cookie": cookie, "X-CSRF-Token": csrf})
+    status, headers, data = https("POST", stop, sure, {"Cookie": cookie, "X-CSRF-Token": csrf})
     assert status == 200 and server["processes"].args() == [("local", ["stop", "web"])]
     assert headers["Content-Security-Policy"].startswith("default-src 'self'") and headers["X-Frame-Options"] == "DENY"
     audit = (w.state_dir() / "audit.jsonl").read_text()

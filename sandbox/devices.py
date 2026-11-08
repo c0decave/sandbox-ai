@@ -5,6 +5,7 @@
   sandbox-ai devices add [RUN] DEVICE           hand a host device to the running sandbox (as --device)
   sandbox-ai devices remove [RUN] DEVICE|ID     take it away again
   sandbox-ai limits [RUN] [--memory SIZE] [--cpus N] [--pids N]   change the running sandbox's limits
+  sandbox-ai limits [RUN] --show [--json]       the limits it runs with now (nothing changed, no root needed)
 
 DEVICE: a path under /dev, or usb:VENDOR:PRODUCT[:SERIAL] (the USB device's nodes, found through sysfs).
 RUN as for `sandbox-ai net` ($SANDBOX_AI_RUN; may be left out when only one sandbox runs). A device gets
@@ -16,7 +17,8 @@ devices.jsonl).
 
 How: nothing runs in the sandbox. A helper of your own user enters the sandbox's user namespace (you own it),
 clones the device node there (open_tree) and mounts it into each of the sandbox's mount namespaces, the
-agent's under Firejail included (move_mount; Linux 5.2 or later). Limits go to the sandbox's cgroup:
+agent's under Firejail included (move_mount; Linux 5.2 or later). Limits go to the cgroup the start put them on
+(Podman: the agent container's own libpod-<id>.scope, not the pod's; Bubblewrap: its systemd scope):
 `systemctl --user set-property --runtime` for a systemd scope, else the cgroup files where delegated.
 
 Standard library only.
@@ -110,10 +112,23 @@ def owner_is_us(proc, pid):
         os.close(parent)
 
 
+def podman_groups(own):
+    """(the container's own cgroup, the pod's) of a Podman container's process in the cgroup OWN: the container's is
+    its libpod-<id>.scope (libpod-<id> without systemd), also when crun put the process into a cgroup below it
+    (.../libpod-<id>.scope/container); the pod's is the one above it. (OWN, OWN) when there is none."""
+    parts = own.split("/")
+    for index in range(len(parts) - 1, 0, -1):
+        if parts[index].startswith("libpod-") and not parts[index].startswith("libpod-conmon-"):
+            return "/".join(parts[:index + 1]), "/".join(parts[:index]) or "/"
+    return own, own
+
+
 def sandbox_processes(record, proc=PROC, owned=None):
-    """{"pids", "mntns": {ns: pid}, "user": pid, "cgroup"} of the running sandbox RECORD (run.json): the processes
-    whose /sandbox/session/config.json is this run's (the session directory is the run's own), and every process
-    of the same pod (Podman: the pod's cgroup) or user namespace (Bubblewrap). None if it is not found."""
+    """{"pids", "mntns": {ns: pid}, "user": pid, "cgroup", "limits"} of the running sandbox RECORD (run.json): the
+    processes whose /sandbox/session/config.json is this run's (the session directory is the run's own), and every
+    process of the same pod (Podman: the pod's cgroup) or user namespace (Bubblewrap). "cgroup" holds them all (the
+    pod's), "limits" is the cgroup the start put --memory, --cpus and --pids on (the agent container's own: Podman
+    sets them there, not on the pod). None if it is not found."""
     want = read(Path(record.get("session_dir", "")) / "config.json")
     if not want:
         return None
@@ -129,15 +144,14 @@ def sandbox_processes(record, proc=PROC, owned=None):
     anchor = anchors[0]
     if record.get("backend") == "podman":
         # All rootless containers share Podman's user namespace; the pod's cgroup is this sandbox's alone.
-        own = cgroup_path(proc, anchor) or ""
-        prefix = own.rsplit("/", 1)[0] if "/libpod-" in own else own
+        container, prefix = podman_groups(cgroup_path(proc, anchor) or "")
         members = [pid for pid in pids if prefix and (cgroup_path(proc, pid) or "").startswith(prefix + "/")
                    or pid in anchors]
-        group = prefix
+        group, limits = prefix, container
     else:
         user = namespace(proc, anchor, "user")
         members = [pid for pid in pids if namespace(proc, pid, "user") == user]
-        group = cgroup_path(proc, anchor)
+        group = limits = cgroup_path(proc, anchor)
     mounts, own_user = {}, namespace(proc, anchor, "user")
     for pid in members:
         ns = namespace(proc, pid, "mnt")
@@ -146,7 +160,7 @@ def sandbox_processes(record, proc=PROC, owned=None):
         if ns and ns not in mounts and (proc / str(pid) / "root" / "sandbox").is_dir() and \
                 namespace(proc, pid, "user") == own_user:
             mounts[ns] = pid
-    return {"pids": members, "mntns": mounts, "user": anchor, "cgroup": group}
+    return {"pids": members, "mntns": mounts, "user": anchor, "cgroup": group, "limits": limits or group}
 
 
 # --- the namespace helper (runs in a process of its own: setns needs a single thread) --------------
@@ -1302,10 +1316,8 @@ def set_limits(record, memory=None, cpus=None, pids=None, out=print, finder=sand
         if wider:
             raise ValueError("; ".join(f"{given}: {why} (security mode {mode['name']})" for given, why in wider))
     properties, files = limit_properties(memory, cpus, pids)
-    found = finder(record)
-    if not found or not found.get("cgroup"):
-        raise ValueError("the sandbox's cgroup was not found (has it ended?)")
-    unit = found["cgroup"].rsplit("/", 1)[-1]
+    group = limits_cgroup(record, finder)
+    unit = group.rsplit("/", 1)[-1]
     runner = runner or subprocess.run
     if unit.endswith((".scope", ".slice", ".service")) and shutil.which("systemctl"):
         result = runner(["systemctl", "--user", "set-property", "--runtime", unit, *properties],
@@ -1313,7 +1325,7 @@ def set_limits(record, memory=None, cpus=None, pids=None, out=print, finder=sand
         if result.returncode == 0:
             out(f"limits of {record.get('run')}: {' '.join(properties)} (systemd unit {unit}, until it ends)")
             return "systemd"
-    directory = cgroup_root / found["cgroup"].lstrip("/")
+    directory = cgroup_root / group.lstrip("/")
     try:
         for name, value in files.items():
             if (directory / name).exists():
@@ -1323,6 +1335,66 @@ def set_limits(record, memory=None, cpus=None, pids=None, out=print, finder=sand
                          "you? a systemd user session does that)") from None
     out(f"limits of {record.get('run')}: {', '.join(f'{k}={v}' for k, v in files.items())} (cgroup {directory})")
     return "cgroup"
+
+
+def limits_cgroup(record, finder=sandbox_processes):
+    """The cgroup path ("/user.slice/...") the run's limits are on (sandbox_processes "limits"), or ValueError."""
+    found = finder(record)
+    group = (found or {}).get("limits") or (found or {}).get("cgroup")
+    if not group:
+        raise ValueError("the sandbox's cgroup was not found (has it ended?)")
+    return group
+
+
+def cgroup_value(directory, name, cgroup_root=CGROUP_ROOT):
+    """The smallest value of the cgroup file NAME on the path from DIRECTORY up to CGROUP_ROOT (what binds: a limit
+    on a parent holds the run's cgroup too), as a number (cpu.max: CPUs), or None for no limit anywhere."""
+    found = None
+    directory, root = Path(directory), Path(cgroup_root)
+    while directory == root or root in directory.parents:
+        text = (read(directory / name, 256) or b"").decode("ascii", "replace").split()
+        value = None
+        if name == "cpu.max":
+            if len(text) == 2 and text[0].isdigit() and text[1].isdigit() and int(text[1]):
+                value = int(text[0]) / int(text[1])
+        elif text and text[0].isdigit():
+            value = int(text[0])
+        if value is not None and (found is None or value < found):
+            found = value
+        if directory == root:
+            break
+        directory = directory.parent
+    return found
+
+
+def current_limits(record, finder=sandbox_processes, cgroup_root=CGROUP_ROOT):
+    """{"memory": bytes, "memory_high": bytes, "cpus": float, "pids": int} the run has now (None: no limit), read
+    from the cgroup `limits` writes, and above it; nothing is changed."""
+    directory = Path(cgroup_root) / limits_cgroup(record, finder).lstrip("/")
+    if not directory.is_dir():
+        raise ValueError(f"the sandbox's cgroup {directory} was not found (has it ended?)")
+    cpus = cgroup_value(directory, "cpu.max", cgroup_root)
+    return {"memory": cgroup_value(directory, "memory.max", cgroup_root),
+            "memory_high": cgroup_value(directory, "memory.high", cgroup_root),
+            "cpus": round(cpus, 3) if cpus is not None else None,
+            "pids": cgroup_value(directory, "pids.max", cgroup_root)}
+
+
+def size_shown(value):
+    """8g, 7.4g, 512m: bytes as --memory takes them (one decimal at most)."""
+    for unit, letter in ((1 << 40, "t"), (1 << 30, "g"), (1 << 20, "m"), (1 << 10, "k")):
+        if value >= unit:
+            return f"{value / unit:.1f}".removesuffix(".0") + letter
+    return str(value)
+
+
+def limits_line(limits):
+    """memory 8g, memory.high 7.4g, cpus 4, pids 4096 (none: no limit)."""
+    def number(value):
+        return f"{value:g}" if isinstance(value, float) else str(value)
+    return ", ".join(f"{label} {'none' if value is None else shown_as(value)}" for label, value, shown_as in (
+        ("memory", limits["memory"], size_shown), ("memory.high", limits["memory_high"], size_shown),
+        ("cpus", limits["cpus"], number), ("pids", limits["pids"], number)))
 
 
 # --- command line -------------------------------------------------------------------------------------------
@@ -1336,6 +1408,8 @@ def main(argv, out=print, prog="devices"):
         parser.add_argument("-me", "--memory", metavar="SIZE", help="e.g. 8g, 512m; none: no limit")
         parser.add_argument("-cu", "--cpus", metavar="N", help="e.g. 2 or 1.5; none: no limit")
         parser.add_argument("-pi", "--pids", metavar="N", help="processes and threads; none: no limit")
+        parser.add_argument("--show", action="store_true", help="show the limits the sandbox runs with now")
+        parser.add_argument("--json", action="store_true", help="with --show: as JSON")
     else:
         parser = argparse.ArgumentParser(prog="sandbox-ai devices", description=__doc__.split("\n\n")[0],
                                          formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1348,9 +1422,17 @@ def main(argv, out=print, prog="devices"):
             command = commands.add_parser(name)
             command.add_argument("args", nargs="+", metavar="[RUN] DEVICE")
     args = parser.parse_args(argv)
+    if prog == "limits" and args.show and (args.memory or args.cpus or args.pids):
+        parser.error("--show changes nothing: give it without --memory, --cpus and --pids")
+    if prog == "limits" and args.json and not args.show:
+        parser.error("--json goes with --show")
     try:
         if prog == "limits":
             record = net.choose(net.running(), args.run)
+            if args.show:
+                limits = current_limits(record)
+                out(json.dumps(limits) if args.json else limits_line(limits))
+                return 0
             set_limits(record, args.memory, args.cpus, args.pids, out=out)
             return 0
         if args.command == "list":

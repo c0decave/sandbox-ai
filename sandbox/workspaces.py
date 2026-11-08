@@ -14,9 +14,12 @@ session is kept in its options, so `sandbox-ai resume NAME --restart` starts wit
 added with --ro: it would come back writable); `remove` takes it out again.
 
 How: nothing runs in the sandbox. A helper of your own user opens DIR and checks that it is the directory that
-was checked (device and inode), enters the sandbox's user namespace, clones DIR there (open_tree) and mounts it
+was checked (device and inode), that each PID it is given still names the process found (its start time), enters
+the sandbox's user namespace, clones DIR there (open_tree) and mounts it
 in each of the sandbox's mount namespaces, the agent's under Firejail included (move_mount; Linux 5.2 or later,
-read-only through mount_setattr: 5.12). The mount point is made on /workspaces, a small tmpfs every start of
+nosuid, nodev and read-only through mount_setattr: Linux 5.12, without which nothing is added). Nothing of the
+kernel's own (/proc, /sys, /dev, or a proc, sysfs, cgroup, devpts ... file system mounted below DIR) is handed over.
+The mount point is made on /workspaces, a small tmpfs every start of
 0.1.76 or later has, only in the sandbox's own mount namespaces (never one the agent made). `remove` freezes the
 sandbox for the check, refuses while a process there has a file open, its working directory or a mapping below it,
 refuses while the agent holds a copy the mount tables show in a namespace of its own, and unmounts strictly (the
@@ -54,7 +57,35 @@ MOVE_MOUNT_F_EMPTY_PATH, MOVE_MOUNT_T_EMPTY_PATH = 0x4, 0x40
 MOUNT_ATTR_RDONLY, MOUNT_ATTR_NOSUID, MOUNT_ATTR_NODEV = 0x1, 0x2, 0x4
 CLONE_NEWNS, CLONE_NEWUSER = 0x00020000, 0x10000000
 MNT_DETACH, UMOUNT_NOFOLLOW = 2, 8
-STATES = ("attached", "removed")
+# The registry's states: pending (recorded before the mount: it may be there, a failed save leaves no unknown mount),
+# attached, partial (a removal that stopped half-way: gone in the namespaces of "gone_in", still in the others),
+# removed. Every state but removed counts as present (names, overlaps, remove).
+STATES = ("pending", "attached", "partial", "removed")
+PRESENT = ("pending", "attached", "partial")
+# File systems of the kernel itself: never handed to a sandbox, neither as DIR nor mounted somewhere below it.
+KERNEL_FILESYSTEMS = frozenset({"proc", "sysfs", "cgroup", "cgroup2", "devtmpfs", "devpts", "mqueue", "debugfs",
+                                "tracefs", "securityfs", "bpf", "configfs", "fusectl", "pstore", "efivarfs",
+                                "binfmt_misc", "hugetlbfs"})
+KERNEL_TREES = (Path("/proc"), Path("/sys"), Path("/dev"))
+MOUNTINFO = Path("/proc/self/mountinfo")
+PARTIAL = 3  # the helper's exit status when a removal stopped half-way (stdout: {"gone": [pid, ...]})
+
+# Why `workspace remove` refuses: each refusal carries one of these phrases, so that a front end can tell the reason
+# (the CLI's text, the web UI's and the app's error):
+#   REFUSED_IN_USE    "a process holds it": a process of the sandbox has a file, its working directory or a mapping
+#                     below it (--force detaches it anyway)
+#   REFUSED_COPY      "the agent took a copy into a namespace of its own": a mount namespace the agent made shows
+#                     it; no unmount reaches it there (--force takes it out of the sandbox's own view)
+#   REFUSED_UNKNOWN   "copies cannot be looked for": no cgroup of the run's own, or the sandbox's own mount of it not
+#                     found (--force takes it out of the sandbox's own view)
+#   REFUSED_BUSY      "the kernel still holds it": the strict unmount failed (something no look at /proc shows,
+#                     a descriptor in flight, io_uring) (--force detaches it anyway)
+#   REFUSED_PARTIAL   "partly removed": the removal stopped half-way and could not be undone (state partial)
+REFUSED_IN_USE = "a process holds it"
+REFUSED_COPY = "the agent took a copy into a namespace of its own"
+REFUSED_UNKNOWN = "copies cannot be looked for"
+REFUSED_BUSY = "the kernel still holds it"
+REFUSED_PARTIAL = "partly removed"
 _modules = {}
 
 
@@ -94,24 +125,81 @@ def check(result, what, kernel="5.2"):
     return result
 
 
+def mount_id(fd):
+    """The mount ID of the mount the descriptor FD lies on (/proc/self/fdinfo, as /proc/self/mountinfo numbers it)."""
+    with contextlib.suppress(OSError, ValueError):
+        for line in Path(f"/proc/self/fdinfo/{fd}").read_text().splitlines():
+            if line.startswith("mnt_id:"):
+                return int(line.split(":", 1)[1])
+    raise OSError(errno.ENOTSUP, "the mount of the directory cannot be told (no mnt_id in /proc/self/fdinfo)")
+
+
+def kernel_mounts(text, holder, source):
+    """[(mount point, file system type)] of the kernel's own file systems (KERNEL_FILESYSTEMS) in a recursive clone
+    of SOURCE, by the mount table TEXT (mountinfo): the mount HOLDER (its ID) that SOURCE lies on, and every mount at
+    or below SOURCE that hangs off it. HOLDER missing from the table: [(SOURCE, "unknown")] (refused: never "none"
+    for want of a match)."""
+    mounts = {}
+    for line in text.splitlines():
+        head, separator, tail = line.partition(" - ")
+        fields, kind = head.split(), tail.split()[:1]
+        if not separator or len(fields) < 5 or not kind:
+            continue
+        with contextlib.suppress(ValueError):
+            mounts[int(fields[0])] = (int(fields[1]), unescaped(fields[4]), kind[0])
+    if holder not in mounts:
+        return [(source, "unknown")]
+
+    def hangs_off_holder(ident):
+        for _ in range(len(mounts) + 1):
+            if ident == holder:
+                return True
+            if ident not in mounts or mounts[ident][0] == ident:
+                return False
+            ident = mounts[ident][0]
+        return False
+    prefix = source.rstrip("/") + "/"
+    return [(point, kind) for ident, (parent, point, kind) in mounts.items() if kind in KERNEL_FILESYSTEMS and (
+        ident == holder or ((point == source or point.startswith(prefix)) and hangs_off_holder(parent)))]
+
+
 def clone(c, source, identity, mode):
     """A detached copy (open_tree) of the directory SOURCE, refused unless it is still IDENTITY (device, inode):
-    what was checked is what is mounted, whatever was swapped in on the way since. Read-only for MODE ro; never
-    set-user-ID or device files."""
+    what was checked is what is mounted, whatever was swapped in on the way since. Refused when it holds a file
+    system of the kernel's own (KERNEL_FILESYSTEMS: proc, sysfs, cgroup ...). Read-only for MODE ro; never
+    set-user-ID or device files: without mount_setattr (Linux 5.12) nothing is added."""
     fd = os.open(source, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    tree = None
     try:
         info = os.fstat(fd)
         if (info.st_dev, info.st_ino) != tuple(identity):
             raise OSError(errno.ESTALE, f"{source} changed after it was checked; add it again")
         tree = check(c.syscall(SYS_OPEN_TREE, fd, b"", OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_RECURSIVE
                                | AT_EMPTY_PATH), f"clone {source}")
+        # The clone took every mount below SOURCE (AT_RECURSIVE): none may be the kernel's own.
+        refused = kernel_mounts(MOUNTINFO.read_text(errors="replace"), mount_id(fd), source)
+        if refused:
+            point, kind = refused[0]
+            raise OSError(errno.EPERM, f"{source} holds {point} ({kind}), a file system of the kernel's own: not "
+                                       "handed to a sandbox" if kind != "unknown" else
+                                       f"the mounts below {source} cannot be told: not added")
+    except BaseException:
+        if tree is not None:
+            os.close(tree)
+        raise
     finally:
         os.close(fd)
     attributes = MountAttr(MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV | (MOUNT_ATTR_RDONLY if mode == "ro" else 0), 0, 0, 0)
     result = c.syscall(SYS_MOUNT_SETATTR, tree, b"", AT_EMPTY_PATH | AT_RECURSIVE, ctypes.byref(attributes),
                        ctypes.sizeof(attributes))
-    if result < 0 and (mode == "ro" or ctypes.get_errno() != errno.ENOSYS):
+    if result < 0:
+        code = ctypes.get_errno()
         os.close(tree)
+        if code == errno.ENOSYS:  # without it the tree would keep set-user-ID programs and device files: never
+            raise OSError(code, "this kernel lacks mount_setattr (Linux 5.12 or later is needed to add a workspace "
+                                "without set-user-ID programs and device files): restart the session with it "
+                                "instead (sandbox-ai resume NAME --restart --workspace DIR)")
+        ctypes.set_errno(code)
         check(result, f"make {source} {'read-only' if mode == 'ro' else 'nosuid'}", "5.12")
     return tree
 
@@ -140,13 +228,40 @@ def mounted(base, target):
     return os.fstat(base).st_dev != os.fstat(target).st_dev
 
 
-def helper(op, user_pid, name, targets, source=None, identity=None, mode="rw", proc=PROC, c=None, force=False):
+def start_time(pid, proc=PROC):
+    """The start time of PID (/proc/PID/stat field 22, clock ticks since boot), or None (gone): with the PID it names
+    one process, never another that got the PID later."""
+    try:
+        text = (Path(proc) / str(pid) / "stat").read_text(errors="replace")
+    except OSError:
+        return None
+    fields = text.rpartition(")")[2].split()  # the command (field 2) may hold spaces and parentheses
+    return int(fields[19]) if len(fields) > 19 and fields[19].isdigit() else None
+
+
+class Partial(OSError):
+    """A removal that stopped half-way and could not be undone: GONE are the pids of the namespaces it left."""
+
+    def __init__(self, code, text, gone):
+        super().__init__(code, text)
+        self.gone = gone
+
+
+def helper(op, user_pid, name, targets, source=None, identity=None, mode="rw", proc=PROC, c=None, force=False,
+           starts=None):
     """In this (fresh, single-threaded) process: enter the user namespace of USER_PID, then mount SOURCE (op add)
-    at /workspaces/NAME, or unmount it there (op remove), in the mount namespace of every pid in TARGETS. An add
-    that fails in one namespace is undone in those it reached."""
+    at /workspaces/NAME, or unmount it there (op remove), in the mount namespace of every pid in TARGETS. STARTS
+    ({pid: start time}) are the processes' start times when they were found: a PID that names another process now
+    is refused. An add that fails in one namespace is undone in those it reached; a removal that fails in one is
+    undone in those it left (mounted again from the one where it failed), else Partial."""
     c = c or libc()
     user = os.open(proc / str(user_pid) / "ns" / "user", os.O_RDONLY | os.O_CLOEXEC)
     namespaces = [os.open(proc / str(pid) / "ns" / "mnt", os.O_RDONLY | os.O_CLOEXEC) for pid in targets]
+    if starts is not None:  # checked after the namespaces were opened: what the descriptors hold is that process's
+        for pid in [user_pid, *targets]:
+            if start_time(pid, proc) is None or start_time(pid, proc) != starts.get(str(pid)):
+                raise OSError(errno.ESRCH, f"process {pid} of the sandbox is gone (its PID may name another process "
+                                           "now): try again")
     check(c.setns(user, CLONE_NEWUSER), "enter the sandbox's user namespace")
     trees = []
     if op == "add":
@@ -160,16 +275,62 @@ def helper(op, user_pid, name, targets, source=None, identity=None, mode="rw", p
             check(c.setns(fd, CLONE_NEWNS), "enter a mount namespace of the sandbox")
             if op == "add":
                 attach(c, name, trees[index])
-                reached.append(fd)
             else:
                 detach(c, name, force)
-    except OSError:
-        for fd in reached:
-            with contextlib.suppress(OSError):
-                check(c.setns(fd, CLONE_NEWNS), "enter a mount namespace of the sandbox")
-                detach(c, name, True)
+            reached.append(index)
+    except OSError as exc:
+        if op == "add":
+            for index in reached:
+                with contextlib.suppress(OSError):
+                    check(c.setns(namespaces[index], CLONE_NEWNS), "enter a mount namespace of the sandbox")
+                    detach(c, name, True)
+            raise
+        if not reached:
+            raise
+        lost = restore(c, name, [namespaces[index] for index in reached])
+        if lost:
+            gone = [targets[index] for index in reached if namespaces[index] in lost]
+            raise Partial(exc.errno or errno.EBUSY, f"{WORKSPACES_DIR}/{name} is {REFUSED_PARTIAL}: gone in the mount "
+                          f"namespace of process {', '.join(map(str, gone))}, still there in the others "
+                          f"({exc.strerror or exc}); sandbox-ai workspace remove --force takes it out of every one",
+                          gone) from None
         raise
     return 0
+
+
+def restore(c, name, namespaces):
+    """Mount /workspaces/NAME again in the mount namespaces NAMESPACES (descriptors) a removal had left, from clones
+    of the mount in the current one, where the removal failed (a clone keeps read-only, nosuid and nodev); the
+    descriptors of those where it could not."""
+    trees = []
+    try:
+        base, target = place(name, False)
+    except OSError:
+        return list(namespaces)
+    try:
+        if target is None or not mounted(base, target):
+            return list(namespaces)
+        for _ in namespaces:
+            tree = c.syscall(SYS_OPEN_TREE, target, b"", OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_RECURSIVE
+                             | AT_EMPTY_PATH)
+            if tree < 0:
+                break
+            trees.append(tree)
+    finally:
+        if target is not None:
+            os.close(target)
+        os.close(base)
+    lost = list(namespaces[len(trees):])
+    for fd, tree in zip(namespaces, trees):
+        try:
+            check(c.setns(fd, CLONE_NEWNS), "enter a mount namespace of the sandbox")
+            attach(c, name, tree)
+        except OSError:
+            lost.append(fd)
+        finally:
+            with contextlib.suppress(OSError):
+                os.close(tree)
+    return lost
 
 
 def place(name, create):
@@ -211,8 +372,9 @@ def detach(c, name, force=False):
                 code = ctypes.get_errno()
                 if code != errno.EBUSY or not force:
                     if code == errno.EBUSY:
-                        raise OSError(code, f"{WORKSPACES_DIR}/{name} is still in use in the sandbox (an open file or "
-                                            "directory, or a mount below it): --force detaches it anyway")
+                        raise OSError(code, f"{WORKSPACES_DIR}/{name} is still in use in the sandbox: {REFUSED_BUSY} "
+                                            "(an open file or directory, or a mount below it, that no look at /proc "
+                                            "shows): --force detaches it anyway")
                     check(-1 if code else 0, f"unmount {WORKSPACES_DIR}/{name}")
                 check(c.umount2(path, MNT_DETACH | UMOUNT_NOFOLLOW), f"unmount {WORKSPACES_DIR}/{name}")
         with contextlib.suppress(OSError):
@@ -235,32 +397,44 @@ def own_namespaces(found, proc=PROC):
     return [pid for pid in found["mntns"].values() if own is not None and user(pid) == own]
 
 
-def run_helper(op, found, name, source=None, identity=None, mode="rw", force=False):
-    """Run helper() in a process of its own; (status, error text)."""
-    targets = own_namespaces(found)
+def run_helper(op, found, name, source=None, identity=None, mode="rw", force=False, proc=PROC):
+    """Run helper() in a process of its own; (status, error text), and for status PARTIAL a third item:
+    {"gone": [pids of the namespaces the removal left]}."""
+    targets = own_namespaces(found, proc)
     if not targets:
         return 1, "no mount namespace of the sandbox found"
-    command = [sys.executable, "-I", str(Path(__file__)), "--internal-helper",
-               json.dumps({"op": op, "user": found["user"], "name": name, "targets": targets, "source": source,
-                           "identity": identity, "mode": mode, "force": force})]
+    # Bare PIDs could name other processes by the time the helper opens them: it checks their start times.
+    starts = {str(pid): start_time(pid, proc) for pid in [found["user"], *targets]}
+    gone = [pid for pid, value in starts.items() if value is None]
+    if gone:
+        return 1, f"process {gone[0]} of the sandbox is gone (has it ended?)"
+    request = {"op": op, "user": found["user"], "name": name, "targets": targets, "source": source,
+               "identity": identity, "mode": mode, "force": force, "starts": starts}
+    command = [sys.executable, "-I", str(Path(__file__)), "--internal-helper", json.dumps(request)]
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         if op == "add":  # killed before its own rollback: take out what it may have mounted already
             with contextlib.suppress(OSError, subprocess.SubprocessError):
                 undo = [sys.executable, "-I", str(Path(__file__)), "--internal-helper",
-                        json.dumps({"op": "remove", "user": found["user"], "name": name, "targets": targets,
-                                    "force": True})]
+                        json.dumps({**request, "op": "remove", "source": None, "identity": None, "force": True})]
                 subprocess.run(undo, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
         return 1, "the helper did not finish within 30 s (a mount namespace that does not answer?)"
+    if result.returncode == PARTIAL:
+        detail = {"gone": []}
+        with contextlib.suppress(ValueError, AttributeError):
+            data = json.loads(result.stdout.strip().splitlines()[-1])
+            detail["gone"] = [int(pid) for pid in data.get("gone", []) if isinstance(pid, int)]
+        return PARTIAL, result.stderr.strip()[-500:], detail
     return result.returncode, result.stderr.strip()[-500:]
 
 
 def helper_main(argument):
     request = json.loads(argument)
+    starts = request.get("starts")
     return helper(request["op"], int(request["user"]), request["name"], [int(p) for p in request["targets"]],
                   request.get("source"), request.get("identity"), request.get("mode", "rw"),
-                  force=bool(request.get("force")))
+                  force=bool(request.get("force")), starts=starts if isinstance(starts, dict) else None)
 
 
 # --- which processes use a workspace -----------------------------------------------------------------
@@ -424,6 +598,10 @@ def judged(record, real, read_only=False):
         raise ValueError(f"--workspace is not allowed by the administrator's policy ({l.POLICY_FILE})")
     if any(c in str(real) for c in (",", "\n", "\r")) or not str(real).isprintable():
         raise ValueError("a workspace path cannot hold commas or control characters")
+    for tree in KERNEL_TREES:  # also checked by check_workspace_scope; here too, whatever a start's version checks
+        if overlaps(real, tree):
+            raise ValueError(f"{shown(real)} {'lies in' if tree in real.parents else 'is or holds'} {tree}: the "
+                             "kernel's and the devices' trees are never a workspace (use --device for a device)")
     l.check_workspace_scope(real)
     # A start lets a workspace hold the project's own .venv/bin or node_modules/.bin on your PATH, and checks what
     # the agent changed there after the run (tool_dirs_state); for a workspace added later nothing would.
@@ -432,7 +610,7 @@ def judged(record, real, read_only=False):
             raise ValueError(f"{shown(real)} holds {shown(directory)}, a directory on your PATH: programs the agent "
                              "puts there would run on the host. Start with it as a workspace instead (the start checks "
                              "it after the run), or take it off your PATH")
-    for entry in checks.get("workspaces", []) + added_workspaces(record):
+    for entry in checks.get("workspaces", []) + present_workspaces(record):
         other = Path(entry["host"])
         if overlaps(real, other):
             raise ValueError(f"workspaces must not overlap: {shown(real)} and {shown(other)} "
@@ -457,7 +635,7 @@ def sandbox_name(record, real):
     (workspace_targets), so that a restart with it finds it at the same place."""
     checks = record.get("workspace_checks") or {}
     taken = {PurePosixPath(entry["sandbox"]).name for entry in checks.get("workspaces", [])[1:]}
-    taken |= {PurePosixPath(entry["sandbox"]).name for entry in added_workspaces(record)}
+    taken |= {PurePosixPath(entry["sandbox"]).name for entry in present_workspaces(record)}
     base = real.name or "root"
     name, suffix = base, 2
     while name in taken:
@@ -503,6 +681,12 @@ def save(record, entries):
 
 def added_workspaces(record):
     return [entry for entry in load(record) if entry.get("state") == "attached"]
+
+
+def present_workspaces(record):
+    """The added workspaces that are, or may be, mounted (pending, attached, partial): what names, overlaps and
+    `remove` go by."""
+    return [entry for entry in load(record) if entry.get("state") in PRESENT]
 
 
 def publish_push_rules(record, entries=None):
@@ -617,14 +801,28 @@ def add(record, value, read_only=False, out=print, runner=run_helper, finder=fin
             if mode == "rw":
                 # A link planted in it later may be meant to get another directory mounted at a later start.
                 (remember or (lambda trees: l.remember_exposed(None, trees)))([real])
-            status, error = runner("add", found, name, str(real), identity, mode)
-            if status:
-                raise ValueError(f"could not add {shown(real)}: {error or 'the helper failed'}")
-            entries = load(record)
-            entry = {"host": str(real), "sandbox": f"{WORKSPACES_DIR}/{name}", "mode": mode, "state": "attached",
+            # Recorded before the mount (pending): a save failing afterwards, or a launcher killed on the way, never
+            # leaves a mount the registry does not know (listed as pending, `remove` takes it out).
+            entry = {"host": str(real), "sandbox": f"{WORKSPACES_DIR}/{name}", "mode": mode, "state": "pending",
                      "since": time.time(), "identity": identity, "kept": False}
-            entries.append(entry)
-            save(record, entries)
+            save(record, load(record) + [entry])
+            status, error = runner("add", found, name, str(real), identity, mode)[:2]
+            if status:
+                with contextlib.suppress(OSError):  # the helper undid its mounts: the pending entry goes
+                    save(record, [other for other in load(record) if not (other.get("sandbox") == entry["sandbox"]
+                                                                         and other.get("state") == "pending")])
+                raise ValueError(f"could not add {shown(real)}: {error or 'the helper failed'}")
+            entry["state"] = "attached"
+            try:
+                entries = load(record)
+                for other in entries:
+                    if other.get("sandbox") == entry["sandbox"] and other.get("state") == "pending":
+                        other["state"] = "attached"
+                save(record, entries)
+            except OSError as exc:
+                raise ValueError(f"{shown(real)} is mounted at {entry['sandbox']}, but the run's registry could not "
+                                 f"be written ({exc.strerror or exc}): it is listed as pending; sandbox-ai workspace "
+                                 f"remove {entry['sandbox']} takes it out") from None
             pushed, why = publish_push_rules(record)
     finally:
         os.close(fd)
@@ -658,15 +856,24 @@ def add(record, value, read_only=False, out=print, runner=run_helper, finder=fin
 
 
 def matching(record, value):
-    entries = added_workspaces(record)
+    """The added workspace VALUE names: its sandbox path, its name, its host path, or any directory (relative paths
+    too) that resolves to its host path. A value that names one workspace by name and another as a directory is
+    refused (ambiguous)."""
+    entries = present_workspaces(record)
     resolved = None
-    if value.startswith(("/", "~", ".")) and not value.startswith(WORKSPACES_DIR + "/"):
+    if not value.startswith(WORKSPACES_DIR + "/"):
+        candidate = Path(value).expanduser()
         with contextlib.suppress(OSError, RuntimeError):
-            resolved = str(Path(value).expanduser().resolve())
-    for entry in entries:
-        names = (entry["sandbox"], PurePosixPath(entry["sandbox"]).name, entry["host"])
-        if value in names or resolved == entry["host"]:
-            return entry
+            if value.startswith(("/", "~", ".")) or candidate.is_dir():
+                resolved = str(candidate.resolve())
+    by_name = [e for e in entries if value in (e["sandbox"], PurePosixPath(e["sandbox"]).name, e["host"])]
+    by_directory = [e for e in entries if resolved is not None and resolved == e["host"]]
+    found = {e["sandbox"]: e for e in by_name + by_directory}
+    if len(found) > 1:
+        raise ValueError(f"{shown(value)} is ambiguous: it names {', '.join(sorted(found))} (by name and as the "
+                         f"directory {shown(resolved)}); give the sandbox path (/workspaces/NAME) or the full host path")
+    if found:
+        return next(iter(found.values()))
     started = (record.get("workspace_checks") or {}).get("workspaces", [])
     if any(value in (e.get("host"), e.get("sandbox")) or resolved == e.get("host") for e in started):
         raise ValueError(f"{shown(value)} is a workspace of the start: it stays until the run ends")
@@ -714,23 +921,36 @@ def remove(record, value, force=False, out=print, runner=run_helper, finder=find
             unknown = [reason for pid, reason in held if pid is None]
             held = [(pid, point) for pid, point in held if pid is not None]
             if unknown and not force:
-                raise ValueError(f"{unknown[0]}; --force takes it out of the sandbox's own view anyway (only a restart "
-                                 "is sure)")
+                raise ValueError(f"{entry['sandbox']}: {REFUSED_UNKNOWN} ({unknown[0]}); --force takes it out of the "
+                                 "sandbox's own view anyway (only a restart is sure)")
             if held and not force:
-                raise ValueError(f"{entry['sandbox']} has been taken into a namespace of the agent's own (process "
+                raise ValueError(f"{entry['sandbox']}: {REFUSED_COPY} (process "
                                  f"{', '.join(str(pid) for pid, _ in held[:8])}): no unmount reaches it there, only a "
                                  "restart of the sandbox takes it away. --force takes it out of the sandbox's own view")
             if busy and not force:
                 shown_busy = "; ".join(f"{pid} {shown(command, 40)} ({what})" for pid, command, what in busy[:8])
                 raise ValueError(f"{entry['sandbox']} is in use in the sandbox: {shown_busy}"
-                                 f"{' ...' if len(busy) > 8 else ''}. Let the agent leave it, or --force (what is "
-                                 "open stays usable, also for writing, until it is closed; only a restart is sure)")
-            status, error = runner("remove", found, PurePosixPath(entry["sandbox"]).name, force=force)
+                                 f"{' ...' if len(busy) > 8 else ''}: {REFUSED_IN_USE}. Let the agent leave it, or "
+                                 "--force (what is open stays usable, also for writing, until it is closed; only a "
+                                 "restart is sure)")
+            result = runner("remove", found, PurePosixPath(entry["sandbox"]).name, force=force)
+        status, error = result[:2]
+        if status == PARTIAL:
+            # Gone in some of the sandbox's namespaces, still there in others: the registry says so, and which.
+            gone = (result[2] if len(result) > 2 and isinstance(result[2], dict) else {}).get("gone", [])
+            entries = load(record)
+            for other in entries:
+                if other.get("sandbox") == entry["sandbox"] and other.get("state") in PRESENT:
+                    other.update(state="partial", gone_in=sorted(set(other.get("gone_in", [])) | set(gone)),
+                                 partial_since=time.time())
+            save(record, entries)
+            log(record, "remove-partial", entry, gone_in=gone)
+            raise ValueError(f"could not remove {entry['sandbox']}: {error or REFUSED_PARTIAL}")
         if status:
             raise ValueError(f"could not remove {entry['sandbox']}: {error or 'the helper failed'}")
         entries = load(record)
         for other in entries:
-            if other.get("sandbox") == entry["sandbox"] and other.get("state") == "attached":
+            if other.get("sandbox") == entry["sandbox"] and other.get("state") in PRESENT:
                 other.update(state="removed", removed=time.time())
         save(record, entries)
         publish_push_rules(record)
@@ -759,17 +979,21 @@ def listing(record):
               for e in checks.get("workspaces", [])]
     if not checks and record.get("workspace"):
         result.append({"host": record["workspace"], "sandbox": "/work", "mode": None, "source": "start"})
-    for entry in added_workspaces(record):
-        result.append({"host": entry["host"], "sandbox": entry["sandbox"], "mode": entry["mode"], "source": "added",
-                       "kept": bool(entry.get("kept")),
-                       "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(entry.get("since") or 0))})
+    for entry in present_workspaces(record):
+        row = {"host": entry["host"], "sandbox": entry["sandbox"], "mode": entry["mode"], "source": "added",
+               "kept": bool(entry.get("kept")), "state": entry["state"],
+               "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(entry.get("since") or 0))}
+        if entry["state"] == "partial":
+            row["gone_in"] = [pid for pid in entry.get("gone_in", []) if isinstance(pid, int)]
+        result.append(row)
     return result
 
 
 def list_lines(record, entries):
     rows = [["SANDBOX", "MODE", "SOURCE", "HOST"]]
     for entry in entries:
-        source = entry["source"] + (", kept" if entry.get("kept") else "")
+        source = entry["source"] + (", kept" if entry.get("kept") else "") + \
+            (f", {entry['state']}" if entry.get("state") not in (None, "attached") else "")
         rows.append([entry["sandbox"], entry["mode"] or "-", source, shown(entry["host"], 500)])
     widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]) - 1)]
     return ["  ".join(cell.ljust(width) for cell, width in zip(row, widths)) + "  " + row[-1] for row in rows]
@@ -815,6 +1039,10 @@ if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "--internal-helper":
         try:
             sys.exit(helper_main(sys.argv[2]))
+        except Partial as exc:
+            print(exc.strerror or str(exc), file=sys.stderr)
+            print(json.dumps({"gone": exc.gone}))
+            sys.exit(PARTIAL)
         except OSError as exc:
             print(exc.strerror or str(exc), file=sys.stderr)
             sys.exit(1)

@@ -51,6 +51,7 @@ def test_sandbox_processes_finds_this_pod_only(world):
     assert sorted(found["pids"]) == [100, 101, 102] and found["user"] == 100
     assert sorted(found["mntns"].values()) == [100, 101]  # not the infra container's, not the other sandbox's
     assert found["cgroup"].endswith("libpod_pod_abc.slice")
+    assert found["limits"].endswith("libpod_pod_abc.slice/libpod-sup.scope")  # where the start put --memory
     assert d.sandbox_processes({**record, "session_dir": str(proc / "none")}, proc) is None
 
 
@@ -63,6 +64,7 @@ def test_bubblewrap_sandboxes_are_told_apart_by_their_user_namespace(tmp_path):
     fake_process(proc, 400, 8, 40, "/user.slice/run-2.scope")
     found = d.sandbox_processes({"backend": "bwrap", "session_dir": str(session)}, proc)
     assert sorted(found["pids"]) == [300, 301] and found["cgroup"] == "/user.slice/run-1.scope"
+    assert found["limits"] == "/user.slice/run-1.scope"
 
 
 class FakeLibc:
@@ -169,7 +171,9 @@ def test_limits_through_systemd_or_the_cgroup_files(world, tmp_path, monkeypatch
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
     monkeypatch.setattr(d.shutil, "which", lambda name: "/usr/bin/" + name)
     assert d.set_limits(record, memory="4g", cpus="2", out=lines.append, finder=finder, runner=systemctl) == "systemd"
-    assert commands[0][:5] == ["systemctl", "--user", "set-property", "--runtime", "libpod_pod_abc.slice"]
+    # The agent container's own scope, where Podman put --memory/--cpus/--pids-limit: never the pod's slice (a
+    # higher limit there would change nothing, a lower one would stay unseen by the memory watch).
+    assert commands[0][:5] == ["systemctl", "--user", "set-property", "--runtime", "libpod-sup.scope"]
     assert "MemoryMax=4G" in commands[0] and "CPUQuota=200%" in commands[0]
     # Without systemd: the delegated cgroup files.
     cgroup = tmp_path / "cg" / record_cgroup(proc, record).lstrip("/")
@@ -205,7 +209,88 @@ def test_limits_keep_to_the_runs_security_mode(world, monkeypatch):
 
 
 def record_cgroup(proc, record):
-    return d.sandbox_processes(record, proc)["cgroup"]
+    return d.sandbox_processes(record, proc)["limits"]
+
+
+def test_the_limits_go_to_the_containers_scope_also_below_it_with_crun(tmp_path):
+    """crun puts the container's processes into a cgroup below its scope (.../libpod-<id>.scope/container): the
+    limits are still the scope's, the pod is still the slice above it."""
+    proc, session = tmp_path / "proc", tmp_path / "session"
+    session.mkdir()
+    (session / "config.json").write_text("{}")
+    pod = "/user.slice/user-1000.slice/user@1000.service/user.slice/libpod_pod_abc.slice"
+    fake_process(proc, 100, 1, 10, f"{pod}/libpod-sup.scope/container", config="{}")
+    fake_process(proc, 102, 1, 12, f"{pod}/libpod-infra.scope", sandbox=False)
+    found = d.sandbox_processes({"backend": "podman", "session_dir": str(session)}, proc)
+    assert found["limits"] == f"{pod}/libpod-sup.scope" and found["cgroup"] == pod
+    assert sorted(found["pids"]) == [100, 102]
+    assert d.podman_groups("/x/libpod-conmon-1.scope") == ("/x/libpod-conmon-1.scope",) * 2  # no container's
+    assert d.podman_groups("/user.slice/run-1.scope") == ("/user.slice/run-1.scope",) * 2
+
+
+def limits_world(tmp_path, memory="8589934592", high="7902739251", cpu="400000 100000", pids="4096", pod=None):
+    root = tmp_path / "cg"
+    scope = root / "user.slice" / "pod.slice" / "libpod-sup.scope"
+    scope.mkdir(parents=True)
+    for name, value in (("memory.max", memory), ("memory.high", high), ("cpu.max", cpu), ("pids.max", pids)):
+        (scope / name).write_text(value + "\n")
+    for name, value in (pod or {}).items():
+        (scope.parent / name).write_text(value + "\n")
+    found = {"pids": [100], "user": 100, "cgroup": "/user.slice/pod.slice", "limits": "/user.slice/pod.slice/libpod-sup.scope"}
+    return root, lambda record: found
+
+
+def test_limits_show_reads_what_the_run_has_now(tmp_path):
+    root, finder = limits_world(tmp_path)
+    shown = d.current_limits({"run": "mine"}, finder, root)
+    assert shown == {"memory": 8 << 30, "memory_high": 7902739251, "cpus": 4.0, "pids": 4096}
+    assert d.limits_line(shown) == "memory 8g, memory.high 7.4g, cpus 4, pids 4096"
+    # No limit: null, "none"; half a CPU stays a fraction.
+    root, finder = limits_world(tmp_path / "b", memory="max", high="max", cpu="max 100000", pids="max")
+    shown = d.current_limits({"run": "mine"}, finder, root)
+    assert shown == {"memory": None, "memory_high": None, "cpus": None, "pids": None}
+    assert d.limits_line(shown) == "memory none, memory.high none, cpus none, pids none"
+    root, finder = limits_world(tmp_path / "c", cpu="150000 100000", memory="536870912")
+    assert d.current_limits({}, finder, root)["cpus"] == 1.5 and d.limits_line(d.current_limits({}, finder, root)) \
+        .startswith("memory 512m, ")
+    # A smaller limit on a parent (the pod's slice) binds too: shown as what the run has.
+    root, finder = limits_world(tmp_path / "d", pod={"memory.max": str(2 << 30), "pids.max": "max"})
+    assert d.current_limits({}, finder, root)["memory"] == 2 << 30
+    with pytest.raises(ValueError, match="has it ended"):
+        d.current_limits({}, lambda record: None, root)
+    with pytest.raises(ValueError, match="was not found"):
+        d.current_limits({}, lambda record: {"cgroup": "/gone", "limits": "/gone"}, root)
+
+
+def test_limits_show_on_the_command_line(world, tmp_path, monkeypatch, capsys):
+    """`limits RUN --show --json` (what the app and the web UI call): the JSON shape exactly; nothing written, and
+    refused together with a change."""
+    proc, record = world
+    root, finder = limits_world(tmp_path)
+    net = d.module("net")
+    monkeypatch.setattr(net, "running", lambda: {"mine": record})
+    real = d.current_limits
+    monkeypatch.setattr(d, "current_limits", lambda r: real(r, finder, root))
+    changed = []
+    monkeypatch.setattr(d, "set_limits", lambda *a, **kw: changed.append(a))
+    before = {path: path.read_text() for path in root.rglob("*") if path.is_file()}
+    lines = []
+    assert d.main(["mine", "--show", "--json"], out=lines.append, prog="limits") == 0
+    data = json.loads(lines[0])
+    assert list(data) == ["memory", "memory_high", "cpus", "pids"]
+    assert data == {"memory": 8589934592, "memory_high": 7902739251, "cpus": 4.0, "pids": 4096}
+    assert d.main(["mine", "--show"], out=lines.append, prog="limits") == 0
+    assert lines[-1] == "memory 8g, memory.high 7.4g, cpus 4, pids 4096"
+    assert changed == [] and {path: path.read_text() for path in root.rglob("*") if path.is_file()} == before
+    for extra in (["--memory", "4g"], ["--cpus", "2"], ["--pids", "10"]):
+        with pytest.raises(SystemExit) as exc:
+            d.main(["mine", "--show", *extra], out=lines.append, prog="limits")
+        assert exc.value.code == 2
+        assert "--show changes nothing" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        d.main(["mine", "--json"], out=lines.append, prog="limits")
+    assert changed == []
+
 
 
 # --- device identity, rules, replug: a fake sysfs and udev ----------------------------------------------------------

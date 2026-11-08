@@ -101,11 +101,15 @@ def test_a_directory_swapped_after_the_check_is_not_mounted(space, tmp_path):
         w.helper("add", 100, "project", [100], str(link), identity, "rw", proc, FakeLibc())  # no link followed
 
 
-def test_read_only_needs_mount_setattr_and_rw_goes_without(space):
-    proc, _, source, identity = space
-    with pytest.raises(OSError, match="5.12"):
-        w.helper("add", 100, "project", [100], str(source), identity, "ro", proc, FakeLibc(setattr_errno=errno.ENOSYS))
-    w.helper("add", 100, "project", [100], str(source), identity, "rw", proc, FakeLibc(setattr_errno=errno.ENOSYS))
+def test_without_mount_setattr_nothing_is_added(space):
+    """Without mount_setattr (Linux < 5.12) a clone keeps set-user-ID programs and device files: no add at all,
+    writable or not, and the way on is said (a restart with the workspace)."""
+    proc, mounts, source, identity = space
+    for mode in ("ro", "rw"):
+        c = FakeLibc(setattr_errno=errno.ENOSYS)
+        with pytest.raises(OSError, match=r"5\.12.*resume NAME --restart --workspace DIR"):
+            w.helper("add", 100, "project", [100], str(source), identity, mode, proc, c)
+        assert w.SYS_MOVE_MOUNT not in kinds(c.calls) and not (mounts / "project").exists()
     with pytest.raises(OSError, match="nosuid"):
         w.helper("add", 100, "project", [100], str(source), identity, "rw", proc, FakeLibc(setattr_errno=errno.EPERM))
 
@@ -566,3 +570,250 @@ def test_remove_refuses_while_the_agent_holds_a_copy(run):
     w.remove(record, "fresh", force=True, out=lines.append, runner=runner, finder=fake_found,
              using=lambda f, p: [], taken=lambda f, p, group=None: [(103, "/tmp/mine")])
     assert any("namespace of its own (process 103)" in line for line in lines)
+
+
+# --- review findings: kernel trees, pending and partial states, refusal phrases, PIDs with start times -------------
+
+
+def test_the_kernels_trees_are_never_a_workspace(run):
+    """/proc, /sys (its cgroup tree), /dev (/dev/shm): refused for a live add as at a start, also read-only."""
+    record, _ = run
+    for tree in ("/proc", "/proc/1/root", "/sys", "/sys/fs/cgroup", "/dev", "/dev/shm"):
+        for read_only in (False, True):
+            with pytest.raises(ValueError, match="kernel's and the devices' trees"):
+                w.judged(record, Path(tree), read_only)
+    if Path("/dev/shm").is_dir():
+        with pytest.raises(ValueError, match="kernel's and the devices' trees"):
+            w.add(record, "/dev/shm", read_only=True, runner=lambda *a, **kw: (0, ""), finder=fake_found,
+                  remember=lambda trees: None)
+        assert w.present_workspaces(record) == []
+
+
+def test_kernel_file_systems_in_the_clone_are_found_by_the_mount_table():
+    table = ("1 1 0:1 / / rw - ext4 /dev/sda1 rw\n"
+             "20 1 0:20 / /srv/chroot rw shared:1 - ext4 /dev/sdb rw\n"
+             "21 20 0:4 / /srv/chroot/proc rw - proc proc rw\n"
+             "22 1 0:5 / /srv/other/proc rw - proc proc rw\n"
+             "23 1 0:30 / /mnt/sys rw - sysfs sysfs rw\n"
+             "24 1 0:31 / /srv/my\\040chroot/dev rw - devtmpfs udev rw\n"
+             "25 20 0:32 / /srv/chroot/sys/fs/cgroup rw - cgroup2 cgroup2 rw\n"
+             "26 1 0:33 / /srv/project/data rw - fuse.sshfs host:/x rw\n")
+    assert w.kernel_mounts(table, 20, "/srv/chroot") == [("/srv/chroot/proc", "proc"),
+                                                         ("/srv/chroot/sys/fs/cgroup", "cgroup2")]
+    assert w.kernel_mounts(table, 1, "/srv/chroot/sys") == [("/srv/chroot/sys/fs/cgroup", "cgroup2")]
+    assert w.kernel_mounts(table, 1, "/srv/project") == []         # another file system below it: fine
+    assert w.kernel_mounts(table, 1, "/srv/chroo") == []           # a prefix of a name is not a parent
+    assert w.kernel_mounts(table, 23, "/mnt/sys/kernel") == [("/mnt/sys", "sysfs")]  # lies on one itself
+    assert w.kernel_mounts(table, 1, "/srv/my chroot") == [("/srv/my chroot/dev", "devtmpfs")]
+    assert w.kernel_mounts(table, 99, "/x") == [("/x", "unknown")]  # its mount not in the table: never "none"
+
+
+def test_the_helper_refuses_a_directory_holding_a_kernel_file_system(space, tmp_path, monkeypatch):
+    proc, mounts, source, identity = space
+    fd = os.open(source, os.O_PATH)
+    holder = w.mount_id(fd)
+    os.close(fd)
+    table = tmp_path / "mountinfo"
+    monkeypatch.setattr(w, "MOUNTINFO", table)
+    table.write_text(f"{holder} 1 0:1 / / rw - tmpfs t rw\n{holder + 7000} {holder} 0:4 / {source}/proc rw - proc proc rw\n")
+    c = FakeLibc()
+    with pytest.raises(OSError, match=r"/proc \(proc\), a file system of the kernel's own"):
+        w.helper("add", 100, "project", [100, 101], str(source), identity, "ro", proc, c)
+    assert w.SYS_MOVE_MOUNT not in kinds(c.calls) and w.SYS_MOUNT_SETATTR not in kinds(c.calls)
+    table.write_text(f"{holder} 1 0:1 / / rw - tmpfs t rw\n{holder + 7000} {holder} 0:4 / {source}/data rw - ext4 x rw\n")
+    w.helper("add", 100, "project", [100], str(source), identity, "ro", proc, FakeLibc())  # another disk: added
+    table.write_text("1 1 0:1 / / rw - tmpfs t rw\n")  # its mount not found: refused
+    with pytest.raises(OSError, match="cannot be told"):
+        w.helper("add", 100, "project", [100], str(source), identity, "ro", proc, FakeLibc())
+
+
+def test_a_relative_directory_names_its_workspace_and_an_ambiguous_value_is_refused(run, monkeypatch):
+    record, tmp = run
+    runner = lambda op, found, name, *rest, **kw: (0, "")  # noqa: E731
+    w.add(record, make(tmp / "elsewhere" / "lib"), out=lambda line: None, runner=runner, finder=fake_found,
+          remember=lambda trees: None)  # /workspaces/lib-2
+    w.add(record, make(tmp / "a" / "docs"), out=lambda line: None, runner=runner, finder=fake_found,
+          remember=lambda trees: None)  # /workspaces/docs
+    w.add(record, make(tmp / "b" / "notes"), out=lambda line: None, runner=runner, finder=fake_found,
+          remember=lambda trees: None)  # /workspaces/notes
+    monkeypatch.chdir(tmp / "elsewhere")
+    assert w.matching(record, "lib")["sandbox"] == "/workspaces/lib-2"  # a directory here, not a name
+    make(tmp / "c")
+    (tmp / "c" / "docs").symlink_to(tmp / "b" / "notes")
+    monkeypatch.chdir(tmp / "c")
+    with pytest.raises(ValueError, match="ambiguous.*/workspaces/docs, /workspaces/notes"):
+        w.matching(record, "docs")  # the name of one, the directory of another
+    assert w.matching(record, "/workspaces/docs")["host"] == str(tmp / "a" / "docs")
+    assert w.matching(record, str(tmp / "b" / "notes"))["sandbox"] == "/workspaces/notes"
+    assert w.matching(record, "notes")["sandbox"] == "/workspaces/notes"  # no directory of that name here
+
+
+def test_an_add_is_recorded_pending_before_the_mount_and_a_failed_save_leaves_it_known(run, monkeypatch):
+    record, tmp = run
+    seen = []
+
+    def runner(op, found, name, *rest, **kw):
+        seen.append([(e["sandbox"], e["state"]) for e in w.load(record)])
+        return 0, ""
+    real_save, saves = w.save, []
+
+    def save(record_, entries):
+        saves.append(1)
+        if len(saves) == 2:  # the one after the mount
+            raise OSError(28, "No space left on device")
+        real_save(record_, entries)
+    monkeypatch.setattr(w, "save", save)
+    with pytest.raises(ValueError, match="is mounted at /workspaces/fresh.*listed as pending"):
+        w.add(record, make(tmp / "fresh"), out=lambda line: None, runner=runner, finder=fake_found,
+              remember=lambda trees: None)
+    assert seen == [[("/workspaces/fresh", "pending")]]  # recorded before the helper ran
+    monkeypatch.setattr(w, "save", real_save)
+    listed = w.listing(record)[-1]
+    assert listed["sandbox"] == "/workspaces/fresh" and listed["state"] == "pending"
+    assert "added, pending" in "\n".join(w.list_lines(record, w.listing(record)))
+    with pytest.raises(ValueError, match="must not overlap"):  # still counts: it may be mounted
+        w.judged(record, tmp / "fresh")
+    calls = []
+    w.remove(record, "fresh", out=lambda line: None, runner=lambda op, found, name, **kw: calls.append(op) or (0, ""),
+             finder=fake_found, using=lambda f, p: [])
+    assert calls == ["remove"] and w.present_workspaces(record) == []
+    # A mount that fails takes its pending entry out again.
+    with pytest.raises(ValueError, match="could not add"):
+        w.add(record, make(tmp / "fresh"), runner=lambda *a, **kw: (1, "EPERM"), finder=fake_found,
+              remember=lambda trees: None)
+    assert w.present_workspaces(record) == []
+
+
+class NamespaceLibc(FakeLibc):
+    """Where /workspaces/NAME is mounted, by mount namespace (the order setns enters them: 0, 1 ...): move_mount
+    mounts it in the current one, an unmount takes it out; a strict unmount fails (EBUSY) in BUSY_IN; open_tree
+    fails with CLONE_FAILS."""
+
+    def __init__(self, count, busy_in=(), clone_fails=False):
+        super().__init__()
+        self.order, self.where, self.mounted_in = [], None, set(range(count))
+        self.busy_in, self.clone_fails = set(busy_in), clone_fails
+
+    def index(self):
+        return self.order.index(self.where)
+
+    def setns(self, fd, kind):
+        if kind == w.CLONE_NEWNS:
+            if fd not in self.order:
+                self.order.append(fd)
+            self.where = fd
+        return super().setns(fd, kind)
+
+    def syscall(self, number, *args):
+        if number == w.SYS_OPEN_TREE and self.clone_fails:
+            self.calls.append(("syscall", number))
+            ctypes.set_errno(errno.EPERM)
+            return -1
+        if number == w.SYS_MOVE_MOUNT:
+            self.mounted_in.add(self.index())
+        return super().syscall(number, *args)
+
+    def umount2(self, path, flags):
+        self.calls.append(("umount2", path, flags))
+        if not flags & w.MNT_DETACH and self.index() in self.busy_in:
+            ctypes.set_errno(errno.EBUSY)
+            return -1
+        self.mounted_in.discard(self.index())
+        return 0
+
+
+def test_a_removal_failing_in_a_later_namespace_is_undone_in_the_earlier_ones(space, monkeypatch):
+    proc, mounts, _, _ = space
+    (mounts / "project").mkdir()
+    (mounts / "project" / "keep").write_text("")  # the mount point stays while another namespace has it
+    c = NamespaceLibc(2, busy_in={1})
+    monkeypatch.setattr(w, "mounted", lambda base, target: c.index() in c.mounted_in)
+    with pytest.raises(OSError, match=w.REFUSED_BUSY) as exc:
+        w.helper("remove", 100, "project", [100, 101], proc=proc, c=c)
+    assert not isinstance(exc.value, w.Partial)
+    assert c.mounted_in == {0, 1}  # mounted again where it had gone: as it was
+    # Cannot be mounted again: Partial, which says where it is gone.
+    c = NamespaceLibc(2, busy_in={1}, clone_fails=True)
+    monkeypatch.setattr(w, "mounted", lambda base, target: c.index() in c.mounted_in)
+    with pytest.raises(w.Partial, match=w.REFUSED_PARTIAL) as exc:
+        w.helper("remove", 100, "project", [100, 101], proc=proc, c=c)
+    assert exc.value.gone == [100] and c.mounted_in == {1}
+    assert "--force" in str(exc.value)
+
+
+def test_a_partial_removal_is_recorded_with_its_namespaces_and_force_finishes_it(run):
+    record, tmp = run
+    ok = lambda op, found, name, *rest, **kw: (0, "")  # noqa: E731
+    w.add(record, make(tmp / "fresh"), out=lambda line: None, runner=ok, finder=fake_found, remember=lambda t: None)
+    partial = lambda op, found, name, **kw: (w.PARTIAL, f"/workspaces/fresh is {w.REFUSED_PARTIAL}: ...", {"gone": [100]})  # noqa: E731,E501
+    with pytest.raises(ValueError, match=w.REFUSED_PARTIAL):
+        w.remove(record, "fresh", runner=partial, finder=fake_found, using=lambda f, p: [])
+    entry = w.load(record)[-1]
+    assert entry["state"] == "partial" and entry["gone_in"] == [100]
+    assert w.listing(record)[-1]["state"] == "partial" and w.listing(record)[-1]["gone_in"] == [100]
+    assert w.added_workspaces(record) == []  # not offered to the push check or a restart while half there
+    w.remove(record, "/workspaces/fresh", force=True, out=lambda line: None, runner=ok, finder=fake_found,
+             using=lambda f, p: [])
+    assert w.load(record)[-1]["state"] == "removed" and w.present_workspaces(record) == []
+    log = [json.loads(line)["event"] for line in (tmp / "logs" / "workspaces.jsonl").read_text().splitlines()]
+    assert log == ["add", "remove-partial", "remove"]
+
+
+def test_each_refusal_of_remove_says_its_own_reason(run):
+    record, tmp = run
+    ok = lambda op, found, name, *rest, **kw: (0, "")  # noqa: E731
+    w.add(record, make(tmp / "fresh"), out=lambda line: None, runner=ok, finder=fake_found, remember=lambda t: None)
+    cases = {w.REFUSED_IN_USE: dict(using=lambda f, p: [(101, "bash", "cwd")]),
+             w.REFUSED_COPY: dict(taken=lambda f, p, group=None: [(103, "/tmp/mine")]),
+             w.REFUSED_UNKNOWN: dict(taken=lambda f, p, group=None: [(None, "the sandbox's own mount was not found")])}
+    for phrase, options in cases.items():
+        options.setdefault("using", lambda f, p: [])
+        with pytest.raises(ValueError) as exc:
+            w.remove(record, "fresh", runner=ok, finder=fake_found, **options)
+        text = str(exc.value)
+        assert phrase in text and "--force" in text
+        assert not any(other in text for other in cases if other != phrase), text
+    phrases = [w.REFUSED_IN_USE, w.REFUSED_COPY, w.REFUSED_UNKNOWN, w.REFUSED_BUSY, w.REFUSED_PARTIAL]
+    assert len(set(phrases)) == 5 and all(f'"{phrase}"' in (ROOT / "sandbox/workspaces.py").read_text()
+                                          for phrase in phrases)  # documented in the module
+
+
+def stat_line(pid, start):
+    """/proc/PID/stat with START as field 22 (and a command holding a space and a parenthesis)."""
+    return f"{pid} (my (x) cmd) S " + " ".join(str(n) for n in range(4, 22)) + f" {start} 0 0\n"
+
+
+def test_the_helper_refuses_a_pid_that_names_another_process_now(space):
+    proc, mounts, source, identity = space
+    for pid, start in ((100, 5000), (101, 5001)):
+        (proc / str(pid) / "stat").write_text(stat_line(pid, start))
+    assert w.start_time(100, proc) == 5000 and w.start_time(999, proc) is None
+    c = FakeLibc()
+    with pytest.raises(OSError, match="process 101 of the sandbox is gone"):
+        w.helper("add", 100, "project", [100, 101], str(source), identity, "rw", proc, c,
+                 starts={"100": 5000, "101": 4000})  # 101 started again since it was found
+    assert c.calls == []  # not even the user namespace entered
+    w.helper("add", 100, "project", [100, 101], str(source), identity, "rw", proc, FakeLibc(),
+             starts={"100": 5000, "101": 5001})
+    assert (mounts / "project").is_dir()
+
+
+def test_run_helper_hands_the_start_times_over(tmp_path, monkeypatch):
+    proc = tmp_path / "proc"
+    for pid, start in ((100, 5000), (101, 5001)):
+        (proc / str(pid) / "ns").mkdir(parents=True)
+        (proc / str(pid) / "ns" / "user").symlink_to("user:[1]")
+        (proc / str(pid) / "stat").write_text(stat_line(pid, start))
+    found = {"user": 100, "mntns": {"a": 100, "b": 101}}
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(json.loads(command[-1]))
+        return __import__("types").SimpleNamespace(returncode=w.PARTIAL, stdout='{"gone": [100]}\n',
+                                                   stderr="/workspaces/x is partly removed")
+    monkeypatch.setattr(w.subprocess, "run", run)
+    assert w.run_helper("remove", found, "x", proc=proc) == (w.PARTIAL, "/workspaces/x is partly removed",
+                                                             {"gone": [100]})
+    assert commands[0]["starts"] == {"100": 5000, "101": 5001} and commands[0]["targets"] == [100, 101]
+    (proc / "101" / "stat").unlink()  # ended meanwhile
+    assert w.run_helper("remove", found, "x", proc=proc)[0] == 1 and len(commands) == 1
