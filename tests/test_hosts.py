@@ -770,3 +770,53 @@ def test_hosts_file_lock(remote):
     lock.chmod(0o644)
     with h.hosts_file_lock():
         assert lock.stat().st_mode & 0o777 == 0o600
+
+
+def not_root(remote):
+    """The SSH user there is no root (this test may run as root): id -u says 1000."""
+    fake = remote["home"] / "rbin/id"
+    fake.write_text('#!/bin/sh\nif [ "$1" = -u ]; then echo 1000; else /usr/bin/id "$@"; fi\n')
+    fake.chmod(0o755)
+
+
+def test_install_copies_this_sandbox_ai_and_installs_it_for_the_user(remote):
+    """hosts install: this machine's tree goes to the host (no release server needed there), install.sh installs it
+    for the SSH user in ~/.local, the temporary folder is gone afterwards, and the host's sandbox-ai answers."""
+    h.save({"ct1": h.check("ct1", {"ssh": "user@ct1"})})
+    (remote["home"] / ".local/bin/sandbox-ai").unlink(missing_ok=True)  # nothing there yet
+    not_root(remote)
+    lines = []
+    assert h.cli(["install", "ct1", "--no-sudo"], lines.append) == 0, lines
+    assert "installed for the user" in lines[0], lines
+    installed = list((remote["home"] / ".local/share/sandbox-ai").glob("versions/*/sandbox/agent_sandbox.py"))
+    assert installed, "install.sh put it into ~/.local/share/sandbox-ai"
+    sent = [json.loads(line) for line in remote["log"].read_text().splitlines()]
+    assert any("tar -xzf - -C" in args[-1] for args in sent) and any("--no-app-deps" in args[-1] for args in sent)
+
+
+def test_install_needs_root_for_a_system_installation(remote):
+    h.save({"ct1": h.check("ct1", {"ssh": "user@ct1"})})
+    not_root(remote)
+    result = h.install("ct1", mode="system", sudo=False)
+    assert "needs root" in result["error"] and not result["sudo"]
+    (remote["home"] / "sudo").write_text("password")
+    result = h.install("ct1", mode="system")
+    assert result["needs_password"] and "wants a password" in result["error"]
+    assert not list(Path("/tmp").glob("sandbox-ai-install.*")), "the copy is removed when nothing is installed"
+
+
+def test_install_bundle_and_arguments(tmp_path):
+    import io
+    import tarfile
+    names = tarfile.open(fileobj=io.BytesIO(h.install_bundle("here")), mode="r:gz").getnames()
+    assert "install.sh" in names and "sandbox/agent_sandbox.py" in names
+    assert not any("__pycache__" in n or n == ".git" or n.startswith(".git/") or n.endswith(".pyc") for n in names)
+    small = tarfile.open(fileobj=io.BytesIO(h.install_bundle("download")), mode="r:gz").getnames()
+    assert set(small) <= {"install.sh", "sandbox/release-signers"}
+    assert h.install_args("user") == '--from "$d" --user --no-app-deps'
+    assert h.install_args("system", "/opt", "download", "0.1.78") == "--system --prefix /opt --no-app-deps --version 0.1.78"
+    for bad in (("root",), ("system", "/opt/../etc"), ("system", "relative"), ("user", None, "here", "1.2")):
+        with pytest.raises(ValueError):
+            h.install_args(*bad)
+    with pytest.raises(ValueError, match="no sandbox-ai tree"):
+        h.install_bundle("here", tmp_path)

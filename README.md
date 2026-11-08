@@ -2260,6 +2260,8 @@ sandbox-ai hosts test ct1                 # SSH, its sandbox-ai version, its doc
 sandbox-ai hosts run ct1 -- list          # sandbox-ai list on ct1
 sandbox-ai hosts run ct1 -- attach web    # into a session there (a terminal over SSH)
 sandbox-ai hosts list                     # each host's sandbox-ai version and whether an update is there
+sandbox-ai hosts install ct1              # sandbox-ai onto ct1 (this machine's copy; --download: its signed release)
+sandbox-ai hosts install ct1 --system     # for every user there: as root over SSH, else with sudo
 sandbox-ai hosts update ct1               # sandbox-ai update on ct1: old -> new version
 sandbox-ai hosts update --all             # every host of the list, one after the other, and a summary
 sandbox-ai hosts remove ct1

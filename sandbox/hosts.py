@@ -12,6 +12,10 @@
   sandbox-ai hosts update NAME...|--all [--version X.Y.Z] [--sudo] [--jobs N] [--json]
                                                        the host's own `sandbox-ai update` (signed, as install.sh
                                                        installed it): old -> new version per host, a summary
+  sandbox-ai hosts install NAME [--user|--system [--prefix DIR]] [--sudo|--no-sudo] [--from-here|--download
+                       [--version X.Y.Z]] [--json]     install sandbox-ai there: this machine's copy (default) or
+                                                       the signed release the host downloads; for the SSH user, or
+                                                       for every user as root (SSH as root, or with sudo)
   sandbox-ai hosts run NAME -- ARGS...                 `sandbox-ai ARGS` on that host (e.g. -- list --json)
 
 The desktop app and the web interface (sandbox-ai web) use the same list (~/.config/sandbox-ai/hosts.json) and
@@ -844,6 +848,9 @@ def update(name, version=None, sudo=None, path=None, runner=subprocess.run):
         return result
     args = update_args(info, version)
     use_sudo = bool(entry.get("update_sudo")) if sudo is None else bool(sudo)
+    if use_sudo and str(entry.get("ssh", "")).startswith("root@"):
+        use_sudo = False
+        result["notes"].append("without sudo: the SSH user is root")
     if use_sudo and info["kind"] == "user":
         use_sudo = False
         result["notes"].append("without sudo: the installation there is the user's own (as root it would become "
@@ -895,6 +902,201 @@ def update_terminal(name, version=None, path=None, runner=subprocess.run):
         raise ValueError(why)
     return argv(name, update_args(info, version), tty=True, path=path,
                 sudo="prompt" if info["kind"] != "user" else None)
+
+
+# --- installing sandbox-ai on a host (hosts install) ------------------------------------------------------------
+#
+# The host needs sshd, bash, tar, gzip and python3; sandbox-ai itself not. This machine's own sandbox-ai is copied
+# there (SOURCE "here": the tree this command runs from, so the host gets exactly this version and needs no access
+# to the release server), or only its install.sh with the release keys (SOURCE "download": the host fetches the
+# signed release itself). Both are unpacked into a private temporary folder there and installed with install.sh:
+# for the SSH user (MODE "user": ~/.local/share/sandbox-ai), or for every user (MODE "system": PREFIX/lib/sandbox-ai,
+# root's: as root over SSH, or with sudo: `sudo -n`, which never asks; when sudo wants a password, a terminal asks).
+
+INSTALL_TIMEOUT = 900
+SKIPPED = {".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".venv", "node_modules", "build", "dist"}
+SKIPPED_FILES = {"uv.lock", "pytest.txt", "tests.txt"}
+
+
+def tree_root():
+    """The sandbox-ai tree this command runs from (the folder holding install.sh and sandbox/)."""
+    return Path(__file__).resolve().parent.parent
+
+
+def install_bundle(source="here", root=None):
+    """The gzipped tar sent to the host: the whole tree (SOURCE "here"; no caches, VCS data or build output), or only
+    install.sh and the release keys (SOURCE "download")."""
+    import io
+    import tarfile
+    root = Path(root or tree_root())
+    if not (root / "install.sh").is_file() or not (root / "sandbox" / "agent_sandbox.py").is_file():
+        raise ValueError(f"{printable(str(root))} is no sandbox-ai tree with install.sh: install from a release "
+                         "on that host instead (--download)")
+
+    def keep(info):
+        parts = Path(info.name).parts
+        if any(part in SKIPPED for part in parts) or parts[-1] in SKIPPED_FILES or parts[-1].endswith(".pyc"):
+            return None
+        if not (info.isfile() or info.isdir() or info.issym()):
+            return None
+        info.uid = info.gid = 0
+        info.uname = info.gname = ""
+        return info
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        if source == "here":
+            for entry in sorted(root.iterdir()):
+                archive.add(entry, arcname=entry.name, filter=keep)
+        else:
+            archive.add(root / "install.sh", arcname="install.sh", filter=keep)
+            if (root / "sandbox" / "release-signers").is_file():
+                archive.add(root / "sandbox" / "release-signers", arcname="sandbox/release-signers", filter=keep)
+    return buffer.getvalue()
+
+
+PROBE = ('printf "uid=%s\\n" "$(id -u)"; for tool in bash tar gzip python3; do command -v "$tool" >/dev/null 2>&1 '
+         '|| printf "missing=%s\\n" "$tool"; done; if [ "$(id -u)" != 0 ]; then if ! command -v sudo >/dev/null 2>&1; '
+         'then echo sudo=none; elif sudo -n true 2>/dev/null; then echo sudo=ok; else echo sudo=password; fi; fi; '
+         'v=$({ command -v sandbox-ai >/dev/null 2>&1 && sandbox-ai --version; } 2>/dev/null || '
+         '"$HOME/.local/bin/sandbox-ai" --version 2>/dev/null); printf "installed=%s\\n" "$v"')
+
+
+def remote_shell(entry, script, input=None, timeout=60, runner=subprocess.run, tty=False):
+    """(status, stdout bytes, stderr text) of SCRIPT run by the login shell of host ENTRY (no sandbox-ai needed);
+    INPUT: bytes on its standard input."""
+    command = [*ssh_base(entry, tty), script]
+    if tty:
+        return runner(command).returncode, b"", ""
+    try:
+        done = runner(command, input=input if input is not None else b"", capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return 124, b"", f"no answer within {timeout} s"
+    except OSError as exc:
+        return 127, b"", f"{command[0]}: {exc.strerror}"
+    err = done.stderr.decode("utf-8", "replace") if isinstance(done.stderr, bytes) else (done.stderr or "")
+    out = done.stdout if isinstance(done.stdout, bytes) else (done.stdout or "").encode()
+    return done.returncode, out, err
+
+
+def install_args(mode, prefix=None, source="here", version=None, folder="$d"):
+    """install.sh's arguments on the host (FOLDER: where the bundle lies there, a shell word)."""
+    if mode not in ("user", "system"):
+        raise ValueError("the mode is user or system")
+    if prefix is not None and not re.fullmatch(r"/[A-Za-z0-9._/-]{0,200}", prefix) or prefix and ".." in prefix:
+        raise ValueError("--prefix is an absolute path of letters, digits, . _ - and /")
+    if version is not None and not VERSION.fullmatch(version):
+        raise ValueError("--version expects X.Y.Z")
+    # No PySide6 download on a host: the app runs where you are (it reaches the hosts over SSH).
+    words = (["--user"] if mode == "user" else ["--system", "--prefix", prefix or "/usr/local"]) + ["--no-app-deps"]
+    words += ["--version", version] if version else []
+    quoted = " ".join(shlex.quote(word) for word in words)
+    return (f'--from "{folder}" ' if source == "here" else "") + quoted
+
+
+def installer_script(folder, args, sudo=None):
+    """The script that runs install.sh from FOLDER on the host and removes the folder afterwards."""
+    prefix = SUDO[sudo] if sudo else ""
+    return (f"d={shlex.quote(folder)}; case $d in /*/sandbox-ai-install.*) ;; *) exit 2 ;; esac; "
+            f"trap 'rm -rf -- \"$d\"' EXIT; {prefix}bash \"$d/install.sh\" {args}")
+
+
+def install(name, mode=None, prefix=None, sudo=None, source="here", version=None, path=None,
+            runner=subprocess.run, terminal=False):
+    """Install sandbox-ai on host NAME (see above). MODE None: "system" when the SSH user is root, else "user".
+    SUDO None: with sudo when a system installation needs it; False: never (refused when it would be needed).
+    TERMINAL: when sudo wants a password, ask for it in this terminal. {"name", "before", "after", "changed",
+    "mode", "prefix", "sudo", "root", "source", "error", "needs_password", "output", "notes"}."""
+    if name == LOCAL:
+        raise ValueError("this machine installs with install.sh itself (see sandbox-ai update)")
+    if source not in ("here", "download"):
+        raise ValueError("the source is here or download")
+    entry = load(path).get(name)
+    if entry is None:
+        raise ValueError(f"no host {printable(name)}; see: sandbox-ai hosts list")
+    result = {"name": name, "before": None, "after": None, "changed": False, "mode": mode, "prefix": prefix,
+              "sudo": False, "root": False, "source": source, "error": None, "needs_password": False, "output": "",
+              "notes": []}
+    status, out, err = remote_shell(entry, PROBE, timeout=CONNECT_TIMEOUT + 30, runner=runner)
+    if status != 0:
+        result["error"] = failure(status, "", err)
+        return result
+    facts = dict(line.split("=", 1) for line in out.decode("utf-8", "replace").splitlines() if "=" in line)
+    missing = [line.split("=", 1)[1] for line in out.decode("utf-8", "replace").splitlines()
+               if line.startswith("missing=")]
+    if missing:
+        result["error"] = f"{name} lacks {', '.join(printable(m) for m in missing)}: install them there first"
+        return result
+    result["root"] = facts.get("uid") == "0"
+    found = VERSION.search(facts.get("installed", ""))
+    result["before"] = found.group(0) if found else None
+    mode = mode or ("system" if result["root"] else "user")
+    result["mode"], result["prefix"] = mode, (prefix or "/usr/local") if mode == "system" else None
+    if mode == "user" and result["root"]:
+        result["notes"].append("for root (the SSH user): ~/.local of root")
+    use_sudo = mode == "system" and not result["root"]
+    if use_sudo and sudo is False:
+        result["error"] = (f"a system installation on {name} needs root: the SSH user is no root; allow sudo "
+                           "(--sudo) or install for the user (--user)")
+        return result
+    if use_sudo and facts.get("sudo") == "none":
+        result["error"] = f"{name} has no sudo, and the SSH user is no root: install for the user (--user)"
+        return result
+    result["sudo"] = use_sudo
+    try:
+        bundle = install_bundle(source)
+    except (OSError, ValueError) as exc:
+        result["error"] = printable(str(exc))
+        return result
+    upload = ('umask 077 && d=$(mktemp -d "${TMPDIR:-/tmp}/sandbox-ai-install.XXXXXX") && tar -xzf - -C "$d" '
+              '&& printf "%s\\n" "$d"')
+    status, out, err = remote_shell(entry, upload, input=bundle, timeout=INSTALL_TIMEOUT, runner=runner)
+    folder = out.decode("utf-8", "replace").strip().splitlines()[-1:] if status == 0 else []
+    if status != 0 or not folder or not re.fullmatch(r"/[^\s'\"\\$`]*/sandbox-ai-install\.[A-Za-z0-9]+", folder[0]):
+        result["error"] = "the copy to the host failed: " + failure(status, "", err)
+        return result
+    args = install_args(mode, prefix, source, version)
+    if use_sudo and facts.get("sudo") == "password":
+        if not terminal:
+            result["needs_password"] = True
+            result["error"] = (f"sudo on {name} wants a password: install it in a terminal (sandbox-ai hosts install "
+                               f"{name} --system there), or allow sudo without one")
+            remote_shell(entry, f"rm -rf -- {shlex.quote(folder[0])}", timeout=30, runner=runner)
+            return result
+        status, _, _ = remote_shell(entry, installer_script(folder[0], args, "prompt"), runner=runner, tty=True)
+        out, err = b"", ""
+    else:
+        status, out, err = remote_shell(entry, installer_script(folder[0], args, "batch" if use_sudo else None),
+                                        timeout=INSTALL_TIMEOUT, runner=runner)
+    said = f"{err}\n{out.decode('utf-8', 'replace')}"
+    result["output"] = printable(said.strip()[-3000:])
+    if status != 0:
+        if use_sudo and any(text in said for text in SUDO_REFUSED):
+            result["error"] = f"{name}: this user may not use sudo there: {printable(said.strip()[-300:])}"
+        else:
+            result["error"] = f"install.sh on {name} ended with exit status {status}: {printable(said.strip()[-400:])}"
+        return result
+    forget_status(name)
+    status, out, err = run(name, ["--version"], timeout=30, path=path, runner=runner) if runner is subprocess.run \
+        else (0, "", "")
+    found = VERSION.search(out) if status == 0 else None
+    result["after"] = found.group(0) if found else None
+    result["changed"] = bool(result["after"]) and result["after"] != result["before"]
+    if status != 0:
+        result["notes"].append("installed, but sandbox-ai there does not answer yet: " + failure(status, out, err))
+    return result
+
+
+def install_lines(result):
+    """What hosts install prints for one host."""
+    name = result["name"]
+    if result.get("error"):
+        lines = [f"{name}: not installed: {printable(result['error'])}"]
+    else:
+        how = ("for every user in " + printable(result.get("prefix") or "/usr/local") if result.get("mode") == "system"
+               else "for the user") + (" with sudo" if result.get("sudo") else " as root" if result.get("root") else "")
+        lines = [f"{name}: sandbox-ai {printable(result.get('after') or '?')} installed {how}"
+                 + (f" (was {printable(result['before'])})" if result.get("before") else "")]
+    return lines + [f"  note: {printable(note)}" for note in result.get("notes") or []]
 
 
 def update_lines(result):
@@ -973,6 +1175,24 @@ def cli(argv_, out=print):
     updating.add_argument("--no-sudo", dest="sudo", action="store_false", help="without sudo, whatever the host says")
     updating.add_argument("--jobs", type=int, default=1, metavar="N", help="hosts at a time (1-8, default 1)")
     updating.add_argument("--json", action="store_true")
+    installing = commands.add_parser("install", help="install sandbox-ai on a host (from here, or its signed release)")
+    installing.add_argument("name")
+    target = installing.add_mutually_exclusive_group()
+    target.add_argument("--user", dest="mode", action="store_const", const="user",
+                        help="for the SSH user (default unless that is root)")
+    target.add_argument("--system", dest="mode", action="store_const", const="system",
+                        help="for every user under --prefix (as root, or with sudo)")
+    installing.add_argument("--prefix", metavar="DIR", help="the system prefix (default /usr/local)")
+    installing.add_argument("--sudo", action="store_true", default=None,
+                            help="with sudo for a system installation (the default when the SSH user is no root)")
+    installing.add_argument("--no-sudo", dest="sudo", action="store_false", help="never sudo")
+    origin = installing.add_mutually_exclusive_group()
+    origin.add_argument("--from-here", dest="source", action="store_const", const="here",
+                        help="copy this machine's sandbox-ai there (default; the host needs no release server)")
+    origin.add_argument("--download", dest="source", action="store_const", const="download",
+                        help="the host downloads the signed release itself")
+    installing.add_argument("--version", dest="release", metavar="X.Y.Z", help="with --download: this release")
+    installing.add_argument("--json", action="store_true")
     running = commands.add_parser("run", help="sandbox-ai ARGS on a host")
     running.add_argument("name")
     running.add_argument("args", nargs=argparse.REMAINDER)
@@ -999,6 +1219,15 @@ def cli(argv_, out=print):
             for change in (entry.get("sandbox_ai") or {}).get("fixed") or []:
                 out(f"  key: {fixed_text(change)}")
         return 0
+    if a.command == "install":
+        if a.prefix and a.mode != "system":
+            raise ValueError("--prefix is for --system")
+        if a.release and a.source != "download":
+            raise ValueError("--version is for --download (--from-here installs this machine's version)")
+        result = install(a.name, a.mode, a.prefix, a.sudo, a.source or "here", a.release,
+                         terminal=not a.json and sys.stdin.isatty())
+        out(json.dumps(result, indent=2) if a.json else "\n".join(install_lines(result)))
+        return 0 if not result.get("error") else 1
     if a.command == "update":
         if a.all == bool(a.names):
             raise ValueError("name the hosts to update, or --all (every host of the list)")
