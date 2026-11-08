@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 import sys
 
 import pytest
@@ -484,10 +485,10 @@ def test_sandbox_ai_update_keeps_the_kind_of_installation():
 def test_commands_share_one_connection_per_host(tmp_path, monkeypatch):
     """A master started detached from every pipe (-f -N, stdio /dev/null), in a private XDG_RUNTIME_DIR folder;
     commands use it without ever becoming one; a terminal (attach) never goes through it; off with
-    SANDBOX_AI_SSH_MULTIPLEX=0 or without XDG_RUNTIME_DIR."""
+    SANDBOX_AI_SSH_MULTIPLEX=0 or in a folder others can read."""
     entry = {"ssh": "user@ct1", "port": 22}
     runtime = Path(tempfile.mkdtemp(prefix="r", dir="/tmp"))  # short: ssh adds a suffix to a socket path of <108
-    monkeypatch.setattr(h, "_masters", {})
+    monkeypatch.setattr(h, "_failed", {})
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
     monkeypatch.delenv("SANDBOX_AI_SSH_MULTIPLEX", raising=False)
     path = h.control_path(entry)
@@ -514,6 +515,171 @@ def test_commands_share_one_connection_per_host(tmp_path, monkeypatch):
     monkeypatch.delenv("SANDBOX_AI_SSH_MULTIPLEX")
     (runtime / "sandbox-ai" / "ssh").chmod(0o755)
     assert h.control_path(entry) is None, "a folder others can read is not used"
-    monkeypatch.delenv("XDG_RUNTIME_DIR")
-    assert h.control_path(entry) is None
     shutil.rmtree(runtime)
+
+
+def test_control_folder_without_xdg_runtime_dir(monkeypatch):
+    """Without XDG_RUNTIME_DIR (macOS): ~/Library/Caches/sandbox-ai/ssh on macOS, else $TMPDIR/sandbox-ai-UID/ssh,
+    each folder 0700 and the user's; a folder others can read or a symbolic link is not used; a socket path that
+    would not fit (with ssh's temporary suffix) is no sharing."""
+    entry = {"ssh": "user@ct1", "port": 22}
+    scratch = Path(tempfile.mkdtemp(prefix="c", dir="/tmp"))
+    try:
+        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+        monkeypatch.delenv("SANDBOX_AI_SSH_MULTIPLEX", raising=False)
+        monkeypatch.setenv("HOME", str(scratch / "home"))
+        monkeypatch.setenv("TMPDIR", str(scratch / "tmp"))
+        (scratch / "home").mkdir()
+        (scratch / "tmp").mkdir()
+        mac = h.control_path(entry, platform="darwin")
+        assert mac.parent == scratch / "home/Library/Caches/sandbox-ai/ssh" and len(mac.name) == 16
+        other = h.control_path(entry, platform="linux")
+        top = scratch / "tmp" / f"sandbox-ai-{os.getuid()}"
+        assert other.parent == top / "ssh"
+        for folder in (top, top / "ssh", mac.parent.parent, mac.parent):
+            info = folder.lstat()
+            assert oct(info.st_mode & 0o777) == "0o700" and info.st_uid == os.getuid()
+        assert len(os.fsencode(other)) + 17 < 104
+        top.chmod(0o755)
+        assert h.control_path(entry, platform="linux") is None, "a folder in a shared TMPDIR others can read"
+        shutil.rmtree(top)
+        (scratch / "elsewhere").mkdir(mode=0o700)
+        top.symlink_to(scratch / "elsewhere")
+        assert h.control_path(entry, platform="linux") is None, "never through a symbolic link"
+        top.unlink()
+        deep = scratch / ("t" * 70)
+        deep.mkdir()
+        monkeypatch.setenv("TMPDIR", str(deep))
+        assert h.control_path(entry, platform="linux") is None, "too long for a socket: no sharing"
+        assert not (deep / f"sandbox-ai-{os.getuid()}").exists()
+    finally:
+        shutil.rmtree(scratch)
+
+
+def test_one_master_start_at_a_time_across_processes(monkeypatch):
+    """A lock file (0600) beside the socket: while another process holds it, a command never waits and never
+    starts a second master; a failed start is remembered (in this process and, in the lock file, for the
+    others) and not tried again for MASTER_RETRY seconds; a socket that does not answer is removed under the
+    lock only."""
+    import fcntl
+    import socket
+    runtime = Path(tempfile.mkdtemp(prefix="r", dir="/tmp"))
+    try:
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+        monkeypatch.delenv("SANDBOX_AI_SSH_MULTIPLEX", raising=False)
+        monkeypatch.setattr(h, "_failed", {})
+        entry = {"ssh": "user@ct1", "port": 22}
+        path = h.control_path(entry)
+        seen = []
+
+        def runner(argv, **kw):
+            seen.append(argv)
+            return subprocess.CompletedProcess(argv, 255 if "-O" in argv else answer[0])
+        answer = [255]
+        holder = os.open(f"{path}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(holder, fcntl.LOCK_EX)  # another process starting the master
+        assert h.ensure_master(entry, path, runner=runner) is False and seen == [], "no wait, no second master"
+        os.close(holder)
+        assert oct(os.stat(f"{path}.lock").st_mode & 0o777) == "0o600"
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(str(path))  # a socket left by a master that ended
+        listener.close()
+        assert h.ensure_master(entry, path, runner=runner) is False
+        assert [a[a.index("-O") + 1] if "-O" in a else "start" for a in seen] == ["check", "start"]
+        assert not path.exists(), "the socket nobody answers on was removed (under the lock)"
+        assert h.ensure_master(entry, path, runner=runner) is False and len(seen) == 2, "the failure is remembered"
+        monkeypatch.setattr(h, "_failed", {})  # another process: the lock file has the time
+        assert h.ensure_master(entry, path, runner=runner) is False and len(seen) == 2
+        real = h.time.time
+        monkeypatch.setattr(h.time, "time", lambda: real() + h.MASTER_RETRY + 1)
+        answer[0] = 0
+        assert h.ensure_master(entry, path, runner=runner) is True and len(seen) == 3, "tried again after a minute"
+        assert Path(f"{path}.lock").read_text() == "", "a start that worked clears the failure"
+        assert h.ensure_master(entry, path, runner=runner, deadline=h.time.monotonic() + 0.5) is False
+        assert len(seen) == 3, "no time left in the command's budget: no master start"
+    finally:
+        shutil.rmtree(runtime)
+
+
+@pytest.fixture
+def mux(tmp_path, monkeypatch):
+    """A stand-in ssh that plays a master as well: -O check answers while its socket (a file here) exists, -O exit
+    removes it, ControlMaster=yes makes it (or, ~/mode "slow", hangs); a command through it fails as ssh (mode
+    "dead") or never answers (mode "hang"); anything else runs and says so."""
+    runtime = Path(tempfile.mkdtemp(prefix="r", dir="/tmp"))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.delenv("SANDBOX_AI_SSH_MULTIPLEX", raising=False)
+    monkeypatch.setattr(h, "_failed", {})
+    bin_dir, log, mode = tmp_path / "bin", tmp_path / "ssh.log", tmp_path / "mode"
+    bin_dir.mkdir()
+    mode.write_text("ok")
+    (bin_dir / "ssh").write_text(f"""#!{sys.executable}
+import json, os, sys, time
+args = sys.argv[1:]
+mode = open({str(mode)!r}).read()
+path = next((a.split("=", 1)[1] for a in args if a.startswith("ControlPath=")), None)
+kind = ("-O " + args[args.index("-O") + 1] if "-O" in args else "master" if "ControlMaster=yes" in args
+        else "shared" if path and os.path.exists(path) else "own")
+open({str(log)!r}, "a").write(kind + "\\n")
+if kind == "-O check":
+    sys.exit(0 if os.path.exists(path) else 255)
+if kind == "-O exit":
+    os.unlink(path)
+    sys.exit(0)
+if kind == "master":
+    if mode == "slow":
+        time.sleep(30)
+    open(path, "w").close()
+    sys.exit(0)
+if kind == "shared" and mode == "dead":
+    print("mux_client_request_session: read from master failed: Broken pipe", file=sys.stderr)
+    sys.exit(255)
+if kind == "shared" and mode == "hang":
+    time.sleep(30)
+print("ran " + ("list" if " list;" in args[-1] else args[-1]))
+""")
+    (bin_dir / "ssh").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    h.save({"ct1": {"ssh": "user@ct1", "port": 22, "description": ""}})
+    yield {"log": log, "mode": mode}
+    shutil.rmtree(runtime)
+
+
+def test_master_start_is_spent_out_of_the_timeout(mux):
+    """A host that drops packets: the master start and the command together take the command's timeout (not
+    timeout + ConnectTimeout); the next command does not try a master again, it connects on its own."""
+    mux["mode"].write_text("slow")
+    began = time.monotonic()
+    status, _, err = h.run("ct1", ["list"], timeout=2)
+    assert status == 124 and "within 2 s" in err and time.monotonic() - began < 3.5
+    mux["mode"].write_text("ok")
+    began = time.monotonic()
+    assert h.run("ct1", ["list"], timeout=10)[:2] == (0, "ran list\n") and time.monotonic() - began < 5
+    assert mux["log"].read_text().split() == ["master", "own"]
+
+
+def test_dead_master_is_left_for_a_connection_of_its_own(mux):
+    """A master whose TCP connection died answers -O check: a command through it that fails as ssh (255) or gets
+    no answer is tried once more without it, and the master is asked to exit."""
+    assert h.run("ct1", ["list"], timeout=10)[:2] == (0, "ran list\n")
+    assert mux["log"].read_text().splitlines() == ["master", "shared"]
+    mux["mode"].write_text("dead")
+    assert h.run("ct1", ["list"], timeout=10)[:2] == (0, "ran list\n")
+    assert mux["log"].read_text().splitlines()[2:] == ["-O check", "shared", "-O exit", "own"]
+    mux["mode"].write_text("hang")
+    mux["log"].write_text("")
+    began = time.monotonic()
+    assert h.run("ct1", ["list"], timeout=2)[:2] == (0, "ran list\n") and time.monotonic() - began < 6
+    assert mux["log"].read_text().splitlines() == ["master", "shared", "-O exit", "own"]
+
+
+def test_remove_and_changed_settings_end_the_shared_connection(mux, monkeypatch):
+    """hosts remove asks the host's master to exit at once (else it serves commands for up to CONTROL_PERSIST s);
+    so does hosts set when it changes what the connection was made for."""
+    assert h.run("ct1", ["list"], timeout=10)[0] == 0
+    assert h.cli(["set", "ct1", "--update-sudo", "on"], lambda line: None) == 0
+    assert "-O exit" not in mux["log"].read_text(), "update_sudo is no connection setting"
+    assert h.cli(["remove", "ct1"], lambda line: None) == 0
+    assert mux["log"].read_text().splitlines()[-1] == "-O exit"
+    assert not h.control_path({"ssh": "user@ct1", "port": 22}).exists()

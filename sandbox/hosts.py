@@ -38,6 +38,7 @@ import argparse
 import concurrent.futures
 import contextlib
 import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -174,55 +175,173 @@ def entries(path=None):
 
 # One SSH connection per host, shared by the commands that follow within a minute (the web interface and the app
 # poll every few seconds: each would pay a full handshake otherwise). The master is started on its own, detached
-# from every pipe (a master that ssh backgrounds itself keeps the first command's stderr open), and only in
-# XDG_RUNTIME_DIR (a socket there is the user's alone); SANDBOX_AI_SSH_MULTIPLEX=0 switches it off.
+# from every pipe (a master that ssh backgrounds itself keeps the first command's stderr open), in a folder that is
+# this user's alone: XDG_RUNTIME_DIR/sandbox-ai/ssh, else (macOS) ~/Library/Caches/sandbox-ai/ssh, else
+# $TMPDIR/sandbox-ai-UID/ssh (each folder sandbox-ai makes 0700 and checked to be the user's).
+# The app, the web interface and the CLI are separate processes: a lock file beside the socket (flock) lets one of
+# them at a time check, clean up and start a host's master; a command that finds it taken connects on its own
+# meanwhile (through the master if one answers) instead of waiting. A start that failed is not tried again for
+# MASTER_RETRY seconds (the lock file keeps its time for the other processes); commands connect on their own
+# meanwhile. The start is spent out of the command's own timeout. A command through the master that fails as ssh
+# (exit status 255), or gets no answer at all, is tried once more on its own connection and the master is asked to
+# exit: one whose TCP connection died still answers -O check. SANDBOX_AI_SSH_MULTIPLEX=0 switches it off.
 CONTROL_PERSIST = 60
-_masters = {}
-_masters_lock = threading.Lock()
+MASTER_RETRY = 60
+CONNECTION = ("ssh", "port", "identity", "command")  # what a shared connection is made for (its socket's name)
+# A socket's path is at most 104 bytes on macOS (108 on Linux), and ssh binds PATH.<16 random characters> first.
+SOCKET_LIMIT = 104 - 1 - 17
+_failed = {}  # str(control path) -> time.monotonic() of a master start that failed in this process
+_failed_lock = threading.Lock()
 
 
-def control_path(entry):
-    """The control socket for ENTRY's connection, or None (no XDG_RUNTIME_DIR, switched off, an odd path)."""
-    if os.environ.get("SANDBOX_AI_SSH_MULTIPLEX", "1") == "0" or not os.environ.get("XDG_RUNTIME_DIR"):
+def control_folders(platform=None):
+    """[(folder, mode bits it must not have)]: the folders sandbox-ai makes for the control sockets, the socket
+    folder last (see above)."""
+    platform = platform or sys.platform
+    if os.environ.get("XDG_RUNTIME_DIR"):  # the user's alone (0700, by its definition)
+        top = [(Path(os.environ["XDG_RUNTIME_DIR"]) / "sandbox-ai", 0o002)]
+    elif platform == "darwin":
+        top = [(Path.home() / "Library" / "Caches" / "sandbox-ai", 0o022)]
+    else:
+        top = [(Path(os.environ.get("TMPDIR") or "/tmp") / f"sandbox-ai-{os.getuid()}", 0o077)]
+    return [*top, (top[0][0] / "ssh", 0o077)]
+
+
+def private_folder(folder, forbidden):
+    """FOLDER made (0700) unless it exists; True when it is a folder of this user's (not a symbolic link) without
+    the mode bits FORBIDDEN."""
+    with contextlib.suppress(FileExistsError):
+        os.mkdir(folder, 0o700)
+    info = os.lstat(folder)
+    return stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & forbidden
+
+
+def control_path(entry, platform=None):
+    """The control socket for ENTRY's connection, or None (switched off, no private folder for it, a path too long
+    for a socket or one ssh would read differently)."""
+    if os.environ.get("SANDBOX_AI_SSH_MULTIPLEX", "1") == "0":
         return None
-    base = Path(os.environ["XDG_RUNTIME_DIR"]) / "sandbox-ai" / "ssh"
-    key = hashlib.sha256(json.dumps([entry.get("ssh"), entry.get("port"), entry.get("identity"),
-                                     entry.get("command")]).encode()).hexdigest()[:24]
-    path = base / key
-    if len(str(path)) > 88 or re.search(r"[\s\"'%]", str(path)):
+    folders = control_folders(platform)
+    key = hashlib.sha256(json.dumps([entry.get(name) for name in CONNECTION]).encode()).hexdigest()[:16]
+    path = folders[-1][0] / key
+    if len(os.fsencode(path)) > SOCKET_LIMIT or re.search(r"[\s\"'%]", str(path)):
         return None
     try:
-        base.mkdir(mode=0o700, parents=True, exist_ok=True)
-        info = os.lstat(base)
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        if platform == "darwin" or (platform is None and sys.platform == "darwin"):
+            folders[0][0].parent.mkdir(parents=True, exist_ok=True)  # ~/Library/Caches
+        if not all(private_folder(folder, forbidden) for folder, forbidden in folders):
             return None
     except OSError:
         return None
     return path
 
 
-def ensure_master(entry, path, runner=subprocess.run):
-    """Start the shared connection for ENTRY at PATH unless one answers there; False if it could not be started
-    (the command then connects on its own, as without multiplexing)."""
-    with _masters_lock:
-        lock = _masters.setdefault(str(path), threading.Lock())
-    with lock:
+def master_lock(path):
+    """An open descriptor of PATH.lock (made 0600, never through a symbolic link, this user's), or None."""
+    try:
+        fd = os.open(f"{path}.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError:
+        return None
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        os.close(fd)
+        return None
+    return fd
+
+
+def master_failed(path, fd=None):
+    """Whether a master start for PATH failed less than MASTER_RETRY seconds ago, in this process or (its time in
+    the lock file FD) in another one."""
+    with _failed_lock:
+        when = _failed.get(str(path))
+    if when is not None and time.monotonic() - when < MASTER_RETRY:
+        return True
+    if fd is None:
+        return False
+    try:
+        noted = float(os.pread(fd, 32, 0).decode("ascii") or "nan")
+    except (OSError, ValueError, UnicodeDecodeError):
+        return False
+    return -1 < time.time() - noted < MASTER_RETRY  # (-1: the time as written, rounded)
+
+
+def note_master(path, fd, ok):
+    """Remember whether the master start for PATH worked (in this process, and in the lock file FD)."""
+    with _failed_lock:
+        if ok:
+            _failed.pop(str(path), None)
+        else:
+            _failed[str(path)] = time.monotonic()
+    with contextlib.suppress(OSError):
+        os.ftruncate(fd, 0)
+        if not ok:
+            os.pwrite(fd, f"{time.time():.3f}".encode(), 0)
+
+
+def ensure_master(entry, path, runner=subprocess.run, deadline=None):
+    """Whether commands for ENTRY go through the shared connection at PATH: one answers there, this call started
+    it, or another process or thread is checking or starting it right now and one may answer (the command then
+    uses it if it does, else connects on its own). False when it could not be started (or failed less than
+    MASTER_RETRY seconds ago): the command connects on its own, as without multiplexing. DEADLINE
+    (time.monotonic()) bounds the check and the start: they are spent out of the command's own timeout."""
+    def budget(limit):
+        return limit if deadline is None else min(limit, deadline - time.monotonic())
+    if master_failed(path) or budget(1) < 1:
+        return False
+    fd = master_lock(path)
+    if fd is None:
+        return False
+    try:
+        if master_failed(path, fd):
+            return False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno not in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
+                return False
+            # Another process or thread checks or starts it: never wait for that (an unreachable host would
+            # hold every poll for its whole ConnectTimeout).
+            return path.exists()
         base = ssh_base(entry, control=path)
         check = [base[0], *base[1:-2], "-O", "check", "--", entry["ssh"]]
         try:
             if path.exists() and runner(check, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                        stderr=subprocess.DEVNULL, timeout=10).returncode == 0:
+                                        stderr=subprocess.DEVNULL, timeout=budget(10)).returncode == 0:
+                note_master(path, fd, True)
                 return True
+            if budget(1) < 1:
+                return False
+            # Under the lock nobody else is starting a master here: a socket that does not answer is one that
+            # ended (or never finished starting).
             with contextlib.suppress(FileNotFoundError):
                 if path.is_socket():
-                    path.unlink()  # a master that ended left it
+                    path.unlink()
             plain = ssh_base(entry)
             start = [plain[0], *plain[1:-2], "-o", f"ControlPath={path}", "-o", "ControlMaster=yes",
                      "-o", f"ControlPersist={CONTROL_PERSIST}", "-f", "-N", "--", entry["ssh"]]
-            return runner(start, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                          timeout=CONNECT_TIMEOUT + 15).returncode == 0
+            ok = runner(start, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        timeout=budget(CONNECT_TIMEOUT + 5)).returncode == 0
         except (OSError, subprocess.TimeoutExpired):
-            return False
+            ok = False
+        note_master(path, fd, ok)
+        return ok
+    finally:
+        os.close(fd)  # (and with it the lock)
+
+
+def stop_master(entry, path=None, runner=subprocess.run, timeout=5):
+    """Ask the shared connection for ENTRY (at PATH, else its usual place) to exit: best effort, at most TIMEOUT
+    seconds. For a host that was removed or whose connection settings (CONNECTION) changed, and for a master whose
+    connection died."""
+    path = path or control_path(entry)
+    if path is None or not path.exists():
+        return False
+    try:
+        base = ssh_base(entry, control=path)
+        return runner([base[0], *base[1:-2], "-O", "exit", "--", entry["ssh"]], stdin=subprocess.DEVNULL,
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout).returncode == 0
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
 
 
 def ssh_base(entry, tty=False, control=None):
@@ -283,22 +402,40 @@ def argv(name, args, tty=False, path=None, sudo=None, control=None):
 
 
 def run(name, args, input=None, timeout=120, path=None, runner=subprocess.run, sudo=None):
-    """(exit status, stdout, stderr) of `sandbox-ai ARGS` on host NAME; 255 when SSH itself failed."""
-    control = None
+    """(exit status, stdout, stderr) of `sandbox-ai ARGS` on host NAME; 255 when SSH itself failed, 124 when it
+    did not end within TIMEOUT seconds (starting the shared connection included)."""
+    deadline = time.monotonic() + timeout
+    control = entry = None
     if name != LOCAL and runner is subprocess.run:  # (tests give a runner of their own: one command each)
         entry = load(path).get(name)
         control = control_path(entry) if entry else None
-        if control is not None and not ensure_master(entry, control):
+        if control is not None and not ensure_master(entry, control, deadline=deadline):
             control = None
+    status, out, err, answered = run_once(name, args, input, deadline - time.monotonic(), timeout, path, runner,
+                                          sudo, control)
+    if control is not None and (status == 255 or status == 124 and not answered):
+        # Through a master whose connection died (it still answers -O check, locally): once more on a connection
+        # of its own, which at least gets the time to connect; the master is asked to exit.
+        stop_master(entry, control)
+        status, out, err, _ = run_once(name, args, input, max(deadline - time.monotonic(),
+                                                              min(timeout, CONNECT_TIMEOUT + 5)),
+                                       timeout, path, runner, sudo, None)
+    return status, out, err
+
+
+def run_once(name, args, input, seconds, timeout, path, runner, sudo, control):
+    """(status, stdout, stderr, whether anything was answered) of one try of run() within SECONDS."""
     command = argv(name, args, path=path, sudo=sudo, control=control)
+    if seconds <= 0:
+        return 124, "", f"sandbox-ai on {name}: no answer within {timeout} s", False
     try:
-        done = runner(command, input=input, capture_output=True, text=True, timeout=timeout,
+        done = runner(command, input=input, capture_output=True, text=True, timeout=seconds,
                       **({} if input is not None else {"stdin": subprocess.DEVNULL}))
-    except subprocess.TimeoutExpired:
-        return 124, "", f"sandbox-ai on {name}: no answer within {timeout} s"
+    except subprocess.TimeoutExpired as exc:
+        return 124, "", f"sandbox-ai on {name}: no answer within {timeout} s", bool(exc.stdout or exc.stderr)
     except OSError as exc:
-        return 127, "", f"{command[0]}: {exc.strerror}"
-    return done.returncode, done.stdout, done.stderr
+        return 127, "", f"{command[0]}: {exc.strerror}", False
+    return done.returncode, done.stdout, done.stderr, True
 
 
 def run_json(name, args, timeout=120, path=None, runner=subprocess.run):
@@ -845,16 +982,20 @@ def cli(argv_, out=print):
     if a.command == "set":
         if a.name not in hosts:
             raise ValueError(f"no host {printable(a.name)}")
+        before = hosts[a.name]
         hosts[a.name] = check(a.name, {**hosts[a.name], "update_sudo": a.update_sudo == "on"})
         save(hosts)
+        if any(before.get(key) != hosts[a.name].get(key) for key in CONNECTION):
+            stop_master(before)  # its shared connection was made for what the entry said before
         out(f"host {a.name}: its update " + ("runs with sudo" if a.update_sudo == "on" else "runs without sudo"))
         return 0
     if a.command == "remove":
         if a.name not in hosts:
             raise ValueError(f"no host {printable(a.name)}")
-        del hosts[a.name]
+        removed = hosts.pop(a.name)
         save(hosts)
         forget_status(a.name)
+        stop_master(removed)  # its shared connection would otherwise serve commands for up to CONTROL_PERSIST s
         out(f"host {a.name} removed")
         return 0
     if a.command == "test":

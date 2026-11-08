@@ -809,6 +809,10 @@ def test_alive_of_a_foreground_start(scenario, tmp_path):
         fake_process(tmp_path, 500, 1, b"vim\0", start=77)
         assert m.alive("task", data) is False
         assert m.alive("task", {**data, "pid_start": None}) is False  # never without the start time
+        # A process that only names a file ending like the launcher (pytest running tests/test_agent_sandbox.py
+        # had every task of its own PID taken for running) is not one.
+        fake_process(tmp_path, 501, 1, b"python3\0-m\0pytest\0tests/test_agent_sandbox.py\0", start=77)
+        assert m.alive("task", {**data, "pid": 501}) is False
 
 
 def test_foreground_start_pause_attach_and_rebirth(tmp_path, monkeypatch):

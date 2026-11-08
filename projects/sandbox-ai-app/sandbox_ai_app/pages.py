@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import time
 
-from PySide6.QtCore import Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
@@ -18,8 +18,8 @@ from .files import printable
 from .state import choose_files, choose_folder
 from .i18n import N_, tr
 from .widgets import (
-    MONO, SORT_ROLE, AsyncCommand, Task, background, bars, confirm, fill, fit_columns, outcome, plain_label,
-    row_key, safe_tooltip, selected, selected_rows, table, warn,
+    MONO, SORT_ROLE, AsyncCommand, Task, background, bars, confirm, fill, find_row, fit_columns, outcome, plain_label,
+    row_key, safe_tooltip, selected, selected_rows, set_enabled, table, warn,
 )
 
 
@@ -106,6 +106,44 @@ def scope_items(combo):
         combo.addItem(text, scope)
 
 
+# The kinds sandbox-ai approves at most for the run (approvals.widest_answer): a push, a request, a tool call, a device.
+RUN_AT_MOST = ("push", "http", "mcp", "tool", "device")
+# Keys of the Approvals page (Alt+A and Alt+D are menu mnemonics in German too: the page takes them while it has the
+# focus, before any menu): (key, modifiers) -> action.
+SHORTCUTS = {(Qt.Key.Key_A, Qt.KeyboardModifier.AltModifier): "allow",
+             (Qt.Key.Key_D, Qt.KeyboardModifier.AltModifier): "deny",
+             (Qt.Key.Key_B, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier): "block"}
+MODIFIERS = (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.AltModifier
+             | Qt.KeyboardModifier.MetaModifier)
+
+
+def shortcut_of(event):
+    """The action of the Approvals page a key EVENT stands for, or None."""
+    try:
+        modifiers = event.modifiers() & MODIFIERS
+        return next((action for (key, wanted), action in SHORTCUTS.items()
+                     if event.key() == key and modifiers == wanted), None)
+    except (AttributeError, TypeError):
+        return None
+
+
+def local_widest(policy, record, question):
+    """The widest answer an allow of a question of this machine keeps, as sandbox-ai's approvals.widest_answer says
+    it: the administrator's POLICY, the run's security mode (its run.json RECORD) and the kind's own cap."""
+    caps = [policy if policy in backend.SCOPES else "always"]
+    mode = record.get("mode") if isinstance(record, dict) and isinstance(record.get("mode"), dict) else {}
+    if mode.get("approval_scope") in backend.SCOPES:
+        caps.append(mode["approval_scope"])
+    if isinstance(question, dict) and question.get("kind") in RUN_AT_MOST:
+        caps.append("run")
+    return min(caps, key=backend.SCOPES.index)
+
+
+def remote_browser(entry):
+    """True for a question of another host to open a page: the page is opened here, where the human is."""
+    return entry is not None and entry[2] != LOCAL and entry[1].get("kind") == "browser"
+
+
 
 def asker(name, record):
     """Which sandbox asks: its run NAME, workspace (~ for HOME) and session, from its run.json RECORD."""
@@ -158,10 +196,13 @@ class QuestionsWindow(QDialog):
         self.table.itemSelectionChanged.connect(self.update_buttons)
         layout.addWidget(self.table, 1)
         row = QHBoxLayout()
+        self.table.setAccessibleName(tr("Open questions"))
         self.allow_button = QPushButton(tr("Allow once"))
+        self.allow_button.setAccessibleName(tr("Allow once"))
         self.allow_button.clicked.connect(lambda: self.answer("allow"))
-        self.deny_button = QPushButton(tr("Deny"))
-        self.deny_button.setToolTip(tr("Refused this time"))
+        self.deny_button = QPushButton(tr("Deny for this run"))
+        self.deny_button.setAccessibleName(tr("Deny for this run"))
+        self.deny_button.setToolTip(tr("Refused; not asked again in this run"))
         self.deny_button.clicked.connect(lambda: self.answer("deny"))
         close = QPushButton(tr("Close"))
         close.clicked.connect(self.reject)
@@ -186,14 +227,17 @@ class QuestionsWindow(QDialog):
         return self.page.questions.get(row_key(self.table, rows[0])) if rows else None
 
     def update_buttons(self):
-        entry = None if self.page.answering is not None else self.current()
-        self.allow_button.setEnabled(entry is not None)
-        self.deny_button.setEnabled(entry is not None)
+        entry = self.current()
+        rules = self.page.answer_rules(entry)
+        self.allow_button.setText(tr("Open here and allow") if remote_browser(entry) else tr("Allow once"))
+        set_enabled(self.allow_button, rules["allow"] is None, rules["allow"])
+        set_enabled(self.deny_button, rules["deny"] is None, rules["deny"])
 
     def answer(self, decision):
         entry = self.current()
         if entry is not None:
-            self.page.answer(decision, "once", entry=entry, parent=self)
+            self.page.answer(decision, "once" if decision == "allow" else "run", entry=entry, parent=self,
+                             open_here=decision == "allow" and remote_browser(entry))
 
 
 class ApprovalsPage(QWidget):
@@ -219,18 +263,21 @@ class ApprovalsPage(QWidget):
         self.url.setFont(font)
         self.url.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.url.hide()
-        url_row = QHBoxLayout()
-        url_row.addWidget(self.url, 1)
-        # A browser question of another host: the page is opened here, where the human is, and that host is told
-        # not to open it (--no-open).
-        self.open_here_button = QPushButton(tr("Open here"))
-        self.open_here_button.setToolTip(tr("Open the page in this computer's browser and allow the question without "
-                                            "opening it on its host"))
-        self.open_here_button.clicked.connect(lambda: self.open_here())
-        self.open_here_button.hide()
-        url_row.addWidget(self.open_here_button)
-        open_layout.addLayout(url_row)
+        open_layout.addWidget(self.url)
+        # Whose questions are listed: every host's, this machine's or one host's (Hosts › Show questions).
+        filter_row = QHBoxLayout()
+        self.host_filter = QComboBox()
+        self.host_filter.setAccessibleName(tr("Questions of"))
+        self.host_filter.setToolTip(tr("Whose questions are listed: every host's, this machine's or one host's"))
+        self.host_filter.addItem(tr("All hosts"), None)
+        self.host_filter.addItem(tr("This machine"), LOCAL)
+        self.host_filter.currentIndexChanged.connect(lambda _=0: self.show_all())
+        filter_row.addWidget(QLabel(tr("Questions of")))
+        filter_row.addWidget(self.host_filter)
+        filter_row.addStretch()
+        open_layout.addLayout(filter_row)
         self.open = table([tr("Sandbox"), tr("Kind"), tr("Question"), tr("Asked"), tr("Refused in"), tr("Host")])
+        self.open.setAccessibleName(tr("Open questions"))
         self.open.itemSelectionChanged.connect(self.selection_changed)
         open_layout.addWidget(self.open)
         # What the selected question means (resolved names, the run's earlier connections): in a thread.
@@ -251,22 +298,34 @@ class ApprovalsPage(QWidget):
             open_layout.addWidget(widget)
         row = QHBoxLayout()
         self.scope = QComboBox()
+        self.scope.setAccessibleName(tr("Scope of an allow"))
+        self.scope.setToolTip(tr("How long an allow lasts: once, for this run, or always for the project"))
         scope_items(self.scope)
+        # Allow takes the scope of the box; Deny is for the run (as the web interface's and the command line's),
+        # Deny once only this time; Block always is a deny remembered for the project, asked first.
         self.allow_button = QPushButton(tr("Allow"))
+        self.allow_button.setAccessibleName(tr("Allow"))
+        self.allow_button.setToolTip(tr("Allow with the scope chosen (Alt+A)"))
         self.allow_button.clicked.connect(lambda: self.answer("allow"))
-        self.deny_button = QPushButton(tr("Deny"))
-        self.deny_button.setToolTip(tr("Refused; not asked again in this run (once: only this time)"))
+        self.deny_button = QPushButton(tr("Deny for this run"))
+        self.deny_button.setAccessibleName(tr("Deny for this run"))
+        self.deny_button.setToolTip(tr("Refused; not asked again in this run (Alt+D)"))
         self.deny_button.clicked.connect(lambda: self.answer("deny"))
-        self.block_button = QPushButton(tr("Block always"))
+        self.deny_once_button = QPushButton(tr("Deny once"))
+        self.deny_once_button.setAccessibleName(tr("Deny once"))
+        self.deny_once_button.setToolTip(tr("Refused this time only: the sandbox may ask again"))
+        self.deny_once_button.clicked.connect(lambda: self.answer("deny", "once"))
+        self.block_button = QPushButton(tr("Block always…"))
+        self.block_button.setAccessibleName(tr("Block always"))
+        self.block_button.setProperty("role", "danger")
         self.block_button.setToolTip(tr("Refused now and at every later start of this project, without a question "
-                                        "(Forget… below lifts it)"))
+                                        "(Forget… below lifts it; Ctrl+Shift+B)"))
         self.block_button.clicked.connect(lambda: self.answer("deny", "always"))
-        # The administrator's max_approval_scope caps the answers (sandbox-ai refuses wider ones anyway).
+        # The administrator's max_approval_scope caps the allows (sandbox-ai refuses wider ones anyway); read again
+        # at every scan, so a policy changed meanwhile counts.
         self.max_scope = sai.max_scope()
-        for index in range(self.scope.count()):
-            if backend.SCOPES.index(self.scope.itemData(index)) > backend.SCOPES.index(self.max_scope):
-                self.scope.model().item(index).setEnabled(False)
-        for widget in (QLabel(tr("Scope")), self.scope, self.allow_button, self.deny_button, self.block_button):
+        for widget in (QLabel(tr("Scope")), self.scope, self.allow_button, self.deny_button, self.deny_once_button,
+                       self.block_button):
             row.addWidget(widget)
         row.addStretch()
         open_layout.addLayout(row)
@@ -284,18 +343,28 @@ class ApprovalsPage(QWidget):
         history_box = QGroupBox(tr("History"))
         history_layout = QVBoxLayout(history_box)
         self.history = table([tr("Time"), tr("Sandbox"), tr("Question"), tr("Answer"), tr("Scope"), tr("Reason")])
+        self.history.setAccessibleName(tr("History of the answers"))
         history_layout.addWidget(self.history)
         always_box = QGroupBox(tr("Allowed or blocked always (per project)"))
         always_layout = QVBoxLayout(always_box)
         self.always = table([tr("Project"), tr("Allowed"), tr("Kind")])
+        self.always.setAccessibleName(tr("Allowed or blocked always"))
         always_layout.addWidget(self.always)
         row = QHBoxLayout()
+        # Whose list: this machine's (sandbox-ai's file) or a host's (`sandbox-ai approvals remembered` there).
+        self.always_host = QComboBox()
+        self.always_host.setAccessibleName(tr("Remembered on"))
+        self.always_host.setToolTip(tr("Whose list: this machine's or a host's"))
+        self.always_host.addItem(tr("This machine"), LOCAL)
+        self.always_host.activated.connect(lambda _=0: self.load_always())
         refresh = QPushButton(tr("Refresh"))
+        refresh.setAccessibleName(tr("Refresh the remembered answers"))
         refresh.clicked.connect(lambda: self.load_always())
         self.forget_button = QPushButton(tr("Forget…"))
+        self.forget_button.setAccessibleName(tr("Forget"))
         self.forget_button.setToolTip(tr("The project's sandboxes ask again next time"))
         self.forget_button.clicked.connect(lambda: self.forget())
-        for widget in (refresh, self.forget_button):
+        for widget in (self.always_host, refresh, self.forget_button):
             row.addWidget(widget)
         row.addStretch()
         always_layout.addLayout(row)
@@ -315,7 +384,9 @@ class ApprovalsPage(QWidget):
         self.project, self.marked, self.project_pending = None, None, 0
         self.open_box = open_box
         self.records, self.contexts, self.always_token, self.always_loaded = {}, {}, 0, False
-        self.answering = None  # the ThreadCall that sends an answer
+        # The answers on their way, per question ({(host, run, id): ThreadCall}): a slow host's answer (over SSH, up
+        # to REMOTE_ANSWER_WAIT) never holds up the others, whose time runs.
+        self.answers = {}
         # Questions asked while a modal dialog blocks this page are offered in a window above it; the questions
         # open when it was closed are not offered again.
         self.questions_window, self.dismissed = None, set()
@@ -340,18 +411,29 @@ class ApprovalsPage(QWidget):
             return
         self.generation += 1
         token = self.generation
-        self.polling = background(self.sai.approvals_snapshot, None, SNAPSHOT_WAIT, timeout=SNAPSHOT_WAIT + 5,
+        self.polling = background(self.scan, SNAPSHOT_WAIT, timeout=SNAPSHOT_WAIT + 5,
                                   done=lambda result, error: self.polled(token, result, error))
+
+    def scan(self, wait):
+        """(open, answered) of this machine's questions and the policy's widest scope, read together."""
+        snapshot = self.sai.approvals_snapshot(wait=wait)
+        try:
+            widest = self.sai.max_scope()
+        except Exception:  # noqa: BLE001 - a policy that cannot be read: the narrowest, sandbox-ai decides anyway
+            widest = "once"
+        return snapshot, widest
 
     def polled(self, token, result, error):
         self.polling = None
         if token == self.generation:
+            if error is None:
+                result, self.max_scope = result
             self.apply(result, error)
 
     def poll(self, now=None):
         """Scan now (cached: a question file is parsed once; a few small files, no command)."""
         try:
-            result, error = self.sai.approvals_snapshot(wait=POLL_WAIT), None
+            (result, self.max_scope), error = self.scan(POLL_WAIT), None
         except TimeoutError:  # a scan in a thread holds the cache (maybe stuck): its result, or the next, comes
             self.poll_soon()
             return
@@ -375,7 +457,7 @@ class ApprovalsPage(QWidget):
             (host, q.get("run", ""), {}, q) for host in sorted(self.remote) for q in self.remote[host]]
         self.show_open(pending, now)
         keys = {(host, run, q.get("id")) for host, run, _, q in pending}
-        new = [(self.label_of(host, run, record, q), q) for host, run, record, q in pending
+        new = [(self.label_of(host, run, record, q), q, (host, run, q.get("id"))) for host, run, record, q in pending
                if (host, run, q.get("id")) not in self.seen]
         self.seen = keys
         self.offer_questions()
@@ -404,10 +486,65 @@ class ApprovalsPage(QWidget):
             return
         self.hosts_reading = background(self.sai.remote_hosts, timeout=30, done=self.hosts_listed)
 
+    def forget_host(self, name):
+        """Host NAME was removed from the list (the Hosts page): its questions go at once, not at the next read."""
+        if self.known_hosts is not None:
+            self.known_hosts.discard(name)
+        self.remote.pop(name, None)
+        self.remote_problems.pop(name, None)
+        self.remote_again.discard(name)
+        self.fill_hosts(sorted(self.known_hosts or ()))
+        self.show_remote_note()
+        self.show_all()
+
+    def fill_hosts(self, hosts):
+        """The host choices of the question filter and of the remembered list: the choice stays while its host does
+        (filled again only when the hosts changed: an open list must not close under the mouse every few seconds)."""
+        if list(hosts) == getattr(self, "filled_hosts", None):
+            return
+        self.filled_hosts = list(hosts)
+        remembered_on = self.always_host.currentData()
+        for combo, extra in ((self.host_filter, [(tr("All hosts"), None)]), (self.always_host, [])):
+            chosen = combo.currentData()
+            combo.blockSignals(True)
+            combo.clear()
+            for text, data in extra + [(tr("This machine"), LOCAL)] + [(printable(host), host) for host in hosts]:
+                combo.addItem(text, data)
+            index = combo.findData(chosen)
+            combo.setCurrentIndex(index if index >= 0 else 0)
+            combo.blockSignals(False)
+        if self.always_host.currentData() != remembered_on and self.always_loaded:
+            self.load_always()  # its host is gone: this machine's list, not that host's rows under another name
+
+    def show_host(self, host):
+        """List only HOST's questions (None: every host's), e.g. for Hosts › Show questions."""
+        index = self.host_filter.findData(host)
+        if index < 0 and host is not None:  # not read yet (the page was not polled since the host came)
+            self.fill_hosts(sorted({*(self.known_hosts or ()), host}))
+            index = self.host_filter.findData(host)
+        self.host_filter.setCurrentIndex(max(0, index))
+        self.show_all()
+
+    def select_question(self, key):
+        """Select the question KEY (host, run, id), e.g. from its notification; False when it is gone."""
+        if key not in self.questions:
+            return False
+        if self.host_filter.currentData() not in (None, key[0]):
+            self.host_filter.setCurrentIndex(0)  # every host's: the question must be seen
+        self.show_all()
+        row = find_row(self.open, key)
+        if row < 0:
+            return False
+        self.open.clearSelection()
+        self.open.selectRow(row)
+        self.open.setFocus()
+        return True
+
     def hosts_listed(self, hosts, error):
         self.hosts_reading = None
         hosts = list(hosts or []) if error is None else list(self.remote)
         self.known_hosts = set(hosts)
+        self.fill_hosts(sorted(hosts))
         for gone in (set(self.remote) | set(self.remote_problems)) - set(hosts):
             self.remote.pop(gone, None)
             self.remote_problems.pop(gone, None)
@@ -499,6 +636,10 @@ class ApprovalsPage(QWidget):
         self.questions = {key: (run, q, host) for key, (host, run, _, q) in zip(keys, pending)}
         self.labels = {key: self.label_of(host, run, record, q) for key, (host, run, record, q) in zip(keys, pending)}
         self.records = {key: record for key, (_, _, record, _) in zip(keys, pending)}
+        # The table lists the questions of the host chosen above (all are counted, announced and offered anyway).
+        chosen = self.host_filter.currentData()
+        pending = [entry for entry in pending if chosen is None or entry[0] == chosen]
+        keys = [(host, run, q.get("id")) for host, run, _, q in pending]
         if keys != self.entry_keys or self.marked != self.project:
             self.marked = self.project
             had_selection = selected_rows(self.open) != []
@@ -576,41 +717,119 @@ class ApprovalsPage(QWidget):
         rows = selected_rows(self.open)
         return self.questions.get(row_key(self.open, rows[0])) if rows else None
 
+    @property
+    def answering(self):
+        """An answer on its way (any question's), or None when none is."""
+        return next(iter(self.answers.values()), None)
+
+    @staticmethod
+    def key_of(entry):
+        run, question, host = entry
+        return host, run, question.get("id")
+
     def widest(self, entry):
-        """The widest answer ENTRY may get: this machine's policy, or what the other host said (its policy, the run's
-        security mode, the kind of question)."""
+        """The widest allow ENTRY may get: this machine's policy, the run's security mode and the kind (as sandbox-ai
+        caps it), or what the other host said of it (the same, there). A deny is never capped."""
         if entry is not None and entry[2] != LOCAL:
             scope = entry[1].get("max_scope")
             return scope if scope in backend.SCOPES else "once"
-        return self.max_scope
+        if entry is not None:
+            return local_widest(self.max_scope, self.records.get(self.key_of(entry)), entry[1])
+        return self.max_scope if self.max_scope in backend.SCOPES else "once"
+
+    def expired(self, entry, now=None):
+        """True when sandbox-ai refused ENTRY already (its time is up); a question to open a page has no deadline."""
+        if entry[1].get("kind") == "browser":
+            return False
+        return self.timing(entry, now)[1] == 0
+
+    def answer_rules(self, entry):
+        """{"allow", "deny", "block"}: None where the button may answer ENTRY, else why not."""
+        if entry is None:
+            why = tr("Select a question first.")
+        elif self.key_of(entry) in self.answers:
+            why = tr("The answer is on its way.")
+        elif self.expired(entry):
+            why = tr("Its time is up: sandbox-ai refused it already.")
+        else:
+            why = None
+        rules = {"allow": why, "deny": why, "block": why}
+        if why is None and entry[2] != LOCAL:
+            rules["allow"] = self.remote_allow_refused(entry)
+        if why is None and entry[1].get("kind") not in ("connect", "dns"):
+            rules["block"] = tr("Only names and addresses can be blocked always.")
+        return rules
+
+    @staticmethod
+    def remote_allow_refused(entry):
+        """Why another host's question ENTRY cannot be allowed from here, or None: that host allows no allow (its
+        policy, the run's mode), or its page cannot be opened here (refused there, not http/https, not whole)."""
+        question = entry[1]
+        if question.get("allow_refused") or question.get("max_scope") is None:
+            return tr("On {host} this can only be denied: {reason}", host=printable(entry[2]),
+                      reason=printable(question.get("allow_refused") or "?"))
+        if question.get("kind") != "browser":
+            return None
+        if question.get("url_refused"):
+            return tr("{host} does not let the page be opened elsewhere: {reason}", host=printable(entry[2]),
+                      reason=printable(question["url_refused"]))
+        if question.get("url_truncated"):
+            return tr("The address came shortened from {host}: it is not opened here.", host=printable(entry[2]))
+        if openable_url(question.get("url")) is None:
+            return tr("Only http and https pages are opened here.")
+        return None
 
     def update_buttons(self):
-        entry = None if self.answering is not None else self.current()
+        entry = self.current()
+        rules = self.answer_rules(entry)
         widest = self.widest(entry)
-        self.allow_button.setEnabled(entry is not None)
-        self.deny_button.setEnabled(entry is not None)
-        self.block_button.setEnabled(entry is not None and widest == "always"
-                                     and entry[1].get("kind") in ("connect", "dns"))
-        self.scope.setEnabled(entry is not None and not backend.question_url(entry[1]))
+        # Another host's page is opened here, where the human is: that host may have no screen at all.
+        self.allow_button.setText(tr("Open here and allow") if remote_browser(entry) else tr("Allow"))
+        self.allow_button.setAccessibleName(self.allow_button.text())
+        set_enabled(self.allow_button, rules["allow"] is None, rules["allow"])
+        set_enabled(self.deny_button, rules["deny"] is None, rules["deny"])
+        set_enabled(self.deny_once_button, rules["deny"] is None, rules["deny"])
+        set_enabled(self.block_button, rules["block"] is None, rules["block"])
+        self.scope.setEnabled(rules["allow"] is None and not backend.question_url(entry[1]))
         # The scopes the selected question may get (another host's policy is that host's).
         for index in range(self.scope.count()):
             self.scope.model().item(index).setEnabled(
                 backend.SCOPES.index(self.scope.itemData(index)) <= backend.SCOPES.index(widest))
         if backend.SCOPES.index(self.scope.currentData()) > backend.SCOPES.index(widest):
             self.scope.setCurrentIndex(self.scope.findData("once"))
-        remote_url = entry is not None and entry[2] != LOCAL and openable_url(entry[1].get("url")) is not None \
-            and entry[1].get("kind") == "browser"
-        self.open_here_button.setVisible(remote_url)
-        self.open_here_button.setEnabled(remote_url)
         if self.questions_window is not None:
             self.questions_window.update_buttons()
+
+    def eventFilter(self, watched, event):  # noqa: N802
+        """Alt+A (allow), Alt+D (deny for the run) and Ctrl+Shift+B (block always, asked first) while the focus is on
+        this page: taken before any shortcut of the window (in German Alt+A and Alt+D open menus)."""
+        kind = event.type()
+        if kind in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress) and isinstance(watched, QWidget):
+            action = shortcut_of(event)
+            if action and self.isVisible() and (watched is self or self.isAncestorOf(watched)):
+                event.accept()
+                if kind == QEvent.Type.KeyPress:
+                    self.shortcut(action)
+                return True
+        return False
+
+    def shortcut(self, action):
+        button = {"allow": self.allow_button, "deny": self.deny_button, "block": self.block_button}[action]
+        if button.isEnabled():
+            button.click()
 
     def selection_changed(self):
         entry = self.current()
         url = backend.question_url(entry[1]) if entry else None
-        self.url.setVisible(bool(url))
+        destination = entry[1].get("url_host") if entry and entry[2] != LOCAL and entry[1].get("kind") == "browser" \
+            else None
+        self.url.setVisible(bool(url or destination))
         if url and entry[2] != LOCAL:
-            self.url.setText(tr("{host} asks to open: {url}", host=printable(entry[2]), url=url))
+            self.url.setText(tr("{host} asks to open: {url}", host=printable(entry[2]), url=url)
+                             + (" " + tr("(shortened)") if entry[1].get("url_truncated") else ""))
+        elif destination:  # the page itself stays on that host (url_refused): where it leads is said
+            self.url.setText(tr("{host} asks to open a page on {destination}", host=printable(entry[2]),
+                                destination=printable(destination)))
         else:
             self.url.setText(tr("Open in your browser: {url}", url=url) if url else "")
         self.update_buttons()
@@ -655,8 +874,17 @@ class ApprovalsPage(QWidget):
 
     def showEvent(self, event):  # noqa: N802
         super().showEvent(event)
+        app = QApplication.instance()
+        if app is not None:  # the keys Alt+A, Alt+D and Ctrl+Shift+B while the focus is on this page (see eventFilter)
+            app.installEventFilter(self)
         if not self.always_loaded:
             self.load_always()
+
+    def hideEvent(self, event):  # noqa: N802
+        super().hideEvent(event)
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
 
     def load_always(self, note=None):
         """What was allowed "always", per project (read from sandbox-ai's file in a thread); NOTE is shown
@@ -664,12 +892,19 @@ class ApprovalsPage(QWidget):
         self.always_loaded = True
         self.always_token += 1
         token = self.always_token
-        background(self.sai.remembered, timeout=30,
-                   done=lambda rows, error: self.always_ready(token, rows, error, note))
+        host = self.always_host.currentData() or LOCAL
+        if host == LOCAL:
+            background(self.sai.remembered, timeout=30,
+                       done=lambda rows, error: self.always_ready(token, rows, error, note, host))
+        else:  # `sandbox-ai approvals remembered --json` there, over SSH
+            self.always_message.setText(tr("Asking {host}…", host=printable(host)))
+            background(lambda: self.sai.host_remembered(host), timeout=90,
+                       done=lambda rows, error: self.always_ready(token, rows, error, note, host))
 
-    def always_ready(self, token, rows, error, note=None):
+    def always_ready(self, token, rows, error, note=None, host=LOCAL):
         if token != self.always_token:
             return
+        self.always_shown = host
         if isinstance(error, AttributeError):
             self.always_message.setText(tr("This sandbox-ai version cannot list them yet: update it."))
             rows = []
@@ -692,14 +927,20 @@ class ApprovalsPage(QWidget):
             self.always_message.setText(tr("Select an entry first."))
             return
         project, entry = key
-        if not confirm(self, tr("Forget"), tr("Forget {entry} for {project}? The project's next sandboxes ask again. "
-                                              "Sandboxes running now keep what they already allowed until they end "
-                                              "(take it back there with Sandboxes › Revoke…, sandbox-ai net revoke).",
-                                              entry=printable(entry), project=printable(project)),
-                       tr("Forget"), destructive=True):
+        host = getattr(self, "always_shown", LOCAL)  # the host whose list is shown, never the one chosen meanwhile
+        text = tr("Forget {entry} for {project}? The project's next sandboxes ask again. Sandboxes running now keep "
+                  "what they already allowed until they end (take it back there with Sandboxes › Revoke…, sandbox-ai "
+                  "net revoke).", entry=printable(entry), project=printable(project))
+        if host != LOCAL:
+            text = tr("On {host}: {text}", host=printable(host), text=text)
+        if not confirm(self, tr("Forget"), text, tr("Forget"), destructive=True):
             return
-        background(self.sai.forget_remembered, project, entry, owner=self, source=self.forget_button, timeout=90,
-                   done=self.forgotten)
+        if host == LOCAL:
+            background(self.sai.forget_remembered, project, entry, owner=self, source=self.forget_button, timeout=90,
+                       done=self.forgotten)
+        else:
+            background(lambda: self.sai.forget_remembered(project, entry, host=host), owner=self,
+                       source=self.forget_button, timeout=120, done=self.forgotten)
 
     def forgotten(self, result, error):
         status, out, err = outcome(result, error)
@@ -707,49 +948,86 @@ class ApprovalsPage(QWidget):
 
     def answer(self, decision, scope=None, entry=None, parent=None, open_here=False):
         """Send the answer in the background (`sandbox-ai approvals` may take up to a minute; on another host through
-        `sandbox-ai hosts run HOST --`). Allow asks first, naming the sandbox, its host, the question and the scope;
-        Deny takes one click and lasts for the run at most ("once" from the scope box: this time only); Block always
-        is a deny with the scope "always". ENTRY: the (run, question, host) to answer (default: the one highlighted);
-        PARENT: the window asking; OPEN_HERE (a browser question of another host): allowed there with --no-open, and
+        `sandbox-ai hosts run HOST --`), one per question: a slow host's answer holds up no other question. Allow asks
+        first, naming the sandbox, its host, the question and the scope (the scope box, capped as sandbox-ai caps it);
+        Deny takes one click and lasts for the run (as the web interface's and the command line's), SCOPE "once" (Deny
+        once) this time only; Block always is a deny with the scope "always", asked first. A question whose time is up
+        is not answered. ENTRY: the (run, question, host) to answer (default: the one highlighted); PARENT: the window
+        asking; OPEN_HERE (a browser question of another host, always so for Allow): allowed there with --no-open,
         the page opened here once that host took the answer."""
         entry = entry or self.current()
-        if not entry or self.answering is not None:
+        if not entry or self.key_of(entry) in self.answers:
             return
         run, question, host = entry
-        if scope is None:
-            scope = self.scope.currentData()
-            if decision == "deny" and scope != "once":
-                scope = "run"
-        widest = self.widest(entry)
-        if backend.SCOPES.index(scope) > backend.SCOPES.index(widest):
-            self.message.setText(tr("The administrator's policy allows answers up to “{scope}”.", scope=widest))
-            return
+        key = self.key_of(entry)
+        if decision == "deny":
+            # A deny is for the run unless "once" was chosen (the Deny once button); "always" is Block always. The
+            # policy caps allows only: a deny is never narrowed.
+            scope = scope if scope in backend.SCOPES else "run"
+        else:
+            refused = self.remote_allow_refused(entry) if host != LOCAL else None
+            if refused:
+                self.message.setText(refused)
+                return
+            scope = scope if scope in backend.SCOPES else self.scope.currentData()
+            # Refused here above what the policy allows (another host: what it said); the caps of the run's mode and
+            # of the kind narrow the answer in sandbox-ai itself, which says so (the box offers no more anyway).
+            widest = self.widest(entry) if host != LOCAL else \
+                self.max_scope if self.max_scope in backend.SCOPES else "once"
+            if backend.SCOPES.index(scope) > backend.SCOPES.index(widest):
+                self.message.setText(tr("Allowed at most “{scope}” here (the policy, the run's security mode or the "
+                                        "kind of question).", scope=widest))
+                return
+            # Another host's page is opened here (that host may have no screen): allowed there with --no-open.
+            open_here = open_here or remote_browser(entry)
         url = openable_url(question.get("url")) if open_here and question.get("kind") == "browser" else None
         if open_here and url is None:
             self.message.setText(tr("Only http and https pages are opened here."))
             return
+        if self.expired(entry):
+            self.message.setText(tr("Expired: sandbox-ai refused the question already."))
+            return
         if decision == "allow" and not self.confirm_allow(entry, scope, parent, open_here=url is not None):
             return
-        if self.answering is not None:  # answered meanwhile (in the other window, while the question was open)
+        if decision == "deny" and scope == "always" and not self.confirm_block(entry, parent):
             return
+        # Answered meanwhile (in the other window), or its time ran out while the question was open: not sent.
+        if key in self.answers or key not in self.questions:
+            return
+        if self.expired(entry):
+            self.message.setText(tr("Expired: sandbox-ai refused the question already."))
+            self.update_buttons()
+            return
+        self.scope.setCurrentIndex(self.scope.findData("once"))  # a wider scope is chosen for one answer only
         self.message.setText(tr("Sending the answer…"))
         ident = question.get("id", "")
-        done = lambda result, error: self.answered(result, error, decision, scope, host, url)  # noqa: E731
+        done = lambda result, error: self.answered(result, error, decision, scope, host, url, key)  # noqa: E731
         if host == LOCAL:
             # sandbox-ai answers within 60 s; a call that hangs past that (e.g. on a stuck pipe) frees the buttons.
-            self.answering = background(self.sai.answer, ident, decision, scope, timeout=ANSWER_WAIT, done=done)
+            self.answers[key] = background(self.sai.answer, ident, decision, scope, timeout=ANSWER_WAIT, done=done)
         elif not self.sai.question_id.fullmatch(str(ident)):
             self.message.setText(tr("Not a question of sandbox-ai: {ident}", ident=printable(ident)[:60]))
             return
         else:
             argv = ["approvals", decision, ident, "--scope", scope] + (["--no-open"] if url is not None else [])
-            self.answering = background(lambda: self.sai.host_run(host, *argv, timeout=REMOTE_ANSWER_WAIT - 30),
-                                        timeout=REMOTE_ANSWER_WAIT, done=done)
+            self.answers[key] = background(lambda: self.sai.host_run(host, *argv, timeout=REMOTE_ANSWER_WAIT - 30),
+                                           timeout=REMOTE_ANSWER_WAIT, done=done)
         self.update_buttons()
 
     def open_here(self):
         """A browser question of another host: allowed there without opening it (--no-open), opened here."""
         self.answer("allow", "once", open_here=True)
+
+    def confirm_block(self, entry, parent=None):
+        """Block always outlives the run: every later start of the project is refused it without a question."""
+        run, question, host = entry
+        lines = [tr("Sandbox: {sandbox}", sandbox=self.labels.get(self.key_of(entry), printable(run)))]
+        if host != LOCAL:
+            lines.append(tr("Host: {host}", host=printable(host)))
+        lines += [tr("Asks to: {question}", question=describe(question)),
+                  tr("Refused now and at every later start of this project, without a question. Forget… on this "
+                     "page lifts it.")]
+        return confirm(parent or self, tr("Block always?"), "\n".join(lines), tr("Block always"), destructive=True)
 
     def confirm_allow(self, entry, scope, parent=None, open_here=False):
         run, question, host = entry
@@ -768,9 +1046,8 @@ class ApprovalsPage(QWidget):
         return confirm(parent or self, tr("Allow this request?"), "\n".join(lines), tr("Allow"),
                        destructive=scope == "always" and not url)
 
-    def answered(self, result, error, decision="deny", scope="once", host=LOCAL, url=None):
-        self.answering = None
-        self.scope.setCurrentIndex(self.scope.findData("once"))  # a wider scope is chosen for one answer only
+    def answered(self, result, error, decision="deny", scope="once", host=LOCAL, url=None, key=None):
+        self.answers.pop(key, None)
         status, out, err = outcome(result, error)
         text = printable((out + err).strip())
         if status != 0:
@@ -782,11 +1059,13 @@ class ApprovalsPage(QWidget):
                 QDesktopServices.openUrl(url)
         if host == LOCAL:
             self.poll()
-            if status == 0 and scope == "always":
+            if status == 0 and scope == "always" and self.always_host.currentData() == LOCAL:
                 self.load_always()  # it is listed there now
         else:
             self.poll_remote([host])  # read again now, also when a read of it runs already
             self.update_buttons()
+            if status == 0 and scope == "always" and self.always_host.currentData() == host:
+                self.load_always()
 
 
 class StatisticsPage(QWidget):

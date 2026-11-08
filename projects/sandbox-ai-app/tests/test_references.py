@@ -89,7 +89,8 @@ BLOCKING_SAI = {"call", "answer", "dry_run", "doctor", "mcp_catalog", "statistic
                 "write_project",
                 # over SSH to the hosts of `sandbox-ai hosts` (seconds; a host that does not answer: up to the timeout)
                 "host_run", "host_json", "host_instances", "host_questions", "host_test", "host_update",
-                "limits_shown", "review_home"}
+                "limits_shown", "review_home", "host_remembered", "host_net_options", "ended_starts", "start_history",
+                "collect", "host_set", "host_add", "host_remove"}
 # (host_statuses(cached=True) reads what `sandbox-ai hosts list` kept, without SSH: the Hosts page lists it at once.)
 # (stop_commands runs on the GUI thread on purpose: only when quitting, bounded by one grace period.)
 BLOCKING_MODULES = {"subprocess"}
@@ -148,7 +149,7 @@ def blocking_calls(source):
 def test_pages_run_commands_and_slow_reads_only_in_the_background():
     found = [f"{name}:{line} {what}"
              for name in ("pages.py", "images_page.py", "ui.py", "board_view.py", "wizard.py", "settings.py",
-                          "hosts_page.py")
+                          "hosts_page.py", "llm_page.py", "terminal.py")
              if (PACKAGE / name).exists()
              for line, what in blocking_calls((PACKAGE / name).read_text())]
     assert not found, "on the GUI thread (use widgets.background, ThreadCall or Task):\n" + "\n".join(found)

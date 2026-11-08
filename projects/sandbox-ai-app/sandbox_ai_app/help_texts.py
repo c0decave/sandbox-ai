@@ -48,14 +48,15 @@ def _tip(ident, title, what, does=None, cli="", section=""):
 PAGE_SECTIONS = {"launch": "page-launch", "board": "page-board", "sandboxes": "page-sandboxes",
                  "approvals": "page-approvals", "terminals": "page-terminals", "connections": "page-connections",
                  "activity": "page-activity", "statistics": "page-statistics", "files": "page-files",
-                 "kits": "page-kits", "mcp": "page-mcp", "images": "page-images", "credentials": "page-credentials",
-                 "system": "page-system", "hosts": "page-hosts", "help": "page-help"}
+                 "kits": "page-kits", "mcp": "page-mcp", "llm": "page-llm", "images": "page-images",
+                 "credentials": "page-credentials", "system": "page-system", "hosts": "page-hosts", "help": "page-help"}
 PAGE_CLI = {"launch": "sandbox-ai AGENT [options]", "board": ".sandbox-ai.json",
             "sandboxes": "sandbox-ai list",
             "approvals": "--ask", "terminals": "tmux", "connections": "sandbox-ai logs, --log-dir",
             "activity": "sandbox-ai activity",
             "statistics": "sandbox-ai activity", "files": "", "kits": "sandbox-ai kits, --kit",
-            "mcp": "sandbox-ai mcp, --mcp", "images": "sandbox-ai build", "credentials": "sandbox-ai secrets",
+            "mcp": "sandbox-ai mcp, --mcp", "llm": "sandbox-ai llm, --llm NAME", "images": "sandbox-ai build",
+            "credentials": "sandbox-ai secrets",
             "system": "sandbox-ai doctor", "hosts": "sandbox-ai hosts", "help": ""}
 
 
@@ -272,22 +273,39 @@ AREA_TIPS = (
          "", "page-board"),
     # Sandboxes & sessions
     _tip("sandboxes.table", ("Sandboxes, sessions, MCP servers", "Sandboxen, Sitzungen, MCP-Server"),
-         ("Everything that runs or is kept on this computer, with kind, project, agent, backend and start time; "
-          "rows of the current project are bold.",
-          "Alles, was auf diesem Rechner läuft oder aufbewahrt wird, mit Art, Projekt, Agent, Backend und "
-          "Startzeit; Zeilen des aktuellen Projekts sind fett."),
-         ("Select a row for its details and the buttons that act on it.",
-          "Wählen Sie eine Zeile für ihre Details und die Knöpfe, die auf sie wirken."),
+         ("Everything that runs or is kept on this computer and on every host, with kind, project, agent, "
+          "backend, start time and host; rows of the current project are bold, a start with an open question is "
+          "marked asking. Rows of a host that did not answer are greyed (last seen N s ago) and cannot be acted "
+          "on.",
+          "Alles, was auf diesem Rechner und auf jedem Host läuft oder aufbewahrt wird, mit Art, Projekt, Agent, "
+          "Backend, Startzeit und Host; Zeilen des aktuellen Projekts sind fett, ein Start mit offener Frage ist "
+          "als fragt markiert. Zeilen eines Hosts, der nicht antwortete, sind ausgegraut (zuletzt vor N s "
+          "gesehen) und lassen sich nicht bedienen."),
+         ("Select a row for its details and the buttons that act on it. The hosts are read about every 10 "
+          "seconds while the page is shown, every minute otherwise.",
+          "Wählen Sie eine Zeile für ihre Details und die Knöpfe, die auf sie wirken. Die Hosts werden etwa alle "
+          "10 Sekunden gelesen, solange die Seite zu sehen ist, sonst jede Minute."),
          "sandbox-ai list", "sessions"),
     _tip("sandboxes.only_project", ("Only the current project", "Nur das aktuelle Projekt"),
          ("Limits the list to the sandboxes and sessions of the project open now.",
           "Beschränkt die Liste auf die Sandboxen und Sitzungen des gerade offenen Projekts."),
          None, "", "page-sandboxes"),
+    _tip("sandboxes.ended", ("Ended", "Beendet"),
+         ("Also lists the starts that ended: stopped MCP servers and whatever else sandbox-ai keeps, on this "
+          "computer and every host.",
+          "Listet auch die beendeten Starts: gestoppte MCP-Server und was sandbox-ai sonst noch aufbewahrt, auf "
+          "diesem Rechner und jedem Host."),
+         ("History… shows what happened to the selected start; Clean up… removes leftovers and kept starts "
+          "unused for longer than keep_days, after showing what it would remove.",
+          "Verlauf… zeigt, was mit dem gewählten Start geschah; Aufräumen… entfernt Reste und aufbewahrte Starts, "
+          "die länger als keep_days ungenutzt sind, nachdem es gezeigt hat, was es entfernen würde."),
+         "sandbox-ai list --all, sandbox-ai gc", "page-sandboxes"),
     _tip("sandboxes.stop", ("Stop", "Beenden"),
-         ("Ends the selected sandbox after asking; its launcher cleans up. A session can be paused instead.",
+         ("Ends the selected sandbox after asking; its launcher cleans up. A session can be paused instead. "
+          "Rename… gives a start another name; its run id stays.",
           "Beendet die gewählte Sandbox nach Rückfrage; ihr Launcher räumt auf. Eine Sitzung lässt sich stattdessen "
-          "pausieren."),
-         None, "sandbox-ai stop NAME", "sessions"),
+          "pausieren. Umbenennen… gibt einem Start einen anderen Namen; seine Lauf-ID bleibt."),
+         None, "sandbox-ai stop NAME, sandbox-ai rename OLD NEW", "sessions"),
     _tip("sandboxes.live", ("While it runs", "Während sie läuft"),
          ("Changes for a running sandbox: allow or revoke a host, hand over a device, change the limits, show "
           "its log.",
@@ -298,25 +316,40 @@ AREA_TIPS = (
          "sandbox-ai net allow | sandbox-ai devices | sandbox-ai limits", "network"),
     # Approvals
     _tip("approvals.open", ("Open questions", "Offene Fragen"),
-         ("What running sandboxes ask: a destination not allowed yet, a push with warnings, an MCP tool call, a "
-          "page to open.",
-          "Was laufende Sandboxen fragen: ein noch nicht erlaubtes Ziel, ein Push mit Warnungen, ein MCP-"
-          "Werkzeugaufruf, eine zu öffnende Seite."),
-         ("The sandbox waits for your answer; without one in time the request is refused.",
-          "Die Sandbox wartet auf Ihre Antwort; ohne Antwort rechtzeitig wird die Anfrage abgelehnt."),
-         "--ask", "approvals"),
+         ("What running sandboxes ask, on this computer and on every host: a destination not allowed yet, a push "
+          "with warnings, an MCP tool call, a page to open.",
+          "Was laufende Sandboxen fragen, auf diesem Rechner und auf jedem Host: ein noch nicht erlaubtes Ziel, ein "
+          "Push mit Warnungen, ein MCP-Werkzeugaufruf, eine zu öffnende Seite."),
+         ("The sandbox waits for your answer; without one in time the request is refused. Each question is "
+          "answered on its own: a slow host never holds up the others.",
+          "Die Sandbox wartet auf Ihre Antwort; ohne Antwort rechtzeitig wird die Anfrage abgelehnt. Jede Frage "
+          "wird für sich beantwortet: Ein langsamer Host hält die anderen nie auf."),
+         "--ask, sandbox-ai approvals list", "approvals"),
+    _tip("approvals.hosts", ("Questions of", "Fragen von"),
+         ("Whose questions are listed: every host's, this machine's or one host's. Show questions on the Hosts "
+          "page sets it.",
+          "Wessen Fragen aufgelistet sind: die aller Hosts, die dieses Rechners oder die eines Hosts. Fragen "
+          "zeigen auf der Seite Hosts stellt es ein."),
+         None, "sandbox-ai hosts run HOST -- approvals list", "page-approvals"),
     _tip("approvals.scope", ("For how long", "Für wie lange"),
-         ("Once, for this run, or always (kept for the project). The security mode decides what is offered.",
-          "Einmal, für diesen Lauf oder immer (für das Projekt gemerkt). Der Sicherheitsmodus bestimmt, was "
-          "angeboten wird."),
-         ("Allow, Deny and Block use the scope chosen here.",
-          "Erlauben, Ablehnen und Sperren nutzen den hier gewählten Umfang."),
-         "--mode", "approvals"),
-    _tip("approvals.always", ("Allowed always", "Immer erlaubt"),
-         ("Your standing answers per project.", "Ihre dauerhaften Antworten pro Projekt."),
-         ("Forget one and the sandbox asks again the next time.",
-          "Vergessen Sie eine, fragt die Sandbox beim nächsten Mal wieder."),
-         "", "approvals"),
+         ("How long an allow lasts: once, for this run, or always (kept for the project). The security mode and "
+          "the administrator decide what is offered.",
+          "Wie lange ein Erlauben gilt: einmal, für diesen Lauf oder immer (für das Projekt gemerkt). "
+          "Sicherheitsmodus und Administrator bestimmen, was angeboten wird."),
+         ("Allow (Alt+A) uses the scope chosen here. Deny for this run (Alt+D) refuses it until the run ends, "
+          "Deny once only this time, Block always… (Ctrl+Shift+B, asked first) at every later start of the "
+          "project.",
+          "Erlauben (Alt+A) nutzt die hier gewählte Geltung. Für diesen Lauf ablehnen (Alt+D) weist es bis zum "
+          "Ende des Laufs ab, Einmal ablehnen nur dieses Mal, Immer sperren… (Strg+Umschalt+B, mit Rückfrage) bei "
+          "jedem späteren Start des Projekts."),
+         "sandbox-ai approvals allow | deny ID --scope once|run|always", "approvals"),
+    _tip("approvals.always", ("Allowed or blocked always", "Immer erlaubt oder blockiert"),
+         ("Your standing answers per project, of this machine or of a host chosen beside Refresh.",
+          "Ihre dauerhaften Antworten pro Projekt, die dieses Rechners oder eines Hosts, den Sie neben "
+          "Aktualisieren wählen."),
+         ("Forget… one, there too, and the sandbox asks again the next time.",
+          "Vergessen Sie eine mit Vergessen…, auch dort, fragt die Sandbox beim nächsten Mal wieder."),
+         "sandbox-ai approvals remembered, sandbox-ai approvals forget", "approvals"),
     # Terminals
     _tip("terminals.tabs", ("Terminal tabs", "Terminal-Tabs"),
          ("The sandboxes started in the app, builds and logins, each in a tab: the agent in tmux window 0, a shell "
@@ -434,6 +467,41 @@ AREA_TIPS = (
          ("Adding one defines it under a name; nothing runs until a start names it.",
           "Hinzufügen definiert ihn unter einem Namen; nichts läuft, bis ein Start ihn nennt."),
          "sandbox-ai mcp catalog | add", "mcp"),
+    # LLM servers
+    _tip("llm.host", ("Whose servers", "Wessen Server"),
+         ("This machine or a host of sandbox-ai hosts: the list, Add, Check, Models and Remove act there (on a "
+          "host over SSH).",
+          "Dieser Rechner oder ein Host von sandbox-ai hosts: Liste, Hinzufügen, Prüfen, Modelle und Entfernen "
+          "wirken dort (auf einem Host über SSH)."),
+         None, "sandbox-ai hosts run HOST -- llm list", "page-llm"),
+    _tip("llm.servers", ("Your LLM servers", "Ihre LLM-Server"),
+         ("The model servers registered by name (Ollama, LM Studio, llama.cpp, vLLM or another OpenAI-compatible "
+          "server), local or reached over a VPN, with kind, URL, model, key and the agents they suit.",
+          "Die unter einem Namen eingetragenen Modellserver (Ollama, LM Studio, llama.cpp, vLLM oder ein anderer "
+          "OpenAI-kompatibler Server), lokal oder über ein VPN erreicht, mit Art, URL, Modell, Schlüssel und den "
+          "Agenten, zu denen sie passen."),
+         ("A start uses one with --llm NAME[:MODEL]: only its address and port are opened, and the agent sees a "
+          "placeholder instead of the key.",
+          "Ein Start nutzt einen mit --llm NAME[:MODELL]: Nur seine Adresse und sein Port werden geöffnet, und der "
+          "Agent sieht einen Platzhalter statt des Schlüssels."),
+         "sandbox-ai llm list, --llm NAME", "llm"),
+    _tip("llm.add", ("Add a server", "Einen Server hinzufügen"),
+         ("Registers a server under a name: its kind, URL, an optional default model, VPN profile and key.",
+          "Trägt einen Server unter einem Namen ein: seine Art, URL und optional ein Standardmodell, ein "
+          "VPN-Profil und einen Schlüssel."),
+         ("A key typed here is kept as a secret of sandbox-ai, never on a command line; on a host, name a secret "
+          "kept there already.",
+          "Ein hier eingegebener Schlüssel wird als Geheimnis von sandbox-ai aufbewahrt, nie auf einer "
+          "Befehlszeile; auf einem Host nennen Sie ein dort schon aufbewahrtes Geheimnis."),
+         "sandbox-ai llm add NAME --kind KIND --url URL", "page-llm"),
+    _tip("llm.check", ("Check and models", "Prüfen und Modelle"),
+         ("Check tests reachability, TLS, the key, the model and the API the chosen agent needs; Models lists "
+          "what the server offers now.",
+          "Prüfen testet Erreichbarkeit, TLS, den Schlüssel, das Modell und die API, die der gewählte Agent "
+          "braucht; Modelle listet, was der Server gerade anbietet."),
+         ("Nothing is changed; Remove… forgets a server after asking (its secret stays).",
+          "Nichts wird geändert; Entfernen… vergisst einen Server nach Rückfrage (sein Geheimnis bleibt)."),
+         "sandbox-ai llm check NAME --agent AGENT, sandbox-ai llm models NAME", "llm"),
     # Images
     _tip("images.images", ("Images and variants", "Images und Varianten"),
          ("Each agent's image and your variants: built or not, when, how big, and whether the extension changed "
@@ -513,17 +581,34 @@ AREA_TIPS = (
          ("The app greys forbidden options out everywhere.", "Die App graut verbotene Optionen überall aus."),
          "", "policy"),
     # Hosts
-    _tip("hosts.list", ("Hosts", "Hosts"),
-         ("Other machines whose sandbox-ai this app manages over SSH, such as LXC containers.",
-          "Andere Rechner, deren sandbox-ai diese App über SSH verwaltet, etwa LXC-Container."),
-         ("Select one to see what runs there; Test runs its sandbox-ai doctor.",
-          "Wählen Sie einen, um zu sehen, was dort läuft; Testen führt sein sandbox-ai doctor aus."),
-         "sandbox-ai hosts", "hosts"),
+    _tip("hosts.table", ("Hosts", "Hosts"),
+         ("Other machines whose sandbox-ai this app manages over SSH, such as LXC containers: for each, whether it "
+          "answered (or when it was last seen), its sandbox-ai version, the starts running and the questions "
+          "waiting there.",
+          "Andere Rechner, deren sandbox-ai diese App über SSH verwaltet, etwa LXC-Container: für jeden, ob er "
+          "antwortete (oder wann er zuletzt gesehen wurde), seine sandbox-ai-Version, die dort laufenden Starts "
+          "und die wartenden Fragen."),
+         ("Add…, Edit… (whether its update uses sudo), Remove… and Test act on the list; Update and Update all "
+          "run each host's own signed update.",
+          "Hinzufügen…, Bearbeiten… (ob sein Update sudo nutzt), Entfernen… und Testen wirken auf die Liste; "
+          "Aktualisieren und Alle aktualisieren führen das eigene signierte Update jedes Hosts aus."),
+         "sandbox-ai hosts list | add | set | remove | test | update", "hosts"),
+    _tip("hosts.show", ("Its starts and questions", "Seine Starts und Fragen"),
+         ("Show starts opens Sandboxes & sessions with only this host's starts, Show questions the Approvals page "
+          "with only its questions.",
+          "Starts zeigen öffnet Sandboxen & Sitzungen nur mit den Starts dieses Hosts, Fragen zeigen die Seite "
+          "Freigaben nur mit seinen Fragen."),
+         ("Attach, pause, stop, allow and deny happen there, as for this computer.",
+          "Verbinden, Pausieren, Beenden, Erlauben und Ablehnen geschehen dort, wie für diesen Rechner."),
+         "sandbox-ai hosts run HOST -- list", "page-hosts"),
     _tip("hosts.tabs", ("On the host", "Auf dem Host"),
-         ("The host's starts and sessions and its open questions.",
-          "Die Starts und Sitzungen des Hosts und seine offenen Fragen."),
-         ("Attach opens a session's terminal here.", "Verbinden öffnet das Terminal einer Sitzung hier."),
-         "", "hosts"),
+         ("The chosen host's doctor, its updates, and its defaults for every start there: security mode, "
+          "canaries, how long kept starts stay, the agents' telemetry.",
+          "Der doctor des gewählten Hosts, seine Updates und seine Standards für jeden Start dort: "
+          "Sicherheitsmodus, Canaries, wie lange aufbewahrte Starts bleiben, die Telemetrie der Agenten."),
+         ("Save defaults… writes them there; a step down in security is asked first.",
+          "Vorgaben speichern… schreibt sie dort; ein Schritt zu weniger Sicherheit wird vorher erfragt."),
+         "sandbox-ai defaults set | unset", "page-hosts"),
     # Help
     _tip("help.search", ("Search the help", "Hilfe durchsuchen"),
          ("Finds sections whose title or text contains every word you type, in English and German.",
@@ -629,8 +714,10 @@ PLACES = {
               ("apply_button", "board.apply", "after"), ("gallery_button", "board.presets", "after"),
               ("arrange_button", "board.tools", "after")),
     "sandboxes": (("table", "sandboxes.table", "corner"), ("only_project", "sandboxes.only_project", "after"),
+                  ("show_ended", "sandboxes.ended", "after"),
                   ("stop_button", "sandboxes.stop", "after"), ("devices_label", "sandboxes.live", "group")),
-    "approvals": (("open", "approvals.open", "group"), ("scope", "approvals.scope", "after"),
+    "approvals": (("open", "approvals.open", "group"), ("host_filter", "approvals.hosts", "after"),
+                  ("scope", "approvals.scope", "after"),
                   ("always", "approvals.always", "group")),
     "terminals": (("tabs", "terminals.tabs", "corner"),),
     "connections": (("directory", "connections.directory", "after"), ("filter", "connections.filter", "after"),
@@ -643,13 +730,16 @@ PLACES = {
     "kits": (("table", "kits.table", "group"), ("use_button", "kits.use", "after"),
              ("trust_button", "kits.hooks", "after"), ("new_skill_button", "kits.skill", "after")),
     "mcp": (("servers", "mcp.servers", "group"), ("catalog", "mcp.catalog", "group")),
+    "llm": (("host_box", "llm.host", "after"), ("servers", "llm.servers", "corner"),
+            ("add_button", "llm.add", "after"), ("check_button", "llm.check", "after")),
     "images": (("images", "images.images", "group"), ("build_button", "images.build", "after"),
                ("new_button", "images.variant", "after"), ("editor_tabs", "images.editor", "corner")),
     "credentials": (("overview", "credentials.overview", "group"), ("logins", "credentials.logins", "group"),
                     ("secrets", "credentials.secrets", "group"), ("vpn", "credentials.vpn", "group")),
     "system": (("checks", "system.checks", "group"), ("theme", "system.settings", "group"),
                ("update_button", "system.update", "after"), ("policy_text", "system.policy", "group")),
-    "hosts": (("list", "hosts.list", "corner"), ("tabs", "hosts.tabs", "corner")),
+    "hosts": (("table", "hosts.table", "corner"), ("starts_button", "hosts.show", "after"),
+              ("tabs", "hosts.tabs", "corner")),
     "help": (),  # the Help page places its own
 }
 SETTINGS_TABS = ("settings.appearance", "settings.window", "settings.polling", "settings.sandbox-ai",

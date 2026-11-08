@@ -756,6 +756,47 @@ def test_the_open_questions_of_another_host_are_checked_and_count_down():
             s.host_questions("ct1")
 
 
+def test_what_another_host_refuses_and_its_null_deadlines_are_kept():
+    """The CLI contract of `approvals list --json`: null times are no deadline (never expired); max_scope null with
+    allow_refused: only a deny; a browser question without its url (url_refused) names where it leads (url_host);
+    url_truncated is kept; a long URL is no longer cut."""
+    long = "https://login.example/" + "a" * 5000
+    found = backend.remote_questions("ct1", [
+        {"id": "1-1-1", "run": "r", "kind": "browser", "timeout": None, "seconds_left": None, "url": long,
+         "url_truncated": True, "max_scope": "once"},
+        {"id": "1-1-2", "run": "r", "kind": "connect", "timeout": 60, "seconds_left": 30, "max_scope": None,
+         "allow_refused": "the security mode paranoid approves nothing"},
+        {"id": "1-1-3", "run": "r", "kind": "browser", "timeout": None, "seconds_left": None, "max_scope": "once",
+         "url_refused": "a file: URL", "url_host": "intranet.example"},
+        {"id": "1-1-4", "run": "r", "kind": "dns", "url_refused": "x", "url_host": "y", "url_truncated": True}])
+    browser, refused, hidden, dns = found
+    assert browser.timing(now=browser.read_at + 3600)[1] is None, "no deadline, never expired"
+    assert browser["url"] == long and browser["url_truncated"] is True
+    assert refused["max_scope"] is None and "paranoid" in refused["allow_refused"]
+    assert "url" not in hidden and hidden["url_refused"] == "a file: URL" and hidden["url_host"] == "intranet.example"
+    assert not {"url_refused", "url_host", "url_truncated"} & set(dns), "only a browser question has a URL"
+    assert backend.RemoteQuestion("ct1", {"id": "1-1-5", "run": "r", "max_scope": None})["allow_refused"]
+
+
+def test_the_remembered_answers_of_another_host_and_what_gc_and_history_say():
+    calls = []
+    remembered = {"/srv/app": {"hosts": ["pypi.org", 7], "tcp": ["192.0.2.5:5432"], "blocked_hosts": ["evil.example"],
+                               "blocked_tcp": [], "details": {}}, "/bad": "x"}
+    s = backend.SandboxAI(runner=json_runner(calls, {"approvals": (0, json.dumps(remembered), ""),
+                                                     "gc": (0, json.dumps({"removed": [], "dry_run": True}), ""),
+                                                     "list": (0, json.dumps([{"event": "start"}, "junk"]), "")}))
+    assert s.host_remembered("ct1") == [("/srv/app", "pypi.org", "host"), ("/srv/app", "192.0.2.5:5432", "tcp"),
+                                         ("/srv/app", "evil.example", "blocked-host")]
+    assert calls[-1][3:] == ["hosts", "run", "ct1", "--", "approvals", "remembered", "--json"]
+    assert s.forget_remembered("/srv/app", "-x", host="ct1")[0] == 2
+    assert s.collect("ct1", True) == {"removed": [], "dry_run": True}
+    assert calls[-1][3:] == ["hosts", "run", "ct1", "--", "gc", "--dry-run", "--json"]
+    assert s.start_history("web", "ct1") == [{"event": "start"}]
+    assert calls[-1][3:] == ["hosts", "run", "ct1", "--", "list", "--history", "web", "--json"]
+    with pytest.raises(ValueError):
+        s.start_history("--all", "ct1")
+
+
 def test_the_keys_of_other_hosts_starts_never_meet_this_machines():
     """A host may be called "session" or "run": its starts' keys live in a namespace of their own."""
     listing = [{"name": "web", "kind": "session", "state": "running"}, {"name": "--evil"}]

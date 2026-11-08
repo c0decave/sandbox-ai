@@ -82,9 +82,6 @@ TEXTS = {
     'Host: {host}': {
         'en': 'Host: {host}',
         'de': 'Host: {host}'},
-    '{host}: asking…': {
-        'en': '{host}: asking…',
-        'de': '{host}: wird gefragt…'},
     '{host}: no answer': {
         'en': '{host}: no answer',
         'de': '{host}: keine Antwort'},
@@ -276,9 +273,6 @@ TEXTS = {
     'SSH': {
         'en': 'SSH',
         'de': 'SSH'},
-    'Starts and sessions': {
-        'en': 'Starts and sessions',
-        'de': 'Starts und Sitzungen'},
     'Test': {
         'en': 'Test',
         'de': 'Testen'},
@@ -291,15 +285,9 @@ TEXTS = {
     'Your user needs SSH access with a key (ssh-copy-id), and sandbox-ai installed there. The host key is learnt at the first contact and checked from then on.': {
         'en': 'Your user needs SSH access with a key (ssh-copy-id), and sandbox-ai installed there. The host key is learnt at the first contact and checked from then on.',
         'de': 'Dein Benutzer braucht dort SSH-Zugang mit Schlüssel (ssh-copy-id) und ein installiertes sandbox-ai. Der Host-Schlüssel wird beim ersten Kontakt gelernt und ab dann geprüft.'},
-    '{host}: {starts} starts, {questions} open questions': {
-        'en': '{host}: {starts} starts, {questions} open questions',
-        'de': '{host}: {starts} Starts, {questions} offene Fragen'},
     '{name} (this machine)': {
         'en': '{name} (this machine)',
         'de': '{name} (diese Maschine)'},
-    '{start} cannot be attached (not a running session).': {
-        'en': '{start} cannot be attached (not a running session).',
-        'de': '{start} kann nicht verbunden werden (keine laufende Sitzung).'},
     '~/.ssh/id_ed25519 (optional)': {
         'en': '~/.ssh/id_ed25519 (optional)',
         'de': '~/.ssh/id_ed25519 (optional)'},
@@ -1596,15 +1584,6 @@ TEXTS = {
     'Block always': {
         'en': 'Block always',
         'de': 'Immer blockieren'},
-    'Refused now and at every later start of this project, without a question (Forget… below lifts it)': {
-        'en': 'Refused now and at every later start of this project, without a question (Forget… below lifts it)',
-        'de': 'Jetzt und bei jedem späteren Start dieses Projekts ohne Nachfrage abgelehnt (Vergessen… unten hebt es auf)'},
-    'Refused; not asked again in this run (once: only this time)': {
-        'en': 'Refused; not asked again in this run (once: only this time)',
-        'de': 'Abgelehnt; in diesem Lauf nicht wieder gefragt (einmal: nur dieses Mal)'},
-    "The administrator's policy allows answers up to “{scope}”.": {
-        'en': "The administrator's policy allows answers up to “{scope}”.",
-        'de': 'Die Richtlinie des Administrators erlaubt Antworten bis „{scope}“.'},
     'allowed: address and port': {
         'en': 'allowed: address and port',
         'de': 'erlaubt: Adresse und Port'},
@@ -4722,9 +4701,6 @@ TEXTS = {
     'Allow once': {
         'en': 'Allow once',
         'de': 'Einmal erlauben'},
-    'Refused this time': {
-        'en': 'Refused this time',
-        'de': 'Diesmal abgelehnt'},
     '(no commit name)': {
         'en': '(no commit name)',
         'de': '(kein Commit-Name)'},
@@ -5400,24 +5376,12 @@ TEXTS = {
     'Mount a folder of its host into the selected sandbox until it ends (sandbox-ai workspace add)': {
         'en': 'Mount a folder of its host into the selected sandbox until it ends (sandbox-ai workspace add)',
         'de': 'Einen Ordner ihres Hosts in die gewählte Sandbox einhängen, bis sie endet (sandbox-ai workspace add)'},
-    'Not while it is {state}.': {
-        'en': 'Not while it is {state}.',
-        'de': 'Nicht, solange der Start {state} ist.'},
-    'On {host}: stop {start}? Its agent ends; what it did not save is lost (a session keeps its HOME, and Resume starts it again).': {
-        'en': 'On {host}: stop {start}? Its agent ends; what it did not save is lost (a session keeps its HOME, and Resume starts it again).',
-        'de': 'Auf {host}: {start} stoppen? Ihr Agent endet; was er nicht gespeichert hat, geht verloren (eine Sitzung behält ihr HOME, und Fortsetzen startet sie wieder).'},
     'Only http and https pages are opened here.': {
         'en': 'Only http and https pages are opened here.',
         'de': 'Hier werden nur http- und https-Seiten geöffnet.'},
-    'Open here': {
-        'en': 'Open here',
-        'de': 'Hier öffnen'},
     'Open questions of the running sandboxes, on every host': {
         'en': 'Open questions of the running sandboxes, on every host',
         'de': 'Offene Fragen der laufenden Sandboxen, auf allen Hosts'},
-    "Open the page in this computer's browser and allow the question without opening it on its host": {
-        'en': "Open the page in this computer's browser and allow the question without opening it on its host",
-        'de': 'Die Seite im Browser dieses Rechners öffnen und die Frage erlauben, ohne sie auf ihrem Host zu öffnen'},
     'Remove device from {run} on {host}': {
         'en': 'Remove device from {run} on {host}',
         'de': 'Gerät von {run} auf {host} entfernen'},
@@ -5442,9 +5406,6 @@ TEXTS = {
     'Revoke for {run} on {host}': {
         'en': 'Revoke for {run} on {host}',
         'de': 'Für {run} auf {host} zurücknehmen'},
-    'Select a start first.': {
-        'en': 'Select a start first.',
-        'de': 'Wähle zuerst einen Start.'},
     "The HOME of {name} changed since its last start ({since}) in files that decide what runs at a start (shell, git, ssh, the agent's settings, hooks, plugins, skills):": {
         'en': "The HOME of {name} changed since its last start ({since}) in files that decide what runs at a start (shell, git, ssh, the agent's settings, hooks, plugins, skills):",
         'de': 'Das HOME von {name} hat sich seit dem letzten Start ({since}) in Dateien geändert, die bestimmen, was bei einem Start läuft (Shell, git, ssh, die Einstellungen des Agenten, Hooks, Plugins, Skills):'},
@@ -5502,4 +5463,563 @@ TEXTS = {
     '… and {count} more': {
         'en': '… and {count} more',
         'de': '… und {count} weitere'},
+    # round 2: per-question answers, the fleet view, host management, LLM servers
+    'not asked yet': {
+        'en': 'not asked yet',
+        'de': 'noch nicht gefragt'},
+    'no answer (last seen {seconds} s ago)': {
+        'en': 'no answer (last seen {seconds} s ago)',
+        'de': 'keine Antwort (zuletzt gesehen vor {seconds} s)'},
+    'no answer': {
+        'en': 'no answer',
+        'de': 'keine Antwort'},
+    'the security mode from {old} down to {new}': {
+        'en': 'the security mode from {old} down to {new}',
+        'de': 'den Sicherheitsmodus von {old} herab auf {new}'},
+    'no canaries of {categories} any more': {
+        'en': 'no canaries of {categories} any more',
+        'de': 'keine Köder mehr für {categories}'},
+    "the agents' telemetry from {old} to {new}": {
+        'en': "the agents' telemetry from {old} to {new}",
+        'de': 'die Telemetrie der Agenten von {old} auf {new}'},
+    'kept starts unused for {days} days removed with their HOME': {
+        'en': 'kept starts unused for {days} days removed with their HOME',
+        'de': 'aufbewahrte Starts, {days} Tage unbenutzt, samt ihrem HOME entfernt'},
+    'Edit {host}': {
+        'en': 'Edit {host}',
+        'de': '{host} bearbeiten'},
+    'Its sandbox-ai is a system installation: update it with sudo': {
+        'en': 'Its sandbox-ai is a system installation: update it with sudo',
+        'de': 'Sein sandbox-ai ist eine Systeminstallation: mit sudo aktualisieren'},
+    'Show starts': {
+        'en': 'Show starts',
+        'de': 'Starts zeigen'},
+    "The Sandboxes page with this host's starts only": {
+        'en': "The Sandboxes page with this host's starts only",
+        'de': 'Die Seite Sandboxen, nur mit den Starts dieses Hosts'},
+    'Show questions': {
+        'en': 'Show questions',
+        'de': 'Fragen zeigen'},
+    "The Approvals page with this host's questions only": {
+        'en': "The Approvals page with this host's questions only",
+        'de': 'Die Seite Freigaben, nur mit den Fragen dieses Hosts'},
+    'Look at every host now (their starts and questions)': {
+        'en': 'Look at every host now (their starts and questions)',
+        'de': 'Jetzt bei jedem Host nachsehen (seine Starts und Fragen)'},
+    'Refresh the hosts': {
+        'en': 'Refresh the hosts',
+        'de': 'Hosts neu lesen'},
+    'Add a host reached over SSH (sandbox-ai hosts add)': {
+        'en': 'Add a host reached over SSH (sandbox-ai hosts add)',
+        'de': 'Einen über SSH erreichbaren Host hinzufügen (sandbox-ai hosts add)'},
+    "Change the host's settings (sandbox-ai hosts set)": {
+        'en': "Change the host's settings (sandbox-ai hosts set)",
+        'de': 'Die Einstellungen des Hosts ändern (sandbox-ai hosts set)'},
+    'Edit the host': {
+        'en': 'Edit the host',
+        'de': 'Host bearbeiten'},
+    'Forget the host (sandbox-ai hosts remove); asked first': {
+        'en': 'Forget the host (sandbox-ai hosts remove); asked first',
+        'de': 'Den Host vergessen (sandbox-ai hosts remove); vorher gefragt'},
+    'Remove the host': {
+        'en': 'Remove the host',
+        'de': 'Host entfernen'},
+    "SSH, the host's sandbox-ai and its doctor (sandbox-ai hosts test)": {
+        'en': "SSH, the host's sandbox-ai and its doctor (sandbox-ai hosts test)",
+        'de': 'SSH, das sandbox-ai des Hosts und sein Doctor (sandbox-ai hosts test)'},
+    'Test the host': {
+        'en': 'Test the host',
+        'de': 'Host testen'},
+    'Update the host': {
+        'en': 'Update the host',
+        'de': 'Host aktualisieren'},
+    'Ask every host for its sandbox-ai version now': {
+        'en': 'Ask every host for its sandbox-ai version now',
+        'de': 'Jeden Host jetzt nach seiner sandbox-ai-Version fragen'},
+    'Security mode': {
+        'en': 'Security mode',
+        'de': 'Sicherheitsmodus'},
+    'Telemetry': {
+        'en': 'Telemetry',
+        'de': 'Telemetrie'},
+    'Canary categories': {
+        'en': 'Canary categories',
+        'de': 'Köder-Kategorien'},
+    'Remove kept starts unused for': {
+        'en': 'Remove kept starts unused for',
+        'de': 'Aufbewahrte Starts entfernen, unbenutzt seit'},
+    'Remove kept starts after a while': {
+        'en': 'Remove kept starts after a while',
+        'de': 'Aufbewahrte Starts nach einer Weile entfernen'},
+    'Days': {
+        'en': 'Days',
+        'de': 'Tage'},
+    'Kept starts': {
+        'en': 'Kept starts',
+        'de': 'Aufbewahrte Starts'},
+    'Save defaults…': {
+        'en': 'Save defaults…',
+        'de': 'Vorgaben speichern…'},
+    'Write the defaults of every later start on the host (sandbox-ai defaults set/unset there); a step down in security is asked first': {
+        'en': 'Write the defaults of every later start on the host (sandbox-ai defaults set/unset there); a step down in security is asked first',
+        'de': 'Die Vorgaben jedes späteren Starts auf dem Host schreiben (dort sandbox-ai defaults set/unset); weniger Sicherheit wird vorher gefragt'},
+    "sandbox-ai's default ({mode})": {
+        'en': "sandbox-ai's default ({mode})",
+        'de': 'Vorgabe von sandbox-ai ({mode})'},
+    "sandbox-ai's default ({categories})": {
+        'en': "sandbox-ai's default ({categories})",
+        'de': 'Vorgabe von sandbox-ai ({categories})'},
+    'these categories:': {
+        'en': 'these categories:',
+        'de': 'diese Kategorien:'},
+    'To change the address, the port or the key: remove the host and add it again (its host key is learnt anew).': {
+        'en': 'To change the address, the port or the key: remove the host and add it again (its host key is learnt anew).',
+        'de': 'Um Adresse, Port oder Schlüssel zu ändern: den Host entfernen und neu hinzufügen (sein Host-Schlüssel wird neu gelernt).'},
+    'Answers': {
+        'en': 'Answers',
+        'de': 'Antwortet'},
+    'days': {
+        'en': 'days',
+        'de': 'Tage'},
+    'This machine is always in the list.': {
+        'en': 'This machine is always in the list.',
+        'de': 'Dieser Rechner steht immer in der Liste.'},
+    'This machine has no SSH settings.': {
+        'en': 'This machine has no SSH settings.',
+        'de': 'Dieser Rechner hat keine SSH-Einstellungen.'},
+    'Nothing changed.': {
+        'en': 'Nothing changed.',
+        'de': 'Nichts geändert.'},
+    'Defaults of {host}': {
+        'en': 'Defaults of {host}',
+        'de': 'Vorgaben von {host}'},
+    'Every later start on {host} gets less protection: {changes}. Save anyway?': {
+        'en': 'Every later start on {host} gets less protection: {changes}. Save anyway?',
+        'de': 'Jeder spätere Start auf {host} bekommt weniger Schutz: {changes}. Trotzdem speichern?'},
+    'Canary categories: {known}': {
+        'en': 'Canary categories: {known}',
+        'de': 'Köder-Kategorien: {known}'},
+    'Open questions': {
+        'en': 'Open questions',
+        'de': 'Offene Fragen'},
+    'Deny for this run': {
+        'en': 'Deny for this run',
+        'de': 'Für diesen Lauf ablehnen'},
+    'Refused; not asked again in this run': {
+        'en': 'Refused; not asked again in this run',
+        'de': 'Abgelehnt; in diesem Lauf nicht mehr gefragt'},
+    'Questions of': {
+        'en': 'Questions of',
+        'de': 'Fragen von'},
+    "Whose questions are listed: every host's, this machine's or one host's": {
+        'en': "Whose questions are listed: every host's, this machine's or one host's",
+        'de': 'Wessen Fragen gelistet sind: die aller Hosts, dieses Rechners oder eines Hosts'},
+    'Scope of an allow': {
+        'en': 'Scope of an allow',
+        'de': 'Geltung einer Erlaubnis'},
+    'How long an allow lasts: once, for this run, or always for the project': {
+        'en': 'How long an allow lasts: once, for this run, or always for the project',
+        'de': 'Wie lange eine Erlaubnis gilt: einmal, für diesen Lauf oder immer für das Projekt'},
+    'Allow with the scope chosen (Alt+A)': {
+        'en': 'Allow with the scope chosen (Alt+A)',
+        'de': 'Mit der gewählten Geltung erlauben (Alt+A)'},
+    'Refused; not asked again in this run (Alt+D)': {
+        'en': 'Refused; not asked again in this run (Alt+D)',
+        'de': 'Abgelehnt; in diesem Lauf nicht mehr gefragt (Alt+D)'},
+    'Deny once': {
+        'en': 'Deny once',
+        'de': 'Einmal ablehnen'},
+    'Refused this time only: the sandbox may ask again': {
+        'en': 'Refused this time only: the sandbox may ask again',
+        'de': 'Nur diesmal abgelehnt: die Sandbox darf wieder fragen'},
+    'Block always…': {
+        'en': 'Block always…',
+        'de': 'Immer sperren…'},
+    'Refused now and at every later start of this project, without a question (Forget… below lifts it; Ctrl+Shift+B)': {
+        'en': 'Refused now and at every later start of this project, without a question (Forget… below lifts it; Ctrl+Shift+B)',
+        'de': 'Jetzt und bei jedem späteren Start dieses Projekts ohne Frage abgelehnt (Vergessen… unten hebt es auf; Strg+Umschalt+B)'},
+    'History of the answers': {
+        'en': 'History of the answers',
+        'de': 'Verlauf der Antworten'},
+    'Allowed or blocked always': {
+        'en': 'Allowed or blocked always',
+        'de': 'Immer erlaubt oder gesperrt'},
+    'Remembered on': {
+        'en': 'Remembered on',
+        'de': 'Gemerkt auf'},
+    "Whose list: this machine's or a host's": {
+        'en': "Whose list: this machine's or a host's",
+        'de': 'Wessen Liste: die dieses Rechners oder eines Hosts'},
+    'Refresh the remembered answers': {
+        'en': 'Refresh the remembered answers',
+        'de': 'Gemerkte Antworten neu lesen'},
+    'Select a question first.': {
+        'en': 'Select a question first.',
+        'de': 'Wählen Sie zuerst eine Frage.'},
+    'Only names and addresses can be blocked always.': {
+        'en': 'Only names and addresses can be blocked always.',
+        'de': 'Nur Namen und Adressen lassen sich immer sperren.'},
+    'Refused now and at every later start of this project, without a question. Forget… on this page lifts it.': {
+        'en': 'Refused now and at every later start of this project, without a question. Forget… on this page lifts it.',
+        'de': 'Jetzt und bei jedem späteren Start dieses Projekts ohne Frage abgelehnt. Vergessen… auf dieser Seite hebt es auf.'},
+    'Block always?': {
+        'en': 'Block always?',
+        'de': 'Immer sperren?'},
+    'Open here and allow': {
+        'en': 'Open here and allow',
+        'de': 'Hier öffnen und erlauben'},
+    'The answer is on its way.': {
+        'en': 'The answer is on its way.',
+        'de': 'Die Antwort ist unterwegs.'},
+    'Expired: sandbox-ai refused the question already.': {
+        'en': 'Expired: sandbox-ai refused the question already.',
+        'de': 'Abgelaufen: sandbox-ai hat die Frage schon abgelehnt.'},
+    'Its time is up: sandbox-ai refused it already.': {
+        'en': 'Its time is up: sandbox-ai refused it already.',
+        'de': 'Ihre Zeit ist um: sandbox-ai hat sie schon abgelehnt.'},
+    "Allowed at most “{scope}” here (the policy, the run's security mode or the kind of question).": {
+        'en': "Allowed at most “{scope}” here (the policy, the run's security mode or the kind of question).",
+        'de': 'Hier höchstens „{scope}“ erlaubt (die Richtlinie, der Sicherheitsmodus des Laufs oder die Art der Frage).'},
+    'End it': {
+        'en': 'End it',
+        'de': 'Beenden'},
+    'the kept start {name} with its HOME (last used {time}, {workspace})': {
+        'en': 'the kept start {name} with its HOME (last used {time}, {workspace})',
+        'de': 'der aufbewahrte Start {name} samt seinem HOME (zuletzt benutzt {time}, {workspace})'},
+    'the leftovers of {name} (ended; its HOME was not kept)': {
+        'en': 'the leftovers of {name} (ended; its HOME was not kept)',
+        'de': 'die Reste von {name} (beendet; sein HOME wurde nicht aufbewahrt)'},
+    'the history of {name}': {
+        'en': 'the history of {name}',
+        'de': 'der Verlauf von {name}'},
+    'left alone: {name}: {reason}': {
+        'en': 'left alone: {name}: {reason}',
+        'de': 'gelassen: {name}: {reason}'},
+    'left alone: {path} is damaged; remove it by hand': {
+        'en': 'left alone: {path} is damaged; remove it by hand',
+        'de': 'gelassen: {path} ist beschädigt; von Hand entfernen'},
+    'Untaint…': {
+        'en': 'Untaint…',
+        'de': 'Taint aufheben…'},
+    'Untaint': {
+        'en': 'Untaint',
+        'de': 'Taint aufheben'},
+    "Take back the run's taint (sandbox-ai net untaint): only once you checked the untrusted content that entered it": {
+        'en': "Take back the run's taint (sandbox-ai net untaint): only once you checked the untrusted content that entered it",
+        'de': 'Den Taint des Laufs zurücknehmen (sandbox-ai net untaint): erst, wenn Sie die nicht vertrauenswürdigen Inhalte geprüft haben, die hineinkamen'},
+    'status {status}': {
+        'en': 'status {status}',
+        'de': 'Status {status}'},
+    'status unknown': {
+        'en': 'status unknown',
+        'de': 'Status unbekannt'},
+    'renamed to {name}': {
+        'en': 'renamed to {name}',
+        'de': 'umbenannt in {name}'},
+    'renamed from {name}': {
+        'en': 'renamed from {name}',
+        'de': 'umbenannt von {name}'},
+    'Ended': {
+        'en': 'Ended',
+        'de': 'Beendete'},
+    'Also the starts that ended: stopped MCP servers and what else sandbox-ai list --all keeps, on this machine and every host': {
+        'en': 'Also the starts that ended: stopped MCP servers and what else sandbox-ai list --all keeps, on this machine and every host',
+        'de': 'Auch die beendeten Starts: gestoppte MCP-Server und was sandbox-ai list --all sonst aufbewahrt, auf diesem Rechner und jedem Host'},
+    'Refresh the sandboxes': {
+        'en': 'Refresh the sandboxes',
+        'de': 'Sandboxen neu lesen'},
+    'Sandboxes and sessions': {
+        'en': 'Sandboxes and sessions',
+        'de': 'Sandboxen und Sitzungen'},
+    '{host} does not answer (last seen {seconds} s ago): its state now is not known.': {
+        'en': '{host} does not answer (last seen {seconds} s ago): its state now is not known.',
+        'de': '{host} antwortet nicht (zuletzt gesehen vor {seconds} s): sein Zustand jetzt ist unbekannt.'},
+    'It ended: History… shows what happened to it.': {
+        'en': 'It ended: History… shows what happened to it.',
+        'de': 'Er ist beendet: Verlauf… zeigt, was mit ihm geschah.'},
+    '{host} does not answer.': {
+        'en': '{host} does not answer.',
+        'de': '{host} antwortet nicht.'},
+    'Rename {name} on {host}': {
+        'en': 'Rename {name} on {host}',
+        'de': '{name} auf {host} umbenennen'},
+    'Rename {name}': {
+        'en': 'Rename {name}',
+        'de': '{name} umbenennen'},
+    'New name (1-40 letters, digits, _ . -; its run id stays)': {
+        'en': 'New name (1-40 letters, digits, _ . -; its run id stays)',
+        'de': 'Neuer Name (1-40 Buchstaben, Ziffern, _ . -; seine Lauf-ID bleibt)'},
+    'History of {name} on {host}': {
+        'en': 'History of {name} on {host}',
+        'de': 'Verlauf von {name} auf {host}'},
+    'History of {name}': {
+        'en': 'History of {name}',
+        'de': 'Verlauf von {name}'},
+    'Clean up on {host}': {
+        'en': 'Clean up on {host}',
+        'de': 'Aufräumen auf {host}'},
+    'Clean up': {
+        'en': 'Clean up',
+        'de': 'Aufräumen'},
+    'Untaint {run} on {host}': {
+        'en': 'Untaint {run} on {host}',
+        'de': 'Taint von {run} auf {host} aufheben'},
+    'Untaint {run}': {
+        'en': 'Untaint {run}',
+        'de': 'Taint von {run} aufheben'},
+    'memory': {
+        'en': 'memory',
+        'de': 'Speicher'},
+    'processes': {
+        'en': 'processes',
+        'de': 'Prozesse'},
+    'Unchanged: {limits} (an empty field keeps its limit; none removes it).': {
+        'en': 'Unchanged: {limits} (an empty field keeps its limit; none removes it).',
+        'de': 'Unverändert: {limits} (ein leeres Feld behält seine Grenze; none entfernt sie).'},
+    'Rename…': {
+        'en': 'Rename…',
+        'de': 'Umbenennen…'},
+    'Another name for the selected start; its run id stays (sandbox-ai rename)': {
+        'en': 'Another name for the selected start; its run id stays (sandbox-ai rename)',
+        'de': 'Ein anderer Name für den gewählten Start; seine Lauf-ID bleibt (sandbox-ai rename)'},
+    'History…': {
+        'en': 'History…',
+        'de': 'Verlauf…'},
+    'What happened to the selected start: starts, ends, pauses, renames (sandbox-ai list --history)': {
+        'en': 'What happened to the selected start: starts, ends, pauses, renames (sandbox-ai list --history)',
+        'de': 'Was mit dem gewählten Start geschah: Starts, Enden, Pausen, Umbenennungen (sandbox-ai list --history)'},
+    'Clean up…': {
+        'en': 'Clean up…',
+        'de': 'Aufräumen…'},
+    'Remove leftovers and the kept starts unused for longer than its keep_days, on this machine or the host chosen above (sandbox-ai gc; shown first)': {
+        'en': 'Remove leftovers and the kept starts unused for longer than its keep_days, on this machine or the host chosen above (sandbox-ai gc; shown first)',
+        'de': 'Reste entfernen und die aufbewahrten Starts, die länger als keep_days unbenutzt sind, auf diesem Rechner oder dem oben gewählten Host (sandbox-ai gc; vorher gezeigt)'},
+    'the list of hosts could not be read: {error}': {
+        'en': 'the list of hosts could not be read: {error}',
+        'de': 'die Liste der Hosts war nicht lesbar: {error}'},
+    'Only the starts of agents have a name to change.': {
+        'en': 'Only the starts of agents have a name to change.',
+        'de': 'Nur Starts von Agenten haben einen änderbaren Namen.'},
+    "A name is 1-40 letters, digits, '_', '.' or '-', beginning with a letter or digit.": {
+        'en': "A name is 1-40 letters, digits, '_', '.' or '-', beginning with a letter or digit.",
+        'de': "Ein Name besteht aus 1-40 Buchstaben, Ziffern, '_', '.' oder '-' und beginnt mit einem Buchstaben oder einer Ziffer."},
+    'No history of {name}.': {
+        'en': 'No history of {name}.',
+        'de': 'Kein Verlauf von {name}.'},
+    'Nothing to remove.': {
+        'en': 'Nothing to remove.',
+        'de': 'Nichts zu entfernen.'},
+    'Remove these? Kept starts go with their HOME; this cannot be undone.': {
+        'en': 'Remove these? Kept starts go with their HOME; this cannot be undone.',
+        'de': 'Diese entfernen? Aufbewahrte Starts gehen samt ihrem HOME; das lässt sich nicht rückgängig machen.'},
+    'unchanged (none: no limit)': {
+        'en': 'unchanged (none: no limit)',
+        'de': 'unverändert (none: keine Grenze)'},
+    '{state}, last seen {seconds} s ago': {
+        'en': '{state}, last seen {seconds} s ago',
+        'de': '{state}, zuletzt gesehen vor {seconds} s'},
+    '{state}, not seen': {
+        'en': '{state}, not seen',
+        'de': '{state}, nicht gesehen'},
+    '{state}, asking': {
+        'en': '{state}, asking',
+        'de': '{state}, fragt'},
+    'It waits for an answer on the Approvals page.': {
+        'en': 'It waits for an answer on the Approvals page.',
+        'de': 'Er wartet auf eine Antwort auf der Seite Freigaben.'},
+    '{host} does not answer: {problem}': {
+        'en': '{host} does not answer: {problem}',
+        'de': '{host} antwortet nicht: {problem}'},
+    "An MCP server's sandbox: it only stops (sandbox-ai stop there).": {
+        'en': "An MCP server's sandbox: it only stops (sandbox-ai stop there).",
+        'de': 'Die Sandbox eines MCP-Servers: sie lässt sich nur stoppen (dort sandbox-ai stop).'},
+    'Nothing changed: an empty field leaves its limit as it is. To remove a limit, type none.': {
+        'en': 'Nothing changed: an empty field leaves its limit as it is. To remove a limit, type none.',
+        'de': 'Nichts geändert: ein leeres Feld lässt seine Grenze, wie sie ist. Um eine Grenze zu entfernen, geben Sie none ein.'},
+    'Remove the limit of {limits} of {run}? Until it ends it may then take all of them its host has.': {
+        'en': 'Remove the limit of {limits} of {run}? Until it ends it may then take all of them its host has.',
+        'de': 'Die Grenze für {limits} von {run} entfernen? Bis zu seinem Ende darf er dann alles davon nehmen, was sein Host hat.'},
+    'Remove the limit': {
+        'en': 'Remove the limit',
+        'de': 'Grenze entfernen'},
+    'Take back the taint of {run}? Untrusted content entered it; the rules for tainted runs (what it may reach, what is asked) no longer hold until such content enters it again. Only when you checked what came in.': {
+        'en': 'Take back the taint of {run}? Untrusted content entered it; the rules for tainted runs (what it may reach, what is asked) no longer hold until such content enters it again. Only when you checked what came in.',
+        'de': 'Den Taint von {run} zurücknehmen? Nicht vertrauenswürdige Inhalte kamen hinein; die Regeln für Läufe mit Taint (was er erreichen darf, was gefragt wird) gelten dann nicht mehr, bis wieder solche Inhalte hineinkommen. Nur, wenn Sie geprüft haben, was hereinkam.'},
+    'Removed:': {
+        'en': 'Removed:',
+        'de': 'Entfernt:'},
+    'LM Studio': {
+        'en': 'LM Studio',
+        'de': 'LM Studio'},
+    'Ollama': {
+        'en': 'Ollama',
+        'de': 'Ollama'},
+    'llama.cpp server': {
+        'en': 'llama.cpp server',
+        'de': 'llama.cpp-Server'},
+    'vLLM': {
+        'en': 'vLLM',
+        'de': 'vLLM'},
+    'OpenAI-compatible server (a gateway, LiteLLM, …)': {
+        'en': 'OpenAI-compatible server (a gateway, LiteLLM, …)',
+        'de': 'OpenAI-kompatibler Server (ein Gateway, LiteLLM, …)'},
+    'The server lists no models.': {
+        'en': 'The server lists no models.',
+        'de': 'Der Server nennt keine Modelle.'},
+    'Loaded': {
+        'en': 'Loaded',
+        'de': 'Geladen'},
+    'New LLM server on {host}': {
+        'en': 'New LLM server on {host}',
+        'de': 'Neuer LLM-Server auf {host}'},
+    "The server's root, http(s)://HOST[:PORT][/PREFIX]; each agent gets the API path it needs. Plain http only to this host, private or Tailscale addresses.": {
+        'en': "The server's root, http(s)://HOST[:PORT][/PREFIX]; each agent gets the API path it needs. Plain http only to this host, private or Tailscale addresses.",
+        'de': 'Die Wurzel des Servers, http(s)://HOST[:PORT][/PRÄFIX]; jeder Agent bekommt den API-Pfad, den er braucht. Unverschlüsseltes http nur zu diesem Rechner, privaten oder Tailscale-Adressen.'},
+    'The model a start uses when --llm names none (optional)': {
+        'en': 'The model a start uses when --llm names none (optional)',
+        'de': 'Das Modell, das ein Start nimmt, wenn --llm keines nennt (optional)'},
+    'The VPN profile the server is reached through (optional)': {
+        'en': 'The VPN profile the server is reached through (optional)',
+        'de': 'Das VPN-Profil, über das der Server erreicht wird (optional)'},
+    'It also offers the Anthropic Messages API (Claude Code)': {
+        'en': 'It also offers the Anthropic Messages API (Claude Code)',
+        'de': 'Er bietet auch die Anthropic Messages API (Claude Code)'},
+    'URL': {
+        'en': 'URL',
+        'de': 'URL'},
+    'Secret for the API key (optional)': {
+        'en': 'Secret for the API key (optional)',
+        'de': 'Geheimnis für den API-Schlüssel (optional)'},
+    'On another host the key is a secret of sandbox-ai there: keep it on that host first (sandbox-ai secrets set NAME), then name it here. The app does not send a key to another host.': {
+        'en': 'On another host the key is a secret of sandbox-ai there: keep it on that host first (sandbox-ai secrets set NAME), then name it here. The app does not send a key to another host.',
+        'de': 'Auf einem anderen Host ist der Schlüssel ein Geheimnis von sandbox-ai dort: erst auf jenem Host ablegen (sandbox-ai secrets set NAME), dann hier nennen. Die App schickt keinen Schlüssel an einen anderen Host.'},
+    "A key typed here is kept as a secret of sandbox-ai (standard input, never a command line); the server's entry only names that secret, and the proxy adds the key on the wire.": {
+        'en': "A key typed here is kept as a secret of sandbox-ai (standard input, never a command line); the server's entry only names that secret, and the proxy adds the key on the wire.",
+        'de': 'Ein hier eingegebener Schlüssel wird als Geheimnis von sandbox-ai abgelegt (Standardeingabe, nie eine Befehlszeile); der Eintrag des Servers nennt nur dieses Geheimnis, und der Proxy fügt den Schlüssel unterwegs hinzu.'},
+    "A server's name is 1-32 letters, digits, '_' or '-', not starting with '-'.": {
+        'en': "A server's name is 1-32 letters, digits, '_' or '-', not starting with '-'.",
+        'de': "Der Name eines Servers sind 1-32 Buchstaben, Ziffern, '_' oder '-', nicht mit '-' am Anfang."},
+    'Choose the kind of server.': {
+        'en': 'Choose the kind of server.',
+        'de': 'Die Art des Servers wählen.'},
+    'The URL is http(s)://HOST[:PORT][/PREFIX], without user, query or fragment.': {
+        'en': 'The URL is http(s)://HOST[:PORT][/PREFIX], without user, query or fragment.',
+        'de': 'Die URL ist http(s)://HOST[:PORT][/PRÄFIX], ohne Benutzer, Abfrage oder Fragment.'},
+    'LLM servers': {
+        'en': 'LLM servers',
+        'de': 'LLM-Server'},
+    'every agent': {
+        'en': 'every agent',
+        'de': 'jeder Agent'},
+    "Check the API this agent needs (or every agent's)": {
+        'en': "Check the API this agent needs (or every agent's)",
+        'de': 'Die API prüfen, die dieser Agent braucht (oder die jedes Agenten)'},
+    'Models': {
+        'en': 'Models',
+        'de': 'Modelle'},
+    'Adding {name} on {host}…': {
+        'en': 'Adding {name} on {host}…',
+        'de': '{name} wird auf {host} hinzugefügt…'},
+    'the server works for it': {
+        'en': 'the server works for it',
+        'de': 'der Server taugt dafür'},
+    'the check found problems': {
+        'en': 'the check found problems',
+        'de': 'die Prüfung fand Probleme'},
+    'Check of {name} on {host}': {
+        'en': 'Check of {name} on {host}',
+        'de': 'Prüfung von {name} auf {host}'},
+    'Models listed: {count}': {
+        'en': 'Models listed: {count}',
+        'de': 'Genannte Modelle: {count}'},
+    'Models of {server}': {
+        'en': 'Models of {server}',
+        'de': 'Modelle von {server}'},
+    'Not a model name: {model}': {
+        'en': 'Not a model name: {model}',
+        'de': 'Kein Modellname: {model}'},
+    "Not a VPN profile's name: {name}": {
+        'en': "Not a VPN profile's name: {name}",
+        'de': 'Kein Name eines VPN-Profils: {name}'},
+    "A secret's name is letters, digits and '_', not starting with a digit.": {
+        'en': "A secret's name is letters, digits and '_', not starting with a digit.",
+        'de': "Der Name eines Geheimnisses sind Buchstaben, Ziffern und '_', nicht mit einer Ziffer am Anfang."},
+    'LLM servers (sandbox-ai llm) the agents can use: start one with --llm NAME. Keys stay secrets of sandbox-ai; the connection proxy adds them on the wire, so an agent only sees a placeholder.': {
+        'en': 'LLM servers (sandbox-ai llm) the agents can use: start one with --llm NAME. Keys stay secrets of sandbox-ai; the connection proxy adds them on the wire, so an agent only sees a placeholder.',
+        'de': 'LLM-Server (sandbox-ai llm), die die Agenten nutzen können: ein Start mit --llm NAME nimmt einen davon. Schlüssel bleiben Geheimnisse von sandbox-ai; der Verbindungs-Proxy fügt sie unterwegs hinzu, ein Agent sieht nur einen Platzhalter.'},
+    'Add a server': {
+        'en': 'Add a server',
+        'de': 'Einen Server hinzufügen'},
+    'Add an LLM server on the chosen host': {
+        'en': 'Add an LLM server on the chosen host',
+        'de': 'Einen LLM-Server auf dem gewählten Host hinzufügen'},
+    "Reachability, TLS, the key, the models and the agents' APIs": {
+        'en': "Reachability, TLS, the key, the models and the agents' APIs",
+        'de': 'Erreichbarkeit, TLS, der Schlüssel, die Modelle und die APIs der Agenten'},
+    'The models the server offers now': {
+        'en': 'The models the server offers now',
+        'de': 'Die Modelle, die der Server jetzt anbietet'},
+    'Forget the server (its secrets stay in sandbox-ai secrets)': {
+        'en': 'Forget the server (its secrets stay in sandbox-ai secrets)',
+        'de': 'Den Server vergessen (seine Geheimnisse bleiben in sandbox-ai secrets)'},
+    'Ask the chosen host again': {
+        'en': 'Ask the chosen host again',
+        'de': 'Den gewählten Host erneut fragen'},
+    'LLM servers on {host}: {count}': {
+        'en': 'LLM servers on {host}: {count}',
+        'de': 'LLM-Server auf {host}: {count}'},
+    'No LLM server yet on {host}.': {
+        'en': 'No LLM server yet on {host}.',
+        'de': 'Noch kein LLM-Server auf {host}.'},
+    "Refused: {name} is not a server's name that can be passed on.": {
+        'en': "Refused: {name} is not a server's name that can be passed on.",
+        'de': 'Abgelehnt: {name} ist kein Servername, der weitergegeben werden kann.'},
+    'Could not add {name} on {host}.': {
+        'en': 'Could not add {name} on {host}.',
+        'de': '{name} konnte auf {host} nicht hinzugefügt werden.'},
+    'New LLM server': {
+        'en': 'New LLM server',
+        'de': 'Neuer LLM-Server'},
+    'Forget the LLM server {name} on {host}? Starts with {option} cannot start until it is added again.': {
+        'en': 'Forget the LLM server {name} on {host}? Starts with {option} cannot start until it is added again.',
+        'de': 'Den LLM-Server {name} auf {host} vergessen? Starts mit {option} können nicht starten, bis er wieder hinzugefügt ist.'},
+    'Could not forget {name} on {host}: {error}': {
+        'en': 'Could not forget {name} on {host}: {error}',
+        'de': '{name} konnte auf {host} nicht vergessen werden: {error}'},
+    '{name} removed.': {
+        'en': '{name} removed.',
+        'de': '{name} entfernt.'},
+    'Could not list the LLM servers on {host}: {error}': {
+        'en': 'Could not list the LLM servers on {host}: {error}',
+        'de': 'Die LLM-Server auf {host} konnten nicht aufgelistet werden: {error}'},
+    'A typed key needs the name of the secret to keep it as.': {
+        'en': 'A typed key needs the name of the secret to keep it as.',
+        'de': 'Ein eingegebener Schlüssel braucht den Namen des Geheimnisses, unter dem er abgelegt wird.'},
+    '{name} added.': {
+        'en': '{name} added.',
+        'de': '{name} hinzugefügt.'},
+    'Could not list the models of {name}: {error}': {
+        'en': 'Could not list the models of {name}: {error}',
+        'de': 'Die Modelle von {name} konnten nicht aufgelistet werden: {error}'},
+    'Model servers of your own, kept by name on this machine or a host: Ollama, LM Studio, llama.cpp, vLLM or another OpenAI-compatible one, local or behind a VPN. A start with --llm NAME reaches only that server; its key stays with the proxy.': {
+        'en': 'Model servers of your own, kept by name on this machine or a host: Ollama, LM Studio, llama.cpp, vLLM or another OpenAI-compatible one, local or behind a VPN. A start with --llm NAME reaches only that server; its key stays with the proxy.',
+        'de': 'Eigene Modellserver, unter einem Namen aufbewahrt auf diesem Rechner oder einem Host: Ollama, LM Studio, llama.cpp, vLLM oder ein anderer OpenAI-kompatibler, lokal oder hinter einem VPN. Ein Start mit --llm NAME erreicht nur diesen Server; sein Schlüssel bleibt beim Proxy.'},
+    'Add the server you run, then Check it for the agent you use.': {
+        'en': 'Add the server you run, then Check it for the agent you use.',
+        'de': 'Fügen Sie den Server hinzu, den Sie betreiben, und prüfen Sie ihn dann mit Prüfen für den Agenten, den Sie nutzen.'},
+    'On {host} this can only be denied: {reason}': {
+        'en': 'On {host} this can only be denied: {reason}',
+        'de': 'Auf {host} lässt sich das nur ablehnen: {reason}'},
+    '{host} does not let the page be opened elsewhere: {reason}': {
+        'en': '{host} does not let the page be opened elsewhere: {reason}',
+        'de': '{host} lässt die Seite nicht anderswo öffnen: {reason}'},
+    'The address came shortened from {host}: it is not opened here.': {
+        'en': 'The address came shortened from {host}: it is not opened here.',
+        'de': 'Die Adresse kam gekürzt von {host}: sie wird hier nicht geöffnet.'},
+    '{host} asks to open a page on {destination}': {
+        'en': '{host} asks to open a page on {destination}',
+        'de': '{host} möchte eine Seite auf {destination} öffnen'},
+    '(shortened)': {
+        'en': '(shortened)',
+        'de': '(gekürzt)'},
 }

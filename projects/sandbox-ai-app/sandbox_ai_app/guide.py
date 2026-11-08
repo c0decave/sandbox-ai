@@ -66,6 +66,11 @@ TOUR = (
          N_("MCP servers in sandboxes of their own, from your definitions and the catalogs, with their network "
             "and folders."),
          N_("Add a search server from the catalog and connect it on the board.")),
+    Step("llm", N_("LLM servers"),
+         N_("Model servers of your own, kept by name on this machine or a host: Ollama, LM Studio, llama.cpp, vLLM "
+            "or another OpenAI-compatible one, local or behind a VPN. A start with --llm NAME reaches only that "
+            "server; its key stays with the proxy."),
+         N_("Add the server you run, then Check it for the agent you use.")),
     Step("images", N_("Images"),
          N_("The agents' images: build, update, and extend them with packages of your own."),
          N_("Build the image of the agent you use, once.")),

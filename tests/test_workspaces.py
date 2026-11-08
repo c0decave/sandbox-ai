@@ -5,6 +5,7 @@ import errno
 import importlib.util
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -817,3 +818,117 @@ def test_run_helper_hands_the_start_times_over(tmp_path, monkeypatch):
     assert commands[0]["starts"] == {"100": 5000, "101": 5001} and commands[0]["targets"] == [100, 101]
     (proc / "101" / "stat").unlink()  # ended meanwhile
     assert w.run_helper("remove", found, "x", proc=proc)[0] == 1 and len(commands) == 1
+
+
+def test_an_add_whose_undo_is_not_confirmed_says_so(space, tmp_path):
+    """A helper killed on the way (30 s) whose undo failed as well, or whose own rollback failed: run_helper says
+    {"undone": False} (add() then keeps the entry)."""
+    proc, _, source, identity = space
+
+    class RollbackFails(FakeLibc):
+        def setns(self, fd, kind):
+            self.calls.append(("setns", kind))
+            if len([c for c in self.calls if c[0] == "setns"]) == 4:  # back into the first namespace: refused
+                ctypes.set_errno(errno.EPERM)
+                return -1
+            return 0
+    with pytest.raises(w.Unsure, match="could not be taken out again"):
+        w.helper("add", 100, "project", [100, 101], str(source), identity, "rw", proc, RollbackFails(fail_move=2))
+    # run_helper: a timeout with a failed undo, a timeout with an undo that worked, the helper unsure.
+    helper_proc = tmp_path / "hproc"
+    for pid, start in ((100, 5000), (101, 5001)):
+        (helper_proc / str(pid) / "ns").mkdir(parents=True)
+        (helper_proc / str(pid) / "ns" / "user").symlink_to("user:[1]")
+        (helper_proc / str(pid) / "stat").write_text(stat_line(pid, start))
+    found = {"user": 100, "mntns": {"a": 100, "b": 101}}
+    for undo, expected in ((1, False), (0, True), (OSError(5, "EIO"), False)):
+        ops = []
+
+        def runner(command, **kwargs):
+            ops.append(json.loads(command[-1])["op"])
+            if len(ops) == 1:
+                raise subprocess.TimeoutExpired(command, 30)
+            if isinstance(undo, Exception):
+                raise undo
+            return subprocess.CompletedProcess(command, undo, "", "")
+        result = w.run_helper("add", found, "x", "/src", [1, 2], proc=helper_proc, runner=runner)
+        assert ops == ["add", "remove"] and result[0] == 1 and result[2] == {"undone": expected}
+    unsure = lambda command, **kw: subprocess.CompletedProcess(command, w.UNSURE, "", "rollback failed")  # noqa: E731
+    assert w.run_helper("add", found, "x", "/src", [1, 2], proc=helper_proc, runner=unsure)[2] == {"undone": False}
+
+
+def test_an_add_whose_undo_is_not_confirmed_stays_known(run):
+    """The pending entry stays (with why), so that names, overlaps and `remove --force` still know what may be
+    mounted; an undo that worked takes it out, as before."""
+    record, tmp = run
+    with pytest.raises(ValueError, match="undo was not confirmed.*remove --force /workspaces/fresh"):
+        w.add(record, make(tmp / "fresh"), runner=lambda *a, **kw: (1, "no answer", {"undone": False}),
+              finder=fake_found, remember=lambda trees: None)
+    entry, = w.present_workspaces(record)
+    assert entry["state"] == "pending" and entry["sandbox"] == "/workspaces/fresh"
+    assert "not confirmed" in w.listing(record)[-1]["note"]
+    with pytest.raises(ValueError, match="must not overlap"):
+        w.judged(record, tmp / "fresh")
+    w.remove(record, "fresh", force=True, out=lambda line: None, runner=lambda *a, **kw: (0, ""), finder=fake_found,
+             using=lambda f, p: [])
+    assert w.present_workspaces(record) == []
+    # An undo that worked: the entry goes, as before.
+    with pytest.raises(ValueError, match="could not add"):
+        w.add(record, make(tmp / "fresh"), runner=lambda *a, **kw: (1, "no answer", {"undone": True}),
+              finder=fake_found, remember=lambda trees: None)
+    assert w.present_workspaces(record) == []
+
+
+def test_a_kept_workspace_is_at_the_same_place_after_a_restart(run, monkeypatch):
+    """/x/lib read-only (not kept), then /y/lib writable (kept): the second is where a restart puts it
+    (workspace_targets of the session's options), the read-only one never takes that name; removing a kept one
+    says where the later ones go at a restart."""
+    record, tmp = run
+    options = []
+    monkeypatch.setattr(w, "session_of", lambda r: "s1")
+    monkeypatch.setattr(w, "keep", lambda r, host, add=True: (options.append(host) if add else options.remove(host))
+                        or True)
+    ok = lambda *a, **kw: (0, "")  # noqa: E731
+    lines = []
+
+    def add(path, **kw):
+        return w.add(record, make(path), out=lines.append, runner=ok, finder=fake_found, remember=lambda t: None, **kw)
+
+    def after_restart():
+        start = [e["host"] for e in record["workspace_checks"]["workspaces"]]
+        return dict((host, sandbox) for host, sandbox in L.workspace_targets(
+            __import__("argparse").Namespace(workspaces=start + options)))
+    first = add(tmp / "x" / "lib", read_only=True)
+    second = add(tmp / "y" / "lib")
+    third = add(tmp / "z" / "lib")
+    assert options == [str(tmp / "y" / "lib"), str(tmp / "z" / "lib")]  # the read-only one is not kept
+    assert first == "/workspaces/lib-ro"  # the start's other/lib holds "lib"
+    assert after_restart()[str(tmp / "y" / "lib")] == second == "/workspaces/lib-2"
+    assert after_restart()[str(tmp / "z" / "lib")] == third == "/workspaces/lib-3"
+    # A kept one whose place a not-kept one holds now (a directory named lib-ro): said, not silent.
+    fourth = add(tmp / "w" / "lib-ro")
+    assert fourth == "/workspaces/lib-ro-2" and after_restart()[str(tmp / "w" / "lib-ro")] == "/workspaces/lib-ro"
+    assert "after a restart it is at /workspaces/lib-ro" in lines[-1]
+    lines.clear()
+    w.remove(record, "/workspaces/lib-2", out=lines.append, runner=ok, finder=fake_found, using=lambda f, p: [])
+    assert after_restart()[str(tmp / "z" / "lib")] == "/workspaces/lib-2"
+    assert any(f"after a restart {tmp / 'z' / 'lib'} is at /workspaces/lib-2 (now /workspaces/lib-3)" in line
+               for line in lines)
+
+
+def test_a_partial_removal_leaves_the_push_check(run):
+    """Only attached workspaces are in push-added.json: one half removed is taken out of it at once."""
+    record, tmp = run
+    push = tmp / "push"
+    push.mkdir()
+    (push / "push.json").write_text(json.dumps({"derived": {}}))
+    record["push_check"] = {"dir": str(push)}
+    privacy = w.module("privacy")
+    ok = lambda op, found, name, *rest, **kw: (0, "")  # noqa: E731
+    w.add(record, make(tmp / "fresh"), out=lambda line: None, runner=ok, finder=fake_found, remember=lambda t: None)
+    listed = lambda: [e["path"] for e in json.loads((push / privacy.ADDED_PUSH).read_text())["workspaces"]]  # noqa: E731
+    assert listed() == ["/workspaces/fresh"]
+    partial = lambda op, found, name, **kw: (w.PARTIAL, "partly removed", {"gone": [100]})  # noqa: E731
+    with pytest.raises(ValueError, match=w.REFUSED_PARTIAL):
+        w.remove(record, "fresh", runner=partial, finder=fake_found, using=lambda f, p: [])
+    assert listed() == []

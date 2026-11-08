@@ -12,7 +12,8 @@ A sandbox asks (with --ask, the default) when its agent connects to a destinatio
 allow, looks up a name they do not pin, pushes commits the privacy check has warnings about, or sends a
 request an "ask" rule holds; an MCP server asks about tool calls its rules hold; a device rule asks before a
 device is attached (`sandbox-ai devices add`, --device, a replug). Without an answer within
-60 seconds the question is refused. Scopes: once (this connection), run (until the
+60 seconds the question is refused (a canary's within 5 minutes; a request to open a URL in your browser
+waits until it is answered or the run ends). Scopes: once (this connection), run (until the
 sandbox ends), always (also every later start of this project; kept in
 ~/.config/sandbox-ai/approved.json). A name allowed after a lookup is reached by the agent's next try
 (for lookups once means run: the name stays pinned); only its public addresses are opened. A deny counts
@@ -37,7 +38,6 @@ import shutil
 import socket
 import subprocess
 import sys
-import urllib.parse
 import threading
 import time
 
@@ -378,22 +378,39 @@ def what(question):
                f"{shown(question.get('ruleset'), 120)})"
     if kind == "browser":
         url = question.get("url")
-        try:
-            host = urllib.parse.urlsplit(url).hostname if isinstance(url, str) else None
-        except ValueError:
-            host = None
+        host = url_host(url)
         return f"open {shown(url, 1000)} in your browser" + (f" (host {shown(host, 253)})" if host else "")
     return shown(kind, 40)
 
 
-QUESTION_SECONDS = 60  # a question without its own "timeout" is refused after this long
+def url_host(url):
+    """The host a browser opens for URL (http or https), or None. The authority ends at the first /, ?, # or
+    backslash (a browser reads a backslash as a slash in these URLs: https://a.example\\.b.example/ opens
+    a.example), after a user part, without a port; an IPv6 address in its brackets."""
+    if not isinstance(url, str):
+        return None
+    scheme, sep, rest = url.partition("://")
+    if not sep or scheme.lower() not in ("http", "https"):
+        return None
+    authority = re.split(r"[/?#\\]", rest, maxsplit=1)[0]
+    authority = authority.rpartition("@")[2]  # after a user part (URL refuses those: this is where it would go)
+    if authority.startswith("["):
+        host = authority[:authority.find("]") + 1] if "]" in authority else ""
+    else:
+        host = authority.rsplit(":", 1)[0] if authority.count(":") == 1 else authority
+    return host.lower() or None
 
 
 def question_times(question, now=None):
     """{"timeout", "seconds_left"} of an open QUESTION: computed here, on its host, so another machine's clock
-    does not matter (the web and the app count down from seconds_left)."""
+    does not matter (the web and the app count down from seconds_left). Every question that is refused without
+    an answer carries its own "timeout" (the sandbox's, a device's, a canary's); one without (a browser
+    question: nothing in the sandbox waits for it, it stays open until answered or the run ends) has no
+    deadline: both are None."""
     timeout = question.get("timeout")
-    timeout = timeout if isinstance(timeout, (int, float)) and 0 < timeout <= 86400 else QUESTION_SECONDS
+    if question.get("kind") == "browser" or isinstance(timeout, bool) or \
+            not (isinstance(timeout, (int, float)) and 0 < timeout <= 86400):
+        return {"timeout": None, "seconds_left": None}
     try:
         asked = calendar.timegm(time.strptime(str(question.get("time")), "%Y-%m-%dT%H:%M:%SZ"))
     except (ValueError, OverflowError):
@@ -402,16 +419,30 @@ def question_times(question, now=None):
     return {"timeout": timeout, "seconds_left": max(0, int(left))}
 
 
-def widest_answer(question, record, widest="always"):
-    """The widest scope an "allow" of QUESTION keeps: the policy's, the run's security mode's, and the kind's own
-    (pushes, requests, tool calls and devices at most for the run; a name at least for the run)."""
+def answer_cap(record, widest="always"):
+    """The widest scope the policy (WIDEST) and the run's security mode (its run.json RECORD) allow."""
     caps = [widest if widest in SCOPES else "always"]
     mode = record.get("mode") if isinstance(record, dict) and isinstance(record.get("mode"), dict) else {}
     if mode.get("approval_scope") in SCOPES:
         caps.append(mode["approval_scope"])
-    if question.get("kind") in ("push", "http", "mcp", "tool", "device"):
-        caps.append("run")
     return min(caps, key=SCOPES.index)
+
+
+DNS_ONCE = ("an allowed name stays pinned for the run (the agent's next try reaches it), and this run approves at "
+            "most once (its security mode or the administrator's policy): deny it, or allow the name at the next "
+            "start (--allow-host) if you mean it")
+
+
+def widest_answer(question, record, widest="always"):
+    """The widest scope an "allow" of QUESTION keeps, as answer() then applies it: the policy's, the run's security
+    mode's, and the kind's own (pushes, requests, tool calls and devices at most for the run). A name is pinned
+    for the run at least: where only "once" is allowed it cannot be allowed at all (None)."""
+    cap = answer_cap(record, widest)
+    if question.get("kind") in ("push", "http", "mcp", "tool", "device"):
+        cap = min((cap, "run"), key=SCOPES.index)
+    if question.get("kind") == "dns" and cap == "once":
+        return None
+    return cap
 
 
 def origin(record):
@@ -496,6 +527,8 @@ def answer(ident, decision, scope="once", runs=None, resolver=resolve, opener=No
         # The run's security mode (run.json) caps answers too; its supervisor holds the same cap.
         mode = record.get("mode") if isinstance(record, dict) and isinstance(record.get("mode"), dict) else {}
         cap = mode.get("approval_scope", "always")
+        if decision == "allow" and kind == "dns" and widest_answer(question, record, widest) is None:
+            raise ValueError(f"{shown(question.get('name'))}: {DNS_ONCE}")
         if decision == "allow" and cap in SCOPES and SCOPES.index(scope) > SCOPES.index(cap):
             scope, notes = cap, [f"the security mode {shown(mode.get('name'), 20)} of this run approves at most "
                                  f"for {'the run' if cap == 'run' else 'once'}"]
@@ -860,6 +893,21 @@ def serve_browser(socket_path, approvals_dir, stop, notify=None, limit=20, liste
     server.close()
 
 
+def browser_fields(url):
+    """What list --json says about a browser question's URL, so the page may be opened where the human is (the
+    web, the app on another host): "url" (whole, escaped) only when it is one an "allow" opens (URL: http(s),
+    printable ASCII, no user part), else "url_refused"; "url_host", the host it opens (shown as the real
+    destination); "url_truncated" when it had to be cut."""
+    if not isinstance(url, str):
+        return {"url_refused": "no URL"}
+    if not URL.fullmatch(url):
+        return {"url_refused": "not an http(s) URL of printable ASCII without a user part (it is never opened)",
+                **({"url_host": shown(url_host(url), 253)} if url_host(url) else {})}
+    host = url_host(url)
+    return {"url": shown(url, REQUEST_LIMIT), **({"url_truncated": True} if len(url) > REQUEST_LIMIT else {}),
+            "url_host": shown(host, 253) if host else None}
+
+
 def read_line(connection, limit, deadline):
     """One line of at most LIMIT bytes, read within DEADLINE seconds in all (a slow sender cannot hold the
     listener)."""
@@ -932,9 +980,9 @@ def main(argv, out=print):
                              "kind": shown(q.get("kind")), "time": shown(q.get("time")), "question": describe(q),
                              "always": always(q).removeprefix("; "), **question_times(q),
                              "max_scope": widest_answer(q, record, widest),
-                             # a browser question: the page may be opened where the human is (the web, another host)
-                             **({"url": shown(q.get("url"), 2048)} if q.get("kind") == "browser"
-                                and isinstance(q.get("url"), str) else {})}
+                             **({"allow_refused": DNS_ONCE} if q.get("kind") == "dns"
+                                and widest_answer(q, record, widest) is None else {}),
+                             **(browser_fields(q.get("url")) if q.get("kind") == "browser" else {})}
                             for name, record, q in questions()], indent=2))
             return 0
         if args.command == "list":

@@ -121,76 +121,114 @@ SECTIONS = (
         "page-sandboxes", "app", ("Sandboxes & sessions", "Sandboxen & Sitzungen"),
         ("This page lists every sandbox-ai instance of your account in one table, read again every few seconds: "
          "one-off runs (started here, in a terminal, by a script or another copy of the app), sessions (running, "
-         "paused or stopped), MCP server sandboxes, and launcher processes that have not registered yet. Columns "
-         "show kind, name, project, agent, backend, start time, state and proxy. The current project's rows are "
-         "bold; Only the current project hides the rest.\n\n"
+         "paused or stopped), MCP server sandboxes, and launcher processes that have not registered yet, on this "
+         "machine and on every host of `sandbox-ai hosts`. Columns show kind, name, project, agent, backend, start "
+         "time, state, proxy, host and memory. The current project's rows are bold; Only the current project hides "
+         "the rest, Ended also lists the starts that ended (`sandbox-ai list --all`).\n\n"
+         "The hosts are read about every 10 seconds while the page is shown and every minute while it is not. The "
+         "rows of a host that did not answer are greyed with “last seen N s ago”, and their buttons are off: what "
+         "they show may no longer be true. A start with an open question is marked asking.\n\n"
          "The buttons follow the kind of the selected row; a tooltip says why one does not apply.\n\n"
          "- Session: Attach (in a window), Attach in the app, Pause, Resume, Delete.\n"
          "- While it runs: Allow… and Revoke… change what the sandbox may reach, Allowed during the run shows "
-         "what was added, Connection log opens its log, Add device…, Remove device and Limits… change hardware "
-         "and limits until it ends.\n"
+         "what was added (Untaint… there lifts the run's taint), Connection log opens its log, Add device…, Remove "
+         "device and Limits… change hardware and limits until it ends.\n"
+         "- Rename… gives a start another name (its run id stays), History… shows its starts, ends, pauses and "
+         "renames. Clean up… removes leftovers and kept starts unused for longer than keep_days, on this machine "
+         "or the host chosen; it shows what it would remove first and asks.\n"
          "- Stop… asks first. A session keeps its HOME; a one-off run's launcher cleans up.\n\n"
          "A launcher that has not registered can only be ended in its own terminal. Connections already open "
          "stay open after a revoke.",
          "Diese Seite listet jede Instanz von sandbox-ai Ihres Kontos in einer Tabelle, alle paar Sekunden neu "
          "gelesen: einmalige Läufe (hier, in einem Terminal, von einem Skript oder einer anderen App gestartet), "
          "Sessions (laufend, pausiert oder gestoppt), Sandboxen von MCP-Servern und Launcher, die sich noch nicht "
-         "angemeldet haben. Die Spalten zeigen Art, Name, Projekt, Agent, Backend, Startzeit, Zustand und Proxy. "
-         "Die Zeilen des aktuellen Projekts sind fett; Nur das aktuelle Projekt blendet den Rest aus.\n\n"
+         "angemeldet haben, auf diesem Rechner und auf jedem Host von `sandbox-ai hosts`. Die Spalten zeigen Art, "
+         "Name, Projekt, Agent, Backend, Startzeit, Zustand, Proxy, Host und Speicher. Die Zeilen des aktuellen "
+         "Projekts sind fett; Nur das aktuelle Projekt blendet den Rest aus, Beendete listet auch die beendeten "
+         "Starts (`sandbox-ai list --all`).\n\n"
+         "Die Hosts werden etwa alle 10 Sekunden gelesen, solange die Seite zu sehen ist, sonst jede Minute. Die "
+         "Zeilen eines Hosts, der nicht antwortete, sind ausgegraut mit „zuletzt gesehen vor N s“, und ihre "
+         "Schaltflächen sind aus: Was sie zeigen, stimmt vielleicht nicht mehr. Ein Start mit offener Frage ist "
+         "als fragt markiert.\n\n"
          "Die Schaltflächen folgen der Art der gewählten Zeile; ein Tooltip sagt, warum eine nicht passt.\n\n"
          "- Sitzung: Verbinden (in einem Fenster), In der App verbinden, Pausieren, Fortsetzen, Löschen.\n"
          "- Während sie läuft: Erlauben… und Zurücknehmen… ändern, was die Sandbox erreichen darf, Während des "
-         "Laufs erlaubt zeigt das Hinzugefügte, Verbindungslog öffnet ihr Log, Gerät hinzufügen…, Gerät entfernen "
-         "und Grenzen… ändern Hardware und Limits, bis sie endet.\n"
+         "Laufs erlaubt zeigt das Hinzugefügte (Taint aufheben… dort hebt den Taint des Laufs auf), Verbindungslog "
+         "öffnet ihr Log, Gerät hinzufügen…, Gerät entfernen und Grenzen… ändern Hardware und Limits, bis sie "
+         "endet.\n"
+         "- Umbenennen… gibt einem Start einen anderen Namen (seine Lauf-ID bleibt), Verlauf… zeigt seine Starts, "
+         "Enden, Pausen und Umbenennungen. Aufräumen… entfernt Reste und aufbewahrte Starts, die länger als "
+         "keep_days ungenutzt sind, auf diesem Rechner oder dem gewählten Host; es zeigt zuerst, was es entfernen "
+         "würde, und fragt.\n"
          "- Stoppen… fragt zuerst. Eine Session behält ihr HOME; der Launcher eines einmaligen Laufs räumt auf.\n\n"
          "Ein nicht angemeldeter Launcher lässt sich nur in seinem eigenen Terminal beenden. Schon offene "
          "Verbindungen bleiben nach dem Zurücknehmen offen."),
-        cli=("sandbox-ai list", "sandbox-ai net list", "sandbox-ai net allow", "sandbox-ai net revoke",
-             "sandbox-ai net stop RUN", "sandbox-ai session stop NAME", "sandbox-ai mcp stop NAME",
-             "sandbox-ai devices", "sandbox-ai limits"),
-        see=("sessions", "network", "devices", "limits", "page-terminals"),
+        cli=("sandbox-ai list", "sandbox-ai list --all", "sandbox-ai list --history NAME", "sandbox-ai rename OLD NEW",
+             "sandbox-ai gc --dry-run", "sandbox-ai net list", "sandbox-ai net allow", "sandbox-ai net revoke",
+             "sandbox-ai net untaint RUN", "sandbox-ai net stop RUN", "sandbox-ai session stop NAME",
+             "sandbox-ai mcp stop NAME", "sandbox-ai devices", "sandbox-ai limits"),
+        see=("sessions", "network", "taint", "devices", "limits", "page-hosts", "page-terminals"),
         tours=("area:sandboxes",)),
     section(
         "page-approvals", "app", ("Approvals", "Freigaben"),
         ("A running sandbox waits here when its agent wants something the options do not allow: a connection, a "
          "name lookup, a push despite privacy warnings, an MCP tool call or request an ask rule holds, a URL to "
-         "open. Each question shows the run, what is asked, its age and the countdown: without an answer it is "
+         "open. The questions of this machine and of every host of `sandbox-ai hosts` are listed together; "
+         "Questions of shows only this machine's or one host's (Show questions on the Hosts page sets it). Each "
+         "question shows the run, what is asked, its age, the countdown and the host: without an answer it is "
          "refused after 60 seconds.\n\n"
-         "- Choose the scope: once, for this run, or always (this project). The security mode and the "
+         "- Choose the scope of an allow: once, for this run, or always (this project). The security mode and the "
          "administrator's max_approval_scope may offer less.\n"
-         "- Allow asks for a confirmation that names the sandbox, the question and the scope (Cancel is the "
-         "default for always). Deny refuses with one click, Block always refuses it at every later start of the "
-         "project.\n"
+         "- Allow (Alt+A) asks for a confirmation that names the sandbox, the question and the scope (Cancel is "
+         "the default for always). For another host's page to open it reads Open here and allow: the page opens "
+         "in this computer's browser, and the host is told not to open it (`--no-open`).\n"
+         "- Deny for this run (Alt+D) is the default deny: refused, and not asked again until the run ends. Deny "
+         "once refuses only this time, so the sandbox may ask again. Block always… (Ctrl+Shift+B) refuses it at "
+         "every later start of the project too, after asking you.\n"
+         "- Each question is answered on its own: several answers can be on their way at once, and a slow host "
+         "never holds up the others.\n"
          "- The selected question explains itself from what is already known, never by looking anything up: a "
          "name the agent gave is marked unverified.\n\n"
          "History lists questions with answers. Allowed or blocked always (per project) lists your standing "
-         "answers; Forget… removes one, so it is asked again. Sandboxes running now keep what they were allowed "
-         "until they end: use Revoke… on Sandboxes & sessions there.\n\n"
+         "answers, of this machine or of a host chosen beside Refresh; Forget… removes one there, so it is asked "
+         "again. Sandboxes running now keep what they were allowed until they end: use Revoke… on Sandboxes & "
+         "sessions there.\n\n"
          "The page is polled every second, also while the window is closed to the tray; new questions raise a "
          "desktop notification and a count in the navigation. The open questions are a panel you can float over "
          "other pages. Choose once while you are unsure.",
          "Eine laufende Sandbox wartet hier, wenn ihr Agent etwas will, das die Optionen nicht erlauben: eine "
          "Verbindung, eine Namensauflösung, einen Push trotz Datenschutz-Warnungen, einen MCP-Aufruf oder eine "
-         "Anfrage, die eine ask-Regel anhält, eine zu öffnende URL. Jede Frage zeigt Lauf, Gegenstand, Alter und "
-         "Countdown: Ohne Antwort wird sie nach 60 Sekunden abgelehnt.\n\n"
-         "- Wählen Sie die Dauer: einmal, für diesen Lauf oder immer (dieses Projekt). Sicherheitsmodus und "
-         "max_approval_scope des Administrators können weniger anbieten.\n"
-         "- Erlauben verlangt eine Bestätigung, die Sandbox, Frage und Dauer nennt (bei immer ist Abbrechen "
-         "vorgewählt). Ablehnen lehnt mit einem Klick ab, Immer blockieren lehnt es bei jedem späteren Start des "
-         "Projekts ab.\n"
+         "Anfrage, die eine ask-Regel anhält, eine zu öffnende URL. Die Fragen dieses Rechners und jedes Hosts von "
+         "`sandbox-ai hosts` stehen zusammen; Fragen von zeigt nur die dieses Rechners oder eines Hosts (Fragen "
+         "zeigen auf der Seite Hosts stellt es ein). Jede Frage zeigt Lauf, Gegenstand, Alter, Countdown und Host: "
+         "Ohne Antwort wird sie nach 60 Sekunden abgelehnt.\n\n"
+         "- Wählen Sie die Geltung eines Erlaubens: einmal, für diesen Lauf oder immer (dieses Projekt). "
+         "Sicherheitsmodus und max_approval_scope des Administrators können weniger anbieten.\n"
+         "- Erlauben (Alt+A) verlangt eine Bestätigung, die Sandbox, Frage und Geltung nennt (bei immer ist "
+         "Abbrechen vorgewählt). Für eine zu öffnende Seite eines anderen Hosts heißt es Hier öffnen und erlauben: "
+         "Die Seite öffnet sich im Browser dieses Rechners, und der Host erfährt, dass er sie nicht öffnen soll "
+         "(`--no-open`).\n"
+         "- Für diesen Lauf ablehnen (Alt+D) ist das übliche Ablehnen: abgewiesen und bis zum Ende des Laufs nicht "
+         "wieder gefragt. Einmal ablehnen weist nur dieses Mal ab, die Sandbox darf wieder fragen. Immer "
+         "sperren… (Strg+Umschalt+B) weist es nach einer Rückfrage auch bei jedem späteren Start des Projekts "
+         "ab.\n"
+         "- Jede Frage wird für sich beantwortet: Mehrere Antworten können zugleich unterwegs sein, und ein "
+         "langsamer Host hält die anderen nie auf.\n"
          "- Die gewählte Frage erklärt sich aus dem, was schon bekannt ist, ohne etwas nachzuschlagen: Ein Name, "
          "den der Agent angab, ist als ungeprüft markiert.\n\n"
          "Verlauf listet Fragen mit Antworten. Immer erlaubt oder blockiert (je Projekt) listet Ihre dauerhaften "
-         "Antworten; Vergessen… entfernt eine, dann wird wieder gefragt. Jetzt laufende Sandboxen behalten bis zu "
-         "ihrem Ende, was sie erlaubt bekamen: Nutzen Sie dort Zurücknehmen… auf Sandboxen & Sitzungen.\n\n"
+         "Antworten, die dieses Rechners oder eines Hosts, den Sie neben Aktualisieren wählen; Vergessen… entfernt "
+         "dort eine, dann wird wieder gefragt. Jetzt laufende Sandboxen behalten bis zu ihrem Ende, was sie "
+         "erlaubt bekamen: Nutzen Sie dort Zurücknehmen… auf Sandboxen & Sitzungen.\n\n"
          "Die Seite fragt jede Sekunde ab, auch wenn das Fenster in den Infobereich geschlossen ist; neue Fragen "
          "bringen eine Desktop-Benachrichtigung und einen Zähler in der Navigation. Die offenen Fragen sind ein "
          "Bereich, den Sie über anderen Seiten schweben lassen können. Wählen Sie einmal, solange Sie unsicher "
          "sind."),
-        cli=("sandbox-ai approvals list", "sandbox-ai approvals allow ID --scope once|run|always",
-             "sandbox-ai approvals deny ID", "sandbox-ai approvals history", "sandbox-ai approvals remembered",
-             "sandbox-ai approvals forget PROJECT ENTRY", "--ask"),
-        see=("approvals", "network", "rulesets", "policy"),
+        cli=("sandbox-ai approvals list", "sandbox-ai approvals allow ID --scope once|run|always [--no-open]",
+             "sandbox-ai approvals deny ID --scope run|once|always", "sandbox-ai approvals history",
+             "sandbox-ai approvals remembered", "sandbox-ai approvals forget PROJECT ENTRY",
+             "sandbox-ai hosts run HOST -- approvals list", "--ask"),
+        see=("approvals", "network", "rulesets", "policy", "page-hosts"),
         tours=("approvals-network", "area:approvals")),
     section(
         "page-terminals", "app", ("Terminals", "Terminals"),
@@ -401,6 +439,47 @@ SECTIONS = (
         see=("mcp", "rulesets", "vpn-tor"),
         tours=("area:mcp",)),
     section(
+        "page-llm", "app", ("LLM servers", "LLM-Server"),
+        ("LLM servers lists the model servers `sandbox-ai llm` keeps by name, so that an agent can work with a "
+         "model of your own instead of the cloud: Ollama, LM Studio, the llama.cpp server, vLLM or another "
+         "OpenAI-compatible server, on this machine, in your LAN or reached through a VPN. Host chooses whose "
+         "list it is: this machine's or a host's of `sandbox-ai hosts` (over SSH). The page asks only while it "
+         "is shown or a button asks.\n\n"
+         "- The table shows each server's name, kind, URL, default model, key, VPN profile and the agents it "
+         "suits.\n"
+         "- Add… registers one: name, kind, URL (the server's root), optionally a model, a VPN profile, whether it "
+         "also speaks the Anthropic Messages API (for Claude Code) and a key. A key typed in for this machine is "
+         "kept as a secret of sandbox-ai first (on standard input, never on a command line), and the server only "
+         "names that secret; on a host, name a secret kept there already.\n"
+         "- Check tests reachability, TLS, the key, the model and the API the chosen agent needs (or every "
+         "agent's). Models lists what the server offers now. Remove… forgets a server after asking; its secret "
+         "stays.\n\n"
+         "A start uses a server with `--llm NAME` or `--llm NAME:MODEL`, or connect an LLM part to the agent on "
+         "the Board: only the server's address and port are opened, and the connection proxy adds the key on the "
+         "wire, so the agent only sees a placeholder.",
+         "LLM-Server listet die Modellserver, die `sandbox-ai llm` unter einem Namen aufbewahrt, damit ein Agent "
+         "mit einem eigenen Modell statt der Cloud arbeiten kann: Ollama, LM Studio, der Server von llama.cpp, "
+         "vLLM oder ein anderer OpenAI-kompatibler Server, auf diesem Rechner, im LAN oder über ein VPN erreicht. "
+         "Host wählt, wessen Liste es ist: die dieses Rechners oder die eines Hosts von `sandbox-ai hosts` (über "
+         "SSH). Die Seite fragt nur, solange sie zu sehen ist oder ein Knopf es verlangt.\n\n"
+         "- Die Tabelle zeigt Name, Art, URL, Standardmodell, Schlüssel und VPN-Profil jedes Servers und die "
+         "Agenten, zu denen er passt.\n"
+         "- Hinzufügen… trägt einen ein: Name, Art, URL (die Wurzel des Servers), optional ein Modell, ein "
+         "VPN-Profil, ob er auch die Anthropic-Messages-API spricht (für Claude Code) und einen Schlüssel. Ein für "
+         "diesen Rechner eingegebener Schlüssel wird zuerst als Geheimnis von sandbox-ai aufbewahrt (über die "
+         "Standardeingabe, nie auf einer Befehlszeile), und der Server nennt nur dieses Geheimnis; auf einem Host "
+         "nennen Sie ein dort schon aufbewahrtes Geheimnis.\n"
+         "- Prüfen testet Erreichbarkeit, TLS, den Schlüssel, das Modell und die API, die der gewählte Agent "
+         "braucht (oder die jedes Agenten). Modelle listet, was der Server gerade anbietet. Entfernen… vergisst "
+         "einen Server nach Rückfrage; sein Geheimnis bleibt.\n\n"
+         "Ein Start nutzt einen Server mit `--llm NAME` oder `--llm NAME:MODELL`, oder Sie verbinden auf der Tafel "
+         "ein LLM-Teil mit dem Agenten: Nur Adresse und Port des Servers werden geöffnet, und der Verbindungs-Proxy "
+         "fügt den Schlüssel unterwegs hinzu, sodass der Agent nur einen Platzhalter sieht."),
+        cli=("sandbox-ai llm list", "sandbox-ai llm add NAME --kind KIND --url URL", "sandbox-ai llm check NAME",
+             "sandbox-ai llm models NAME", "sandbox-ai llm remove NAME", "--llm NAME[:MODEL]"),
+        see=("llm", "secrets", "vpn-tor", "page-hosts", "page-board"),
+        tours=("area:llm",)),
+    section(
         "page-images", "app", ("Images", "Images"),
         ("Images lists each agent's image and your variants: built or not, whether each is current with its "
          "extension (or needs a rebuild for a changed extension or a new base), agent version, created and size, "
@@ -500,26 +579,53 @@ SECTIONS = (
         "page-hosts", "app", ("Hosts", "Hosts"),
         ("Hosts manages other machines, such as Proxmox LXC containers or servers, whose sandbox-ai this app "
          "controls over SSH. The list is the one `sandbox-ai hosts` keeps; the web interface uses it too.\n\n"
-         "- Add a host with a name and its SSH address (user@host). Test runs SSH, the host's sandbox-ai and its "
-         "doctor. Remove forgets it.\n"
-         "- For the chosen host: its starts and sessions (Attach opens a terminal tab here; pause, resume, stop), "
-         "its open approvals (allow, deny), its doctor, and the agents' telemetry of every start there.\n\n"
+         "The table has one row per host: its SSH address, whether it answered (or when it was last seen), its "
+         "sandbox-ai version, how many starts run there and how many questions wait. The starts and questions "
+         "come from the Sandboxes and Approvals pages, which read every host anyway; Refresh asks every host now.\n\n"
+         "- Show starts opens Sandboxes & sessions with only this host's starts, Show questions the Approvals page "
+         "with only its questions: attach, pause, stop, allow and deny happen there, as for this computer.\n"
+         "- Add… adds a host with a name and its SSH address (user@host). Edit… changes whether its update runs "
+         "with sudo (`sandbox-ai hosts set NAME --update-sudo on|off`); a new address or key is Remove… and Add…. "
+         "Test runs SSH, the host's sandbox-ai and its doctor.\n"
+         "- Update and Update all run each host's own signed `sandbox-ai update`; a sudo that wants a password "
+         "opens it in a terminal tab. Check versions asks every host for its version now.\n\n"
+         "The tabs on the right are about the chosen host: Doctor shows its checks with the commands that fix "
+         "them, Updates what the updates printed, and Defaults what every start there uses unless it says "
+         "otherwise: the security mode, the canaries, how many days unused kept starts stay (keep_days) and the "
+         "agents' telemetry. Save defaults… writes them with `sandbox-ai defaults set` or `unset` there; a step "
+         "down in security is asked first.\n\n"
          "Everything runs as `sandbox-ai hosts run HOST -- ARGS`, each argument quoted on its own. SSH uses your "
          "keys and never prompts for a password; the host key is learnt at the first contact and checked "
          "strictly after that. Nothing listens on the hosts but sshd.",
          "Hosts verwaltet andere Rechner, etwa Proxmox-LXC-Container oder Server, deren sandbox-ai diese App über "
          "SSH steuert. Die Liste ist die von `sandbox-ai hosts`; die Weboberfläche nutzt sie auch.\n\n"
-         "- Host hinzufügen mit einem Namen und seiner SSH-Adresse (benutzer@host). Testen prüft SSH, das "
-         "sandbox-ai des Hosts und seinen doctor. Entfernen vergisst ihn.\n"
-         "- Für den gewählten Host: seine Starts und Sessions (Verbinden öffnet hier einen Terminal-Tab; "
-         "pausieren, fortsetzen, stoppen), seine offenen Freigaben (erlauben, ablehnen), sein doctor und die "
-         "Telemetrie der Agenten für jeden Start dort.\n\n"
+         "Die Tabelle hat eine Zeile pro Host: seine SSH-Adresse, ob er antwortete (oder wann er zuletzt gesehen "
+         "wurde), seine sandbox-ai-Version, wie viele Starts dort laufen und wie viele Fragen warten. Starts und "
+         "Fragen kommen von den Seiten Sandboxen und Freigaben, die ohnehin jeden Host lesen; Aktualisieren fragt "
+         "jetzt jeden Host.\n\n"
+         "- Starts zeigen öffnet Sandboxen & Sitzungen nur mit den Starts dieses Hosts, Fragen zeigen die Seite "
+         "Freigaben nur mit seinen Fragen: Verbinden, Pausieren, Beenden, Erlauben und Ablehnen geschehen dort, "
+         "wie für diesen Rechner.\n"
+         "- Hinzufügen… fügt einen Host mit einem Namen und seiner SSH-Adresse (benutzer@host) hinzu. "
+         "Bearbeiten… ändert, ob sein Update mit sudo läuft (`sandbox-ai hosts set NAME --update-sudo on|off`); "
+         "eine neue Adresse oder ein neuer Schlüssel ist Entfernen… und Hinzufügen…. Testen prüft SSH, das "
+         "sandbox-ai des Hosts und seinen doctor.\n"
+         "- Aktualisieren und Alle aktualisieren führen das eigene signierte `sandbox-ai update` jedes Hosts aus; "
+         "ein sudo, das ein Passwort will, öffnet es in einem Terminal-Tab. Versionen prüfen fragt jetzt jeden "
+         "Host nach seiner Version.\n\n"
+         "Die Tabs rechts gelten dem gewählten Host: Doctor zeigt seine Prüfungen mit den Befehlen, die sie "
+         "beheben, Updates, was die Updates ausgaben, und Standards, was jeder Start dort nutzt, wenn er nichts "
+         "anderes sagt: den Sicherheitsmodus, die Canaries, wie viele Tage ungenutzte aufbewahrte Starts bleiben "
+         "(keep_days) und die Telemetrie der Agenten. Vorgaben speichern… schreibt sie dort mit `sandbox-ai "
+         "defaults set` oder `unset`; ein Schritt zu weniger Sicherheit wird vorher erfragt.\n\n"
          "Alles läuft als `sandbox-ai hosts run HOST -- ARGS`, jedes Argument einzeln gequotet. SSH nutzt Ihre "
          "Schlüssel und fragt nie nach einem Passwort; der Host-Schlüssel wird beim ersten Kontakt gelernt und "
          "danach streng geprüft. Auf den Hosts lauscht nichts außer sshd."),
-        cli=("sandbox-ai hosts list", "sandbox-ai hosts add NAME USER@HOST", "sandbox-ai hosts test NAME",
-             "sandbox-ai hosts run NAME -- ARGS", "sandbox-ai hosts remove NAME"),
-        see=("hosts", "web"),
+        cli=("sandbox-ai hosts list", "sandbox-ai hosts add NAME USER@HOST",
+             "sandbox-ai hosts set NAME --update-sudo on|off", "sandbox-ai hosts test NAME",
+             "sandbox-ai hosts update NAME|--all", "sandbox-ai hosts run NAME -- ARGS", "sandbox-ai hosts remove NAME",
+             "sandbox-ai defaults set | unset"),
+        see=("hosts", "web", "page-sandboxes", "page-approvals", "security-modes", "canaries"),
         tours=("area:hosts",)),
     section(
         "page-help", "app", ("Help", "Hilfe"),
@@ -1285,8 +1391,8 @@ SECTIONS = (
          "Start angemahnt."),
         cli=("sandbox-ai llm add NAME", "sandbox-ai llm list", "sandbox-ai llm models NAME",
              "sandbox-ai llm check NAME", "sandbox-ai llm remove NAME", "--llm", "--no-provider-defaults"),
-        see=("vpn-tor", "network", "secrets", "app-presets-gallery"),
-        tours=()),
+        see=("page-llm", "vpn-tor", "network", "secrets", "app-presets-gallery"),
+        tours=("area:llm",)),
     section(
         "web", "concepts", ("Web interface", "Weboberfläche"),
         ("`sandbox-ai web` is the desktop app's counterpart in the browser, with the same themes. One service on "

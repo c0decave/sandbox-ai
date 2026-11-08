@@ -33,9 +33,13 @@ def child(*argv, hold_mib=0, program=None):
     return process
 
 
+# Rootless Podman's tree: the pod's slice is the sandbox's own top cgroup; user-1000.slice above it holds the desktop.
+POD = "user.slice/user-1000.slice/user@1000.service/user.slice/user-libpod_pod_abc.slice"
+
+
 def cgroup(tmp_path, pids, current, limit=8 * GIB, shmem=0, oom_kill=0, leaf=None):
     """A cgroup v2 directory as the kernel shows it; LEAF: some PIDS sit in a child cgroup."""
-    group = tmp_path / "cgroup" / "user.slice" / "libpod-abc.scope"
+    group = tmp_path / "cgroup" / POD / "libpod-abc.scope"
     group.mkdir(parents=True, exist_ok=True)
     (group / "memory.max").write_text(f"{limit}\n")
     (group / "memory.current").write_text(f"{current}\n")
@@ -345,3 +349,54 @@ def test_memory_high_set_back_to_max_is_set_again(tmp_path, processes):
     w.tick()
     assert int((group / "memory.high").read_text()) == high
     assert [json.loads(line)["event"] for line in log.read_text().splitlines()] == ["memory-high-reset"]
+
+
+def limit(directory, maximum, current):
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "memory.max").write_text(f"{maximum}\n")
+    (directory / "memory.current").write_text(f"{current}\n")
+
+
+def test_the_walk_stops_at_the_sandboxs_own_cgroup(tmp_path, processes):
+    """A smaller memory.max above the sandbox's own top cgroup (the user's slice, holding the desktop session) is
+    not the sandbox's: its use is neither reported in memory.json nor a reason to end the agent's processes."""
+    agent = child(hold_mib=10, program="claude")
+    victim = child(hold_mib=40)
+    processes += [agent, victim]
+    group = cgroup(tmp_path, [agent.pid, victim.pid], current=1 * GIB)
+    user = tmp_path / "cgroup" / "user.slice" / "user-1000.slice"
+    limit(user, 4 * GIB, int(3.9 * GIB))  # the desktop session uses nearly all of it
+    top = s.MemoryWatch.sandbox_top
+    assert top(group) == group.parent and top(group / "container") == group.parent
+    w = watch(group, session=tmp_path)
+    state = w.tick()
+    assert (state["limit"], state["current"]) == (8 * GIB, 1 * GIB)
+    shared = json.loads((tmp_path / "memory.json").read_text())
+    assert shared["used_bytes"] == 1 * GIB and shared["limit_bytes"] == 8 * GIB, "no host session use for the agent"
+    assert victim.poll() is None and agent.poll() is None
+    limit(group.parent, 2 * GIB, int(1.2 * GIB))  # the pod's own slice: it binds
+    assert s.memory_state(group)["limit"] == 2 * GIB
+    (group / "memory.max").write_text("max\n")
+    (group.parent / "memory.max").write_text("max\n")
+    with pytest.raises(ValueError, match="no memory limit"):
+        s.memory_state(group)  # only the user's slice has one: not the sandbox's
+
+
+def test_bubblewrap_scope_is_its_own_top(tmp_path):
+    """Bubblewrap runs in its systemd-run scope: neither the walk nor cgroup_dir goes above it (app.slice,
+    user@1000.service and the user's slice are the desktop's)."""
+    app = tmp_path / "cgroup" / "user.slice" / "user-1000.slice" / "user@1000.service" / "app.slice"
+    scope = app / "run-r1234abcd.scope"
+    limit(app, 1 * GIB, int(0.9 * GIB))
+    limit(scope, 4 * GIB, 2 * GIB)
+    for name, value in (("memory.stat", "anon 1\nshmem 0\n"), ("memory.events", "oom_kill 0\n")):
+        (scope / name).write_text(value)
+    assert s.MemoryWatch.sandbox_top(scope) == scope
+    assert (s.memory_state(scope)["limit"], s.memory_state(scope)["current"]) == (4 * GIB, 2 * GIB)
+    proc = tmp_path / "proc"
+    (proc / "42").mkdir(parents=True)
+    (proc / "42" / "cgroup").write_text("0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r1234abcd.scope\n")
+    root = tmp_path / "cgroup"
+    assert s.cgroup_dir(42, proc=proc, root=root) == scope
+    (scope / "memory.max").write_text("max\n")
+    assert s.cgroup_dir(42, proc=proc, root=root) is None, "app.slice's limit is not the sandbox's"

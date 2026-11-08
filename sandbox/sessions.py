@@ -196,7 +196,9 @@ def alive(name, data):
     task) is its own launcher: the recorded PID of that start time, running agent_sandbox.py."""
     cmdline = launcher().process_cmdline(data.get("pid"), data.get("pid_start"), PROC)
     if foreground(data):
-        return data.get("pid_start") is not None and any(arg.endswith(b"agent_sandbox.py") for arg in cmdline)
+        # The launcher's own file by name (not "test_agent_sandbox.py" or any path merely ending like it).
+        return data.get("pid_start") is not None and any(os.path.basename(arg) == b"agent_sandbox.py"
+                                                         for arg in cmdline)
     return os.fsencode(str(session_dir(name) / "tmux")) in cmdline
 
 

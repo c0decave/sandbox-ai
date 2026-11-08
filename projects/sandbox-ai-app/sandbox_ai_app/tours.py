@@ -112,10 +112,12 @@ AREA_TOURS = {
     ),
     "sandboxes": (
         step("table", ("What runs and what is kept", "Was läuft und was bleibt"),
-             ("One-off runs, sessions that keep running when you close the app, and MCP servers, with their state "
-              "and project.",
-              "Einmalige Läufe, Sessions, die weiterlaufen, wenn Sie die App schließen, und MCP-Server, mit Zustand "
-              "und Projekt."),
+             ("One-off runs, sessions that keep running when you close the app, and MCP servers, with their state, "
+              "project and host. A host that did not answer has its rows greyed (last seen N s ago); a start with "
+              "an open question is marked asking.",
+              "Einmalige Läufe, Sessions, die weiterlaufen, wenn Sie die App schließen, und MCP-Server, mit Zustand, "
+              "Projekt und Host. Die Zeilen eines Hosts, der nicht antwortete, sind ausgegraut (zuletzt gesehen vor "
+              "N s); ein Start mit offener Frage ist als fragt markiert."),
              ("Select a row to see its options and history.", "Wählen Sie eine Zeile, um Optionen und Verlauf zu "
               "sehen.")),
         step("only_project", ("Only this project", "Nur dieses Projekt"),
@@ -123,10 +125,18 @@ AREA_TOURS = {
               "Beschränkt die Liste auf die Sandboxes des geöffneten Projekts."),
              ("Switch it off to see everything on this computer.", "Schalten Sie es aus, um alles auf diesem Rechner "
               "zu sehen.")),
+        step("show_ended", ("What ended", "Was beendet ist"),
+             ("Ended also lists the starts that ended. History… shows what happened to one, Clean up… removes what "
+              "is left over after showing it first.",
+              "Beendete listet auch die beendeten Starts. Verlauf… zeigt, was mit einem geschah, Aufräumen… entfernt "
+              "Übriggebliebenes, nachdem es dies zuerst gezeigt hat."),
+             ("Switch it on and look at the history of an old start.", "Schalten Sie es ein und sehen Sie sich den "
+              "Verlauf eines alten Starts an.")),
         step("stop_button", ("Stop", "Beenden"),
-             ("Ends the selected sandbox; its launcher cleans up. A session can also be paused and resumed.",
+             ("Ends the selected sandbox; its launcher cleans up. A session can also be paused and resumed; "
+              "Rename… gives a start another name.",
               "Beendet die gewählte Sandbox; ihr Launcher räumt auf. Eine Session lässt sich auch pausieren und "
-              "fortsetzen."),
+              "fortsetzen; Umbenennen… gibt einem Start einen anderen Namen."),
              ("Stop a run you no longer need.", "Beenden Sie einen Lauf, den Sie nicht mehr brauchen.")),
     ),
     "approvals": (
@@ -138,18 +148,32 @@ AREA_TOURS = {
               "abgelehnt."),
              ("Keep this page open while an agent works, or let the tray tell you.",
               "Lassen Sie die Seite offen, während ein Agent arbeitet, oder lassen Sie sich vom Tray benachrichtigen.")),
+        step("host_filter", ("Whose questions", "Wessen Fragen"),
+             ("The questions of this machine and of every host are listed together; here you narrow them to this "
+              "machine or one host.",
+              "Die Fragen dieses Rechners und jedes Hosts stehen zusammen; hier beschränken Sie sie auf diesen "
+              "Rechner oder einen Host."),
+             ("Choose This machine.", "Wählen Sie Dieser Rechner.")),
         step("scope", ("For how long", "Für wie lange"),
-             ("Once, for the run, or always (kept for the project). The security mode decides what is offered.",
-              "Einmal, für den Lauf oder immer (für das Projekt gemerkt). Der Sicherheitsmodus bestimmt, was "
-              "angeboten wird."),
+             ("How long an allow lasts: once, for the run, or always (kept for the project). The security mode "
+              "decides what is offered.",
+              "Wie lange ein Erlauben gilt: einmal, für den Lauf oder immer (für das Projekt gemerkt). Der "
+              "Sicherheitsmodus bestimmt, was angeboten wird."),
              ("Choose once while you are unsure.", "Wählen Sie einmal, solange Sie unsicher sind.")),
         step("allow_button", ("Allow, deny, block", "Erlauben, ablehnen, sperren"),
-             ("Allow lets it through, deny refuses this one, block refuses it from now on.",
-              "Erlauben lässt es durch, Ablehnen weist dieses eine ab, Sperren weist es ab sofort ab."),
+             ("Allow (Alt+A) lets it through; for another host's page it reads Open here and allow and opens the "
+              "page in your browser here. Deny for this run (Alt+D) refuses it until the run ends, Deny once only "
+              "this time, Block always… at every later start too, after asking.",
+              "Erlauben (Alt+A) lässt es durch; für eine Seite eines anderen Hosts heißt es Hier öffnen und erlauben "
+              "und öffnet die Seite hier in Ihrem Browser. Für diesen Lauf ablehnen (Alt+D) weist es bis zum Ende "
+              "des Laufs ab, Einmal ablehnen nur dieses Mal, Immer sperren… nach einer Rückfrage auch bei jedem "
+              "späteren Start."),
              ("Answer the next question here.", "Beantworten Sie die nächste Frage hier.")),
         step("always", ("What you allowed always", "Was Sie immer erlaubt haben"),
-             ("Your standing answers. Forget one and it is asked again.",
-              "Ihre dauerhaften Antworten. Vergessen Sie eine, wird wieder gefragt."),
+             ("Your standing answers, of this machine or of a host you choose below. Forget one and it is asked "
+              "again.",
+              "Ihre dauerhaften Antworten, die dieses Rechners oder eines Hosts, den Sie darunter wählen. Vergessen "
+              "Sie eine, wird wieder gefragt."),
              ("Look through them now and then.", "Sehen Sie sie ab und zu durch.")),
     ),
     "terminals": (
@@ -272,6 +296,38 @@ AREA_TOURS = {
              ("Add a search server and connect it on the board.", "Fügen Sie einen Suchserver hinzu und verbinden "
               "Sie ihn auf der Tafel.")),
     ),
+    "llm": (
+        step("host_box", ("Whose servers", "Wessen Server"),
+             ("This machine or a host of sandbox-ai hosts: the list and every button act there.",
+              "Dieser Rechner oder ein Host von sandbox-ai hosts: die Liste und jeder Knopf wirken dort."),
+             ("Keep this machine for now.", "Bleiben Sie vorerst bei diesem Rechner.")),
+        step("servers", ("Your LLM servers", "Ihre LLM-Server"),
+             ("Model servers of your own, kept by name: Ollama, LM Studio, llama.cpp, vLLM or another "
+              "OpenAI-compatible one, local or behind a VPN. A start uses one with --llm NAME and reaches only its "
+              "address.",
+              "Eigene Modellserver, unter einem Namen aufbewahrt: Ollama, LM Studio, llama.cpp, vLLM oder ein "
+              "anderer OpenAI-kompatibler, lokal oder hinter einem VPN. Ein Start nutzt einen mit --llm NAME und "
+              "erreicht nur seine Adresse."),
+             ("Select a server to act on it.", "Wählen Sie einen Server, um mit ihm zu arbeiten.")),
+        step("add_button", ("Add one", "Einen hinzufügen"),
+             ("Its name, kind and URL, optionally a model, a VPN profile and a key; the key is kept as a secret of "
+              "sandbox-ai, and the agent only ever sees a placeholder.",
+              "Name, Art und URL, optional ein Modell, ein VPN-Profil und ein Schlüssel; der Schlüssel wird als "
+              "Geheimnis von sandbox-ai aufbewahrt, und der Agent sieht immer nur einen Platzhalter."),
+             ("Add the Ollama on this machine: http://127.0.0.1:11434.", "Fügen Sie das Ollama auf diesem Rechner "
+              "hinzu: http://127.0.0.1:11434.")),
+        step("check_button", ("Check it", "Prüfen"),
+             ("Reachability, TLS, the key, the model and the API the chosen agent needs, before a start depends "
+              "on it.",
+              "Erreichbarkeit, TLS, der Schlüssel, das Modell und die API, die der gewählte Agent braucht, bevor ein "
+              "Start davon abhängt."),
+             ("Check the server for the agent you use.", "Prüfen Sie den Server für den Agenten, den Sie nutzen.")),
+        step("models_button", ("Its models", "Seine Modelle"),
+             ("What the server offers now; a start picks one with --llm NAME:MODEL.",
+              "Was der Server gerade anbietet; ein Start wählt eines mit --llm NAME:MODELL."),
+             ("List the models and note one for your next start.", "Listen Sie die Modelle auf und merken Sie sich "
+              "eines für Ihren nächsten Start.")),
+    ),
     "images": (
         step("images", ("The images", "Die Images"),
              ("Each agent's image and your variants: built or not, when, how big, and whether their extension "
@@ -336,20 +392,34 @@ AREA_TOURS = {
              ("Look for an update.", "Suchen Sie nach einem Update.")),
     ),
     "hosts": (
-        step("list", ("Other machines", "Andere Rechner"),
-             ("Machines whose sandbox-ai this app manages over SSH, such as LXC containers; the web interface uses "
-              "the same list.",
-              "Rechner, deren sandbox-ai diese App über SSH verwaltet, etwa LXC-Container; die Weboberfläche nutzt "
-              "dieselbe Liste."),
+        step("table", ("Other machines", "Andere Rechner"),
+             ("Machines whose sandbox-ai this app manages over SSH, such as LXC containers: whether each answered, "
+              "its sandbox-ai version, the starts running and the questions waiting there.",
+              "Rechner, deren sandbox-ai diese App über SSH verwaltet, etwa LXC-Container: ob jeder antwortete, "
+              "seine sandbox-ai-Version, die dort laufenden Starts und die wartenden Fragen."),
              ("Add a host with its SSH address.", "Fügen Sie einen Host mit seiner SSH-Adresse hinzu.")),
-        step("doctor", ("Test it", "Testen"),
-             ("The host's sandbox-ai doctor: whether everything a sandbox needs is there.",
-              "sandbox-ai doctor auf dem Host: ob alles da ist, was eine Sandbox braucht."),
+        step("test_button", ("Test it", "Testen"),
+             ("SSH, the host's sandbox-ai and its doctor: whether everything a sandbox needs is there.",
+              "SSH, das sandbox-ai des Hosts und sein doctor: ob alles da ist, was eine Sandbox braucht."),
              ("Test the host you added.", "Testen Sie den Host, den Sie hinzugefügt haben.")),
-        step("starts", ("Its sandboxes", "Seine Sandboxes"),
-             ("What runs there; attach opens its terminal here.",
-              "Was dort läuft; Anhängen öffnet sein Terminal hier."),
-             ("Attach to a session on the host.", "Hängen Sie sich an eine Session auf dem Host.")),
+        step("starts_button", ("Its starts", "Seine Starts"),
+             ("Show starts opens Sandboxes & sessions with only this host's starts: attach, pause and stop them "
+              "there.",
+              "Starts zeigen öffnet Sandboxen & Sitzungen nur mit den Starts dieses Hosts: Verbinden, pausieren und "
+              "beenden Sie sie dort."),
+             ("Show the starts of a host.", "Zeigen Sie die Starts eines Hosts.")),
+        step("questions_button", ("Its questions", "Seine Fragen"),
+             ("Show questions opens the Approvals page with only this host's questions.",
+              "Fragen zeigen öffnet die Seite Freigaben nur mit den Fragen dieses Hosts."),
+             ("Answer a host's question there.", "Beantworten Sie dort eine Frage des Hosts.")),
+        step("tabs", ("Doctor, updates, defaults", "Doctor, Updates, Standards"),
+             ("The chosen host's doctor, its updates and its defaults for every start there: security mode, "
+              "canaries, how long kept starts stay, telemetry. A step down in security is asked first.",
+              "Doctor, Updates und Standards des gewählten Hosts für jeden Start dort: Sicherheitsmodus, Canaries, "
+              "wie lange aufbewahrte Starts bleiben, Telemetrie. Ein Schritt zu weniger Sicherheit wird vorher "
+              "erfragt."),
+             ("Open Defaults and look at the host's security mode.", "Öffnen Sie Standards und sehen Sie sich den "
+              "Sicherheitsmodus des Hosts an.")),
     ),
     "help": (
         step("index", ("Every topic", "Jedes Thema"),
@@ -566,8 +636,10 @@ TASK_TOURS = {tour.id: tour for tour in (
               "Einmal, für den Lauf oder immer für das Projekt. Wählen Sie einmal, solange Sie unsicher sind."),
              ("Choose for the run.", "Wählen Sie für den Lauf.")),
         task("approvals", "allow_button", ("Answer", "Antworten"),
-             ("Allow lets it through, Deny refuses this request, Block refuses it from now on.",
-              "Erlauben lässt es durch, Ablehnen weist diese Anfrage ab, Sperren weist sie ab sofort ab."),
+             ("Allow lets it through. Deny for this run refuses it until the run ends, Deny once only this "
+              "request, Block always… at every later start too.",
+              "Erlauben lässt es durch. Für diesen Lauf ablehnen weist es bis zum Ende des Laufs ab, Einmal ablehnen "
+              "nur diese Anfrage, Immer sperren… auch bei jedem späteren Start."),
              ("Allow it.", "Erlauben Sie es.")),
         task("sandboxes", "table", ("Change a running sandbox", "Eine laufende Sandbox ändern"),
              ("Without waiting for a question: select a running sandbox; While it runs allows or revokes a host "

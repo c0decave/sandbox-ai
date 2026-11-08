@@ -6452,7 +6452,8 @@ def cgroup_dir(pid, proc=Path("/proc"), root=CGROUP_ROOT):
     if line is None:
         return None
     path = Path(root) / line[3:].strip().lstrip("/")
-    for candidate in (path, path.parent):
+    top = MemoryWatch.sandbox_top(path)
+    for candidate in (path, path.parent) if path != top else (path,):  # never above the sandbox's own cgroup
         try:
             if (candidate / "memory.max").read_text().strip() not in ("max", ""):
                 return candidate
@@ -6461,12 +6462,15 @@ def cgroup_dir(pid, proc=Path("/proc"), root=CGROUP_ROOT):
     return None
 
 
-def memory_state(cgroup):
+def memory_state(cgroup, top=None):
     """{"current", "limit", "oom_kill", "anon", "shmem"} (bytes, kills) of CGROUP; shmem is what tmpfs files hold.
-    The limit is the smallest memory.max on the path from CGROUP up to the cgroup root (one set on a parent, a pod's,
-    holds CGROUP as well), with that cgroup's use as "current"; read again at every look. ValueError when no
-    cgroup on the path has a limit."""
+    The limit is the smallest memory.max on the path from CGROUP up to the sandbox's own top cgroup TOP (default:
+    MemoryWatch.sandbox_top; one set on a parent, a pod's, holds CGROUP as well), never above it, with that
+    cgroup's use as "current"; read again at every look. ValueError when no cgroup on the path has a limit."""
     cgroup = Path(cgroup)
+    top = Path(top) if top is not None else MemoryWatch.sandbox_top(cgroup)
+    if cgroup != top and top not in cgroup.parents:
+        top = cgroup  # (a TOP that does not hold CGROUP: CGROUP alone)
     levels, directory = [], cgroup
     for _ in range(64):
         try:  # the root of the cgroup tree has no memory.max: the walk ends there
@@ -6482,11 +6486,11 @@ def memory_state(cgroup):
                 current = None
             if current is not None:
                 levels.append((current, int(value)))
-        if directory.parent == directory:
+        if directory == top or directory.parent == directory:
             break
         directory = directory.parent
     if not levels:
-        raise ValueError(f"no memory limit on {cgroup} or above")
+        raise ValueError(f"no memory limit on {cgroup} or above it, up to the sandbox's own {top.name}")
     current, limit = min(levels, key=lambda level: level[1])  # the smallest; of equal ones the nearest
 
     def pairs(name):
@@ -6561,6 +6565,22 @@ class MemoryWatch:
     """Watches the sandbox's memory from the host while it runs (see above). LOCATE() gives (cgroup, protected pids)
     once the sandbox's processes exist, or None; SESSION is the session directory (memory.json for the agent), LOG
     a file for memory.jsonl records (or None), NOTIFY(title, text) tells the human."""
+
+    @staticmethod
+    def sandbox_top(cgroup):
+        """The sandbox's own top cgroup for CGROUP (one of its processes' or the one with its limit): with Podman
+        the pod's (the parent of the container's libpod-<id>[.scope], when that parent is a pod's:
+        *libpod_pod_<id>.slice), else the container's own; with Bubblewrap the run's systemd-run scope (run-*.scope)
+        it lies in; else CGROUP itself. Nothing above it is the sandbox's: the user's slice holds the desktop
+        session, whose use is not the sandbox's to report (memory.json) or to act on (cgroup_dir, memory_state)."""
+        path = Path(cgroup)
+        for candidate in (path, *path.parents):
+            if candidate.name.startswith("libpod-") and not candidate.name.startswith("libpod-conmon-"):
+                return candidate.parent if "libpod_pod_" in candidate.parent.name else candidate
+        for candidate in (path, *path.parents):
+            if candidate.name.startswith("run-") and candidate.name.endswith(".scope"):
+                return candidate
+        return path
 
     def __init__(self, locate, name, session=None, log=None, notify=None, warn=MEMORY_WARN, act=MEMORY_ACT,
                  interval=MEMORY_INTERVAL, grace=MEMORY_GRACE, clock=time.monotonic, kill=os.kill, proc=Path("/proc"),

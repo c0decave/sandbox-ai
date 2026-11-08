@@ -17,7 +17,7 @@ import weakref
 
 from PySide6.QtCore import QCoreApplication, QEvent, QTimer, QUrl, Qt, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QGroupBox, QHBoxLayout, QLabel, QMessageBox, QPushButton, QSplitter, QTabWidget, QVBoxLayout, QWidget,
+    QComboBox, QGroupBox, QHBoxLayout, QLabel, QPushButton, QSplitter, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from . import theme
@@ -25,7 +25,7 @@ from .backend import setting as backend_setting
 from .files import printable
 from .i18n import N_, tr
 from .pty_bridge import PtyBridge
-from .widgets import background, fill, plain_label, row_key, table, warn
+from .widgets import background, confirm, fill, plain_label, row_key, table, warn
 
 WEB = Path(__file__).resolve().with_name("web")
 # The vendoring script next to the package (a checkout or sandbox-ai's installation; not in a wheel).
@@ -545,9 +545,10 @@ class TerminalsPage(QWidget):
         view = self.tabs.widget(index)
         if view is None:
             return
-        if ask and view.running and QMessageBox.question(
-                self, tr("Close terminal"), tr("The command in this tab still runs. End it?")) != \
-                QMessageBox.StandardButton.Yes:
+        # Ending a command that runs loses what it did not save: asked, with Cancel as the default.
+        if ask and view.running and not confirm(self, tr("Close terminal"), tr("The command in this tab still runs. "
+                                                                              "End it?"), tr("End it"),
+                                                destructive=True):
             return
         view.close_terminal()
         self.tabs.removeTab(index)

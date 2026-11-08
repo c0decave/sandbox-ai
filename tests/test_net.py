@@ -1286,3 +1286,20 @@ def test_show_keep_is_refused_when_the_policy_caps_approvals(sandbox, tmp_path, 
         assert net.main(["show", "codex-1234abcd", option], out=lambda line: None) == 1
         assert "approves at most for run" in capsys.readouterr().err
     assert json.loads((app / ".sandbox-ai.json").read_text())["options"] == []
+
+
+def test_allow_keep_is_refused_when_the_policy_caps_approvals(sandbox, tmp_path, monkeypatch, capsys):
+    """net allow --keep checks the policy as net show --keep does, before anything changes: nothing allowed, nothing
+    written."""
+    app = keep_project(tmp_path, monkeypatch)
+    monkeypatch.setattr(net.approvals_module(), "policy_scope", lambda: "run")
+    assert net.main(["allow", "codex-1234abcd", "--allow-host", "pypi.org", "--keep"], out=lambda line: None,
+                    resolver=fake_resolver) == 1
+    assert "approves at most for run" in capsys.readouterr().err
+    assert json.loads((app / ".sandbox-ai.json").read_text())["options"] == []
+    record = net.choose(net.running(), "codex-1234abcd")
+    assert "pypi.org" not in net.given(record)["hosts"] and "pypi.org" not in net.remembered(record)
+    monkeypatch.setattr(net.approvals_module(), "policy_scope", lambda: "always")
+    assert net.main(["allow", "codex-1234abcd", "--allow-host", "pypi.org", "--keep"], out=lambda line: None,
+                    resolver=fake_resolver) == 0
+    assert "pypi.org" in json.loads((app / ".sandbox-ai.json").read_text())["options"]

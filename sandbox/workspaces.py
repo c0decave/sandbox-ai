@@ -11,7 +11,8 @@ location, nothing a sandbox may have planted a link in, no overlap with the run'
 none of the files the launcher reads inside it, no directory of your PATH in it); it is read-only with --ro, and
 always when the run's security mode or --workspace-ro keeps further workspaces read-only. A workspace added to a
 session is kept in its options, so `sandbox-ai resume NAME --restart` starts with it at the same place (not one
-added with --ro: it would come back writable); `remove` takes it out again.
+added with --ro: it would come back writable; in a session it is named NAME-ro, so that it never takes the place a
+kept one gets back at a restart); `remove` takes it out again.
 
 How: nothing runs in the sandbox. A helper of your own user opens DIR and checks that it is the directory that
 was checked (device and inode), that each PID it is given still names the process found (its start time), enters
@@ -69,6 +70,7 @@ KERNEL_FILESYSTEMS = frozenset({"proc", "sysfs", "cgroup", "cgroup2", "devtmpfs"
 KERNEL_TREES = (Path("/proc"), Path("/sys"), Path("/dev"))
 MOUNTINFO = Path("/proc/self/mountinfo")
 PARTIAL = 3  # the helper's exit status when a removal stopped half-way (stdout: {"gone": [pid, ...]})
+UNSURE = 4  # the helper's exit status when what it did may not have been undone (an add whose rollback failed)
 
 # Why `workspace remove` refuses: each refusal carries one of these phrases, so that a front end can tell the reason
 # (the CLI's text, the web UI's and the app's error):
@@ -239,6 +241,10 @@ def start_time(pid, proc=PROC):
     return int(fields[19]) if len(fields) > 19 and fields[19].isdigit() else None
 
 
+class Unsure(OSError):
+    """An add that failed and whose rollback failed as well: it may still be mounted somewhere."""
+
+
 class Partial(OSError):
     """A removal that stopped half-way and could not be undone: GONE are the pids of the namespaces it left."""
 
@@ -280,10 +286,16 @@ def helper(op, user_pid, name, targets, source=None, identity=None, mode="rw", p
             reached.append(index)
     except OSError as exc:
         if op == "add":
+            failed = False
             for index in reached:
-                with contextlib.suppress(OSError):
+                try:
                     check(c.setns(namespaces[index], CLONE_NEWNS), "enter a mount namespace of the sandbox")
                     detach(c, name, True)
+                except OSError:
+                    failed = True
+            if failed:
+                raise Unsure(exc.errno or errno.EIO, f"{exc.strerror or exc}; and it could not be taken out again "
+                             "of every mount namespace it reached") from None
             raise
         if not reached:
             raise
@@ -397,9 +409,11 @@ def own_namespaces(found, proc=PROC):
     return [pid for pid in found["mntns"].values() if own is not None and user(pid) == own]
 
 
-def run_helper(op, found, name, source=None, identity=None, mode="rw", force=False, proc=PROC):
+def run_helper(op, found, name, source=None, identity=None, mode="rw", force=False, proc=PROC, runner=None):
     """Run helper() in a process of its own; (status, error text), and for status PARTIAL a third item:
-    {"gone": [pids of the namespaces the removal left]}."""
+    {"gone": [pids of the namespaces the removal left]}; for a failed add whose undo is not confirmed (killed on
+    the way and the undo failed too, or its rollback failed): {"undone": False}."""
+    runner = runner or subprocess.run
     targets = own_namespaces(found, proc)
     if not targets:
         return 1, "no mount namespace of the sandbox found"
@@ -412,14 +426,22 @@ def run_helper(op, found, name, source=None, identity=None, mode="rw", force=Fal
                "identity": identity, "mode": mode, "force": force, "starts": starts}
     command = [sys.executable, "-I", str(Path(__file__)), "--internal-helper", json.dumps(request)]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+        result = runner(command, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
-        if op == "add":  # killed before its own rollback: take out what it may have mounted already
-            with contextlib.suppress(OSError, subprocess.SubprocessError):
-                undo = [sys.executable, "-I", str(Path(__file__)), "--internal-helper",
-                        json.dumps({**request, "op": "remove", "source": None, "identity": None, "force": True})]
-                subprocess.run(undo, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
-        return 1, "the helper did not finish within 30 s (a mount namespace that does not answer?)"
+        text = "the helper did not finish within 30 s (a mount namespace that does not answer?)"
+        if op != "add":
+            return 1, text
+        # Killed before its own rollback: take out what it may have mounted already; only an undo that finished
+        # says so ({"undone": False} keeps the entry: add()).
+        undo = [sys.executable, "-I", str(Path(__file__)), "--internal-helper",
+                json.dumps({**request, "op": "remove", "source": None, "identity": None, "force": True})]
+        try:
+            undone = runner(undo, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            undone = False
+        return 1, text + ("" if undone else "; taking it out again did not finish either"), {"undone": undone}
+    if op == "add" and result.returncode not in (0, 1):  # (UNSURE, or the helper died some other way)
+        return result.returncode, result.stderr.strip()[-500:], {"undone": False}
     if result.returncode == PARTIAL:
         detail = {"gone": []}
         with contextlib.suppress(ValueError, AttributeError):
@@ -630,17 +652,46 @@ def judged(record, real, read_only=False):
     return "ro" if read_only or checks.get("read_only") else "rw"
 
 
-def sandbox_name(record, real):
-    """/workspaces/<name> for REAL: its name, -2, -3 ... after the names taken, as a start names them
-    (workspace_targets), so that a restart with it finds it at the same place."""
-    checks = record.get("workspace_checks") or {}
-    taken = {PurePosixPath(entry["sandbox"]).name for entry in checks.get("workspaces", [])[1:]}
-    taken |= {PurePosixPath(entry["sandbox"]).name for entry in present_workspaces(record)}
-    base = real.name or "root"
+def free_name(base, taken):
+    """BASE, else BASE-2, BASE-3 ...: the first not in TAKEN (as a start names its workspaces)."""
     name, suffix = base, 2
     while name in taken:
         name, suffix = f"{base}-{suffix}", suffix + 1
     return name
+
+
+def restart_names(record, extra=()):
+    """{host path: name} a restart of the session gives the added workspaces it keeps (and EXTRA host paths after
+    them): workspace_targets names the start's workspaces as now, then the kept ones in the order they were added
+    (their --workspace options), each its directory's name, -2, -3 ... after the names taken before it."""
+    checks = record.get("workspace_checks") or {}
+    used = {PurePosixPath(entry["sandbox"]).name for entry in checks.get("workspaces", [])[1:]}
+    kept = [entry["host"] for entry in sorted(present_workspaces(record), key=lambda e: e.get("since") or 0)
+            if entry.get("kept")]
+    names = {}
+    for host in [*kept, *extra]:
+        names[host] = free_name(PurePosixPath(host).name or "root", used)
+        used.add(names[host])
+    return names
+
+
+def sandbox_name(record, real, keeping=False):
+    """(name, its name after a restart or None) of /workspaces/<name> for REAL. One the session keeps (KEEPING) gets
+    the name a restart gives it (restart_names), so that it is at the same place then. One that is not kept while
+    the run has a session (added read-only) is named <name>-ro (-ro-2 ...): it never takes the name a later kept one
+    gets back at a restart. Else (no session: no restart) its name, -2, -3 ... after the names taken. The second
+    item names the place after a restart when it cannot be the same (a workspace that is not kept holds that name
+    now)."""
+    checks = record.get("workspace_checks") or {}
+    taken = {PurePosixPath(entry["sandbox"]).name for entry in checks.get("workspaces", [])[1:]}
+    taken |= {PurePosixPath(entry["sandbox"]).name for entry in present_workspaces(record)}
+    base = real.name or "root"
+    if keeping:
+        later = restart_names(record, [str(real)])[str(real)]
+        if later not in taken:
+            return later, None
+        return free_name(base, taken), later
+    return free_name(f"{base}-ro" if session_of(record) is not None else base, taken), None
 
 
 # --- the run's registry and log ----------------------------------------------------------------------------------
@@ -794,7 +845,10 @@ def add(record, value, read_only=False, out=print, runner=run_helper, finder=fin
     try:
         with locked(record):
             mode = judged(record, real, read_only)
-            name = sandbox_name(record, real)
+            checks = record.get("workspace_checks") or {}
+            # Kept in the session's options (see below) unless read-only without --workspace-ro.
+            keeping = session_of(record) is not None and not (mode == "ro" and not checks.get("read_only"))
+            name, elsewhere = sandbox_name(record, real, keeping)
             found = finder(record)
             if not found:
                 raise ValueError("the sandbox's processes were not found (has it ended?)")
@@ -806,8 +860,24 @@ def add(record, value, read_only=False, out=print, runner=run_helper, finder=fin
             entry = {"host": str(real), "sandbox": f"{WORKSPACES_DIR}/{name}", "mode": mode, "state": "pending",
                      "since": time.time(), "identity": identity, "kept": False}
             save(record, load(record) + [entry])
-            status, error = runner("add", found, name, str(real), identity, mode)[:2]
+            result = runner("add", found, name, str(real), identity, mode)
+            status, error = result[:2]
             if status:
+                undone = (result[2] if len(result) > 2 and isinstance(result[2], dict) else {}).get("undone", True)
+                if undone is not True:
+                    # Killed on the way (or its rollback failed) and the undo not confirmed: it may be mounted in
+                    # some namespaces. The entry stays (pending, with why), so that names, overlaps and `remove`
+                    # still know it.
+                    note = "the add failed and its undo was not confirmed: it may be mounted"
+                    with contextlib.suppress(OSError):
+                        entries = load(record)
+                        for other in entries:
+                            if other.get("sandbox") == entry["sandbox"] and other.get("state") == "pending":
+                                other["note"] = note
+                        save(record, entries)
+                    raise ValueError(f"could not add {shown(real)}: {error or 'the helper failed'}; {note} at "
+                                     f"{entry['sandbox']}: it stays listed (pending) until sandbox-ai workspace "
+                                     f"remove --force {entry['sandbox']} takes it out")
                 with contextlib.suppress(OSError):  # the helper undid its mounts: the pending entry goes
                     save(record, [other for other in load(record) if not (other.get("sandbox") == entry["sandbox"]
                                                                          and other.get("state") == "pending")])
@@ -826,8 +896,7 @@ def add(record, value, read_only=False, out=print, runner=run_helper, finder=fin
             pushed, why = publish_push_rules(record)
     finally:
         os.close(fd)
-    checks = record.get("workspace_checks") or {}
-    if mode == "ro" and not checks.get("read_only"):
+    if not keeping:
         # Kept as --workspace it would come back writable at a restart (only --workspace-ro or the mode make further
         # workspaces read-only): this one lasts for the run.
         if session_of(record) is not None:
@@ -852,6 +921,9 @@ def add(record, value, read_only=False, out=print, runner=run_helper, finder=fin
                  f"{shown(why, 300)}): push them from the host" if pushed is False else "")
     out(f"added {shown(real)} to {shown(record.get('run'))} at {entry['sandbox']} ({mode}"
         f"{', kept for the session' if entry['kept'] else ''}){push_note}")
+    if entry["kept"] and elsewhere:
+        out(f"  after a restart it is at {WORKSPACES_DIR}/{elsewhere} (a workspace that is not kept holds that name "
+            "now)")
     return entry["sandbox"]
 
 
@@ -944,6 +1016,7 @@ def remove(record, value, force=False, out=print, runner=run_helper, finder=find
                     other.update(state="partial", gone_in=sorted(set(other.get("gone_in", [])) | set(gone)),
                                  partial_since=time.time())
             save(record, entries)
+            publish_push_rules(record)  # half there: no longer offered to the push check (only attached ones are)
             log(record, "remove-partial", entry, gone_in=gone)
             raise ValueError(f"could not remove {entry['sandbox']}: {error or REFUSED_PARTIAL}")
         if status:
@@ -960,6 +1033,11 @@ def remove(record, value, force=False, out=print, runner=run_helper, finder=find
             kept = keep(record, entry["host"], add=False)
         except (OSError, ValueError) as exc:
             out(f"  still in the session's options: {shown(exc, 500)}")
+        if kept:  # the kept ones after it are named anew at a restart
+            for host, later in restart_names(record).items():
+                now = next((e["sandbox"] for e in present_workspaces(record) if e["host"] == host), None)
+                if now and now != f"{WORKSPACES_DIR}/{later}":
+                    out(f"  after a restart {shown(host)} is at {WORKSPACES_DIR}/{later} (now {now})")
     log(record, "remove", entry, forced=force or None, open=[pid for pid, _, _ in busy] or None)
     if held:
         out(f"  warning: the agent still holds {entry['sandbox']} in a namespace of its own (process "
@@ -985,6 +1063,8 @@ def listing(record):
                "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(entry.get("since") or 0))}
         if entry["state"] == "partial":
             row["gone_in"] = [pid for pid in entry.get("gone_in", []) if isinstance(pid, int)]
+        if isinstance(entry.get("note"), str):
+            row["note"] = entry["note"]
         result.append(row)
     return result
 
@@ -1043,7 +1123,13 @@ if __name__ == "__main__":
             print(exc.strerror or str(exc), file=sys.stderr)
             print(json.dumps({"gone": exc.gone}))
             sys.exit(PARTIAL)
+        except Unsure as exc:
+            print(exc.strerror or str(exc), file=sys.stderr)
+            sys.exit(UNSURE)
         except OSError as exc:
             print(exc.strerror or str(exc), file=sys.stderr)
             sys.exit(1)
+        except Exception as exc:  # noqa: BLE001 (whatever it reached may still be mounted)
+            print(f"the helper failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+            sys.exit(UNSURE)
     sys.exit(main(sys.argv[1:]))

@@ -1067,6 +1067,15 @@ def load_workspaces_module():
     return _workspaces_module
 
 
+def keep_allowed():
+    """ValueError unless the administrator's policy lets what is allowed during a run be kept for later starts
+    (max_approval_scope always): net show --keep and net allow --keep, checked before anything changes."""
+    widest = approvals_module().policy_scope()
+    if widest != "always":
+        raise ValueError(f"--keep: the administrator's policy approves at most for {widest}, so what was "
+                         "allowed during the run is not kept for later starts (nothing was written)")
+
+
 def keep_in_project(record, tokens, write=True, workspaces=(), preview=None):
     """Add TOKENS (options) to the run's project file, WORKSPACE/.sandbox-ai.json, and trust the result: only while
     the file is exactly what you trusted (an agent's change is never trusted along), or a new one for the run's
@@ -1196,10 +1205,7 @@ def main(argv, out=print, resolver=resolve):
             return stop(record, args.wait, out)
         if args.command == "show":
             if getattr(args, "keep", False) or getattr(args, "keep_all", False):
-                widest = approvals_module().policy_scope()
-                if widest != "always":
-                    raise ValueError(f"--keep: the administrator's policy approves at most for {widest}, so what was "
-                                     "allowed during the run is not kept for later starts (nothing was written)")
+                keep_allowed()
             result = ask(record["directory"], {"op": "show"})
             show(result, out, names=remembered(record), run=record.get("run", args.run), as_json=args.json,
                  logins=git_logins(record), wildcards=run_wildcards(record))
@@ -1284,6 +1290,7 @@ def main(argv, out=print, resolver=resolve):
             request["https"] = sorted((set(request["https"]) | {f"{a}/32" if ":" not in a else f"{a}/128" for a in mine})
                                       - {f"{a}/32" if ":" not in a else f"{a}/128" for a in kept})
         if getattr(args, "keep", False):
+            keep_allowed()  # as net show --keep: before anything changes
             keep_in_project(record, [], write=False)  # a --keep that cannot be done changes nothing
         if logins and args.command == "allow":
             # Read every token before anything changes: a missing variable or secret refuses the whole command.

@@ -118,7 +118,8 @@ def test_fill_keeps_row_keys_and_the_selection_across_sorting(qapp):
 def test_pages_and_preview(window):
     assert [window.nav.item(i).text() for i in range(window.nav.count())] == [
         "PROJECT", "Start", "Board", "RUNNING", "Sandboxes & sessions", "Approvals", "Terminals", "INSIGHT",
-        "Connections", "Activity", "Statistics", "Files", "MANAGE", "Kits & plugins", "MCP servers", "Images", "Credentials",
+        "Connections", "Activity", "Statistics", "Files", "MANAGE", "Kits & plugins", "MCP servers", "LLM servers", "Images",
+        "Credentials",
         "SYSTEM", "System", "Hosts", "Help"]
     launch = window.launch
     launch.agent.setCurrentText("codex")
@@ -313,7 +314,8 @@ def test_sandboxes_lists_and_manages_the_other_hosts_starts(window, wait, monkey
     monkeypatch.setattr(window.sai, "host_terminal", lambda name, *args: ["ssh", "-tt", name, *args])
     monkeypatch.setattr(page, "terminal", lambda argv, title, embedded=False: opened.append((argv, title)))
     page.refresh_remote()
-    assert wait(lambda: page.table.rowCount() == 1, 15)
+    # Each host is read apart: the round is over when both answered (or not).
+    assert wait(lambda: page.table.rowCount() == 1 and page.remote_reading is None, 15)
     assert page.table.item(0, 1).text() == "web" and page.table.item(0, 8).text() == "ct1"
     assert "1 on other hosts" in page.summary.text() and "ct2: no answer" in page.summary.text()
     page.table.selectRow(0)
@@ -401,7 +403,10 @@ def test_block_always_and_the_blocked_list(window, env, wait):
     page = window.approvals
     page.poll()
     assert page.current() is not None and page.block_button.isEnabled()
-    page.answer("deny", "always")  # what the Block always button does: no question first
+    widgets.SHOWN.clear()
+    page.answer("deny", "always")  # what the Block always button does: asked first (it outlives the run)
+    title, text, _ = widgets.SHOWN[-1]
+    assert title == "Block always?" and "192.0.2.66:443" in text and "every later start" in text
     assert wait(lambda: page.answering is None, 90)
     answer = json.loads((run / "approvals" / "1700000000-1-9.answer").read_text())
     # In this run a block counts for the run; sandbox-ai remembers it for the project once the sandbox applied it.
@@ -1999,13 +2004,15 @@ def test_approvals_of_every_host_are_one_table_answered_on_their_host(window, en
     assert wait(lambda: reads.count("ct1") > reads_before, 15), "read again at once after an answer there"
     # A browser question of another host: opened here (http/https only), allowed there without opening it.
     page.open.selectRow(widgets.find_row(page.open, ("ct1", "claude-r", "1700000000-1-2")))
-    assert page.open_here_button.isVisibleTo(page.open_box) and "ct1" in page.url.text()
+    assert page.allow_button.text() == "Open here and allow" and "ct1" in page.url.text()
+    assert page.allow_button.isEnabled()
     page.open_here()
     assert wait(lambda: page.answering is None, 15)
     assert ("ct1", ("approvals", "allow", "1700000000-1-2", "--scope", "once", "--no-open")) in ran
     assert opened == ["https://login.example/device?code=1"]
     page.open.selectRow(widgets.find_row(page.open, ("ct1", "claude-r", "1700000000-1-3")))
-    assert not page.open_here_button.isVisibleTo(page.open_box)
+    assert page.allow_button.text() == "Open here and allow" and not page.allow_button.isEnabled()
+    assert "http and https" in page.allow_button.toolTip()
     count = len(ran)
     page.open_here()
     assert len(ran) == count and opened == ["https://login.example/device?code=1"], "a file: URL is never opened"
@@ -2251,3 +2258,337 @@ def test_the_question_count_in_the_strip_of_icons(window):
     assert item.text() == "Approvals  (3)" and item.toolTip().startswith("Approvals (Ctrl+")
     window.questions_changed(0, [])
     assert item.text() == "Approvals" and item.toolTip() == window.nav_tooltip("approvals")
+
+
+# -- round 2: answers per question, the fleet view, managing starts --
+
+
+def test_a_slow_answer_on_another_host_holds_up_no_other_question(window, env, monkeypatch, wait):
+    """Regression: one `answering` slot for every question: while another host took up to two minutes for one answer,
+    every question was greyed out and this machine's ran out of time unanswered."""
+    import threading
+    run = fake_run(env)
+    ask(run, "1700000000-1-1", kind="dns", name="pypi.org")
+    release, ran = threading.Event(), []
+    monkeypatch.setattr(window.sai, "remote_hosts", lambda: ["ct1"])
+    monkeypatch.setattr(window.sai, "host_questions", lambda name, timeout=30: [
+        remote_question(id="1700000000-9-1", kind="connect", question="connect to 192.0.2.7:443")])
+    monkeypatch.setattr(window.sai, "host_run", lambda name, *args, timeout=120: ran.append((name, args)) or
+                        (release.wait(120), (0, "ok", ""))[1])
+    page = window.approvals
+    page.poll()
+    page.poll_remote()
+    assert wait(lambda: page.open.rowCount() == 2, 15)
+    try:
+        page.open.selectRow(widgets.find_row(page.open, ("ct1", "claude-r", "1700000000-9-1")))
+        page.answer("deny")
+        assert wait(lambda: ran, 10) and not page.deny_button.isEnabled(), "this one is on its way"
+        page.open.selectRow(widgets.find_row(page.open, ("local", "claude-abc", "1700000000-1-1")))
+        assert page.deny_button.isEnabled() and page.allow_button.isEnabled(), "the other questions stay answerable"
+        page.answer("deny")
+        assert wait(lambda: (run / "approvals" / "1700000000-1-1.answer").exists(), 60)
+        assert page.answering is not None, "the slow one is still on its way"
+    finally:
+        release.set()
+    assert wait(lambda: page.answering is None, 30)
+    assert ("ct1", ("approvals", "deny", "1700000000-9-1", "--scope", "run")) in ran
+
+
+def test_deny_is_for_the_run_deny_once_is_once_and_an_expired_question_is_not_answered(window, env, wait):
+    """As the web interface and the command line: Deny lasts for the run unless "once" is chosen (Deny once); a
+    question whose time is up is refused by sandbox-ai already and is not answered from here."""
+    run = fake_run(env)
+    ask(run, "1700000000-1-1", kind="connect", destination="192.0.2.7:5432", address="192.0.2.7", port=5432)
+    ask(run, "1700000000-1-2", kind="connect", destination="192.0.2.8:5432", address="192.0.2.8", port=5432)
+    ask(run, "1700000000-1-3", seconds_ago=70, kind="connect", destination="192.0.2.9:5432", address="192.0.2.9",
+        port=5432)
+    page = window.approvals
+    page.poll()
+    assert page.deny_button.text() == "Deny for this run" and page.deny_once_button.text() == "Deny once"
+    page.open.selectRow(widgets.find_row(page.open, ("local", "claude-abc", "1700000000-1-1")))
+    page.answer("deny")  # the scope box says "once": it is for allows
+    assert wait(lambda: page.answering is None, 90)
+    assert json.loads((run / "approvals" / "1700000000-1-1.answer").read_text())["scope"] == "run"
+    page.open.selectRow(widgets.find_row(page.open, ("local", "claude-abc", "1700000000-1-2")))
+    page.deny_once_button.click()
+    assert wait(lambda: page.answering is None, 90)
+    assert json.loads((run / "approvals" / "1700000000-1-2.answer").read_text())["scope"] == "once"
+    page.open.selectRow(widgets.find_row(page.open, ("local", "claude-abc", "1700000000-1-3")))
+    assert not page.allow_button.isEnabled() and not page.deny_button.isEnabled()
+    assert "time is up" in page.deny_button.toolTip()
+    page.answer("deny")
+    assert page.message.text().startswith("Expired") and page.answering is None
+    assert not (run / "approvals" / "1700000000-1-3.answer").exists()
+
+
+def test_the_policy_is_read_at_every_scan_and_caps_allows_only(window, env, monkeypatch, wait):
+    """Regression: max_scope was read once when the page was built; and a deny under a policy capped at "once" was
+    sent as --scope once, though sandbox-ai caps allows only."""
+    run = fake_run(env)
+    ask(run, "1700000000-1-1", kind="connect", destination="192.0.2.7:5432", address="192.0.2.7", port=5432)
+    page = window.approvals
+    page.poll()
+    always, run_scope = page.scope.findData("always"), page.scope.findData("run")
+    assert page.scope.model().item(always).isEnabled()
+    monkeypatch.setattr(window.sai, "max_scope", lambda: "once")
+    page.poll()
+    assert not page.scope.model().item(always).isEnabled() and not page.scope.model().item(run_scope).isEnabled()
+    assert page.block_button.isEnabled(), "a block is a deny: never capped"
+    calls = []
+    monkeypatch.setattr(window.sai, "call", lambda *args, timeout=120, input=None: calls.append(args) or (0, "", ""))
+    page.answer("deny")
+    assert wait(lambda: page.answering is None, 15)
+    assert calls[-1] == ("approvals", "deny", "1700000000-1-1", "--scope", "run")
+    page.scope.setCurrentIndex(always)
+    page.answer("allow")
+    assert "at most" in page.message.text() and calls[-1][1] == "deny", "an allow above the policy is not sent"
+
+
+def test_the_approvals_keys_answer_the_selected_question(window, env, wait, qapp):
+    """Alt+D denies for the run, Alt+A allows (asked first), Ctrl+Shift+B blocks always (asked first): taken by the
+    page while the focus is on it, also where the menu bar would take Alt+letters."""
+    from PySide6.QtTest import QTest
+    run = fake_run(env)
+    ask(run, "1700000000-1-1", kind="connect", destination="192.0.2.7:5432", address="192.0.2.7", port=5432)
+    window.show()
+    window.show_page("approvals")
+    page = window.approvals
+    page.poll()
+    assert page.current() is not None
+    page.open.setFocus()
+    qapp.processEvents()
+    QTest.keyClick(page.open, Qt.Key.Key_D, Qt.KeyboardModifier.AltModifier)
+    assert wait(lambda: (run / "approvals" / "1700000000-1-1.answer").exists(), 60)
+    assert json.loads((run / "approvals" / "1700000000-1-1.answer").read_text()) == {"decision": "deny", "scope": "run"}
+    assert all(w.accessibleName() for w in (page.open, page.history, page.always, page.allow_button, page.deny_button,
+                                            page.deny_once_button, page.block_button, page.scope, page.host_filter))
+
+
+def test_a_notification_selects_its_question(window, env, wait):
+    run = fake_run(env)
+    ask(run, "1700000000-1-1", kind="dns", name="a.example")
+    ask(run, "1700000000-1-2", kind="dns", name="b.example")
+    actions = []
+    window.notify = lambda title, text, action=None, **_: actions.append(action)
+    window.approvals.poll()
+    assert actions and window.approvals.current() is None, "two questions: nothing chosen for you"
+    label, callback = actions[-1]
+    callback()
+    assert window.current_page() == "approvals"
+    assert window.approvals.current() is not None and window.approvals.current()[1]["name"] in ("a.example", "b.example")
+
+
+def test_the_approvals_host_filter_and_a_removed_host(window, env, monkeypatch, wait):
+    run = fake_run(env)
+    ask(run, "1700000000-1-1", kind="dns", name="pypi.org")
+    monkeypatch.setattr(window.sai, "remote_hosts", lambda: ["ct1"])
+    monkeypatch.setattr(window.sai, "host_questions", lambda name, timeout=30: [
+        remote_question(id="1700000000-9-1", kind="connect", question="connect to 192.0.2.7:443")])
+    page = window.approvals
+    page.poll()
+    page.poll_remote()
+    assert wait(lambda: page.open.rowCount() == 2, 15)
+    page.show_host("ct1")
+    assert page.open.rowCount() == 1 and page.open.item(0, 5).text() == "ct1"
+    assert window.nav_item("approvals").text() == "Approvals  (2)", "every question is still counted"
+    window.hosts.host_removed.emit("ct1")
+    assert not page.remote and page.host_filter.findData("ct1") < 0, "removed: its questions go at once"
+    assert page.open.rowCount() == 1 and page.open.item(0, 5).text() == "this machine", "back to every host's"
+
+
+def test_the_remembered_list_of_another_host_and_forget_there(window, monkeypatch, wait):
+    page = window.approvals
+    ran = []
+    remembered = {"/srv/app": {"hosts": ["pypi.org"], "tcp": [], "blocked_hosts": ["evil.example"], "blocked_tcp": []}}
+
+    def host_run(name, *args, timeout=120):
+        ran.append((name, args))
+        return 0, json.dumps(remembered) if args[:2] == ("approvals", "remembered") else "forgot", ""
+    monkeypatch.setattr(window.sai, "host_run", host_run)
+    page.fill_hosts(["ct1"])
+    page.always_host.setCurrentIndex(page.always_host.findData("ct1"))
+    page.load_always()
+    assert wait(lambda: page.always.rowCount() == 2, 15)
+    page.always.selectRow(widgets.find_row(page.always, ("/srv/app", "evil.example")))
+    widgets.SHOWN.clear()
+    page.forget()
+    assert widgets.SHOWN[-1][1].startswith("On ct1: ")
+    assert wait(lambda: ("ct1", ("approvals", "forget", "/srv/app", "evil.example")) in ran, 15)
+
+
+def test_a_host_that_does_not_answer_keeps_its_rows_greyed_with_their_buttons_off(window, monkeypatch, wait):
+    """Regression: an unreachable host's rows looked running, with live buttons; its error was kept under the key
+    "hosts", which a host may be called; a list of hosts that could not be read left old rows for ever."""
+    page = window.sandboxes
+    there = backend.Instance("session", backend.remote_key("hosts", "web"), "web", state="running",
+                             record={"attachable": True}, host="hosts")
+    failing = []
+
+    def host_instances(name, timeout=60):
+        if failing:
+            raise ValueError("ssh: connect to host 192.0.2.10 port 22: Connection timed out")
+        return [there]
+    monkeypatch.setattr(window.sai, "remote_hosts", lambda: ["hosts"])
+    monkeypatch.setattr(window.sai, "host_instances", host_instances)
+    page.refresh_remote()
+    assert wait(lambda: page.table.rowCount() == 1 and page.remote_reading is None, 15)
+    page.table.selectRow(0)
+    assert page.stop_button.isEnabled()
+    failing.append(True)
+    page.refresh_remote()
+    assert wait(lambda: "hosts" in page.remote_problems and page.remote_reading is None, 15)
+    assert page.table.rowCount() == 1 and "last seen" in page.table.item(0, 6).text()
+    page.table.selectRow(0)
+    assert not page.stop_button.isEnabled() and "does not answer" in page.stop_button.toolTip()
+    assert not page.session_buttons["pause"].isEnabled()
+    # The list of hosts cannot be read: said apart; the hosts known are asked again.
+    monkeypatch.setattr(window.sai, "remote_hosts", lambda: (_ for _ in ()).throw(ValueError("hosts.json damaged")))
+    failing.clear()
+    page.refresh_remote()
+    assert wait(lambda: page.remote_reading is None and "hosts" not in page.remote_problems, 15)
+    assert "the list of hosts could not be read" in page.summary.text()
+    assert page.table.rowCount() == 1 and "last seen" not in page.table.item(0, 6).text()
+    window.hosts.host_removed.emit("hosts")
+    assert page.table.rowCount() == 0 and page.host_filter.findData("hosts") < 0, "removed: gone at once"
+
+
+def test_an_mcp_server_on_another_host_only_stops(window, monkeypatch, wait):
+    page = window.sandboxes
+    server = backend.Instance("mcp", backend.remote_key("ct1", "fetch"), "fetch", state="running", host="ct1")
+    monkeypatch.setattr(window.sai, "remote_hosts", lambda: ["ct1"])
+    monkeypatch.setattr(window.sai, "host_instances", lambda name, timeout=60: [server])
+    page.refresh_remote()
+    assert wait(lambda: page.table.rowCount() == 1, 15)
+    page.table.selectRow(0)
+    assert page.stop_button.isEnabled()
+    assert not any(b.isEnabled() for b in page.run_buttons), "no network, devices, workspaces or limits"
+    assert not page.session_buttons["pause"].isEnabled() and "MCP server" in page.session_buttons["pause"].toolTip()
+    assert not page.manage_buttons["rename"].isEnabled()
+
+
+def test_the_network_options_of_another_host_are_that_hosts(window, monkeypatch, wait):
+    """Regression: the dialog for another host's start offered what this machine's sandbox-ai takes."""
+    from sandbox_ai_app import ui
+    page = window.sandboxes
+    there = backend.Instance("run", backend.remote_key("ct1", "web"), "web", state="running", host="ct1")
+    monkeypatch.setattr(window.sai, "remote_hosts", lambda: ["ct1"])
+    monkeypatch.setattr(window.sai, "host_instances", lambda name, timeout=60: [there])
+    help_text = "usage: sandbox-ai net allow [-h] [--allow-host HOST] [--allow-tcp IP:PORT] [--dns] [--allow-pypi]"
+    ran, seen = [], []
+    monkeypatch.setattr(window.sai, "host_run", lambda name, *args, timeout=120: ran.append((name, args)) or (
+        (0, help_text, "") if args[-1:] == ("--help",) else (0, "ok", "")))
+
+    class FakeNetwork:
+        def __init__(self, parent, presets, title, supported=None):
+            seen.append((set(presets), set(supported or ())))
+
+        def exec(self):
+            return QtWidgets.QDialog.DialogCode.Rejected
+    monkeypatch.setattr(ui, "NetworkDialog", FakeNetwork)
+    page.refresh_remote()
+    assert wait(lambda: page.table.rowCount() == 1, 15)
+    page.table.selectRow(0)
+    page.network("allow")
+    assert wait(lambda: seen and not widgets.busy(page), 15)
+    presets, supported = seen[-1]
+    assert "--dns" in supported and "--git-token-env" not in supported and "--allow-host-port" not in supported
+    assert presets <= {"pypi"}
+    page.network("allow")
+    assert wait(lambda: len(seen) == 2, 15)
+    assert sum(1 for _, args in ran if args[-1:] == ("--help",)) <= 2
+
+
+def test_limits_an_emptied_field_says_unchanged_and_none_asks(window, monkeypatch, wait):
+    from sandbox_ai_app import ui
+    dialog = ui.LimitsDialog(None, "web", current={"memory": 8 << 30, "memory_high": None, "cpus": 2, "pids": None})
+    assert dialog.memory.placeholderText().startswith("unchanged")
+    dialog.memory.setText("")
+    assert dialog.values() == ("", "", "") and dialog.cleared() == ["memory"]
+    assert "Unchanged: memory" in dialog.unchanged.text()
+    dialog.deleteLater()
+    page = window.sandboxes
+    calls = []
+    monkeypatch.setattr(window.sai, "set_limits", lambda *args, **kw: calls.append(args) or (0, "", ""))
+
+    class NoLimit:
+        def __init__(self, parent, run, host="local", current=None, note=None):
+            pass
+
+        def exec(self):
+            return QtWidgets.QDialog.DialogCode.Accepted
+
+        def values(self):
+            return "none", "", ""
+    monkeypatch.setattr(ui, "LimitsDialog", NoLimit)
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", False)
+    widgets.SHOWN.clear()
+    page.limits_known("local", "claude-abc", {"memory": 8 << 30}, None)
+    assert widgets.SHOWN and widgets.SHOWN[-1][0] == "Limits" and "memory" in widgets.SHOWN[-1][1]
+    assert not calls, "declined: the limit stays"
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    page.limits_known("local", "claude-abc", {"memory": 8 << 30}, None)
+    assert wait(lambda: calls, 15) and calls[-1][:2] == ("claude-abc", "none")
+
+
+def test_rename_history_clean_up_and_untaint(window, monkeypatch, wait):
+    page = window.sandboxes
+    work = backend.Instance("session", "session:work", "work", session="work", state="running", run="claude-abc")
+    monkeypatch.setattr(window.sai, "instances", lambda: ([work], []))
+    ran = []
+    monkeypatch.setattr(window.sai, "host_run", lambda name, *args, timeout=120: ran.append((name, args)) or (0, "ok", ""))
+    monkeypatch.setattr(window.sai, "start_history", lambda name, host="local": [
+        {"time": "2026-11-07T10:00:00Z", "event": "start", "run": "claude-abc", "agent": "claude"},
+        {"time": "2026-11-07T11:00:00Z", "event": "rename", "run": "claude-abc", "to": "work\x1b[2J"}])
+    collected = []
+
+    def collect(host="local", dry_run=True):
+        collected.append((host, dry_run))
+        return {"removed": [{"name": "old", "agent": "codex", "last_used": "2026-08-01T10:00:00Z", "workspace": "/w"}],
+                "leftovers": [], "histories": ["gone"], "skipped": [], "damaged": [], "dry_run": dry_run}
+    monkeypatch.setattr(window.sai, "collect", collect)
+    page.refresh()
+    page.table.selectRow(0)
+    monkeypatch.setattr(QtWidgets.QInputDialog, "getText", lambda *a, **k: ("work-2", True))
+    page.rename()
+    assert wait(lambda: ("local", ("rename", "work", "work-2")) in ran, 15)
+    monkeypatch.setattr(QtWidgets.QInputDialog, "getText", lambda *a, **k: ("-x", True))
+    count = len(ran)
+    page.rename()
+    assert len(ran) == count, "a name that reads as an option is refused"
+    widgets.SHOWN.clear()
+    page.history()
+    assert wait(lambda: widgets.SHOWN, 15)
+    title, text, _ = widgets.SHOWN[-1]
+    assert title == "History of work" and "renamed to work\\x1b[2J" in text and "2026-11-07 10:00" in text
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", False)
+    widgets.SHOWN.clear()
+    page.clean_up()
+    assert wait(lambda: widgets.SHOWN, 15) and "old" in widgets.SHOWN[-1][1] and "gone" in widgets.SHOWN[-1][1]
+    assert collected == [("local", True)], "declined: only shown"
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    page.clean_up()
+    assert wait(lambda: ("local", False) in collected, 15)
+    page.allowed_shown("claude-abc", (0, "claude-abc: tainted\n  take it back: sandbox-ai net untaint claude-abc", ""),
+                       None)
+    page.allowed_dialog.untaint_button.click()
+    assert wait(lambda: ("local", ("net", "untaint", "claude-abc")) in ran, 15)
+    assert any(title == "Untaint claude-abc" for title, *_ in widgets.SHOWN), "asked first"
+
+
+def test_ended_starts_and_the_asking_marker(window, env, monkeypatch, wait):
+    page = window.sandboxes
+    run = fake_run(env)
+    ended = backend.Instance("mcp", "ended:local:fetch", "fetch", mcp="fetch", state="stopped", host="local")
+    monkeypatch.setattr(window.sai, "ended_starts", lambda name="local": [ended])
+    page.refresh()
+    rows = page.table.rowCount()
+    page.show_ended.setChecked(True)
+    assert wait(lambda: page.table.rowCount() == rows + 1, 15)
+    page.table.selectRow(widgets.find_row(page.table, "ended:local:fetch"))
+    assert not page.stop_button.isEnabled() and page.manage_buttons["history"].isEnabled()
+    page.show_ended.setChecked(False)
+    assert page.table.rowCount() == rows
+    ask(run, "1700000000-1-1", kind="dns", name="pypi.org")
+    window.approvals.poll()
+    row = widgets.find_row(page.table, "run:claude-abc")
+    assert row >= 0 and "asking" in page.table.item(row, 6).text()

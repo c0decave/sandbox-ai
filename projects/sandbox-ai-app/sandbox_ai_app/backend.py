@@ -69,6 +69,8 @@ PATH_OPTIONS = {"--workspace", "--state-dir", "--privacy-rules", "--rules", "--l
 HIDDEN = {"--session", "--dry-run", "--help", "--version"}
 SCOPES = ("once", "run", "always")
 REMOTE_QUESTION_WAIT = 30  # seconds a host may take to list its open questions (over SSH)
+NET_OPTIONS_SECONDS = 600  # how long a host's `net allow --help` is kept when its sandbox-ai version is not known
+BASE_NET_OPTIONS = frozenset({"--allow-host", "--allow-tcp", "--allow"})  # what every sandbox-ai since 0.1.70 takes
 RECENT_PROJECTS = 12  # projects the app's own list keeps
 KIT_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"  # kits.KIT_NAME
 SKILL_NAME = r"[a-z0-9][a-z0-9-]{0,63}"  # a new skill's name, as Claude wants it
@@ -585,7 +587,8 @@ class SandboxAI:
         administrator's max_approval_scope are refused here already (sandbox-ai refuses them too)."""
         if not self.question_id.fullmatch(str(ident)) or decision not in ("allow", "deny") or scope not in SCOPES:
             return 2, "", "invalid question or answer"
-        if SCOPES.index(scope) > SCOPES.index(self.max_scope()):
+        # The policy caps allows only (as sandbox-ai does): a deny, also Block always, is never refused for its scope.
+        if decision == "allow" and SCOPES.index(scope) > SCOPES.index(self.max_scope()):
             return 2, "", f"the administrator's policy allows answers up to {self.max_scope()!r}"
         return self.call("approvals", decision, ident, "--scope", scope, timeout=60)
 
@@ -627,16 +630,22 @@ class SandboxAI:
         """[(project, entry, kind)] of what was allowed or blocked "always" (approvals.remembered: read from
         the file, valid entries only); kind: "host", "tcp", "blocked-host" or "blocked-tcp". Older sandbox-ai
         versions lack it: AttributeError."""
-        known = self.module("approvals").remembered()
-        return [(str(project), str(value), kind) for project, entry in sorted(known.items())
-                for kind, field in (("host", "hosts"), ("tcp", "tcp"), ("blocked-host", "blocked_hosts"),
-                                    ("blocked-tcp", "blocked_tcp")) for value in entry.get(field, [])]
+        return remembered_rows(self.module("approvals").remembered())
 
-    def forget_remembered(self, project, entry):
-        """`sandbox-ai approvals forget PROJECT ENTRY`: the project's sandboxes ask again for ENTRY."""
-        if not all(isinstance(v, str) and v and "\0" not in v and not v.startswith("-") for v in (project, entry)):
+    def host_remembered(self, name):
+        """remembered() of host NAME: `sandbox-ai approvals remembered --json` there, over SSH. ValueError: no
+        answer (or a sandbox-ai there too old to list them)."""
+        data = self.host_json(name, "approvals", "remembered", "--json", timeout=60)
+        if not isinstance(data, dict):
+            raise ValueError(f"{name}: not a list of remembered answers")
+        return remembered_rows(data)
+
+    def forget_remembered(self, project, entry, host="local"):
+        """`sandbox-ai approvals forget PROJECT ENTRY` (on HOST): the project's sandboxes ask again for ENTRY."""
+        if not all(isinstance(v, str) and v and "\0" not in v and not v.startswith("-") and len(v) <= 4096
+                   for v in (project, entry)):
             return 2, "", "invalid project or entry"
-        return self.call("approvals", "forget", project, entry, timeout=60)
+        return self.host_run(host, "approvals", "forget", project, entry, timeout=60)
 
     def run_log(self, run, record):
         """The newest connections log of the run RUN (record: its run.json), in the default log directory of
@@ -1267,6 +1276,10 @@ class SandboxAI:
             args += ["--description", description]
         return self.checked(*args, timeout=30)
 
+    def host_set(self, name, update_sudo):
+        """`sandbox-ai hosts set NAME --update-sudo on|off`: whether hosts update runs its update with sudo."""
+        return self.checked("hosts", "set", name, "--update-sudo", "on" if update_sudo else "off", timeout=30)
+
     def host_remove(self, name):
         return self.checked("hosts", "remove", name, timeout=30)
 
@@ -1298,6 +1311,63 @@ class SandboxAI:
             found.append(Instance(kind, remote_key(name, entry["name"]), entry["name"], run=None, project=str(
                 entry.get("workspace") or ""), agent=str(entry.get("agent") or ""), started=str(entry.get("started") or ""),
                 state=str(entry.get("state") or ""), record=entry, host=name))
+        return found
+
+    def ended_starts(self, name="local"):
+        """The starts that ended on host NAME (this machine for "local"), as `sandbox-ai list --all --json` there lists
+        them (stopped MCP servers, kept starts that do not run) - [Instance] keyed ended:HOST:NAME, never equal to a
+        key of what runs. ValueError: no answer."""
+        data = self.host_json(name, "list", "--all", "--json", timeout=60)
+        found = []
+        for entry in data if isinstance(data, list) else []:
+            if not isinstance(entry, dict) or not isinstance(entry.get("name"), str) or \
+                    not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}", entry["name"]):
+                continue
+            state = str(entry.get("state") or "")
+            if state in ("running", "paused", "starting"):
+                continue
+            kind = entry.get("kind") if entry.get("kind") in ("session", "run", "mcp") else "run"
+            found.append(Instance(kind, f"ended:{name}:{entry['name']}", entry["name"], project=str(
+                entry.get("workspace") or ""), agent=str(entry.get("agent") or ""),
+                started=str(entry.get("started") or ""), state=state or "ended", record=entry, host=name,
+                session=entry["name"] if kind == "session" else None, mcp=entry["name"] if kind == "mcp" else None))
+        return found
+
+    def start_history(self, name, host="local"):
+        """What happened to the start NAME on HOST: [{"time", "event", "run", ...}] of `sandbox-ai list --history NAME
+        --json`. ValueError: not answered."""
+        if not valid_run(name):
+            raise ValueError("invalid start")
+        data = self.host_json(host, "list", "--history", name, "--json", timeout=60)
+        if not isinstance(data, list):
+            raise ValueError("not a history")
+        return [entry for entry in data if isinstance(entry, dict)]
+
+    def collect(self, host="local", dry_run=True):
+        """`sandbox-ai gc [--dry-run] --json` on HOST: {"removed", "leftovers", "histories", "skipped", "damaged",
+        "days", "dry_run"}. ValueError: not answered."""
+        data = self.host_json(host, "gc", *(["--dry-run"] if dry_run else []), "--json", timeout=300)
+        if not isinstance(data, dict):
+            raise ValueError("not what sandbox-ai gc says")
+        return data
+
+    def host_net_options(self, name, command="allow"):
+        """The options `sandbox-ai net COMMAND` takes on host NAME (its --help there, parsed), kept per host and
+        sandbox-ai version (for NET_OPTIONS_SECONDS without a known version). ValueError: no answer."""
+        try:
+            version = (self.host_statuses(cached=True).get(name) or {}).get("version")
+        except Exception:  # noqa: BLE001 - an older sandbox-ai, or no list of hosts: asked every NET_OPTIONS_SECONDS
+            version = None
+        cache = self.__dict__.setdefault("_net_options", {})
+        key = (name, command, version)
+        kept = cache.get(key)
+        if kept is not None and (version or time.time() - kept[0] < NET_OPTIONS_SECONDS):
+            return set(kept[1])
+        status, out, err = self.host_run(name, "net", command, "--help", timeout=60)
+        found = set(re.findall(r"(?<![\w-])--[a-z0-9][a-z0-9-]*", out)) if status == 0 else set()
+        if not found:
+            raise ValueError((err or out).strip()[-300:] or f"exit status {status}")
+        cache[key] = (time.time(), found)
         return found
 
     def remote_hosts(self):
@@ -1659,6 +1729,21 @@ class ProjectReview:
     def text(self):
         """The file as it was read, for display (escaped)."""
         return printable(self.data.decode("utf-8", "replace"))
+
+
+def remembered_rows(known):
+    """[(project, entry, kind)] of approvals.remembered()'s {project: {"hosts", "tcp", "blocked_hosts",
+    "blocked_tcp"}} (also another host's JSON: only strings are taken, sorted)."""
+    rows = []
+    for project, entry in sorted((known if isinstance(known, dict) else {}).items()):
+        if not isinstance(entry, dict):
+            continue
+        for kind, field in (("host", "hosts"), ("tcp", "tcp"), ("blocked-host", "blocked_hosts"),
+                            ("blocked-tcp", "blocked_tcp")):
+            values = entry.get(field)
+            rows += [(str(project), value, kind) for value in (values if isinstance(values, list) else [])
+                     if isinstance(value, str)]
+    return rows
 
 
 def valid_run(run):
@@ -2532,10 +2617,13 @@ class QuestionCache:
 class RemoteQuestion(dict):
     """An open question of a sandbox on another HOST, as `sandbox-ai approvals list --json` there lists it: the
     question's text comes from that host's sandbox-ai ("question", escaped there), the time left from its own clock
-    ("seconds_left" when it was read, READ_AT: time.time() then here). Only these fields are kept, checked."""
+    ("seconds_left" when it was read, READ_AT: time.time() then here; null: no deadline, as for a page to open). Only
+    these fields are kept, checked. "max_scope" null with "allow_refused" (why): no allow is offered; a page that host
+    will not let be opened elsewhere has no "url" but "url_refused" (why) and "url_host" (where it leads);
+    "url_truncated": the URL is not whole."""
 
     FIELDS = {"id": 40, "run": 128, "sandbox": 400, "kind": 20, "time": 40, "question": 2000, "always": 400,
-              "url": 2048, "max_scope": 10}
+              "url": 65536, "max_scope": 10, "allow_refused": 400, "url_refused": 400, "url_host": 255}
 
     def __init__(self, host, item, read_at=None):
         super().__init__()
@@ -2547,10 +2635,17 @@ class RemoteQuestion(dict):
             value = item.get(key)
             self[key] = int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and \
                 0 <= value <= 86400 else None
-        if self.get("max_scope") not in SCOPES:
+        if "max_scope" in item and item["max_scope"] is None:
+            # That host allows no answer but a deny (its policy, the run's mode): said why, never offered here.
+            self["max_scope"] = None
+            self.setdefault("allow_refused", "its host allows only a deny")
+        elif self.get("max_scope") not in SCOPES:
             self["max_scope"] = "always"  # an older sandbox-ai there: it refuses what its policy does not allow
+        if item.get("url_truncated") is True:
+            self["url_truncated"] = True
         if self.get("kind") != "browser":
-            self.pop("url", None)
+            for key in ("url", "url_refused", "url_host", "url_truncated"):
+                self.pop(key, None)
 
     def timing(self, now=None):
         """(age in seconds or None, seconds left or None) as question_timing gives them, counted on from

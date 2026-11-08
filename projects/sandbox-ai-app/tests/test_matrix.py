@@ -642,7 +642,7 @@ def test_an_approval_of_each_kind_and_scope(window, env, monkeypatch, wait, kind
     assert page.url.isHidden() == (kind != "browser")
     assert page.scope.isEnabled() == (kind != "browser")
     assert page.block_button.isEnabled() == (kind in ("connect", "dns"))
-    # The answer: Allow asks first (Cancel the default for "always"), Deny and Block take one click.
+    # The answer: Allow asks first (Cancel the default for "always"), Block always too; Deny takes one click.
     shown = len(widgets.SHOWN)
     page.scope.setCurrentIndex(page.scope.findData(scope))
     if decision == "allow":
@@ -658,7 +658,7 @@ def test_an_approval_of_each_kind_and_scope(window, env, monkeypatch, wait, kind
         page.block_button.click()
     assert not page.allow_button.isEnabled(), "one answer at a time"
     assert wait(lambda: page.answering is None, 10)
-    sent = {"allow": ("allow", scope), "deny": ("deny", "run" if scope != "once" else "once"),
+    sent = {"allow": ("allow", scope), "deny": ("deny", "run"),  # Deny is for the run (Deny once: once)
             "block": ("deny", "always")}[decision]
     assert w.commands.argv("approvals") == [["approvals", sent[0], ident, "--scope", sent[1]]], "answered once"
     assert page.message.text() == f"{run}: {decision} ({scope})"

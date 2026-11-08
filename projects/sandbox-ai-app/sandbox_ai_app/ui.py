@@ -1,9 +1,9 @@
 """The windows of sandbox-ai-app (PySide6)."""
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 import json
 import os
+import re
 from pathlib import Path
 import shlex
 import time
@@ -629,9 +629,10 @@ class LaunchPage(QWidget):
                                     tr("Choose a workspace first: the file is written there."))
             return
         text = json.dumps(document, indent=2)
-        answer = QMessageBox.question(self, tr("Write and trust"), tr("Write {path} with this content and trust it?",
-                                                                      path=f"{main}/.sandbox-ai.json") + f"\n\n{text}")
-        if answer == QMessageBox.StandardButton.Yes:  # the folder may be slow (a network file system): in a thread
+        # Trusted, the file's options apply at every start there without a question: Cancel is the default.
+        if confirm(self, tr("Write and trust"), tr("Write {path} with this content and trust it?",
+                                                   path=f"{main}/.sandbox-ai.json"), tr("Write and trust"),
+                   destructive=True, details=text):  # the folder may be slow (a network file system): in a thread
             background(self.sai.write_project, main, document, owner=self, timeout=60, done=self.project_written)
 
     def project_written(self, path, error):
@@ -708,6 +709,33 @@ class NetworkDialog(QDialog):
         if "--git-token-env" in self.supported and url and ref:
             args += [f"--git-token-{self.git_kind.currentData()}", f"{url}={ref}"]
         return args
+
+
+class AllowedDialog(QDialog):
+    """What a running sandbox was given since its start (sandbox-ai net show), and Untaint… for its taint."""
+
+    def __init__(self, parent, title, text, untaint):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        layout = QVBoxLayout(self)
+        self.view = QPlainTextEdit(text)
+        self.view.setReadOnly(True)
+        self.view.setFont(MONO)
+        self.view.setAccessibleName(tr("Allowed during the run"))
+        layout.addWidget(self.view, 1)
+        row = QHBoxLayout()
+        self.untaint_button = QPushButton(tr("Untaint…"))
+        self.untaint_button.setAccessibleName(tr("Untaint"))
+        self.untaint_button.setToolTip(tr("Take back the run's taint (sandbox-ai net untaint): only once you checked "
+                                          "the untrusted content that entered it"))
+        self.untaint_button.clicked.connect(lambda _=False: untaint())
+        close = QPushButton(tr("Close"))
+        close.clicked.connect(self.reject)
+        row.addWidget(self.untaint_button)
+        row.addStretch()
+        row.addWidget(close)
+        layout.addLayout(row)
+        self.resize(720, 460)
 
 
 DEVICE_EXAMPLE = "/dev/..."  # the same in every language
@@ -823,8 +851,12 @@ class LimitsDialog(QDialog):
         self.initial = limit_texts(current) if current is not None else {"memory": "", "cpus": "", "pids": ""}
         for key, edit in (("memory", self.memory), ("cpus", self.cpus), ("pids", self.pids)):
             edit.setText(self.initial[key])
-            if current is not None and not self.initial[key]:
-                edit.setPlaceholderText(tr("none"))
+            # A field emptied keeps its limit: the field says so ("none" removes it, asked first).
+            edit.setPlaceholderText(tr("none") if current is not None and not self.initial[key] else
+                                    tr("unchanged (none: no limit)"))
+            edit.textChanged.connect(lambda _="": self.show_unchanged())
+        self.unchanged = plain_label(role="secondary")
+        form.addRow(self.unchanged)
         if current is not None and current.get("memory_high"):
             form.addRow(plain_label(tr("Memory pressure from {size} on (memory.high): set at the start.",
                                        size=size_text(current["memory_high"])), role="secondary"))
@@ -835,20 +867,77 @@ class LimitsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
 
+    def edits(self):
+        return (("memory", tr("memory"), self.memory), ("cpus", tr("CPUs"), self.cpus), ("pids", tr("processes"),
+                                                                                           self.pids))
+
     def values(self):
         """What to change: a value as it was shown is left out (empty: unchanged)."""
         return tuple("" if edit.text().strip() == self.initial[key] else edit.text().strip()
-                     for key, edit in (("memory", self.memory), ("cpus", self.cpus), ("pids", self.pids)))
+                     for key, _, edit in self.edits())
+
+    def cleared(self):
+        """The limits whose field was emptied: they stay as they are (only "none" removes one)."""
+        return [label for key, label, edit in self.edits() if self.initial[key] and not edit.text().strip()]
+
+    def show_unchanged(self):
+        cleared = self.cleared()
+        self.unchanged.setText(tr("Unchanged: {limits} (an empty field keeps its limit; none removes it).",
+                                  limits=", ".join(cleared)) if cleared else "")
 
 
 KIND_TITLES = {"run": N_("Run"), "session": N_("Session"), "mcp": N_("MCP server"), "unregistered": N_("Not registered")}
 STATE_TITLES = {"running": N_("running"), "paused": N_("paused"), "stopped": N_("stopped"), "damaged": N_("damaged"),
                 "starting": N_("starting")}
-REMOTE_SECONDS = 60  # between two looks at the other hosts' starts (over SSH)
+REMOTE_SECONDS = 60  # between two looks at the other hosts' starts (over SSH) while the page is hidden
+REMOTE_SHOWN_SECONDS = 10  # the same while the page is shown: the fleet at a glance
+START_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}"  # a start's name as sandbox-ai takes it (rename NEW)
+ENDED_STATES = ("stopped", "ended")
+ACTIVE_STATES = ("running", "paused", "starting")
 SESSION_ACTIONS = (("attach", N_("Attach")), ("attach-app", N_("Attach in the app")), ("pause", N_("Pause")),
                    ("resume", N_("Resume")), ("delete", N_("Delete")))
 ACTION_TITLES = {**dict(SESSION_ACTIONS), "stop": N_("Stop")}
-REMOTE_WAIT = 60  # seconds one host may take to list its starts (the hosts are asked at the same time)
+REMOTE_WAIT = 60  # seconds one host may take to list its starts (the hosts are asked at the same time, each apart)
+
+
+def history_time(value):
+    """An ISO time of a start's history (UTC) as "YYYY-MM-DD HH:MM", or "-" (as sandbox-ai list --history shows it)."""
+    return printable(value[:16].replace("T", " ")) if isinstance(value, str) and len(value) >= 16 else "-"
+
+
+def history_details(entry):
+    """What a history entry says besides its time, event and run, in one line (escaped)."""
+    event = entry.get("event")
+    if event == "exit":
+        return tr("status {status}", status=entry["status"]) if isinstance(entry.get("status"), int) else \
+            tr("status unknown")
+    if event == "rename":
+        return tr("renamed to {name}", name=printable(str(entry["to"]))) if entry.get("to") else \
+            tr("renamed from {name}", name=printable(str(entry.get("from"))))
+    if event in ("start", "rebirth"):
+        return " ".join(printable(str(entry[key])) for key in ("agent", "workspace") if entry.get(key))
+    return printable(str(entry.get("note") or ""))
+
+
+def gc_lines(result):
+    """What `sandbox-ai gc --json` removes (or would remove), one escaped line each: kept starts with their HOME,
+    leftovers, histories; what it leaves alone."""
+    result = result if isinstance(result, dict) else {}
+
+    def listed(key):
+        value = result.get(key)
+        return value if isinstance(value, list) else []
+    lines = [tr("the kept start {name} with its HOME (last used {time}, {workspace})", name=printable(str(e.get("name"))),
+                time=history_time(e.get("last_used")), workspace=printable(str(e.get("workspace") or "-")))
+             for e in listed("removed") if isinstance(e, dict)]
+    lines += [tr("the leftovers of {name} (ended; its HOME was not kept)", name=printable(str(name)))
+              for name in listed("leftovers")]
+    lines += [tr("the history of {name}", name=printable(str(name))) for name in listed("histories")]
+    lines += [tr("left alone: {name}: {reason}", name=printable(str(e.get("name"))), reason=printable(str(e.get("reason"))))
+              for e in listed("skipped") if isinstance(e, dict)]
+    lines += [tr("left alone: {path} is damaged; remove it by hand", path=printable(str(path)))
+              for path in listed("damaged")]
+    return lines
 
 
 def same_folder(a, b):
@@ -866,6 +955,7 @@ class SandboxesPage(QWidget):
     open_log = Signal(str)
     counted = Signal(int, int)  # instances that run, of them in the current project
     updated = Signal(object)  # {key: Instance} after each read (the window's tabs follow it)
+    fleet_changed = Signal(object)  # {host: {"running", "seen", "problem"}} after each look at a host (Hosts page)
 
     def __init__(self, sai, terminal):
         super().__init__()
@@ -873,6 +963,10 @@ class SandboxesPage(QWidget):
         self.project, self.instances, self.problems, self.stoppable = None, {}, [], None
         self.reading, self.added, self.devices_token = None, [], 0
         self.added_workspaces = []
+        # (host, run) of the starts with an open question (the Approvals page's poller): marked "asking".
+        self.asking = set()
+        # The starts that ended, when "Ended" is on: {host: [Instance]} from `sandbox-ai list --all --json`.
+        self.ended, self.ended_token = {}, 0
         layout = QVBoxLayout(self)
         top = QHBoxLayout()
         self.summary = plain_label(role="secondary")
@@ -886,25 +980,50 @@ class SandboxesPage(QWidget):
         self.host_filter.addItem(tr("This machine"), LOCAL)
         self.host_filter.currentIndexChanged.connect(lambda _=0: self.show_instances())
         self.host_filter.hide()
+        self.show_ended = QCheckBox(tr("Ended"))
+        self.show_ended.setToolTip(tr("Also the starts that ended: stopped MCP servers and what else sandbox-ai list "
+                                      "--all keeps, on this machine and every host"))
+        self.show_ended.toggled.connect(lambda _=False: self.ended_toggled())
         refresh = QPushButton(tr("Refresh"))
+        refresh.setAccessibleName(tr("Refresh the sandboxes"))
         refresh.setToolTip(tr("Read again now (it is read every few seconds anyway)"))
-        refresh.clicked.connect(lambda _=False: self.refresh())
+        refresh.clicked.connect(lambda _=False: (self.refresh(), self.refresh_remote()))
         top.addWidget(self.summary, 1)
         top.addWidget(self.host_filter)
         top.addWidget(self.only_project)
+        top.addWidget(self.show_ended)
         top.addWidget(refresh)
         layout.addLayout(top)
         self.table = table([tr("Kind"), tr("Name"), tr("Project"), tr("Agent"), tr("Backend"), tr("Started"),
                             tr("State"), tr("Proxy"), tr("Host"), tr("Memory")], stretch=2)
+        self.table.setAccessibleName(tr("Sandboxes and sessions"))
         self.table.itemSelectionChanged.connect(self.selection_changed)
         layout.addWidget(self.table, 1)
         below = QHBoxLayout()
         self.detail = plain_label(role="secondary")
         self.detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.stop_button = QPushButton(tr("Stop…"))
+        self.stop_button.setAccessibleName(tr("Stop"))
         self.stop_button.setProperty("role", "danger")
         self.stop_button.clicked.connect(lambda _=False: self.stop())
+        # A start's name and history, and what is left over (sandbox-ai rename, list --history, gc): on its host.
+        self.manage_buttons = {}
+        for key, text, tip, slot in (
+                ("rename", tr("Rename…"), tr("Another name for the selected start; its run id stays (sandbox-ai "
+                                             "rename)"), self.rename),
+                ("history", tr("History…"), tr("What happened to the selected start: starts, ends, pauses, renames "
+                                               "(sandbox-ai list --history)"), self.history),
+                ("clean", tr("Clean up…"), tr("Remove leftovers and the kept starts unused for longer than its "
+                                              "keep_days, on this machine or the host chosen above (sandbox-ai gc; "
+                                              "shown first)"), self.clean_up)):
+            button = QPushButton(text)
+            button.setToolTip(tip)
+            button.setAccessibleName(text.rstrip("…"))
+            button.clicked.connect(lambda _=False, s=slot: s())
+            self.manage_buttons[key] = button
         below.addWidget(self.detail, 1)
+        for button in self.manage_buttons.values():
+            below.addWidget(button)
         below.addWidget(self.stop_button)
         layout.addLayout(below)
         # The sessions' own actions (sandbox-ai session ...).
@@ -913,6 +1032,7 @@ class SandboxesPage(QWidget):
         self.session_buttons = {}
         for action, text in SESSION_ACTIONS:
             button = QPushButton(tr(text))
+            button.setAccessibleName(tr(text))
             button.clicked.connect(lambda _=False, a=action: self.session(a))
             self.session_buttons[action] = button
         session_row.addWidget(flow(*self.session_buttons.values()))
@@ -938,6 +1058,7 @@ class SandboxesPage(QWidget):
                 ("limits", tr("Limits…"), tr("Change memory, CPUs and processes of the selected sandbox"), self.limits)):
             button = QPushButton(text)
             button.setToolTip(tip)
+            button.setAccessibleName(text.rstrip("…"))
             button.clicked.connect(lambda _=False, s=slot: s())
             self.run_buttons.append(button)
             self.run_named[key] = button
@@ -954,9 +1075,10 @@ class SandboxesPage(QWidget):
         self.timer.timeout.connect(self.refresh_soon)
         self.timer.start(backend.setting("sandboxes_interval"))
         # The other hosts' starts (sandbox-ai hosts), over SSH: read now and then in the background, never on the
-        # GUI thread; a host that does not answer is said in the summary and keeps its last rows.
+        # GUI thread, each host apart (a slow one holds up no other); a host that does not answer is said in the
+        # summary and keeps its last rows, greyed out with when it was seen last, their buttons off.
         self.remote, self.remote_problems, self.remote_reading, self.remote_again = {}, {}, None, False
-        self.remote_names = []
+        self.remote_seen, self.hosts_problem, self.remote_names, self.round = {}, None, [], 0
         self.remote_timer = QTimer(self)
         self.remote_timer.timeout.connect(self.refresh_remote)
         self.remote_timer.start(REMOTE_SECONDS * 1000)
@@ -983,53 +1105,167 @@ class SandboxesPage(QWidget):
         self.reading = None
         self.apply(result, error)
 
+    def showEvent(self, event):  # noqa: N802
+        """Shown: the hosts are looked at every REMOTE_SHOWN_SECONDS (hidden: every REMOTE_SECONDS)."""
+        super().showEvent(event)
+        if self.remote_timer.interval() != REMOTE_SHOWN_SECONDS * 1000:
+            self.remote_timer.start(REMOTE_SHOWN_SECONDS * 1000)
+            self.refresh_remote()
+
+    def hideEvent(self, event):  # noqa: N802
+        super().hideEvent(event)
+        self.remote_timer.start(REMOTE_SECONDS * 1000)
+
     def refresh_remote(self):
-        """Read the other hosts' starts in the background (the hosts at the same time). Asked while a read runs (after
-        an action there), it reads once more when that one is done: what the action changed is shown, not only what was
-        read before it."""
+        """Read the other hosts' starts in the background: the list of hosts, then every host at the same time, each
+        in its own thread with its own timeout; each host's rows are shown as soon as it answered. Asked while a round
+        runs (after an action there), it reads once more when that one is done: what the action changed is shown,
+        not only what was read before it. A list of hosts that cannot be read: the hosts known are read again."""
         if self.remote_reading is not None:
             self.remote_again = True
             return
         self.remote_again = False
+        self.round += 1
+        token = self.round
+        self.remote_reading = {""}  # "" the list of hosts; then the names of the hosts still asked
+        # Reads, not work: no owner, so they neither grey out the buttons (busy()) nor hold up closing the window.
+        background(self.sai.remote_hosts, timeout=30,
+                   done=lambda hosts, error: alive(self) and self.hosts_listed(token, hosts, error))
 
-        def read():
-            hosts = self.sai.remote_hosts()
-            found = {}
-            if hosts:
-                with ThreadPoolExecutor(max_workers=min(8, len(hosts))) as pool:
-                    futures = {name: pool.submit(self.sai.host_instances, name, REMOTE_WAIT) for name in hosts}
-                for name, future in futures.items():
-                    try:
-                        found[name] = (future.result(), None)
-                    except Exception as exc:  # noqa: BLE001 - said in the summary
-                        found[name] = (None, str(exc))
-            return hosts, found
-        # A read, not work: no owner, so it neither greys out the buttons (busy()) nor holds up closing the window.
-        self.remote_reading = background(read, timeout=REMOTE_WAIT + 60,
-                                         done=lambda result, error: alive(self) and self.remote_done(result, error))
-
-    def remote_done(self, result, error):
-        self.remote_reading = None
-        hosts, found = result if error is None and result else (None, {})
-        if hosts is not None:
-            for gone in set(self.remote) - set(hosts):
-                self.remote.pop(gone, None)
-            self.remote_problems = {name: text for name, text in self.remote_problems.items() if name in hosts}
+    def hosts_listed(self, token, hosts, error):
+        if token != self.round:
+            return
+        if error is None:
+            hosts, self.hosts_problem = list(hosts or []), None
+            for gone in set(self.remote) | set(self.remote_seen) | set(self.remote_problems) | set(self.ended):
+                if gone not in hosts and gone != LOCAL:
+                    self.drop_host(gone)
             self.remote_names = list(hosts)
             self.fill_host_filter()
-        for name, (instances, problem) in found.items():
-            if instances is not None:
-                self.remote[name] = instances
+        else:
+            self.hosts_problem = printable(error)[:200]
+            hosts = list(self.remote_names)
+        self.remote_reading = set(hosts)
+        ended = self.show_ended.isChecked()
+
+        def read(name):
+            """[Instance] of host NAME, and with "Ended" its starts that ended (in the worker thread)."""
+            return self.sai.host_instances(name, REMOTE_WAIT), (self.sai.ended_starts(name) if ended else None)
+        for name in hosts:
+            background(read, name, timeout=REMOTE_WAIT + 15,
+                       done=lambda result, error_, n=name: alive(self) and self.host_read(token, n, result, error_))
+        self.round_done(token)
+
+    def host_read(self, token, name, result, error):
+        if token != self.round or name not in (self.remote_reading or ()):
+            return
+        self.remote_reading.discard(name)
+        if name in self.remote_names:  # not removed meanwhile (Hosts › Remove)
+            if error is None:
+                instances, ended = result
+                self.remote[name] = list(instances)
+                self.remote_seen[name] = time.time()
                 self.remote_problems.pop(name, None)
+                if ended is not None:
+                    self.ended[name] = list(ended)
             else:
-                self.remote_problems[name] = problem
-        if error is not None:
-            self.remote_problems["hosts"] = str(error)
-        self.instances = {**{k: i for k, i in self.instances.items() if i.host == "local"},
-                          **{i.key: i for found in self.remote.values() for i in found}}
-        self.show_instances()
+                self.remote_problems[name] = printable(error)[:300]
+            self.merge_remote()
+        self.round_done(token)
+
+    def round_done(self, token):
+        if token != self.round or self.remote_reading:
+            return
+        self.remote_reading = None
+        self.merge_remote()
         if self.remote_again:  # asked again meanwhile (an action there): a fresh read
             self.refresh_remote()
+
+    def merge_remote(self):
+        self.instances = {**{k: i for k, i in self.instances.items() if i.host == LOCAL},
+                          **{i.key: i for found in self.remote.values() for i in found}}
+        self.show_instances()
+        self.fleet_changed.emit(self.fleet())
+
+    def fleet(self):
+        """{host: {"running": starts running or paused, "seen": time.time() of the last answer or None, "problem":
+        why it did not answer or None}} of this machine and every host (what the Hosts page lists)."""
+        found = {LOCAL: {"running": sum(1 for i in self.instances.values() if i.host == LOCAL
+                                        and i.state in ("running", "paused")), "seen": time.time(), "problem": None}}
+        for name in self.remote_names:
+            found[name] = {"running": sum(1 for i in self.remote.get(name, []) if i.state in ("running", "paused"))
+                           if name in self.remote_seen else None, "seen": self.remote_seen.get(name),
+                           "problem": self.remote_problems.get(name)}
+        return found
+
+    def drop_host(self, name):
+        for store in (self.remote, self.remote_seen, self.remote_problems, self.ended):
+            store.pop(name, None)
+        if self.remote_reading:
+            self.remote_reading.discard(name)
+
+    def forget_host(self, name):
+        """Host NAME was removed from the list (the Hosts page): its rows go at once, not at the next look."""
+        self.drop_host(name)
+        self.remote_names = [n for n in self.remote_names if n != name]
+        self.fill_host_filter()
+        self.merge_remote()
+
+    def show_host(self, host):
+        """List only HOST's starts (Hosts › Show starts)."""
+        index = self.host_filter.findData(host)
+        if index < 0 and host not in (None, LOCAL):
+            self.remote_names.append(host)
+            self.fill_host_filter()
+            index = self.host_filter.findData(host)
+        self.host_filter.setCurrentIndex(max(0, index))
+        self.only_project.setChecked(False)
+        self.show_instances()
+
+    def set_asking(self, asking):
+        """ASKING: {(host, run)} of the starts with an open question; they are marked in the State column."""
+        asking = set(asking)
+        if asking != self.asking:
+            self.asking = asking
+            self.show_instances()
+
+    def is_asking(self, instance):
+        if instance.host == LOCAL:
+            return bool(instance.run) and (LOCAL, instance.run) in self.asking
+        record = instance.record or {}
+        return any((instance.host, run) in self.asking for run in (record.get("run"), record.get("id"), instance.name)
+                   if isinstance(run, str) and run)
+
+    def stale(self, instance):
+        """Seconds since INSTANCE's host answered last when it does not answer now, else None."""
+        if instance.host == LOCAL or instance.host not in self.remote_problems:
+            return None
+        seen = self.remote_seen.get(instance.host)
+        return int(time.time() - seen) if seen else 0
+
+    # -- the starts that ended --
+
+    def ended_toggled(self):
+        self.load_ended()
+        if self.show_ended.isChecked():
+            self.refresh_remote()
+        self.show_instances()
+
+    def load_ended(self):
+        """This machine's starts that ended (`sandbox-ai list --all --json`), in the background."""
+        self.ended_token += 1
+        token = self.ended_token
+        if not self.show_ended.isChecked():
+            self.ended = {}
+            return
+        background(self.sai.ended_starts, LOCAL, timeout=60,
+                   done=lambda found, error: alive(self) and self.ended_loaded(token, found, error))
+
+    def ended_loaded(self, token, found, error):
+        if token != self.ended_token:
+            return
+        self.ended[LOCAL] = list(found or []) if error is None else []
+        self.show_instances()
 
     def fill_host_filter(self):
         """All hosts, this machine, and each host of `sandbox-ai hosts`; the choice stays while its host does."""
@@ -1059,6 +1295,7 @@ class SandboxesPage(QWidget):
         self.instances = {**local, **{i.key: i for found_ in getattr(self, "remote", {}).values() for i in found_}}
         self.show_instances()
         self.updated.emit(local)  # the other pages act on this account's own
+        self.fleet_changed.emit(self.fleet())
 
     def set_project(self, path):
         self.project = path
@@ -1073,9 +1310,21 @@ class SandboxesPage(QWidget):
     def mine(self, instance):
         return same_folder(instance.project, self.project)
 
+    def listed(self):
+        """{key: Instance} the table may show: every instance, and with "Ended" the starts that ended (those that a
+        host lists already as kept are not listed twice)."""
+        found = dict(self.instances)
+        if self.show_ended.isChecked():
+            names = {(i.host, i.name) for i in self.instances.values()}
+            for host, ended in self.ended.items():
+                if host == LOCAL or host in self.remote_names:
+                    found.update({i.key: i for i in ended if (i.host, i.name) not in names})
+        return found
+
     def show_instances(self):
         host = self.host_filter.currentData()
-        shown = [i for i in self.instances.values() if (not self.only_project.isChecked() or self.mine(i))
+        self.rows = self.listed()
+        shown = [i for i in self.rows.values() if (not self.only_project.isChecked() or self.mine(i))
                  and (host is None or getattr(i, "host", "local") == host)]
         order = {"run": 0, "session": 1, "mcp": 2, "unregistered": 3}
         shown.sort(key=lambda i: (getattr(i, "host", "local") != "local", not self.mine(i), order.get(i.kind, 9),
@@ -1084,9 +1333,16 @@ class SandboxesPage(QWidget):
         for i in shown:
             memory = backend.memory_share(i) if i.state in ("running", "paused") else None
             sorts.append([None] * 9 + [memory[0] if memory else -1.0])  # by the share, not as text ("9 %" > "10 %")
+            state = tr(STATE_TITLES.get(i.state, i.state)) if i.state else ""
+            stale, asking = self.stale(i), self.is_asking(i)
+            if stale is not None:  # its host did not answer: what was seen then, not what is now
+                state = tr("{state}, last seen {seconds} s ago", state=state or "?", seconds=stale) \
+                    if i.host in self.remote_seen else tr("{state}, not seen", state=state or "?")
+            elif asking:
+                state = tr("{state}, asking", state=state or "?")
             rows.append([tr(KIND_TITLES.get(i.kind, i.kind)), printable(i.name), printable(i.project), printable(i.agent),
-                         printable(i.backend), local_time(i.started), tr(STATE_TITLES.get(i.state, i.state)) if i.state
-                         else "", "" if i.proxy is None else tr("on") if i.proxy else tr("off"),
+                         printable(i.backend), local_time(i.started), state,
+                         "" if i.proxy is None else tr("on") if i.proxy else tr("off"),
                          tr("this machine") if getattr(i, "host", "local") == "local" else printable(i.host),
                          "" if memory is None else f"{memory[0]:.0f} %"])
             color = {"running": "ok", "paused": "warn", "damaged": "bad", "starting": "warn"}.get(i.state)
@@ -1094,13 +1350,23 @@ class SandboxesPage(QWidget):
                 color = "bad"  # the watch is about to end a process in it
             elif memory is not None and memory[0] >= 85 and color != "bad":
                 color = "warn"
+            if asking and color != "bad":
+                color = "warn"
+            if stale is not None or i.state in ENDED_STATES and i.key.startswith("ended:"):
+                color = "muted"
             colors.append(color)
-            tips.append(tr("Current project") if self.mine(i) else None)
+            tip = [tr("Current project")] if self.mine(i) else []
+            if asking:
+                tip.append(tr("It waits for an answer on the Approvals page."))
+            if stale is not None:
+                tip.append(tr("{host} does not answer: {problem}", host=printable(i.host),
+                              problem=printable(self.remote_problems.get(i.host, ""))[:200]))
+            tips.append("\n".join(tip) or None)
         fill(self.table, rows, colors, tooltips=tips, sort=sorts, keys=[i.key for i in shown])
         if getattr(self, "wanted", "") and not selected_rows(self.table) and find_row(self.table, self.wanted) >= 0:
             self.table.selectRow(find_row(self.table, self.wanted))
         for row in range(self.table.rowCount()):
-            instance = self.instances.get(row_key(self.table, row))
+            instance = self.rows.get(row_key(self.table, row))
             if instance is not None and self.mine(instance):
                 for column in range(self.table.columnCount()):
                     item = self.table.item(row, column)
@@ -1117,6 +1383,8 @@ class SandboxesPage(QWidget):
             text += " · " + tr("{count} on other hosts", count=elsewhere)
         for name, problem in sorted(getattr(self, "remote_problems", {}).items()):
             text += " · " + tr("{host}: no answer", host=printable(name)) + f" ({printable(problem)[:120]})"
+        if getattr(self, "hosts_problem", None):
+            text += " · " + tr("the list of hosts could not be read: {error}", error=self.hosts_problem)
         if self.project:
             text += " · " + tr("{count} in the current project", count=len(here))
         if self.problems:
@@ -1127,7 +1395,7 @@ class SandboxesPage(QWidget):
 
     def current(self):
         rows = selected_rows(self.table)
-        return self.instances.get(row_key(self.table, rows[0])) if rows else None
+        return getattr(self, "rows", self.instances).get(row_key(self.table, rows[0])) if rows else None
 
     # -- buttons --
 
@@ -1158,21 +1426,34 @@ class SandboxesPage(QWidget):
         host = printable(instance.host)
         state, attachable = instance.state, bool((instance.record or {}).get("attachable"))
         running = state in ("running", "paused")
+        shown_state = tr(STATE_TITLES.get(state, state))
+        stale = self.stale(instance)
+        # A host that does not answer: what its rows say is what was seen then; nothing is sent to it from them.
+        gone = None if stale is None else tr("{host} does not answer (last seen {seconds} s ago): its state now is not "
+                                             "known.", host=host, seconds=stale)
+        if gone is None and instance.key.startswith("ended:"):
+            gone = tr("It ended: History… shows what happened to it.")
+        mcp = instance.kind == "mcp"
         for key, button in self.run_named.items():
-            why = tr("Its connection log is on {host} (sandbox-ai there).", host=host) if key == "log" else \
-                None if running else tr("Not while it is {state} on {host}.", state=tr(STATE_TITLES.get(state, state)),
-                                        host=host)
+            why = gone or (tr("Its connection log is on {host} (sandbox-ai there).", host=host) if key == "log" else
+                           tr("An MCP server's sandbox: it only stops (sandbox-ai stop there).") if mcp else
+                           None if running else tr("Not while it is {state} on {host}.", state=shown_state, host=host))
             set_enabled(button, why is None, why)
+        # As sandbox-ai there takes them (starts.act): an MCP server only stops; a run without a kept start pauses
+        # and resumes but keeps nothing to attach to or delete.
         rules = {"attach": state == "running" and attachable, "attach-app": state == "running" and attachable,
-                 "pause": state == "running", "resume": state in ("paused", "stopped"),
+                 "pause": state == "running" and not mcp, "resume": state in ("paused", "stopped") and not mcp,
                  "delete": state == "stopped" and instance.kind == "session"}
         for action, button in self.session_buttons.items():
-            why = None if rules.get(action) else tr("Not while it is {state} on {host}.",
-                                                    state=tr(STATE_TITLES.get(state, state)), host=host)
+            why = gone or (tr("An MCP server's sandbox: it only stops (sandbox-ai stop there).") if mcp else
+                           None if rules.get(action) else tr("Not while it is {state} on {host}.", state=shown_state,
+                                                             host=host))
             set_enabled(button, why is None, why)
         stoppable = state in ("running", "paused")
-        set_enabled(self.stop_button, stoppable, None if stoppable else tr("It does not run."),
+        why = gone or (None if stoppable else tr("It does not run."))
+        set_enabled(self.stop_button, why is None, why,
                     tooltip=tr("End the selected start on {host} (sandbox-ai stop there)", host=host))
+        self.update_manage_buttons(instance, gone)
 
     def remote_action(self, instance, action):
         """ACTION (pause, resume, stop, delete) on the start INSTANCE of another host, as `sandbox-ai ACTION NAME`
@@ -1199,6 +1480,13 @@ class SandboxesPage(QWidget):
         if instance is not None and getattr(instance, "host", "local") != "local":
             self.update_remote_buttons(instance)
             return
+        if instance is not None and instance.key.startswith("ended:"):
+            why = tr("It ended: History… shows what happened to it.")
+            for button in [*self.run_buttons, *self.session_buttons.values(), self.stop_button]:
+                set_enabled(button, False, why)
+            self.update_manage_buttons(instance, why)
+            return
+        self.update_manage_buttons(instance)
         kind = instance.kind if instance else None
         state = instance.state if instance else None
         run_why = (none if instance is None else
@@ -1231,6 +1519,114 @@ class SandboxesPage(QWidget):
             why = None
         set_enabled(self.stop_button, why is None, why, tooltip=tr("End the selected sandbox: a session (its state is "
                                                                   "kept), an MCP server, or a run (sandbox-ai net stop)"))
+
+    def update_manage_buttons(self, instance, gone=None):
+        """Rename… and History… follow the selected start; Clean up… acts on the host chosen above."""
+        if instance is None:
+            why = tr("Select a row first.")
+        elif instance.kind in ("mcp", "unregistered"):
+            why = tr("Only the starts of agents have a name to change.")
+        elif not backend.valid_run(instance.name):
+            why = tr("Not a start's name: {ident}", ident=printable(instance.name)[:60])
+        else:
+            why = None
+        set_enabled(self.manage_buttons["rename"], (gone or why) is None, gone or why)
+        history_why = tr("Select a row first.") if instance is None else None if backend.valid_run(instance.name) \
+            and instance.kind != "unregistered" else tr("Not a start's name: {ident}",
+                                                        ident=printable(instance.name)[:60])
+        if history_why is None and gone and self.stale(instance) is not None:
+            history_why = gone
+        set_enabled(self.manage_buttons["history"], history_why is None, history_why)
+        host = self.host_filter.currentData()
+        stale_host = host not in (None, LOCAL) and host in self.remote_problems
+        why = tr("{host} does not answer.", host=printable(host)) if stale_host else None
+        set_enabled(self.manage_buttons["clean"], why is None, why)
+
+    def start_host(self, instance):
+        """(host, name) as `sandbox-ai rename`, `list --history` take a start there."""
+        host = getattr(instance, "host", LOCAL)
+        name = instance.session if host == LOCAL and instance.session else instance.name
+        return host, name
+
+    def rename(self):
+        instance = self.current()
+        if instance is None or instance.kind in ("mcp", "unregistered"):
+            return
+        host, old = self.start_host(instance)
+        title = tr("Rename {name} on {host}", name=printable(old), host=printable(host)) if host != LOCAL else \
+            tr("Rename {name}", name=printable(old))
+        new, ok = QInputDialog.getText(self, title, tr("New name (1-40 letters, digits, _ . -; its run id stays)"),
+                                       text=old)
+        new = (new or "").strip()
+        if not ok or not new or new == old:
+            return
+        if not re.fullmatch(START_NAME, new) or not backend.valid_run(old):
+            warn(self, title, tr("A name is 1-40 letters, digits, '_', '.' or '-', beginning with a letter or digit."))
+            return
+
+        def done(result, error):
+            self.command_done(title, result, error, quiet_success=False)
+            if host != LOCAL:
+                self.refresh_remote()
+        background(lambda: self.sai.host_run(host, "rename", old, new, timeout=60), owner=self,
+                   source=list(self.manage_buttons.values()), timeout=90, done=done)
+
+    def history(self):
+        instance = self.current()
+        if instance is None:
+            return
+        host, name = self.start_host(instance)
+        if not backend.valid_run(name):
+            return
+        title = tr("History of {name} on {host}", name=printable(name), host=printable(host)) if host != LOCAL else \
+            tr("History of {name}", name=printable(name))
+        background(self.sai.start_history, name, host, owner=self, source=self.manage_buttons["history"], timeout=90,
+                   done=lambda found, error: self.history_shown(title, name, found, error))
+
+    def history_shown(self, title, name, found, error):
+        self.update_buttons()
+        if error is not None:
+            warn(self, title, printable(error), modal=False)
+            return
+        lines = ["  ".join([history_time(entry.get("time")), printable(str(entry.get("event") or "?")),
+                            printable(str(entry.get("run") or "-")), history_details(entry)]).rstrip()
+                 for entry in found]
+        show_text(self, title, "\n".join(lines) or tr("No history of {name}.", name=printable(name)), modal=False)
+
+    def clean_up(self):
+        """`sandbox-ai gc` on this machine or the host chosen above: what would go is shown first (--dry-run)."""
+        host = self.host_filter.currentData() or LOCAL
+        title = tr("Clean up on {host}", host=printable(host)) if host != LOCAL else tr("Clean up")
+        background(self.sai.collect, host, True, owner=self, source=list(self.manage_buttons.values()), timeout=150,
+                   done=lambda found, error: self.clean_previewed(host, title, found, error))
+
+    def clean_previewed(self, host, title, found, error):
+        self.update_buttons()
+        if error is not None:
+            warn(self, title, printable(error), modal=False)
+            return
+        lines = gc_lines(found)
+        if not lines:
+            inform(self, title, tr("Nothing to remove."), modal=False)
+            return
+        text = tr("Remove these? Kept starts go with their HOME; this cannot be undone.") + "\n\n" + "\n".join(lines)
+        if host != LOCAL:
+            text = tr("On {host}: {text}", host=printable(host), text=text)
+        if not confirm(self, title, text, tr("Remove"), destructive=True):
+            return
+
+        def done(result, error_):
+            if error_ is not None:
+                warn(self, title, printable(error_), modal=False)
+            else:
+                lines = gc_lines(result)
+                inform(self, title, tr("Removed:") + "\n" + "\n".join(lines) if lines else tr("Nothing to remove."),
+                       modal=False)
+            self.refresh()
+            if host != LOCAL:
+                self.refresh_remote()
+        background(self.sai.collect, host, False, owner=self, source=list(self.manage_buttons.values()), timeout=330,
+                   done=done)
 
     def stop(self, instance=None):
         instance = instance or self.current()
@@ -1294,8 +1690,10 @@ class SandboxesPage(QWidget):
             self.workspaces_label.setText(tr("This sandbox-ai version cannot add workspaces during a run."))
             return
         def shown(entry):
+            note = entry.get("note") if isinstance(entry.get("note"), str) else ""  # what sandbox-ai says of it
             return (f"{printable(entry.get('sandbox'))} ← {printable(entry.get('host'))}"
-                    + (f" ({tr('read-only')})" if entry.get("mode") == "ro" else ""))
+                    + (f" ({tr('read-only')})" if entry.get("mode") == "ro" else "")
+                    + (f": {printable(note)[:300]}" if note else ""))
         self.workspaces_label.setText(tr("Workspaces added during the run: {list}",
                                          list=", ".join(map(shown, self.added_workspaces)))
                                       if self.added_workspaces else tr("No workspace added during the run."))
@@ -1487,10 +1885,19 @@ class SandboxesPage(QWidget):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         memory, cpus, pids = dialog.values()
-        if not (memory or cpus or pids):
-            return  # nothing changed
         title = tr("Limits of {run} on {host}", run=printable(run), host=printable(host)) if host != "local" else \
             tr("Limits")
+        if not (memory or cpus or pids):
+            if getattr(dialog, "cleared", lambda: [])():
+                inform(self, title, tr("Nothing changed: an empty field leaves its limit as it is. To remove a limit, "
+                                       "type none."), modal=False)
+            return  # nothing changed
+        removed = [label for label, value in ((tr("memory"), memory), (tr("CPUs"), cpus), (tr("processes"), pids))
+                   if value == "none"]
+        if removed and not confirm(self, title, tr(
+                "Remove the limit of {limits} of {run}? Until it ends it may then take all of them its host has.",
+                limits=", ".join(removed), run=printable(run)), tr("Remove the limit"), destructive=True):
+            return
         background(self.on_host(host, self.sai.set_limits, run, memory, cpus, pids), owner=self,
                    source=self.run_buttons, timeout=150, done=lambda result, error: self.reported(title, result, error))
 
@@ -1522,16 +1929,28 @@ class SandboxesPage(QWidget):
         if host != "local":
             title = tr("Allow for {run} on {host}", run=printable(run), host=printable(host)) if op == "allow" else \
                 tr("Revoke for {run} on {host}", run=printable(run), host=printable(host))
-            # Ports "on this computer" would be that host's loopback: not offered from here.
-            supported = self.sai.net_options(op) - {"--allow-host-port"}
-        else:
-            title = tr("Allow for {run}", run=run) if op == "allow" else tr("Revoke for {run}", run=run)
-            supported = self.sai.net_options(op)
-        dialog = NetworkDialog(self, self.sai.presets(), title, supported)
+            # What sandbox-ai there takes (its own `net allow --help`, kept per host and version), not what the one
+            # here does; asked in the background.
+            background(self.sai.host_net_options, host, op, owner=self, source=self.run_buttons, timeout=90,
+                       done=lambda found, error: self.network_dialog(host, run, op, title, found, error))
+            return
+        title = tr("Allow for {run}", run=run) if op == "allow" else tr("Revoke for {run}", run=run)
+        self.network_dialog(host, run, op, title, self.sai.net_options(op), None)
+
+    def network_dialog(self, host, run, op, title, supported, error):
+        self.update_buttons()
+        presets = self.sai.presets()
+        if host != LOCAL:
+            # Not known (no answer, an older sandbox-ai): only what every version since 0.1.70 takes. Ports "on this
+            # computer" would be that host's loopback: never offered from here.
+            supported = set(supported or ()) if error is None else set(backend.BASE_NET_OPTIONS)
+            supported -= {"--allow-host-port"}
+            presets = {name: hosts for name, hosts in presets.items() if f"--allow-{name}" in supported}
+        dialog = NetworkDialog(self, presets, title, supported)
         if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.arguments():
             return
         background(self.sai.host_run, host, "net", op, run, *dialog.arguments(), owner=self, source=self.run_buttons,
-                   timeout=150, done=lambda result, error: self.reported(title, result, error))
+                   timeout=150, done=lambda result, error_: self.reported(title, result, error_))
 
     def show_allowed(self):
         target = self.target()
@@ -1541,9 +1960,29 @@ class SandboxesPage(QWidget):
                        done=lambda result, error: self.allowed_shown(run, result, error, host))
 
     def allowed_shown(self, run, result, error, host="local"):
-        title = tr("{run} on {host}", run=printable(run), host=printable(host)) if host != "local" else run
-        inform(self, title, "\n".join(outcome(result, error)[1:]).strip())
+        """What the run was given since its start, with Untaint… (sandbox-ai net untaint RUN): not modal, so the
+        Approvals page stays usable while it is open."""
+        from . import widgets
+        title = tr("{run} on {host}", run=printable(run), host=printable(host)) if host != "local" else printable(run)
+        text = "\n".join(printable(line) for line in "\n".join(outcome(result, error)[1:]).strip().splitlines())
         self.update_buttons()
+        self.allowed_dialog = AllowedDialog(self, title, text, lambda: self.untaint(host, run))
+        if widgets.AUTO_ANSWER is not None:  # tests: what would be shown is collected
+            widgets.SHOWN.append((title, text, None))
+            return
+        widgets.show_modeless(self.allowed_dialog)
+
+    def untaint(self, host, run):
+        """`sandbox-ai net untaint RUN` (on HOST): the rules for tainted runs no longer hold - asked first."""
+        title = tr("Untaint {run} on {host}", run=printable(run), host=printable(host)) if host != LOCAL else \
+            tr("Untaint {run}", run=printable(run))
+        if not backend.valid_run(run) or not confirm(self, title, tr(
+                "Take back the taint of {run}? Untrusted content entered it; the rules for tainted runs (what it may "
+                "reach, what is asked) no longer hold until such content enters it again. Only when you checked what "
+                "came in.", run=printable(run)), tr("Untaint"), destructive=True):
+            return
+        background(self.sai.host_run, host, "net", "untaint", run, owner=self, source=self.run_buttons, timeout=90,
+                   done=lambda result, error: self.reported(title, result, error))
 
     def log(self):
         instance = self.current()
@@ -2318,8 +2757,8 @@ SECTIONS = ((N_("Project"), (("launch", N_("Start")), ("board", N_("Board")))),
                              ("terminals", N_("Terminals")))),
             (N_("Insight"), (("connections", N_("Connections")), ("activity", N_("Activity")),
                              ("statistics", N_("Statistics")), ("files", N_("Files")))),
-            (N_("Manage"), (("kits", N_("Kits & plugins")), ("mcp", N_("MCP servers")), ("images", N_("Images")),
-                            ("credentials", N_("Credentials")))),
+            (N_("Manage"), (("kits", N_("Kits & plugins")), ("mcp", N_("MCP servers")), ("llm", N_("LLM servers")),
+                            ("images", N_("Images")), ("credentials", N_("Credentials")))),
             (N_("System"), (("system", N_("System")), ("hosts", N_("Hosts")), ("help", N_("Help")))))
 PAGES = tuple(page for _, pages in SECTIONS for page in pages)
 SHORTCUT_PAGES = 9
@@ -2726,6 +3165,8 @@ class MainWindow(QMainWindow):
         self.files = FilesPage(sai, self.projects)
         self.kits = KitsPage(sai, self.in_terminal)
         self.mcp = McpPage(sai)
+        from .llm_page import LlmPage
+        self.llm = LlmPage(sai)  # the LLM servers of `sandbox-ai llm`, on this machine or a host
         self.images = ImagesPage(sai, self.in_terminal)
         self.credentials = CredentialsPage(sai, self.in_terminal)
         self.terminals = terminal.TerminalsPage(sai=sai, in_terminal=self.in_terminal)
@@ -2762,6 +3203,14 @@ class MainWindow(QMainWindow):
         self.sandboxes.counted.connect(lambda running, here: self.update_activity(sandboxes=here))
         self.sandboxes.updated.connect(self.sync_tabs)
         self.approvals.pending_changed.connect(self.questions_changed)
+        # The fleet: the Hosts page lists what the Sandboxes and Approvals pages last saw of every host, and leads to
+        # them filtered by a host; a host removed there leaves both at once.
+        self.sandboxes.fleet_changed.connect(self.hosts.set_fleet)
+        self.hosts.host_removed.connect(self.sandboxes.forget_host)
+        self.hosts.host_removed.connect(self.approvals.forget_host)
+        self.hosts.show_starts.connect(lambda host: (self.sandboxes.show_host(host), self.show_page("sandboxes")))
+        self.hosts.show_questions.connect(lambda host: (self.approvals.show_host(host), self.show_page("approvals")))
+        self.hosts.refresh_requested.connect(lambda: (self.sandboxes.refresh_remote(), self.approvals.poll_remote()))
         self.kits.enable_kit.connect(self.enable_kit)
         self.kits.inventory_loaded.connect(self.board.set_kit_inventory)
         self.board.opened.connect(self.project_opened)
@@ -3874,18 +4323,34 @@ class MainWindow(QMainWindow):
         self.show_question_count()
         if hasattr(self, "project_bar"):
             self.update_activity()
+        # Which starts ask (marked on the Sandboxes page), and how many questions wait on each host (Hosts page).
+        keys = list(getattr(getattr(self, "approvals", None), "questions", {}) or {})
+        if hasattr(self, "sandboxes"):
+            self.sandboxes.set_asking({(host, run) for host, run, _ in keys})
+        if hasattr(self, "hosts"):
+            counts = {}
+            for host, _, _ in keys:
+                counts[host] = counts.get(host, 0) + 1
+            self.hosts.set_questions(counts)
         if new and backend.setting("notify"):
-            run, question = new[0]
+            entries = [(entry[0], entry[1], entry[2] if len(entry) > 2 else None) for entry in new]
+            run, question, key = entries[0]
             more = tr(" and {count} more", count=len(new) - 1) if len(new) > 1 else ""
             from .pages import describe
             # A canary that went off is an alarm (an error toast stays until it is closed); anything else
             # waits for an answer (a warning).
-            canaries = [(r, q) for r, q in new if isinstance(q, dict) and q.get("kind") == "canary"]
+            canaries = [e for e in entries if isinstance(e[1], dict) and e[1].get("kind") == "canary"]
             if canaries:
-                run, question = canaries[0]
+                run, question, key = canaries[0]
             self.notify(tr("sandbox-ai asks: {sandbox}", sandbox=run), f"{describe(question)}{more}",
                         level="error" if canaries else "warning",
-                        action=(tr("Open approvals"), lambda: self.show_page("approvals")))
+                        action=(tr("Open approvals"), lambda k=key: self.open_question(k)))
+
+    def open_question(self, key):
+        """A notification's action: the Approvals page with its question selected (when it is still open)."""
+        self.show_page("approvals")
+        if key is not None:
+            self.approvals.select_question(key)
 
     def changeEvent(self, event):  # noqa: N802
         """A new theme: the navigation's icons and the question count take its colours."""

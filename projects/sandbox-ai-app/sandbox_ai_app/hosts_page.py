@@ -1,9 +1,10 @@
 """The Hosts page: other machines (Proxmox LXC containers, servers) whose sandbox-ai this app manages over SSH,
-with the list `sandbox-ai hosts` keeps (the web interface uses the same). For the chosen host: its starts and
-sessions (attach in a terminal tab, pause, resume, stop), its open approvals (allow, deny), its doctor and the
-agents' telemetry of every start there. Everything runs as `sandbox-ai hosts run HOST -- ARGS`, each argument
-quoted on its own, over SSH with your keys (no password prompt, the host key learnt once); nothing listens on
-the hosts but sshd.
+with the list `sandbox-ai hosts` keeps (the web interface uses the same). One row per host: whether it answered,
+its sandbox-ai version, how many starts run there and how many questions wait; Show starts and Show questions lead
+to the Sandboxes and Approvals pages, filtered by that host (their actions live there, once). Here: add, edit,
+remove and test a host, update it, its doctor and its defaults for every start (security mode, canaries, keep_days,
+the agents' telemetry). Everything runs as `sandbox-ai hosts run HOST -- ARGS`, each argument quoted on its own,
+over SSH with your keys (no password prompt, the host key learnt once); nothing listens on the hosts but sshd.
 
 Each host shows its sandbox-ai version and whether an update is there (hosts list's status, kept 10 minutes).
 Update and Update all run `sandbox-ai hosts update` (each host's own signed update); a sudo that wants a password
@@ -12,41 +13,29 @@ can read private (ssh refuses it) and say so.
 """
 from __future__ import annotations
 
-import re
+import json
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit,
-    QPushButton, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout,
-    QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLineEdit, QPlainTextEdit,
+    QPushButton, QSpinBox, QSplitter, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from .files import printable
-from .i18n import N_, tr
-from .reviews import home_review, review_refusal
-from .widgets import MONO, background, confirm, plain_label, set_enabled, warn
+from .i18n import tr
+from .widgets import MONO, background, confirm, fill, plain_label, row_key, selected_rows, set_enabled, table, warn
 
-# Seconds between two looks at the chosen host while the page is shown (one at a time; an SSH host may be slow).
-REFRESH_SECONDS = 20
-STATES = {"running": N_("running"), "paused": N_("paused"), "stopped": N_("stopped"), "damaged": N_("damaged"),
-          "starting": N_("starting")}
-START_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}"
+# Security modes in rising strictness (sandbox-ai's modes.NAMES) and its default when defaults.json names none.
+MODES = ("lax", "low", "medium", "high", "paranoid")
+DEFAULT_MODE = "medium"
+TELEMETRY_RANK = {"off": 2, "strict": 1, "on": 0}  # the more private, the higher
+DEFAULT_CANARIES = ("credentials", "home")  # canary.DEFAULT_CATEGORIES, when the host does not say
+CANARY_LIST = "list"  # the canaries choice "these categories"
 
 
 def is_remote(entry):
     """A host of the list other than this machine (as SandboxAI.remote_hosts counts them)."""
     return entry.get("kind") != "local" and entry.get("name") != "local"
-
-
-def start_rules(entry):
-    """{action: why not, or None} for a start of a host's `sandbox-ai list --json` (ENTRY)."""
-    state = entry.get("state") if entry else None
-    shown = tr(STATES[state]) if state in STATES else printable(str(state or "?"))
-    if entry is None:
-        return {action: tr("Select a start first.") for action in ("attach", "pause", "resume", "stop")}
-    rules = {"attach": state == "running" and bool(entry.get("attachable")), "pause": state == "running",
-             "resume": state in ("paused", "stopped"), "stop": state in ("running", "paused")}
-    return {action: None if ok else tr("Not while it is {state}.", state=shown) for action, ok in rules.items()}
 
 
 def version_text(info):
@@ -83,10 +72,59 @@ def update_text(name, result):
                       *("  " + note for note in result.get("notes") or [])])
 
 
-def cell(text):
-    item = QTableWidgetItem(printable(str(text if text is not None else "")))
-    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-    return item
+def reach_text(info, now=None):
+    """Whether a host answered (the Sandboxes page's last look, {"seen", "problem"}), in a few words."""
+    import time
+    now = time.time() if now is None else now
+    if not info:
+        return tr("not asked yet")
+    seen = info.get("seen")
+    if info.get("problem"):
+        return tr("no answer (last seen {seconds} s ago)", seconds=int(now - seen)) if seen else tr("no answer")
+    return tr("yes") if seen else tr("not asked yet")
+
+
+def security_steps_down(old, new):
+    """What of the defaults OLD -> NEW ({key: value}, a key missing: sandbox-ai's own default) lowers the security
+    of every later start: [text] (empty: nothing does)."""
+    found = []
+    old_mode, new_mode = old.get("mode", DEFAULT_MODE), new.get("mode", DEFAULT_MODE)
+    if old_mode in MODES and new_mode in MODES and MODES.index(new_mode) < MODES.index(old_mode):
+        found.append(tr("the security mode from {old} down to {new}", old=old_mode, new=new_mode))
+    def canaries(value):
+        return set() if value is False else set(value) if isinstance(value, list) else set(DEFAULT_CANARIES)
+    lost = canaries(old.get("canaries")) - canaries(new.get("canaries"))
+    if lost:
+        found.append(tr("no canaries of {categories} any more", categories=", ".join(sorted(lost))))
+    if TELEMETRY_RANK.get(new.get("telemetry", "off"), 0) < TELEMETRY_RANK.get(old.get("telemetry", "off"), 0):
+        found.append(tr("the agents' telemetry from {old} to {new}", old=old.get("telemetry", "off"),
+                        new=new.get("telemetry", "off")))
+    old_days, new_days = old.get("keep_days"), new.get("keep_days")
+    if isinstance(new_days, int) and (not isinstance(old_days, int) or new_days < old_days):
+        found.append(tr("kept starts unused for {days} days removed with their HOME", days=new_days))
+    return found
+
+
+class EditHostDialog(QDialog):
+    """What `sandbox-ai hosts set NAME` changes: whether its update runs with sudo. The rest is shown: changing the
+    address or the key is Remove and Add (its host key is learnt anew)."""
+
+    def __init__(self, entry, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(tr("Edit {host}", host=printable(entry.get("name", ""))))
+        form = QFormLayout(self)
+        for label, key in ((tr("SSH"), "ssh"), (tr("Port"), "port"), (tr("Key"), "identity"),
+                           (tr("Description"), "description")):
+            form.addRow(label, plain_label(printable(str(entry.get(key) or "-"))))
+        self.sudo = QCheckBox(tr("Its sandbox-ai is a system installation: update it with sudo"))
+        self.sudo.setChecked(bool(entry.get("update_sudo")))
+        form.addRow(self.sudo)
+        form.addRow(plain_label(tr("To change the address, the port or the key: remove the host and add it again (its "
+                                   "host key is learnt anew)."), role="secondary"))
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
 
 
 class AddHostDialog(QDialog):
@@ -120,6 +158,14 @@ class AddHostDialog(QDialog):
 
 
 class HostsPage(QWidget):
+    """The hosts of `sandbox-ai hosts` with what the other pages last saw of them (set_fleet, set_questions): the
+    Sandboxes page reads every host's starts, the Approvals page their questions; this page adds no SSH of its own for
+    that. Show starts and Show questions switch to those pages, filtered by the host."""
+    host_removed = Signal(str)  # a host left the list: the other pages drop its rows at once
+    show_starts = Signal(str)  # Sandboxes, filtered by that host
+    show_questions = Signal(str)  # Approvals, filtered by that host
+    refresh_requested = Signal()  # look at every host now (the Sandboxes and Approvals pages do)
+
     def __init__(self, sai, in_terminal):
         super().__init__()
         self.sai, self.in_terminal = sai, in_terminal
@@ -129,86 +175,54 @@ class HostsPage(QWidget):
         split = QSplitter()
         left = QWidget()
         left_layout = QVBoxLayout(left)
-        self.list = QListWidget()
-        self.list.currentItemChanged.connect(lambda *_: self.refresh_host() if self.isVisible() else None)
-        left_layout.addWidget(self.list, 1)
-        buttons = QHBoxLayout()
-        self.add_button, self.remove_button, self.test_button = (QPushButton(tr("Add…")), QPushButton(tr("Remove")),
-                                                                 QPushButton(tr("Test")))
-        self.add_button.clicked.connect(self.add)
-        self.remove_button.clicked.connect(self.remove)
-        self.test_button.clicked.connect(self.test)
-        for button in (self.add_button, self.remove_button, self.test_button):
-            buttons.addWidget(button)
-        left_layout.addLayout(buttons)
-        updates = QHBoxLayout()
-        self.update_button, self.update_all_button, self.versions_button = (
-            QPushButton(tr("Update")), QPushButton(tr("Update all")), QPushButton(tr("Check versions")))
-        self.update_button.setToolTip(tr("sandbox-ai update on this host (its own signed update; sudo for a system "
-                                         "installation)"))
-        self.update_all_button.setToolTip(tr("sandbox-ai update on every host of the list, one after the other"))
-        self.update_button.clicked.connect(self.update_host)
-        self.update_all_button.clicked.connect(self.update_all)
-        self.versions_button.clicked.connect(lambda: self.load_versions(refresh=True))
-        for button in (self.update_button, self.update_all_button, self.versions_button):
-            updates.addWidget(button)
-        left_layout.addLayout(updates)
+        self.table = table([tr("Host"), tr("SSH"), tr("Answers"), tr("sandbox-ai"), tr("Running"), tr("Questions")],
+                           stretch=1)
+        self.table.setAccessibleName(tr("Hosts"))
+        self.table.itemSelectionChanged.connect(self.host_changed)
+        left_layout.addWidget(self.table, 1)
+
+        def button(text, tip, slot, name=None):
+            widget = QPushButton(text)
+            widget.setToolTip(tip)
+            widget.setAccessibleName(name or text.rstrip("…"))
+            widget.clicked.connect(lambda _=False: slot())
+            return widget
+        self.starts_button = button(tr("Show starts"), tr("The Sandboxes page with this host's starts only"),
+                                    lambda: self.host() and self.show_starts.emit(self.host()))
+        self.questions_button = button(tr("Show questions"), tr("The Approvals page with this host's questions only"),
+                                       lambda: self.host() and self.show_questions.emit(self.host()))
+        self.refresh_button = button(tr("Refresh"), tr("Look at every host now (their starts and questions)"),
+                                     self.refresh, tr("Refresh the hosts"))
+        self.add_button = button(tr("Add…"), tr("Add a host reached over SSH (sandbox-ai hosts add)"), self.add,
+                                 tr("Add a host"))
+        self.edit_button = button(tr("Edit…"), tr("Change the host's settings (sandbox-ai hosts set)"), self.edit,
+                                  tr("Edit the host"))
+        self.remove_button = button(tr("Remove…"), tr("Forget the host (sandbox-ai hosts remove); asked first"),
+                                    self.remove, tr("Remove the host"))
+        self.test_button = button(tr("Test"), tr("SSH, the host's sandbox-ai and its doctor (sandbox-ai hosts test)"),
+                                  self.test, tr("Test the host"))
+        self.update_button = button(tr("Update"), tr("sandbox-ai update on this host (its own signed update; sudo for "
+                                                     "a system installation)"), self.update_host, tr("Update the host"))
+        self.update_all_button = button(tr("Update all"), tr("sandbox-ai update on every host of the list, one after "
+                                                             "the other"), self.update_all)
+        self.versions_button = button(tr("Check versions"), tr("Ask every host for its sandbox-ai version now"),
+                                      lambda: self.load_versions(refresh=True))
+        for group in ((self.starts_button, self.questions_button, self.refresh_button),
+                      (self.add_button, self.edit_button, self.remove_button, self.test_button),
+                      (self.update_button, self.update_all_button, self.versions_button)):
+            row = QHBoxLayout()
+            for widget in group:
+                row.addWidget(widget)
+            row.addStretch(1)
+            left_layout.addLayout(row)
         split.addWidget(left)
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        # Whose starts and questions the tabs show: never another host's while the chosen one is asked.
         self.pane_title = plain_label(role="section")
         right_layout.addWidget(self.pane_title)
         self.tabs = QTabWidget()
         right_layout.addWidget(self.tabs, 1)
-        # starts
-        starts = QWidget()
-        starts_layout = QVBoxLayout(starts)
-        self.starts = QTableWidget(0, 5)
-        self.starts.setHorizontalHeaderLabels([tr("Name"), tr("Agent"), tr("State"), tr("Workspace"), tr("Started")])
-        self.starts.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.starts.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self.starts.horizontalHeader().setStretchLastSection(True)
-        self.starts.itemSelectionChanged.connect(self.update_start_buttons)
-        starts_layout.addWidget(self.starts, 1)
-        row = QHBoxLayout()
-        self.attach_button = QPushButton(tr("Attach"))
-        self.attach_button.clicked.connect(self.attach)
-        row.addWidget(self.attach_button)
-        self.action_buttons = {}
-        for action, label in (("pause", tr("Pause")), ("resume", tr("Resume")), ("stop", tr("Stop"))):
-            button = QPushButton(label)
-            button.clicked.connect(lambda _=False, a=action: self.start_action(a))
-            self.action_buttons[action] = button
-            row.addWidget(button)
-        self.refresh_button = QPushButton(tr("Refresh"))
-        self.refresh_button.clicked.connect(self.refresh_host)
-        row.addStretch(1)
-        row.addWidget(self.refresh_button)
-        starts_layout.addLayout(row)
-        self.tabs.addTab(starts, tr("Starts and sessions"))
-        # approvals
-        approvals = QWidget()
-        approvals_layout = QVBoxLayout(approvals)
-        self.questions = QTableWidget(0, 2)
-        self.questions.setHorizontalHeaderLabels([tr("Question"), tr("Sandbox")])
-        self.questions.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.questions.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self.questions.horizontalHeader().setStretchLastSection(True)
-        approvals_layout.addWidget(self.questions, 1)
-        row = QHBoxLayout()
-        self.scope = QComboBox()
-        for scope, text in (("once", tr("once")), ("run", tr("for this run")), ("always", tr("always"))):
-            self.scope.addItem(text, scope)
-        self.allow_button, self.deny_button = QPushButton(tr("Allow")), QPushButton(tr("Deny"))
-        self.allow_button.clicked.connect(lambda: self.answer("allow"))
-        self.deny_button.clicked.connect(lambda: self.answer("deny"))
-        for widget in (self.scope, self.allow_button, self.deny_button):
-            row.addWidget(widget)
-        row.addStretch(1)
-        approvals_layout.addLayout(row)
-        self.tabs.addTab(approvals, tr("Approvals"))
         # doctor
         from .doctor_view import DoctorView
         self.doctor = DoctorView()  # sandbox-ai doctor --json of the host, by area, the fix commands copyable
@@ -217,20 +231,53 @@ class HostsPage(QWidget):
         self.updates = QPlainTextEdit()
         self.updates.setReadOnly(True)
         self.updates.setFont(MONO)
+        self.updates.setAccessibleName(tr("Updates"))
         self.updates.setPlaceholderText(tr("Update or Update all: each host's own sandbox-ai update, signed, as "
                                            "install.sh installed it there."))
         self.tabs.addTab(self.updates, tr("Updates"))
-        # defaults
+        # defaults (sandbox-ai defaults there): what every start on the host uses unless it says otherwise
         defaults = QWidget()
         form = QFormLayout(defaults)
+        self.mode = QComboBox()
+        self.mode.setAccessibleName(tr("Security mode"))
         self.telemetry = QComboBox()
+        self.telemetry.setAccessibleName(tr("Telemetry"))
         for level, text in (("off", tr("off: no usage statistics, error reports, feedback or update checks "
                                        "(recommended)")),
                             ("strict", tr("strict: also no other calls than the model's")),
                             ("on", tr("on: the agents' own settings"))):
             self.telemetry.addItem(text, level)
-        self.telemetry.activated.connect(self.set_telemetry)
+        self.canaries = QComboBox()
+        self.canaries.setAccessibleName(tr("Canaries"))
+        self.canary_list = QLineEdit()
+        self.canary_list.setAccessibleName(tr("Canary categories"))
+        self.canary_list.setPlaceholderText(", ".join(DEFAULT_CANARIES))
+        self.canaries.currentIndexChanged.connect(lambda _=0: self.canary_list.setEnabled(
+            self.canaries.currentData() == CANARY_LIST))
+        canary_row = QHBoxLayout()
+        canary_row.addWidget(self.canaries)
+        canary_row.addWidget(self.canary_list, 1)
+        self.keep = QCheckBox(tr("Remove kept starts unused for"))
+        self.keep.setAccessibleName(tr("Remove kept starts after a while"))
+        self.keep_days = QSpinBox()
+        self.keep_days.setAccessibleName(tr("Days"))
+        self.keep_days.setRange(1, 3650)
+        self.keep_days.setValue(90)
+        self.keep_days.setSuffix(" " + tr("days"))
+        self.keep.toggled.connect(self.keep_days.setEnabled)
+        keep_row = QHBoxLayout()
+        keep_row.addWidget(self.keep)
+        keep_row.addWidget(self.keep_days)
+        keep_row.addStretch(1)
+        form.addRow(tr("Security mode"), self.mode)
+        form.addRow(tr("Canaries"), canary_row)
+        form.addRow(tr("Kept starts"), keep_row)
         form.addRow(tr("Telemetry of Claude Code, Codex and OpenCode"), self.telemetry)
+        self.save_defaults_button = button(tr("Save defaults…"), tr("Write the defaults of every later start on the "
+                                                                    "host (sandbox-ai defaults set/unset there); a "
+                                                                    "step down in security is asked first"),
+                                           self.save_defaults)
+        form.addRow(self.save_defaults_button)
         self.defaults_note = plain_label(role="secondary")
         form.addRow(self.defaults_note)
         self.tabs.addTab(defaults, tr("Defaults"))
@@ -240,24 +287,25 @@ class HostsPage(QWidget):
         self.status = plain_label(role="secondary")
         layout.addWidget(self.status)
         self.entries, self.versions, self.queue, self.results = [], {}, [], []
-        self.shown_host, self.asking, self.asked = None, None, 0
-        self.timer = QTimer(self)
-        self.timer.setInterval(REFRESH_SECONDS * 1000)
-        self.timer.timeout.connect(self.tick)
+        self.fleet, self.question_counts = {}, {}
+        self.defaults, self.defaults_host, self.defaults_token = None, None, 0
+        self.set_defaults_enabled(False)
         self.load_hosts()
-        self.update_start_buttons()
 
     # -- the list --
 
     def host(self):
-        item = self.list.currentItem()
-        return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        rows = selected_rows(self.table)
+        return row_key(self.table, rows[0]) if rows else None
+
+    def entry(self, name):
+        return next((e for e in self.entries if e.get("name") == name), {})
 
     def load_hosts(self, select=None):
         if not self.sai.hosts_supported():
             self.status.setText(tr("This sandbox-ai has no hosts yet: update it."))
-            for widget in (self.add_button, self.remove_button, self.test_button, self.tabs, self.update_button,
-                           self.update_all_button, self.versions_button):
+            for widget in (self.add_button, self.remove_button, self.test_button, self.edit_button, self.tabs,
+                           self.update_button, self.update_all_button, self.versions_button):
                 widget.setEnabled(False)
             return
         if not self.sai.host_update_supported():
@@ -275,67 +323,96 @@ class HostsPage(QWidget):
             self.status.setText(printable(str(exc)))
             self.entries = []
         current = select or self.host()
-        self.list.blockSignals(True)
-        self.list.clear()
+        self.show_hosts()
+        if current is not None and current in self.table.row_keys:
+            self.table.clearSelection()
+            self.table.selectRow(self.row_of(current))
+        if not selected_rows(self.table) and self.table.rowCount():
+            self.table.selectRow(0)
+        self.host_changed()
+
+    def row_of(self, name):
+        from .widgets import find_row
+        return find_row(self.table, name)
+
+    def show_hosts(self):
+        """One row per host: whether it answered, its version, starts running, questions waiting."""
+        rows, colors = [], []
         for entry in self.entries:
-            text = tr("{name} (this machine)", name=entry["name"]) if entry.get("kind") == "local" else \
-                f"{entry['name']}  {entry.get('ssh', '')}"
-            version = version_text(self.versions.get(entry["name"]))
-            if version:
-                text += f"  ({version})"
-            item = QListWidgetItem(printable(text))
-            item.setData(Qt.ItemDataRole.UserRole, entry["name"])
-            item.setToolTip(printable(entry.get("description") or ""))
-            self.list.addItem(item)
-            if entry["name"] == current:
-                self.list.setCurrentItem(item)
-        if self.list.currentItem() is None and self.list.count():
-            self.list.setCurrentRow(0)
-        self.list.blockSignals(False)
-        self.remove_button.setEnabled(self.host() not in (None, "local"))
-        if self.isVisible():
-            self.refresh_host()
+            name = entry["name"]
+            local = entry.get("kind") == "local" or name == "local"
+            info = self.fleet.get(name)
+            count = info.get("running") if info else None
+            questions = self.question_counts.get(name)
+            rows.append([tr("{name} (this machine)", name=printable(name)) if local else printable(name),
+                         "" if local else printable(f"{entry.get('ssh', '')}:{entry.get('port', 22)}"),
+                         tr("yes") if local else reach_text(info), version_text(self.versions.get(name)),
+                         "" if count is None else str(count), "" if questions is None else str(questions)])
+            colors.append("bad" if info and info.get("problem") else "warn" if questions else None)
+        # The selection stays on its host (fill() keeps it by key) without a change of host on the way: the
+        # defaults of the host shown are not asked again at every look at the fleet.
+        self.table.blockSignals(True)
+        try:
+            fill(self.table, rows, colors, tooltips=[printable(e.get("description") or "") or None
+                                                     for e in self.entries], keys=[e["name"] for e in self.entries])
+        finally:
+            self.table.blockSignals(False)
 
-    def showEvent(self, event):
-        """The selected host is asked when the page is shown, not when the window is built: no sandbox-ai command
-        (and no SSH connection) at every start of the app for a page nobody opened; then every REFRESH_SECONDS while
-        it is shown (open questions time out after a minute)."""
-        super().showEvent(event)
-        if self.host() is not None and not event.spontaneous():
-            self.refresh_host()
-        self.timer.start()
+    def set_fleet(self, fleet):
+        """{host: {"running", "seen", "problem"}} from the Sandboxes page's last look at every host."""
+        self.fleet = dict(fleet or {})
+        self.show_hosts()
 
-    def hideEvent(self, event):
-        super().hideEvent(event)
-        self.timer.stop()
+    def set_questions(self, counts):
+        """{host: open questions} from the Approvals page."""
+        counts = dict(counts or {})
+        if counts != self.question_counts:
+            self.question_counts = counts
+            self.show_hosts()
 
-    def tick(self):
-        if self.isVisible() and self.asking is None and self.host() is not None:
-            self.refresh_host(quiet=True)
+    def refresh(self):
+        self.refresh_requested.emit()
+        self.load_hosts()
 
     def label(self, name):
-        entry = next((e for e in self.entries if e.get("name") == name), {})
+        entry = self.entry(name)
         return tr("{name} (this machine)", name=name) if entry.get("kind") == "local" or name == "local" else \
             f"{name}  {entry.get('ssh', '')}".strip()
 
-    def clear_view(self, name, text):
-        """Empty the tabs of the host shown so far: what is there belongs to NAME only once it answered."""
-        self.starts.setRowCount(0)
-        self.questions.setRowCount(0)
-        self.shown_host = None
-        self.pane_title.setText(printable(text))
-        self.update_start_buttons()
+    def host_changed(self):
+        name = self.host()
+        remote = name not in (None, "local")
+        set_enabled(self.remove_button, remote, tr("This machine is always in the list.") if name else None)
+        set_enabled(self.edit_button, remote, tr("This machine has no SSH settings.") if name else None)
+        for widget in (self.starts_button, self.questions_button, self.test_button):
+            widget.setEnabled(name is not None)
+        self.pane_title.setText(printable(self.label(name)) if name else "")
+        if name != self.defaults_host:
+            self.defaults, self.defaults_host = None, None
+            self.set_defaults_enabled(False)
+            self.defaults_note.setText("")
+            if self.isVisible() and name is not None:
+                self.load_defaults()
+
+    def showEvent(self, event):  # noqa: N802
+        """The chosen host's defaults are asked when the page is shown, not when the window is built (no SSH at
+        every start of the app for a page nobody opened)."""
+        super().showEvent(event)
+        if self.host() is not None and self.defaults_host != self.host() and not event.spontaneous():
+            self.load_defaults()
 
     def add(self):
         dialog = AddHostDialog(self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         name, ssh, port, identity, description = dialog.values()
+
         def done(result, error):
             if error:
                 warn(self, tr("Add a host"), printable(str(error)))
                 return
             self.load_hosts(name)
+            self.refresh_requested.emit()
             # A key ssh would refuse (others could read it) was made private, and the connection tried: said here.
             said = [line.strip() for line in str(result or "").splitlines() if line.strip().startswith(("key:", "note:",
                                                                                                     "connection:"))]
@@ -343,6 +420,20 @@ class HostsPage(QWidget):
                 self.status.setText(printable("\n".join([name, *said])))
         background(self.sai.host_add, name, ssh, port, identity, description, owner=self, source=self.add_button,
                    timeout=60, done=done)
+
+    def edit(self):
+        name = self.host()
+        if name in (None, "local"):
+            return
+        dialog = EditHostDialog(self.entry(name), self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        sudo = dialog.sudo.isChecked()
+        if sudo == bool(self.entry(name).get("update_sudo")):
+            return
+        background(self.sai.host_set, name, sudo, owner=self, source=self.edit_button, timeout=60,
+                   done=lambda result, error: warn(self, tr("Edit {host}", host=name), printable(str(error)))
+                   if error else self.load_hosts(name))
 
     def remove(self):
         name = self.host()
@@ -353,9 +444,16 @@ class HostsPage(QWidget):
                 "web no longer reach it (its approvals are no longer answered from here).", host=self.label(name)),
                 tr("Remove"), destructive=True):
             return
-        background(self.sai.host_remove, name, owner=self, source=self.remove_button, timeout=60,
-                   done=lambda result, error: warn(self, tr("Remove"), printable(str(error))) if error
-                   else self.load_hosts())
+
+        def done(result, error):
+            if error:
+                warn(self, tr("Remove"), printable(str(error)))
+                return
+            self.fleet.pop(name, None)
+            self.question_counts.pop(name, None)
+            self.host_removed.emit(name)  # its starts and questions leave the other pages at once
+            self.load_hosts()
+        background(self.sai.host_remove, name, owner=self, source=self.remove_button, timeout=60, done=done)
 
     def test(self):
         name = self.host()
@@ -375,198 +473,123 @@ class HostsPage(QWidget):
             self.show_doctor(result.get("doctor") or [])
         background(self.sai.host_test, name, owner=self, source=self.test_button, timeout=180, done=done)
 
-    # -- the chosen host --
+    # -- the chosen host's defaults --
 
-    def refresh_host(self, quiet=False):
-        """Ask the chosen host for its starts, questions and defaults. Another host's rows go at once (a slow SSH
-        host must not look like the one asked before); QUIET (the timer): the same host's rows stay until it
-        answers."""
+    def set_defaults_enabled(self, enabled):
+        for widget in (self.mode, self.canaries, self.canary_list, self.keep, self.keep_days, self.telemetry,
+                       self.save_defaults_button):
+            widget.setEnabled(enabled)
+        if enabled:
+            self.canary_list.setEnabled(self.canaries.currentData() == CANARY_LIST)
+            self.keep_days.setEnabled(self.keep.isChecked())
+
+    def load_defaults(self):
+        """`sandbox-ai defaults show --json` of the chosen host (this machine: here), in the background."""
         name = self.host()
-        self.remove_button.setEnabled(name not in (None, "local"))
         if name is None:
-            self.clear_view(None, "")
             return
-        if name != self.shown_host:
-            self.clear_view(name, tr("{host}: asking…", host=self.label(name)))
-        if not quiet:
-            self.status.setText(tr("Asking {host}…", host=name))
-        self.asked += 1
-        token = self.asking = (name, self.asked)
-        background(lambda: (self.sai.host_json(name, "list", "--json"),
-                            self.sai.host_json(name, "approvals", "list", "--json", timeout=60),
-                            self.sai.host_json(name, "defaults", "show", "--json", timeout=60)),
-                   owner=self, source=self.refresh_button, timeout=270,
-                   done=lambda result, error: self.shown(name, result, error, token))
+        self.defaults_token += 1
+        token = self.defaults_token
+        self.defaults_note.setText(tr("Asking {host}…", host=name))
+        background(lambda: self.sai.host_json(name, "defaults", "show", "--json", timeout=60), owner=self, timeout=90,
+                   done=lambda result, error: self.defaults_read(token, name, result, error))
 
-    def shown(self, name, result, error, token=None):
-        if token is not None and token == self.asking:
-            self.asking = None
-        if name != self.host() or (token is not None and token[1] != self.asked):
-            return  # another host was chosen meanwhile, or asked again since: only the latest answer counts
-        if error:
-            self.clear_view(name, tr("{host}: no answer", host=self.label(name)))
-            self.status.setText(printable(f"{name}: {error}"))
+    def defaults_read(self, token, name, result, error):
+        if token != self.defaults_token or name != self.host():
+            return  # another host was chosen meanwhile: only its own answer counts
+        if error is not None or not isinstance(result, dict):
+            self.defaults_note.setText(printable(tr("{host}: no answer", host=name) + f" ({error})"))
             return
-        starts, questions, defaults = result
-        self.shown_host = name
-        self.pane_title.setText(printable(tr("{host}: {starts} starts, {questions} open questions",
-                                             host=self.label(name), starts=len(starts), questions=len(questions))))
-        self.status.setText(tr("{host}: {starts} starts, {questions} open questions", host=name, starts=len(starts),
-                               questions=len(questions)))
-        # Row by row in place, the selection kept on its start (by name) and its question (by id): the page reads
-        # again every REFRESH_SECONDS, and a row chosen just before must not jump to another start.
-        starts = [e for e in starts if isinstance(e, dict)]
-        questions = [q for q in questions if isinstance(q, dict)]
-        chosen = self.chosen_start()
-        chosen_name = chosen.get("name") if chosen else None
-        chosen_question = self.chosen_question()
-        self.starts.blockSignals(True)
-        self.starts.setRowCount(len(starts))
-        for row, entry in enumerate(starts):
-            for column, key in enumerate(("name", "agent", "state", "workspace", "started")):
-                value = entry.get(key)
-                item = cell(tr(STATES[value]) if key == "state" and value in STATES else value)
-                item.setData(Qt.ItemDataRole.UserRole, entry)
-                self.starts.setItem(row, column, item)
-        self.select(self.starts, next((r for r, e in enumerate(starts) if chosen_name and e.get("name") == chosen_name),
-                                      None))
-        self.starts.blockSignals(False)
-        self.questions.setRowCount(len(questions))
-        for row, question in enumerate(questions):
-            item = cell(question.get("question"))
-            item.setData(Qt.ItemDataRole.UserRole, question.get("id"))
-            self.questions.setItem(row, 0, item)
-            self.questions.setItem(row, 1, cell(question.get("sandbox") or question.get("run")))
-        self.select(self.questions, next((r for r, q in enumerate(questions)
-                                          if chosen_question and q.get("id") == chosen_question), None))
-        self.update_start_buttons()
-        level = (defaults.get("values") or {}).get("telemetry", "off")
-        self.telemetry.setEnabled(bool(defaults.get("telemetry_levels")))
-        self.telemetry.setCurrentIndex(max(0, self.telemetry.findData(level)))
+        values = result.get("values") if isinstance(result.get("values"), dict) else {}
+        self.defaults, self.defaults_host = dict(values), name
+        modes = [m for m in result.get("modes") or MODES if isinstance(m, str)]
+        self.mode.clear()
+        self.mode.addItem(tr("sandbox-ai's default ({mode})", mode=DEFAULT_MODE), None)
+        for mode in modes:
+            self.mode.addItem(printable(mode), mode)
+        self.mode.setCurrentIndex(max(0, self.mode.findData(values.get("mode"))) if values.get("mode") else 0)
+        default = [c for c in result.get("canary_default") or DEFAULT_CANARIES if isinstance(c, str)]
+        self.canaries.clear()
+        self.canaries.addItem(tr("sandbox-ai's default ({categories})", categories=", ".join(default)), None)
+        self.canaries.addItem(tr("off"), False)
+        self.canaries.addItem(tr("these categories:"), CANARY_LIST)
+        canaries = values.get("canaries")
+        self.canaries.setCurrentIndex(1 if canaries is False else 2 if isinstance(canaries, list) else 0)
+        self.canary_list.setText(", ".join(printable(c) for c in canaries) if isinstance(canaries, list) else "")
+        self.canary_categories = [c for c in result.get("canary_categories") or () if isinstance(c, str)]
+        days = values.get("keep_days")
+        self.keep.setChecked(isinstance(days, int) and days > 0)
+        if isinstance(days, int) and days > 0:
+            self.keep_days.setValue(days)
+        self.telemetry.setCurrentIndex(max(0, self.telemetry.findData(values.get("telemetry", "off"))))
+        self.set_defaults_enabled(True)
+        self.telemetry.setEnabled(bool(result.get("telemetry_levels")))
         self.defaults_note.setText(printable(tr("For every start on {host}, in {path}", host=name,
-                                                path=defaults.get("path", "?"))))
+                                                path=result.get("path", "?"))))
 
-    @staticmethod
-    def select(table, row):
-        """Select ROW of TABLE alone, or nothing (None)."""
-        table.clearSelection()
-        if row is not None:
-            table.selectRow(row)
+    def chosen_defaults(self):
+        """{key: value} as the form says (a key left out: sandbox-ai's own default), or a ValueError."""
+        chosen = {}
+        if self.mode.currentData():
+            chosen["mode"] = self.mode.currentData()
+        if self.canaries.currentData() is False:
+            chosen["canaries"] = False
+        elif self.canaries.currentData() == CANARY_LIST:
+            categories = [c.strip() for c in self.canary_list.text().replace(",", " ").split() if c.strip()]
+            known = getattr(self, "canary_categories", []) or list(DEFAULT_CANARIES) + ["workspace"]
+            unknown = [c for c in categories if c not in known]
+            if unknown or not categories:
+                raise ValueError(tr("Canary categories: {known}", known=", ".join(known)))
+            chosen["canaries"] = categories
+        if self.keep.isChecked():
+            chosen["keep_days"] = self.keep_days.value()
+        level, before = self.telemetry.currentData(), (self.defaults or {}).get("telemetry")
+        if not self.telemetry.isEnabled():  # a sandbox-ai there without telemetry levels: left as it is
+            if before is not None:
+                chosen["telemetry"] = before
+        elif level != "off" or before == "off":  # "off" is the default: written only where it was written
+            chosen["telemetry"] = level
+        return chosen
 
-    def chosen_start(self):
-        rows = self.starts.selectionModel().selectedRows() if self.starts.selectionModel() else []
-        item = self.starts.item(rows[0].row(), 0) if rows else None
-        return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
-
-    def chosen_question(self):
-        rows = self.questions.selectionModel().selectedRows() if self.questions.selectionModel() else []
-        item = self.questions.item(rows[0].row(), 0) if rows else None
-        return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
-
-    def update_start_buttons(self):
-        """Attach, Pause, Resume and Stop follow the state of the selected start (as on the Sandboxes page)."""
-        rules = start_rules(self.chosen_start())
-        set_enabled(self.attach_button, rules["attach"] is None, rules["attach"])
-        for action, button in self.action_buttons.items():
-            set_enabled(button, rules[action] is None, rules[action])
-
-    def attach(self):
-        entry, name = self.chosen_start(), self.host()
-        if entry is None or name is None:
-            return
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}", str(entry.get("name"))):
-            warn(self, tr("Hosts"), tr("Not a start's name: {ident}", ident=printable(str(entry.get("name")))[:60]))
-            return  # the other host chose it: never an option for sandbox-ai there
-        if not entry.get("attachable"):
-            warn(self, tr("Attach"), tr("{start} cannot be attached (not a running session).",
-                                        start=printable(entry["name"])))
-            return
-        self.in_terminal(self.sai.host_terminal(name, "attach", entry["name"]), printable(f"{name}: {entry['name']}"))
-
-    def start_action(self, action):
-        entry, name = self.chosen_start(), self.host()
-        if entry is None or name is None:
-            return
-        if not re.fullmatch(START_NAME, str(entry.get("name"))):
-            warn(self, tr("Hosts"), tr("Not a start's name: {ident}", ident=printable(str(entry.get("name")))[:60]))
-            return
-        start = entry["name"]
-        if action == "stop" and not confirm(self, tr("Stop"), tr(
-                "On {host}: stop {start}? Its agent ends; what it did not save is lost (a session keeps its HOME, and "
-                "Resume starts it again).", host=self.label(name), start=printable(start)), tr("Stop"),
-                destructive=True):
-            return
-
-        def go():
-            background(lambda: self.sai.host_run(name, action, start, timeout=180), owner=self,
-                       source=self.action_buttons[action], timeout=210,
-                       done=lambda result, error: self.acted(result, error))
-        if action == "resume" and entry.get("state") == "stopped":
-            # What changed in its kept HOME since its last start, before it starts again (asked when anything did).
-            background(lambda: self.sai.review_home(start, name), owner=self, source=self.action_buttons[action],
-                       timeout=150, done=lambda result, error: self.home_reviewed(name, start, result, error, go))
-            return
-        go()
-
-    def home_reviewed(self, host, start, result, error, go):
-        title = tr("Resume {name} on {host}", name=printable(start), host=printable(host))
-        if error is not None:
-            if review_refusal(error) or confirm(self, title, tr(
-                    "What changed in the HOME of {name} since its last start could not be checked:\n{error}\n\n"
-                    "Resume it anyway?", name=printable(start), error=printable(str(error))[-800:]), tr("Resume"),
-                    destructive=True):
-                go()
-            return
-        found = home_review(start, result, host)
-        if found is None:
-            go()
-            return
-        text, details = found
-        if confirm(self, title, text + "\n\n" + tr("Resume it anyway?"), tr("Resume"), destructive=True,
-                   details=details):
-            go()
-
-    def acted(self, result, error):
-        if error or (result and result[0] != 0):
-            text = str(error) if error else (result[2] or result[1]).strip()[-500:]
-            warn(self, tr("Hosts"), printable(text))
-        elif result and (result[1] or "").strip():
-            self.status.setText(printable(result[1].strip()[-500:]))  # what sandbox-ai said (a narrowed scope, ...)
-        self.refresh_host(quiet=True)
-
-    def answer(self, decision):
-        rows = self.questions.selectionModel().selectedRows() if self.questions.selectionModel() else []
+    def save_defaults(self):
         name = self.host()
-        if not rows or name is None:
+        if name is None or self.defaults is None or name != self.defaults_host:
             return
-        ident = self.questions.item(rows[0].row(), 0).data(Qt.ItemDataRole.UserRole)
-        if not isinstance(ident, str) or not re.fullmatch(r"[0-9]{1,12}-[0-9]{1,10}-[0-9]{1,10}", ident):
-            warn(self, tr("Hosts"), tr("Not a question of sandbox-ai: {ident}", ident=printable(str(ident))[:60]))
-            return  # the other host chose it: never an option for sandbox-ai there
-        question = self.questions.item(rows[0].row(), 0).text()
-        sandbox = self.questions.item(rows[0].row(), 1).text() if self.questions.item(rows[0].row(), 1) else ""
-        scope = self.scope.currentData()  # read here, on the GUI thread, never in the worker
-        if decision == "allow" and not confirm(
-                self, tr("Allow this request?"), "\n".join([
-                    tr("Host: {host}", host=self.label(name)), tr("Sandbox: {sandbox}", sandbox=sandbox),
-                    tr("Asks to: {question}", question=question),
-                    tr("Scope: {scope}", scope=self.scope.currentText())]
-                    + ([tr("“Always” is remembered for this project: later runs get this without asking.")]
-                       if scope == "always" else [])),
-                tr("Allow"), destructive=scope == "always"):
+        try:
+            chosen = self.chosen_defaults()
+        except ValueError as exc:
+            warn(self, tr("Defaults"), str(exc))
             return
-        # "Always" for a connection waits for the sandbox's certificate check (up to 30 s) on top of SSH.
-        background(lambda: self.sai.host_run(name, "approvals", decision, ident, "--scope", scope, timeout=100),
-                   owner=self, source=[self.allow_button, self.deny_button], timeout=130,
-                   done=lambda result, error: self.acted(result, error))
+        old = {key: value for key, value in self.defaults.items() if key in ("mode", "canaries", "keep_days",
+                                                                              "telemetry")}
+        steps = [("set", key, value) for key, value in chosen.items() if old.get(key, object()) != value] + \
+                [("unset", key, None) for key in old if key not in chosen]
+        if not steps:
+            self.defaults_note.setText(tr("Nothing changed."))
+            return
+        lower = security_steps_down(old, chosen)
+        if lower and not confirm(self, tr("Defaults of {host}", host=self.label(name)), tr(
+                "Every later start on {host} gets less protection: {changes}. Save anyway?", host=self.label(name),
+                changes="; ".join(lower)), tr("Save"), destructive=True):
+            return
+        argv = [("defaults", "set", key, json.dumps(value)) if op == "set" else ("defaults", "unset", key)
+                for op, key, value in steps]
 
-    def set_telemetry(self, _index=None):
-        name, level = self.host(), self.telemetry.currentData()
-        if name is None:
-            return
-        args = ("defaults", "unset", "telemetry") if level == "off" else ("defaults", "set", "telemetry", level)
-        background(lambda: self.sai.host_run(name, *args, timeout=60), owner=self, source=self.telemetry, timeout=90,
-                   done=lambda result, error: self.acted(result, error))
+        def work():
+            said = []
+            for args in argv:
+                status, out, err = self.sai.host_run(name, *args, timeout=60)
+                said.append((out + err).strip())
+                if status != 0:
+                    raise ValueError("\n".join(said))
+            return "\n".join(said)
+
+        def done(result, error):
+            if error:
+                warn(self, tr("Defaults"), printable(str(error)))
+            self.defaults_host = None
+            self.load_defaults()
+        background(work, owner=self, source=self.save_defaults_button, timeout=60 * len(argv) + 30, done=done)
 
     # -- versions and updates --
 
