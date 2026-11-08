@@ -680,8 +680,8 @@ def sandbox_name(record, real, keeping=False):
     the name a restart gives it (restart_names), so that it is at the same place then. One that is not kept while
     the run has a session (added read-only) is named <name>-ro (-ro-2 ...): it never takes the name a later kept one
     gets back at a restart. Else (no session: no restart) its name, -2, -3 ... after the names taken. The second
-    item names the place after a restart when it cannot be the same (a workspace that is not kept holds that name
-    now)."""
+    item names the place after a restart when it cannot be the same (another workspace holds that name now: one
+    that is not kept, or a kept one that a restart puts elsewhere, e.g. after a removal)."""
     checks = record.get("workspace_checks") or {}
     taken = {PurePosixPath(entry["sandbox"]).name for entry in checks.get("workspaces", [])[1:]}
     taken |= {PurePosixPath(entry["sandbox"]).name for entry in present_workspaces(record)}
@@ -922,8 +922,16 @@ def add(record, value, read_only=False, out=print, runner=run_helper, finder=fin
     out(f"added {shown(real)} to {shown(record.get('run'))} at {entry['sandbox']} ({mode}"
         f"{', kept for the session' if entry['kept'] else ''}){push_note}")
     if entry["kept"] and elsewhere:
-        out(f"  after a restart it is at {WORKSPACES_DIR}/{elsewhere} (a workspace that is not kept holds that name "
-            "now)")
+        holder = next((other for other in present_workspaces(record)
+                       if PurePosixPath(other.get("sandbox") or "").name == elsewhere), None)
+        if holder is not None and holder.get("kept"):
+            why = (f"{shown(holder.get('host'))}, kept for the session too, holds that name now; a restart puts it "
+                   "at its own place")
+        elif holder is not None:
+            why = f"{shown(holder.get('host'))} holds that name now; it is not kept for the session"
+        else:
+            why = "another workspace holds that name now"
+        out(f"  after a restart it is at {WORKSPACES_DIR}/{elsewhere} ({why})")
     return entry["sandbox"]
 
 

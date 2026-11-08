@@ -2596,6 +2596,10 @@ def parse_mount(value):
         source = Path(source).expanduser().resolve(strict=True)
     except OSError as exc:
         raise ValueError(f"Mount source unavailable: {exc}") from None
+    if source.is_socket():
+        # Through a symlink as well (resolved above): /var/run/docker.sock would be the host's root.
+        raise ValueError(f"--mount {source} is a socket: whoever connects to it gets what runs behind it (a "
+                         "container engine, an agent holding your keys, the session bus); sockets are never mounted")
     if mode not in ("ro", "rw") or not (source.is_dir() or source.is_file()):
         raise ValueError("Mount must be a regular file/directory with ro or rw mode")
     if any(source == base or base in source.parents for base in (DEV, Path("/proc"), Path("/sys"))):
@@ -3108,6 +3112,19 @@ def validate(a):
         # The connection log is always kept; a workspace containing this directory needs --log-dir elsewhere.
         a.log_dir = default_log_dir(workspace)
         check_private_dir(a, a.log_dir, "The default log directory (set --log-dir)")
+        check_output_dir(a.log_dir, "The default log directory (set --log-dir)")
+
+
+def check_output_dir(path, option):
+    """Refuse a host directory PATH bound read-write into the sandbox for the launcher's output (--log-dir,
+    --gui-vnc) that is, holds or lies in a folder of the user's sockets, a private location (sandbox-ai's own
+    folders for them in XDG_STATE_HOME, where the wizard puts them, excepted) or a kernel file system."""
+    path = Path(path).expanduser().resolve()
+    check_socket_location(path, option)
+    check_kernel_mounts(path, option)
+    state = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state").expanduser().resolve()
+    if not any(own in path.parents for own in (state / "sandbox-ai" / "logs", state / "sandbox-ai" / "vnc")):
+        check_private_location(path, option)
 
 
 def default_log_dir(project):
@@ -3177,7 +3194,45 @@ def kernel_mounts_below(path, mountinfo=Path("/proc/self/mountinfo")):
     return found
 
 
+def kernel_mount_holding(path, mountinfo=Path("/proc/self/mountinfo")):
+    """(mount point, file system type) of the kernel's own file system (KERNEL_FILESYSTEMS) that PATH (resolved)
+    lies in, by the mount table of this namespace, else None: the mount with the longest mount point that is PATH or
+    one of its parents (the last such line on equal points: an overmount lies on top). A kernel file system mounted
+    on a shorter one of them later in the table may hide that mount: it counts as well (refused rather than
+    guessed). A procfs at /mnt/chroot/proc hands out /proc/PID/root also to a workspace /mnt/chroot/proc/1, which
+    kernel_mounts_below does not see. An unreadable table: None (as kernel_mounts_below)."""
+    try:
+        text = Path(mountinfo).read_text(errors="replace")
+    except OSError:
+        return None
+    target = str(path).rstrip("/") or "/"
+    matches = []
+    for line in text.splitlines():
+        head, separator, tail = line.partition(" - ")
+        fields, kind = head.split(), tail.split()[:1]
+        if not separator or len(fields) < 5 or not kind:
+            continue
+        point = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), fields[4]).rstrip("/") or "/"
+        if point == "/" or target == point or target.startswith(point + "/"):
+            matches.append((point, kind[0]))
+    if not matches:
+        return None
+    longest = max(len(point) for point, _ in matches)
+    index = max(i for i, (point, _) in enumerate(matches) if len(point) == longest)
+    for point, kind in [matches[index]] + matches[index + 1:]:
+        if kind in KERNEL_FILESYSTEMS:
+            return point, kind
+    return None
+
+
 def check_kernel_mounts(path, option, mountinfo=Path("/proc/self/mountinfo")):
+    """Refuse a host PATH (resolved) given to a sandbox that lies in a file system of the kernel's own
+    (kernel_mount_holding) or holds one (kernel_mounts_below)."""
+    holding = kernel_mount_holding(path, mountinfo)
+    if holding:
+        raise ValueError(f"{option} {path} lies in {holding[0]}, a file system of the kernel's own ({holding[1]}); "
+                         "the sandbox would get the host's processes, devices or control files with it. Give a "
+                         "project directory.")
     found = kernel_mounts_below(path, mountinfo)
     if found:
         shown = ", ".join(f"{point} ({kind})" for point, kind in found[:5]) + (" ..." if len(found) > 5 else "")
@@ -3324,8 +3379,10 @@ def check_host_sources(a):
         check_socket_location(a.state_dir.expanduser().resolve(), "--state-dir")
         check_kernel_mounts(a.state_dir.expanduser().resolve(), "--state-dir")
         check_package_location(a.state_dir.expanduser().resolve(), "--state-dir")
-    if a.log_dir:
-        check_planted(a.log_dir, "--log-dir", before)
+    for path, option in [(a.log_dir, "--log-dir"), (a.gui_vnc, "--gui-vnc")]:
+        if path:
+            check_planted(path, option, before)
+            check_output_dir(path, option)
     for value in a.kit_dir:
         check_planted(value, "--kit-dir", before)
     # An MCP image server mounts its folders again for every connection: the agent must not be able to swap

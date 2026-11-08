@@ -148,6 +148,11 @@ def test_add_list_remove(remote):
     ("ok", "-oProxyCommand=touch /tmp/pwned", {}, "ssh is"), ("ok", "u@h;id", {}, "ssh is"),
     ("ok", "u@h h", {}, "ssh is"), ("ok", "u@h", {"port": 0}, "port"), ("ok", "u@h", {"port": True}, "port"),
     ("ok", "u@h", {"identity": "relative/key"}, "identity"), ("ok", "u@h", {"command": "x; rm -rf ~"}, "command"),
+    # Security review round 3: a command ssh's remote shell would take for an option; an identity outside HOME.
+    ("ok", "u@h", {"command": "-oProxyCommand=x"}, "command"), ("ok", "u@h", {"command": "--help"}, "command"),
+    ("ok", "u@h", {"identity": "/etc/shadow"}, "outside your HOME"),
+    ("ok", "u@h", {"identity": "~/../../etc/passwd"}, "outside your HOME"),
+    ("ok", "u@h", {"identity": "~"}, "outside your HOME"), ("ok", "u@h", {"identity": ""}, "identity"),
     ("ok", "u@h", {"extra": 1}, "allowed keys"),
 ])
 def test_what_a_host_may_not_be(name, target, extra, why):
@@ -278,7 +283,7 @@ def test_test_makes_an_unprotected_key_private_and_tries_again(remote):
 def test_a_key_ssh_names_as_too_open_is_made_private_and_tried_again(remote, monkeypatch):
     """A key ssh_config names (not the host's identity, not a default one): ssh says it is too open; it is made
     private, and the connection is tried once more."""
-    other = key(remote["tmp"] / "keys/config_key")
+    other = key(remote["tmp"] / "local-home/keys/config_key")
     h.save({"ct1": h.check("ct1", {"ssh": "user@ct1", "identity": str(other)})})
     real = h.key_candidates
     monkeypatch.setattr(h, "key_candidates", lambda entry: [])  # as if only ssh_config knew it
@@ -691,3 +696,77 @@ def test_remove_and_changed_settings_end_the_shared_connection(mux, monkeypatch)
     assert h.cli(["remove", "ct1"], lambda line: None) == 0
     assert mux["log"].read_text().splitlines()[-1] == "-O exit"
     assert not h.control_path({"ssh": "user@ct1", "port": 22}).exists()
+
+
+# --- security review round 3: the identity and hosts.json's writers ---------------------------------------
+
+def test_identity_is_a_key_file_in_home(remote, tmp_path):
+    """The identity is made private (0600) by add and test: it must be a regular file in HOME (also with its links
+    resolved), and only one that holds a private key is changed."""
+    home = tmp_path / "local-home"
+    good = key(home / ".ssh/id_ok")
+    assert h.check("ct1", {"ssh": "u@h", "identity": "~/.ssh/id_ok"})["identity"] == "~/.ssh/id_ok"
+    assert h.check("ct1", {"ssh": "u@h", "identity": str(home / ".ssh/not-yet")})  # missing: ssh says so
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (home / "linked").symlink_to(outside)
+    (home / ".ssh/id_link").symlink_to(good)
+    (home / ".ssh/folder").mkdir()
+    for identity, why in [(str(home / "linked/key"), "outside your HOME"), ("~/.ssh/id_link", "symbolic link"),
+                          ("~/.ssh/folder", "not a regular file")]:
+        with pytest.raises(ValueError, match=why):
+            h.check("ct1", {"ssh": "u@h", "identity": identity})
+    # A file of yours in HOME that is no key (your notes): never made private through the identity.
+    notes = home / "notes.txt"
+    notes.write_text("my notes\n")
+    notes.chmod(0o644)
+    fixed, _ = h.protect_keys(h.check("ct1", {"ssh": "u@h", "identity": str(notes)}))
+    assert fixed == [] and notes.stat().st_mode & 0o777 == 0o644
+    fixed, _ = h.protect_keys(h.check("ct1", {"ssh": "u@h", "identity": str(good)}))
+    assert [change["path"] for change in fixed] == [str(good)] and good.stat().st_mode & 0o777 == 0o600
+    lines = []
+    with pytest.raises(ValueError, match="outside your HOME"):
+        h.cli(["add", "ct9", "u@h", "--identity", str(outside / "key")], lines.append)
+    assert "ct9" not in h.load()
+
+
+def test_hosts_file_lock(remote):
+    """Every writer of hosts.json (add, set, remove; the web interface) holds hosts_file_lock: one at a time, a
+    lock file beside it (0600), reentrant within a thread (save takes it too)."""
+    import threading
+    path = h.config_file()
+    with h.hosts_file_lock() as held:
+        assert held == path
+        lock = path.with_name("hosts.json.lock")
+        assert lock.is_file() and lock.stat().st_mode & 0o777 == 0o600
+        with h.hosts_file_lock(path):  # reentrant: save() within a read-modify-write
+            h.save({"ct1": h.check("ct1", {"ssh": "user@ct1"})})
+        got = []
+
+        def other():
+            try:
+                with h.hosts_file_lock(timeout=0.3):
+                    got.append("locked")
+            except ValueError as exc:
+                got.append(str(exc))
+        thread = threading.Thread(target=other)
+        thread.start()
+        thread.join()
+        assert "being changed by another" in got[0], got
+        # A writer that waits gets it once the first one is done.
+        waiting = threading.Thread(target=lambda: h.cli(["remove", "ct1"], got.append))
+        waiting.start()
+        time.sleep(0.2)
+        assert "ct1" in h.load(), "the remove waits for the lock"
+    waiting.join(5)
+    assert h.load() == {} and "host ct1 removed" in got
+    # Another process: the same lock (flock), as the app's and the web interface's.
+    script = (f"import importlib.util, sys; spec = importlib.util.spec_from_file_location('h', {str(ROOT / 'sandbox/hosts.py')!r}); "
+              "h = importlib.util.module_from_spec(spec); spec.loader.exec_module(h)\n"
+              "try:\n    with h.hosts_file_lock(timeout=0.3): print('locked')\nexcept ValueError: print('busy')")
+    with h.hosts_file_lock():
+        assert subprocess.run([sys.executable, "-c", script], capture_output=True, text=True).stdout.strip() == "busy"
+    assert subprocess.run([sys.executable, "-c", script], capture_output=True, text=True).stdout.strip() == "locked"
+    lock.chmod(0o644)
+    with h.hosts_file_lock():
+        assert lock.stat().st_mode & 0o777 == 0o600

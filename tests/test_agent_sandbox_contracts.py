@@ -142,6 +142,14 @@ def test_parse_mount(scenario, tmp_path):
         for mount in ("missing-separators", f"{tmp_path}/missing:/mnt/data:rw", f"{tmp_path}:/mnt/data:bad"):
             with pytest.raises(ValueError):
                 s.parse_mount(mount)
+        # Security review round 3: a socket (/var/run/docker.sock), also through a symlink, gives what runs behind it.
+        with socket.socket(socket.AF_UNIX) as server:
+            server.bind(str(tmp_path / "engine.sock"))
+            (tmp_path / "link").symlink_to(tmp_path / "engine.sock")
+            for source in ("engine.sock", "link"):
+                for mode in ("ro", "rw"):
+                    with pytest.raises(ValueError, match=re.escape(f"--mount {tmp_path}/engine.sock is a socket")):
+                        s.parse_mount(f"{tmp_path / source}:/var/run/docker.sock:{mode}")
     else:
         path = tmp_path / ("colon: and spaces" if scenario == "edge" else "reference")
         path.write_text("unchanged")
@@ -2609,6 +2617,10 @@ def test_check_host_sources(scenario, tmp_path):
         for options in cases:
             with pytest.raises(ValueError, match="agent can change"):
                 s.validate(exposure_args(tmp_path, *options))
+        # Security review round 3: --log-dir and --gui-vnc (bound rw) never in a private location or socket folder.
+        for option in ("--log-dir", "--gui-vnc"):
+            with pytest.raises(ValueError, match=f"{option} .*lies in"):
+                s.validate(exposure_args(tmp_path, option, str(Path.home() / ".ssh" / "out")))
         return
     # The persistent HOME must not lie in a workspace, where it could be committed or swapped.
     (tmp_path / "work").mkdir()
@@ -3368,17 +3380,78 @@ def test_kernel_mounts_below(scenario, tmp_path):
         assert s.kernel_mounts_below(Path("/srv/chro"), table) == [], "a prefix of a name is not a parent"
 
 
+def test_kernel_mount_holding(scenario, tmp_path):
+    """Security review round 3: a path INSIDE a kernel file system mounted outside /proc, /sys and /dev (a chroot's
+    procfs) is refused as well: the mount holding it is the one with the longest mount point, the last on top."""
+    table = tmp_path / "mountinfo"
+    table.write_text(MOUNTINFO_SAMPLE)
+    if scenario == "happy":
+        assert s.kernel_mount_holding(Path("/srv/chroot/data/x"), table) is None
+        assert s.kernel_mount_holding(Path("/srv/chroot"), table) is None, "holding one is kernel_mounts_below's"
+        assert s.kernel_mount_holding(Path("/srv/chroot/proc/1"), table) == ("/srv/chroot/proc", "proc")
+        assert s.kernel_mount_holding(Path("/srv/chroot/proc"), table) == ("/srv/chroot/proc", "proc")
+        assert s.kernel_mount_holding(Path("/srv/other dir/proc/self"), table) == ("/srv/other dir/proc", "proc")
+    elif scenario == "sad":
+        assert s.kernel_mount_holding(Path("/srv/chroot/proc/1"), tmp_path / "missing") is None
+        assert s.kernel_mount_holding(Path("/srv/chroot/processes"), table) is None, "a prefix of a name"
+    else:
+        # Overmounts: the last line on the same point lies on top; a kernel file system mounted later on a parent
+        # may hide the deeper mount, so it counts.
+        table.write_text(MOUNTINFO_SAMPLE + "50 40 0:30 / /srv/chroot/proc rw - tmpfs tmpfs rw\n")
+        assert s.kernel_mount_holding(Path("/srv/chroot/proc/1"), table) is None
+        table.write_text(MOUNTINFO_SAMPLE + "51 22 0:31 / /srv/chroot/data rw - proc proc rw\n")
+        assert s.kernel_mount_holding(Path("/srv/chroot/data/1"), table) == ("/srv/chroot/data", "proc")
+        table.write_text(MOUNTINFO_SAMPLE + "52 22 0:32 / /srv rw - sysfs sysfs rw\n")
+        assert s.kernel_mount_holding(Path("/srv/chroot/data/1"), table) == ("/srv", "sysfs")
+
+
 def test_check_kernel_mounts(scenario, tmp_path):
     table = tmp_path / "mountinfo"
     table.write_text(MOUNTINFO_SAMPLE)
     if scenario == "happy":
         s.check_kernel_mounts(Path("/srv/chroot/data"), "Workspace", table)
+        s.check_kernel_mounts(Path("/srv/chroot/data/deeper"), "--state-dir", table)
     elif scenario == "sad":
         with pytest.raises(ValueError, match="kernel's own: /srv/chroot/proc \\(proc\\)"):
             s.check_kernel_mounts(Path("/srv/chroot"), "Workspace", table)
     else:
         with pytest.raises(ValueError, match="--mount"):
             s.check_kernel_mounts(Path("/srv"), "--mount", table)
+        # Inside one mounted outside /proc, /sys and /dev (a chroot's procfs: /srv/chroot/proc/1/root is /).
+        for option in ("Workspace", "--mount", "--state-dir"):
+            with pytest.raises(ValueError, match=f"{option} /srv/chroot/proc/1 lies in /srv/chroot/proc, a file "
+                                                 "system of the kernel's own \\(proc\\)"):
+                s.check_kernel_mounts(Path("/srv/chroot/proc/1"), option, table)
+
+
+def test_check_output_dir(scenario, tmp_path, monkeypatch):
+    """Security review round 3: --log-dir and --gui-vnc are bound read-write; like a workspace they must not be,
+    hold or lie in a folder of your sockets, a private location or a kernel file system."""
+    run, state = tmp_path / "run", tmp_path / "state"
+    (run / "bus").mkdir(parents=True)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(run))
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    if scenario == "happy":
+        s.check_output_dir(tmp_path / "logs", "--log-dir")
+        # sandbox-ai's own folders for them in XDG_STATE_HOME (the wizard's defaults) are not private locations.
+        s.check_output_dir(state / "sandbox-ai" / "logs" / "project-1234", "--log-dir")
+        s.check_output_dir(state / "sandbox-ai" / "vnc" / "project-1234", "--gui-vnc")
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="--gui-vnc .*a socket there"):
+            s.check_output_dir(run / "bus", "--gui-vnc")
+        for private in (state, state / "sandbox-ai" / "logs", state / "sandbox-ai" / "runs", Path.home() / ".ssh"):
+            with pytest.raises(ValueError, match="--log-dir .*(lies in|contains)"):
+                s.check_output_dir(private, "--log-dir")
+    else:
+        table = tmp_path / "mountinfo"
+        table.write_text(f"22 1 0:21 / / rw - ext4 /dev/sda1 rw\n40 22 0:5 / {tmp_path}/chroot/proc rw - proc "
+                         "proc rw\n")
+        real = s.check_kernel_mounts
+        monkeypatch.setattr(s, "check_kernel_mounts", lambda path, option: real(path, option, table))
+        with pytest.raises(ValueError, match="--log-dir .*lies in .*kernel's own"):
+            s.check_output_dir(tmp_path / "chroot/proc/1", "--log-dir")
+        with pytest.raises(ValueError, match="--gui-vnc .*holds file systems of the kernel's own"):
+            s.check_output_dir(tmp_path / "chroot", "--gui-vnc")
 
 
 def test_check_workspace_scope(scenario, tmp_path, monkeypatch):

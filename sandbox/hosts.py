@@ -23,7 +23,8 @@ remote command falls back to ~/.local/bin/sandbox-ai (install.sh's place) when s
 A key file that others can read is refused by ssh ("UNPROTECTED PRIVATE KEY FILE"): add and test make your own
 key files (the host's --identity, else ~/.ssh/id_*; regular files you own, never through a symbolic link)
 private (0600), say so, and try the connection again; a key folder that others can write to is named, not
-changed.
+changed. An --identity lies in your HOME (a regular file, not a link) and is changed only if it holds a private
+key. Writers of hosts.json (add, set, remove, the web interface) hold hosts_file_lock (hosts.json.lock beside it).
 
 An update runs the host's own `sandbox-ai update`: install.sh's signed update of the installation there (a user
 one in ~/.local/share/sandbox-ai, or a system one in PREFIX/lib/sandbox-ai, which needs root: --sudo, or the
@@ -114,21 +115,96 @@ def check(name, entry):
     if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
         raise ValueError(f"host {name}: port is 1-65535")
     identity = entry.get("identity")
-    if identity is not None and (not isinstance(identity, str) or not os.path.isabs(os.path.expanduser(identity))
-                                 or "\n" in identity):
-        raise ValueError(f"host {name}: identity is an absolute path (or ~/...)")
+    if identity is not None:
+        check_identity(name, identity)
     description = entry.get("description", "")
     if not isinstance(description, str) or len(description) > 200 or not description.isprintable():
         raise ValueError(f"host {name}: description is one line of at most 200 characters")
     command = entry.get("command")
-    if command is not None and (not isinstance(command, str) or not COMMAND.fullmatch(command)):
-        raise ValueError(f"host {name}: command is the path of sandbox-ai there")
+    if command is not None and (not isinstance(command, str) or not COMMAND.fullmatch(command)
+                                or command.startswith("-")):
+        raise ValueError(f"host {name}: command is the path of sandbox-ai there (not starting with '-')")
     update_sudo = entry.get("update_sudo", False)
     if not isinstance(update_sudo, bool):
         raise ValueError(f"host {name}: update_sudo is true or false")
     return {"ssh": target, "port": port, **({"identity": identity} if identity else {}),
             "description": description, **({"command": command} if command else {}),
             **({"update_sudo": True} if update_sudo else {})}
+
+
+def check_identity(name, identity):
+    """Refuse host NAME's IDENTITY (its key file, for ssh -i) unless it is an absolute path (or ~/...) inside your
+    HOME, also with its links resolved, and, if it exists, a regular file (not a symbolic link, a folder or a
+    device): add and test make the key file private (0600), which must never reach a file elsewhere."""
+    if not isinstance(identity, str) or any(c in identity for c in "\n\r\0") or not identity \
+            or not os.path.isabs(os.path.expanduser(identity)):
+        raise ValueError(f"host {name}: identity is an absolute path (or ~/...)")
+    home = os.path.normpath(str(Path.home()))
+    path = os.path.normpath(os.path.expanduser(identity))
+    real_home, real = os.path.realpath(home), os.path.realpath(path)
+
+    def below(inner, outer):
+        return inner.startswith(outer.rstrip("/") + "/") and inner != outer
+    if not below(path, home) or not below(real, real_home):
+        raise ValueError(f"host {name}: identity {printable(identity)} lies outside your HOME ({printable(home)}); "
+                         "give a key file there, e.g. ~/.ssh/id_ed25519")
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return  # not there (yet): ssh says so at the connection
+    except OSError as exc:
+        raise ValueError(f"host {name}: identity {printable(identity)}: {exc.strerror}") from None
+    if not stat.S_ISREG(info.st_mode):
+        kind = "a symbolic link" if stat.S_ISLNK(info.st_mode) else "not a regular file"
+        raise ValueError(f"host {name}: identity {printable(identity)} is {kind}; give the key file itself")
+
+
+HOSTS_LOCK_TIMEOUT = 15  # seconds hosts_file_lock waits for another writer of hosts.json
+_held_locks = threading.local()
+
+
+@contextlib.contextmanager
+def hosts_file_lock(path=None, timeout=HOSTS_LOCK_TIMEOUT):
+    """Hold the lock for a read-modify-write of hosts.json (PATH, else config_file()): an flock on PATH.lock
+    beside it (0600, this user's, never through a symbolic link), so that the CLI, the app and the web interface
+    never lose each other's change. Reentrant within a thread (save() takes it as well); waits at most TIMEOUT
+    seconds for another writer, then a ValueError. Yields PATH."""
+    path = Path(path or config_file())
+    held = getattr(_held_locks, "paths", None)
+    if held is None:
+        held = _held_locks.paths = set()
+    key = str(path.absolute())
+    if key in held:
+        yield path
+        return
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock = path.with_name(path.name + ".lock")
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise ValueError(f"{printable(lock)}: not a regular file of yours; remove it")
+        if stat.S_IMODE(info.st_mode) & 0o077:
+            os.fchmod(fd, 0o600)
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if exc.errno not in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
+                    raise
+                if time.monotonic() >= deadline:
+                    raise ValueError(f"{printable(path)} is being changed by another sandbox-ai (the app, the web "
+                                     "interface or a command); try again") from None
+                time.sleep(0.05)
+        held.add(key)
+        try:
+            yield path
+        finally:
+            held.discard(key)
+    finally:
+        os.close(fd)  # (and with it the lock)
 
 
 def load(path=None):
@@ -153,18 +229,20 @@ def load(path=None):
 
 
 def save(hosts, path=None):
+    """Write HOSTS to the file, atomically, under hosts_file_lock (a read-modify-write holds it around its load()
+    as well)."""
     path = Path(path or config_file())
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=".hosts-", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w") as stream:
-            os.fchmod(stream.fileno(), 0o600)
-            json.dump({"version": 1, "hosts": hosts}, stream, indent=2)
-            stream.write("\n")
-        os.replace(temporary, path)
-    except BaseException:
-        Path(temporary).unlink(missing_ok=True)
-        raise
+    with hosts_file_lock(path):
+        fd, temporary = tempfile.mkstemp(prefix=".hosts-", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w") as stream:
+                os.fchmod(stream.fileno(), 0o600)
+                json.dump({"version": 1, "hosts": hosts}, stream, indent=2)
+                stream.write("\n")
+            os.replace(temporary, path)
+        except BaseException:
+            Path(temporary).unlink(missing_ok=True)
+            raise
 
 
 def entries(path=None):
@@ -512,7 +590,8 @@ def protect_keys(entry, output=""):
     """([fixed], [warnings]) after making ENTRY's key files private, and the key files ssh's OUTPUT names as too
     open (one an ssh_config names); a key folder that others can write to is named, not changed."""
     fixed, warnings = [], []
-    paths = [(path, False) for path in key_candidates(entry)]
+    # The host's identity is changed only if it holds a private key, as what ssh's output names (never any file).
+    paths = [(path, bool(entry.get("identity"))) for path in key_candidates(entry)]
     for match in TOO_OPEN.finditer(output or ""):
         path = Path(match.group(1) or match.group(2))
         if path.is_absolute() and all(path != known for known, _ in paths):
@@ -962,16 +1041,17 @@ def cli(argv_, out=print):
         else:
             out(summary(results))
         return 0 if all(not r.get("error") or r.get("after") for r in results) else 1
-    hosts = load()
     if a.command == "add":
-        if a.name in hosts:
-            raise ValueError(f"host {a.name} exists; remove it first")
         entry = check(a.name, {"ssh": a.ssh, "port": a.port, **({"identity": a.identity} if a.identity else {}),
                                "description": a.description,
                                **({"command": a.remote_command} if a.remote_command else {}),
                                **({"update_sudo": True} if a.update_sudo else {})})
-        hosts[a.name] = entry
-        save(hosts)
+        with hosts_file_lock():
+            hosts = load()
+            if a.name in hosts:
+                raise ValueError(f"host {a.name} exists; remove it first")
+            hosts[a.name] = entry
+            save(hosts)
         out(f"host {a.name} added")
         fixed, warnings = protect_keys(entry)
         for change in fixed:
@@ -989,20 +1069,24 @@ def cli(argv_, out=print):
             f"  connection: failed: {failure(status, said, err)}")
         return 0
     if a.command == "set":
-        if a.name not in hosts:
-            raise ValueError(f"no host {printable(a.name)}")
-        before = hosts[a.name]
-        hosts[a.name] = check(a.name, {**hosts[a.name], "update_sudo": a.update_sudo == "on"})
-        save(hosts)
+        with hosts_file_lock():
+            hosts = load()
+            if a.name not in hosts:
+                raise ValueError(f"no host {printable(a.name)}")
+            before = hosts[a.name]
+            hosts[a.name] = check(a.name, {**hosts[a.name], "update_sudo": a.update_sudo == "on"})
+            save(hosts)
         if any(before.get(key) != hosts[a.name].get(key) for key in CONNECTION):
             stop_master(before)  # its shared connection was made for what the entry said before
         out(f"host {a.name}: its update " + ("runs with sudo" if a.update_sudo == "on" else "runs without sudo"))
         return 0
     if a.command == "remove":
-        if a.name not in hosts:
-            raise ValueError(f"no host {printable(a.name)}")
-        removed = hosts.pop(a.name)
-        save(hosts)
+        with hosts_file_lock():
+            hosts = load()
+            if a.name not in hosts:
+                raise ValueError(f"no host {printable(a.name)}")
+            removed = hosts.pop(a.name)
+            save(hosts)
         forget_status(a.name)
         stop_master(removed)  # its shared connection would otherwise serve commands for up to CONTROL_PERSIST s
         out(f"host {a.name} removed")

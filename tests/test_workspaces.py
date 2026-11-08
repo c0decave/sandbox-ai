@@ -909,11 +909,20 @@ def test_a_kept_workspace_is_at_the_same_place_after_a_restart(run, monkeypatch)
     fourth = add(tmp / "w" / "lib-ro")
     assert fourth == "/workspaces/lib-ro-2" and after_restart()[str(tmp / "w" / "lib-ro")] == "/workspaces/lib-ro"
     assert "after a restart it is at /workspaces/lib-ro" in lines[-1]
+    assert f"({tmp / 'x' / 'lib'} holds that name now; it is not kept for the session)" in lines[-1]
     lines.clear()
     w.remove(record, "/workspaces/lib-2", out=lines.append, runner=ok, finder=fake_found, using=lambda f, p: [])
     assert after_restart()[str(tmp / "z" / "lib")] == "/workspaces/lib-2"
     assert any(f"after a restart {tmp / 'z' / 'lib'} is at /workspaces/lib-2 (now /workspaces/lib-3)" in line
                for line in lines)
+    # Security review round 3: a KEPT one holds the place (z/lib at lib-3 now, at lib-2 after a restart): said so,
+    # never "one that is not kept".
+    lines.clear()
+    fifth = add(tmp / "v" / "lib")
+    assert fifth == "/workspaces/lib-2" and after_restart()[str(tmp / "v" / "lib")] == "/workspaces/lib-3"
+    assert "after a restart it is at /workspaces/lib-3" in lines[-1] and "not kept" not in lines[-1]
+    assert f"({tmp / 'z' / 'lib'}, kept for the session too, holds that name now; a restart puts it at its own " \
+           "place)" in lines[-1]
 
 
 def test_a_partial_removal_leaves_the_push_check(run):
