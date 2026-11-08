@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -34,11 +35,27 @@ def scenario(request):
     return request.param
 
 
+def make_dist(out, seconds=240):
+    """scripts/make_dist.py into OUT, as a release builds it; one that does not finish within SECONDS (it hung on CI
+    runners only) fails with where it waited: faulthandler's dump of the child, its frames on one line, which is what
+    the CI annotation shows."""
+    process = subprocess.Popen([sys.executable, "-X", "faulthandler", str(ROOT / "scripts/make_dist.py"),
+                                "--allow-dirty", "--skip-python", "--out", str(out)], stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, env={**os.environ, "SOURCE_DATE_EPOCH": "0"})
+    try:
+        _, err = process.communicate(timeout=seconds)
+    except subprocess.TimeoutExpired:
+        process.send_signal(signal.SIGABRT)  # faulthandler writes every thread's frames to stderr
+        _, err = process.communicate(timeout=30)
+        frames = [line.strip() for line in err.decode(errors="replace").splitlines() if line.strip().startswith("File")]
+        pytest.fail("make_dist hung: " + " < ".join(f.replace('File "', "").replace('", line ', ":") for f in frames)[:900])
+    assert process.returncode == 0, err.decode(errors="replace")[-2000:]
+
+
 @pytest.fixture(scope="module")
 def dist(tmp_path_factory):
     out = tmp_path_factory.mktemp("dist")
-    subprocess.run([sys.executable, str(ROOT / "scripts/make_dist.py"), "--allow-dirty", "--skip-python",
-                    "--out", str(out)], check=True, capture_output=True, env={**os.environ, "SOURCE_DATE_EPOCH": "0"})
+    make_dist(out)
     return out
 
 
@@ -303,9 +320,7 @@ def test_install_protects_foreign_files_and_refuses_bad_input(scenario, tmp_path
 
 def test_make_dist_is_reproducible(scenario, tmp_path, dist):
     other = tmp_path / "again"
-    env = {**os.environ, "SOURCE_DATE_EPOCH": "0"}
-    subprocess.run([sys.executable, str(ROOT / "scripts/make_dist.py"), "--allow-dirty", "--skip-python",
-                    "--out", str(other)], check=True, capture_output=True, env=env)
+    make_dist(other)
     name = f"sandbox-ai-bundle-{VERSION}.tar.gz"
     assert (other / name).read_bytes() == (dist / name).read_bytes()
     sums = dict(reversed(line.split("  ")) for line in (dist / "SHA256SUMS").read_text().splitlines())
