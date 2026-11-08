@@ -1,7 +1,7 @@
 # Source distribution: the package plus everything a checkout has.
 include LICENSE README.md README_DE.md QUICKSTART.md QUICKSTART_DE.md SANDBOX.md TODO.md RELEASING.md PROXMOX_LXC.md PROXMOX_LXC_DE.md INTEGRATIONS.md INTEGRATIONS_DE.md
 include install.sh sandbox-ai claude-sandbox codex-sandbox opencode-sandbox sandbox-build-image sandbox-mcp sandbox-session sandbox-wizard
-recursive-include sandbox Containerfile.* build_image.sh release-signers mcp-signers
+recursive-include sandbox Containerfile.* build_image.sh release-signers mcp-signers public_suffix_list.dat
 graft sandbox/web
 graft sandbox/presets
 graft sandbox/templates

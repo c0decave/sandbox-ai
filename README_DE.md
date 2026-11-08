@@ -1661,6 +1661,14 @@ den Agenten des Laufs; geht das nicht, ändert sich nichts, auch nicht der Lauf.
 Ein Git-Login wird als Verweis behalten (`--git-token-env URL=VAR`), nie als
 Token.
 
+`sandbox-ai net show [LAUF] --keep` behält auf dieselbe Weise, was der Lauf bis
+dahin bekommen hat: was Sie mit `net allow` gegeben haben, Wildcards, Netze,
+DNS, Host-Ports, Geräte und hinzugefügte Workspaces sowie was „immer“ erlaubt
+wurde. Was eine Frage nur einmal oder für den Lauf geöffnet hat, bleibt draußen
+(und wird genannt); `--keep-all` behält auch das. Beide zeigen jede Option, bevor
+die Datei geschrieben wird, und beide werden abgelehnt, solange die Richtlinie
+des Administrators Antworten unter „immer“ begrenzt.
+
 Den Namen eines Laufs zeigt `list`; der Agent bekommt ihn als
 `$SANDBOX_AI_RUN` und kann so den genauen Befehl nennen. Er darf fehlen, wenn
 nur eine Sandbox läuft (oder nur eine für das aktuelle Verzeichnis).

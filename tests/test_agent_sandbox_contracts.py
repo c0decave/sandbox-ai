@@ -3327,6 +3327,10 @@ def test_check_workspace_scope(scenario, tmp_path, monkeypatch):
         for risky in [Path("/"), tmp_path / "home", s.HERE, s.HERE.parent, Path(tempfile.gettempdir())]:
             with pytest.raises(ValueError, match="Workspace"):
                 s.check_workspace_scope(risky.resolve())
+        # The kernel's and the devices' trees, also where a read-only workspace was meant (review finding).
+        for tree in ("/proc", "/proc/1/root", "/sys", "/sys/fs/cgroup", "/dev", "/dev/shm"):
+            with pytest.raises(ValueError, match="kernel's and the devices' trees"):
+                s.check_workspace_scope(Path(tree))
     else:
         monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
         (tmp_path / "run").mkdir()

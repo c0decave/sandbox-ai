@@ -1575,6 +1575,13 @@ creates one for the run's agent; when it cannot, nothing changes, not even the
 run. A Git login is kept as its reference (`--git-token-env URL=VAR`), never as
 a token.
 
+`sandbox-ai net show [RUN] --keep` keeps what the run was given so far the same
+way: what you gave with `net allow`, wildcards, networks, DNS, host ports,
+devices and added workspaces, and what was approved "always". What a question
+opened only once or for the run is left out (and named); `--keep-all` keeps it
+too. Both print every option before the file is written, and both are refused
+while the administrator's policy caps answers below "always".
+
 The name of a run is shown by `list` and given to the agent as
 `$SANDBOX_AI_RUN`, so it can name the exact command; it may be left out when
 only one sandbox runs (or one for the current directory). `--allow-host` names

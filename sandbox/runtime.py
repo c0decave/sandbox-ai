@@ -1070,8 +1070,16 @@ def dns_address_reply(query, addresses, ttl=30):
 WILDCARDS = set()
 WILDCARDS_LOCK = threading.Lock()
 # Suffixes under which anyone can have a name of their own (a public suffix, a hosting or cloud service): a wildcard
-# at or below one would let the agent open any server it rents there, unasked. Two-label country domains
-# (co.uk, com.au, ...) are refused by their shape. Not the whole Public Suffix List: name such hosts one by one.
+# at or above one would let the agent open any server it rents there, unasked (*.X matches names at every depth
+# below X). Three sources, all refused:
+# - the Public Suffix List (ICANN and PRIVATE sections), a pinned copy beside this file (public_suffix_list.dat; the
+#   launcher binds it into the sandbox next to /sandbox/runtime.py): *.X is refused when X is a public suffix, or
+#   when a public suffix lies below X (*.amazonaws.com covers s3.amazonaws.com, where anyone has a bucket);
+# - SHARED_SUFFIXES: hosting, tunnel and request-catcher services (some not in the list at all), refused at or
+#   below them: they hand out names at any depth;
+# - COUNTRY_SECOND_LEVEL: two-label country domains (co.uk, com.au, ...) by their shape.
+# Without the list file (a copy of sandbox-ai that lacks it), FALLBACK_PUBLIC_SUFFIXES stands in for the list:
+# private-section entries refused at or below them. A list file that is there but malformed refuses every wildcard.
 SHARED_SUFFIXES = frozenset("""
 amazonaws.com cloudfront.net elasticbeanstalk.com awsapprunner.com on.aws lambda-url.on.aws
 azurewebsites.net azureedge.net azure-api.net azurestaticapps.net cloudapp.net cloudapp.azure.com blob.core.windows.net
@@ -1083,22 +1091,128 @@ loca.lt trycloudflare.com serveo.net surge.sh readthedocs.io blogspot.com wordpr
 squarespace.com tumblr.com myshopify.com webflow.io carrd.co neocities.org digitaloceanspaces.com ondigitalocean.app
 linodeobjects.com scw.cloud ovh.net duckdns.org no-ip.org ddns.net dyndns.org freedns.org sslip.io nip.io
 xip.io traefik.me localtest.me lvh.me
+devtunnels.ms b-cdn.net azurefd.net webhook.site pipedream.net interact.sh oast.fun oast.pro oast.live oast.site
+oast.online oast.me oastify.com burpcollaborator.net lhr.life localhost.run serveousercontent.com localtunnel.me
+pinggy.link bore.pub requestbin.net beeceptor.com canarytokens.com dnslog.cn ceye.io
+""".split())
+FALLBACK_PUBLIC_SUFFIXES = frozenset("""
+github.io githubusercontent.com gitlab.io devtunnels.ms ts.net hf.space azurefd.net b-cdn.net supabase.co csb.app
+eu.org vercel.app vercel.dev netlify.app pages.dev workers.dev fly.dev herokuapp.com appspot.com blogspot.com
+cloudfront.net azurewebsites.net azurestaticapps.net web.app firebaseapp.com run.app ngrok.io ngrok.app ngrok-free.app
+ngrok.dev ngrok-free.dev trycloudflare.com onrender.com glitch.me repl.co readthedocs.io surge.sh myshopify.com
+deno.dev r2.dev
 """.split())
 COUNTRY_SECOND_LEVEL = re.compile(r"(?:co|com|net|org|gov|edu|ac|or|ne|go|gob|nic|mil|ltd|plc|sch|info|biz)\.[a-z]{2}")
 WILDCARD_SUFFIX = re.compile(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}")
+PUBLIC_SUFFIX_FILE = Path(__file__).resolve().parent / "public_suffix_list.dat"
+PSL_LABEL = re.compile(r"[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?")
+PSL_SECTIONS = ("// ===BEGIN ICANN DOMAINS===", "// ===END ICANN DOMAINS===", "// ===BEGIN PRIVATE DOMAINS===",
+                "// ===END PRIVATE DOMAINS===")
+class PublicSuffixList:
+    """The Public Suffix List, parsed strictly: both sections there, whole and in order, a "*" only as a rule's
+    first label, a "!" only before a rule, at least 1000 rules; anything else is a ValueError (a list that cannot be
+    read refuses every wildcard, never none). Labels outside ASCII are kept in their xn-- form, as DNS has them."""
+    _loaded, _lock = {}, threading.Lock()
+
+    def __init__(self, text):
+        lines = [line.strip() for line in text.splitlines()]
+        marks = [lines.index(mark) if mark in lines else -1 for mark in PSL_SECTIONS]
+        if -1 in marks or marks != sorted(marks):
+            raise ValueError("not the Public Suffix List: its ICANN and PRIVATE sections are missing or out of order")
+        self.rules, self.wildcards, self.exceptions = set(), set(), set()
+        for number, line in enumerate(lines, 1):
+            if not line or line.startswith("//"):
+                continue
+            rule = line.split()[0].lower()  # a rule ends at the first white space
+            exception = rule.startswith("!")
+            labels = rule[1:].split(".") if exception else rule.split(".")
+            try:
+                if any(not label for label in labels):
+                    raise ValueError("an empty label")
+                wildcard = labels[0] == "*"
+                if wildcard and exception:
+                    raise ValueError("an exception with a wildcard")
+                if any("*" in label for label in labels[1:]) or "*" in labels[0] and not wildcard:
+                    raise ValueError('"*" not as the first label')
+                labels = [self.label(label) for label in (labels[1:] if wildcard else labels)]
+                if not labels:
+                    raise ValueError("a bare *")
+            except (ValueError, UnicodeError) as exc:
+                raise ValueError(f"public suffix list line {number}: {printable_text(line, 100)!r}: {exc}") from None
+            (self.exceptions if exception else self.wildcards if wildcard else self.rules).add(".".join(labels))
+        if len(self.rules) < 1000:
+            raise ValueError(f"the public suffix list has only {len(self.rules)} rules: cut short")
+        self.above = set()  # every name a public suffix lies below
+        for name in self.rules:
+            parts = name.split(".")
+            self.above.update(".".join(parts[i:]) for i in range(1, len(parts)))
+        for name in self.wildcards:  # *.P: every LABEL.P is public, so P and what it lies below
+            parts = name.split(".")
+            self.above.update(".".join(parts[i:]) for i in range(len(parts)))
+
+    @staticmethod
+    def label(label):
+        """A rule's LABEL in the form DNS uses (xn-- for one outside ASCII); ValueError for anything else."""
+        if not label.isascii():
+            label = "xn--" + label.encode("punycode").decode("ascii")
+        if not PSL_LABEL.fullmatch(label):
+            raise ValueError(f"not a label: {label!r}")
+        return label
+
+    def public(self, name):
+        """NAME (lower case, dotted) is a public suffix: listed, or below a *. rule, and no ! exception."""
+        parent = name.split(".", 1)[1] if "." in name else ""
+        return name not in self.exceptions and (name in self.rules or parent in self.wildcards)
+
+    def refuses(self, suffix):
+        """*.SUFFIX would reach names anyone can register: SUFFIX is a public suffix, or one lies below it."""
+        return self.public(suffix) or suffix in self.above
+
+    @classmethod
+    def load(cls, path=None):
+        """The list of PATH (default: PUBLIC_SUFFIX_FILE), read once; None when there is no such file
+        (FALLBACK_PUBLIC_SUFFIXES stands in); ValueError when it cannot be read or parsed."""
+        path = Path(path) if path is not None else PUBLIC_SUFFIX_FILE
+        with cls._lock:
+            if str(path) not in cls._loaded:
+                try:
+                    cls._loaded[str(path)] = cls(path.read_text(encoding="utf-8"))
+                except FileNotFoundError:
+                    cls._loaded[str(path)] = None
+                except (OSError, UnicodeError) as exc:
+                    cls._loaded[str(path)] = ValueError(f"the public suffix list {path} cannot be read: {exc}")
+                except ValueError as exc:
+                    cls._loaded[str(path)] = exc
+            loaded = cls._loaded[str(path)]
+        if isinstance(loaded, ValueError):
+            raise ValueError(str(loaded))
+        return loaded
 
 
-def wildcard_suffix(value):
+def wildcard_suffix(value, path=None):
     """"example.com" of "*.example.com" (lower case); ValueError for anything else: a wildcard needs at least two
-    labels below it (*.com would open a whole top-level domain)."""
+    labels below it (*.com would open a whole top-level domain), and none at or above a public suffix or a shared
+    service (SHARED_SUFFIXES, PublicSuffixList; PATH: another public suffix list, for tests)."""
     if not isinstance(value, str) or not value.startswith("*.") or not WILDCARD_SUFFIX.fullmatch(value[2:].lower()) \
             or "." not in value[2:]:
         raise ValueError(f"not a host wildcard *.DOMAIN.TLD: {printable_text(str(value), 100)!r}")
     suffix = value[2:].lower()
     shared = next((s for s in SHARED_SUFFIXES if suffix == s or suffix.endswith("." + s)), None)
-    if shared or COUNTRY_SECOND_LEVEL.fullmatch(suffix):
-        raise ValueError(f"not a host wildcard here: below {printable_text(shared or suffix, 100)} anyone can have a "
-                         "name of their own (a public suffix or hosting service), so the agent could open any server "
+    if not shared and COUNTRY_SECOND_LEVEL.fullmatch(suffix):
+        shared = suffix
+    if not shared:
+        try:
+            listed = PublicSuffixList.load(path)
+        except ValueError as exc:
+            raise ValueError(f"not a host wildcard here: {exc}; every wildcard is refused until it is restored") \
+                from None
+        if listed is None:
+            shared = next((s for s in FALLBACK_PUBLIC_SUFFIXES if suffix == s or suffix.endswith("." + s)), None)
+        elif listed.refuses(suffix):
+            shared = suffix
+    if shared:
+        raise ValueError(f"not a host wildcard here: it reaches {printable_text(shared, 100)}, where anyone can have "
+                         "a name of their own (a public suffix or hosting service), so the agent could open any server "
                          "it rents there; give the hosts by name instead")
     return suffix
 
@@ -1186,7 +1300,9 @@ def dns_logger(pinned, port=53, stop=None, broker=None, quiet=(), who=None, cana
         """A name below an allowed wildcard: its question is answered on the host by the launcher (a second or
         so); the addresses go back to the client, which still waits, instead of a refusal it would not retry."""
         try:
-            answer = broker.ask("dns", {"name": name, "wildcard": True, **found}, wait=True) or {}
+            # "wildcard": the suffix it lies below; such questions have a budget of their own (ApprovalBroker.ask).
+            suffix = next((s for s in sorted(wildcards(), key=len) if under_wildcard(name, {s})), True)
+            answer = broker.ask("dns", {"name": name, "wildcard": suffix, **found}, wait=True) or {}
             addresses = (answer.get("addresses") or []) if answer.get("decision") == "allow" else []
             sock.sendto((dns_address_reply(query, addresses) if addresses else None) or reply, peer)
         except (OSError, ValueError, RuntimeError, struct.error):
@@ -1223,10 +1339,12 @@ def dns_logger(pinned, port=53, stop=None, broker=None, quiet=(), who=None, cana
             if name not in pinned:
                 found = who.lookup("udp", peer[0], peer[1]) if who is not None else {}
                 log_event("egress-denied.jsonl", {"host": name, "reason": "not in allowed hosts", **found})
-                if canaries is not None:
-                    canaries.lookup(name, found)
-                if broker is not None and re.fullmatch(r"(?=.{1,253}$)(?:[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9])?\.)+"
-                                                       r"[a-z][a-z0-9-]{0,62}", name) and \
+                # A name with a canary token is reported and never asked about: the question would go to the host,
+                # which looks the name up (below a wildcard by itself), and the token would leave through its DNS.
+                hit = canaries.lookup(name, found) if canaries is not None else None
+                if not hit and broker is not None and \
+                        re.fullmatch(r"(?=.{1,253}$)(?:[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}",
+                                     name) and \
                         not any(name == q or name.endswith("." + q) for q in quiet):
                     broker.ask("dns", {"name": name, **found}, wait=False)
         except (OSError, ValueError, IndexError, struct.error, RuntimeError):
@@ -5678,6 +5796,11 @@ def narrowest_scope(*scopes):
     return min((scope if scope in SCOPES else "once" for scope in scopes), key=SCOPES.index)
 OPEN_QUESTIONS = 20      # at a time; more are refused without asking
 RUN_QUESTIONS = 500      # per run; after that, nothing more is asked
+# Lookups below a host wildcard (details "wildcard": its suffix) are answered on the host by themselves: they have a
+# budget of their own, per wildcard, so that a program looking up names without end cannot use up the questions the
+# human is asked (RUN_QUESTIONS, OPEN_QUESTIONS). Twice the names the host opens below one (approvals.WILDCARD_NAMES):
+# past those it asks the human, and refusals count too. At a time they are held by the DNS stub's DNS_WORKERS.
+WILDCARD_QUESTIONS = 512
 
 
 class ApprovalBroker:
@@ -5703,6 +5826,7 @@ class ApprovalBroker:
         self.blocked_hosts = {h for h in blocked.get("hosts", []) if isinstance(h, str)}
         self.blocked_tcp = {t for t in blocked.get("tcp", []) if isinstance(t, str)}
         self.lock, self.pending, self.decided, self.counter = threading.Lock(), {}, {}, 0
+        self.serial, self.wildcard_asked = 0, {}  # every question's number (its ID); wildcard questions per suffix
         self.run_token = secrets.randbelow(10 ** 9)  # IDs differ between sandboxes asking in the same second
         self.directory.mkdir(mode=0o700, exist_ok=True)
         memory_part("questions open", lambda: len(self.pending))
@@ -5740,11 +5864,20 @@ class ApprovalBroker:
                 return self.decided[key]
             waiting = self.pending.get(key)
             if waiting is None:
-                if len(self.pending) >= OPEN_QUESTIONS or self.counter >= RUN_QUESTIONS:
-                    return {"decision": "deny", "scope": "once", "reason": "too many questions"}
-                self.counter += 1
-                ident = f"{int(time.time())}-{self.run_token}-{self.counter}"
-                waiting = self.pending[key] = {"id": ident, "event": threading.Event(), "answer": None}
+                below = str(details.get("wildcard")) if kind == "dns" and details.get("wildcard") else None
+                if below is not None:
+                    if self.wildcard_asked.get(below, 0) >= WILDCARD_QUESTIONS:
+                        return {"decision": "deny", "scope": "once", "reason": "too many lookups below the wildcard"}
+                    self.wildcard_asked[below] = self.wildcard_asked.get(below, 0) + 1
+                else:
+                    asked = sum(1 for entry in self.pending.values() if not entry.get("wildcard"))
+                    if asked >= OPEN_QUESTIONS or self.counter >= RUN_QUESTIONS:
+                        return {"decision": "deny", "scope": "once", "reason": "too many questions"}
+                    self.counter += 1
+                self.serial += 1
+                ident = f"{int(time.time())}-{self.run_token}-{self.serial}"
+                waiting = self.pending[key] = {"id": ident, "event": threading.Event(), "answer": None,
+                                               "wildcard": below is not None}
                 if kind == "connect":  # shown in the question: what "Allow always" will remember
                     details = {**details, "remembers": self.remembers(details)}
                 try:

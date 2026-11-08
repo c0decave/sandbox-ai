@@ -218,7 +218,7 @@ DEFAULTS_KEYS = {"version", "subnet", "subnet6", "mode", "canaries", "keep_days"
 SESSION_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}"
 # The directory of a start: its first name, with a suffix when that directory is taken (sessions.new_key).
 START_ID = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}"
-__version__ = "0.1.77"
+__version__ = "0.1.78"
 CONFIG_NAME = ".sandbox-ai.json"
 RULES_NAME = "rules.json"  # ~/.config/sandbox-ai/rules.json: your own rules, for every start
 # Label on session pods: the session's tmux directory, so a stale pod can be told apart from someone else's.
@@ -3133,6 +3133,12 @@ def check_workspace_scope(workspace):
         if workspace == path or workspace in path.parents:
             raise ValueError(f"Workspace {workspace} is or contains {label}; the agent could change your shell "
                              "start files, credentials and sandbox-ai's trust store. Use a project directory.")
+    # The kernel's and the devices' trees (also read-only: /proc/PID/root, /sys/fs/cgroup, /dev/shm), as --mount.
+    for tree in (Path("/proc"), Path("/sys"), DEV):
+        if workspace == tree or tree in workspace.parents or workspace in tree.parents:
+            raise ValueError(f"Workspace {workspace} {'lies in' if tree in workspace.parents else 'is or holds'} "
+                             f"{tree}: the kernel's and the devices' trees are never a workspace; use --device for "
+                             "devices.")
     check_private_location(workspace, "Workspace")
     check_package_location(workspace, "Workspace")
 
@@ -6305,6 +6311,9 @@ def pod_commands(a, name, session, home):
     if sys.stdin.isatty() and sys.stdout.isatty():
         run += ["--tty"]
     bindings = [(HERE / "runtime.py", "/sandbox/runtime.py", "ro"),
+                # The Public Suffix List beside it: the supervisor checks host wildcards against it (runtime.py).
+                *([(HERE / "public_suffix_list.dat", "/sandbox/public_suffix_list.dat", "ro")]
+                  if (HERE / "public_suffix_list.dat").is_file() else []),
                 (session, "/sandbox/session", "ro"), (home, "/root", "rw"),
                 *((Path(src).expanduser().resolve(), dest, workspace_mode(a, index))
                   for index, (src, dest) in enumerate(workspace_targets(a))),
@@ -6453,8 +6462,32 @@ def cgroup_dir(pid, proc=Path("/proc"), root=CGROUP_ROOT):
 
 
 def memory_state(cgroup):
-    """{"current", "limit", "oom_kill", "anon", "shmem"} (bytes, kills) of CGROUP; shmem is what tmpfs files hold."""
+    """{"current", "limit", "oom_kill", "anon", "shmem"} (bytes, kills) of CGROUP; shmem is what tmpfs files hold.
+    The limit is the smallest memory.max on the path from CGROUP up to the cgroup root (one set on a parent, a pod's,
+    holds CGROUP as well), with that cgroup's use as "current"; read again at every look. ValueError when no
+    cgroup on the path has a limit."""
     cgroup = Path(cgroup)
+    levels, directory = [], cgroup
+    for _ in range(64):
+        try:  # the root of the cgroup tree has no memory.max: the walk ends there
+            value = (directory / "memory.max").read_text().strip()
+        except OSError:
+            break
+        if value != "max":
+            try:
+                current = int((directory / "memory.current").read_text().strip())
+            except OSError:
+                if directory == cgroup:
+                    raise
+                current = None
+            if current is not None:
+                levels.append((current, int(value)))
+        if directory.parent == directory:
+            break
+        directory = directory.parent
+    if not levels:
+        raise ValueError(f"no memory limit on {cgroup} or above")
+    current, limit = min(levels, key=lambda level: level[1])  # the smallest; of equal ones the nearest
 
     def pairs(name):
         found = {}
@@ -6464,9 +6497,8 @@ def memory_state(cgroup):
                 found[key] = int(value)
         return found
     stat, events = pairs("memory.stat"), pairs("memory.events")
-    return {"current": int((cgroup / "memory.current").read_text().strip()),
-            "limit": int((cgroup / "memory.max").read_text().strip()),
-            "oom_kill": events.get("oom_kill", 0), "anon": stat.get("anon", 0), "shmem": stat.get("shmem", 0)}
+    return {"current": current, "limit": limit, "oom_kill": events.get("oom_kill", 0), "anon": stat.get("anon", 0),
+            "shmem": stat.get("shmem", 0)}
 
 
 def memory_stall(cgroup):
@@ -6542,6 +6574,7 @@ class MemoryWatch:
             warn, act, interval, grace, clock, kill, Path(proc)
         self.cgroup, self.protected, self.first_oom = None, set(), None
         self.high_for = None  # the limit memory.high was set for (it follows `sandbox-ai limits --memory`)
+        self.high_set = False  # memory.high was written for high_for (else the write failed, recorded once)
         self.ended_at = None  # when the watch last ended a process
         self.warned, self.peak, self.ended, self.ending, self.events = False, 0, [], {}, []
         self.stopping, self.thread, self.written = threading.Event(), None, 0.0
@@ -6620,18 +6653,30 @@ class MemoryWatch:
         with contextlib.suppress(OSError):
             if (Path(self.cgroup) / "memory.max").read_text().strip() == "max":
                 (Path(self.cgroup) / "memory.high").write_text("max\n")
-                self.high_for = None
+                self.high_for, self.high_set = None, False
 
     def throttle(self, state):
-        """memory.high at MEMORY_HIGH of the current limit (again when the limit changed); best effort: where the
-        cgroup file cannot be written, the watch alone acts, as before."""
-        if not state["limit"] or self.high_for == state["limit"]:
+        """memory.high at MEMORY_HIGH of the current limit (again when the limit changed, and when something set it
+        back to max: systemd does, when it applies a unit's properties again); best effort: where the cgroup file
+        cannot be written, the watch alone acts, as before."""
+        if not state["limit"]:
             return
+        if self.high_for == state["limit"]:
+            if not self.high_set:
+                return  # the write failed for this limit: recorded once
+            try:  # read at every look (the kernel rounds what was written to pages: only "max" is a reset)
+                if (Path(self.cgroup) / "memory.high").read_text().strip() != "max":
+                    return
+            except OSError:
+                return
+            self.record("memory-high-reset", limit=state["limit"])
         high = int(state["limit"] * MEMORY_HIGH)
         try:
             (Path(self.cgroup) / "memory.high").write_text(f"{high}\n")
+            self.high_set = True
         except OSError as exc:  # recorded: then only the watch keeps the kernel's OOM killer away
             self.record("memory-high", error=exc.strerror or str(exc), limit=state["limit"])
+            self.high_set = False
         self.high_for = state["limit"]
 
     def supervisor_rss(self):
@@ -6859,6 +6904,7 @@ def bwrap_command(a, session, home):
     for name in ("hosts", "resolv.conf", "nsswitch.conf", "passwd", "group"):
         cmd += ["--ro-bind", str(session / name), "/etc/" + name]
     cmd += ["--ro-bind", str(HERE / "runtime.py"), "/sandbox/runtime.py",
+            "--ro-bind-try", str(HERE / "public_suffix_list.dat"), "/sandbox/public_suffix_list.dat",  # runtime.py's
             "--ro-bind", str(session), "/sandbox/session", "--bind", str(home), "/root"]
     for index, (src, dest) in enumerate(workspace_targets(a)):
         cmd += ["--ro-bind" if workspace_mode(a, index) == "ro" else "--bind", str(Path(src).expanduser().resolve()),

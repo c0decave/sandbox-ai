@@ -43,7 +43,8 @@ answers it, then the name is open for the run (`example.com` itself only if allo
   `--allow-duckduckgo`, and real DNS with `--dns` (or `--nameserver IP`); `--allow-host '*.DOMAIN'`
   opens every name below a domain (not a public suffix such as `*.co.uk` or a hosting service such as
   `*.github.io`). `--keep` keeps it for the next starts too. `sandbox-ai net show` lists what was
-  added; `sandbox-ai net show $SANDBOX_AI_RUN --keep` keeps everything the run was given.
+  added; `sandbox-ai net show $SANDBOX_AI_RUN --keep` keeps what the human gave the run (`--keep-all`
+  also what was approved only once or for the run).
 - **For the next start**: the same options on the command line or in `.sandbox-ai.json`, or a
   profile: `--profile development` (provider, PyPI, GitHub, OpenAI, Anthropic), `--profile frontier`
   (provider, OpenAI, Anthropic), `--profile dns`, `--profile egress-all`. A server on the host's

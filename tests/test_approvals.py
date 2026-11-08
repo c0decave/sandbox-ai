@@ -544,3 +544,76 @@ def test_the_watch_answers_wildcard_lookups_itself_and_tells_nobody(tmp_path):
     thread.join(5)
     assert auto == [("api.example.org", "*.example.org")]
     assert len(notes) == 1 and "other.example" in notes[0]  # only the other one is announced
+
+
+# --- review fixes: canary names, the wildcard cap under a lock, --no-open ---------------------------------------
+
+def test_a_name_with_a_canary_token_is_never_answered_or_looked_up_on_the_host(tmp_path, monkeypatch):
+    """Defence in depth beside the DNS stub (which never asks about such a name): the host's own look at the
+    question finds the token in the run's canary.json and neither answers it by itself nor resolves it."""
+    record = wildcard_run(tmp_path)
+    token = "tok123canary"
+    (Path(record["directory"]) / "canary.json").write_text(json.dumps({"files": [], "names": [[token, "c1", "plain"]]}))
+    dns = lambda name, **extra: {"kind": "dns", "name": name, "id": "1-2-3", **extra}  # noqa: E731
+    assert ap.under_wildcard(dns(f"{token}.example.org"), record) is None
+    assert ap.under_wildcard(dns(f"x.tok123.canary.example.org"), record) is None  # across labels
+    assert ap.under_wildcard(dns("api.example.org", canary="c1"), record) is None  # marked by the sandbox
+    assert ap.under_wildcard(dns("api.example.org"), record) == "*.example.org"
+    (Path(record["directory"]) / "canary.json").write_text("{not json")
+    assert ap.under_wildcard(dns("api.example.org"), record) is None  # unreadable: never answered by itself
+    (Path(record["directory"]) / "canary.json").write_text(json.dumps({"names": [[token, "c1", "plain"]]}))
+    ask({"claude-1": record}, "1-2-9", kind="dns", name=f"{token}.example.org")
+    looked = []
+    monkeypatch.setattr(ap, "policy_scope", lambda: "always")
+    with pytest.raises(ValueError, match="canary token"):
+        ap.answer("1-2-9", "allow", "run", runs={"claude-1": record}, resolver=lambda name: looked.append(name) or
+                  ["192.0.2.1"], out=lambda line: None)
+    assert looked == [] and not (Path(record["directory"]) / "approvals" / "1-2-9.answer").exists()
+
+
+def test_the_wildcard_cap_holds_for_answers_that_arrive_together(tmp_path, monkeypatch):
+    """Counting the names below a wildcard and opening one more is one step: two lookups that both passed the
+    watch's count while one slot was left open one name, and the other goes to the human."""
+    record = wildcard_run(tmp_path)
+    monkeypatch.setattr(ap, "WILDCARD_NAMES", 1)
+    monkeypatch.setattr(ap, "policy_allows_host", lambda name: True)
+    questions = [{"id": f"1-2-{n}", "kind": "dns", "name": f"n{n}.example.org"} for n in range(2)]
+    assert all(ap.under_wildcard(q, record) == "*.example.org" for q in questions)  # both pass the first look
+    answered, humans, start = [], [], threading.Barrier(2)
+
+    def fake(ident, decision, scope, runs=None, out=None):
+        name = next(q["name"] for q in questions if q["id"] == ident)
+        time.sleep(0.2)  # resolving takes a while: the other answer arrives meanwhile
+        ap.net().update_hosts(record, {name: ["192.0.2.9"]})
+        answered.append((ident, decision))
+        return {"decision": decision}
+
+    def one(question):
+        start.wait()
+        ap.answer_wildcard(question, record, "*.example.org", fake, ask_human=lambda title, text: humans.append(text))
+    threads = [threading.Thread(target=one, args=(q,)) for q in questions]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    assert len(answered) == 1 and len(humans) == 1 and len(ap.net().remembered(record)) == 1
+    assert "sandbox-ai approvals allow 1-2-" in humans[0]
+
+
+def test_allow_no_open_answers_a_browser_question_without_opening_it_here(run, monkeypatch):
+    monkeypatch.setattr(ap, "policy_scope", lambda: "always")
+    opened, lines = [], []
+    monkeypatch.setattr(ap, "open_browser", opened.append)
+    directory = ask(run, "1-1-1", kind="browser", url="https://claude.ai/oauth?code=1")
+    questions = ap.questions
+    monkeypatch.setattr(ap, "questions", lambda runs=None, answered=False: questions(run, answered))
+    assert ap.main(["allow", "1-1-1", "--no-open"], out=lines.append) == 0
+    assert opened == [] and json.loads((directory / "1-1-1.answer").read_text())["decision"] == "allow"
+    assert (directory / "1-1-1.done").exists() and "not opened on this host" in lines[0]
+    ask(run, "1-1-2", kind="dns", name="pypi.org")
+    assert ap.main(["allow", "1-1-2", "--no-open"], out=lines.append) == 1  # only for browser questions
+    assert not (directory / "1-1-2.answer").exists()
+    with pytest.raises(ValueError, match="goes with allow"):
+        ap.answer("1-1-2", "deny", runs=run, no_open=True, out=lambda line: None)
+    ask(run, "1-1-3", kind="browser", url="https://example.org/")
+    assert ap.main(["allow", "1-1-3"], out=lines.append) == 0 and opened == ["https://example.org/"]  # as before

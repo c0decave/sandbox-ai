@@ -2,7 +2,7 @@
 """sandbox-ai approvals: answer what running sandboxes ask.
 
   sandbox-ai approvals list [--json]             open questions of every running sandbox
-  sandbox-ai approvals allow ID [--scope once|run|always]
+  sandbox-ai approvals allow ID [--scope once|run|always] [--no-open]
   sandbox-ai approvals deny ID [--scope run|once]
   sandbox-ai approvals history [RUN]             questions and their answers
   sandbox-ai approvals remembered [--json]        what was allowed "always", per project
@@ -471,11 +471,16 @@ def wait_done(path, seconds):
             time.sleep(0.1)
 
 
-def answer(ident, decision, scope="once", runs=None, resolver=resolve, opener=None, out=print, wait=10.0):
+def answer(ident, decision, scope="once", runs=None, resolver=resolve, opener=None, out=print, wait=10.0,
+           no_open=False):
     """Write the answer to question IDENT; side effects the supervisor cannot do itself happen here:
-    a name is resolved and pinned, a browser is opened, an "always" is remembered for the project."""
+    a name is resolved and pinned, a browser is opened, an "always" is remembered for the project. NO_OPEN (a browser
+    question only): allowed without opening the page on this host (the human opened it where they are: the web
+    interface or the app on another machine)."""
     if decision not in ("allow", "deny") or scope not in ("once", "run", "always"):
         raise ValueError("decision allow|deny, scope once|run|always")
+    if no_open and decision != "allow":
+        raise ValueError("--no-open goes with allow (of a browser question)")
     widest = policy_scope()
     if decision == "allow" and SCOPES.index(scope) > SCOPES.index(widest):
         raise ValueError(f"the administrator's policy allows answers up to --scope {widest}")
@@ -486,6 +491,8 @@ def answer(ident, decision, scope="once", runs=None, resolver=resolve, opener=No
     for name, record, question in matches:
         kind = question.get("kind")
         notes = []
+        if no_open and kind != "browser":
+            raise ValueError(f"--no-open is for browser questions only; {shown(ident)} is a {shown(kind, 20)} question")
         # The run's security mode (run.json) caps answers too; its supervisor holds the same cap.
         mode = record.get("mode") if isinstance(record, dict) and isinstance(record.get("mode"), dict) else {}
         cap = mode.get("approval_scope", "always")
@@ -518,6 +525,8 @@ def answer(ident, decision, scope="once", runs=None, resolver=resolve, opener=No
             host = question.get("name")
             if not isinstance(host, str) or not HOST.fullmatch(host):
                 raise ValueError(f"not a host name: {shown(host)}")
+            if canary_in_name(record, host):  # looked up here, the token would leave through this host's DNS
+                raise ValueError(f"{shown(host)} carries a canary token of the run: it is never looked up")
             resolved = resolver(host)
             addresses = public_addresses(host, resolved)
             if len(addresses) < len(resolved):
@@ -536,7 +545,10 @@ def answer(ident, decision, scope="once", runs=None, resolver=resolve, opener=No
             url = question.get("url", "")
             if not isinstance(url, str) or not URL.fullmatch(url):
                 raise ValueError("only http(s) URLs are opened")
-            (opener or open_browser)(url)
+            if no_open:
+                notes.append("not opened on this host (--no-open): open it where you are")
+            else:
+                (opener or open_browser)(url)
         path = Path(record["directory"]) / "approvals" / f"{ident}.answer"
         temporary = path.with_name(f".{ident}.answer")
         temporary.write_text(json.dumps(reply))
@@ -660,15 +672,50 @@ def desktop_question(title, text, ident, actions=QUESTION_ACTIONS, answer_with=N
 # Names answered by themselves below one wildcard in one run: more go to the human as any lookup does (the agent
 # chooses the names: without a cap it could grow the pins, the firewall sets and the host's lookups without end).
 WILDCARD_NAMES = 256
+CANARY_CONFIG = "canary.json"  # in the run's control directory: the canaries' name forms (canary.py, runtime.py)
+
+
+def canary_in_name(record, name):
+    """NAME carries a canary token of the run (its control directory's canary.json, as the DNS stub matches: in
+    the name or across its labels), or the list cannot be read (then every name counts as carrying one)."""
+    try:
+        config = json.loads((Path(record["directory"]) / CANARY_CONFIG).read_text())
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
+        return True
+    forms = config.get("names") if isinstance(config, dict) else None
+    if not isinstance(forms, list):
+        return True
+    name = str(name).lower().rstrip(".")
+    needles = {entry[0].lower() for entry in forms
+               if isinstance(entry, (list, tuple)) and entry and isinstance(entry[0], str) and len(entry[0]) >= 8}
+    return any(needle in name or needle in name.replace(".", "") for needle in needles)
+
+
+@contextlib.contextmanager
+def wildcard_lock(record):
+    """The run's lock for names opened below its wildcards: counting them and opening one more is one step (two
+    answers at once must not both pass the cap). Held around answer(), which takes the names lock (net.hosts_lock)
+    inside it, never the other way round."""
+    fd = os.open(Path(record["directory"]) / "wildcard-names.lock",
+                 os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
 
 
 def under_wildcard(question, record):
     """The *.DOMAIN of the run (--allow-host at the start or `sandbox-ai net allow`) that QUESTION's name lies
-    below, or None: only lookups (kind dns) of a proper host name, and only while fewer than WILDCARD_NAMES names
-    below it were opened in this run."""
+    below, or None: only lookups (kind dns) of a proper host name without a canary token of the run, and only while
+    fewer than WILDCARD_NAMES names below it were opened in this run."""
     name = question.get("name") if question.get("kind") == "dns" else None
     if not isinstance(name, str) or not HOST.fullmatch(name):
         return None
+    if question.get("canary") or canary_in_name(record, name):
+        return None  # never looked up on the host by itself: the token would leave through its DNS
     for wildcard in net().run_wildcards(record):
         if name.endswith(wildcard[1:]):
             try:
@@ -679,7 +726,7 @@ def under_wildcard(question, record):
     return None
 
 
-def answer_wildcard(question, record, wildcard, answer_with=None, out=None):
+def answer_wildcard(question, record, wildcard, answer_with=None, out=None, ask_human=None):
     """Answer the lookup QUESTION below WILDCARD on the host, at once: allowed for the run when the name lies inside
     the administrator's ceiling and resolves to public addresses (answer() resolves, pins and checks them); denied
     for the run otherwise, so the held lookup does not wait for nobody."""
@@ -687,9 +734,16 @@ def answer_wildcard(question, record, wildcard, answer_with=None, out=None):
     runs = {record.get("run", "run"): record}
     ident, name = question.get("id"), question.get("name")
     try:
-        if not policy_allows_host(name):
-            raise ValueError(f"{shown(name)} lies outside the administrator's policy (allow_hosts)")
-        return answer_with(ident, "allow", "run", runs=runs, out=out or (lambda line: None))
+        with wildcard_lock(record):
+            # Counted again under the lock, and the name opened before it is let go: the cap holds for answers
+            # that arrive together. Past it (or a canary token found now), the human is asked, as for any lookup.
+            if under_wildcard(question, record) != wildcard:
+                (ask_human or desktop_notification)(
+                    "sandbox-ai asks", f"{describe(question)}\nsandbox-ai approvals allow {shown(ident)}")
+                return None
+            if not policy_allows_host(name):
+                raise ValueError(f"{shown(name)} lies outside the administrator's policy (allow_hosts)")
+            return answer_with(ident, "allow", "run", runs=runs, out=out or (lambda line: None))
     except (OSError, ValueError) as exc:
         with contextlib.suppress(OSError, ValueError):
             answer_with(ident, "deny", "run", runs=runs, out=lambda line: None)
@@ -838,6 +892,9 @@ def main(argv, out=print):
         command.add_argument("id")
         if name == "allow":
             command.add_argument("-s", "--scope", choices=["once", "run", "always"], default="once")
+            command.add_argument("--no-open", action="store_true",
+                                 help="a browser question: allow it without opening the page on this host (you "
+                                      "opened it where you are: the web interface, the app on another machine)")
         else:
             command.add_argument("-s", "--scope", choices=["run", "once", "always"], default="run",
                                  help="run (default): not asked again in this run; once: may be asked again; "
@@ -903,7 +960,8 @@ def main(argv, out=print):
                     [row[:4] + [row[5] or "-", row[4]] for row in rows] if rows else [], out, indent=0,
                     empty="no answered questions")
             return 0
-        answer(args.id, args.command, args.scope, out=out)
+        answer(args.id, args.command, args.scope, out=out, **({"no_open": True} if getattr(args, "no_open", False)
+                                                              else {}))
         return 0
     except (ValueError, OSError) as exc:
         print(f"sandbox-ai approvals: {exc}", file=sys.stderr)

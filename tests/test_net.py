@@ -1183,6 +1183,106 @@ def test_keep_checks_what_the_supervisor_reports(sandbox):
             net.running_options(record, bad)
     (sandbox["run"] / "wildcards.json").write_text(json.dumps(["*.example.org"]))
     net.update_hosts(record, {"a.example.org": ["192.0.2.60"], "other.example": ["192.0.2.61"]})
-    tokens, _, _ = net.running_options(record, {"https": ["192.0.2.60/32", "192.0.2.61/32"]})
+    tokens, _, _ = net.running_options(record, {"https": ["192.0.2.60/32", "192.0.2.61/32"]}, everything=True)
     # The names below a wildcard are not kept one by one: the wildcard is.
     assert "a.example.org" not in tokens and tokens.count("--allow-host") == 2 and "*.example.org" in tokens
+
+
+def wildcard_sandbox(sandbox):
+    record = {**json.loads((sandbox["run"] / "run.json").read_text()), "directory": str(sandbox["run"])}
+    session = Path(record["session_dir"])
+    (session / "config.json").write_text(json.dumps({"ask": True}))
+    (session / "resolv.conf").write_text("nameserver 127.0.0.1\n")
+    return record
+
+
+def test_concurrent_wildcard_changes_lose_nothing(sandbox, monkeypatch):
+    """`net allow` and `net revoke` of wildcards at once: the supervisor's answer and the file written from it are
+    one step under the run's lock, each with a temporary file of its own (a shared one was renamed away under the
+    other: FileNotFoundError), so the file ends as the supervisor's last answer, never an older one."""
+    monkeypatch.setattr(rt, "WILDCARDS", set())  # the supervisor's set (control_server) for this test only
+    record = wildcard_sandbox(sandbox)
+    asked, slow = net.ask, threading.Event()
+
+    def ask(directory, request, timeout=net.ASK_SECONDS):
+        answer = asked(directory, request, timeout)
+        if request.get("add") == ["*.first.example"]:
+            slow.set()
+            time.sleep(0.4)  # the first answer is written late: the others asked meanwhile
+        return answer
+    monkeypatch.setattr(net, "ask", ask)
+    errors = []
+
+    def change(wildcard):
+        try:
+            net.change_wildcards(record, "allow", [wildcard])
+        except Exception as exc:  # noqa: BLE001 - reported by the assertion below
+            errors.append(exc)
+    first = threading.Thread(target=change, args=("*.first.example",))
+    first.start()
+    slow.wait(5)
+    others = [threading.Thread(target=change, args=(f"*.n{n}.example",)) for n in range(8)]
+    for thread in others:
+        thread.start()
+    for thread in [first, *others]:
+        thread.join(20)
+    assert errors == []
+    wanted = sorted(["*.first.example"] + [f"*.n{n}.example" for n in range(8)])
+    assert json.loads(net.wildcards_file(record).read_text()) == wanted == net.run_wildcards(record)
+    assert not list(sandbox["run"].glob(".wildcards.*"))  # no temporary file left behind
+
+
+def keep_project(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    l = net.launcher()
+    app = tmp_path / "app"
+    app.mkdir(exist_ok=True)
+    (app / ".sandbox-ai.json").write_text(json.dumps({"version": 1, "agent": "codex", "options": []}))
+    l.trust_config(app / ".sandbox-ai.json")
+    return app
+
+
+def test_show_keep_keeps_what_you_gave_and_leaves_out_what_approvals_opened(sandbox, tmp_path, monkeypatch):
+    """By default `net show --keep` writes what you allowed with `net allow` and what you approved "always" for the
+    project, never the names and addresses an approval opened once or for the run; it shows every option before
+    it writes; --keep-all keeps those as well."""
+    app = keep_project(tmp_path, monkeypatch)
+    record = {**json.loads((sandbox["run"] / "run.json").read_text()), "directory": str(sandbox["run"])}
+    assert net.main(["allow", "codex-1234abcd", "--allow-host", "pypi.org", "--allow-tcp", "192.0.2.7:8443"],
+                    out=lambda line: None, resolver=fake_resolver) == 0
+    # What approvals.answer and the supervisor do for approved questions: a lookup answered for the run, one
+    # answered always (remembered for the project), a connection answered for the run.
+    net.update_hosts(record, {"approved.example": ["192.0.2.70"], "always.example": ["192.0.2.71"]})
+    sandbox["network"].change({"op": "allow", "https": ["192.0.2.70", "192.0.2.71"]})
+    sandbox["network"].change({"op": "allow", "tcp": [["192.0.2.8", 9443]]}, ssh=False)
+    net.approvals_module().remember(str(app), host="always.example", details={"question": "1-2-3"})
+    lines = []
+    assert net.main(["show", "codex-1234abcd", "--keep"], out=lines.append) == 0
+    options = json.loads((app / ".sandbox-ai.json").read_text())["options"]
+    assert options == ["--allow-host", "always.example", "--allow-host", "pypi.org", "--allow-tcp", "192.0.2.7:8443"]
+    text = "\n".join(lines)
+    assert "approved.example" not in options and "192.0.2.8:9443" not in options
+    left = next(line for line in lines if "left out" in line)
+    assert "--allow-host approved.example" in left and "--allow-tcp 192.0.2.8:9443" in left and "--keep-all" in left
+    preview = lines.index(next(line for line in lines if "writing into" in line))
+    assert lines[preview + 1:preview + 4] == ["  --allow-host always.example", "  --allow-host pypi.org",
+                                              "  --allow-tcp 192.0.2.7:8443"]
+    assert "kept in" in lines[-1] and preview < len(lines) - 1 and "pypi.org" in text
+    lines.clear()
+    assert net.main(["show", "codex-1234abcd", "--keep-all"], out=lines.append) == 0
+    options = json.loads((app / ".sandbox-ai.json").read_text())["options"]
+    assert "approved.example" in options and "192.0.2.8:9443" in options
+    # Taken back with net revoke: no longer yours to keep.
+    assert net.main(["revoke", "codex-1234abcd", "--allow-host", "pypi.org"], out=lambda line: None) == 0
+    assert "pypi.org" not in net.given(record)["hosts"] and "192.0.2.7:8443" in net.given(record)["tcp"]
+
+
+def test_show_keep_is_refused_when_the_policy_caps_approvals(sandbox, tmp_path, monkeypatch, capsys):
+    app = keep_project(tmp_path, monkeypatch)
+    assert net.main(["allow", "codex-1234abcd", "--allow-host", "pypi.org"], out=lambda line: None,
+                    resolver=fake_resolver) == 0
+    monkeypatch.setattr(net.approvals_module(), "policy_scope", lambda: "run")
+    for option in ("--keep", "--keep-all"):
+        assert net.main(["show", "codex-1234abcd", option], out=lambda line: None) == 1
+        assert "approves at most for run" in capsys.readouterr().err
+    assert json.loads((app / ".sandbox-ai.json").read_text())["options"] == []
