@@ -454,13 +454,17 @@ def discover_raw(kind, fetch):
         return [{"name": m["name"], "size": m.get("size"), "loaded": None if loaded is None else m["name"] in loaded,
                  "details": with_date(" ".join(v for v in (m.get("details", {}).get("parameter_size"),
                                                           m.get("details", {}).get("quantization_level")) if v),
-                                      m.get("modified_at"))}
+                                      m.get("modified_at")),
+                 "arch": m.get("details", {}).get("family"), "parameters": m.get("details", {}).get("parameter_size"),
+                 "quantization": m.get("details", {}).get("quantization_level")}
                 for m in tags]
     if kind == "lmstudio":
         try:
             data = fetch("/api/v0/models")["data"]
             return [{"name": m["id"], "size": m.get("size_bytes"), "loaded": m.get("state") == "loaded",
-                     "details": m.get("quantization", "")} for m in data if m.get("type") in ("llm", "vlm")]
+                     "details": m.get("quantization", ""), "type": m.get("type"), "arch": m.get("arch"),
+                     "quantization": m.get("quantization"), "context": m.get("max_context_length")}
+                    for m in data if m.get("type") in ("llm", "vlm")]
         except (OSError, ValueError, KeyError, TypeError):
             # Older LM Studio, or one behind a gateway: the OpenAI-compatible listing only.
             return [{"name": m["id"], "size": None, "loaded": None, "details": with_date("", m.get("created"))}
@@ -497,10 +501,21 @@ def clean_models(models):
         if not isinstance(name, str) or not MODEL_NAME.fullmatch(name):
             continue
         size, loaded, details = model.get("size"), model.get("loaded"), model.get("details")
-        result.append({"name": name,
-                       "size": size if isinstance(size, int) and not isinstance(size, bool) and size >= 0 else None,
-                       "loaded": loaded if isinstance(loaded, bool) else None,
-                       "details": printable(details)[:80] if isinstance(details, str) else ""})
+        context = model.get("context")
+
+        def word(key, limit=40):  # a short, terminal-safe text field the server may or may not give
+            value = model.get(key)
+            return printable(value)[:limit] if isinstance(value, str) and value.strip() else None
+        entry = {"name": name,
+                 "size": size if isinstance(size, int) and not isinstance(size, bool) and size >= 0 else None,
+                 "loaded": loaded if isinstance(loaded, bool) else None,
+                 "details": printable(details)[:80] if isinstance(details, str) else ""}
+        # The columns a front end shows when the server gives them (LM Studio, Ollama): only when known.
+        extra = {"type": word("type", 20), "arch": word("arch"), "parameters": word("parameters", 20),
+                 "quantization": word("quantization", 20),
+                 "context": context if isinstance(context, int) and not isinstance(context, bool)
+                 and 0 < context < 1 << 31 else None}
+        result.append({**entry, **{key: value for key, value in extra.items() if value is not None}})
     return result
 
 
@@ -531,11 +546,25 @@ def format_size(value):
     return f"{value} B"
 
 
+NAME_WIDTH = 48  # a longer model name is cut in the table (with "…"); --json and NAME:MODEL keep it whole
+
+
 def model_table(models):
-    rows = [["#", "NAME", "SIZE", "LOADED", "DETAILS"]]
-    rows += [[str(i), m["name"], format_size(m["size"]), {True: "yes", False: "no", None: "?"}[m["loaded"]],
-              m["details"]] for i, m in enumerate(models, 1)]
-    widths = [max(len(row[i]) for row in rows) for i in range(5)]
+    """Aligned lines: a column only when some model has a value for it (LM Studio has no sizes, vLLM no
+    quantization ...), the name column no wider than NAME_WIDTH."""
+    columns = [("NAME", lambda m: m["name"] if len(m["name"]) <= NAME_WIDTH else m["name"][:NAME_WIDTH - 1] + "…"),
+               ("LOADED", lambda m: {True: "yes", False: "no", None: ""}[m["loaded"]]),
+               ("TYPE", lambda m: m.get("type") or ""),
+               ("PARAMS", lambda m: m.get("parameters") or ""),
+               ("QUANT", lambda m: m.get("quantization") or ""),
+               ("CONTEXT", lambda m: f"{m['context'] // 1024}k" if m.get("context") else ""),
+               ("SIZE", lambda m: format_size(m["size"]) if m["size"] is not None else ""),
+               ("DETAILS", lambda m: m["details"] if m["details"] != (m.get("quantization") or "") else "")]
+    shown = [(title, cell) for index, (title, cell) in enumerate(columns)
+             if index == 0 or any(cell(m) for m in models)]
+    rows = [["#", *[title for title, _ in shown]]]
+    rows += [[str(i), *[cell(m) for _, cell in shown]] for i, m in enumerate(models, 1)]
+    widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
     lines = ["  ".join(v.ljust(width) for v, width in zip(row, widths)).rstrip() for row in rows]
     return lines if models else [lines[0], "(no models found)"]
 
