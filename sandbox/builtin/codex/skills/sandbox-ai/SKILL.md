@@ -30,7 +30,9 @@ variables. Say what is blocked, why you need it, and give the human the exact co
 ## Network
 
 Only the agent's provider is reachable by default; the human may have allowed more. Names that
-are not allowed do not resolve, other addresses are refused.
+are not allowed do not resolve, other addresses are refused. Below a host wildcard the human allowed
+(`--allow-host '*.example.com'`) every name works: its first lookup takes a moment while the host
+answers it, then the name is open for the run (`example.com` itself only if allowed on its own).
 
 - Check before you guess: `getent hosts NAME`, `curl -sSv https://NAME/ -o /dev/null`.
   "Could not resolve host" or "connection refused/reset" means: not allowed.
@@ -38,8 +40,10 @@ are not allowed do not resolve, other addresses are refused.
   `sandbox-ai net allow $SANDBOX_AI_RUN --allow-host NAME` (TCP/443), `--allow-tcp IP:PORT`,
   `--allow IP_OR_CIDR`, `--allow-host-port PORT` (a service on the host's loopback), or a preset:
   `--allow-github`, `--allow-pypi`, `--allow-npm`, `--allow-gitlab`, `--allow-kernel-org`,
-  `--allow-duckduckgo`, and real DNS with `--dns` (or `--nameserver IP`). `--keep` keeps it for the
-  next starts too. `sandbox-ai net show` lists what was added.
+  `--allow-duckduckgo`, and real DNS with `--dns` (or `--nameserver IP`); `--allow-host '*.DOMAIN'`
+  opens every name below a domain (not a public suffix such as `*.co.uk` or a hosting service such as
+  `*.github.io`). `--keep` keeps it for the next starts too. `sandbox-ai net show` lists what was
+  added; `sandbox-ai net show $SANDBOX_AI_RUN --keep` keeps everything the run was given.
 - **For the next start**: the same options on the command line or in `.sandbox-ai.json`, or a
   profile: `--profile development` (provider, PyPI, GitHub, OpenAI, Anthropic), `--profile frontier`
   (provider, OpenAI, Anthropic), `--profile dns`, `--profile egress-all`. A server on the host's
@@ -121,7 +125,9 @@ and the system bundle point at it. Each request is logged on the host with heade
   matter.
 - When a push is refused: remove what was found from the commits (amend, rebase, or rewrite them)
   or ask the human whether it is meant to be public. Push only from `/work` or `/workspaces/NAME`;
-  pushes of commits from anywhere else are refused because they cannot be checked.
+  pushes of commits from anywhere else are refused because they cannot be checked. That includes a
+  workspace the human added during the run (`sandbox-ai workspace add`): its pushes to a public remote
+  are refused until a restart with it, so ask the human to push those from the host.
 - Git may need no credentials at all: the human's `sandbox-ai git-logins` (or those of the identity
   they started with, `--identity NAME`) are added by the connection proxy to Git's requests to their
   servers. A push refused with 401/403 means there is none for that server.
@@ -147,9 +153,11 @@ and the system bundle point at it. Each request is logged on the host with heade
   "Resource temporarily unavailable" on fork may be one; the human can start with `--memory 16g`,
   `--cpus N`, `--pids N` (or `none`), or raise them during the run.
 - Check `/sandbox/session/memory.json` (used, limit, files in /tmp and HOME) before starting something big,
-  and run tests and builds with little parallelism. Files in `/tmp`, `/var/tmp` and HOME are memory. Near
-  the limit the launcher ends the largest process that is not you (a test run, a build) to keep the
-  sandbox alive; when the kernel's OOM killer hits sandbox-ai's supervisor, the whole run ends.
+  and run tests and builds with little parallelism. Files in `/tmp`, `/var/tmp` and HOME are memory. From
+  92 % of the limit the kernel slows the sandbox down (everything gets slow: that is memory, not the
+  network); near the limit, or when it stalls on memory, the launcher ends the largest process that is
+  not you (a test run, a build) to keep the sandbox alive; when the kernel's OOM killer hits sandbox-ai's
+  supervisor, the whole run ends.
 
 ## Other agents: helpers, companions, teams
 
