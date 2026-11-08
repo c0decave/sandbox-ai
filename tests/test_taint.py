@@ -205,9 +205,11 @@ def test_an_untrusted_response_holds_later_writes(tmp_path, pki):  # noqa: F811
         assert answer.startswith(b"HTTP/1.1 403") and b"untrusted content from news.example" in answer
         kind, details = broker.asked[0]
         assert kind == "http" and details["taint"]["source"]["rule"] == "news"
+        # Plain http: the question names the address it goes to; the Host header is only a claim (review 5 M1).
         assert ap.describe({"kind": kind, **details}).startswith(
-            "POST http://api.example/x (rule tainted-writes of rules.json); asked because untrusted content from "
-            "news.example entered this run at ")
+            f"POST http://127.0.0.1:{upstream.server_address[1]}/x (rule tainted-writes of rules.json); its Host "
+            "header names api.example (not verified): a server that routes by it may pass the request on there; "
+            "asked because untrusted content from news.example entered this run at ")
         records = proxy.records(until=lambda r: r.get("rule") == "tainted-writes")
         held = next(r for r in records if r.get("rule") == "tainted-writes")
         assert held["tainted"] == taint.shown()["since"] and held["decision"] == "ask"

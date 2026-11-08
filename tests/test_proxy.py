@@ -1523,3 +1523,133 @@ def test_the_proxys_caches_stay_bounded(monkeypatch, tmp_path):
         assert server.serves_name("1.1.1.1", 443, name)
     assert len(server.verified) <= 3 and ("1.1.1.1", 443, "old") not in server.verified
     assert ("1.1.1.1", 443, "d") in server.verified
+
+
+# --- review 5: a credential goes only with a Host naming its server (domain fronting) ----------------------
+
+
+def exchange_once(server, request, origin, scheme="https", destination="203.0.113.10:443"):
+    """ProxyServer.exchange over socket pairs: (bytes that reached the upstream server, the agent's answer)."""
+    agent_side, proxy_client = socket.socketpair()
+    proxy_upstream, server_side = socket.socketpair()
+    got = bytearray()
+
+    def upstream():
+        server_side.settimeout(3)
+        with contextlib.suppress(OSError):
+            while b"\r\n\r\n" not in got:
+                data = server_side.recv(65536)
+                if not data:
+                    return
+                got.extend(data)
+            server_side.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+    thread = threading.Thread(target=upstream)
+    thread.start()
+    agent_side.sendall(request)
+    agent_side.shutdown(socket.SHUT_WR)
+    server.exchange(rt.Stream(proxy_client), proxy_client, proxy_upstream, scheme, origin,
+                    {"connection": 1, "destination": destination})
+    thread.join(3)
+    agent_side.settimeout(1)
+    try:
+        answer = agent_side.recv(65536)
+    except OSError:
+        answer = b""
+    for sock in (agent_side, proxy_client, proxy_upstream, server_side):
+        sock.close()
+    return bytes(got), answer
+
+
+FRONTED = {"api_keys": [{"host": "myendpoint.hf.space", "port": 443, "name": "HF_TOKEN",
+                         "placeholder": "sandbox-ai-api-key-placeholder-HF_TOKEN", "key": "sk-REAL-SECRET-0123456789"}],
+           "llm": [{"name": "myllm", "scheme": "https", "host": "myllm.hf.space", "port": 443, "prefix": "",
+                    "placeholder": "sandbox-ai-llm-key-placeholder", "key": "LLM-REAL-KEY-zzzzzzzz", "headers": [],
+                    "addresses": []},
+                   {"name": "lan", "scheme": "http", "host": "gpu.lan", "port": 11434, "prefix": "",
+                    "placeholder": "sandbox-ai-llm-key-placeholder", "key": "LAN-REAL-KEY-yyyyyyyy", "headers": [],
+                    "addresses": ["10.0.0.5"]}],
+           "git_tokens": [{"host": "github.com", "port": 443, "user": "x-access-token",
+                           "token": "tok-FRONTED-REAL-0123456789"},
+                          {"host": "localhost", "port": 3080, "user": "ch", "token": "tok-LOOP-42", "loopback": True}]}
+
+
+def fronting_server(tmp_path, config=FRONTED, **kw):
+    fd = os.open(tmp_path / "log.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    return rt.ProxyServer({"body_limit": 65536, **config}, fd, run_dir=tmp_path, **kw), tmp_path / "log.jsonl"
+
+
+@pytest.mark.parametrize("request_, origin", [
+    (b"GET /whoami HTTP/1.1\r\nHost: attacker.hf.space\r\nAuthorization: Bearer "
+     b"sandbox-ai-api-key-placeholder-HF_TOKEN\r\n\r\n", "myendpoint.hf.space"),
+    (b"POST /v1/messages HTTP/1.1\r\nHost: attacker.hf.space\r\nContent-Length: 0\r\n\r\n", "myllm.hf.space"),
+    (b"GET /a/x.git/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: evil.example\r\n\r\n", "github.com"),
+    (b"GET /whoami HTTP/1.1\r\nHost: myendpoint.hf.space:8443\r\nAuthorization: Bearer "
+     b"sandbox-ai-api-key-placeholder-HF_TOKEN\r\n\r\n", "myendpoint.hf.space"),
+    (b"GET /whoami HTTP/1.0\r\nAuthorization: Bearer sandbox-ai-api-key-placeholder-HF_TOKEN\r\n\r\n",
+     "myendpoint.hf.space"),
+], ids=["api-key", "llm-without-placeholder", "git-token", "another-port", "no-host"])
+def test_a_credential_never_goes_with_a_host_naming_another_server(tmp_path, request_, origin):
+    """Review 5 H1 (PoC poc1_fronting.py): front ends route by Host, and one certificate serves many tenants; the
+    proxy added --api-key, --llm and Git login credentials by the TLS name alone. Now refused with a 403 that says
+    why, logged, and nothing reaches the server."""
+    server, log = fronting_server(tmp_path)
+    upstream, answer = exchange_once(server, request_, origin)
+    assert upstream == b""
+    assert answer.startswith(b"HTTP/1.1 403") and b"sandbox-ai: " in answer and b"the credential is for" in answer \
+        or b"no single Host" in answer
+    text = log.read_text()
+    assert '"event": "denied"' in text and "REAL" not in text
+
+
+@pytest.mark.parametrize("host", [b"MyEndpoint.HF.Space.", b"myendpoint.hf.space:443", b"myendpoint.hf.space"])
+def test_a_credential_goes_with_its_own_host_in_any_spelling(tmp_path, host):
+    server, _ = fronting_server(tmp_path)
+    upstream, answer = exchange_once(server, b"GET /whoami HTTP/1.1\r\nHost: " + host + b"\r\nAuthorization: Bearer "
+                                     b"sandbox-ai-api-key-placeholder-HF_TOKEN\r\n\r\n", "myendpoint.hf.space")
+    assert b"Bearer sk-REAL-SECRET-0123456789" in upstream and answer.startswith(b"HTTP/1.1 200")
+
+
+def test_without_a_credential_another_host_is_left_to_the_rules(tmp_path):
+    """Nothing added: the request goes on as before (the placeholder stays a placeholder)."""
+    server, _ = fronting_server(tmp_path)
+    upstream, _ = exchange_once(server, b"GET /x HTTP/1.1\r\nHost: attacker.hf.space\r\nAuthorization: Bearer "
+                                b"agents-own\r\n\r\n", "myendpoint.hf.space")
+    assert b"Bearer agents-own" in upstream
+
+
+def test_plain_http_credentials_need_the_endpoints_name_address_or_the_loopback(tmp_path):
+    """Plain http: an --llm endpoint's key with its name or pinned address; a loopback Git login with a loopback
+    name; any other Host is refused."""
+    server, _ = fronting_server(tmp_path)
+    for host, sent in ((b"gpu.lan:11434", True), (b"10.0.0.5:11434", True), (b"other.lan:11434", False)):
+        upstream, answer = exchange_once(server, b"POST /v1/x HTTP/1.1\r\nHost: " + host + b"\r\nContent-Length: 0\r\n"
+                                         b"\r\n", "10.0.0.5:11434", scheme="http", destination="10.0.0.5:11434")
+        assert (b"LAN-REAL-KEY" in upstream) == sent and answer.startswith(b"HTTP/1.1 200" if sent else b"HTTP/1.1 403")
+    git = b"GET /o/r.git/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: %s\r\n\r\n"
+    for host, sent in ((b"localhost:3080", True), (b"127.0.0.1:3080", True), (b"git.evil.example:3080", False)):
+        upstream, _ = exchange_once(server, git % host, "127.0.0.1:3080", scheme="http", destination="127.0.0.1:3080")
+        assert (b"Authorization: Basic" in upstream) == sent
+
+
+def test_a_question_names_the_verified_server_and_the_host_header_as_a_claim(tmp_path):
+    """Review 5 M1 (PoC poc2_approval_host.py): in mode high a POST to an attacker's server, with Host:
+    api.github.com, was asked about as a write to api.github.com. The question and the log now name the server the
+    proxy verified; the Host header is shown as an unverified claim."""
+    spec = importlib.util.spec_from_file_location("approvals_for_proxy", ROOT / "sandbox/approvals.py")
+    approvals = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(approvals)
+    rules = [{"name": "security mode high", "version": 1, "http": [
+        {"id": "mode-writes", "host": "*", "methods": ["POST"], "decision": "ask", "reason": "a write"}]}]
+    asked = []
+    server, log = fronting_server(tmp_path, {"rules": rules},
+                                  asker=lambda kind, details: asked.append((kind, details)) or
+                                  {"decision": "deny", "scope": "once"})
+    exchange_once(server, b"POST /repos/me/project/issues HTTP/1.1\r\nHost: api.github.com\r\nContent-Length: 2\r\n"
+                  b"\r\n{}", "collector.attacker.example", destination="198.51.100.7:443")
+    kind, details = asked[0]
+    assert details["host"] == "collector.attacker.example" and details["host_header"] == "api.github.com"
+    assert details["url"] == "https://collector.attacker.example/repos/me/project/issues"
+    text = approvals.describe({"kind": kind, **details})
+    assert "POST https://collector.attacker.example/" in text and "api.github.com (not verified)" in text
+    record = json.loads(log.read_text().splitlines()[-1])
+    assert record["url"].startswith("https://collector.attacker.example/") and record["host_header"] == "api.github.com"

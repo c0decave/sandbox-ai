@@ -354,8 +354,11 @@ def what(question):
         return f"push {', '.join(shown(r, 200) for r in refs[:10])} to {shown(question.get('url'), 500)} " \
                "despite privacy warnings"
     if kind == "http":
+        claim = question.get("host_header")
         return f"{shown(question.get('method'), 20)} {shown(question.get('url'), 500)} (rule " \
-               f"{shown(question.get('rule'), 80)} of {shown(question.get('ruleset'), 120)})"
+               f"{shown(question.get('rule'), 80)} of {shown(question.get('ruleset'), 120)})" + \
+               (f"; its Host header names {shown(claim, 300)} (not verified): a server that routes by it may "
+                f"pass the request on there" if claim else "")
     if kind == "mcp":
         return f"call the MCP tool {shown(question.get('tool'), 128)} of {shown(question.get('server'), 40)} with " \
                f"{shown(question.get('arguments'), 300)} (rule {shown(question.get('rule'), 80)} of " \

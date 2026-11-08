@@ -2625,6 +2625,73 @@ def host_name(value):
     return value.rsplit(":", 1)[0] if value.count(":") == 1 else value
 
 
+DEFAULT_PORTS = {"http": 80, "https": 443}
+LOOPBACK_NAMES = frozenset({"localhost", "127.0.0.1", "::1"})
+HOST_HEADER = re.compile(r"(?:\[([0-9A-Fa-f:.]{2,45})\]|([^\s\[\]:/@?#\\]{1,253}))(?::(\d{1,5}))?")
+
+
+def host_authority(value):
+    """(name, port) a Host header VALUE names: the name in lower case without a trailing dot (an address in its
+    usual form), the port as given (None when it names none); None when it is malformed."""
+    match = HOST_HEADER.fullmatch((value or "").strip())
+    if not match:
+        return None
+    name = (match.group(1) or match.group(2)).lower().rstrip(".")
+    with contextlib.suppress(ValueError):
+        name = str(ipaddress.ip_address(name))
+    if match.group(1) and ":" not in name:
+        return None  # [ ] holds IPv6 addresses only
+    port = int(match.group(3)) if match.group(3) else None
+    if port is not None and not 0 < port < 65536:
+        return None
+    return name, port
+
+
+def host_agrees(value, names, port):
+    """The Host header VALUE names one of NAMES (see host_authority), on PORT when it names a port: clients leave
+    out only the scheme's default port, and a name without one still names that server, so only the name decides
+    which tenant a front end serves."""
+    found = host_authority(value)
+    return found is not None and found[0] in names and found[1] in (None, port)
+
+
+def verified_authority(scheme, origin, record, host_header):
+    """(authority, claim) of a request on a connection to ORIGIN (the name the proxy verified, else address:port):
+    the authority as a URL names where the request really goes, and the agent's Host header HOST_HEADER, printable,
+    when it names anything else (None when it agrees; then its own form is the authority, as the client wrote it).
+    The claim is what a server routing by Host may act on; only the authority is checked."""
+    port = str(record.get("destination", "")).rsplit(":", 1)[-1]
+    port = int(port) if port.isdigit() else DEFAULT_PORTS.get(scheme)
+    if is_address_origin(origin):
+        address = origin.rsplit(":", 1)[0].strip("[]") if origin.count(":") == 1 or origin.startswith("[") else origin
+        name = str(ipaddress.ip_address(address))
+    else:
+        name = origin.lower().rstrip(".")
+    if host_header is not None and host_agrees(host_header, {name}, port):
+        return printable_text(host_header.strip(), 300), None
+    shown = f"[{name}]" if ":" in name else name
+    authority = shown if port == DEFAULT_PORTS.get(scheme) else f"{shown}:{port}"
+    return authority, (printable_text(host_header, 300) if host_header is not None else None)
+
+
+def host_header_problem(headers, scheme, port, names, shown=None):
+    """Why the request's Host header does not name the server a credential the proxy adds is bound to (one of
+    NAMES, on PORT), or None. Front ends route by the Host header and one certificate and address serve many
+    tenants, so a key bound to a.example must not go with "Host: b.example" (domain fronting). Absolute-form
+    targets, HTTP/2 (:authority) and a second Host header are refused before this; the comparison ignores case
+    and a trailing dot (host_agrees)."""
+    values = [value for name, value in headers if name.lower() == "host"]
+    if len(values) != 1:
+        return "the request names no single Host"
+    shown = shown or (sorted(names) or ["?"])[0]
+    if host_authority(values[0]) is None:
+        return f"the Host header {printable_text(values[0], 300)!r} is malformed"
+    if host_agrees(values[0], names, port):
+        return None
+    return f"the Host header {printable_text(values[0], 300)} differs from {shown}" \
+        + ("" if port == DEFAULT_PORTS.get(scheme) else f":{port}") + ", the server the credential is for"
+
+
 LLM_KEY_HEADERS = ("authorization", "x-api-key", "api-key")
 
 
@@ -3352,6 +3419,32 @@ class ProxyServer:
                 return base64.b64encode(f"{entry['user']}:{entry['token']}".encode())
         return None
 
+    def credential_host_refusal(self, scheme, origin, port, headers, token, llm, keys):
+        """Why a request the proxy would add a credential to (a Git login TOKEN, the --llm endpoint LLM, the
+        --api-key/--publish KEYS) is refused, or None: its Host header must name the server the credential is
+        bound to, the verified name (HTTPS) or, over plain http, the endpoint's name or pinned addresses (an --llm
+        endpoint) or the host's loopback (a Git login for it). Never forwarded without the credential instead: the
+        agent would learn nothing, and the human would not see the attempt."""
+        if not (token or llm or keys):
+            return None
+        if scheme == "https":
+            names = {origin.lower().rstrip(".")}
+            shown = next(iter(names))
+        else:
+            names, shown = (set(LOOPBACK_NAMES), "localhost") if token else (set(), None)
+            for entry in self.config.get("llm") or []:
+                if entry["name"] == llm:
+                    names |= {str(entry["host"]).lower(), *entry.get("addresses", [])}
+                    shown = str(entry["host"]).lower()
+                    if shown in LOOPBACK_NAMES:
+                        names |= LOOPBACK_NAMES
+        problem = host_header_problem(headers, scheme, port, names, shown)
+        if not problem:
+            return None
+        what = ", ".join(([f"the Git login for {origin}"] if token else []) + ([f"--llm {llm}"] if llm else [])
+                         + [f"--api-key {name}" for name in keys])
+        return f"{problem} ({what}); a request carrying it must name that server, so it was not sent"
+
     def has_http_rules(self, address):
         """ADDRESS is pinned for a host with HTTP rules: on any port, only HTTP the proxy can check gets there."""
         return self.rules.pins(address)
@@ -3420,7 +3513,9 @@ class ProxyServer:
                               "request": {"headers": redact_headers(headers)}})
                     return
                 target = rest.rpartition(" ")[0] or rest
-                authority = header(headers, "host") or origin
+                # Logged and asked about as where it goes: the verified name (else the address), never the Host
+                # header the agent wrote; a Host naming something else is kept beside it as a claim.
+                authority, claim = verified_authority(scheme, origin, record, header(headers, "host"))
                 url = target if "://" in target else f"{scheme}://{authority}{target}"
                 if "://" in target:
                     send_all(client, b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
@@ -3438,7 +3533,8 @@ class ProxyServer:
                 # line. Never the agent's Host header.
                 path = normal_path(target)
                 checked = f"{scheme}://{origin}{path}"
-                entry = {**record, "event": "http", "method": method, "url": redact_text(url)}
+                entry = {**record, "event": "http", "method": method, "url": redact_text(url),
+                         **({"host_header": claim} if claim else {})}
                 current["entry"] = entry
                 destination = str(record.get("destination", "")).rsplit(":", 1)[0].strip("[]") or None
                 parts, facts = None, None
@@ -3458,8 +3554,9 @@ class ProxyServer:
                     entry.update(decision=ruled["decision"], rule=ruled["rule"], ruleset=ruled["ruleset"])
                     refusal = ruled["reason"] if ruled["decision"] == "deny" else None
                     if ruled["decision"] == "ask":
-                        answer = self.http_ask(ruled, method, redact_text(url), facts["claimed"] or facts["server"],
-                                               facts["paths"][0] or "/", facts["body"], self.asked_by(record))
+                        answer = self.http_ask(ruled, method, redact_text(url), authority,
+                                               facts["paths"][0] or "/", facts["body"],
+                                               {**self.asked_by(record), **({"host_header": claim} if claim else {})})
                         entry["approval"] = {k: answer.get(k) for k in ("decision", "scope", "reason")}
                         if answer.get("decision") != "allow":
                             refusal = f"not approved ({answer.get('reason', 'refused')}): {ruled['reason']}"
@@ -3503,12 +3600,26 @@ class ProxyServer:
                     head = head[:-2] + b"Authorization: Basic " + token + b"\r\n\r\n"
                     entry["token_added"] = True
                 port = int(str(record.get("destination", "")).rsplit(":", 1)[-1] or 0)
+                before = head
                 head, llm = llm_head(self.config.get("llm"), scheme, origin, port, path, head)
                 if llm:
                     entry["llm"] = llm  # its key went in on the wire; the log keeps the agent's headers
+                llm_added = bool(llm) and head != before
                 head, keys = api_key_head(self.config.get("api_keys"), scheme, origin, port, head)
                 if keys:
                     entry["api_keys"] = keys  # the keys went in on the wire; the log keeps the placeholders
+                refusal = self.credential_host_refusal(scheme, origin, port, headers, bool(token),
+                                                       llm if llm_added else None, keys)
+                if refusal:
+                    message = f"sandbox-ai: {refusal}\n".encode()
+                    send_all(client, b"HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n"
+                             + f"Content-Length: {len(message)}\r\n\r\n".encode() + message)
+                    for name in ("token_added", "llm", "api_keys"):
+                        entry.pop(name, None)  # nothing was added: the request went nowhere
+                    self.log({**entry, "event": "denied", "reason": refusal, "rule": "(host)",
+                              "request": {"headers": redact_headers(headers)}})
+                    current.pop("entry", None)
+                    return
                 added = bool(entry.get("token_added") or llm or keys)
                 if added:
                     head = identity_head(head)
@@ -6123,7 +6234,8 @@ class ApprovalBroker:
             digest = hashlib.sha256(str(details.get("message", "")).encode("utf-8", "replace")).hexdigest()[:16]
             return kind, f"{details.get('url', '')} {digest}"
         if kind == "http":  # "run" covers this endpoint under this rule, not the rule's other requests
-            return kind, " ".join(str(details.get(k, "")) for k in ("ruleset", "rule", "method", "host", "path"))
+            return kind, " ".join(str(details.get(k, "")) for k in ("ruleset", "rule", "method", "host", "path",
+                                                                   "host_header"))
         if kind == "mcp":  # "run" covers this tool under this rule
             return kind, " ".join(str(details.get(k, "")) for k in ("ruleset", "rule", "server", "tool"))
         if kind == "tool":  # the agent's own tool: "run" covers it under this rule

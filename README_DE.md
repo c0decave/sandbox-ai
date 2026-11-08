@@ -4188,7 +4188,11 @@ Leitung an die Stelle des Platzhalters, und nur in einem Anmelde-Header
 (`Authorization`, `X-API-Key`, `API-Key`) einer HTTPS-Anfrage an HOST auf Port
 443, dessen Zertifikat er geprüft hat. Überall sonst (ein anderer Host, reines
 http, ein Body, ein anderer Header) bleibt der Platzhalter ein Platzhalter.
-Die Option öffnet HOST (TCP/443), braucht den Proxy und lehnt `--no-inspect
+Eine Anfrage, deren `Host`-Header einen anderen Server nennt als den geprüften
+(Frontends leiten danach weiter, und ein Zertifikat dient vielen Mandanten),
+lehnt der Proxy mit einem 403 `sandbox-ai: ...` ab und protokolliert sie; das
+gilt für jede Anmeldung, die der Proxy einsetzt (`--llm`, `--publish`,
+Git-Logins). Die Option öffnet HOST (TCP/443), braucht den Proxy und lehnt `--no-inspect
 HOST` ab. Wie der Schlüssel von `--llm` steht er in keinem Log; eine Antwort
 erreicht den Agenten so, wie der Server sie schickt: Geben Sie keinem Server
 einen Schlüssel, der Anmeldedaten zurückspiegelt.

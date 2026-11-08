@@ -7763,6 +7763,68 @@ def test_host_name(scenario):
         assert rt.host_name("[2001:db8::1]:8443") == "2001:db8::1" and rt.host_name("[broken") is None
 
 
+def test_host_authority(scenario):
+    """Review 5 H1: what a Host header names: the name (case, trailing dot ignored) and the port it gives."""
+    if scenario == "happy":
+        assert rt.host_authority("API.GitHub.com.") == ("api.github.com", None)
+        assert rt.host_authority("api.github.com:8443") == ("api.github.com", 8443)
+        assert rt.host_authority("10.0.0.5") == ("10.0.0.5", None)
+    elif scenario == "sad":
+        for value in (None, "", "a b", "user@host", "host:", "host:99999", "host:0", "host/x", "[not-v6]",
+                      "[10.0.0.1]"):
+            assert rt.host_authority(value) is None, value
+    else:  # IPv6 in brackets, in its usual form
+        assert rt.host_authority("[2001:DB8:0::1]:443") == ("2001:db8::1", 443)
+
+
+def test_host_agrees(scenario):
+    """Review 5 H1: the name decides; a port, when given, must be the connection's."""
+    names = {"llm.example.org"}
+    if scenario == "happy":
+        assert rt.host_agrees("LLM.example.org.", names, 443) and rt.host_agrees("llm.example.org:8443", names, 8443)
+    elif scenario == "sad":
+        assert not rt.host_agrees("other.example.org", names, 443)
+        assert not rt.host_agrees("llm.example.org:443", names, 8443)
+        assert not rt.host_agrees("llm.example.org.evil.example", names, 443)
+    else:  # malformed is never agreement; an address in another spelling is the same address
+        assert not rt.host_agrees("llm.example.org:", names, 443)
+        assert rt.host_agrees("[0:0::1]:80", {"::1"}, 80)
+
+
+def test_host_header_problem(scenario):
+    """Review 5 H1: a credential goes only with a Host naming its server (domain fronting is refused)."""
+    names = {"myendpoint.hf.space"}
+    if scenario == "happy":
+        for value in ("myendpoint.hf.space", "MyEndpoint.HF.space.", "myendpoint.hf.space:443"):
+            assert rt.host_header_problem([("Host", value)], "https", 443, names) is None, value
+    elif scenario == "sad":
+        assert "differs from myendpoint.hf.space" in rt.host_header_problem(
+            [("Host", "attacker.hf.space")], "https", 443, names)
+        assert "differs" in rt.host_header_problem([("Host", "myendpoint.hf.space:8443")], "https", 443, names)
+        assert "no single Host" in rt.host_header_problem([], "https", 443, names)
+    else:  # malformed, and a port other than the default is named in the message
+        assert "malformed" in rt.host_header_problem([("Host", "a b")], "https", 443, names)
+        assert ":8443" in rt.host_header_problem([("Host", "x")], "https", 8443, names)
+        assert rt.host_header_problem([("Host", "myendpoint.hf.space:8443")], "https", 8443, names) is None
+
+
+def test_verified_authority(scenario):
+    """Review 5 M1: a request is shown and logged as where it goes; a different Host is only a claim."""
+    record = {"destination": "198.51.100.7:443"}
+    if scenario == "happy":
+        assert rt.verified_authority("https", "api.github.com", record, "api.github.com") == ("api.github.com", None)
+        assert rt.verified_authority("https", "api.github.com", record, None) == ("api.github.com", None)
+    elif scenario == "sad":
+        assert rt.verified_authority("https", "collector.example", record, "api.github.com") == \
+            ("collector.example", "api.github.com")
+    else:  # plain http goes by the address; another port is part of the authority; agreeing, the client's form
+        assert rt.verified_authority("http", "10.0.0.5:8080", {"destination": "10.0.0.5:8080"}, "intranet:8080") == \
+            ("10.0.0.5:8080", "intranet:8080")
+        assert rt.verified_authority("http", "[::1]:80", {"destination": "[::1]:80"}, "[::1]") == ("[::1]", None)
+        assert rt.verified_authority("https", "a.example", {"destination": "192.0.2.1:8443"}, "A.example:8443") == \
+            ("A.example:8443", None)
+
+
 LLM_ENTRY = {"name": "gpu", "scheme": "https", "host": "llm.example.org", "port": 8443, "addresses": ["192.0.2.9"],
              "prefix": "/ollama", "placeholder": "sandbox-ai-llm-key-placeholder", "key": "sk-live-0123456789",
              "headers": [["CF-Access-Client-Secret", "cf-value"]], "ca": None}

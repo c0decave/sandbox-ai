@@ -3935,7 +3935,10 @@ puts the secret SECRET (default: NAME) in the placeholder's place on the
 wire, and only in a credential header (`Authorization`, `X-API-Key`,
 `API-Key`) of an HTTPS request to HOST on port 443, whose certificate it
 checked. Anywhere else (another host, plain http, a body, another header) the
-placeholder stays a placeholder. The option opens HOST (TCP/443), needs the
+placeholder stays a placeholder. A request whose `Host` header names another
+server than the one checked (front ends route by it, and one certificate serves
+many tenants) is refused with a `sandbox-ai: ...` 403 and logged; this holds for
+every credential the proxy adds (`--llm`, `--publish`, Git logins). The option opens HOST (TCP/443), needs the
 proxy and refuses `--no-inspect HOST`. Like the `--llm` key, the key is in
 no log; an answer reaches the agent as the server sent it, so give no key to
 a server that echoes credentials back.
