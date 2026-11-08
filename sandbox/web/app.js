@@ -2806,7 +2806,9 @@ function llmBodyOf(view, changes) {
 // only the columns some model has a value for; loaded first, then by name; a long name cut (the whole one in its
 // title); a filter. ACTIONS (the LLM page): {use(model, button, cell), copy(ref, button), current: its model, host}.
 const MODEL_NAME_WIDTH = 48;  // as llm models cuts it (llm.NAME_WIDTH)
+let modelTables = 0;  // two tables can be in the page at once (a server's models, a test's): each filter its own id
 function modelsTable(server, models, actions) {
+  const filterId = `llm-models-filter${modelTables++ ? `-${modelTables}` : ""}`;
   const list = (Array.isArray(models) ? models : []).filter(m => m && typeof m === "object" && typeof m.name === "string")
     .sort((a, b) => ({ true: 0, false: 1 }[String(a.loaded)] ?? 2) - ({ true: 0, false: 1 }[String(b.loaded)] ?? 2) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   const loaded = { true: N_("yes"), false: N_("no") };
@@ -2833,7 +2835,7 @@ function modelsTable(server, models, actions) {
     }
     return el("tr", { "data-model": m.name }, cells);
   });
-  const filter = el("input", { type: "search", id: "llm-models-filter", class: "mono", placeholder: t("Filter"), "aria-label": t("Filter the models of {server}", { server }), autocomplete: "off" });
+  const filter = el("input", { type: "search", id: filterId, class: "mono", placeholder: t("Filter"), "aria-label": t("Filter the models of {server}", { server }), autocomplete: "off" });
   const count = el("span", { class: "hint" });
   const apply = () => {
     const words = String(filter.value || "").trim().toLowerCase();
@@ -2859,11 +2861,11 @@ pages.llm = async (main) => {
   const path = (name, more) => hostPath(`/llm/${encodeURIComponent(name)}${more || ""}`, host);
   // the list again (after a change made from the form), the form left as it is
   const refreshList = async () => { try { drawList(await api("GET", hostPath("/llm", host))); } catch (e) { /* the list as it was */ } };
-  // Use as default: the server saved again with that model, the rest from llm show (llm-replace, asked first)
+  // Use as default: the server saved again with that model, the rest from llm show (llm-replace, asked first). Its
+  // CA certificate is not in what is sent and stays as it is (llm add --replace keeps the stored one).
   const useModel = (server) => async (model, trigger, holder) => busy(trigger, async () => {
     let view;
     try { view = await api("GET", path(server)); } catch (e) { output.append(errorNotice(e)); return; }
-    if (view && view.ca) { output.append(notice(t("{name} has a CA certificate of its own ({file}): a change from this page would remove it. Use Edit… and give its file again.", { name: server, file: String(view.ca) }), "warn")); return; }
     const body = llmBodyOf(view, { model, replace: true });
     const asks = [t("Make {model} the default model of {name} on {host}? The server is saved again with it (sandbox-ai llm add --replace), the rest as it is.", { model, name: server, host }),
       body.insecure_http ? t("It still sends the prompts to {url} over plain http, unencrypted.", { url: body.url }) : null].filter(Boolean);
@@ -2959,19 +2961,16 @@ pages.llm = async (main) => {
     for (const [key, value] of Object.entries(more)) if (value) body[key] = value;
     return body;
   };
-  // what is asked first: plain http outside the local networks, a server of that name replaced (and its CA dropped)
+  // what is asked first: plain http outside the local networks, a server of that name replaced
   const asksOf = (body) => [body.insecure_http ? t("Send the prompts to {url} over plain http, unencrypted, from {host}? Whoever is on the way can read them, the answers and the key.", { url: body.url, host }) : null,
-    body.replace ? t("Replace the LLM server {name} on {host}? Every start that uses it sends its prompts (and its key) to {url} from then on.", { name: body.name, host, url: body.url }) : null,
-    body.replace && editing && editing.ca && editing.name === body.name && !body.ca ? t("Its CA certificate ({file}) is removed: give its file again to keep it.", { file: editing.ca }) : null].filter(Boolean);
-  const canon = (b) => JSON.stringify(Object.keys(b).filter(k => !["replace", "confirm"].includes(k) && b[k] !== undefined).sort().map(k => [k, b[k]]));
-  const same = (body) => Boolean(editing && editing.saved) && canon(body) === canon(editing.saved);
-  const setEditing = (view, saved) => {
-    editing = view ? { name: view.name, ca: view.ca || null, saved: saved || null } : null;
+    body.replace ? t("Replace the LLM server {name} on {host}? Every start that uses it sends its prompts (and its key) to {url} from then on.", { name: body.name, host, url: body.url }) : null].filter(Boolean);
+  const setEditing = (view) => {
+    editing = view ? { name: view.name, ca: view.ca || null } : null;
     heading.textContent = editing ? t("Change the server {name}", { name: editing.name }) : t("Add a server");
     save.textContent = editing ? t("Save") : t("Add");
     cancelEdit.hidden = !editing;
     clear(caNote);
-    if (editing && editing.ca) caNote.append(t("It has a CA certificate of its own ({file}): give its file again here, or saving removes it.", { file: editing.ca }));
+    if (editing && editing.ca) caNote.append(t("It has a CA certificate of its own ({file}), which is kept; a file given here replaces it.", { file: editing.ca }));
   };
   const editServer = async (server) => {
     let view;
@@ -2983,7 +2982,7 @@ pages.llm = async (main) => {
     ca.value = ""; vpn.value = view.vpn || ""; anthropic.checked = Boolean(view.anthropic); insecure.checked = Boolean(view.insecure_http); replace.checked = true;
     fillModels(Array.isArray(view.models) ? view.models.map(m => ({ name: m })) : []);
     clear(status); clear(testBox); checkName();
-    setEditing(view, Object.assign(body, { replace: true }));
+    setEditing(view);
     if (typeof url.focus === "function") url.focus();
   };
   // the Default-model select, from what a test (or llm show's last check) listed
@@ -3002,32 +3001,29 @@ pages.llm = async (main) => {
     if (!asks.length) { send(false); return; }
     confirmIn(addRow, asks.join(" "), body.replace ? t("Yes, replace it") : t("Yes, add it"), () => send(true), { kind: "primary", trigger: ev.target });
   } }, t("Add"));
-  // Test connection: sandbox-ai lists a server's models only once it is saved (llm models, llm check), so a new or
-  // changed form is saved first (asked, with what saving asks); the result below, the form kept as it is
-  const test = el("button", { onclick: (ev) => {
-    const body = formBody();
-    if (!body) return;
-    const run = async (saveFirst) => {
-      clear(testBox).append(el("p", { class: "hint" }, t("Testing {name}…", { name: body.name })));
-      if (saveFirst) {
-        try { await api("POST", hostPath("/llm", host), Object.assign({}, body, { confirm: true })); }
-        catch (e) { clear(testBox).append(errorNotice(e, t("Not saved"))); return; }
-        replace.checked = true;
-        setEditing({ name: body.name, ca: body.ca ? `${body.name}.pem` : null }, Object.assign({}, body, { replace: true, ca: undefined }));
-        await refreshList();
-      }
-      let models = null, modelsError = null, check = null;
-      try { models = await api("GET", path(body.name, "/models")); } catch (e) { modelsError = e; }
-      try { check = await api("POST", path(body.name, "/check"), {}); } catch (e) { check = { ok: false, output: errorText(e) }; }
-      const listed = (Array.isArray(models) ? models : []).filter(m => m && typeof m.name === "string");
-      clear(testBox).append(notice(check && check.ok ? t("{name} answers: {count} model(s) listed.", { name: body.name, count: listed.length }) : t("The test of {name} found problems.", { name: body.name }), check && check.ok ? "ok" : "error"),
-        ...[modelsError ? errorNotice(modelsError) : null, check && check.output ? el("pre", {}, String(check.output)) : null].filter(Boolean));
-      fillModels(listed);
-    };
-    if (same(body)) { busy(ev.target, () => run(false)); return; }
-    const asks = [t("Test {name}: it is saved on {host} first (sandbox-ai llm add), then its models are listed and it is checked.", { name: body.name, host }), ...asksOf(body)];
-    confirmIn(addRow, asks.join(" "), t("Yes, save and test"), () => run(true), { kind: "primary", trigger: ev.target });
-  } }, t("Test connection"));
+  // Test connection: the models the server at that URL lists now (sandbox-ai wizard models --kind --url --json on
+  // that host), before anything is stored: nothing is saved, no name is needed, and the form is left as it is. Its
+  // key is named (the command reads that secret there) and its CA goes as a file of that host; a header secret and
+  // a VPN profile do not, so a server that needs one of those can refuse the test and still work for the starts.
+  const test = el("button", { onclick: (ev) => busy(ev.target, async () => {
+    clear(status);
+    const address = url.value.trim();
+    if (!address) { status.append(notice(t("Which URL? {example} of the server to test.", { example: "http://192.168.1.20:1234" }), "error")); return; }
+    const secret = keySecret.value.trim();
+    if (secret && !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(secret)) { status.append(notice(t("A secret's name: letters, digits and _ (up to 64), not starting with a digit."), "error")); return; }
+    const sent = Object.assign({ kind: kind.value, url: address }, textOf(ca) ? { ca: textOf(ca) } : {}, secret ? { api_key_secret: secret } : {});
+    clear(testBox).append(el("p", { class: "hint" }, t("Testing {url}…", { url: address })));
+    let models;
+    try { models = await api("POST", hostPath("/llm-models", host), sent); }
+    catch (e) { clear(testBox).append(errorNotice(e, t("{url} did not answer with a list of models", { url: address }))); fillModels([]); return; }
+    const listed = (Array.isArray(models) ? models : []).filter(m => m && typeof m.name === "string");
+    const partly = headerSecrets.value.trim() || vpn.value.trim();
+    clear(testBox).append(notice(listed.length ? t("{url} answers: {count} model(s) listed.", { url: address, count: listed.length })
+      : t("{url} answers, but lists no model: load or pull one there.", { url: address }), listed.length ? "ok" : "warn"),
+      ...[listed.length ? modelsTable(address, listed) : null,
+        partly ? el("p", { class: "hint" }, t("The test sends no header secret and does not go through a VPN profile: a server that needs one can refuse it and still work for the starts. {check} checks it as the agents reach it, once it is saved.", { check: t("Check") })) : null].filter(Boolean));
+    fillModels(listed);
+  }) }, t("Test connection"));
   const cancelEdit = el("button", { onclick: () => {
     for (const input of [name, url, model, keySecret, headerSecrets, ca, vpn]) input.value = "";
     for (const box of [anthropic, replace, insecure]) box.checked = false;

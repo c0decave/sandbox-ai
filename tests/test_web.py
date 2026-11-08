@@ -298,6 +298,18 @@ def logged_in():
     ("POST", "/api/hosts/ct1/llm/lmstudio/check", {"agent": "opencode"}, ["llm", "check", "lmstudio", "--agent",
                                                                            "opencode"]),
     ("GET", "/api/hosts/ct1/llm/lmstudio/models", None, ["llm", "models", "lmstudio", "--json"]),
+    # "Test connection": the models of a server that is not registered, by its whole URL; nothing is stored
+    ("POST", "/api/hosts/ct1/llm-models", {"kind": "ollama", "url": "http://192.168.1.9:11434"},
+     ["wizard", "models", "--kind=ollama", "--url=http://192.168.1.9:11434", "--json"]),
+    ("POST", "/api/hosts/ct1/llm-models", {"kind": "openai-compatible", "url": "https://gw.example.org:8443/v1/openai"},
+     ["wizard", "models", "--kind=openai-compatible", "--url=https://gw.example.org:8443/v1/openai", "--json"]),
+    ("POST", "/api/hosts/ct1/llm-models", {"kind": "vllm", "url": "http://[2001:db8::5]:8000"},
+     ["wizard", "models", "--kind=vllm", "--url=http://[2001:db8::5]:8000", "--json"]),
+    # an https server with its own CA, and one that wants a key: the key is NAMED (read on that host), never sent
+    ("POST", "/api/hosts/ct1/llm-models", {"kind": "openai-compatible", "url": "https://gw.example.org",
+                                            "ca": "/home/you/ca.pem", "api_key_secret": "GW_KEY"},
+     ["wizard", "models", "--kind=openai-compatible", "--url=https://gw.example.org", "--ca=/home/you/ca.pem",
+      "--api-key-secret=GW_KEY", "--json"]),
     ("POST", "/api/hosts/ct1/llm", {"name": "gw", "kind": "openai-compatible", "url": "https://gw.example.org",
                                     "api_key_secret": "GW_KEY"},
      ["llm", "add", "gw", "--kind", "openai-compatible", "--url", "https://gw.example.org", "--api-key-secret=GW_KEY"]),
@@ -610,6 +622,21 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     ("POST", "/api/hosts/ct1/approvals/1-2", {"decision": "maybe"}, 400),
     ("POST", "/api/hosts/ct1/approvals/1-2", {"decision": "allow", "scope": "forever"}, 400),
     ("POST", "/api/hosts/ct1/llm", {"name": "--replace", "kind": "lmstudio", "url": "http://x"}, 400),
+    ("POST", "/api/hosts/ct1/llm-models", {"kind": "anthropic", "url": "https://x.example.org"}, 400),
+    ("POST", "/api/hosts/ct1/llm-models", {"kind": "ollama"}, 400),
+    ("POST", "/api/hosts/ct1/llm-models", {"url": "https://x.example.org"}, 400),
+    ("POST", "/api/hosts/ct1/llm-models", {"kind": "ollama", "url": "--json"}, 400),
+    ("POST", "/api/hosts/ct1/llm-models", {"kind": "ollama", "url": "ftp://x.example.org"}, 400),
+    ("POST", "/api/hosts/ct1/llm-models", {"kind": "ollama", "url": "http://x.example.org/v1?a=b"}, 400),
+    ("POST", "/api/hosts/ct1/llm-models", {"kind": "ollama", "url": "http://u:p@x.example.org"}, 400),
+    ("POST", "/api/hosts/ct1/llm-models", {"kind": "ollama", "url": "http://x.example.org;id"}, 400),
+    ("POST", "/api/hosts/ct1/llm-models", {"kind": "ollama", "url": f"http://x.example.org/{'a' * 300}"}, 400),
+    ("POST", "/api/hosts/ct1/llm-models", {"kind": "ollama", "url": 11434}, 400),
+    ("POST", "/api/hosts/ct1/llm-models", {"kind": "ollama", "url": "http://x.example.org", "ca": "ca.pem"}, 400),
+    ("POST", "/api/hosts/ct1/llm-models", {"kind": "ollama", "url": "http://x.example.org", "ca": "/x/../ca.pem"}, 400),
+    ("POST", "/api/hosts/ct1/llm-models", {"kind": "ollama", "url": "http://x.example.org",
+                                            "api_key_secret": "sk-the-key-itself"}, 400),
+    ("GET", "/api/hosts/ct1/llm-models", None, 405),
     ("POST", "/api/hosts/ct1/llm", {"name": "a", "kind": "lmstudio", "url": "http://x", "model": "-x"}, 400),
     ("POST", "/api/hosts/ct1/llm/a/check", {"agent": "bash"}, 400),
     ("POST", "/api/hosts/ct1/defaults", {"key": "--x", "value": 1}, 400),
@@ -1839,6 +1866,7 @@ SAFE_POSTS = {r"/api/hosts", r"/api/hosts-status", r"/api/hosts/(?P<host>[^/]+)/
         "/projects/review", "/mcp-catalog", "/git-logins/check", "/publish-logins", "/publish-logins/check",
         "/identities", "/identities-check", "/identities/(?P<name>[^/]+)",
         "/identities/(?P<name>[^/]+)/(?P<action>login|publish)", "/presets/(?P<name>[^/]+)/check",
+        "/llm-models",  # the models a server lists (wizard models --url): nothing is stored
         "/preset-dirs/remove", "/logs", "/privacy-check", "/activity", "/demo-device/start", "/demo-device/stop",
         "/teams/(?P<name>[^/]+)/post", "/images-new", "/images-recipe", "/images/(?P<target>[^/]+)/check")}
 
@@ -4943,6 +4971,7 @@ const LONG = "a-model-with-a-name-far-longer-than-the-table-shows-q8";
   const result = {};
   vm.runInContext('state.me = { user: "admin", csrf: "c" }; state.host = "ct1"; state.page = "llm"; state.hosts = [{ name: "local", kind: "local" }, { name: "ct1", kind: "ssh", ssh: "root@ct1", port: 22 }];', context);
   let addAnswer = () => ({ output: "ok" });
+  let testAnswer = () => [{ name: "m2", loaded: false }, { name: "m1", loaded: true, size: 4294967296 }];
   const shows = {
     gw: { name: "gw", kind: "vllm", url: "https://gw.example.org", model: "qwen3", api_key_secret: "GW_KEY", headers: { "X-Org": "ORG_KEY" },
           ca: null, vpn: "home", anthropic: true, insecure_http: false, models: ["qwen3", "zeta"], checked: null },
@@ -4951,9 +4980,10 @@ const LONG = "a-model-with-a-name-far-longer-than-the-table-shows-q8";
   };
   answer = (method, path) => {
     if (method === "GET" && path.endsWith("/llm")) return [{ name: "gw", kind: "vllm", url: "https://gw.example.org", model: "qwen3" }, { name: "lan", kind: "openai-compatible", url: "https://lan.example.org" }];
+    if (path.endsWith("/llm/lan/models")) return [{ name: "only", loaded: null }];
     if (path.endsWith("/llm/gw/models")) return [{ name: "zeta", loaded: false, size: 4294967296, type: "llm", arch: "qwen2", parameters: "7B", quantization: "Q4_K_M", context: 32768 },
       { name: LONG, loaded: false }, { name: "qwen3", loaded: true, size: 8589934592 }];
-    if (path.endsWith("/llm/new1/models")) return [{ name: "m2", loaded: false }, { name: "m1", loaded: true }];
+    if (path.endsWith("/llm-models")) return testAnswer();
     if (method === "GET") { const name = path.split("/").pop(); return shows[name] || { __status: 404, __error: "no such server" }; }
     if (path.endsWith("/check")) return { ok: true, output: "fine" };
     return addAnswer();
@@ -4994,13 +5024,21 @@ const LONG = "a-model-with-a-name-far-longer-than-the-table-shows-q8";
   result.editAsk = [confirmText(main), posts().length];
   rowButtonIn(main, "Yes, replace it").fire("click"); await settle();
   result.editPosts = posts();
-  // the CA of a server is named when an edit would drop it
+  // a server with a CA of its own: Edit… says it is kept (llm add --replace keeps it), and nothing asks about it
   calls.length = 0;
   rowButtonIn(rowOf("lan"), "Edit…").fire("click"); await settle();
   result.caNote = byId("llm-ca-note").textContent;
   rowButtonIn(main, "Save").fire("click");
   result.caAsk = confirmText(main);
   rowButtonIn(main, "Cancel").fire("click");
+  // "Use as default" on it: nothing about a CA, and what is sent names no CA either (the host keeps the stored one)
+  calls.length = 0;
+  rowButtonIn(rowOf("lan"), "Models").fire("click"); await settle();
+  const lanRow = main.all().find(n => n.attributes["data-model"] === "only");
+  rowButtonIn(lanRow, "Use as default").fire("click"); await settle();
+  result.caUseAsk = confirmText(lanRow);
+  rowButtonIn(lanRow, "Yes, use it").fire("click"); await settle();
+  result.caUsePosts = posts();
   rowButtonIn(main, "Stop editing").fire("click");
   result.stopped = [byId("llm-name").value, byId("llm-form-title").textContent, rowButtonIn(main, "Add") ? "Add" : null];
   // (4) the name checked while typed: the offending character named, a fixed name offered
@@ -5019,19 +5057,40 @@ const LONG = "a-model-with-a-name-far-longer-than-the-table-shows-q8";
   addAnswer = () => ({ __status: 400, __error: "sandbox-ai llm: plain http to 192.168.1.9 needs a local address" });
   rowButtonIn(main, "Add").fire("click"); await settle();
   result.refused = [main.textContent.includes("plain http to 192.168.1.9 needs a local address"), byId("llm-name").value, byId("llm-url").value, byId("llm-kind").value];
-  // (3) Test connection: saved first (asked), then its models and its check, inline; the default-model select filled
+  // (3) Test connection: the models of that URL (wizard models --kind --url --json), nothing saved, the form kept
   addAnswer = () => ({ output: "ok" });
   calls.length = 0;
-  rowButtonIn(main, "Test connection").fire("click");
-  result.testAsk = [confirmText(main), posts().length];
-  rowButtonIn(main, "Yes, save and test").fire("click"); await settle();
-  result.testCalls = paths().filter(p => !p.endsWith("/llm") || p.startsWith("POST"));
+  rowButtonIn(main, "Test connection").fire("click"); await settle();
+  result.testCalls = paths();
   result.testPost = posts()[0];
   result.tested = [byId("llm-test-result").textContent, byId("llm-model-pick").children.map(o => o.value), byId("llm-model-pick").hidden,
-    byId("llm-form-title").textContent, byId("llm-url").value];
+    byId("llm-form-title").textContent, byId("llm-url").value, byId("llm-name").value];
+  // a key and a CA go with the test (named, read on that host); a header secret or a VPN profile cannot, and it says so
+  calls.length = 0;
+  byId("llm-key-secret").value = "GW_KEY"; byId("llm-ca").value = "/home/you/ca.pem";
+  rowButtonIn(main, "Test connection").fire("click"); await settle();
+  result.keyed = [posts()[0], byId("llm-test-result").textContent.includes("does not go through a VPN profile")];
+  byId("llm-vpn").value = "home";
+  rowButtonIn(main, "Test connection").fire("click"); await settle();
+  result.partly = byId("llm-test-result").textContent.includes("The test sends no header secret and does not go through a VPN profile");
+  byId("llm-key-secret").value = "sk-the-key-itself";
   calls.length = 0;
   rowButtonIn(main, "Test connection").fire("click"); await settle();
-  result.retest = [confirmText(main), paths()];
+  result.keyPasted = [calls.length, main.textContent.includes("A secret's name")];
+  byId("llm-key-secret").value = ""; byId("llm-ca").value = ""; byId("llm-vpn").value = "";
+  // a test without a URL asks for one; a server that does not answer says so inline, the form kept
+  calls.length = 0;
+  byId("llm-url").value = "";
+  rowButtonIn(main, "Test connection").fire("click"); await settle();
+  result.noUrl = [calls.length, main.textContent.includes("Which URL?")];
+  byId("llm-url").value = "http://192.168.1.9:11434";
+  testAnswer = () => ({ __status: 502, __error: "sandbox-ai wizard on ct1: exit status 1: Cannot reach ollama at 192.168.1.9:11434" });
+  rowButtonIn(main, "Test connection").fire("click"); await settle();
+  result.testFailed = [byId("llm-test-result").textContent.includes("Cannot reach ollama at 192.168.1.9:11434"),
+    byId("llm-url").value, byId("llm-model-pick").hidden, posts().filter(p => p[0].endsWith("/llm")).length];
+  testAnswer = () => [];
+  rowButtonIn(main, "Test connection").fire("click"); await settle();
+  result.testEmpty = byId("llm-test-result").textContent.includes("lists no model");
   console.log(JSON.stringify(result));
 })().catch(e => { console.error(e.stack); process.exit(1); });
 """
@@ -5043,7 +5102,9 @@ def test_the_llm_page_models_edit_test_and_names(tmp_path):
     names cut with the whole one in a title, a filter), "Use as default" (llm show's fields saved again with the
     model, --replace asked first) and "Copy NAME:MODEL"; Edit… fills the form from llm show and saves with --replace;
     Test connection saves first (asked) and lists the models and checks, filling the default-model select; the
-    name is checked while typed (the offending character, a fixed name); on any error every field stays."""
+    Test connection lists the models of that URL without saving anything (wizard models --kind --url --json), and
+    fills the default-model select; the name is checked while typed (the offending character, a fixed name); on any
+    error every field stays."""
     result = run_driver(tmp_path, LLM_PAGE_DRIVER, "llm_page")
     assert result["columns"] == ["Name", "Loaded", "Type", "Params", "Quant", "Context", "Size", ""]
     long = "a-model-with-a-name-far-longer-than-the-table-shows-q8"
@@ -5068,7 +5129,12 @@ def test_the_llm_page_models_edit_test_and_names(tmp_path):
     assert result["editPosts"] == [["/api/hosts/ct1/llm", {"name": "gw", "kind": "vllm", "url": "https://gw.example.org", "model": "zeta",
                                     "api_key_secret": "GW_KEY", "header_secrets": [{"header": "X-Org", "secret": "ORG_KEY"}],
                                     "vpn": "home", "anthropic": True, "replace": True, "confirm": True}]]
-    assert "lan.pem" in result["caNote"] and "Its CA certificate (lan.pem) is removed" in result["caAsk"]
+    assert "It has a CA certificate of its own (lan.pem), which is kept" in result["caNote"]
+    assert "CA" not in result["caAsk"] and "Replace the LLM server lan on ct1?" in result["caAsk"]
+    assert "CA" not in result["caUseAsk"] and result["caUseAsk"].startswith("Make only the default model of lan on ct1?")
+    assert result["caUsePosts"] == [["/api/hosts/ct1/llm", {"name": "lan", "kind": "openai-compatible",
+                                     "url": "https://lan.example.org", "model": "only", "replace": True, "confirm": True}]], \
+        "no ca in what is sent: llm add --replace keeps the one the host stored"
     assert result["stopped"] == ["", "Add a server", "Add"]
     space, dash, long_name, dot, fine = result["names"]
     assert "a space cannot be in an LLM server's name" in space and "Use my-server" in space
@@ -5079,14 +5145,18 @@ def test_the_llm_page_models_edit_test_and_names(tmp_path):
     assert result["fixed"] == ["my-server", "", None]
     assert result["badName"] == [0, "http://192.168.1.9:11434", "bad.name"], "nothing sent, nothing lost"
     assert result["refused"] == [True, "new1", "http://192.168.1.9:11434", "ollama"], "the CLI's message inline, the form kept"
-    ask, before = result["testAsk"]
-    assert ask.startswith("Test new1: it is saved on ct1 first (sandbox-ai llm add)") and before == 0
-    assert result["testPost"] == ["/api/hosts/ct1/llm", {"name": "new1", "kind": "ollama", "url": "http://192.168.1.9:11434", "model": "",
-                                                         "confirm": True}]
-    assert result["testCalls"] == ["POST /api/hosts/ct1/llm", "GET /api/hosts/ct1/llm/new1/models", "POST /api/hosts/ct1/llm/new1/check"]
-    text, picks, hidden, title, kept = result["tested"]
-    assert "new1 answers: 2 model(s) listed." in text and "fine" in text
-    assert picks == ["", "m1", "m2"] and not hidden and title == "Change the server new1" and kept == "http://192.168.1.9:11434"
-    ask, again = result["retest"]
-    assert ask is None and again == ["GET /api/hosts/ct1/llm/new1/models", "POST /api/hosts/ct1/llm/new1/check"], \
-        "saved and unchanged: tested without saving again"
+    assert result["testCalls"] == ["POST /api/hosts/ct1/llm-models"], "nothing is saved to test"
+    assert result["testPost"] == ["/api/hosts/ct1/llm-models", {"kind": "ollama", "url": "http://192.168.1.9:11434"}]
+    text, picks, hidden, title, kept, named = result["tested"]
+    assert "http://192.168.1.9:11434 answers: 2 model(s) listed." in text and "m1" in text and "m2" in text
+    assert picks == ["", "m1", "m2"] and not hidden, "loaded first, as the default-model list"
+    assert title == "Add a server" and kept == "http://192.168.1.9:11434" and named == "new1", "the form as it was"
+    sent, no_note = result["keyed"]
+    assert sent == ["/api/hosts/ct1/llm-models", {"kind": "ollama", "url": "http://192.168.1.9:11434",
+                                                   "ca": "/home/you/ca.pem", "api_key_secret": "GW_KEY"}]
+    assert not no_note, "a key and a CA do go with the test: nothing to warn about"
+    assert result["partly"], "a VPN profile does not"
+    assert result["keyPasted"] == [0, True], "a pasted key as the secret's name: nothing sent"
+    assert result["noUrl"] == [0, True]
+    assert result["testFailed"] == [True, "http://192.168.1.9:11434", True, 0], "what it said inline, nothing saved"
+    assert result["testEmpty"]

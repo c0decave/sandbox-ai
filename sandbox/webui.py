@@ -518,6 +518,19 @@ def vpn_name(value):
     return value
 
 
+LLM_KINDS = ("lmstudio", "ollama", "llamacpp", "vllm", "openai-compatible")  # llm.KINDS
+# http(s)://HOST[:PORT][/PREFIX] of a server not registered yet, as `wizard models --url` takes it (llm.URL): never
+# a leading "-", no user, no query; the command checks it again.
+LLM_URL = re.compile(r"https?://(?:\[[0-9A-Fa-f:.]{2,45}\]|[A-Za-z0-9][A-Za-z0-9.-]{0,252})(?::[0-9]{1,5})?"
+                     r"(?:/[A-Za-z0-9._~/-]{0,200})?")
+
+
+def llm_kind(value):
+    if value not in LLM_KINDS:
+        raise Refused(400, f"kind is one of {', '.join(LLM_KINDS)}")
+    return value
+
+
 def secret_name(value):
     if not (isinstance(value, str) and NET_REF.fullmatch(value)):
         raise Refused(400, "a secret's name is letters, digits and _ (up to 64), not starting with a digit")
@@ -967,6 +980,7 @@ class Api:
             ("GET", H + r"/logs", self.logs, ()),
             ("GET", H + r"/llm", self.llm, ()),
             ("GET", H + r"/llm/(?P<name>[^/]+)/models", self.llm_models, ()),
+            ("POST", H + r"/llm-models", self.llm_models_of_url, ()),
             ("POST", H + r"/llm", self.add_llm, ("llm-insecure", "llm-replace")),
             ("POST", H + r"/llm/(?P<name>[^/]+)/check", self.check_llm, ()),
             ("DELETE", H + r"/llm/(?P<name>[^/]+)", self.remove_llm, ("llm-remove",)),
@@ -2089,6 +2103,21 @@ class Api:
     # LLM servers (sandbox-ai llm)
     def llm(self, params, body):
         return self.json_of(params["host"], ["llm", "list", "--json"], 30)
+
+    def llm_models_of_url(self, params, body):
+        """sandbox-ai wizard models --kind KIND --url URL [--ca FILE] [--api-key-secret NAME] --json: what a server
+        at that URL lists, before anything is registered (the page's "Test connection"). Nothing is stored on the
+        host; the key is named, never sent (the command reads that secret there), and no header secret goes with it,
+        so a server that wants one of those answers as it answers an anonymous caller."""
+        kind, url = llm_kind(body.get("kind")), body.get("url")
+        if not (isinstance(url, str) and LLM_URL.fullmatch(url)):
+            raise Refused(400, "url is http(s)://HOST[:PORT][/PREFIX]")
+        args = ["wizard", "models", f"--kind={kind}", f"--url={url}"]
+        if body.get("ca") not in (None, ""):
+            args.append(f"--ca={clean_path(body['ca'], 'ca')}")
+        if body.get("api_key_secret") not in (None, ""):
+            args.append(f"--api-key-secret={secret_name(body['api_key_secret'])}")
+        return self.json_of(params["host"], [*args, "--json"], 60)
 
     def add_llm(self, params, body):
         name, kind, url, model = (body.get(k) for k in ("name", "kind", "url", "model"))
