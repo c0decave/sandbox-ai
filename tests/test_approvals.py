@@ -33,17 +33,37 @@ def ask(run, ident, **question):
     return directory
 
 
+SUPERVISORS = []  # the stand-ins started by the test that runs; stopped after it (stop_supervisors)
+
+
+@pytest.fixture(autouse=True)
+def stop_supervisors():
+    """Every stand-in supervisor ends with its test: left running, dozens of them glob every 20 ms for the rest of
+    the session, and on a two-core CI runner that starved every later test (make_dist ran out of its 5 minutes)."""
+    yield
+    while SUPERVISORS:
+        SUPERVISORS.pop().set()
+
+
 def supervisor(run, result=None, stop=None):
     """A stand-in for the sandbox's supervisor: every answer gets its .done (RESULT, or the answer itself)."""
     directory = Path(run["claude-1"]["directory"]) / "approvals"
     stop = stop or threading.Event()
+    SUPERVISORS.append(stop)
 
     def loop():
-        while not stop.wait(0.02):
+        while not stop.wait(0.02) and directory.is_dir():
             for path in directory.glob("*.answer"):
                 done = path.with_suffix(".done")
-                if not done.exists():
-                    done.write_text(json.dumps(result or json.loads(path.read_text())))
+                if done.exists():
+                    continue
+                try:  # an answer being written is read again at the next look, the loop never ends on it
+                    data = json.dumps(result or json.loads(path.read_text()))
+                except (OSError, ValueError):
+                    continue
+                temporary = done.with_name(f".{done.name}")
+                temporary.write_text(data)
+                os.replace(temporary, done)  # whole, as the supervisor writes it
     threading.Thread(target=loop, daemon=True).start()
     return stop
 
