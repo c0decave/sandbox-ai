@@ -843,7 +843,7 @@ def status_text(info):
     return f"{version}, update unknown"
 
 
-def update(name, version=None, sudo=None, path=None, runner=subprocess.run, from_here=False):
+def update(name, version=None, sudo=None, path=None, runner=subprocess.run, from_here=False, terminal=False):
     """Update sandbox-ai on host NAME with its own `sandbox-ai update` (install.sh's signed update), as the same
     kind of installation. SUDO (None: the host's update_sudo): as `sudo -n`, which never asks for a password.
     {"name", "before", "after", "changed", "kind", "sudo", "error", "needs_sudo", "needs_password", "output",
@@ -874,7 +874,8 @@ def update(name, version=None, sudo=None, path=None, runner=subprocess.run, from
             raise ValueError("--from-here installs this machine's version; --version is for the signed release")
         mode = "system" if info["kind"] == "system" else "user"
         done = install(name, mode, info.get("prefix") if mode == "system" else None,
-                       (bool(entry.get("update_sudo")) or None) if sudo is None else sudo, "here", None, path, runner)
+                       (bool(entry.get("update_sudo")) or None) if sudo is None else sudo, "here", None, path, runner,
+                       terminal=terminal)
         result.update(sudo=done.get("sudo", False), error=done.get("error"), output=done.get("output", ""),
                       needs_password=done.get("needs_password", False), after=done.get("after"),
                       changed=bool(done.get("after")) and done.get("after") != result["before"])
@@ -1419,6 +1420,17 @@ def cli(argv_, out=print):
                 if not result.get("needs_password"):
                     continue
                 out(f"{result['name']}: sudo there wants a password; asking in this terminal")
+                if a.from_here:
+                    # this machine's copy again, its sudo asking here: not the release update
+                    try:
+                        again = update(result["name"], sudo=True, from_here=True, terminal=True)
+                    except (OSError, ValueError) as exc:
+                        again = {"error": printable(exc)}
+                    result.update({key: again[key] for key in ("error", "after", "changed", "output", "sudo",
+                                                                 "needs_password", "notes") if key in again})
+                    for line in update_lines(result):
+                        out(line)
+                    continue
                 try:
                     status = subprocess.run(update_terminal(result["name"], a.release)).returncode
                 except (OSError, ValueError) as exc:

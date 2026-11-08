@@ -963,3 +963,25 @@ def test_an_update_with_no_release_points_to_from_here(remote, monkeypatch):
     (remote["home"] / "kind").write_text("user")
     result = h.update("ct1")
     assert "sandbox-ai hosts update ct1 --from-here" in result["error"]
+
+
+def test_a_from_here_update_whose_sudo_wants_a_password_asks_in_the_terminal_from_here(remote, monkeypatch):
+    """In a terminal, the second try of `hosts update --from-here` is this machine's copy again (sudo asking there),
+    never the release update."""
+    h.save({"ct1": h.check("ct1", {"ssh": "user@ct1"})})
+    calls = []
+
+    def update(name, version=None, sudo=None, path=None, runner=None, from_here=False, terminal=False):
+        calls.append((name, sudo, from_here, terminal))
+        if not terminal:
+            return {"name": name, "before": "0.1.70", "after": None, "changed": False, "error": "sudo wants one",
+                    "needs_password": True, "notes": []}
+        return {"name": name, "before": "0.1.70", "after": "0.1.78", "changed": True, "error": None,
+                "needs_password": False, "notes": []}
+    monkeypatch.setattr(h, "update", update)
+    monkeypatch.setattr(h, "update_terminal", lambda *a, **k: pytest.fail("the release update in a terminal"))
+    monkeypatch.setattr(h.sys.stdin, "isatty", lambda: True)
+    lines = []
+    assert h.cli(["update", "ct1", "--from-here"], lines.append) == 0
+    assert calls == [("ct1", None, True, False), ("ct1", True, True, True)]
+    assert any("0.1.78" in line for line in lines), lines
