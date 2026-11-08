@@ -86,22 +86,3 @@ def wait_until(qapp, condition, timeout=10.0):
 def wait(qapp):
     return lambda condition, timeout=10.0: wait_until(qapp, condition, timeout)
 
-
-@pytest.fixture(autouse=True)
-def widgets_freed_on_the_gui_thread(request):
-    """After every test that used Qt: running background calls are waited for, the widgets a fixture deleteLater()ed
-    are deleted now (without an event loop they never would be), and the garbage collector runs here, on the GUI
-    thread. A page left behind keeps its timers firing at every processEvents of later tests, and a QWidget the
-    collector frees on a worker thread crashes the process (the app job's segfault in test_board_dnd)."""
-    yield
-    if "qapp" not in request.fixturenames and "PySide6.QtWidgets" not in sys.modules:
-        return
-    from PySide6 import QtCore, QtWidgets
-    if QtWidgets.QApplication.instance() is None:
-        return
-    widgets = sys.modules.get("sandbox_ai_app.widgets")
-    if widgets is not None and hasattr(widgets, "ThreadCall"):
-        widgets.ThreadCall.wait_all(5)  # bounded: a test's own long call must not hold the whole job
-    QtWidgets.QApplication.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
-    import gc
-    gc.collect()

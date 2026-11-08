@@ -15,6 +15,9 @@ jobs:
       fail-fast: false
       matrix:
         python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        # The suite runs longer than an hour on a runner: each Python version in three parts of the test files.
+        shard: [0, 1, 2]
+    name: test (${{ matrix.python }}, part ${{ matrix.shard }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1, published 2026-07-20
         with:
@@ -27,10 +30,11 @@ jobs:
       - name: Tests (failures summarised as an annotation, readable through the API)
         run: |
           # Into a file, not a pipe: a process a test leaves behind would hold the pipe open and the step would hang.
-          # -v names each test as it starts, so a test that hangs (the run is killed after 90 minutes) is named in the annotation;
-          # faulthandler prints the tracebacks of a test that runs longer than 5 minutes.
-          status=0; timeout --signal=INT --kill-after=60 5400 python -m pytest -v -rfE -o faulthandler_timeout=300 \
-            tests > pytest.txt 2>&1 || status=$?
+          # -v names each test as it starts, so a test that hangs (a part is killed after 60 minutes) is named in the
+          # annotation; faulthandler prints the tracebacks of a test that runs longer than 5 minutes.
+          files=$(ls tests/test_*.py | awk -v part=${{ matrix.shard }} 'NR % 3 == part')
+          status=0; timeout --signal=INT --kill-after=60 3600 python -m pytest -v -rfE -o faulthandler_timeout=300 \
+            $files > pytest.txt 2>&1 || status=$?
           tail -n 300 pytest.txt
           if [ "$status" -ne 0 ]; then
             failed=$(grep -E '^(FAILED|ERROR) ' pytest.txt | head -60 | cut -c1-300)
@@ -106,7 +110,8 @@ jobs:
           if [ "$status" -ne 0 ]; then
             failed=$(grep -E '^(FAILED|ERROR) ' tests.txt | head -60 | cut -c1-300)
             last=$(grep -E '^tests/.*::' tests.txt | tail -n 3 | cut -c1-200)
-            crash=$(grep -E -A12 '^Fatal Python error' tests.txt | grep -E 'File "|Fatal' | head -12 | cut -c1-200)
+            # The whole faulthandler dump, every thread: a crash in a thread of Qt's own shows "<no Python frame>".
+            crash=$(grep -E -A120 '^Fatal Python error' tests.txt | grep -E 'Fatal|[Tt]hread|File "|no Python frame|Extension' | head -60 | cut -c1-200)
             text=$(printf 'exit %s\n%s\nlast tests:\n%s\n%s' "$status" "$failed" "$last" "$crash" | sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g')
             echo "::error title=app tests failed::$text"
           fi
