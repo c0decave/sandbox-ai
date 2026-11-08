@@ -699,6 +699,23 @@ def version_key(version):
     return tuple(int(part) for part in found.groups()) if found else None
 
 
+AS_GIVEN_SINCE = (0, 1, 78)  # the launcher's --workspaces-as-given (and the rule it switches off) came with it
+
+
+def knows_workspaces_as_given(name, path=None):
+    """The sandbox-ai on host NAME takes --workspaces-as-given: this machine's always; another host's when the version
+    its last status found (hosts list, never asked here) is 0.1.78 or later. Older ones do not know the option, and
+    neither do they let the directory a start runs in decide /work, so a start there without it is the same."""
+    if name == LOCAL:
+        return True
+    try:
+        found = statuses([name], cached=True, path=path).get(name)
+    except (OSError, ValueError):
+        return False
+    key = version_key(found.get("version")) if isinstance(found, dict) else None
+    return bool(key and key >= AS_GIVEN_SINCE)
+
+
 def installation(text):
     """{"version", "path", "kind", "prefix"} of what `sandbox-ai version --verbose` printed. KIND: "user" (install.sh
     in ~/.local/share/sandbox-ai or XDG_DATA_HOME), "system" (install.sh in PREFIX/lib/sandbox-ai), "package"

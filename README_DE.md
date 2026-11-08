@@ -2593,8 +2593,12 @@ Haupt-Workspace; `--config DATEI` wählt eine andere Datei, `--no-config`
 ignoriert sie. **Der Ordner, in dem Sie starten,
 entscheidet:** Liegt dort eine `.sandbox-ai.json`, ist er das Projekt – der Haupt-Workspace (`/work`)
 und die Datei, die gilt –, und was `--workspace` nennt, folgt als weitere Workspaces (`/workspaces/NAME`);
-ohne Projektdatei dort ist wie bisher der erste `--workspace` der Haupt-Workspace. Jeder Start nennt, welcher
-Ordner `/work` ist und welche Konfiguration gilt. Optionen mit Wert auf der Kommandozeile haben Vorrang vor denen
+ohne Projektdatei dort ist wie bisher der erste `--workspace` der Haupt-Workspace. Ein `--workspace`, der
+diesen Ordner noch einmal nennt (`.`, `$PWD/`), zählt einmal; einer darin oder darüber (`--workspace
+packages/web` aus der Wurzel eines Monorepos) ist der Ordner, den Sie gewählt haben, und Ihre Reihenfolge gilt.
+Jeder Start nennt, welcher Ordner `/work` ist und welche Konfiguration gilt. (Starts, die sandbox-ai selbst
+baut – aus der App, der Weboberfläche, `team start`, `resume` und `restart` –, nehmen ihre Workspaces, wie sie
+sind: Eine Projektdatei, die später in ihrem Startordner auftaucht, übernimmt sie nie.) Optionen mit Wert auf der Kommandozeile haben Vorrang vor denen
 der Datei, eine Auth-Wahl (`--copy-auth`, `--no-auth`, `--auth-file`,
 `--import-codex-auth`, ein `--copy` einer Anmeldedatei) ersetzt die der Datei, und Agent-Argumente nach `--`
 ersetzen die gespeicherten; einen Schalter, den die Datei setzt (z. B.

@@ -1127,6 +1127,22 @@ def test_terminal_commands():
                                      "workspace": "/srv/app", "options": json.dumps(["--mode", "high"])})
     # On this machine the chosen workspace is given as is (a project file in the service's directory never takes over).
     assert argv[-8:] == ["codex", "--name", "n1", "--workspace", "/srv/app", "--workspaces-as-given", "--mode", "high"]
+    # Review 5 M5: also with the workspace field empty (a --workspace may come in the options); on another host
+    # where its last status found 0.1.78 or later; never on an older one (which has no such rule either).
+    host, argv = w.terminal_command({"host": "local", "kind": "start", "agent": "codex",
+                                     "options": json.dumps(["--workspace", "/srv/x"])})
+    assert argv[-4:] == ["codex", "--workspaces-as-given", "--workspace", "/srv/x"]
+    hosts.save({"ct1": hosts.check("ct1", {"ssh": "root@192.0.2.10"}),
+                "old": hosts.check("old", {"ssh": "root@192.0.2.11"}),
+                "new": hosts.check("new", {"ssh": "root@192.0.2.12"})})
+    hosts.save_statuses({"old": {"version": "0.1.77", "ssh": "root@192.0.2.11", "port": 22, "checked": 1},
+                         "new": {"version": "0.1.78", "ssh": "root@192.0.2.12", "port": 22, "checked": 1}})
+    for name, given in (("ct1", False), ("old", False), ("new", True)):
+        _, argv = w.terminal_command({"host": name, "kind": "start", "agent": "codex", "workspace": "/srv/app"})
+        assert ("--workspaces-as-given" in argv[-1]) == given, name
+        team = w.tool_command("team-start", {"host": name, "team": "t", "agents": "claude,codex",
+                                             "workspace": "/srv/app"})
+        assert team[-1:] == (["--workspaces-as-given"] if given else ["--"]), (name, team)
     for query in ({"host": "local", "kind": "shell"}, {"host": "local", "kind": "start", "agent": "bash"},
                   {"host": "local", "kind": "attach", "name": "--all"},
                   {"host": "local", "kind": "start", "agent": "claude", "workspace": "relative"},

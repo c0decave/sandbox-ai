@@ -2963,10 +2963,11 @@ def terminal_command(query):
             if not workspace.startswith(("/", "~")) or "\0" in workspace:
                 raise Refused(400, "the workspace is an absolute path (or ~/...)")
             args += ["--workspace", workspace]
-            if host == hosts.LOCAL:
-                # The workspace is the one chosen here: a project file in the web service's own working directory
-                # must not take the start over (sandbox-ai 0.1.78; a host's older sandbox-ai would not know it).
-                args.append("--workspaces-as-given")
+        if hosts.knows_workspaces_as_given(host):
+            # The workspace is the one chosen here (or in the options): a project file in the directory the start
+            # runs in (the web service's own, the SSH login's HOME) must not take the start over. Passed wherever
+            # the host's sandbox-ai knows it (0.1.78, which brought that rule; an older one has neither).
+            args.append("--workspaces-as-given")
         options = json.loads(query.get("options") or "[]")
         args += strings(options, "options")
         return host, hosts.argv(host, args, tty=True)
@@ -3071,8 +3072,14 @@ def tool_command(kind, query):
             options = strings(json.loads(query.get("options") or "[]"), "options")
         except ValueError:
             raise Refused(400, "options is a JSON list of strings") from None
+        # Every member's /work is the team's workspace (team.py passes --workspaces-as-given itself from 0.1.78 on;
+        # a remote host of that version whose team.py is older gets it here).
+        hosts = module("hosts")
+        host = host_name(query.get("host") or hosts.LOCAL)
+        given = ["--workspaces-as-given"] if host != hosts.LOCAL and hosts.knows_workspaces_as_given(host) and \
+            "--workspaces-as-given" not in options else []
         return ["team", "start", name, f"--agents={','.join(agents)}",
-                *([f"--workspace={workspace}"] if workspace else []), "--", *options]
+                *([f"--workspace={workspace}"] if workspace else []), "--", *given, *options]
     if kind == "demo-device":
         port = query.get("port")
         if port not in (None, ""):

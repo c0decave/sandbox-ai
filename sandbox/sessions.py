@@ -166,7 +166,10 @@ def load(name):
     path = session_dir(name) / "session.json"
     if not path.is_file():
         raise ValueError(f"No session named {launcher().printable(name)}")
-    return json.loads(path.read_text())
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict):  # valid JSON of another shape is as damaged as a broken file (ValueError)
+        raise ValueError(f"the record of session {launcher().printable(name)} is damaged: {path}")
+    return data
 
 
 def save(name, data):
@@ -410,6 +413,7 @@ def begin(a, argv):
         pid = os.getpid()
         data = {"agent": a.agent, "options": options, "agent_args": agent_args, "backend": a.backend,
                 "podman_url": a.podman_url, "workspace": a.workspace, "cwd": os.getcwd(), "created": now(),
+                "cwd_project": getattr(a, "cwd_project", None),
                 "ready": True, "name": a.start_name, "project": launcher().project_label(a), "keep": True,
                 "mode": "foreground", "pid": pid, "pid_start": launcher().process_start(pid, PROC), "started": now(),
                 "run": a.run_id, "pod": launcher().pod_name(a) if a.backend == "podman" else None}
@@ -479,6 +483,19 @@ def after_attach(name):
     return result or 0
 
 
+def run_options(data):
+    """The options a session's next run is launched with: its saved options, with the main workspace of its first
+    start kept. A session records the folder that was /work because the directory it started in held a project file
+    ("cwd_project"); its runs pass that first and --workspaces-as-given, so that a project file that appears later in
+    the saved working directory (one the agent may have written) never takes the session over. A record from before
+    (no "cwd_project") runs as it always did."""
+    options = list(data["options"])
+    if "cwd_project" not in data or "--workspaces-as-given" in options:
+        return options
+    first = data.get("cwd_project")
+    return [*(["--workspace", first] if isinstance(first, str) and first else []), *options, "--workspaces-as-given"]
+
+
 def parsed(data):
     """Backend and Podman service of the session's running sandbox, as the launcher used them,
     including values from the project configuration."""
@@ -499,7 +516,7 @@ def effective(data):
     """(launcher arguments, project document) of a session as the launcher will see them at its next
     start: saved options plus the trusted project configuration, resolved from the session's directory."""
     l = launcher()
-    argv = [data["agent"], *data["options"]]
+    argv = [data["agent"], *run_options(data)]
     try:
         with in_directory(data["cwd"]):
             a = l.parse_args(argv)
@@ -554,7 +571,7 @@ def launch(name, data, agent_args, a=None, event="rebirth"):
     data.update(pod=f"agent-{run}", run=run, mode="tmux")
     # Without agent arguments the project configuration's agent_args apply.
     # Without a kept HOME the launcher makes a fresh one and discards it at the end.
-    cmd = [sys.executable, "-I", str(HERE / "agent_sandbox.py"), data["agent"], *data["options"],
+    cmd = [sys.executable, "-I", str(HERE / "agent_sandbox.py"), data["agent"], *run_options(data),
            *(["--state-dir", str(directory / "home")] if keeps_home(data) else []),
            "--tmux-socket-dir", str(directory / "tmux"),
            "--pod-name", data["pod"], "--start-id", name, *(["--", *agent_args] if agent_args else [])]
@@ -646,6 +663,7 @@ def start_locked(a, argv, key=None):
         path.chmod(0o700)
     data = {"agent": a.agent, "options": options, "agent_args": agent_args, "backend": a.backend,
             "podman_url": a.podman_url, "workspace": a.workspace, "cwd": os.getcwd(), "created": now(),
+            "cwd_project": getattr(a, "cwd_project", None),
             "ready": False, "name": a.session if a.session is not None else a.start_name,
             "project": launcher().project_label(a), "keep": keep, "mode": "tmux"}
     claim_name(name, data["name"], data)  # refused if a start of the same name saved its own meanwhile

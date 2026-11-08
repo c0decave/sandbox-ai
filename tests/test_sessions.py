@@ -997,3 +997,61 @@ def test_resume_with_a_workspace_refuses_a_running_session(tmp_path, monkeypatch
     monkeypatch.setattr(m, "alive", lambda name, data: True)
     with pytest.raises(ValueError, match="--restart"):
         m.resume("s", [str(tmp_path)])
+
+
+# --- review 5 M5: a session's runs keep the /work of its first start ----------------------------------------
+
+
+def test_run_options_keep_the_first_starts_main_workspace(scenario):
+    """A session records which folder became /work because the directory it started in held a project file
+    ("cwd_project"); its runs pass that folder first and --workspaces-as-given. A record from before the field keeps
+    its options as they were."""
+    data = {"agent": "claude", "options": ["--workspace", "/srv/other", "--allow-pypi"]}
+    if scenario == "happy":
+        assert m.run_options({**data, "cwd_project": "/srv/proj"}) == [
+            "--workspace", "/srv/proj", "--workspace", "/srv/other", "--allow-pypi", "--workspaces-as-given"]
+        assert m.run_options({**data, "cwd_project": None}) == [*data["options"], "--workspaces-as-given"]
+    elif scenario == "sad":
+        assert m.run_options(data) == data["options"]  # an older record: as it always ran
+    else:  # given already (a start of the app or the web): nothing doubled
+        given = {**data, "options": [*data["options"], "--workspaces-as-given"], "cwd_project": None}
+        assert m.run_options(given) == given["options"]
+
+
+def test_a_project_file_the_agent_writes_later_never_takes_a_resume_over(tmp_path, monkeypatch):
+    """Review 5 M5: started from W/sub with --workspace W, the agent wrote W/sub/.sandbox-ai.json; the resume (run
+    from the saved directory W/sub) made W/sub /work and asked the user to trust the agent's file. It keeps W."""
+    work = tmp_path / "w"
+    (work / "sub").mkdir(parents=True)
+    other = tmp_path / "other"
+    other.mkdir()
+    data = make_session("s")
+    data.update(agent="claude", options=["--workspace", str(other)], cwd=str(work / "sub"), cwd_project=None)
+    (work / "sub" / ".sandbox-ai.json").write_text('{"version": 1, "agent": "claude", "options": ["--egress-all-allow"]}')
+    monkeypatch.setenv("PWD", str(work / "sub"))
+    a, document = m.effective(data)
+    assert a is not None and a.workspaces == [str(other)] and not document
+    commands = []
+
+    def popen(cmd, **kwargs):
+        commands.append(cmd)
+        (m.session_dir("s") / "tmux" / "attach.sock").touch()
+        return Mock(pid=4243, poll=Mock(return_value=None))
+    monkeypatch.setattr(m.subprocess, "Popen", popen)
+    monkeypatch.setattr(m, "clear_stale_pod", lambda name, d: None)
+    assert m.launch("s", data, []) == 0
+    assert "--workspaces-as-given" in commands[0] and commands[0][commands[0].index("--workspace") + 1] == str(other)
+
+
+def test_a_record_of_another_shape_is_damaged_not_a_crash():
+    """Review 5 (correctness L1): a session.json holding [] crashed `list`, `ps` and `session list` with an
+    AttributeError (and hid every other start in the web and the app)."""
+    make_session("good")
+    directory = m.session_dir("bad2")
+    directory.mkdir(parents=True)
+    (directory / "session.json").write_text("[]")
+    with pytest.raises(ValueError, match="damaged"):
+        m.load("bad2")
+    assert m.prune("bad2") is False
+    rows = {row[0]: row for row in m.rows()}
+    assert rows["bad2"][3] == "damaged" and "good" in rows

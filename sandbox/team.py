@@ -142,9 +142,11 @@ def prompt_args(agent, prompt):
 
 def launcher_argv(data, agent):
     role = lead_prompt(data) if agent == data["lead"] else member_prompt(data, agent)
+    # --workspaces-as-given: the team's workspace is /work, never a project file of the directory the team was
+    # started from (the web service's, the caller's), which the launcher would otherwise make the main workspace.
     return [sys.executable, "-I", str(HERE / "agent_sandbox.py"), agent, "--session", member_name(data["name"], agent),
-            "--workspace", data["workspace"], "--mcp", server_name(data["name"]), *data["options"],
-            "--", *prompt_args(agent, role)]
+            "--workspace", data["workspace"], "--workspaces-as-given", "--mcp", server_name(data["name"]),
+            *data["options"], "--", *prompt_args(agent, role)]
 
 
 TEAM_CHOSEN = ("--session", "--name", "--project-name", "--workspace", "--workspace-ro", "--mcp-socket-dir",
@@ -246,9 +248,15 @@ def post(name, agent, task, out=print):
     return 0
 
 
-def stop(name, out=print, run=subprocess.run, states=None):
+def damaged_record(name):
+    """What is left of team NAME whose record is damaged: every agent's member name, so that stop and delete reach
+    whatever runs or is kept under them (a member that never was is "gone")."""
+    return {"name": check_name(name), "members": list(AGENTS), "lead": AGENTS[0], "workspace": "?", "options": []}
+
+
+def stop(name, out=print, run=subprocess.run, states=None, data=None):
     """Stop every member that runs (or is paused) and the board; 1 if one of them could not be stopped."""
-    data = load(name)
+    data = load(name) if data is None else data
     states = member_states(data) if states is None else states
     status = 0
     for agent in reversed(data["members"]):
@@ -268,12 +276,22 @@ def stop(name, out=print, run=subprocess.run, states=None):
 
 
 def delete(name, yes=False, out=print, run=subprocess.run, states=None):
-    """Stop the team, delete its members (their HOMEs) and its board; the record stays while a member is left."""
-    data = load(name)
+    """Stop the team, delete its members (their HOMEs) and its board; the record stays while a member is left. A
+    team whose record is damaged is deleted too (with --yes): its members by every agent's member name."""
+    try:
+        data = load(name)
+    except ValueError:
+        if not record_path(name).exists():
+            raise
+        if not yes:
+            raise ValueError(f"the record of team {name} is damaged; this deletes it, every member of its name "
+                             f"({', '.join(member_name(name, a) for a in AGENTS)}) and their HOMEs; add --yes") from None
+        out(f"sandbox-ai team: the record of {name} is damaged: its members are looked up by name")
+        data = damaged_record(name)
     if not yes:
         raise ValueError(f"this deletes team {name}, its members' HOMEs and its board; add --yes")
     states = member_states(data) if states is None else states
-    if stop(name, out, run, states) != 0:
+    if stop(name, out, run, states, data) != 0:
         out(f"sandbox-ai team: {name} is kept: a member could not be stopped")
         return 1
     left = []
@@ -294,6 +312,15 @@ def delete(name, yes=False, out=print, run=subprocess.run, states=None):
     return 0
 
 
+def start_options(argv):
+    """(ARGV up to the first --, the launcher options after it) for `team start`; (ARGV, []) for anything else. The
+    team's own arguments come in any order before the -- (NAME --agents A,B -w DIR, or --agents A,B -w DIR NAME)."""
+    if argv[:1] == ["start"] and "--" in argv:
+        index = argv.index("--")
+        return argv[:index], argv[index + 1:]
+    return argv, []
+
+
 def main(argv, out=print):
     parser = argparse.ArgumentParser(prog="sandbox-ai team", description=__doc__.split("\n\n")[0])
     commands = parser.add_subparsers(dest="command", required=True)
@@ -301,7 +328,7 @@ def main(argv, out=print):
     begin.add_argument("name")
     begin.add_argument("--agents", required=True, help="claude,codex[,opencode]: the first leads")
     begin.add_argument("-w", "--workspace", default=".", help="the shared workspace (default: this directory)")
-    begin.add_argument("options", nargs=argparse.REMAINDER, help="-- launcher options for every member")
+    begin.epilog = "Launcher options for every member follow a --: team start NAME --agents A,B -w DIR -- OPTIONS"
     commands.add_parser("list", help="the teams")
     shown = commands.add_parser("show", help="a team's members and its board")
     shown.add_argument("name")
@@ -315,15 +342,19 @@ def main(argv, out=print):
     deleted = commands.add_parser("delete", help="stop and remove the team with its members' HOMEs")
     deleted.add_argument("name")
     deleted.add_argument("--yes", action="store_true")
+    argv, options = start_options(list(argv))
     a = parser.parse_args(argv)
     try:
         if a.command == "start":
-            options = a.options[1:] if a.options[:1] == ["--"] else a.options
             return start(a.name, a.agents.split(","), a.workspace, options, out)
         if a.command == "list":
             for name in names():
-                data = load(name)
-                out(f"{name:<20} {', '.join(data['members']):<24} {data['workspace']}")
+                try:
+                    data = load(name)
+                except ValueError:  # one damaged record never hides the other teams
+                    out(f"{name:<20} {'(damaged)':<24} remove it with: sandbox-ai team delete {name} --yes")
+                    continue
+                out(f"{name:<20} {', '.join(data['members']):<24} {printable(data['workspace'])}")
             return 0
         if a.command == "show":
             return show(a.name, out, a.json)

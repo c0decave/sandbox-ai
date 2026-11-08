@@ -2447,8 +2447,12 @@ A launcher then reads `.sandbox-ai.json` from the main workspace automatically;
 `--config FILE` selects another file and `--no-config` ignores it. **The directory you start in decides:** when
 it holds a `.sandbox-ai.json`, it is the project — the main workspace (`/work`) and the file that applies — and
 what `--workspace` names follows it as further workspaces (`/workspaces/NAME`); without a project file there,
-the first `--workspace` is the main workspace as before. Every start prints which folder `/work` is and which
-configuration applies. (Starts the app and the web interface build give their workspaces as they are.) Options with
+the first `--workspace` is the main workspace as before. A `--workspace` that names this directory again (`.`,
+`$PWD/`) is listed once; one inside it or around it (`--workspace packages/web` from a monorepo's root) is the
+folder you chose, and the order you gave stands. Every start prints which folder `/work` is and which
+configuration applies. (Starts sandbox-ai builds itself, from the app, the web interface, `team start`, `resume`
+and `restart`, give their workspaces as they are: a project file that appears later in the directory they run
+from never takes them over.) Options with
 a value given on the command line override the file's, an auth choice
 (`--copy-auth`, `--no-auth`, `--auth-file`, `--import-codex-auth`, a `--copy`
 of a credential file) replaces the file's, and agent arguments after `--` replace the saved ones; a switch the file

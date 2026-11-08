@@ -1010,7 +1010,7 @@ def start_arguments(data, extra=()):
     l = launcher()
     sessions = starts_module().module("sessions")
     with sessions.in_directory(data["cwd"]):
-        argv, _ = l.load_presets_module().apply(l.canonical_options([data["agent"], *data["options"], *extra]),
+        argv, _ = l.load_presets_module().apply(l.canonical_options([data["agent"], *sessions.run_options(data), *extra]),
                                                 canonical=l.canonical_options, with_mode=True)
         argv = l.canonical_options(argv)
         try:

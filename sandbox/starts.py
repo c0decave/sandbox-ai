@@ -325,7 +325,8 @@ def start_entries(prune=True):
         if prune and sessions.prune(key):
             continue  # ended without a kept HOME: only its history is left
         data = read_json(directory / "session.json")
-        if data is None or not isinstance(data.get("agent"), str) or not isinstance(data.get("options"), list):
+        if data is None or data.get("agent") not in ("claude", "codex", "opencode") or \
+                not isinstance(data.get("options"), list):  # as `session list` judges it
             found[key] = {"name": key, "id": key, "kind": "session", "agent": None, "state": "damaged",
                           "home": None, "attachable": False, "directory": str(directory)}
             continue

@@ -804,7 +804,9 @@ def test_a_start_its_question_answered_and_its_stop(web, host, agent):
              "rows": "30", "options": json.dumps(["--allow-pypi"])}
     argv, _ = web.svc.websocket("/api/terminal?" + urllib.parse.urlencode(query), {"Host": HOST, "Origin": ORIGIN,
                                                                                     **headers}, "192.0.2.1")
-    assert sandbox_args(argv)[2] == [agent, "--name", name, "--allow-pypi"]
+    # (on this machine the start is as given, the workspace field empty too: review 5 M5)
+    given = ["--workspaces-as-given"] if host == "local" else []
+    assert sandbox_args(argv)[2] == [agent, "--name", name, *given, "--allow-pypi"]
     web.processes.answers[("list",)] = (0, json.dumps([{"name": name, "agent": agent, "state": "running"}]), "")
     question = {"id": "1700000000-7-1", "run": name, "kind": "dns", "question": "look up pypi.org"}
     web.processes.answers[("approvals", "list")] = (0, json.dumps([question]), "")

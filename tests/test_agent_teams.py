@@ -277,3 +277,80 @@ def test_the_command_line(tmp_path, capsys):
     main = load("main_for_team_tests", "main.py")
     assert main.PYTHON_COMMANDS["team"] == ("team.py",)
     assert shlex.split("sandbox-ai team start app --agents claude,codex -- --allow-pypi")
+
+
+# --- review 5: the command line as documented, and /work is the team's workspace ---------------------------
+
+
+@pytest.mark.parametrize("argv", [
+    ["start", "app", "--agents", "claude,codex,opencode", "-w", "/srv/app", "--", "--allow-pypi"],  # README
+    ["start", "app", "--agents=claude,codex,opencode", "--workspace=/srv/app", "--", "--allow-pypi"],  # the web
+    ["start", "--agents", "claude,codex,opencode", "--workspace", "/srv/app", "app", "--", "--allow-pypi"],  # the app
+])
+def test_team_start_takes_its_arguments_in_any_order_before_the_options(monkeypatch, argv):
+    """Review 5 (correctness H1): `team start app --agents A,B -w DIR -- OPTIONS` (the README's form, and what the
+    web sends) failed with "required: --agents": the options' REMAINDER swallowed everything after NAME."""
+    got = []
+    monkeypatch.setattr(team, "start", lambda *args: got.append(args) or 0)
+    assert team.main(argv) == 0
+    name, agents, workspace, options, _ = got[0]
+    assert (name, agents, workspace, options) == ("app", ["claude", "codex", "opencode"], "/srv/app", ["--allow-pypi"])
+    got.clear()
+    assert team.main(["start", "app", "--agents", "claude,codex"]) == 0 and got[0][3] == []
+
+
+def test_the_web_team_start_parses_with_the_real_command_line(monkeypatch):
+    """The argv the web builds for "Start team" goes through team.main as it is."""
+    web = load("webui_for_team_tests", "webui.py")
+    argv = web.tool_command("team-start", {"host": "local", "team": "app", "agents": "claude,codex",
+                                          "workspace": "/srv/app", "options": '["--allow-pypi"]'})
+    got = []
+    monkeypatch.setattr(team, "start", lambda *args: got.append(args) or 0)
+    assert argv[0] == "team" and team.main(argv[1:]) == 0
+    assert got[0][:4] == ("app", ["claude", "codex"], "/srv/app", ["--allow-pypi"])
+
+
+def test_members_work_on_the_teams_workspace_not_the_project_they_were_started_from(tmp_path, monkeypatch):
+    """Review 5 M5 / correctness H2: members ran from the caller's directory (the web service's); one holding a
+    trusted .sandbox-ai.json became every member's /work, and a member of another agent did not start ("is for
+    claude"). Members pass --workspaces-as-given: the team's workspace is /work."""
+    here, work = tmp_path / "proj", tmp_path / "other"
+    here.mkdir()
+    work.mkdir()
+    (here / ".sandbox-ai.json").write_text('{"version": 1, "agent": "claude"}')
+    monkeypatch.chdir(here)
+    monkeypatch.setenv("PWD", str(here))
+    data = {"name": "t1", "members": ["codex", "claude"], "lead": "codex", "workspace": str(work), "options": []}
+    launcher = load("agent_sandbox_for_team_cwd_test", "agent_sandbox.py")
+    for agent in data["members"]:
+        argv = team.launcher_argv(data, agent)
+        assert "--workspaces-as-given" in argv[:argv.index("--")]
+        a = launcher.parse_args(argv[3:])
+        assert a.cwd_project is None and a.workspaces == [str(work)] and a.workspace == str(work)
+
+
+def test_team_list_shows_a_damaged_team_and_delete_removes_it(tmp_path, capsys):
+    """Review 5 (correctness L2): one damaged team.json made `team list` fail (the web's and the app's Teams pages
+    empty), and a damaged team could not be deleted."""
+    team.teams_dir().mkdir(parents=True)
+    for name, text in (("t1", "[]"), ("t3", "{bad")):
+        (team.teams_dir() / name).mkdir()
+        (team.teams_dir() / name / "team.json").write_text(text)
+    good = {"version": 1, "name": "ok", "members": ["claude", "codex"], "lead": "claude", "workspace": "/srv/x",
+            "options": [], "created": "2026-11-08T00:00:00Z"}
+    (team.teams_dir() / "ok").mkdir()
+    (team.teams_dir() / "ok" / "team.json").write_text(json.dumps(good))
+    lines = []
+    assert team.main(["list"], out=lines.append) == 0
+    assert any(line.startswith("ok ") and "/srv/x" in line for line in lines)
+    assert any(line.startswith("t1 ") and "(damaged)" in line and "team delete t1 --yes" in line for line in lines)
+    with pytest.raises(ValueError, match="damaged.*add --yes"):
+        team.delete("t3", False, lines.append)
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv[3:])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    states = {"claude": "stopped", "codex": "gone", "opencode": "gone"}
+    assert team.delete("t3", True, lines.append, run, states) == 0
+    assert ["delete", "t3-claude", "--yes"] in calls and not (team.teams_dir() / "t3").exists()

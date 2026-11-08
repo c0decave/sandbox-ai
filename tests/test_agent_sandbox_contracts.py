@@ -10725,3 +10725,10 @@ def test_project_directory(scenario, tmp_path, monkeypatch):
         assert s.parse_args(["claude", "--workspace", f"{here},{other}"]).workspaces == [str(here), str(other)]
         assert s.parse_args(["claude", "--workspace", str(here)]).cwd_project is None
         assert s.parse_args(["claude"]).workspaces == [str(here)]
+        # Review 5 (correctness M1): the directory named again in another spelling is listed once ("Workspaces must
+        # not overlap: X and X" before); a folder in it or one holding it is what the user chose: their order stands.
+        a = s.parse_args(["claude", "--workspace", f"{other},."])
+        assert a.cwd_project == str(here) and a.workspaces == [str(here), str(other)]
+        for named in (f"{here}/", f"../{here.name}", "sub", str(tmp_path), f"{other},sub"):
+            a = s.parse_args(["claude", "--workspace", named])
+            assert a.cwd_project is None and a.workspaces == named.split(","), named

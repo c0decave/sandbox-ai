@@ -1584,7 +1584,8 @@ def project_directory(a):
     """The working directory when it holds a project configuration that is meant to apply - then it is the project
     (its main workspace, and the file that applies) - else None. Not with --no-config, --config or
     --workspaces-as-given, not without --workspace (then the working directory is the main workspace anyway), and
-    not when it already is the first workspace."""
+    not when the first workspace named is the working directory, or one lies in it or holds it (the user chose
+    that folder)."""
     if a.no_config or a.config or getattr(a, "workspaces_as_given", False) or not a.workspace:
         return None
     here = logical_cwd()
@@ -1593,10 +1594,16 @@ def project_directory(a):
             return None
     except OSError:
         return None
-    first = a.workspaces[0] if a.workspaces else None
-    with contextlib.suppress(OSError):
-        if first and os.path.samefile(first, here):
-            return None  # it is the main workspace already
+    # The first workspace named is this directory (in any spelling: ., $PWD/, ../proj): it is the main one already.
+    # One that lies in it or holds it is the folder the user chose (--workspace packages/web from a monorepo's
+    # root): their order stands, and the project file that applies is that folder's.
+    try:
+        real = Path(here).resolve()
+        named = [Path(os.path.expanduser(value)).resolve() for value in a.workspaces]
+    except (OSError, RuntimeError):
+        return None
+    if not named or named[0] == real or any(real in path.parents or path in real.parents for path in named):
+        return None
     return here
 
 
@@ -1613,9 +1620,10 @@ def parse_args(argv):
     if a.cwd_project:
         # The directory you are in holds a project configuration: it is the project (/work, and the file that
         # applies), and what --workspace names comes after it. Without a project file here, --workspace decides as
-        # before. Starts built by the app, the web interface and `resume` pass --workspaces-as-given, so their own
-        # working directory can never take a project over.
-        a.workspaces = [a.cwd_project, *(w for w in a.workspaces if w != a.cwd_project)]
+        # before. Starts built by sandbox-ai itself (the app, the web interface, team members, `resume` and
+        # `restart`) pass --workspaces-as-given, so their own working directory can never take a project over.
+        real = Path(a.cwd_project).resolve()  # named again in another spelling (--workspace .): listed once
+        a.workspaces = [a.cwd_project, *(w for w in a.workspaces if Path(os.path.expanduser(w)).resolve() != real)]
     a.subnet_origin = {}  # where a --subnet/--subnet6 came from when no option set it (defaults, policy)
     a.workspace = a.workspaces[0]
     a.gui = a.gui or bool(a.gui_vnc)
@@ -2515,7 +2523,12 @@ def load_project_config(a):
     if not isinstance(document, dict) or document.get("version") != 1 or set(document) - CONFIG_KEYS:
         raise ValueError(f"{path}: expected version 1 with keys {sorted(CONFIG_KEYS)}")
     if document.get("agent") != a.agent:
-        raise ValueError(f"{path} is for {document.get('agent')}; use ./{document.get('agent')}-sandbox or --no-config")
+        other = document.get("agent")
+        if other in AGENT_PROGRAMS:
+            raise ValueError(f"{path} is for {other}: start it with sandbox-ai {other}, or start {a.agent} with "
+                             "--no-config")
+        raise ValueError(f"{path} names no agent (\"agent\": claude, codex or opencode); add one, or start with "
+                         "--no-config")
     for key in ("options", "agent_args", "workspaces"):
         values = document.get(key, [])
         if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
