@@ -10372,6 +10372,42 @@ def test_check_sockets_below(scenario, monkeypatch):
         shutil.rmtree(directory, ignore_errors=True)
 
 
+def test_check_launcher_location(scenario, tmp_path):
+    """Review 5 M2: what a sandbox gets writable may neither lie in nor hold the launcher (a checkout, a venv)."""
+    tree = tmp_path / "c0de/sandbox-ai"
+    if scenario == "happy":
+        s.check_launcher_location(tmp_path / "c0de/other", "--mount", [tree])
+        s.check_launcher_location(tmp_path / "elsewhere", "--state-dir", [tree])
+    elif scenario == "sad":
+        for path, word in ((tmp_path / "c0de", "contains"), (tree / "sandbox", "lies in"), (tree, "is")):
+            with pytest.raises(ValueError, match=f"--mount {re.escape(str(path))} {word} sandbox-ai's own launcher"
+                                                 ".*read-only"):
+                s.check_launcher_location(path, "--mount", [tree])
+    else:  # the real launcher trees by default; a sibling whose name only begins like it is fine
+        with pytest.raises(ValueError, match="own launcher"):
+            s.check_launcher_location(s.HERE.parent, "--state-dir")
+        s.check_launcher_location(tmp_path / "c0de/sandbox-ai-other", "--mount", [tree])
+
+
+def test_writable_mounts_and_state_dirs_may_not_hold_the_launcher(tmp_path, monkeypatch):
+    """Review 5 M2 (PoC mount_launcher_parent.py): --mount PARENT_OF_CHECKOUT:rw and --state-dir were accepted;
+    read-only stays allowed. The workspace check and check_given_path use the same helper."""
+    parent = tmp_path / "c0de"
+    checkout = parent / "sandbox-ai"
+    (checkout / "sandbox").mkdir(parents=True)
+    monkeypatch.setattr(s, "launcher_trees", lambda: [checkout / "sandbox", checkout])
+    with pytest.raises(ValueError, match="contains sandbox-ai's own launcher"):
+        s.check_given_path(parent, "--mount", True)
+    with pytest.raises(ValueError, match="--state-dir .* contains sandbox-ai's own launcher"):
+        s.check_given_path(parent, "--state-dir", True)
+    with pytest.raises(ValueError, match="Workspace .* contains sandbox-ai's own launcher"):
+        s.check_workspace_scope(parent)
+    try:
+        s.check_given_path(parent, "--mount", False, warn=lambda line: None)
+    except ValueError as exc:  # read-only: never for the launcher (another check may still object to the place)
+        assert "launcher" not in str(exc)
+
+
 def test_check_given_path(scenario, tmp_path, monkeypatch):
     """Findings H1/M1: read-only too, a host path never reaches sandbox-ai's own folders; private ones warn."""
     home = tmp_path / "home"

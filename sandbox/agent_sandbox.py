@@ -1466,6 +1466,22 @@ def in_launcher_tree(path):
     return any(path == tree or tree in path.parents for tree in launcher_trees())
 
 
+def check_launcher_location(path, option, trees=None):
+    """Refuse a host PATH (resolved) a sandbox would get writable that is, lies in or contains one of sandbox-ai's
+    own launcher trees (TREES, default launcher_trees()): the agent could rewrite the launcher, and the next start
+    would run that on the host. One check for every writable path: workspaces (also those added during the run),
+    --mount rw, --state-dir, an MCP server's folders. Read-only, all of them may hold it."""
+    path = Path(path)
+    for tree in launcher_trees() if trees is None else trees:
+        tree = Path(tree)
+        if path == tree or tree in path.parents or path in tree.parents:
+            where = "lies in" if tree in path.parents else "is" if path == tree else "contains"
+            raise ValueError(f"{option} {path} {where} sandbox-ai's own launcher ({tree}); the agent could rewrite "
+                             "it and run code on the host at the next start. Give it read-only (a --mount with :ro), "
+                             "a folder that does not hold the launcher, or install sandbox-ai (./install.sh --from .) "
+                             "and start it from there.")
+
+
 # How far sockets_below looks into a tree: entries in all, and folders deep.
 SOCKET_SCAN_ENTRIES = 20000
 SOCKET_SCAN_DEPTH = 12
@@ -1548,15 +1564,15 @@ def check_given_path(path, option, writable, own=(), warn=None, refused=()):
     the kernel's own, a tree with a live socket in it, or sandbox-ai's own folders (OWN: the folders of the internal
     start this is; REFUSED: further own folders a start recorded); a private location is given with a warning
     (check_private_location). Read-only, a file or folder of the launcher itself is given as it is (an MCP helper's
-    script); WRITABLE never the launcher's tree nor the package it runs from."""
+    script); WRITABLE never what is, lies in or holds the launcher's tree (check_launcher_location) nor the package
+    it runs from."""
     path = Path(path)
     check_socket_location(path, option)
     check_kernel_mounts(path, option)
     if writable:
         check_package_location(path, option)  # the package's own message first: it says where to move it
-    if writable and in_launcher_tree(path):
-        raise ValueError(f"{option} {path} lies in sandbox-ai's own launcher ({launcher_trees()[-1]}); the agent could "
-                         "rewrite it and run code on the host at the next start. Mount it read-only, or use a copy.")
+    if writable:
+        check_launcher_location(path, option)
     if not (not writable and in_launcher_tree(path)):
         check_private_location(path, option, warn, own, refused)
     check_sockets_below(path, option, warn)
@@ -3590,11 +3606,7 @@ def check_workspace_scope(workspace, own=(), warn=None, refused=()):
     the temporary directory, the kernel's trees, a folder of sockets and sandbox-ai's own folders (OWN: those of the
     internal start this is; REFUSED: further ones a start recorded); a private location is given with a warning."""
     workspace = Path(workspace)
-    for tree in launcher_trees():
-        if workspace == tree or workspace in tree.parents or tree in workspace.parents:
-            raise ValueError(f"Workspace {workspace} {'lies in' if tree in workspace.parents else 'is or contains'} "
-                             f"sandbox-ai's own launcher ({tree}); the agent could rewrite it and run code on the host "
-                             "at the next start. Install sandbox-ai (./install.sh --from .) and start it from there.")
+    check_launcher_location(workspace, "Workspace")
     risky = {Path("/"): "the root directory", Path.home().resolve(): "your HOME directory",
              Path(tempfile.gettempdir()).resolve(): "the temporary directory"}
     if os.environ.get("XDG_RUNTIME_DIR"):

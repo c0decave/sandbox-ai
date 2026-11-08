@@ -751,7 +751,10 @@ Ein Workspace darf weder Ihr HOME, `/`, das Temp-Verzeichnis,
 `XDG_RUNTIME_DIR` noch den Starter von sandbox-ai selbst sein oder enthalten,
 und nicht innerhalb von `--state-dir` oder einem rw-`--mount` liegen: Der Agent
 könnte Shell-Startdateien, Anmeldedaten oder den Starter ändern oder den Pfad
-per Symlink umlenken. Ein Workspace, ein rw-Mount oder `--state-dir` darf auch
+per Symlink umlenken. Ein rw-`--mount`, `--state-dir` oder der rw-Ordner eines
+MCP-Servers darf den Starter von sandbox-ai (ein Checkout, ein venv) ebenfalls
+weder sein, noch enthalten, noch in ihm liegen; geben Sie einen solchen Ordner
+schreibgeschützt (`:ro`). Ein Workspace, ein rw-Mount oder `--state-dir` darf auch
 `~/.config`, `~/.local`, `~/.ssh`, `~/.gnupg`, `~/.mozilla`, `~/bin` oder
 `~/.bin` (die XDG-Verzeichnisse, wo immer sie gesetzt sind) weder sein, noch
 enthalten, noch darin liegen, und kein Verzeichnis Ihres `PATH` sein oder darin

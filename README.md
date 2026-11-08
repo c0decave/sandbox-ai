@@ -722,7 +722,10 @@ user, no `chmod 777` needed.
 A workspace may not be or contain your HOME, `/`, the temporary directory,
 `XDG_RUNTIME_DIR` or sandbox-ai's own launcher, and may not lie inside
 `--state-dir` or an rw `--mount`: the agent could change shell start files,
-credentials or the launcher, or redirect the path with a symlink. Nor may a
+credentials or the launcher, or redirect the path with a symlink. An rw
+`--mount`, `--state-dir` or an MCP server's rw folder may neither be, lie in
+nor contain sandbox-ai's own launcher either (a checkout, a venv); give such a
+folder read-only (`:ro`). Nor may a
 workspace, rw mount or `--state-dir` be, contain or lie in `~/.config`,
 `~/.local`, `~/.ssh`, `~/.gnupg`, `~/.mozilla`, `~/bin` or `~/.bin` (the XDG
 directories wherever they are set), or be or lie in a directory on your
