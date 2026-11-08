@@ -518,7 +518,8 @@ def start_name(value):
 KIT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 KIT_SKILL = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")  # a new skill's name (Claude's rule)
 KIT_PLUGIN = re.compile(r"[A-Za-z0-9@][A-Za-z0-9@/._^~<>=*+-]{0,200}")  # NAME@MARKETPLACE or an npm package
-KIT_ACTIONS = ("add-skill", "new-skill", "add-plugin", "add-marketplace", "remove-skill", "remove-plugin")
+KIT_ACTIONS = ("add-skill", "new-skill", "add-plugin", "add-marketplace", "remove-skill", "remove-plugin",
+               "add-hook", "remove-hook")
 
 
 def kit_name(value, what="a kit's name"):
@@ -556,6 +557,96 @@ def device_value(value):
     if not (isinstance(value, str) and DEVICE_PATH.fullmatch(value)):
         raise Refused(400, "a device is a path under /dev or usb:VENDOR:PRODUCT[:SERIAL] (four hex digits each)")
     return no_dots(value, "a device")
+
+
+# The parity actions (Projects, MCP servers, logins and identities, images, activity, ...): every value is checked here
+# as the command takes it, and passed as --flag=VALUE or after its options, never starting with "-".
+SHA256 = re.compile(r"[0-9a-f]{64}")
+IDENTITY_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")  # identities.NAME
+LOGIN_USER = re.compile(r"[A-Za-z0-9._][A-Za-z0-9._-]{0,63}")  # git_logins.USER, never a leading "-"
+EMAIL = re.compile(r"[^\s<>@,;\"'-][^\s<>@,;\"']{0,63}@[A-Za-z0-9.-]{1,253}")  # identities.EMAIL
+PUBLISH_KINDS = ("crates", "github", "gitlab", "npm", "pypi", "testpypi")
+PUBLISH_URL = re.compile(r"https://[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252})/?")  # publish_logins: https://HOST, no path
+MCP_ENTRY = re.compile(r"(?:[a-z0-9][a-z0-9-]{0,31}:)?[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")  # duckduckgo, hub:binwalk
+MCP_CATALOG_LINE = re.compile(r"(?P<prefix>[^:\s]+):(?P<name>\S+)  \[(?P<network>[^\]]*)\]  (?P<title>.*?)"
+                              r"(?P<unpublished>  \(not published yet\))?  (?P<signature>signed|SIGNATURE BAD|unsigned)")
+SIZE_VALUE = re.compile(r"[0-9]{1,12}(?:\.[0-9]{1,6})?[kmgtKMGT]?")
+NET_PRESETS = ("pypi", "github", "gitlab", "kernel-org", "duckduckgo", "npm")  # agent_sandbox.PRESETS (a test agrees)
+NETWORK = re.compile(r"[0-9A-Fa-f:.]{2,45}(?:/[0-9]{1,3})?")
+BUILD_TARGET = re.compile(r"[a-z0-9][a-z0-9_.-]{0,29}")  # codex, claude, opencode, all, team, vpn or a variant
+HOOK_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+HOOK_EVENT = re.compile(r"[A-Z][A-Za-z]{1,40}")
+HEADER_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,63}")
+PRESET_KEY = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,31}")
+ACTIVITY_KINDS = ("prompt", "reply", "tool", "command", "file", "network", "approval", "mcp", "session", "tokens")
+ACTIVITY_SINCE = re.compile(r"[0-9]{1,5}[smhd]|[0-9]{1,2}:[0-9]{2}|[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[T ][0-9:.]{1,15}(?:Z|[+-][0-9:]{1,5})?)?")
+TOR_COUNTRIES = re.compile(r"[a-z]{2}(?:,[a-z]{2}){0,15}")
+TS_HOSTNAME = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
+PROVIDER = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+DOCTOR_BACKENDS = ("podman", "bwrap", "both")
+
+
+def identity_name(value):
+    if not (isinstance(value, str) and IDENTITY_NAME.fullmatch(value)):
+        raise Refused(400, "an identity's name is 1-32 lower-case letters, digits, '_' or '-'")
+    return value
+
+
+def git_url(value, what="url"):
+    if not (isinstance(value, str) and NET_GIT_URL.fullmatch(value)):
+        raise Refused(400, f"{what} is http(s)://[USER@]HOST[:PORT]")
+    return value
+
+
+def publish_kind(value):
+    if value not in PUBLISH_KINDS:
+        raise Refused(400, f"kind is one of {', '.join(PUBLISH_KINDS)}")
+    return value
+
+
+def flag(body, key):
+    """BODY[KEY] as a bool (absent: False); anything else is refused."""
+    value = body.get(key, False)
+    if not isinstance(value, bool):
+        raise Refused(400, f"{key} is true or false")
+    return value
+
+
+def whole(value, what, low, high):
+    if isinstance(value, str) and value.isascii() and value.isdigit() and len(value) <= 9:
+        value = int(value)
+    if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+        raise Refused(400, f"{what} is a whole number from {low} to {high}")
+    return value
+
+
+def ip_value(value, what, network=False):
+    """An IP address (or with NETWORK an IP or CIDR network) as text, checked by ipaddress."""
+    import ipaddress
+    if not (isinstance(value, str) and NETWORK.fullmatch(value)) or "/" in value and not network:
+        raise Refused(400, f"{what}: an IP address{' or network (CIDR)' if network else ''}")
+    try:
+        ipaddress.ip_network(value, strict=False) if network else ipaddress.ip_address(value)
+    except ValueError:
+        raise Refused(400, f"{what}: not an IP address{' or network' if network else ''}: {printable(value)[:64]}") \
+            from None
+    return value
+
+
+def clean_path(value, what):
+    """An absolute path on the host, printable, without . or .. parts (never read as an option)."""
+    return no_dots(host_path(value, what), what)
+
+
+def catalog_sources(body):
+    """--catalog=FILE_OR_URL options of BODY's "catalogs": absolute paths on the host or https:// URLs."""
+    found = []
+    for value in strings(body.get("catalogs", []), "catalogs", 8):
+        if isinstance(value, str) and value.startswith("https://") and value.isprintable() and " " not in value:
+            found.append(f"--catalog={one_line(value, 'a catalog', 2048)}")
+        else:
+            found.append(f"--catalog={clean_path(value, 'a catalog')}")
+    return found
 
 
 # What ends, removes or weakens something: ONE table, consulted by every route (needs(), confirmed()), each route
@@ -596,7 +687,28 @@ NEEDS_CONFIRM = {
                     "SSH user or for every user, as root or with sudo",
     "secret-delete": "deleting a secret takes it from every start, VPN profile and Git login that names it",
     "secret-replace": "a secret of that name exists: its value is replaced",
+    "project-trust": "a trusted project configuration gives every later start of that project its options",
+    "project-forget": "a project configuration no longer trusted stops the starts of that project from starting "
+                      "until it is trusted again",
+    "mcp-stop": "stopping an MCP server ends it for every start that uses it now",
+    "mcp-unsigned": "an MCP server from a catalog no trusted key signed is taken without that check",
+    "mcp-writable-mount": "a writable mount lets the MCP server change that directory on the host",
+    "git-login-add": "a Git login is used by the connection proxy of every sandbox that reaches that server",
+    "login-remove": "removing a login or an identity takes it from every later start that uses it",
+    "net-keep": "keeping what the run was given writes it into the project's .sandbox-ai.json: every later start of "
+                "that project gets it",
+    "start-restart": "restarting a running start ends what runs in it now (the agent continues its conversation)",
+    "canary-tokens": "the run's canary tokens in full: decoys, but shown here they can be copied and planted",
+    "canary-resume": "resuming a sandbox a canary paused lets it go on after something opened a decoy or sent a "
+                     "token away",
+    "llm-insecure": "plain http to an address outside your local networks is unencrypted: prompts, answers and the "
+                    "key can be read on the way",
+    "vpn-socks": "a SOCKS port in the sandbox lets what goes through it pass the connection proxy by",
+    "login-logout": "logging out forgets the stored login of that agent: its sandboxes need a new login",
+    "kit-hooks-trust": "trusted hooks of a kit run in every later start with that kit",
 }
+# The actions only a terminal asks for (its query carries confirm=1): no route names them.
+TERMINAL_CONFIRM = ("login-logout", "kit-hooks-trust")
 # The order of protection (weakest first) that decides whether a default is lowered: any step down needs a confirm.
 MODE_ORDER = ("lax", "low", "medium", "high", "paranoid")
 TELEMETRY_ORDER = ("on", "off", "strict")
@@ -772,6 +884,7 @@ class Api:
         self.statuses = statuses or (lambda names, refresh=False: module("hosts").statuses(names, refresh=refresh))
         self.approvals_fanout = FanOut(self.host_questions)
         self.starts_fanout = FanOut(self.host_starts)
+        self.every_fanout = FanOut(lambda name: self.host_starts(name, every=True))  # list --all: MCP servers too
         # hosts install: at most one per host at a time; the last result of each kept (a page whose request was cut
         # off before the install ended - a browser gives up on an answer after some minutes - asks for it)
         self.install_lock, self.installing, self.installed = threading.Lock(), {}, {}
@@ -794,7 +907,7 @@ class Api:
             ("GET", H + r"/install", self.install_status, ()),
             ("GET", H + r"/starts", self.starts, ()),
             ("POST", H + r"/starts/(?P<name>[^/]+)/(?P<action>pause|resume|stop|delete)", self.start_action,
-             ("start-stop", "start-delete")),
+             ("start-stop", "start-delete", "start-restart", "workspace-writable", "mcp-attach")),
             ("POST", H + r"/starts/(?P<name>[^/]+)/rename", self.rename, ()),
             ("GET", H + r"/starts/(?P<name>[^/]+)/history", self.history, ()),
             ("GET", H + r"/starts/(?P<name>[^/]+)/review", self.review_home, ()),
@@ -812,7 +925,7 @@ class Api:
             ("GET", H + r"/logs", self.logs, ()),
             ("GET", H + r"/llm", self.llm, ()),
             ("GET", H + r"/llm/(?P<name>[^/]+)/models", self.llm_models, ()),
-            ("POST", H + r"/llm", self.add_llm, ()),
+            ("POST", H + r"/llm", self.add_llm, ("llm-insecure",)),
             ("POST", H + r"/llm/(?P<name>[^/]+)/check", self.check_llm, ()),
             ("DELETE", H + r"/llm/(?P<name>[^/]+)", self.remove_llm, ("llm-remove",)),
             ("GET", H + r"/defaults", self.defaults, ()),
@@ -830,7 +943,7 @@ class Api:
             ("POST", H + r"/limits/(?P<name>[^/]+)", self.set_limits, ("limits-raise",)),
             ("GET", H + r"/presets", self.presets, ()),
             ("GET", H + r"/vpn", self.vpn_list, ()),
-            ("POST", H + r"/vpn", self.vpn_add, ()),
+            ("POST", H + r"/vpn", self.vpn_add, ("vpn-socks",)),
             ("POST", H + r"/vpn/(?P<name>[^/]+)/check", self.vpn_check, ()),
             ("DELETE", H + r"/vpn/(?P<name>[^/]+)", self.vpn_remove, ("vpn-remove",)),
             ("GET", H + r"/kits", self.kits, ()),
@@ -842,6 +955,65 @@ class Api:
             ("GET", H + r"/secrets", self.secrets, ()),
             ("POST", H + r"/secrets/(?P<name>[^/]+)", self.secret_set, ("secret-replace",)),
             ("DELETE", H + r"/secrets/(?P<name>[^/]+)", self.secret_delete, ("secret-delete",)),
+            # project configurations (sandbox-ai wizard trust)
+            ("GET", H + r"/projects", self.projects, ()),
+            ("POST", H + r"/projects/review", self.project_review, ()),
+            ("POST", H + r"/projects/trust", self.project_trust, ("project-trust",)),
+            ("POST", H + r"/projects/forget", self.project_forget, ("project-forget",)),
+            # MCP servers (sandbox-ai mcp)
+            ("GET", H + r"/mcp", self.mcp_list, ()),
+            ("POST", H + r"/mcp", self.mcp_add, ("mcp-unsigned", "mcp-writable-mount")),
+            ("POST", H + r"/mcp-catalog", self.mcp_catalog, ()),
+            ("POST", H + r"/mcp/(?P<name>[^/]+)/start", self.mcp_start, ("mcp-attach", "mcp-restart")),
+            ("POST", H + r"/mcp/(?P<name>[^/]+)/stop", self.mcp_stop, ("mcp-stop",)),
+            # logins and identities (sandbox-ai git-logins, publish-logins, identities): secrets only by name
+            ("GET", H + r"/git-logins", self.git_logins, ()),
+            ("POST", H + r"/git-logins", self.git_login_add, ("git-login-add",)),
+            ("POST", H + r"/git-logins/remove", self.git_login_remove, ("login-remove",)),
+            ("POST", H + r"/git-logins/check", self.git_login_check, ()),
+            ("GET", H + r"/publish-logins", self.publish_logins, ()),
+            ("GET", H + r"/publish-logins/kinds", self.publish_kinds, ()),
+            ("POST", H + r"/publish-logins", self.publish_login_add, ()),
+            ("POST", H + r"/publish-logins/check", self.publish_login_check, ()),
+            ("POST", H + r"/publish-logins/(?P<kind>[^/]+)/remove", self.publish_login_remove, ("login-remove",)),
+            ("GET", H + r"/identities", self.identities, ()),
+            ("POST", H + r"/identities", self.identity_add, ()),
+            ("POST", H + r"/identities-check", self.identity_check, ()),
+            ("GET", H + r"/identities/(?P<name>[^/]+)", self.identity_show, ()),
+            ("POST", H + r"/identities/(?P<name>[^/]+)", self.identity_set, ()),
+            ("POST", H + r"/identities/(?P<name>[^/]+)/(?P<action>login|publish)", self.identity_login, ()),
+            ("POST", H + r"/identities/(?P<name>[^/]+)/(?P<action>logout|unpublish)", self.identity_logout,
+             ("login-remove",)),
+            ("DELETE", H + r"/identities/(?P<name>[^/]+)", self.identity_remove, ("login-remove",)),
+            # the network kept for later starts, the starts with MCP servers that do not run
+            ("POST", H + r"/net/(?P<name>[^/]+)/keep", self.net_keep, ("net-keep",)),
+            ("GET", r"/api/starts/all", lambda params, body: self.all_starts(params, body, every=True), ()),
+            ("GET", H + r"/starts/all", self.starts_every, ()),
+            # presets and their directories
+            ("GET", H + r"/presets/(?P<name>[^/]+)", self.preset_show, ()),
+            ("POST", H + r"/presets/(?P<name>[^/]+)/check", self.preset_check, ()),
+            ("GET", H + r"/preset-dirs", self.preset_dirs, ()),
+            ("POST", H + r"/preset-dirs", self.preset_dir_add, ("defaults-lower",)),
+            ("POST", H + r"/preset-dirs/remove", self.preset_dir_remove, ()),
+            # one run's canaries
+            ("GET", H + r"/canaries/(?P<run>[^/]+)/list", self.canary_list, ()),
+            ("POST", H + r"/canaries/(?P<run>[^/]+)/tokens", self.canary_tokens, ("canary-tokens",)),
+            ("POST", H + r"/canaries/(?P<run>[^/]+)/resume", self.canary_resume, ("canary-resume",)),
+            # a kit, an LLM server, a VPN profile in full
+            ("GET", H + r"/kits/(?P<name>[^/]+)", self.kit_show, ()),
+            ("GET", H + r"/llm/(?P<name>[^/]+)", self.llm_show, ()),
+            ("GET", H + r"/vpn/(?P<name>[^/]+)", self.vpn_show, ()),
+            # logs of a directory or project, the privacy check, the activity
+            ("POST", H + r"/logs", self.logs_of, ()),
+            ("POST", H + r"/privacy-check", self.privacy_check, ()),
+            ("POST", H + r"/activity", self.activity, ()),
+            # the doctor of one backend, the version in full, images, the demo device
+            ("GET", H + r"/doctor/(?P<backend>[^/]+)", self.doctor, ()),
+            ("GET", H + r"/version", self.version_of, ()),
+            ("GET", H + r"/images", self.images, ()),
+            ("GET", H + r"/demo-device", self.demo_status, ()),
+            ("POST", H + r"/demo-device/start", self.demo_start, ()),
+            ("POST", H + r"/demo-device/stop", self.demo_stop, ()),
         ]
 
     def dispatch(self, method, path, body):
@@ -1097,20 +1269,24 @@ class Api:
     def starts(self, params, body):
         return self.json_of(params["host"], ["list", "--json"])
 
-    def host_starts(self, name):
-        listed = self.json_of(name, ["list", "--json"], STARTS_HOST_SECONDS)
+    def host_starts(self, name, every=False):
+        listed = self.json_of(name, ["list", *(["--all"] if every else []), "--json"], STARTS_HOST_SECONDS)
         if not isinstance(listed, list):
             raise Refused(502, f"sandbox-ai list on {name}: not a list of starts")
         return [entry for entry in listed if isinstance(entry, dict)]
 
-    def all_starts(self, params, body):
+    def starts_every(self, params, body):
+        """sandbox-ai list --all --json: the starts and the MCP servers that do not run."""
+        return self.json_of(params["host"], ["list", "--all", "--json"])
+
+    def all_starts(self, params, body, every=False):
         """The starts of every host, asked at once (at most one request in flight per host; a host still asking
         is given with its last list and how old that is): {"starts": [{"host", ...}], "errors": {host: why},
         "seen": {host: when its list was read, Unix time}, "age": {host: seconds since then, by the service's
         clock: the page counts on from when it got the answer, never comparing its clock with the service's},
         "asking": [hosts still being asked]}."""
         names, errors = host_names()
-        found = self.starts_fanout.gather(names, STARTS_HOST_SECONDS)
+        found = (self.every_fanout if every else self.starts_fanout).gather(names, STARTS_HOST_SECONDS)
         starts, seen, age, asking = [], {}, {}, []
         for name in names:
             info = found[name]
@@ -1152,7 +1328,51 @@ class Api:
             return self.done(params["host"], ["delete", name, "--yes"])
         if action == "stop":
             confirmed(body, "start-stop")
+            if body.get("wait") is not None:  # stop --wait SECONDS: how long to wait for it to end
+                wait = whole(body["wait"], "wait", 1, 600)
+                return self.done(params["host"], ["stop", name, f"--wait={wait}"], timeout=wait + 60)
+        if action == "resume":
+            options = self.resume_options(body, name)
+            if options:
+                return self.done(params["host"], ["resume", *options, name], timeout=300)
         return self.done(params["host"], [action, name], timeout=180)
+
+    @staticmethod
+    def resume_options(body, name):
+        """resume --restart, --workspace DIR, --mount SOURCE:DESTINATION[:ro|rw], --mcp NAME (each kept for its later
+        starts): a restart ends what runs now (start-restart), a directory or a writable mount lets the agent change
+        it (workspace-writable), an MCP server is reached by it (mcp-attach); all asked first."""
+        options, widens = [], []
+        for value in strings(body.get("workspaces", []), "workspaces", 16):
+            options.append(f"--workspace={clean_path(value, 'a workspace')}")
+            widens.append(value)
+        mounts = body.get("mounts", [])
+        if not isinstance(mounts, list) or len(mounts) > 16:
+            raise Refused(400, "mounts is a list of {source, destination, mode}")
+        for mount in mounts:
+            if not isinstance(mount, dict) or set(mount) - {"source", "destination", "mode"}:
+                raise Refused(400, "a mount is {source, destination, mode: ro or rw}")
+            source = clean_path(mount.get("source"), "a mount's source")
+            destination = clean_path(mount.get("destination"), "a mount's destination")
+            mode = mount.get("mode") or "ro"
+            if mode not in ("ro", "rw") or ":" in source + destination:
+                raise Refused(400, "a mount is SOURCE:DESTINATION with ro or rw (no ':' in the paths)")
+            options.append(f"--mount={source}:{destination}:{mode}")
+            if mode == "rw":
+                widens.append(f"{source} (writable)")
+        servers = strings(body.get("mcp", []), "mcp", 16)
+        for server in servers:
+            if not MCP_NAME.fullmatch(server):
+                raise Refused(400, "an MCP server's name is 1-32 letters, digits, '_' or '-'")
+            options.append(f"--mcp={server}")
+        if flag(body, "restart"):
+            confirmed(body, "start-restart", name)
+            options.append("--restart")
+        if widens:
+            confirmed(body, "workspace-writable", ", ".join(widens))
+        if servers:
+            confirmed(body, "mcp-attach", f"{', '.join(servers)} to {name}")
+        return options
 
     def rename(self, params, body):
         """sandbox-ai rename OLD NEW: another name for a start (its run id stays)."""
@@ -1258,17 +1478,33 @@ class Api:
                 isinstance(p, int) and not isinstance(p, bool) and 1 <= p <= 65535 for p in ports):
             raise Refused(400, "host_ports is a list of at most 16 ports")
         args += [f"--allow-host-port={port}" for port in ports]
+        for value in strings(body.get("allow", []), "allow", 32):
+            args.append(f"--allow={ip_value(value, 'allow', network=True)}")
+        presets = strings(body.get("presets", []), "presets", len(NET_PRESETS))
+        if not set(presets) <= set(NET_PRESETS):
+            raise Refused(400, f"presets are {', '.join(NET_PRESETS)}")
+        args += [f"--allow-{preset}" for preset in dict.fromkeys(presets)]
         if body.get("dns") is True:
             args.append("--dns")
+        for value in strings(body.get("nameservers", []), "nameservers", 8):
+            args.append(f"--nameserver={ip_value(value, 'a nameserver')}")
         login = body.get("git_login")
         if login is not None:
-            if not (isinstance(login, dict) and login.get("kind") in ("env", "secret")
+            if not (isinstance(login, dict) and login.get("kind") in ("env", "secret", "file")
                     and isinstance(login.get("url"), str) and NET_GIT_URL.fullmatch(login["url"])
-                    and isinstance(login.get("ref"), str) and NET_REF.fullmatch(login["ref"])):
-                raise Refused(400, "git_login is {url: http(s)://[USER@]HOST[:PORT], kind: env|secret, ref: NAME}")
+                    and isinstance(login.get("ref"), str)
+                    and (NET_REF.fullmatch(login["ref"]) if login["kind"] != "file" else login["ref"].startswith("/"))):
+                raise Refused(400, "git_login is {url: http(s)://[USER@]HOST[:PORT], kind: env|secret|file, ref: NAME "
+                                   "or, for a file, its absolute path on that host}")
+            if login["kind"] == "file":
+                clean_path(login["ref"], "the token file")
             args.append(f"--git-token-{login['kind']}={login['url']}={login['ref']}")
         if len(args) == 3:
             raise Refused(400, "nothing to change")
+        if flag(body, "keep"):
+            if op != "allow":
+                raise Refused(400, "keep is for allow (net show --keep keeps what the run was given)")
+            args.append("--keep")
         if op == "allow":
             confirmed(body, "net-allow", f"{' '.join(args[3:])} for {args[2]}")
         return self.done(params["host"], args, 60)
@@ -1387,8 +1623,8 @@ class Api:
         name, kind = body.get("name"), body.get("kind")
         if not (isinstance(name, str) and VPN_NAME.fullmatch(name)):
             raise Refused(400, "a profile name is 1-32 lower-case letters, digits, '_' or '-'")
-        if kind not in ("wireguard", "openvpn", "mullvad", "tailscale"):
-            raise Refused(400, "kind is wireguard, openvpn, mullvad or tailscale")
+        if kind not in ("wireguard", "openvpn", "mullvad", "tailscale", "tor"):
+            raise Refused(400, "kind is wireguard, openvpn, mullvad, tailscale or tor")
         args = ["vpn", "add", name]
         if kind in ("wireguard", "openvpn"):
             path = body.get("file")
@@ -1411,7 +1647,59 @@ class Api:
                 if kind not in kinds or not (isinstance(value, str) and pattern.fullmatch(value)):
                     raise Refused(400, f"{key} does not fit this profile")
                 args.append(f"{option}={value}")
+        args += self.vpn_options(kind, body)
         return self.done(params["host"], args, 180)
+
+    @staticmethod
+    def vpn_options(kind, body):
+        """The further options of vpn add, each only for the kinds that have it: resolvers, check URLs, the
+        provider, a replacement (force), OpenVPN's split, Mullvad's IPv6 choices, Tailscale's node name, ephemeral
+        nodes and tailnet range, Tor's bridges, exit countries and SOCKS port (which passes the proxy by: asked)."""
+        args = []
+        for value in strings(body.get("dns", []), "dns", 8):
+            args.append(f"--dns={ip_value(value, 'a resolver')}")
+        for value in strings(body.get("check_urls", []), "check_urls", 8):
+            if not (value.startswith("https://") and value.isprintable() and " " not in value and len(value) <= 2048):
+                raise Refused(400, "a check URL is https://...")
+            args.append(f"--check-url={value}")
+        if body.get("provider") not in (None, ""):
+            if not (isinstance(body["provider"], str) and PROVIDER.fullmatch(body["provider"])):
+                raise Refused(400, "provider is a name of lower-case letters, digits, '_' or '-'")
+            args.append(f"--provider={body['provider']}")
+        switches = {"no_dns_probe": ("--no-dns-probe", None), "force": ("--force", None),
+                    "split": ("--split", "openvpn"), "no_ipv6": ("--no-ipv6", "mullvad"),
+                    "endpoint_ipv6": ("--endpoint-ipv6", "mullvad"), "ephemeral": ("--ephemeral", "tailscale"),
+                    "socks": ("--socks", "tor")}
+        for key, (option, only) in switches.items():
+            if flag(body, key):
+                if only and kind != only:
+                    raise Refused(400, f"{key} is for {only}")
+                if key == "socks":
+                    confirmed(body, "vpn-socks", str(body.get("name")))
+                args.append(option)
+        if body.get("hostname") not in (None, ""):
+            if kind != "tailscale" or not (isinstance(body["hostname"], str) and TS_HOSTNAME.fullmatch(body["hostname"])):
+                raise Refused(400, "hostname is a Tailscale node's name (lower-case letters, digits and '-')")
+            args.append(f"--hostname={body['hostname']}")
+        for value in strings(body.get("tailnet_allow", []), "tailnet_allow", 16):
+            if kind != "tailscale":
+                raise Refused(400, "tailnet_allow is for tailscale")
+            args.append(f"--tailnet-allow={ip_value(value, 'tailnet_allow', network=True)}")
+        bridges, bridge_secret = body.get("bridges"), body.get("bridge_secret")
+        if bridges not in (None, "") or bridge_secret not in (None, "") or body.get("exit_country") not in (None, ""):
+            if kind != "tor":
+                raise Refused(400, "bridges, bridge_secret and exit_country are for tor")
+        if bridges not in (None, "") and bridge_secret not in (None, ""):
+            raise Refused(400, "bridges (a file) or bridge_secret (a secret's name), not both")
+        if bridges not in (None, ""):
+            args.append(f"--bridges={clean_path(bridges, 'bridges')}")
+        if bridge_secret not in (None, ""):
+            args.append(f"--bridge-secret={secret_name(bridge_secret)}")
+        if body.get("exit_country") not in (None, ""):
+            if not (isinstance(body["exit_country"], str) and TOR_COUNTRIES.fullmatch(body["exit_country"])):
+                raise Refused(400, "exit_country is a country code, or several: de or de,nl")
+            args.append(f"--exit-country={body['exit_country']}")
+        return args
 
     def vpn_check(self, params, body):
         return self.done(params["host"], ["vpn", "check", vpn_name(params["name"])], 180)
@@ -1509,6 +1797,27 @@ class Api:
             options += kit_agents(body, many=False)
             if action == "add-plugin" and body.get("source") not in (None, ""):
                 options.append(f"--source={one_line(body['source'], 'source', 2048)}")
+        elif action == "add-hook":  # a hook script, a hooks.json or an OpenCode plugin module (a file on that host)
+            values = [clean_path(body.get("file"), "file")]
+            options += kit_agents(body)
+            if body.get("as") not in (None, ""):
+                if not (isinstance(body["as"], str) and HOOK_FILE.fullmatch(body["as"])):
+                    raise Refused(400, "as is a file name: letters, digits, '_', '.' or '-'")
+                options.append(f"--as={body['as']}")
+            if body.get("event") not in (None, ""):
+                if not (isinstance(body["event"], str) and HOOK_EVENT.fullmatch(body["event"])):
+                    raise Refused(400, "event is a hook event: PreToolUse, PostToolUse, Stop, ...")
+                options.append(f"--event={body['event']}")
+            if body.get("matcher") not in (None, ""):
+                options.append(f"--matcher={one_line(body['matcher'], 'matcher', 200)}")
+            if body.get("timeout") not in (None, ""):
+                options.append(f"--timeout={whole(body['timeout'], 'timeout', 1, 3600)}")
+        elif action == "remove-hook":
+            hook = body.get("file")
+            if not (isinstance(hook, str) and HOOK_FILE.fullmatch(hook)):
+                raise Refused(400, "file is the hook's file name in the kit")
+            values = [hook]
+            options += kit_agents(body)
         else:  # add-marketplace
             values = [kit_name(body.get("marketplace"), "a marketplace's name"),
                       one_line(body.get("source"), "source", 2048)]
@@ -1517,7 +1826,7 @@ class Api:
             raise Refused(400, "create is true or false")
         if action.startswith("remove-"):
             confirmed(body, "kit-remove", f"{values[0]} from {name}")
-        elif action in ("add-skill", "add-plugin", "add-marketplace"):
+        elif action in ("add-skill", "add-plugin", "add-marketplace", "add-hook"):
             confirmed(body, "kit-add", f"{' '.join(values[:1])} to {name}")
         first = ""
         if body.get("create") is True:
@@ -1620,18 +1929,22 @@ class Api:
 
     # the doctor and the logs
     def doctor(self, params, body):
-        return self.doctor_of(params["host"], 120)
+        backend = params.get("backend")
+        if backend is not None and backend not in DOCTOR_BACKENDS:
+            raise Refused(400, f"the backend is {', '.join(DOCTOR_BACKENDS)}")
+        return self.doctor_of(params["host"], 120, [f"--backend={backend}"] if backend else [])
 
-    def doctor_of(self, host, timeout):
+    def doctor_of(self, host, timeout, extra=()):
         """`sandbox-ai doctor --json` on HOST: its list of checks; from an older sandbox-ai that answers with text
-        (or has no --json yet: then its plain `doctor`), that text as one string, which the page shows as it is."""
-        status, out, err = self.run(host, ["doctor", "--json"], timeout)
+        (or has no --json yet: then its plain `doctor`), that text as one string, which the page shows as it is.
+        EXTRA: --backend=BACKEND (doctor/BACKEND)."""
+        status, out, err = self.run(host, ["doctor", "--json", *extra], timeout)
         try:
             return json.loads(out)
         except ValueError:
             pass
         if status != 0 and not out.strip() and "--json" in (err or ""):  # argparse: unrecognized arguments: --json
-            status, out, err = self.run(host, ["doctor"], timeout)
+            status, out, err = self.run(host, ["doctor", *extra], timeout)
         text = printable(out.rstrip()[-20000:]) if out.strip() and status in (0, 1) else ""
         if not text:
             raise Refused(502, f"sandbox-ai doctor on {host}: exit status {status}: "
@@ -1657,6 +1970,25 @@ class Api:
         key = body.get("api_key_secret")
         if key not in (None, ""):  # the NAME of the secret (sandbox-ai secrets there) that holds the key, never a key
             args.append(f"--api-key-secret={secret_name(key)}")
+        headers = body.get("header_secrets", [])
+        if not isinstance(headers, list) or len(headers) > 8:
+            raise Refused(400, "header_secrets is a list of {header, secret}")
+        for entry in headers:  # a header the proxy adds with a secret's value: the secret's NAME, never the value
+            if not (isinstance(entry, dict) and set(entry) <= {"header", "secret"} and isinstance(entry.get("header"), str)
+                    and HEADER_NAME.fullmatch(entry["header"])):
+                raise Refused(400, "a header secret is {header: NAME, secret: SECRET}")
+            args.append(f"--header-secret={entry['header']}={secret_name(entry.get('secret'))}")
+        if body.get("ca") not in (None, ""):
+            args.append(f"--ca={clean_path(body['ca'], 'ca')}")
+        if body.get("vpn") not in (None, ""):
+            args.append(f"--vpn={vpn_name(body['vpn'])}")
+        if flag(body, "anthropic"):
+            args.append("--anthropic")
+        if flag(body, "replace"):
+            args.append("--replace")
+        if flag(body, "insecure_http"):
+            confirmed(body, "llm-insecure", f"{name} at {printable(url)[:200]}")
+            args.append("--insecure-http")
         return self.done(params["host"], args, 60)
 
     def llm_models(self, params, body):
@@ -1771,6 +2103,426 @@ class Api:
         return None
 
 
+    # --- the parity actions: every one is the CLI command of the same name on that host --------------------------
+
+    def checked(self, host, args, timeout=60):
+        """{"ok": exit status 0, "output"}: a check whose failure is its answer (a missing secret, a preset that
+        lacks a value), not an error of the page."""
+        status, out, err = self.run(host, args, timeout)
+        return {"ok": status == 0, "output": printable((out + err).strip()[-8000:])}
+
+    # project configurations (sandbox-ai wizard trust): trusted exactly as reviewed, by the digest of what was shown
+    def projects(self, params, body):
+        """sandbox-ai wizard trust --list --json: [{"path", "digest", "state": trusted|changed|missing|unreadable}]."""
+        return self.json_of(params["host"], ["wizard", "trust", "--list", "--json"], 30)
+
+    def project_review(self, params, body):
+        """sandbox-ai wizard trust PATH --show --json: {"path", "digest", "document", "trusted", "problem"}; nothing
+        is trusted."""
+        path = clean_path(body.get("path"), "path")
+        return self.json_of(params["host"], ["wizard", "trust", path, "--show", "--json"], 30)
+
+    def project_trust(self, params, body):
+        """sandbox-ai wizard trust PATH --digest SHA256: trusted only if the file is exactly what was reviewed."""
+        path, digest = clean_path(body.get("path"), "path"), body.get("digest")
+        if not (isinstance(digest, str) and SHA256.fullmatch(digest)):
+            raise Refused(400, "digest is the SHA-256 of what was reviewed (64 hex digits)")
+        confirmed(body, "project-trust", path)
+        return self.done(params["host"], ["wizard", "trust", path, f"--digest={digest}"], 30)
+
+    def project_forget(self, params, body):
+        path = clean_path(body.get("path"), "path")
+        confirmed(body, "project-forget", path)
+        return self.done(params["host"], ["wizard", "forget", path], 30)
+
+    # MCP servers (sandbox-ai mcp)
+    def mcp_list(self, params, body):
+        """sandbox-ai mcp list --json: every defined server, running or not, with the starts it serves."""
+        return self.json_of(params["host"], ["mcp", "list", "--json"], 60)
+
+    @staticmethod
+    def mcp_server(value):
+        if not (isinstance(value, str) and MCP_NAME.fullmatch(value)):
+            raise Refused(400, "an MCP server's name is 1-32 letters, digits, '_' or '-', starting with a letter or "
+                               "digit")
+        return value
+
+    def mcp_start(self, params, body):
+        """sandbox-ai mcp start NAME [--backend B] [--vpn PROFILE] [--for START [--restart] --json]: with a start it
+        is attached to it as well (asked first: mcp-attach, or mcp-restart with restart)."""
+        name = self.mcp_server(params["name"])
+        args = ["mcp", "start"]
+        backend = body.get("backend")
+        if backend not in (None, "", "podman", "bwrap"):
+            raise Refused(400, "backend is podman or bwrap")
+        args += [f"--backend={backend}"] if backend else []
+        if body.get("vpn") not in (None, ""):
+            args.append(f"--vpn={vpn_name(body['vpn'])}")
+        restart = flag(body, "restart")
+        if body.get("for") not in (None, ""):
+            start = start_name(body["for"])
+            confirmed(body, "mcp-restart" if restart else "mcp-attach", f"{name} to {start}")
+            return self.json_of(params["host"], [*args, f"--for={start}", "--json", *(["--restart"] if restart else []),
+                                                 name], 300)
+        if restart:
+            raise Refused(400, "restart goes with for (a start)")
+        return self.done(params["host"], [*args, name], 300)
+
+    def mcp_stop(self, params, body):
+        name = self.mcp_server(params["name"])
+        confirmed(body, "mcp-stop", name)
+        return self.done(params["host"], ["mcp", "stop", name], 120)
+
+    def mcp_catalog(self, params, body):
+        """sandbox-ai mcp catalog [--catalog FILE_OR_URL]...: its lines (the command has no --json) read as
+        [{"entry", "prefix", "name", "network", "title", "published", "signature"}]; "problems": the catalogs it
+        could not read (its stderr), "output": what it printed."""
+        status, out, err = self.run(params["host"], ["mcp", "catalog", *catalog_sources(body)], 120)
+        if status != 0:
+            raise Refused(502, f"sandbox-ai mcp on {params['host']}: exit status {status}: "
+                               f"{printable((err or out).strip()[-600:])}")
+        entries = []
+        for line in out.splitlines():
+            match = MCP_CATALOG_LINE.fullmatch(line.rstrip())
+            if match:
+                entries.append({"entry": f"{match['prefix']}:{match['name']}", "prefix": match["prefix"],
+                                "name": match["name"], "network": printable(match["network"]),
+                                "title": printable(match["title"]), "published": not match["unpublished"],
+                                "signature": {"signed": "good", "SIGNATURE BAD": "bad"}.get(match["signature"],
+                                                                                           "none")})
+        return {"entries": entries, "problems": [printable(line)[:600] for line in (err or "").splitlines()
+                                                 if line.strip()][:20],
+                "output": printable(out.strip()[-20000:])}
+
+    def mcp_add(self, params, body):
+        """sandbox-ai mcp add ENTRY with --as, --mount, --env, --network, --memory, --pids, --catalog, --no-pull,
+        --backend, --unsigned (asked: mcp-unsigned) and --vpn; a writable mount is asked first (mcp-writable-mount)."""
+        entry = body.get("entry")
+        if not (isinstance(entry, str) and MCP_ENTRY.fullmatch(entry)):
+            raise Refused(400, "entry is a catalog entry: duckduckgo or hub:binwalk")
+        args = ["mcp", "add"]
+        if body.get("as") not in (None, ""):
+            args.append(f"--as={self.mcp_server(body['as'])}")
+        mounts, writable = body.get("mounts", []), []
+        if not isinstance(mounts, list) or len(mounts) > 16:
+            raise Refused(400, "mounts is a list of {target, host, mode}")
+        for mount in mounts:
+            if not isinstance(mount, dict) or set(mount) - {"target", "host", "mode"}:
+                raise Refused(400, "a mount is {target, host, mode: ro or rw}")
+            target, source = clean_path(mount.get("target"), "a mount's target"), clean_path(mount.get("host"), "a mount's host directory")
+            mode = mount.get("mode") or "ro"
+            if mode not in ("ro", "rw") or "=" in target + source or ":" in target + source:
+                raise Refused(400, "a mount is TARGET=HOST with ro or rw (no '=' or ':' in the paths)")
+            args.append(f"--mount={target}={source}:{mode}")
+            if mode == "rw":
+                writable.append(source)
+        for value in strings(body.get("env", []), "env", 16):
+            args.append(f"--env={secret_name(value)}")
+        if body.get("network") not in (None, ""):
+            if body["network"] not in ("none", "full"):
+                raise Refused(400, "network is none or full")
+            args.append(f"--network={body['network']}")
+        if body.get("memory") not in (None, ""):
+            if not (isinstance(body["memory"], str) and SIZE_VALUE.fullmatch(body["memory"])):
+                raise Refused(400, "memory is a size: 512m, 2g")
+            args.append(f"--memory={body['memory']}")
+        if body.get("pids") not in (None, ""):
+            args.append(f"--pids={whole(body['pids'], 'pids', 1, 1000000)}")
+        args += catalog_sources(body)
+        if flag(body, "no_pull"):
+            args.append("--no-pull")
+        if body.get("backend") not in (None, ""):
+            if body["backend"] not in ("podman", "bwrap", "both"):
+                raise Refused(400, "backend is podman, bwrap or both")
+            args.append(f"--backend={body['backend']}")
+        if body.get("vpn") not in (None, ""):
+            args.append(f"--vpn={vpn_name(body['vpn'])}")
+        if flag(body, "unsigned"):
+            confirmed(body, "mcp-unsigned", entry)
+            args.append("--unsigned")
+        if writable:
+            confirmed(body, "mcp-writable-mount", ", ".join(writable))
+        return self.done(params["host"], [*args, entry], 900)  # it pulls the image: that takes its time
+
+    # logins and identities: the token is always a secret of that host, named, never a value here
+    def git_logins(self, params, body):
+        return self.json_of(params["host"], ["git-logins", "list", "--json"], 30)
+
+    def git_login_add(self, params, body):
+        url = git_url(body.get("url"))
+        args = ["git-logins", "add", f"--secret={secret_name(body.get('secret'))}"]
+        if body.get("user") not in (None, ""):
+            if not (isinstance(body["user"], str) and LOGIN_USER.fullmatch(body["user"])):
+                raise Refused(400, "user is 1-64 letters, digits, '.', '_' or '-'")
+            args.append(f"--user={body['user']}")
+        confirmed(body, "git-login-add", url)
+        return self.done(params["host"], [*args, url], 30)
+
+    def git_login_remove(self, params, body):
+        url = git_url(body.get("url"))
+        confirmed(body, "login-remove", url)
+        return self.done(params["host"], ["git-logins", "remove", url], 30)
+
+    def git_login_check(self, params, body):
+        url = body.get("url")
+        return self.checked(params["host"], ["git-logins", "check", *([git_url(url)] if url not in (None, "") else [])])
+
+    def publish_logins(self, params, body):
+        return self.json_of(params["host"], ["publish-logins", "list", "--json"], 30)
+
+    def publish_kinds(self, params, body):
+        return self.done(params["host"], ["publish-logins", "kinds"], 30)
+
+    @staticmethod
+    def publish_url(body):
+        url = body.get("url")
+        if url in (None, ""):
+            return []
+        if not (isinstance(url, str) and PUBLISH_URL.fullmatch(url)):
+            raise Refused(400, "url is https://HOST (another server of that kind; no path)")
+        return [f"--url={url}"]
+
+    def publish_login_add(self, params, body):
+        kind = publish_kind(body.get("kind"))
+        return self.done(params["host"], ["publish-logins", "add", f"--secret={secret_name(body.get('secret'))}",
+                                          *self.publish_url(body), kind], 30)
+
+    def publish_login_remove(self, params, body):
+        kind = publish_kind(params["kind"])
+        confirmed(body, "login-remove", kind)
+        return self.done(params["host"], ["publish-logins", "remove", kind], 30)
+
+    def publish_login_check(self, params, body):
+        kind = body.get("kind")
+        return self.checked(params["host"], ["publish-logins", "check",
+                                             *([publish_kind(kind)] if kind not in (None, "") else [])])
+
+    def identities(self, params, body):
+        return self.json_of(params["host"], ["identities", "list", "--json"], 30)
+
+    def identity_show(self, params, body):
+        return self.json_of(params["host"], ["identities", "show", "--json", identity_name(params["name"])], 30)
+
+    @staticmethod
+    def identity_fields(body):
+        """--name, --email, --description of BODY (each given or not)."""
+        args = []
+        if body.get("name") not in (None, ""):
+            args.append(f"--name={one_line(body['name'], 'name', 100)}")
+        if body.get("email") not in (None, ""):
+            if not (isinstance(body["email"], str) and EMAIL.fullmatch(body["email"])):
+                raise Refused(400, "email is an address: NAME@DOMAIN")
+            args.append(f"--email={body['email']}")
+        if body.get("description") not in (None, ""):
+            args.append(f"--description={one_line(body['description'], 'description', 300)}")
+        return args
+
+    def identity_add(self, params, body):
+        name = identity_name(body.get("identity"))
+        return self.done(params["host"], ["identities", "add", *self.identity_fields(body), name], 30)
+
+    def identity_set(self, params, body):
+        name = identity_name(params["name"])
+        fields = self.identity_fields(body)
+        if not fields:
+            raise Refused(400, "nothing to change: give name, email or description")
+        return self.done(params["host"], ["identities", "set", *fields, name], 30)
+
+    def identity_login(self, params, body):
+        """identities login NAME URL --secret S [--user U] | identities publish NAME KIND --secret S [--url URL]:
+        a login only a start with --identity NAME uses."""
+        name = identity_name(params["name"])
+        secret = f"--secret={secret_name(body.get('secret'))}"
+        if params["action"] == "login":
+            url = git_url(body.get("url"))
+            user = []
+            if body.get("user") not in (None, ""):
+                if not (isinstance(body["user"], str) and LOGIN_USER.fullmatch(body["user"])):
+                    raise Refused(400, "user is 1-64 letters, digits, '.', '_' or '-'")
+                user = [f"--user={body['user']}"]
+            return self.done(params["host"], ["identities", "login", secret, *user, name, url], 30)
+        kind = publish_kind(body.get("kind"))
+        return self.done(params["host"], ["identities", "publish", secret, *self.publish_url(body), name, kind], 30)
+
+    def identity_logout(self, params, body):
+        name = identity_name(params["name"])
+        if params["action"] == "logout":
+            value = git_url(body.get("url"))
+        else:
+            value = publish_kind(body.get("kind"))
+        confirmed(body, "login-remove", f"{value} of {name}")
+        return self.done(params["host"], ["identities", params["action"], name, value], 30)
+
+    def identity_remove(self, params, body):
+        name = identity_name(params["name"])
+        confirmed(body, "login-remove", name)
+        return self.done(params["host"], ["identities", "remove", name], 30)
+
+    def identity_check(self, params, body):
+        name = body.get("identity")
+        return self.checked(params["host"], ["identities", "check",
+                                             *([identity_name(name)] if name not in (None, "") else [])])
+
+    # the network of a run kept for its project's later starts
+    def net_keep(self, params, body):
+        """sandbox-ai net show NAME --keep | --keep-all: what the run was given into the project's .sandbox-ai.json
+        (asked first)."""
+        name, every = start_name(params["name"]), flag(body, "all")
+        confirmed(body, "net-keep", f"{name}{' (also what approvals opened once or for the run)' if every else ''}")
+        return self.done(params["host"], ["net", "show", name, "--keep-all" if every else "--keep"], 60)
+
+    # presets and their directories
+    def preset_show(self, params, body):
+        name = params["name"]
+        if not KIT_NAME.fullmatch(name):
+            raise Refused(400, "no such preset")
+        return self.json_of(params["host"], ["presets", "show", "--json", name], 30)
+
+    def preset_check(self, params, body):
+        """sandbox-ai presets check NAME [--value KEY=VALUE]... [--agent AGENT]: what is missing before it starts."""
+        name = params["name"]
+        if not KIT_NAME.fullmatch(name):
+            raise Refused(400, "no such preset")
+        values = body.get("values", {})
+        if not isinstance(values, dict) or len(values) > 32:
+            raise Refused(400, "values is {KEY: VALUE}")
+        args = ["presets", "check"]
+        for key, value in values.items():
+            if not PRESET_KEY.fullmatch(key):
+                raise Refused(400, f"no such value: {printable(key)[:64]}")
+            if value in (None, ""):
+                continue
+            args.append(f"--value={key}={one_line(value, key)}")
+        agent = body.get("agent")
+        if agent not in (None, "", *AGENTS):
+            raise Refused(400, "agent is claude, codex or opencode")
+        args += [f"--agent={agent}"] if agent else []
+        return self.checked(params["host"], [*args, name])
+
+    def preset_dirs(self, params, body):
+        return self.json_of(params["host"], ["presets", "dirs", "list", "--json"], 30)
+
+    def preset_dir_add(self, params, body):
+        """presets dirs add DIR: later starts read presets from there too (asked first, as preset_dirs is)."""
+        directory = clean_path(body.get("directory"), "directory")
+        confirmed(body, "defaults-lower", f"preset_dirs: later starts read presets from {directory} too")
+        return self.done(params["host"], ["presets", "dirs", "add", directory], 30)
+
+    def preset_dir_remove(self, params, body):
+        return self.done(params["host"], ["presets", "dirs", "remove", clean_path(body.get("directory"), "directory")],
+                         30)
+
+    # one run's canaries
+    @staticmethod
+    def canary_run(value):
+        if not CANARY_RUN.fullmatch(value):
+            raise Refused(400, "a run is 1-81 letters, digits, '_', '.' or '-'")
+        return value
+
+    def canary_list(self, params, body):
+        """sandbox-ai canaries list RUN --json: its canary files (tokens shortened) and what happened."""
+        return self.json_of(params["host"], ["canaries", "list", self.canary_run(params["run"]), "--json"], 60)
+
+    def canary_tokens(self, params, body):
+        run = self.canary_run(params["run"])
+        confirmed(body, "canary-tokens", run)
+        return self.json_of(params["host"], ["canaries", "list", run, "--tokens", "--json"], 60)
+
+    def canary_resume(self, params, body):
+        run = self.canary_run(params["run"])
+        confirmed(body, "canary-resume", run)
+        return self.done(params["host"], ["canaries", "resume", run], 120)
+
+    # a kit, an LLM server, a VPN profile in full
+    def kit_show(self, params, body):
+        name = params["name"]
+        if not KIT_NAME.fullmatch(name):
+            raise Refused(400, "no such kit")
+        return self.json_of(params["host"], ["kits", "show", "--json", "--", name], 60)
+
+    def llm_show(self, params, body):
+        if params["name"].startswith("-"):
+            raise Refused(400, "no such server")
+        return self.json_of(params["host"], ["llm", "show", params["name"], "--json"], 30)
+
+    def vpn_show(self, params, body):
+        return self.json_of(params["host"], ["vpn", "show", vpn_name(params["name"]), "--json"], 30)
+
+    # logs of a directory or project, the privacy check of repositories, the activity of runs
+    def logs_of(self, params, body):
+        """sandbox-ai logs --json [--project PROJECT] [DIRECTORY]: one log directory, or a project's."""
+        args = ["logs", "--json"]
+        if body.get("project") not in (None, ""):
+            args.append(f"--project={clean_path(body['project'], 'project')}")
+        if body.get("directory") not in (None, ""):
+            args.append(clean_path(body["directory"], "directory"))
+        return self.json_of(params["host"], args, 60)
+
+    def privacy_check(self, params, body):
+        """sandbox-ai privacy-check --json [--rules-dir DIR] [--project NAME] [--all] PATH...: what the next push of
+        each repository would publish that should stay private (nothing is pushed)."""
+        paths = [clean_path(value, "a repository") for value in strings(body.get("paths", []), "paths", 32)]
+        if not paths:
+            raise Refused(400, "paths: the repositories to check (absolute paths on that host)")
+        args = ["privacy-check", "--json"]
+        if body.get("rules_dir") not in (None, ""):
+            args.append(f"--rules-dir={clean_path(body['rules_dir'], 'rules_dir')}")
+        if body.get("project") not in (None, ""):
+            if not (isinstance(body["project"], str) and KIT_NAME.fullmatch(body["project"])):
+                raise Refused(400, "project is the name of a project rule file")
+            args.append(f"--project={body['project']}")
+        if flag(body, "all"):
+            args.append("--all")
+        return self.json_of(params["host"], [*args, *paths], 300)
+
+    def activity(self, params, body):
+        """sandbox-ai activity --json --tail N [--kind K]... [--grep TEXT] [--since TIME] [RUN]: the last events
+        (JSON lines) as {"events": [...]}; the page polls it to follow."""
+        args = ["activity", "--json", f"--tail={whole(body.get('tail', 200), 'tail', 1, 2000)}"]
+        kinds = strings(body.get("kinds", []), "kinds", len(ACTIVITY_KINDS))
+        if not set(kinds) <= set(ACTIVITY_KINDS):
+            raise Refused(400, f"kinds are {', '.join(ACTIVITY_KINDS)}")
+        args += [f"--kind={kind}" for kind in dict.fromkeys(kinds)]
+        if body.get("grep") not in (None, ""):
+            args.append(f"--grep={one_line(body['grep'], 'grep', 200)}")
+        if body.get("since") not in (None, ""):
+            if not (isinstance(body["since"], str) and ACTIVITY_SINCE.fullmatch(body["since"])):
+                raise Refused(400, "since is 10m, 2h, 3d, 14:30, 2026-11-04 or an ISO time")
+            args.append(f"--since={body['since']}")
+        if body.get("run") not in (None, ""):
+            args.append(self.canary_run(body["run"]) if isinstance(body["run"], str) else self.canary_run(""))
+        status, out, err = self.run(params["host"], args, 60)
+        if status != 0:
+            raise Refused(502, f"sandbox-ai activity on {params['host']}: exit status {status}: "
+                               f"{printable((err or out).strip()[-600:])}")
+        events = []
+        for line in out.splitlines():
+            with contextlib.suppress(ValueError):
+                event = json.loads(line)
+                if isinstance(event, dict):
+                    events.append(event)
+        return {"events": events}
+
+    # the version in full, the images, the demo device
+    def version_of(self, params, body):
+        return self.done(params["host"], ["version", "--verbose"], 30)
+
+    def images(self, params, body):
+        return self.json_of(params["host"], ["images", "--json"], 120)
+
+    def demo_status(self, params, body):
+        return self.checked(params["host"], ["demo-device", "status"], 30)
+
+    def demo_start(self, params, body):
+        port = body.get("port")
+        return self.done(params["host"], ["demo-device", "start",
+                                          *([f"--port={whole(port, 'port', 1024, 65535)}"] if port not in (None, "")
+                                            else [])], 60)
+
+    def demo_stop(self, params, body):
+        return self.done(params["host"], ["demo-device", "stop"], 30)
+
+
 def no_canaries(value):
     """Whether VALUE (as `defaults set canaries` takes it) names no canary category at all, whatever the host's
     categories are: false, [], "none", ["none"]."""
@@ -1852,7 +2604,69 @@ def terminal_command(query):
         choice = install_choice({key: query[key] for key in ("mode", "prefix", "source", "version") if query.get(key)}
                                 | ({"sudo": sudo} if sudo is not None else {}))
         return host, hosts.argv(hosts.LOCAL, install_argv(host, choice, as_json=False), tty=True)
-    raise Refused(400, "kind is attach, start, update or install")
+    args = tool_command(kind, query)
+    if args is None:
+        raise Refused(400, "kind is attach, start, update, install, login, plugins, build, trust-hooks or demo-device")
+    return host, hosts.argv(host, args, tty=True)
+
+
+def terminal_confirmed(query, action, detail):
+    """A terminal that NEEDS_CONFIRM ACTION: its query carries confirm=1 (the page asked first, naming the host)."""
+    if query.get("confirm") != "1":
+        raise Refused(400, f"{detail}: {NEEDS_CONFIRM[action]}: confirm=1", confirm=action)
+
+
+def tool_command(kind, query):
+    """The sandbox-ai arguments of the interactive tools a terminal runs (None: no such kind): an agent's login (or
+    its logout, asked first), the plugin store, an image build, a kit's hooks trusted (asked first; the command
+    shows them and asks again) or revoked, the demo device. Every value is checked; nothing starts with "-"."""
+    if kind == "login":
+        agent = query.get("agent")
+        if agent not in AGENTS:
+            raise Refused(400, "agent is claude, codex or opencode")
+        logout = {"1": True, "0": False, None: False, "": False}.get(query.get("logout"), "bad")
+        if logout == "bad":
+            raise Refused(400, "logout is 1 or 0")
+        if logout:
+            terminal_confirmed(query, "login-logout", agent)
+        return ["login", *(["--logout"] if logout else []), agent]
+    if kind == "plugins":
+        agent = query.get("agent") or "claude"
+        if agent not in AGENTS:
+            raise Refused(400, "agent is claude, codex or opencode")
+        update = {"1": True, "0": False, None: False, "": False}.get(query.get("update"), "bad")
+        if update == "bad":
+            raise Refused(400, "update is 1 or 0")
+        kits = [k for k in (query.get("kits") or "").split(",") if k]
+        if len(kits) > 8 or not all(KIT_NAME.fullmatch(k) for k in kits):
+            raise Refused(400, "kits: names of built-in kits, comma-separated")
+        return ["plugins", *(["--update"] if update else []), *[f"--kit={k}" for k in kits], agent]
+    if kind == "build":
+        target = query.get("target")
+        if not (isinstance(target, str) and BUILD_TARGET.fullmatch(target)):
+            raise Refused(400, "target is codex, claude, opencode, all, team, vpn or a variant's name")
+        only = {"1": True, "0": False, None: False, "": False}.get(query.get("extension_only"), "bad")
+        if only == "bad" or only and target in ("team", "vpn"):
+            raise Refused(400, "extension_only is 1 or 0, and not for team or vpn")
+        return ["build", *(["--extension-only"] if only else []), target]
+    if kind == "trust-hooks":
+        kit = query.get("kit")
+        if not (isinstance(kit, str) and KIT_NAME.fullmatch(kit)):
+            raise Refused(400, "kit is a kit's name (or default)")
+        revoke = {"1": True, "0": False, None: False, "": False}.get(query.get("revoke"), "bad")
+        agents = [a for a in (query.get("agents") or "").split(",") if a]
+        if revoke == "bad" or not all(a in AGENTS for a in agents):
+            raise Refused(400, "revoke is 1 or 0; agents: claude, codex, opencode (comma-separated)")
+        if not revoke:
+            terminal_confirmed(query, "kit-hooks-trust", kit)
+        return ["kits", "trust-hooks", *[f"--agent={a}" for a in dict.fromkeys(agents)],
+                *(["--revoke"] if revoke else []), "--", kit]
+    if kind == "demo-device":
+        port = query.get("port")
+        if port not in (None, ""):
+            port = whole(port, "port", 1024, 65535)
+        return ["demo-device", "start", *([f"--port={port}"] if port not in (None, "") else [])]
+    return None
 
 
 # --- WebSocket (RFC 6455) ---------------------------------------------------------------------------------
@@ -2215,7 +3029,8 @@ class Service:
                 options = printable(query.get("options"))[:500]
             started = {"agent": query.get("agent"), "workspace": query.get("workspace"), "options": options}
         audit("terminal", user=session["user"], address=address, host=host,
-              kind=query.get("kind"), name=query.get("name") or query.get("agent"), **started)
+              kind=query.get("kind"), name=query.get("name") or query.get("agent") or query.get("target")
+              or query.get("kit"), **started)
         return argv, session
 
     @staticmethod

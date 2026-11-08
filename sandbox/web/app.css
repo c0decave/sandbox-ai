@@ -210,3 +210,4 @@ tr.related-note td:nth-child(2) { padding-left: 30px; overflow-wrap: anywhere; }
   #host-install-card .form { grid-template-columns: 1fr; }
   #host-install-card .form .wide { grid-column: 1; }
 }
+.check-result pre { max-height: 24em; overflow: auto; }

@@ -13,14 +13,17 @@ const state = {
   boxes: null, terminalCount: 0, polling: false, pollAgain: false, policy: null, session: null, loginMessage: null,
   cards: [], shown: null,
   installing: {},  // host -> when its install began (it may outlast the page that started it)
+  startsEvery: (() => { try { return localStorage.getItem("sandbox-ai-starts-every") === "1"; } catch (e) { return false; } })(),
+  review: null,  // {host, path}: a project configuration to review (a start refused it as untrusted)
 };
 const AGENTS = ["claude", "codex", "opencode"];
 const PAGES = [
   ["starts", N_("Starts and sessions")], ["approvals", N_("Approvals")], ["terminals", N_("Terminals")],
-  ["doctor", N_("Doctor")], ["logs", N_("Logs")], ["llm", N_("LLM servers")], ["vpn", N_("VPN profiles")], ["kits", N_("Kits")], ["canaries", N_("Canaries")], ["secrets", N_("Secrets")], ["settings", N_("Defaults")], ["hosts", N_("Hosts")],
+  ["doctor", N_("Doctor")], ["logs", N_("Logs")], ["llm", N_("LLM servers")], ["vpn", N_("VPN profiles")], ["kits", N_("Kits")], ["canaries", N_("Canaries")], ["secrets", N_("Secrets")], ["logins", N_("Logins")], ["projects", N_("Projects")], ["mcp", N_("MCP servers")],
+  ["presets", N_("Presets")], ["images", N_("Images and tools")], ["activity", N_("Activity")], ["settings", N_("Defaults")], ["hosts", N_("Hosts")],
 ];
 // The pages that show one host's things: the address names the host too (#doctor@ct101).
-const HOST_PAGES = ["starts", "doctor", "logs", "llm", "vpn", "kits", "canaries", "secrets", "settings"];
+const HOST_PAGES = ["starts", "doctor", "logs", "llm", "vpn", "kits", "canaries", "secrets", "logins", "projects", "mcp", "presets", "images", "activity", "settings"];
 
 // --- small helpers ---------------------------------------------------------------------------------------
 
@@ -770,6 +773,8 @@ function startRow(s, starts, main, all) {
     const rename = el("button", { "aria-label": rowLabel(t("Rename…"), s), onclick: () => askRename(actions, s, main, rename) }, t("Rename…"));
     actions.append(rename);
   }
+  if (!mcp && ["running", "paused", "stopped"].includes(s.state) && (s.state !== "stopped" || s.keep))
+    actions.append(el("button", { "aria-label": rowLabel(t("More…"), s), title: t("resume with directories, mounts or MCP servers added, restart, stop with a longer wait"), onclick: () => moreCard(main, s) }, t("More…")));
   actions.append(el("button", { "aria-label": rowLabel(t("History"), s), onclick: () => historyCard(main, s) }, t("History")));
   // which MCP servers a start reaches (or will at its next start), and whom a server serves
   const mcpNote = mcp ? ((s.serves || []).length ? t("serves {starts}", { starts: s.serves.join(", ") }) : t("serves no start yet"))
@@ -815,6 +820,60 @@ async function historyCard(main, s) {
   const rows = (Array.isArray(found) ? found : []).filter(e => e && typeof e === "object").slice().reverse().map(e =>
     el("tr", {}, el("td", {}, String(e.time || "").replace("T", " ").replace("Z", "")), el("td", {}, String(e.event || "")), el("td", { class: "mono" }, String(e.run || "-")), el("td", {}, details(e))));
   clear(body).append(table([t("Time"), t("Event"), t("Run"), t("Detail")], rows, t("No history of {name}.", { name: s.name }), t("History of {name} on {host}", { name: s.name, host: s.host })));
+}
+
+// More of resume and stop (sandbox-ai resume NAME --workspace DIR --mount SRC:DST[:ro|rw] --mcp NAME --restart;
+// sandbox-ai stop NAME --wait SECONDS): what is added is kept for its later starts; what widens it is asked first.
+function moreCard(main, s) {
+  const host = s.host;
+  const old = document.getElementById("more-card");
+  if (old) old.remove();
+  const workspaces = el("textarea", { id: "more-workspaces", rows: 2, class: "mono", placeholder: "/home/you/src/lib" });
+  const mounts = el("textarea", { id: "more-mounts", rows: 2, class: "mono", placeholder: "/home/you/data:/mnt/data:ro" });
+  const servers = el("input", { id: "more-mcp", class: "mono", placeholder: "files" });
+  const restart = el("input", { id: "more-restart", type: "checkbox", checked: s.state === "running" });
+  const wait = el("input", { id: "more-wait", type: "number", min: 1, max: 600, value: 30 });
+  const status = el("div", { class: "wide" }), row = el("div", { class: "row" });
+  const lines = (input) => input.value.split("\n").map(x => x.trim()).filter(Boolean);
+  const request = () => {
+    const body = { workspaces: lines(workspaces), mcp: servers.value.split(/\s+/).filter(Boolean), mounts: [] };
+    for (const line of lines(mounts)) {
+      const parts = line.split(":");
+      if (parts.length < 2 || parts.length > 3 || (parts[2] && !["ro", "rw"].includes(parts[2]))) throw new Error(t("A mount is SOURCE:DESTINATION or SOURCE:DESTINATION:ro|rw: {line}", { line }));
+      body.mounts.push({ source: parts[0], destination: parts[1], mode: parts[2] || "ro" });
+    }
+    if (s.state === "running" && restart.checked) body.restart = true;
+    return body;
+  };
+  const resume = (event) => {
+    clear(status);
+    let body;
+    try { body = request(); } catch (e) { status.append(notice(e.message, "error")); return; }
+    const what = [body.restart ? t("it is restarted now (what runs in it ends; the agent continues its conversation)") : null,
+      body.workspaces.length ? t("the directories {dirs}, writable", { dirs: body.workspaces.join(", ") }) : null,
+      body.mounts.length ? t("the mounts {mounts}", { mounts: body.mounts.map(m => `${m.source}:${m.destination}:${m.mode}`).join(", ") }) : null,
+      body.mcp.length ? t("the MCP servers {servers}", { servers: body.mcp.join(", ") }) : null].filter(Boolean);
+    if (!what.length) { toast("warning", t("Nothing to add"), t("Name directories, mounts or MCP servers, or restart it.")); return; }
+    confirmIn(row, t("Resume {name} on {host} with {what}? What is added is kept for its later starts.", { name: s.name, host, what: what.join(t(" and ")) }), t("Yes, resume it"), async () => {
+      try { const r = await api("POST", hostPath(`/starts/${encodeURIComponent(s.name)}/resume`, host), Object.assign(body, { confirm: true })); toast("success", t("{name} on {host} resumed", { name: s.name, host }), (r && r.output) || ""); card.remove(); if (state.page === "starts") refreshStarts(main, true); }
+      catch (e) { status.append(notice(e.message, "error")); }
+    }, { kind: "primary", trigger: event.target });
+  };
+  const stop = (event) => confirmIn(row, t("Stop {name} on {host}, waiting up to {seconds} seconds for it to end? What runs in it ends.", { name: s.name, host, seconds: wait.value }), t("Yes, stop it"), async () => {
+    try { const r = await api("POST", hostPath(`/starts/${encodeURIComponent(s.name)}/stop`, host), { wait: Number(wait.value), confirm: true }); toast("success", t("{name} on {host} stopped", { name: s.name, host }), (r && r.output) || ""); card.remove(); if (state.page === "starts") refreshStarts(main, true); }
+    catch (e) { status.append(notice(e.message, "error")); }
+  }, { trigger: event.target });
+  row.append(el("button", { class: "primary", onclick: resume }, s.state === "running" ? t("Restart with these…") : t("Resume with these…")),
+    s.state !== "stopped" ? el("button", { onclick: stop }, t("Stop and wait…")) : null, el("button", { onclick: () => card.remove() }, t("Close")));
+  const card = el("div", { class: "card", id: "more-card" }, el("h2", {}, t("More for {name} on {host}", { name: s.name, host })),
+    el("div", { class: "form" },
+      el("label", { for: "more-workspaces" }, t("Directories (one per line)")), workspaces,
+      el("label", { for: "more-mounts" }, t("Mounts (one per line)")), mounts,
+      el("label", { for: "more-mcp" }, t("MCP servers")), servers,
+      s.state === "running" ? el("label", { for: "more-restart" }, t("Restart it now")) : null, s.state === "running" ? restart : null,
+      s.state !== "stopped" ? el("label", { for: "more-wait" }, t("Stop: wait up to (seconds)")) : null, s.state !== "stopped" ? wait : null,
+      status, el("span"), row));
+  main.append(card);
 }
 
 // A stopped start with a kept HOME: first what changed in the files of that HOME that decide what runs at a start
@@ -1162,13 +1221,19 @@ function applyStarts(view, found, main) {
 
 // With the page's poll (a background request): the table of the starts page, if it is the one shown. One asked for
 // while a listing runs (a Stop, a Rename just done) runs right after it, never dropped.
+// list or list --all (MCP servers that do not run too), of one host or of every host
+function startsPath(host) {
+  if (host === "all") return state.startsEvery ? "/api/starts/all" : "/api/starts";
+  return hostPath(state.startsEvery ? "/starts/all" : "/starts", host);
+}
+
 async function refreshStarts(main, now) {
   const view = startsView, host = view.host;
   if (view.main !== main || !view.body || !view.body.isConnected) return;
   if (view.loading) { view.again = true; return; }
   view.loading = true;
   let found;
-  try { found = await api("GET", host === "all" ? "/api/starts" : hostPath("/starts", host), undefined, { background: !now }); }
+  try { found = await api("GET", startsPath(host), undefined, { background: !now }); }
   catch (e) { found = e; }
   finally { view.loading = false; }
   if (state.page === "starts" && view.main === main && view.host === host && view.body.isConnected) applyStarts(view, found, main);
@@ -1201,7 +1266,7 @@ pages.starts = async (main) => {
   const title = () => (all ? t("Starts and sessions on every host") : t("Starts and sessions on {host}", { host }));
   main.append(el("h1", {}, title()), el("p", { class: "hint" }, t("Loading…")));
   let found;
-  try { found = await api("GET", all ? "/api/starts" : hostPath("/starts", host)); } catch (e) { found = e; }
+  try { found = await api("GET", startsPath(host)); } catch (e) { found = e; }
   if (state.page !== "starts" || state.startsHost !== host) return;
   const view = startsView;
   view.main = main; view.host = host; view.rows = new Map(); view.loading = false; view.again = false; view.seen = {};
@@ -1219,13 +1284,47 @@ pages.starts = async (main) => {
     if (state.startsHost !== "all") { state.host = state.startsHost; try { localStorage.setItem("sandbox-ai-host", state.host); } catch (e) { /* this page only */ } }
     show("starts");
   } }, el("option", { value: "all", selected: all }, t("all hosts")), state.hosts.map(h => el("option", { value: h.name, selected: h.name === host }, h.name)));
+  const every = el("input", { type: "checkbox", id: "starts-every", checked: Boolean(state.startsEvery), onchange: (event) => {
+    state.startsEvery = event.target.checked;
+    try { localStorage.setItem("sandbox-ai-starts-every", state.startsEvery ? "1" : ""); } catch (e) { /* this page only */ }
+    show("starts");
+  } });
   const tools = el("div", { class: "row" }, el("label", { for: "starts-host" }, t("Host")), chooser,
+    el("label", {}, every, " ", t("MCP servers that do not run too")),
     all ? null : el("button", { onclick: () => gcCard(main, host) }, t("Clean up…")), ...view.folds);
   clear(main).append(el("h1", {}, title()), tools, view.status, el("div", { class: "table-scroll" }, view.table), view.empty);
   applyStarts(view, found, main);
   // a new start: in a terminal of the page, detachable like every start (Ctrl-b d)
   const target = all ? state.host : host;
   const agent = el("select", { id: "agent" }, AGENTS.map(a => el("option", { value: a }, a)));
+  // the model: the agent's provider, or an LLM server of that host (llm list), as NAME or NAME:MODEL (--llm)
+  const model = el("select", { id: "start-model" });
+  const onlyServer = el("input", { type: "checkbox", id: "start-only-server" });
+  const servers = [];
+  const drawModels = () => {
+    const chosen = model.value;
+    clear(model).append(el("option", { value: "" }, t("the agent's provider (cloud)")));
+    for (const server of servers) {
+      const why = modelProblem(server, agent.value);
+      const label = `${server.name}${server.model ? ` (${server.model})` : ""}${why ? ` — ${why}` : ""}`;
+      model.append(el("option", { value: server.name, disabled: Boolean(why), title: why || null }, label));
+      for (const m of server.models || []) model.append(el("option", { value: `${server.name}:${m}`, disabled: Boolean(why), title: why || null }, `${server.name}:${m}`));
+    }
+    const still = [...model.children].find(o => o.value === chosen && !o.disabled);
+    model.value = still ? chosen : "";
+  };
+  agent.addEventListener("change", drawModels);
+  drawModels();
+  api("GET", hostPath("/llm", target)).then((list) => {
+    for (const server of (Array.isArray(list) ? list : []).filter(x => x && typeof x.name === "string")) {
+      servers.push(server);
+      api("GET", hostPath(`/llm/${encodeURIComponent(server.name)}/models`, target)).then((models) => {
+        server.models = (Array.isArray(models) ? models : []).map(m => m && m.name).filter(n => typeof n === "string" && n);
+        drawModels();
+      }).catch(() => {});
+    }
+    drawModels();
+  }).catch(() => {});
   const name = el("input", { id: "name", placeholder: t("automatic"), pattern: "[A-Za-z0-9][A-Za-z0-9_.-]{0,47}" });
   const workspace = el("input", { id: "workspace", placeholder: "/home/you/src/project", class: "mono" });
   const options = el("textarea", { id: "options", rows: 3, class: "mono", placeholder: "--mode high\n--allow-pypi\n-m sonnet\n--preset-value repo='my repo'", "aria-describedby": "options-hint" });
@@ -1250,6 +1349,8 @@ pages.starts = async (main) => {
   const startStatus = el("div", { class: "wide" });
   main.append(el("h2", {}, t("New start on {host}", { host: target })), el("div", { class: "card" }, el("div", { class: "form" },
     el("label", { for: "agent" }, t("Agent")), agent,
+    el("label", { for: "start-model" }, t("Model")), el("div", { class: "row" }, model,
+      el("label", {}, onlyServer, " ", t("only this server")), el("button", { class: "small", onclick: () => show("llm") }, t("Add a model server…"))),
     el("label", { for: "name" }, t("Name")), name,
     el("label", { for: "workspace" }, t("Workspace")), workspace,
     el("label", { for: "preset" }, t("Preset")), el("div", {}, preset, " ", presetHint),
@@ -1262,10 +1363,36 @@ pages.starts = async (main) => {
         let list;
         try { list = shellWords(options.value); }
         catch (e) { startStatus.append(notice(t("Options: {error}", { error: e.message }), "error")); return; }
+        list = withModel(list, model.value, onlyServer.checked);
         openTerminal({ kind: "start", host: target, agent: agent.value, name: name.value.trim(), workspace: workspace.value.trim(), options: JSON.stringify(list) }, name.value.trim() || t("new {agent}", { agent: agent.value }));
       } }, t("Start in a terminal")),
       el("span", { class: "hint" }, t("Detach with Ctrl-b d: the start runs on."))))));
 };
+
+// Why AGENT cannot use the LLM server SERVER (llm list --json: "agents" are those that can; llm.agent_problem), or "".
+function modelProblem(server, agent) {
+  if (!Array.isArray(server.agents) || server.agents.includes(agent)) return "";
+  return agent === "claude" ? t("not for Claude Code: it needs a server with the Anthropic Messages API") : t("not for {agent}", { agent });
+}
+
+// The options of a new start with the model chosen: CHOICE (NAME or NAME:MODEL of an LLM server; "" the agent's
+// provider) as --llm CHOICE, ONLY adds --no-provider-defaults; any --model, --llm or --no-provider-defaults of the
+// options goes (the launcher refuses --model with --llm).
+function withModel(list, choice, only) {
+  if (!choice) return list;
+  const out = [];
+  for (let i = 0; i < list.length; i++) {
+    const word = list[i];
+    if (word === "--") { out.push(...list.slice(i)); break; }  // the agent's own arguments stay as they are
+    if (["--model", "-mm", "--llm", "-lm"].includes(word)) { i++; continue; }
+    if (word.startsWith("--model=") || word.startsWith("--llm=") || word === "--no-provider-defaults" || word === "-nd") continue;
+    out.push(word);
+  }
+  const at = out.indexOf("--");
+  const added = ["--llm", choice, ...(only ? ["--no-provider-defaults"] : [])];
+  if (at < 0) out.push(...added); else out.splice(at, 0, ...added);
+  return out;
+}
 
 // sandbox-ai gc on a host: first what it would remove (--dry-run), then that, asked first.
 function gcCard(main, host) {
@@ -1358,6 +1485,8 @@ function cardRef(s, getName, setName, heading, title) {
     rename: (fresh) => { setName(fresh); heading.textContent = title(); } };
 }
 
+const NET_PRESETS = ["pypi", "github", "gitlab", "kernel-org", "duckduckgo", "npm"];
+
 // the network of a running start (sandbox-ai net allow|revoke|show|untaint on its host): what widens it is asked
 // first (it applies at once: real DNS, ports on the host, wildcards, Git logins)
 function networkCard(main, s) {
@@ -1369,13 +1498,20 @@ function networkCard(main, s) {
   const hosts = field("net-hosts", "pypi.org api.example.org"), tcp = field("net-tcp", "192.0.2.10:5432");
   const ports = field("net-ports", "3000 11434"), dns = el("input", { id: "net-dns", type: "checkbox" });
   const gitUrl = field("net-git-url", "https://git.example.org"), gitRef = field("net-git-ref", "GITEA_TOKEN");
-  const gitKind = el("select", { id: "net-git-kind" }, el("option", { value: "env" }, t("variable")), el("option", { value: "secret" }, t("secret")));
+  const gitKind = el("select", { id: "net-git-kind" }, el("option", { value: "env" }, t("variable")), el("option", { value: "secret" }, t("secret")), el("option", { value: "file" }, t("file (its path)")));
+  const networks = field("net-allow", "192.0.2.0/24 2001:db8::/64"), nameservers = field("net-nameservers", "192.0.2.53");
+  const presetBoxes = NET_PRESETS.map(p => el("input", { type: "checkbox", id: `net-preset-${p}`, value: p }));
+  const keep = el("input", { id: "net-keep", type: "checkbox" });
   const shown = el("div", { class: "net-shown" });
   const notes = el("div");
-  const words = (input) => input.value.split(/\s+/).filter(Boolean);
+  const words = (input) => String(input.value || "").split(/\s+/).filter(Boolean);
   const body = (op) => {
     const request = { op, allow_host: words(hosts), allow_tcp: words(tcp), host_ports: words(ports).map(Number), dns: dns.checked };
+    // the further options only when given (the requests stay as small as what was asked)
+    const more = { allow: words(networks), presets: presetBoxes.filter(b => b.checked).map(b => b.value), nameservers: words(nameservers) };
+    for (const [key, value] of Object.entries(more)) if (value.length) request[key] = value;
     if (gitUrl.value.trim() && gitRef.value.trim()) request.git_login = { url: gitUrl.value.trim(), kind: gitKind.value, ref: gitRef.value.trim() };
+    if (op === "allow" && keep.checked) request.keep = true;
     return request;
   };
   const revoke = (request, what) => async (event) => busy(event.target, async () => {
@@ -1440,17 +1576,29 @@ function networkCard(main, s) {
     r.allow_tcp.length ? t("the addresses {addresses}", { addresses: r.allow_tcp.join(", ") }) : null,
     r.host_ports.length ? t("the ports {ports} on the host", { ports: r.host_ports.join(", ") }) : null,
     r.dns ? t("real DNS (every name it looks up)") : null,
+    (r.allow || []).length ? t("every protocol and port of {networks}", { networks: r.allow.join(", ") }) : null,
+    (r.presets || []).length ? t("the hosts of {presets}", { presets: r.presets.join(", ") }) : null,
+    (r.nameservers || []).length ? t("the resolvers {servers} (real DNS)", { servers: r.nameservers.join(", ") }) : null,
     r.git_login ? t("a Git login for {url}", { url: r.git_login.url }) : null].filter(Boolean);
   const allow = el("button", { class: "primary", onclick: () => {
     const request = body("allow"), what = widened(request);
     if (!what.length) { toast("warning", t("Nothing to allow"), t("Name host names, addresses, ports, real DNS or a Git login first.")); return; }
     if (!needsConfirm("net-allow")) { send("allow", request, false); return; }
-    confirmIn(actions, t("Allow {what} for {name} on {host} now? It applies at once, until the sandbox ends (or you revoke it).", { what: what.join(t(" and ")), name, host }),
+    confirmIn(actions, request.keep ? t("Allow {what} for {name} on {host} now, and keep it in its project's configuration for every later start?", { what: what.join(t(" and ")), name, host })
+      : t("Allow {what} for {name} on {host} now? It applies at once, until the sandbox ends (or you revoke it).", { what: what.join(t(" and ")), name, host }),
       t("Yes, allow it"), () => send("allow", request, true), { kind: "primary", trigger: allow });
   } }, t("Allow…"));
   actions.append(allow,
     el("button", { onclick: (event) => busy(event.target, () => send("revoke", body("revoke"), false)) }, t("Revoke")),
     el("button", { onclick: refresh }, t("Refresh")));
+  // net show --keep | --keep-all: what the run was given, into its project's .sandbox-ai.json (asked first)
+  const keepRow = el("div", { class: "row" });
+  const keepAsk = (all) => (event) => confirmIn(keepRow, all ? t("Keep everything {name} on {host} was given, also what approvals opened once or for the run, in its project's configuration? Every later start of that project gets it.", { name, host })
+    : t("Keep what you gave {name} on {host} (allowed names and addresses, networks, DNS, ports, devices, workspaces) in its project's configuration? Every later start of that project gets it.", { name, host }), t("Yes, keep it"), async () => {
+    try { const r = await api("POST", hostPath(`/net/${encodeURIComponent(name)}/keep`, host), { all, confirm: true }); toast("success", t("Kept for the later starts of {name}", { name }), (r && r.output) || ""); }
+    catch (e) { failed(t("Could not keep it for {name} on {host}", { name, host }))(e); }
+  }, { kind: "primary", trigger: event.target });
+  keepRow.append(el("button", { onclick: keepAsk(false) }, t("Keep for later starts…")), el("button", { onclick: keepAsk(true) }, t("Keep all for later starts…")));
   const title = () => t("Network of {name} on {host}", { name, host });
   const heading = el("h2", {}, title());
   const card = el("div", { class: "card", id: "network-card" }, heading, notes,
@@ -1463,7 +1611,12 @@ function networkCard(main, s) {
       el("label", { for: "net-dns" }, t("Real DNS")), dns,
       el("label", { for: "net-git-url" }, t("Git login: server")), gitUrl,
       el("label", { for: "net-git-kind" }, t("Git login: token in")), el("div", {}, gitKind, " ", gitRef),
-      el("span"), actions));
+      el("label", { for: "net-allow" }, t("Networks (every port)")), networks,
+      el("span", {}, t("Known hosts")), el("div", { class: "row" }, presetBoxes.map((b, i) => el("label", {}, b, " ", NET_PRESETS[i]))),
+      el("label", { for: "net-nameservers" }, t("Resolvers (real DNS)")), nameservers,
+      el("label", { for: "net-keep" }, t("Also for later starts")), keep,
+      el("span"), actions),
+    el("h3", {}, t("Keep for the project")), keepRow);
   main.append(card);
   registerCard(card, notes, cardRef(s, () => name, (fresh) => { name = fresh; }, heading, title));
   refresh();
@@ -2071,17 +2224,28 @@ function doctorView(results, options) {
 
 pages.doctor = async (main) => {
   const host = state.host;
+  const backend = state.doctorBackend || "";
   main.append(el("h1", {}, t("Doctor on {host}", { host })), el("p", { class: "hint" }, t("Checking…")));
-  const results = await api("GET", hostPath("/doctor"));
+  const results = await api("GET", backend ? hostPath(`/doctor/${encodeURIComponent(backend)}`) : hostPath("/doctor"));
+  const choice = el("select", { id: "doctor-backend", onchange: (event) => { state.doctorBackend = event.target.value; show("doctor"); } },
+    [["", N_("as the host has it")], ["podman", "Podman"], ["bwrap", "Bubblewrap"], ["both", N_("both")]].map(([v, label]) => el("option", { value: v, selected: v === backend }, v === "podman" || v === "bwrap" ? label : t(label))));
   clear(main).append(el("h1", {}, t("Doctor on {host}", { host })),
+    el("div", { class: "row" }, el("label", { for: "doctor-backend" }, t("Backend")), choice),
     el("p", { class: "hint" }, t("Each command is only shown to copy: run it yourself in a terminal on {host}.", { host })),
     doctorView(results, { level: 2, host }));
 };
 
 pages.logs = async (main) => {
+  const host = state.host, where = state.logsOf && state.logsOf.host === host ? state.logsOf : null;
   main.append(el("h1", {}, t("Logs on {host}", { host: state.host })), el("p", { class: "hint" }, t("Loading…")));
-  const data = await api("GET", hostPath("/logs"));
-  clear(main).append(el("h1", {}, t("Logs on {host}", { host: state.host })));
+  const data = where ? await api("POST", hostPath("/logs"), { directory: where.directory, project: where.project }) : await api("GET", hostPath("/logs"));
+  const directory = el("input", { id: "logs-directory", class: "mono", placeholder: "/home/you/.local/state/sandbox-ai/logs/web", value: where ? where.directory : "" });
+  const project = el("input", { id: "logs-project", class: "mono", placeholder: "/home/you/src/project", value: where ? where.project : "" });
+  clear(main).append(el("h1", {}, t("Logs on {host}", { host: state.host })),
+    el("div", { class: "card" }, el("div", { class: "form" }, el("label", { for: "logs-directory" }, t("Log directory")), directory, el("label", { for: "logs-project" }, t("Or a project")), project,
+      el("span"), el("div", { class: "row" }, el("button", { class: "primary", onclick: () => { state.logsOf = directory.value.trim() || project.value.trim() ? { host, directory: directory.value.trim(), project: project.value.trim() } : null; show("logs"); } }, t("Show")),
+        el("button", { onclick: () => { state.logsOf = null; show("logs"); } }, t("The default"))))));
+  privacyCard(main, host);
   const summaries = Array.isArray(data) ? data : [data];
   for (const s of summaries) {
     main.append(el("div", { class: "card" },
@@ -2093,14 +2257,33 @@ pages.logs = async (main) => {
   }
 };
 
+// sandbox-ai privacy-check --json on a host: what the next push of each repository would publish that should stay
+// private (nothing is pushed).
+function privacyCard(main, host) {
+  const paths = el("textarea", { id: "privacy-paths", rows: 2, class: "mono", placeholder: "/home/you/src/project" });
+  const rules = el("input", { id: "privacy-rules", class: "mono", placeholder: t("default") }), project = el("input", { id: "privacy-project", class: "mono", placeholder: t("the directory's name") });
+  const every = el("input", { id: "privacy-all", type: "checkbox" }), result = el("div", { class: "wide" });
+  main.append(el("h2", {}, t("Privacy check of repositories")), el("div", { class: "card" }, el("div", { class: "form" },
+    el("label", { for: "privacy-paths" }, t("Repositories (one per line)")), paths, el("label", { for: "privacy-rules" }, t("Rules directory")), rules,
+    el("label", { for: "privacy-project" }, t("Project rule file")), project, el("label", { for: "privacy-all" }, t("Every file, also unchanged ones")), every,
+    el("span"), el("button", { class: "primary", onclick: (event) => busy(event.target, async () => {
+      clear(result).append(el("p", { class: "hint" }, t("Checking…")));
+      try { clear(result).append(dataView(await api("POST", hostPath("/privacy-check", host), { paths: linesOf(paths.value), rules_dir: rules.value.trim(), project: project.value.trim(), all: every.checked }), t("Nothing that should stay private."))); }
+      catch (e) { clear(result).append(notice(e.message, "error")); }
+    }) }, t("Check")), result)));
+}
+
 pages.vpn = async (main) => {
   const profiles = await api("GET", hostPath("/vpn"));
   clear(main).append(el("h1", {}, t("VPN profiles on {host}", { host: state.host })),
     el("p", { class: "hint" }, t("A profile names the secret that holds its key or password (kept on the page Secrets of that host): no key passes through this page."), " ",
       el("button", { onclick: () => show("secrets") }, t("Open Secrets"))));
   const host = state.host;
+  const shownProfile = el("div");
   const rows = profiles.map(p => {
     const actions = el("td", { class: "actions" },
+      el("button", { onclick: async (event) => busy(event.target, async () => {
+        try { clear(shownProfile).append(el("h3", {}, p.profile), dataView(await api("GET", hostPath(`/vpn/${encodeURIComponent(p.profile)}`, host)))); } catch (e) { clear(shownProfile).append(notice(e.message, "error")); } }) }, t("Show")),
       el("button", { onclick: async (event) => busy(event.target, async () => {
         try { toast("success", t("{profile} works", { profile: p.profile }), (await api("POST", hostPath(`/vpn/${encodeURIComponent(p.profile)}/check`), {})).output || "ok"); }
         catch (e) { failed(t("The check of {profile} failed", { profile: p.profile }))(e); } }) }, t("Check")),
@@ -2109,29 +2292,54 @@ pages.vpn = async (main) => {
       }) }, t("Remove")));
     return el("tr", {}, el("td", { class: "mono" }, p.profile), el("td", {}, p.type || ""), el("td", {}, p.provider || ""), actions);
   });
-  main.append(table([t("Profile"), t("Kind"), t("Provider"), ""], rows, t("No VPN profiles on this host.")));
+  main.append(table([t("Profile"), t("Kind"), t("Provider"), ""], rows, t("No VPN profiles on this host.")), shownProfile);
   const name = el("input", { id: "vpn-name", placeholder: "home", pattern: "[a-z0-9][a-z0-9_-]{0,31}" });
   const kind = el("select", { id: "vpn-kind" }, [["wireguard", N_("WireGuard (a wg-quick file)")], ["openvpn", N_("OpenVPN (an .ovpn file)")],
-    ["mullvad", N_("Mullvad (account number in a secret)")], ["tailscale", N_("Tailscale or Headscale (auth key in a secret)")]].map(([v, label]) => el("option", { value: v }, t(label))));
+    ["mullvad", N_("Mullvad (account number in a secret)")], ["tailscale", N_("Tailscale or Headscale (auth key in a secret)")], ["tor", N_("Tor (every connection through Tor)")]].map(([v, label]) => el("option", { value: v }, t(label))));
   const file = el("input", { id: "vpn-file", class: "mono", placeholder: t("{path} (on that host)", { path: "/home/you/vpn/home.conf" }) });
   const secret = el("input", { id: "vpn-secret", class: "mono", placeholder: "VPN_HOME" });
   const location = el("input", { id: "vpn-location", placeholder: "se-sto" });
   const exitNode = el("input", { id: "vpn-exit", placeholder: "exit-node-1" });
   const loginServer = el("input", { id: "vpn-login", placeholder: "https://headscale.example.org" });
+  const hostname = el("input", { id: "vpn-hostname", class: "mono", placeholder: "sandbox-ai-home" }), tailnet = el("input", { id: "vpn-tailnet", class: "mono", placeholder: "100.64.0.0/10" });
+  const bridges = el("input", { id: "vpn-bridges", class: "mono", placeholder: "/home/you/tor/bridges.txt" }), bridgeSecret = el("input", { id: "vpn-bridge-secret", class: "mono", placeholder: "TOR_BRIDGES" });
+  const exitCountry = el("input", { id: "vpn-exit-country", placeholder: "de,nl" });
   const rows2 = { file: [file, N_("Configuration file")], secret: [secret, N_("Secret (its name)")], location: [location, N_("Location")],
-    exit_node: [exitNode, N_("Exit node")], login_server: [loginServer, N_("Login server")] };
-  const wanted = { wireguard: ["file"], openvpn: ["file", "secret"], mullvad: ["secret", "location"], tailscale: ["secret", "exit_node", "login_server"] };
+    exit_node: [exitNode, N_("Exit node")], login_server: [loginServer, N_("Login server")], hostname: [hostname, N_("Node name")], tailnet_allow: [tailnet, N_("Tailnet range the agent may reach")],
+    bridges: [bridges, N_("Bridges file")], bridge_secret: [bridgeSecret, N_("Bridges: secret (its name)")], exit_country: [exitCountry, N_("Exit countries")] };
+  const wanted = { wireguard: ["file"], openvpn: ["file", "secret"], mullvad: ["secret", "location"], tailscale: ["secret", "exit_node", "login_server", "hostname", "tailnet_allow"],
+    tor: ["bridges", "bridge_secret", "exit_country"] };
+  // the switches of vpn add, each for the kinds that have it ([] for all); socks is asked first (it passes the proxy by)
+  const SWITCHES = [["split", N_("only the server's routes through the tunnel"), ["openvpn"]], ["no_ipv6", N_("no IPv6 in the tunnel"), ["mullvad"]],
+    ["endpoint_ipv6", N_("reach the relay over IPv6"), ["mullvad"]], ["ephemeral", N_("a new ephemeral node per start"), ["tailscale"]],
+    ["socks", N_("a SOCKS port in the sandbox (passes the connection proxy by)"), ["tor"]], ["no_dns_probe", N_("no probe of where DNS leaves"), []], ["force", N_("replace a profile of that name"), []]];
+  const switches = Object.fromEntries(SWITCHES.map(([key]) => [key, el("input", { type: "checkbox", id: `vpn-${key}` })]));
+  const switchLabels = Object.fromEntries(SWITCHES.map(([key, label]) => [key, el("label", {}, switches[key], " ", t(label))]));
+  const dnsServers = el("input", { id: "vpn-dns", class: "mono", placeholder: "10.64.0.1" }), checkUrls = el("input", { id: "vpn-check-urls", class: "mono", placeholder: "https://am.i.mullvad.net/json" });
+  const provider = el("input", { id: "vpn-provider", class: "mono", placeholder: "proton" });
   const form = el("div", { class: "form" }, el("label", { for: "vpn-name" }, t("Name")), name, el("label", { for: "vpn-kind" }, t("Kind")), kind);
   const labels = {};
   for (const [key, [input, text]] of Object.entries(rows2)) { labels[key] = el("label", { for: input.id }, t(text)); form.append(labels[key], input); }
-  const update = () => { for (const key of Object.keys(rows2)) { const on = wanted[kind.value].includes(key); rows2[key][0].hidden = !on; labels[key].hidden = !on; } };
+  const update = () => {
+    for (const key of Object.keys(rows2)) { const on = wanted[kind.value].includes(key); rows2[key][0].hidden = !on; labels[key].hidden = !on; }
+    for (const [key, , kinds] of SWITCHES) switchLabels[key].hidden = Boolean(kinds.length) && !kinds.includes(kind.value);
+  };
+  form.append(el("label", { for: "vpn-dns" }, t("Resolvers")), dnsServers, el("label", { for: "vpn-check-urls" }, t("Check URLs")), checkUrls,
+    el("label", { for: "vpn-provider" }, t("Provider")), provider, el("span", {}, t("Options")), el("div", { class: "row" }, Object.values(switchLabels)));
+  const addRow = el("div", { class: "row" });
   kind.addEventListener("change", update);
   update();
-  form.append(el("span"), el("button", { class: "primary", onclick: async (event) => busy(event.target, async () => {
+  form.append(el("span"), addRow);
+  addRow.append(el("button", { class: "primary", onclick: (event) => {
     const body = { name: name.value.trim(), kind: kind.value };
-    for (const key of wanted[kind.value]) { const value = rows2[key][0].value.trim(); if (value) body[key] = value; }
-    try { await api("POST", hostPath("/vpn"), body); show("vpn"); } catch (e) { failed(t("Could not add the VPN profile"))(e); }
-  }) }, t("Add profile")));
+    const more = { dns: wordsOf(dnsServers.value), check_urls: wordsOf(checkUrls.value), provider: textOf(provider) };
+    for (const [key, value] of Object.entries(more)) if (value.length) body[key] = value;
+    for (const key of wanted[kind.value]) { const value = rows2[key][0].value.trim(); if (value) body[key] = key === "tailnet_allow" ? wordsOf(value) : value; }
+    for (const [key, , kinds] of SWITCHES) if (switches[key].checked && (!kinds.length || kinds.includes(kind.value))) body[key] = true;
+    const send = (confirm) => busy(event.target, async () => { try { await api("POST", hostPath("/vpn", host), Object.assign({}, body, confirm ? { confirm: true } : {})); show("vpn"); } catch (e) { failed(t("Could not add the VPN profile"))(e); } });
+    if (!body.socks) { send(false); return; }
+    confirmIn(addRow, t("Give the sandboxes of {profile} on {host} a SOCKS port? What goes through it passes the connection proxy by: no inspection, no approvals.", { profile: body.name, host }), t("Yes, add it"), () => send(true), { kind: "primary", trigger: event.target });
+  } }, t("Add profile")));
   main.append(el("h2", {}, t("New profile")), el("div", { class: "card" }, form));
 };
 
@@ -2165,6 +2373,11 @@ pages.llm = async (main) => {
           try { output.append(modelsTable(e.name, await api("GET", hostPath(`/llm/${encodeURIComponent(e.name)}/models`)))); }
           catch (err) { output.append(notice(err.message, "error")); }
         }) }, t("Models")),
+        el("button", { onclick: (ev) => busy(ev.target, async () => {
+          clear(output);
+          try { output.append(el("h3", {}, e.name), dataView(await api("GET", hostPath(`/llm/${encodeURIComponent(e.name)}`)))); }
+          catch (err) { output.append(notice(err.message, "error")); }
+        }) }, t("Show")),
         el("button", { class: "danger", onclick: () => confirmIn(actions, t("Forget the LLM server {name} on {host}? Starts with {option} cannot start until it is added again.", { name: e.name, host, option: `--llm ${e.name}` }), t("Yes, forget it"), async () => {
           try { await api("DELETE", hostPath(`/llm/${encodeURIComponent(e.name)}`, host), { confirm: true }); show("llm"); } catch (err) { failed(t("Could not forget {name} on {host}", { name: e.name, host }))(err); }
         }) }, t("Remove")));
@@ -2178,17 +2391,30 @@ pages.llm = async (main) => {
   // the NAME of the secret that holds the API key (sandbox-ai secrets there), never the key
   const keySecret = el("input", { id: "llm-key-secret", class: "mono", placeholder: t("optional, e.g. {name}", { name: "LMSTUDIO_KEY" }), pattern: "[A-Za-z_][A-Za-z0-9_]{0,63}", autocomplete: "off", "aria-describedby": "llm-hint" });
   const status = el("div", { class: "wide" });
+  const headerSecrets = el("input", { id: "llm-headers", class: "mono", placeholder: "X-Gateway-Key=GW_KEY" }), ca = el("input", { id: "llm-ca", class: "mono", placeholder: "/home/you/ca.pem" });
+  const vpn = el("input", { id: "llm-vpn", class: "mono", placeholder: "home" });
+  const anthropic = el("input", { id: "llm-anthropic", type: "checkbox" }), replace = el("input", { id: "llm-replace", type: "checkbox" }), insecure = el("input", { id: "llm-insecure", type: "checkbox" });
+  const addRow = el("div", { class: "row" });
+  addRow.append(el("button", { class: "primary", onclick: (ev) => {
+    clear(status);
+    const secret = keySecret.value.trim();
+    if (secret && !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(secret)) { status.append(notice(t("A secret's name: letters, digits and _ (up to 64), not starting with a digit."), "error")); return; }
+    const headers = wordsOf(headerSecrets.value).map(pair => { const [header, ...rest] = pair.split("="); return { header, secret: rest.join("=") }; });
+    const body = Object.assign({ name: name.value.trim(), kind: kind.value, url: url.value.trim(), model: model.value.trim() }, secret ? { api_key_secret: secret } : {});
+    const more = { header_secrets: headers.length ? headers : null, ca: textOf(ca), vpn: textOf(vpn), anthropic: anthropic.checked, replace: replace.checked, insecure_http: insecure.checked };
+    for (const [key, value] of Object.entries(more)) if (value) body[key] = value;
+    const send = (confirm) => busy(ev.target, async () => { try { await api("POST", hostPath("/llm", host), Object.assign({}, body, confirm ? { confirm: true } : {})); show("llm"); } catch (e) { status.append(notice(e.message, "error")); } });
+    if (!body.insecure_http) { send(false); return; }
+    confirmIn(addRow, t("Send the prompts to {url} over plain http, unencrypted, from {host}? Whoever is on the way can read them, the answers and the key.", { url: body.url, host }), t("Yes, add it"), () => send(true), { kind: "primary", trigger: ev.target });
+  } }, t("Add")));
   main.append(el("h2", {}, t("Add a server")), el("div", { class: "card" }, el("div", { class: "form" },
     el("label", { for: "llm-name" }, t("Name")), name, el("label", { for: "llm-kind" }, t("Kind")), kind,
     el("label", { for: "llm-url" }, "URL"), url, el("label", { for: "llm-model" }, t("Model")), model,
     el("label", { for: "llm-key-secret" }, t("API key: secret (its name)")), keySecret,
-    el("span"), el("button", { class: "primary", onclick: (ev) => busy(ev.target, async () => {
-      clear(status);
-      const secret = keySecret.value.trim();
-      if (secret && !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(secret)) { status.append(notice(t("A secret's name: letters, digits and _ (up to 64), not starting with a digit."), "error")); return; }
-      try { await api("POST", hostPath("/llm"), Object.assign({ name: name.value.trim(), kind: kind.value, url: url.value.trim(), model: model.value.trim() }, secret ? { api_key_secret: secret } : {})); show("llm"); }
-      catch (e) { status.append(notice(e.message, "error")); }
-    }) }, t("Add")), status),
+    el("label", { for: "llm-headers" }, t("Headers from secrets (HEADER=SECRET)")), headerSecrets, el("label", { for: "llm-ca" }, t("CA certificate")), ca,
+    el("label", { for: "llm-vpn" }, t("VPN profile")), vpn, el("label", { for: "llm-anthropic" }, t("Also the Anthropic Messages API")), anthropic,
+    el("label", { for: "llm-replace" }, t("Replace one of that name")), replace, el("label", { for: "llm-insecure" }, t("Plain http outside the local networks")), insecure,
+    el("span"), addRow, status),
     el("p", { class: "hint", id: "llm-hint" }, t("Then start an agent with {option} (Options of a new start). A server that wants a key: keep it on the page Secrets of that host, and name that secret here.", { option: "--llm NAME" }), " ",
       el("button", { onclick: () => show("secrets") }, t("Open Secrets")))));
 
@@ -2235,6 +2461,12 @@ pages.kits = async (main) => {
       brings.append(line);
     }
     const kitActions = el("td", { class: "actions" });
+    kitActions.append(el("button", { onclick: (ev) => busy(ev.target, async () => {
+      try { clear(output).append(el("h3", {}, k.name), dataView(await api("GET", hostPath(`/kits/${encodeURIComponent(k.name)}`, host)))); } catch (e) { clear(output).append(notice(e.message, "error")); }
+    }) }, t("Show")));
+    const trust = el("button", { title: t("the command shows the kit's hooks and asks again"), onclick: () => confirmIn(kitActions, t("Trust the hooks of the kit {kit} on {host}? They run in every later start with that kit; the terminal shows them first.", { kit: k.name, host }), t("Yes, show and trust them"),
+      () => openTerminal({ kind: "trust-hooks", host, kit: k.name, confirm: "1" }, t("hooks of {kit}", { kit: k.name })), { kind: "primary", trigger: trust }) }, t("Trust hooks…"));
+    kitActions.append(trust, el("button", { onclick: () => openTerminal({ kind: "trust-hooks", host, kit: k.name, revoke: "1" }, t("hooks of {kit}", { kit: k.name })) }, t("Revoke hooks")));
     if (own) kitActions.append(el("button", { class: "danger", onclick: () => confirmIn(kitActions, t("Delete the kit {kit} on {host} with everything in it? Projects that use it cannot start until {option} is removed.", { kit: k.name, host, option: `--kit ${k.name}` }), t("Yes, delete it"), async () => {
       try { result(t("{kit} deleted", { kit: k.name }), await api("DELETE", hostPath(`/kits/${encodeURIComponent(k.name)}`, host), { confirm: true })); show("kits"); }
       catch (e) { failed(t("Could not delete {kit}", { kit: k.name }))(e); }
@@ -2268,7 +2500,7 @@ pages.kits = async (main) => {
   const addAsk = el("div", { class: "row wide" });
   // add-skill, add-plugin, add-marketplace widen every later start of that kit: asked first, naming what and where
   // (the values as they were when asking are the ones sent); a new skill (written here) is not
-  const WIDENS = { "add-skill": (b) => b.path, "add-plugin": (b) => b.plugin, "add-marketplace": (b) => b.marketplace };
+  const WIDENS = { "add-skill": (b) => b.path, "add-plugin": (b) => b.plugin, "add-marketplace": (b) => b.marketplace, "add-hook": (b) => b.file };
   const send = (action, body, title) => async (ev) => {
     clear(addStatus);
     const fresh = target.value === "";
@@ -2289,6 +2521,9 @@ pages.kits = async (main) => {
   const plugin = el("input", { id: "kit-plugin", class: "mono", placeholder: t("{plugin}, or an npm package for OpenCode", { plugin: "sandcastle@sandbox-ai" }) });
   const pluginAgent = el("select", { id: "kit-plugin-agent" }, ["claude", "opencode"].map(a => el("option", { value: a }, a)));
   const pluginSource = el("input", { id: "kit-plugin-source", class: "mono", placeholder: t("OWNER/REPO or https://… (only for a marketplace the kit does not declare yet)") });
+  const hookFile = el("input", { id: "kit-hook-file", class: "mono", placeholder: t("{path} (on that host: a script, hooks.json or a plugin module)", { path: "/home/you/hooks/guard.sh" }) });
+  const hookAs = el("input", { id: "kit-hook-as", class: "mono", placeholder: t("the file's name") }), hookEvent = el("input", { id: "kit-hook-event", class: "mono", placeholder: "PreToolUse" });
+  const hookMatcher = el("input", { id: "kit-hook-matcher", class: "mono", placeholder: "Bash|Write" }), hookTimeout = el("input", { id: "kit-hook-timeout", type: "number", min: 1, max: 3600 });
   main.append(el("h2", {}, t("Add to a kit of yours")), el("div", { class: "card" }, el("div", { class: "form" },
     el("label", { for: "kit-target" }, t("Kit")), target, targetLabel, targetName,
     el("span", {}, t("For")), skillAgents,
@@ -2303,8 +2538,22 @@ pages.kits = async (main) => {
     el("label", { for: "kit-plugin" }, t("Plugin")), plugin, el("label", { for: "kit-plugin-agent" }, t("Agent")), pluginAgent,
     el("label", { for: "kit-plugin-source" }, t("Marketplace source")), pluginSource,
     el("span"), el("button", { class: "primary", onclick: send("add-plugin", () => ({ plugin: plugin.value.trim(), agent: pluginAgent.value, source: pluginSource.value.trim() }), n => t("Plugin added to {kit}", { kit: n })) }, t("Add plugin")),
+    el("h3", { class: "wide" }, t("A hook")),
+    el("label", { for: "kit-hook-file" }, t("Hook file")), hookFile, el("label", { for: "kit-hook-as" }, t("Name in the kit")), hookAs,
+    el("label", { for: "kit-hook-event" }, t("Event")), hookEvent, el("label", { for: "kit-hook-matcher" }, t("Tools")), hookMatcher,
+    el("label", { for: "kit-hook-timeout" }, t("Timeout (seconds)")), hookTimeout,
+    el("span"), el("div", { class: "row" }, el("button", { class: "primary", onclick: send("add-hook", () => ({ file: hookFile.value.trim(), as: hookAs.value.trim(), event: hookEvent.value.trim(), matcher: hookMatcher.value.trim(), timeout: hookTimeout.value.trim(), agents: chosenAgents(skillAgents) }), n => t("Hook added to {kit}", { kit: n })) }, t("Add hook")),
+      el("button", { class: "danger", onclick: (ev) => {
+        const name = target.value, file = hookAs.value.trim() || hookFile.value.trim().split("/").pop();
+        if (!name || !file) { toast("warning", t("Which hook?"), t("Choose a kit of yours and name the hook's file.")); return; }
+        confirmIn(addAsk, t("Remove the hook {file} from the kit {kit} on {host}?", { file, kit: name, host }), t("Yes, remove it"), async () => {
+          try { result(t("{kit}: removed {value}", { kit: name, value: file }), await api("POST", hostPath(`/kits/${encodeURIComponent(name)}/remove-hook`, host), { file, agents: chosenAgents(skillAgents), confirm: true })); show("kits"); }
+          catch (e) { addStatus.append(notice(e.message, "error")); }
+        }, { trigger: ev.target });
+      } }, t("Remove hook…"))),
     addAsk, addStatus),
-    el("p", { class: "hint" }, t("Use a kit with {option} (Options of a new start). Claude plugins are installed with {command} on that host.", { option: "--kit NAME", command: "sandbox-ai plugins claude" }))));
+    el("p", { class: "hint" }, t("Use a kit with {option} (Options of a new start). Claude plugins are installed with {command} on that host.", { option: "--kit NAME", command: "sandbox-ai plugins claude" }), " ",
+      el("button", { onclick: () => show("logins") }, t("Open Logins")))));
 
 };
 
@@ -2329,6 +2578,25 @@ function canaryLinks(e) {
   return items;
 }
 
+// One run's canaries (sandbox-ai canaries list RUN --json): its decoy files and what happened; the tokens in full only
+// after a question; a sandbox a canary paused resumed after one too.
+async function canaryRun(main, run) {
+  const host = state.host;
+  const old = document.getElementById("canary-run");
+  if (old) old.remove();
+  const body = el("div", {}, el("p", { class: "hint" }, t("Loading…"))), row = el("div", { class: "row" });
+  const card = el("div", { class: "card", id: "canary-run" }, el("h2", {}, t("Canaries of {run} on {host}", { run, host })), body, row);
+  main.append(card);
+  const tokens = el("button", { onclick: () => confirmIn(row, t("Show the canary tokens of {run} on {host} in full? They are decoys, but whoever sees them here can copy them.", { run, host }), t("Yes, show them"), async () => {
+    try { clear(body).append(dataView(await api("POST", hostPath(`/canaries/${encodeURIComponent(run)}/tokens`, host), { confirm: true }))); } catch (e) { clear(body).append(notice(e.message, "error")); }
+  }, { trigger: tokens }) }, t("Show the tokens…"));
+  const resume = el("button", { class: "danger", onclick: () => confirmIn(row, t("Let {run} on {host} go on? A canary paused it: something opened a decoy or sent a token away.", { run, host }), t("Yes, resume it"), async () => {
+    try { const r = await api("POST", hostPath(`/canaries/${encodeURIComponent(run)}/resume`, host), { confirm: true }); toast("success", t("{name} on {host} resumed", { name: run, host }), (r && r.output) || ""); } catch (e) { failed(t("Could not resume {name} on {host}", { name: run, host }))(e); }
+  }, { trigger: resume }) }, t("Resume the sandbox…"));
+  row.append(tokens, resume, el("button", { onclick: () => card.remove() }, t("Close")));
+  try { clear(body).append(dataView(await api("GET", hostPath(`/canaries/${encodeURIComponent(run)}/list`, host)))); } catch (e) { clear(body).append(notice(e.message, "error")); }
+}
+
 pages.canaries = async (main) => {
   main.append(el("h1", {}, t("Canaries on {host}", { host: state.host })), el("p", { class: "hint" }, t("Loading…")));
   let logs;
@@ -2350,7 +2618,7 @@ pages.canaries = async (main) => {
       el("td", { class: "status-bad" }, `${e.event || "?"}${e.action ? ` (${e.action})` : ""}`),
       el("td", { class: "mono" }, `${e.canary || "-"} ${e.path || ""}`),
       el("td", {}, e.summary || e.error || ""), el("td", { class: "mono" }, canaryProcess(e.process)),
-      el("td", { class: "actions" }, toggle)), detail);
+      el("td", { class: "actions" }, toggle, e.run ? el("button", { onclick: () => canaryRun(main, e.run) }, t("Run…")) : null)), detail);
   }
   main.append(table([t("Time"), t("Run"), t("Event"), t("Canary"), t("What"), t("Process"), ""], rows));
 };
@@ -2436,6 +2704,29 @@ pages.settings = async (main) => {
     el("span", {}, t("Canary files")), el("div", { class: "row" }, boxes.map((b, i) => el("label", {}, b, " ", categories[i]))), el("span"), canaryAsk),
     el("p", { class: "hint mono" }, data.path || ""),
     el("p", { class: "hint" }, t("For every start on this host; an option given at a start wins."))));
+  // keep_days, preset_dirs, subnet, subnet6: saved with Save; what lowers the protection the service asks first
+  const more = [["keep_days", N_("Kept starts unused this many days are removed (empty: never)"), "30"], ["preset_dirs", N_("Extra preset directories (one per line)"), "/home/you/presets"],
+    ["subnet", N_("Network of the starts (IPv4)"), "10.89.0.0/24"], ["subnet6", N_("Network of the starts (IPv6)"), "fd00:89::/64"]];
+  const asking = el("div", { class: "row" });
+  const fields = more.map(([key, label, example]) => {
+    const now = values[key];
+    const input = key === "preset_dirs" ? el("textarea", { id: `default-${key}`, rows: 2, class: "mono", placeholder: example }) : el("input", { id: `default-${key}`, class: "mono", placeholder: example });
+    input.value = now === undefined || now === null ? "" : Array.isArray(now) ? now.join("\n") : String(now);
+    const valueOf = () => {
+      const text = input.value.trim();
+      if (!text) return null;
+      if (key === "keep_days") return Number(text);
+      return key === "preset_dirs" ? linesOf(text) : text;
+    };
+    const saveButton = el("button", { onclick: async (event) => {
+      const value = valueOf();
+      const r = await save(key, value);
+      if (r === true || !confirmable(r)) return;
+      askRefused(asking, r, async () => { await save(key, value, true); }, { trigger: event.target });
+    } }, t("Save"));
+    return [el("label", { for: input.id }, t(label)), el("div", { class: "row" }, input, saveButton)];
+  });
+  main.append(el("h2", {}, t("More defaults")), el("div", { class: "card" }, el("div", { class: "form" }, fields, el("span"), asking)));
 };
 
 // The secrets of a host (sandbox-ai secrets there): names and where each is kept, never a value. A value is typed
@@ -2526,8 +2817,8 @@ function sudoChoice(select) {
 }
 
 // One host's update: its own signed sandbox-ai update; a sudo that wants a password is asked in a terminal tab.
-async function updateHost(name, output, sudo) {
-  const body = sudo === undefined ? {} : { sudo };
+async function updateHost(name, output, sudo, version) {
+  const body = Object.assign(sudo === undefined ? {} : { sudo }, version ? { version } : {});
   const r = await api("POST", `/api/hosts/${encodeURIComponent(name)}/update`, body);
   output.append(...keyNotices(r));
   if (r.changed) output.append(notice(`${name}: ${r.before || "?"} → ${r.after}${r.sudo ? " (sudo)" : ""}`, "ok"));
@@ -2813,6 +3104,8 @@ pages.hosts = async (main) => {
   const updateSudo = Object.fromEntries(remote.map(h => [h.name, el("select", { class: "small", "aria-label": t("sudo for the update of {host}", { host: h.name }) },
     el("option", { value: "" }, h.update_sudo ? t("as set: with sudo") : t("as set: without sudo")),
     el("option", { value: "sudo" }, t("with sudo")), el("option", { value: "none" }, t("without sudo")))]));
+  // a release other than the newest (hosts update --version X.Y.Z)
+  const updateVersion = Object.fromEntries(remote.map(h => [h.name, el("input", { class: "small mono", size: 8, placeholder: t("newest"), pattern: "[0-9]+\\.[0-9]+\\.[0-9]+", "aria-label": t("version for the update of {host}", { host: h.name }) })]));
   const rows = state.hosts.map(h => {
     const version = el("td", { class: "mono" }, h.kind === "local" ? t("this machine") : "…");
     if (h.kind !== "local") versionCells[h.name] = version;
@@ -2829,11 +3122,16 @@ pages.hosts = async (main) => {
             if (r.doctor) output.append(el("h2", {}, t("Doctor on {host}", { host: h.name })), doctorView(r.doctor, { level: 3, host: h.name }));
           } catch (e) { output.append(notice(e.message, "error")); }
         }) }, t("Test")),
+        el("button", { title: t("version --verbose: where it is installed, its release keys"), onclick: (ev) => busy(ev.target, async () => {
+          clear(output);
+          try { output.append(el("h2", {}, t("sandbox-ai on {host}", { host: h.name })), outputBlock(await api("GET", hostPath("/version", h.name)))); } catch (e) { output.append(notice(e.message, "error")); }
+        }) }, t("Version")),
         h.kind === "local" ? null : updateSudo[h.name],
+        h.kind === "local" ? null : updateVersion[h.name],
         h.kind === "local" ? null : el("button", { "aria-label": t("Update {host}", { host: h.name }), onclick: (ev) => busy(ev.target, async () => {
           clear(output);
           output.append(notice(t("Updating {host}…", { host: h.name })));
-          try { await updateHost(h.name, output, sudoChoice(updateSudo[h.name])); } catch (e) { output.append(notice(`${h.name}: ${e.message}`, "error")); }
+          try { await updateHost(h.name, output, sudoChoice(updateSudo[h.name]), updateVersion[h.name].value.trim()); } catch (e) { output.append(notice(`${h.name}: ${e.message}`, "error")); }
           loadVersions(false);
         }) }, t("Update")),
         h.kind === "local" ? null : el("button", { "aria-label": t("Install sandbox-ai on {host}", { host: h.name }), onclick: () => installCard(main, h, afterInstall) }, t("Install…")),
@@ -3011,6 +3309,19 @@ function closeTerminal(entry) {
   if (state.page === "terminals") show("terminals");
 }
 
+// A start refused because its project configuration is not trusted (or changed since): the launcher says
+// "Project configuration PATH is not trusted" (agent_sandbox.load_project_config). The path, or null.
+function untrustedConfig(text) {
+  const plain = String(text).replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "").replace(/\r/g, "");
+  const match = /Project configuration (\/[^\n]*?) is (?:not trusted|changed since it was trusted)/.exec(plain);
+  return match ? match[1] : null;
+}
+
+function offerReview(host, path) {
+  toast("warning", t("The project configuration is not trusted"), t("{path} on {host}: review it, and trust exactly what you saw.", { path, host }),
+    { action: [t("Review it"), () => { state.review = { host, path }; state.host = host; show("projects"); }] });
+}
+
 function openTerminal(params, title) {
   if (!window.Terminal) { toast("warning", t("No terminals here"), t("Terminals need xterm.js on the server: {command}", { command: "sandbox-ai web vendor" })); return; }
   // One tab per start: attaching again shows the tab already open. PARAMS.host: the start's own (else the chosen).
@@ -3036,7 +3347,15 @@ function openTerminal(params, title) {
   const encoder = new TextEncoder();
   const entry = { id, title: `${host}: ${title}`, key, closed: false, opened: false, dismissed: false, ended: "", term, ws, box, fit: () => { if (fit) { fit.fit(); if (ws.readyState === 1) ws.send(JSON.stringify({ resize: [term.cols, term.rows] })); } } };
   ws.onopen = () => { entry.opened = true; };
-  ws.onmessage = (event) => term.write(typeof event.data === "string" ? event.data : new Uint8Array(event.data));
+  const decoder = new TextDecoder();
+  let seen = "", offered = false;
+  ws.onmessage = (event) => {
+    term.write(typeof event.data === "string" ? event.data : new Uint8Array(event.data));
+    if (offered) return;
+    seen = (seen + (typeof event.data === "string" ? event.data : decoder.decode(new Uint8Array(event.data), { stream: true }))).slice(-4000);
+    const path = untrustedConfig(seen);
+    if (path) { offered = true; offerReview(host, path); }
+  };
   ws.onclose = (event) => {
     entry.closed = true;
     window.removeEventListener("resize", entry.fit);
@@ -3056,5 +3375,382 @@ function openTerminal(params, title) {
   state.current = entry;
   show("terminals");
 }
+
+
+// --- what the CLI has besides: project configurations, MCP servers, logins, presets, images, activity ---------------
+
+function textOf(input) { return String((input && input.value) || "").trim(); }
+function wordsOf(text) { return String(text || "").split(/\s+/).filter(Boolean); }
+function linesOf(text) { return String(text || "").split("\n").map(x => x.trim()).filter(Boolean); }
+function outputBlock(r) { return el("pre", {}, String((r && r.output) || "")); }
+
+// A command's JSON as people read it: a list of objects as a table of their fields (each as text), else the JSON.
+function dataView(data, empty) {
+  if (Array.isArray(data) && data.length && data.every(x => x && typeof x === "object" && !Array.isArray(x))) {
+    const keys = [...new Set(data.flatMap(x => Object.keys(x)))].slice(0, 8);
+    return el("div", { class: "table-scroll" }, table(keys, data.map(x => el("tr", {}, keys.map(k => el("td", { class: "mono" },
+      x[k] === undefined || x[k] === null ? "" : typeof x[k] === "object" ? JSON.stringify(x[k]) : String(x[k])))))));
+  }
+  if (Array.isArray(data) && !data.length) return el("p", { class: "hint" }, empty || t("Nothing here."));
+  return el("pre", {}, JSON.stringify(data, null, 2));
+}
+
+// What a check answers ({ok, output}): fine or not, with what it said.
+function checkResult(box, r) { clear(box).append(notice(r.ok ? t("Everything is in place.") : t("The check found problems."), r.ok ? "ok" : "error"), outputBlock(r)); }
+
+// A change that the service may still ask for (the view was out of date): asked in ROW, then sent confirmed.
+async function sendAsking(row, method, path, body, done, trigger) {
+  try { done(await api(method, path, body)); }
+  catch (e) {
+    if (body.confirm !== true && confirmable(e)) { askRefused(row, e, async () => { try { done(await api(method, path, Object.assign({}, body, { confirm: true }))); } catch (err) { failed(t("It did not work"))(err); } }, { trigger }); return; }
+    failed(t("It did not work"))(e);
+  }
+}
+
+// Project configurations (sandbox-ai wizard trust): a .sandbox-ai.json is used only while it is exactly what was
+// trusted. Review shows it as it takes effect with its SHA-256; Trust sends that digest, so a file changed since the
+// review is not trusted.
+pages.projects = async (main) => {
+  const host = state.host;
+  main.append(el("h1", {}, t("Project configurations on {host}", { host })), el("p", { class: "hint" }, t("Loading…")));
+  let list;
+  try { list = await api("GET", hostPath("/projects", host)); } catch (e) { list = e; }
+  clear(main).append(el("h1", {}, t("Project configurations on {host}", { host })),
+    el("p", { class: "hint" }, t("A project's {file} gives its starts their options: it is used only while it is exactly what you trusted.", { file: ".sandbox-ai.json" })));
+  const reviewBox = el("div");
+  const path = el("input", { id: "project-path", class: "mono", placeholder: "/home/you/src/project/.sandbox-ai.json" });
+  const review = async (wanted) => {
+    clear(reviewBox).append(el("p", { class: "hint" }, t("Loading…")));
+    let r;
+    try { r = await api("POST", hostPath("/projects/review", host), { path: wanted }); }
+    catch (e) { clear(reviewBox).append(notice(e.message, "error")); return; }
+    const row = el("div", { class: "row" });
+    const now = r.trusted ? t("trusted as it is") : r.trusted_digest ? t("changed since it was trusted") : t("not trusted");
+    clear(reviewBox).append(el("div", { class: "card", id: "project-review" }, el("h2", {}, t("{path} on {host}", { path: r.path, host })),
+      el("p", {}, now), r.problem ? notice(r.problem, "error") : el("pre", {}, JSON.stringify(r.document, null, 2)),
+      el("p", { class: "hint mono" }, t("SHA-256 {digest}", { digest: r.digest })), row));
+    if (!r.problem && !r.trusted) {
+      const trust = el("button", { class: "primary", onclick: () => confirmIn(row, t("Trust exactly this configuration of {path} on {host}? Every later start of that project gets its options; if the file changes, it is no longer trusted.", { path: r.path, host }), t("Yes, trust it"), async () => {
+        try { const out = await api("POST", hostPath("/projects/trust", host), { path: r.path, digest: r.digest, confirm: true }); toast("success", t("{path} trusted on {host}", { path: r.path, host }), (out && out.output) || ""); show("projects"); }
+        catch (e) { failed(t("Could not trust {path} on {host}", { path: r.path, host }))(e); }
+      }, { kind: "primary", trigger: trust }) }, t("Trust exactly this…"));
+      row.append(trust);
+    }
+  };
+  main.append(el("div", { class: "card" }, el("div", { class: "form" }, el("label", { for: "project-path" }, t("Configuration file")), path,
+    el("span"), el("button", { class: "primary", onclick: () => { if (path.value.trim()) review(path.value.trim()); } }, t("Review")))), reviewBox);
+  const STATES_OF = { trusted: N_("trusted as it is"), changed: N_("changed since it was trusted"), missing: N_("missing"), unreadable: N_("unreadable") };
+  if (list instanceof Error) main.append(notice(list.message, "error"));
+  else main.append(el("h2", {}, t("Trusted")), table([t("Configuration file"), t("State"), ""], (Array.isArray(list) ? list : []).filter(x => x && typeof x.path === "string").map(x => {
+    const actions = el("td", { class: "actions" });
+    const forget = el("button", { class: "danger", onclick: () => confirmIn(actions, t("Forget the trust in {path} on {host}? Starts of that project refuse to start until it is trusted again.", { path: x.path, host }), t("Yes, forget it"), async () => {
+      try { await api("POST", hostPath("/projects/forget", host), { path: x.path, confirm: true }); show("projects"); } catch (e) { failed(t("Could not forget {path} on {host}", { path: x.path, host }))(e); }
+    }, { trigger: forget }) }, t("Forget…"));
+    actions.append(el("button", { onclick: () => { path.value = x.path; review(x.path); } }, t("Review")), forget);
+    return el("tr", {}, el("td", { class: "mono" }, x.path), el("td", {}, STATES_OF[x.state] ? t(STATES_OF[x.state]) : String(x.state || "")), actions);
+  }), t("No trusted project configurations on this host.")));
+  if (state.review && state.review.host === host) { const wanted = state.review.path; state.review = null; path.value = wanted; review(wanted); }
+};
+
+// MCP servers (sandbox-ai mcp): every defined one, running or not; start (for a start: attached to it), stop, the
+// catalogs and adding from them.
+pages.mcp = async (main) => {
+  const host = state.host;
+  main.append(el("h1", {}, t("MCP servers on {host}", { host })), el("p", { class: "hint" }, t("Loading…")));
+  const list = await api("GET", hostPath("/mcp", host));
+  clear(main).append(el("h1", {}, t("MCP servers on {host}", { host })), el("p", { class: "hint" }, t("Each runs in a sandbox of its own; an agent reaches it with {option}.", { option: "--mcp NAME" })));
+  const servers = (Array.isArray(list) ? list : []).filter(x => x && typeof x.name === "string");
+  const startBox = el("div");
+  const startForm = (server) => {
+    const backend = el("select", { id: "mcp-backend" }, el("option", { value: "" }, t("as defined")), ["podman", "bwrap"].map(b => el("option", { value: b }, b)));
+    const vpn = el("input", { id: "mcp-vpn", class: "mono", placeholder: "home" });
+    const forStart = el("input", { id: "mcp-for", class: "mono", placeholder: t("a start's name (optional)") });
+    const restart = el("input", { id: "mcp-restart", type: "checkbox" });
+    const row = el("div", { class: "row" });
+    const go = (event) => {
+      const body = { backend: backend.value, vpn: vpn.value.trim(), for: forStart.value.trim(), restart: restart.checked };
+      const send = async (confirm) => {
+        try { const r = await api("POST", hostPath(`/mcp/${encodeURIComponent(server)}/start`, host), Object.assign({}, body, confirm ? { confirm: true } : {})); toast("success", t("{name} started on {host}", { name: server, host }), (r && (r.output || r.message)) || ""); show("mcp"); }
+        catch (e) { failed(t("Could not start {name} on {host}", { name: server, host }))(e); }
+      };
+      if (!body.for) { busy(event.target, () => send(false)); return; }
+      confirmIn(row, body.restart ? t("Start {name} on {host} for {start} and restart {start} now? What runs in it ends; the agent continues its conversation.", { name: server, host, start: body.for })
+        : t("Start {name} on {host} for {start}? {start} reaches it from its next start on (kept).", { name: server, host, start: body.for }), t("Yes, start it"), () => send(true), { kind: "primary", trigger: event.target });
+    };
+    row.append(el("button", { class: "primary", onclick: go }, t("Start")), el("button", { onclick: () => clear(startBox) }, t("Close")));
+    clear(startBox).append(el("div", { class: "card" }, el("h2", {}, t("Start {name} on {host}", { name: server, host })), el("div", { class: "form" },
+      el("label", { for: "mcp-backend" }, t("Backend")), backend, el("label", { for: "mcp-vpn" }, t("VPN profile")), vpn,
+      el("label", { for: "mcp-for" }, t("For the start")), forStart, el("label", { for: "mcp-restart" }, t("Restart that start now")), restart, el("span"), row)));
+  };
+  main.append(table([t("Name"), t("State"), t("Serves"), t("Command"), ""], servers.map(x => {
+    const actions = el("td", { class: "actions" });
+    const stop = el("button", { class: "danger", onclick: () => confirmIn(actions, t("Stop the MCP server {name} on {host}? The starts it serves lose it until it starts again.", { name: x.name, host }), t("Yes, stop it"), async () => {
+      try { await api("POST", hostPath(`/mcp/${encodeURIComponent(x.name)}/stop`, host), { confirm: true }); show("mcp"); } catch (e) { failed(t("Could not stop {name} on {host}", { name: x.name, host }))(e); }
+    }, { trigger: stop }) }, t("Stop"));
+    actions.append(el("button", { onclick: () => startForm(x.name) }, t("Start…")), stop);
+    return el("tr", {}, el("td", { class: "mono" }, x.name), statusCell(x.status), el("td", {}, (x.serves || []).join(", ")), el("td", { class: "mono" }, String(x.command || "")), actions);
+  }), t("No MCP servers on this host yet: add one from a catalog below.")), startBox);
+
+  // the catalogs, and adding an entry with its options
+  const catalogs = el("input", { id: "mcp-catalogs", class: "mono", placeholder: t("default catalogs (or files and https URLs)") });
+  const catalogBox = el("div");
+  const entry = el("input", { id: "mcp-entry", class: "mono", placeholder: "hub:binwalk" });
+  const as = el("input", { id: "mcp-as", class: "mono", placeholder: t("the entry's name") });
+  const mounts = el("textarea", { id: "mcp-mounts", rows: 2, class: "mono", placeholder: "/mnt/samples=/home/you/samples:ro" });
+  const env = el("input", { id: "mcp-env", class: "mono", placeholder: "VT_API_KEY" });
+  const network = el("select", { id: "mcp-network" }, el("option", { value: "" }, t("as the entry says")), ["none", "full"].map(n => el("option", { value: n }, n)));
+  const memory = el("input", { id: "mcp-memory", placeholder: "512m" }), pids = el("input", { id: "mcp-pids", type: "number", min: 1, placeholder: "128" });
+  const backend = el("select", { id: "mcp-add-backend" }, el("option", { value: "" }, t("Podman when it is there")), ["podman", "bwrap", "both"].map(b => el("option", { value: b }, b)));
+  const vpn = el("input", { id: "mcp-add-vpn", class: "mono", placeholder: "home" });
+  const noPull = el("input", { id: "mcp-no-pull", type: "checkbox" }), unsigned = el("input", { id: "mcp-unsigned", type: "checkbox" });
+  const addRow = el("div", { class: "row" }), addStatus = el("div", { class: "wide" });
+  const showCatalog = (event) => busy(event.target, async () => {
+    clear(catalogBox).append(el("p", { class: "hint" }, t("Loading…")));
+    let r;
+    try { r = await api("POST", hostPath("/mcp-catalog", host), { catalogs: wordsOf(catalogs.value) }); } catch (e) { clear(catalogBox).append(notice(e.message, "error")); return; }
+    const SIGNED = { good: N_("signed"), bad: N_("signature bad"), none: N_("unsigned") };
+    clear(catalogBox).append(...(r.problems || []).map(x => notice(x, "warn")), table([t("Entry"), t("Network"), t("Title"), t("Signature"), ""], (r.entries || []).map(x =>
+      el("tr", {}, el("td", { class: "mono" }, x.entry), el("td", { class: "mono" }, x.network), el("td", {}, x.title, x.published ? "" : ` (${t("not published yet")})`),
+        el("td", { class: x.signature === "good" ? "status-ok" : "status-fail" }, t(SIGNED[x.signature] || N_("unsigned"))),
+        el("td", { class: "actions" }, el("button", { onclick: () => { entry.value = x.entry; unsigned.checked = false; entry.focus(); } }, t("Add…"))))), t("The catalogs list no servers.")));
+  });
+  const add = (event) => {
+    clear(addStatus);
+    const body = { entry: entry.value.trim(), as: as.value.trim(), env: wordsOf(env.value), network: network.value, memory: memory.value.trim(), pids: pids.value.trim(),
+      catalogs: wordsOf(catalogs.value), no_pull: noPull.checked, backend: backend.value, vpn: vpn.value.trim(), unsigned: unsigned.checked, mounts: [] };
+    for (const line of linesOf(mounts.value)) {
+      const match = /^([^=]+)=([^:]+)(?::(ro|rw))?$/.exec(line);
+      if (!match) { addStatus.append(notice(t("A mount is TARGET=HOST or TARGET=HOST:ro|rw: {line}", { line }), "error")); return; }
+      body.mounts.push({ target: match[1], host: match[2], mode: match[3] || "ro" });
+    }
+    const send = async (confirm) => {
+      try { const r = await api("POST", hostPath("/mcp", host), Object.assign({}, body, confirm ? { confirm: true } : {})); toast("success", t("{name} added on {host}", { name: body.entry, host }), (r && r.output) || ""); show("mcp"); }
+      catch (e) { addStatus.append(notice(e.message, "error")); }
+    };
+    const writable = body.mounts.filter(m => m.mode === "rw").map(m => m.host);
+    const what = [body.unsigned ? t("from a catalog no trusted key signed") : null, writable.length ? t("with {dirs} writable", { dirs: writable.join(", ") }) : null].filter(Boolean);
+    if (!what.length) { busy(event.target, () => send(false)); return; }
+    confirmIn(addRow, t("Add the MCP server {name} on {host} {what}?", { name: body.entry, host, what: what.join(t(" and ")) }), t("Yes, add it"), () => send(true), { kind: "primary", trigger: event.target });
+  };
+  addRow.append(el("button", { class: "primary", onclick: add }, t("Add the server")));
+  main.append(el("h2", {}, t("Catalogs")), el("div", { class: "card" }, el("div", { class: "form" }, el("label", { for: "mcp-catalogs" }, t("Catalogs")), catalogs,
+    el("span"), el("button", { onclick: showCatalog }, t("Show the catalog"))), catalogBox),
+  el("h2", {}, t("Add a server")), el("div", { class: "card" }, el("div", { class: "form" },
+    el("label", { for: "mcp-entry" }, t("Catalog entry")), entry, el("label", { for: "mcp-as" }, t("Name for --mcp")), as,
+    el("label", { for: "mcp-mounts" }, t("Mounts (one per line)")), mounts, el("label", { for: "mcp-env" }, t("Variables (secrets it names)")), env,
+    el("label", { for: "mcp-network" }, t("Network")), network, el("label", { for: "mcp-memory" }, t("Memory")), memory, el("label", { for: "mcp-pids" }, t("Processes")), pids,
+    el("label", { for: "mcp-add-backend" }, t("Backend")), backend, el("label", { for: "mcp-add-vpn" }, t("VPN profile")), vpn,
+    el("label", { for: "mcp-no-pull" }, t("The image is there already")), noPull, el("label", { for: "mcp-unsigned" }, t("Also from an unsigned catalog")), unsigned,
+    addStatus, el("span"), addRow)));
+};
+
+// Logins (sandbox-ai login, plugins, git-logins, publish-logins, identities): the tokens stay secrets of that host,
+// named here, never shown or sent.
+pages.logins = async (main) => {
+  const host = state.host;
+  main.append(el("h1", {}, t("Logins on {host}", { host })));
+  main.append(el("p", { class: "hint" }, t("Tokens stay in that host's secrets: here they are named, never shown."), " ", el("button", { onclick: () => show("secrets") }, t("Open Secrets"))));
+  // the agents' own logins and Claude's plugins: interactive, in a terminal
+  const agentRows = AGENTS.map(agent => {
+    const actions = el("td", { class: "actions" });
+    const logout = el("button", { class: "danger", onclick: () => confirmIn(actions, t("Log {agent} out on {host}? Its sandboxes need a new login.", { agent, host }), t("Yes, log out"), () => openTerminal({ kind: "login", host, agent, logout: "1", confirm: "1" }, t("logout {agent}", { agent })), { trigger: logout }) }, t("Log out…"));
+    actions.append(el("button", { class: "primary", onclick: () => openTerminal({ kind: "login", host, agent }, t("login {agent}", { agent })) }, t("Log in (terminal)")), logout);
+    return el("tr", {}, el("td", { class: "mono" }, agent), actions);
+  });
+  const update = el("input", { id: "plugins-update", type: "checkbox" }), pluginKits = el("input", { id: "plugins-kits", class: "mono", placeholder: "egm" });
+  main.append(el("h2", {}, t("The agents' logins")), table([t("Agent"), ""], agentRows),
+    el("div", { class: "card" }, el("h3", {}, t("Claude plugins")), el("div", { class: "form" },
+      el("label", { for: "plugins-update" }, t("Also update them")), update, el("label", { for: "plugins-kits" }, t("Plugins of built-in kits")), pluginKits,
+      el("span"), el("button", { onclick: () => openTerminal({ kind: "plugins", host, agent: "claude", update: update.checked ? "1" : "", kits: wordsOf(pluginKits.value.replace(/,/g, " ")).join(",") }, t("plugins on {host}", { host })) }, t("Install in a terminal")))));
+
+  const section = async (title, path, draw) => {
+    const box = el("div", {}, el("p", { class: "hint" }, t("Loading…")));
+    main.append(el("h2", {}, title), box);
+    try { draw(box, await api("GET", hostPath(path, host))); } catch (e) { clear(box).append(notice(e.message, "error")); }
+  };
+  const removeButton = (holder, text, path, body) => {
+    const button = el("button", { class: "danger", onclick: () => confirmIn(holder, text, t("Yes, remove it"), async () => {
+      try { await api("POST", hostPath(path, host), Object.assign({}, body, { confirm: true })); show("logins"); } catch (e) { failed(t("Could not remove it"))(e); }
+    }, { trigger: button }) }, t("Remove…"));
+    return button;
+  };
+  const check = (path, body) => async (event) => { const box = event.target.parentNode.parentNode.querySelector(".check-result") || event.target.parentNode; await busy(event.target, async () => { try { checkResult(box, await api("POST", hostPath(path, host), body())); } catch (e) { clear(box).append(notice(e.message, "error")); } }); };
+
+  await section(t("Git logins (every sandbox's proxy)"), "/git-logins", (box, list) => {
+    const rows = (Array.isArray(list) ? list : []).filter(x => x && x.url).map(x => {
+      const actions = el("td", { class: "actions" });
+      actions.append(removeButton(actions, t("Remove the Git login for {url} on {host}? Sandboxes no longer push there with it.", { url: x.url, host }), "/git-logins/remove", { url: x.url }));
+      return el("tr", {}, el("td", { class: "mono" }, x.url), el("td", { class: "mono" }, x.user || ""), el("td", { class: "mono" }, x.secret || ""), actions);
+    });
+    const url = el("input", { id: "git-url", class: "mono", placeholder: "https://git.example.org" }), user = el("input", { id: "git-user", class: "mono", placeholder: "x-access-token" });
+    const secret = el("input", { id: "git-secret", class: "mono", placeholder: "GITEA_TOKEN" });
+    const row = el("div", { class: "row" }), result = el("div", { class: "wide check-result" });
+    const add = (event) => {
+      const body = { url: url.value.trim(), secret: secret.value.trim(), user: user.value.trim() };
+      confirmIn(row, t("Give every sandbox on {host} that reaches {url} the Git login of the secret {secret}? The connection proxy adds it; the token never enters a sandbox.", { host, url: body.url, secret: body.secret }), t("Yes, add it"), () => sendAsking(row, "POST", hostPath("/git-logins", host), Object.assign(body, { confirm: true }), () => show("logins")), { kind: "primary", trigger: event.target });
+    };
+    row.append(el("button", { class: "primary", onclick: add }, t("Add…")), el("button", { onclick: check("/git-logins/check", () => ({ url: url.value.trim() })) }, t("Check")));
+    clear(box).append(table([t("Server"), t("User"), t("Secret"), ""], rows, t("No Git logins on this host.")), el("div", { class: "card" }, el("div", { class: "form" },
+      el("label", { for: "git-url" }, t("Server")), url, el("label", { for: "git-user" }, t("User")), user, el("label", { for: "git-secret" }, t("Secret (its name)")), secret, el("span"), row, result)));
+  });
+
+  await section(t("Publish logins (with --publish only)"), "/publish-logins", (box, list) => {
+    const rows = (Array.isArray(list) ? list : []).filter(x => x && x.kind).map(x => {
+      const actions = el("td", { class: "actions" });
+      actions.append(removeButton(actions, t("Remove the publish login {kind} on {host}?", { kind: x.kind, host }), `/publish-logins/${encodeURIComponent(x.kind)}/remove`, {}));
+      return el("tr", {}, el("td", { class: "mono" }, x.kind), el("td", { class: "mono" }, x.host || ""), el("td", { class: "mono" }, x.secret || ""), actions);
+    });
+    const kind = el("select", { id: "publish-kind" }, PUBLISH_KINDS.map(k => el("option", { value: k }, k)));
+    const secret = el("input", { id: "publish-secret", class: "mono", placeholder: "PYPI_TOKEN" }), url = el("input", { id: "publish-url", class: "mono", placeholder: "https://npm.example.org" });
+    const row = el("div", { class: "row" }), result = el("div", { class: "wide check-result" });
+    row.append(el("button", { class: "primary", onclick: (event) => busy(event.target, () => sendAsking(row, "POST", hostPath("/publish-logins", host), { kind: kind.value, secret: secret.value.trim(), url: url.value.trim() }, () => show("logins"), event.target)) }, t("Add")),
+      el("button", { onclick: check("/publish-logins/check", () => ({ kind: kind.value })) }, t("Check")),
+      el("button", { onclick: (event) => busy(event.target, async () => { try { clear(result).append(outputBlock(await api("GET", hostPath("/publish-logins/kinds", host)))); } catch (e) { clear(result).append(notice(e.message, "error")); } }) }, t("What each kind opens")));
+    clear(box).append(table([t("Kind"), t("Host"), t("Secret"), ""], rows, t("No publish logins on this host.")), el("div", { class: "card" }, el("div", { class: "form" },
+      el("label", { for: "publish-kind" }, t("Kind")), kind, el("label", { for: "publish-secret" }, t("Secret (its name)")), secret, el("label", { for: "publish-url" }, t("Another server (optional)")), url, el("span"), row, result)));
+  });
+
+  await section(t("Identities (--identity NAME)"), "/identities", (box, found) => {
+    const all = found && typeof found === "object" && !Array.isArray(found) ? found : {};
+    const shown = el("div");
+    const rows = Object.entries(all).filter(([, x]) => x && typeof x === "object").map(([name, x]) => {
+      const actions = el("td", { class: "actions" });
+      actions.append(el("button", { onclick: async (event) => busy(event.target, async () => { try { clear(shown).append(el("h3", {}, name), dataView(await api("GET", hostPath(`/identities/${encodeURIComponent(name)}`, host)))); } catch (e) { clear(shown).append(notice(e.message, "error")); } }) }, t("Show")));
+      const remove = el("button", { class: "danger", onclick: () => confirmIn(actions, t("Remove the identity {name} on {host} with its logins? Starts with {option} cannot start.", { name, host, option: `--identity ${name}` }), t("Yes, remove it"), async () => {
+        try { await api("DELETE", hostPath(`/identities/${encodeURIComponent(name)}`, host), { confirm: true }); show("logins"); } catch (e) { failed(t("Could not remove it"))(e); }
+      }, { trigger: remove }) }, t("Remove…"));
+      actions.append(remove);
+      for (const g of Array.isArray(x.git) ? x.git : []) actions.append(removeButton(actions, t("Remove the Git login {url} of {name} on {host}?", { url: g.url, name, host }), `/identities/${encodeURIComponent(name)}/logout`, { url: g.url }));
+      for (const p of Array.isArray(x.publish) ? x.publish : []) actions.append(removeButton(actions, t("Remove the publish login {kind} of {name} on {host}?", { kind: p.kind, name, host }), `/identities/${encodeURIComponent(name)}/unpublish`, { kind: p.kind }));
+      const logins = [...(Array.isArray(x.git) ? x.git.map(g => g.url) : []), ...(Array.isArray(x.publish) ? x.publish.map(p => p.kind) : [])].join(", ");
+      return el("tr", {}, el("td", { class: "mono" }, name), el("td", {}, [x.name, x.email].filter(Boolean).join(" ")), el("td", {}, x.description || ""), el("td", { class: "mono" }, logins), actions);
+    });
+    const ident = el("input", { id: "identity-name", class: "mono", placeholder: "work" }), person = el("input", { id: "identity-person", placeholder: "Ann Example" });
+    const email = el("input", { id: "identity-email", class: "mono", placeholder: "ann@example.org" }), description = el("input", { id: "identity-description" });
+    const loginUrl = el("input", { id: "identity-url", class: "mono", placeholder: "https://github.com" }), loginUser = el("input", { id: "identity-user", class: "mono" });
+    const loginSecret = el("input", { id: "identity-secret", class: "mono", placeholder: "GH_WORK" });
+    const publishKind = el("select", { id: "identity-kind" }, el("option", { value: "" }, t("a Git server (above)")), PUBLISH_KINDS.map(k => el("option", { value: k }, k)));
+    const row = el("div", { class: "row" }), loginRow = el("div", { class: "row" }), result = el("div", { class: "wide check-result" });
+    const fields = () => ({ name: person.value.trim(), email: email.value.trim(), description: description.value.trim() });
+    row.append(el("button", { class: "primary", onclick: (event) => busy(event.target, () => sendAsking(row, "POST", hostPath("/identities", host), Object.assign({ identity: ident.value.trim() }, fields()), () => show("logins"), event.target)) }, t("Add")),
+      el("button", { onclick: (event) => busy(event.target, () => sendAsking(row, "POST", hostPath(`/identities/${encodeURIComponent(ident.value.trim())}`, host), fields(), () => show("logins"), event.target)) }, t("Change it")),
+      el("button", { onclick: check("/identities-check", () => ({ identity: ident.value.trim() })) }, t("Check")));
+    loginRow.append(el("button", { class: "primary", onclick: (event) => busy(event.target, () => {
+      const name = encodeURIComponent(ident.value.trim());
+      return publishKind.value ? sendAsking(loginRow, "POST", hostPath(`/identities/${name}/publish`, host), { kind: publishKind.value, secret: loginSecret.value.trim(), url: loginUrl.value.trim() }, () => show("logins"), event.target)
+        : sendAsking(loginRow, "POST", hostPath(`/identities/${name}/login`, host), { url: loginUrl.value.trim(), secret: loginSecret.value.trim(), user: loginUser.value.trim() }, () => show("logins"), event.target);
+    }) }, t("Add the login")));
+    clear(box).append(table([t("Identity"), t("Commits as"), t("Description"), t("Logins"), ""], rows, t("No identities on this host: starts work as default.")), shown,
+      el("div", { class: "card" }, el("div", { class: "form" },
+        el("label", { for: "identity-name" }, t("Identity")), ident, el("label", { for: "identity-person" }, t("Commit name")), person,
+        el("label", { for: "identity-email" }, t("Commit e-mail")), email, el("label", { for: "identity-description" }, t("Description")), description, el("span"), row, result,
+        el("h3", { class: "wide" }, t("A login of this identity")),
+        el("label", { for: "identity-kind" }, t("For")), publishKind, el("label", { for: "identity-url" }, t("Server")), loginUrl,
+        el("label", { for: "identity-user" }, t("User")), loginUser, el("label", { for: "identity-secret" }, t("Secret (its name)")), loginSecret, el("span"), loginRow)));
+  });
+};
+const PUBLISH_KINDS = ["npm", "pypi", "testpypi", "crates", "gitlab", "github"];
+
+// Presets (sandbox-ai presets): what each sets, what is missing before it starts, and the extra directories.
+pages.presets = async (main) => {
+  const host = state.host;
+  main.append(el("h1", {}, t("Presets on {host}", { host })), el("p", { class: "hint" }, t("Loading…")));
+  let list;
+  try { list = await api("GET", hostPath("/presets", host)); } catch (e) { list = e; }
+  clear(main).append(el("h1", {}, t("Presets on {host}", { host })));
+  const detail = el("div");
+  const open = async (p) => {
+    clear(detail).append(el("p", { class: "hint" }, t("Loading…")));
+    let found;
+    try { found = await api("GET", hostPath(`/presets/${encodeURIComponent(p.id)}`, host)); } catch (e) { clear(detail).append(notice(e.message, "error")); return; }
+    const values = found && typeof found.values === "object" && found.values ? found.values : {};
+    const inputs = Object.entries(values).map(([key, spec]) => [key, el("input", { id: `preset-value-${key}`, class: "mono", placeholder: spec && spec.default !== undefined ? String(spec.default) : "" }), spec]);
+    const agent = el("select", { id: "preset-agent" }, el("option", { value: "" }, t("any agent")), AGENTS.map(a => el("option", { value: a }, a)));
+    const result = el("div", { class: "wide" });
+    clear(detail).append(el("div", { class: "card" }, el("h2", {}, `${found.id || p.id}: ${found.title || ""}`), el("p", {}, found.description || ""),
+      el("pre", {}, JSON.stringify(found, null, 2)),
+      el("div", { class: "form" }, inputs.map(([key, input, spec]) => [el("label", { for: input.id }, (spec && spec.label) || key), input]),
+        el("label", { for: "preset-agent" }, t("Agent")), agent,
+        el("span"), el("button", { class: "primary", onclick: (event) => busy(event.target, async () => {
+          const body = { values: Object.fromEntries(inputs.map(([key, input]) => [key, input.value.trim()])), agent: agent.value };
+          try { checkResult(result, await api("POST", hostPath(`/presets/${encodeURIComponent(p.id)}/check`, host), body)); } catch (e) { clear(result).append(notice(e.message, "error")); }
+        }) }, t("Check what is missing")), result)));
+  };
+  if (list instanceof Error) main.append(notice(list.message, "error"));
+  else main.append(table([t("Preset"), t("Title"), t("Origin"), ""], (Array.isArray(list) ? list : []).filter(p => p && p.id).map(p =>
+    el("tr", {}, el("td", { class: "mono" }, p.id), el("td", {}, p.title || ""), el("td", {}, p.origin || ""), el("td", { class: "actions" }, el("button", { onclick: () => open(p) }, t("Show"))))), t("No presets on this host.")), detail);
+  // the extra preset directories (defaults.json preset_dirs)
+  const dirsBox = el("div");
+  main.append(el("h2", {}, t("Preset directories")), dirsBox);
+  let dirs;
+  try { dirs = await api("GET", hostPath("/preset-dirs", host)); } catch (e) { dirsBox.append(notice(e.message, "error")); return; }
+  const listed = Array.isArray(dirs && dirs.dirs) ? dirs.dirs : [];
+  const directory = el("input", { id: "preset-dir", class: "mono", placeholder: "/home/you/presets" });
+  const row = el("div", { class: "row" });
+  dirsBox.append(el("p", { class: "hint mono" }, [dirs.builtin, dirs.yours].filter(Boolean).join("  ·  ")),
+    table([t("Directory"), t("State"), ""], listed.map(d => {
+      const path = typeof d === "string" ? d : String(d.path || d.directory || "");
+      return el("tr", {}, el("td", { class: "mono" }, path), el("td", {}, typeof d === "object" ? String(d.state || d.used || "") : ""),
+        el("td", { class: "actions" }, el("button", { onclick: (event) => busy(event.target, async () => { try { await api("POST", hostPath("/preset-dirs/remove", host), { directory: path }); show("presets"); } catch (e) { failed(t("Could not remove it"))(e); } }) }, t("Remove"))));
+    }), t("No extra preset directories.")),
+    el("div", { class: "card" }, el("div", { class: "form" }, el("label", { for: "preset-dir" }, t("Directory")), directory, el("span"), row)));
+  row.append(el("button", { class: "primary", onclick: (event) => confirmIn(row, t("Read presets from {dir} on {host} too, for every later start?", { dir: directory.value.trim(), host }), t("Yes, add it"), async () => {
+    try { await api("POST", hostPath("/preset-dirs", host), { directory: directory.value.trim(), confirm: true }); show("presets"); } catch (e) { failed(t("Could not add it"))(e); }
+  }, { kind: "primary", trigger: event.target }) }, t("Add…")));
+};
+
+// Images and tools: the images (sandbox-ai images), a build in a terminal, the demo device.
+const BUILD_TARGETS = ["claude", "codex", "opencode", "all", "team", "vpn"];
+pages.images = async (main) => {
+  const host = state.host;
+  main.append(el("h1", {}, t("Images and tools on {host}", { host })), el("p", { class: "hint" }, t("Loading…")));
+  let images;
+  try { images = await api("GET", hostPath("/images", host)); } catch (e) { images = e; }
+  clear(main).append(el("h1", {}, t("Images and tools on {host}", { host })));
+  main.append(el("h2", {}, t("Images")), images instanceof Error ? notice(images.message, "error") : dataView(Array.isArray(images) ? images : (images && images.images) || images, t("No images yet: build one below.")));
+  const variants = Array.isArray(images) ? images.map(x => x && (x.variant || x.name)).filter(v => typeof v === "string" && /^[a-z0-9][a-z0-9_.-]{0,29}$/.test(v) && !BUILD_TARGETS.includes(v)) : [];
+  const target = el("select", { id: "build-target" }, [...BUILD_TARGETS, ...new Set(variants)].map(v => el("option", { value: v }, v)));
+  const only = el("input", { id: "build-only", type: "checkbox" });
+  main.append(el("h2", {}, t("Build")), el("div", { class: "card" }, el("div", { class: "form" },
+    el("label", { for: "build-target" }, t("Image")), target, el("label", { for: "build-only" }, t("Only the extension layers")), only,
+    el("span"), el("button", { class: "primary", onclick: () => openTerminal({ kind: "build", host, target: target.value, extension_only: only.checked ? "1" : "" }, t("build {target}", { target: target.value })) }, t("Build in a terminal"))),
+  el("p", { class: "hint" }, t("Each build takes the newest releases of the agent and its base images."))));
+  // the demo device: an emulated serial device to practise hardware analysis on
+  const status = el("div"), port = el("input", { id: "demo-port", type: "number", min: 1024, max: 65535, placeholder: "5555" });
+  const refresh = async () => { try { const r = await api("GET", hostPath("/demo-device", host)); clear(status).append(notice(r.output || "", r.ok ? "ok" : "")); } catch (e) { clear(status).append(notice(e.message, "error")); } };
+  const act = (path, body) => (event) => busy(event.target, async () => { try { const r = await api("POST", hostPath(path, host), body()); toast("success", t("Demo device"), (r && r.output) || ""); } catch (e) { failed(t("Demo device"))(e); } await refresh(); });
+  main.append(el("h2", {}, t("Demo device")), el("div", { class: "card" }, status, el("div", { class: "form" }, el("label", { for: "demo-port" }, t("Port")), port,
+    el("span"), el("div", { class: "row" }, el("button", { class: "primary", onclick: act("/demo-device/start", () => (port.value ? { port: Number(port.value) } : {})) }, t("Start")),
+      el("button", { onclick: act("/demo-device/stop", () => ({})) }, t("Stop")), el("button", { onclick: () => openTerminal({ kind: "demo-device", host, port: port.value }, t("demo device")) }, t("Start in a terminal")), el("button", { onclick: refresh }, t("Refresh"))))));
+  refresh();
+};
+
+// Activity (sandbox-ai activity --json): the last events of the runs, filtered; Follow asks again every few seconds.
+const ACTIVITY_KINDS = ["prompt", "reply", "tool", "command", "file", "network", "approval", "mcp", "session", "tokens"];
+pages.activity = async (main) => {
+  const host = state.host;
+  const run = el("input", { id: "activity-run", class: "mono", placeholder: t("every run") }), tail = el("input", { id: "activity-tail", type: "number", min: 1, max: 2000, value: 100 });
+  const grep = el("input", { id: "activity-grep" }), since = el("input", { id: "activity-since", placeholder: "2h" });
+  const kinds = ACTIVITY_KINDS.map(k => el("input", { type: "checkbox", id: `activity-${k}`, value: k }));
+  const follow = el("input", { id: "activity-follow", type: "checkbox" });
+  const box = el("div");
+  const load = async () => {
+    let r;
+    try { r = await api("POST", hostPath("/activity", host), { run: run.value.trim(), tail: Number(tail.value) || 100, kinds: kinds.filter(k => k.checked).map(k => k.value), grep: grep.value.trim(), since: since.value.trim() }, { background: follow.checked }); }
+    catch (e) { clear(box).append(notice(e.message, "error")); return; }
+    const events = Array.isArray(r.events) ? r.events : [];
+    clear(box).append(table([t("Time"), t("Run"), t("Kind"), t("What")], events.slice().reverse().map(e => el("tr", {}, el("td", {}, String(e.time || "").replace("T", " ").replace("Z", "")),
+      el("td", { class: "mono" }, String(e.run || "")), el("td", {}, String(e.kind || "")), el("td", { class: "mono" }, String(e.summary || e.text || e.command || e.path || JSON.stringify(e))))), t("No activity found.")));
+  };
+  const tick = () => { if (state.page !== "activity" || state.host !== host || !box.isConnected) return; if (follow.checked) load().finally(() => setTimeout(tick, 5000)); else setTimeout(tick, 5000); };
+  clear(main).append(el("h1", {}, t("Activity on {host}", { host })), el("div", { class: "card" }, el("div", { class: "form" },
+    el("label", { for: "activity-run" }, t("Run")), run, el("label", { for: "activity-tail" }, t("Last events")), tail,
+    el("span", {}, t("Kinds")), el("div", { class: "row" }, kinds.map((k, i) => el("label", {}, k, " ", ACTIVITY_KINDS[i]))),
+    el("label", { for: "activity-grep" }, t("Containing")), grep, el("label", { for: "activity-since" }, t("Since")), since,
+    el("label", { for: "activity-follow" }, t("Follow (every 5 seconds)")), follow,
+    el("span"), el("button", { class: "primary", onclick: (event) => busy(event.target, load) }, t("Show")))), box);
+  await load();
+  setTimeout(tick, 5000);
+};
 
 loadThemes().then(render);

@@ -202,6 +202,10 @@ NOT_WORDS = {
     "home", "lmstudio", "my-kit", "release-notes", "ct101", "exit-node-1", "se-sto", "VPN_HOME", "Proxmox CT 101",
     "pypi.org api.example.org", "GITEA_TOKEN", "button, input, select, textarea",
     "HTTPS (TCP/443)", "IP:PORT (TCP)", "CPUs", "SSH", "URL", "ok",
+    # examples in the placeholders of the CLI's other commands, and names of programs
+    "files", "Podman", "Bubblewrap", "sandbox-ai-home", "TOR_BRIDGES", "de,nl", "proton", "X-Gateway-Key=GW_KEY",
+    "PreToolUse", "Bash|Write", "hub:binwalk", "VT_API_KEY", "egm", "x-access-token", "PYPI_TOKEN", "work", "Ann Example",
+    "GH_WORK",
 }
 # Where a literal is read by people even when it is one lowercase word: (callee, argument) of the page's helpers.
 TEXT_POSITIONS = {("toast", 1), ("toast", 2), ("notice", 0), ("failed", 0), ("ask", 0), ("ask", 1), ("say", 0),

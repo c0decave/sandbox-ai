@@ -267,6 +267,72 @@ ACTIONS = [
     ("GET", "/secrets", None, [["secrets", "list"]]),
     ("POST", "/secrets/GH_TOKEN", {"secret": "ghp-matrix-value", "confirm": True}, [["secrets", "set", "GH_TOKEN"]]),
     ("DELETE", "/secrets/GH_TOKEN", {"confirm": True}, [["secrets", "delete", "GH_TOKEN"]]),
+    # the parity actions (Projects, MCP servers, Logins, Images, Activity and the rest)
+    ("GET", "/projects", None, [["wizard", "trust", "--list", "--json"]]),
+    ("POST", "/projects/review", {"path": "/srv/project/.sandbox-ai.json"},
+     [["wizard", "trust", "/srv/project/.sandbox-ai.json", "--show", "--json"]]),
+    ("POST", "/projects/trust", {"path": "/srv/project/.sandbox-ai.json", "digest": "b" * 64, "confirm": True},
+     [["wizard", "trust", "/srv/project/.sandbox-ai.json", "--digest=" + "b" * 64]]),
+    ("POST", "/projects/forget", {"path": "/srv/project/.sandbox-ai.json", "confirm": True},
+     [["wizard", "forget", "/srv/project/.sandbox-ai.json"]]),
+    ("GET", "/mcp", None, [["mcp", "list", "--json"]]),
+    ("POST", "/mcp", {"entry": "hub:capa", "unsigned": True, "confirm": True}, [["mcp", "add", "--unsigned", "hub:capa"]]),
+    ("POST", "/mcp-catalog", {"catalogs": []}, [["mcp", "catalog"]]),
+    ("POST", "/mcp/files/start", {"vpn": "mv"}, [["mcp", "start", "--vpn=mv", "files"]]),
+    ("POST", "/mcp/files/start", {"for": "web", "confirm": True}, [["mcp", "start", "--for=web", "--json", "files"]]),
+    ("POST", "/mcp/files/stop", {"confirm": True}, [["mcp", "stop", "files"]]),
+    ("GET", "/git-logins", None, [["git-logins", "list", "--json"]]),
+    ("POST", "/git-logins", {"url": "https://github.com", "secret": "GH_TOKEN", "confirm": True},
+     [["git-logins", "add", "--secret=GH_TOKEN", "https://github.com"]]),
+    ("POST", "/git-logins/remove", {"url": "https://github.com", "confirm": True},
+     [["git-logins", "remove", "https://github.com"]]),
+    ("POST", "/git-logins/check", {}, [["git-logins", "check"]]),
+    ("GET", "/publish-logins", None, [["publish-logins", "list", "--json"]]),
+    ("GET", "/publish-logins/kinds", None, [["publish-logins", "kinds"]]),
+    ("POST", "/publish-logins", {"kind": "pypi", "secret": "PYPI"}, [["publish-logins", "add", "--secret=PYPI", "pypi"]]),
+    ("POST", "/publish-logins/check", {}, [["publish-logins", "check"]]),
+    ("POST", "/publish-logins/pypi/remove", {"confirm": True}, [["publish-logins", "remove", "pypi"]]),
+    ("GET", "/identities", None, [["identities", "list", "--json"]]),
+    ("GET", "/identities/work", None, [["identities", "show", "--json", "work"]]),
+    ("POST", "/identities", {"identity": "work", "email": "a@example.org"},
+     [["identities", "add", "--email=a@example.org", "work"]]),
+    ("POST", "/identities/work", {"name": "A B"}, [["identities", "set", "--name=A B", "work"]]),
+    ("POST", "/identities/work/login", {"url": "https://github.com", "secret": "GH_WORK"},
+     [["identities", "login", "--secret=GH_WORK", "work", "https://github.com"]]),
+    ("POST", "/identities/work/publish", {"kind": "npm", "secret": "NPM_WORK"},
+     [["identities", "publish", "--secret=NPM_WORK", "work", "npm"]]),
+    ("POST", "/identities/work/logout", {"url": "https://github.com", "confirm": True},
+     [["identities", "logout", "work", "https://github.com"]]),
+    ("POST", "/identities/work/unpublish", {"kind": "npm", "confirm": True}, [["identities", "unpublish", "work", "npm"]]),
+    ("DELETE", "/identities/work", {"confirm": True}, [["identities", "remove", "work"]]),
+    ("POST", "/identities-check", {}, [["identities", "check"]]),
+    ("POST", "/net/web/keep", {"all": False, "confirm": True}, [["net", "show", "web", "--keep"]]),
+    ("GET", "/starts/all", None, [["list", "--all", "--json"]]),
+    ("GET", "/presets/development", None, [["presets", "show", "--json", "development"]]),
+    ("POST", "/presets/development/check", {"values": {}, "agent": "claude"},
+     [["presets", "check", "--agent=claude", "development"]]),
+    ("GET", "/preset-dirs", None, [["presets", "dirs", "list", "--json"]]),
+    ("POST", "/preset-dirs", {"directory": "/srv/presets", "confirm": True}, [["presets", "dirs", "add", "/srv/presets"]]),
+    ("POST", "/preset-dirs/remove", {"directory": "/srv/presets"}, [["presets", "dirs", "remove", "/srv/presets"]]),
+    ("GET", "/canaries/web/list", None, [["canaries", "list", "web", "--json"]]),
+    ("POST", "/canaries/web/tokens", {"confirm": True}, [["canaries", "list", "web", "--tokens", "--json"]]),
+    ("POST", "/canaries/web/resume", {"confirm": True}, [["canaries", "resume", "web"]]),
+    ("GET", "/kits/mv", None, [["kits", "show", "--json", "--", "mv"]]),
+    ("POST", "/kits/mv/add-hook", {"file": "/srv/hooks/guard.sh", "agents": [], "confirm": True},
+     [["kits", "add-hook", "--", "mv", "/srv/hooks/guard.sh"]]),
+    ("POST", "/kits/mv/remove-hook", {"file": "guard.sh", "agents": [], "confirm": True},
+     [["kits", "remove-hook", "--", "mv", "guard.sh"]]),
+    ("GET", "/llm/gpu", None, [["llm", "show", "gpu", "--json"]]),
+    ("GET", "/vpn/mv", None, [["vpn", "show", "mv", "--json"]]),
+    ("POST", "/logs", {"directory": "/srv/logs"}, [["logs", "--json", "/srv/logs"]]),
+    ("POST", "/privacy-check", {"paths": ["/srv/project"]}, [["privacy-check", "--json", "/srv/project"]]),
+    ("POST", "/activity", {"tail": 20, "kinds": ["tool"]}, [["activity", "--json", "--tail=20", "--kind=tool"]]),
+    ("GET", "/doctor/podman", None, [["doctor", "--json", "--backend=podman"]]),
+    ("GET", "/version", None, [["version", "--verbose"]]),
+    ("GET", "/images", None, [["images", "--json"]]),
+    ("GET", "/demo-device", None, [["demo-device", "status"]]),
+    ("POST", "/demo-device/start", {}, [["demo-device", "start"]]),
+    ("POST", "/demo-device/stop", {}, [["demo-device", "stop"]]),
 ]
 
 
@@ -533,6 +599,65 @@ def test_a_terminal_query_that_is_not_one_is_refused_before_anything_runs(web, h
     assert web.processes.log == []
 
 
+# -- the interactive tools in a terminal: logins, the plugin store, image builds, a kit's hooks, the demo device --
+
+TOOL_TERMINALS = [
+    ({"kind": "login", "agent": "codex"}, ["login", "codex"]),
+    ({"kind": "login", "agent": "claude", "logout": "1", "confirm": "1"}, ["login", "--logout", "claude"]),
+    ({"kind": "plugins", "agent": "claude", "update": "1", "kits": "egm,review"},
+     ["plugins", "--update", "--kit=egm", "--kit=review", "claude"]),
+    ({"kind": "build", "target": "opencode", "extension_only": "1"}, ["build", "--extension-only", "opencode"]),
+    ({"kind": "build", "target": "vpn"}, ["build", "vpn"]),
+    ({"kind": "trust-hooks", "kit": "team", "agents": "claude", "confirm": "1"},
+     ["kits", "trust-hooks", "--agent=claude", "--", "team"]),
+    ({"kind": "trust-hooks", "kit": "team", "revoke": "1"}, ["kits", "trust-hooks", "--revoke", "--", "team"]),
+    ({"kind": "demo-device", "port": "5555"}, ["demo-device", "start", "--port=5555"]),
+]
+
+
+@pytest.mark.parametrize("host", HOSTS)
+@pytest.mark.parametrize("state", STATES)
+@pytest.mark.parametrize("sent,args", TOOL_TERMINALS, ids=[" ".join(a) for _, a in TOOL_TERMINALS])
+def test_the_tool_terminals_in_every_login_state_on_every_host(web, state, host, sent, args):
+    import urllib.parse
+    headers = web.headers(state)
+    target = "/api/terminal?" + urllib.parse.urlencode({"host": host, "csrf": headers.get("X-CSRF-Token", "none"),
+                                                        **sent})
+    if state != "full":
+        with pytest.raises(w.Refused) as refused:
+            web.svc.websocket(target, {"Host": HOST, "Origin": ORIGIN, **headers}, "192.0.2.1")
+        assert refused.value.status == {"wrong-host": 421, "wrong-origin": 403, "wrong-csrf": 403}.get(state, 401)
+        return
+    argv, _ = web.svc.websocket(target, {"Host": HOST, "Origin": ORIGIN, **headers}, "192.0.2.1")
+    found_host, _, found = sandbox_args(argv)
+    assert (found_host, found) == (host, args)
+    assert argv[1] == "-tt" if host == "ct1" else True, "a terminal: a tty over SSH"
+    web.assert_nothing_leaked()
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_a_tool_terminal_that_is_not_one_or_not_confirmed_is_refused(web, host):
+    import urllib.parse
+    headers = web.headers("full")
+    sent = {"Host": HOST, "Origin": ORIGIN, **headers}
+    for query, confirm in (({"kind": "login", "agent": "bash"}, None), ({"kind": "login", "agent": "--status"}, None),
+                           ({"kind": "login", "agent": "claude", "logout": "1"}, "login-logout"),
+                           ({"kind": "login", "agent": "claude", "logout": "yes", "confirm": "1"}, None),
+                           ({"kind": "plugins", "kits": "--x"}, None), ({"kind": "plugins", "agent": "-s"}, None),
+                           ({"kind": "build", "target": "--pin"}, None), ({"kind": "build", "target": "Claude"}, None),
+                           ({"kind": "build", "target": "team", "extension_only": "1"}, None),
+                           ({"kind": "trust-hooks", "kit": "team"}, "kit-hooks-trust"),
+                           ({"kind": "trust-hooks", "kit": "--yes", "confirm": "1"}, None),
+                           ({"kind": "trust-hooks", "kit": "team", "agents": "bash", "confirm": "1"}, None),
+                           ({"kind": "demo-device", "port": "80"}, None), ({"kind": "demo-device", "port": "-1"}, None),
+                           ({"kind": "images"}, None)):
+        with pytest.raises(w.Refused) as refused:
+            web.svc.websocket("/api/terminal?" + urllib.parse.urlencode({"host": host, "csrf": web.csrf, **query}),
+                              sent, "192.0.2.1")
+        assert refused.value.status == 400 and refused.value.confirm == confirm, query
+    assert web.processes.log == []
+
+
 # -- a host's install: this machine's sandbox-ai, which reaches the host over SSH --
 
 INSTALL_CASES = [
@@ -685,7 +810,7 @@ def test_every_call_of_the_page_is_in_the_matrix():
         prefix = "/api/hosts/X" if path.startswith("hostPath(") else ""
         path = re.sub(r", [A-Za-z_.]+\)$", ")", path)[len("hostPath("):-1] if prefix else path
         calls.add((method, prefix + re.sub(r"\$\{[^}]*\}", "X", path.strip("\"`"))))
-    covered = {(m, "/api/hosts/X" + re.sub(r"/(web|gpu|mv|1700000000-1-2|GH_TOKEN|14)(?=/|$)", "/X", p))
+    covered = {(m, "/api/hosts/X" + re.sub(r"/(web|gpu|mv|1700000000-1-2|GH_TOKEN|14|work|development|files)(?=/|$)", "/X", p))
                for m, p, _, _ in ACTIONS}
     covered |= {(m, re.sub(r"/ct1$", "/X", p)) for m, p, _ in SESSION_CALLS} | {("POST", "/api/login")}
     covered |= {("GET", "/api/approvals")}  # test_the_questions_of_every_host_in_every_login_state

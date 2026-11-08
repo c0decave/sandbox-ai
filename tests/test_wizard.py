@@ -1066,3 +1066,66 @@ def test_edit_the_mode(tmp_path):
     # The expert line keeps the mode.
     assert w.run(prompt=scripted(["0", "--offline", "s", "y"]), out=out.append, project=project, mode="edit") == path
     assert json.loads(path.read_text())["mode"] == "high"
+
+
+def test_trust_show_json_trusts_nothing_and_digest_trusts_only_what_was_reviewed(tmp_path, capsys):
+    """trust --show --json: {path, digest, document} of the file as it is, nothing trusted; trust --digest SHA256:
+    trusted only while the file is exactly what was reviewed (a changed file, a malformed digest: refused)."""
+    import hashlib
+    (tmp_path / "proj").mkdir()
+    path = tmp_path / "proj" / ".sandbox-ai.json"
+    text = json.dumps({"version": 1, "agent": "codex", "options": ["--dns"]})
+    path.write_text(text)
+    assert w.cli(["trust", str(path), "--show", "--json"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    assert shown["path"] == str(path) and shown["digest"] == digest and shown["document"]["options"] == ["--dns"]
+    assert shown["trusted"] is False and shown["problem"] is None
+    assert str(path) not in w.launcher().trusted_configs(), "--show trusts nothing"
+    # The file changed after the review: the digest of the review does not fit, nothing is trusted.
+    path.write_text(json.dumps({"version": 1, "agent": "codex", "options": ["--egress-all-allow"]}))
+    assert w.cli(["trust", str(path), "--digest", digest]) == 1
+    assert "not what was reviewed" in capsys.readouterr().out
+    assert str(path) not in w.launcher().trusted_configs()
+    for bad in ("x" * 64, digest[:10], digest.upper()):
+        assert w.cli(["trust", str(path), "--digest", bad]) == 2
+        assert str(path) not in w.launcher().trusted_configs()
+    # As reviewed: trusted without a question, with exactly that digest; the launcher accepts it.
+    path.write_text(text)
+    assert w.cli(["trust", str(path), "--digest", digest]) == 0
+    assert w.launcher().trusted_configs()[str(path)] == digest
+    launcher = w.launcher()
+    assert launcher.load_project_config(launcher.parse_args(["codex", "--workspace", str(tmp_path / "proj")]))[0] == path
+    capsys.readouterr()
+    assert w.cli(["trust", str(path), "--show", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["trusted"] is True
+
+
+def test_trust_digest_refuses_hidden_characters_and_list_names_the_state(tmp_path, capsys):
+    import hashlib
+    path = tmp_path / ".sandbox-ai.json"
+    data = '{"version": 1, "agent": "codex", "description": "\u202eharmless"}'.encode()
+    path.write_bytes(data)
+    assert w.cli(["trust", str(path), "--show", "--json"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["problem"] and "control or invisible" in shown["problem"]
+    assert w.cli(["trust", str(path), "--digest", hashlib.sha256(data).hexdigest()]) == 1
+    assert str(path) not in w.launcher().trusted_configs()
+    good, gone = tmp_path / "a.json", tmp_path / "b.json"
+    good.write_text("{}")
+    gone.write_text("{}")
+    w.launcher().trust_config(good)
+    w.launcher().trust_config(gone)
+    gone.unlink()
+    changed = tmp_path / "c.json"
+    changed.write_text("{}")
+    w.launcher().trust_config(changed)
+    changed.write_text('{"x": 1}')
+    capsys.readouterr()
+    assert w.cli(["trust", "--list", "--json"]) == 0
+    listed = {e["path"]: e["state"] for e in json.loads(capsys.readouterr().out)}
+    assert listed == {str(good): "trusted", str(gone): "missing", str(changed): "changed"}
+    with pytest.raises(SystemExit):
+        w.cli(["trust", str(good), "--list"])
+    with pytest.raises(SystemExit):
+        w.cli(["trust", str(good), "--show", "--digest", "0" * 64])

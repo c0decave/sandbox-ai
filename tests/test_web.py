@@ -420,6 +420,124 @@ def logged_in():
     ("GET", "/api/hosts/ct1/secrets", None, ["secrets", "list"]),
     # a limit lower than the current one (here: none now) needs no confirmation
     ("POST", "/api/hosts/ct1/limits/web", {"memory": "999999t"}, ["limits", "web", "--memory=999999t"]),
+    # the parity actions: each the CLI command of the same name, every value as --flag=VALUE or after the options
+    ("GET", "/api/hosts/ct1/projects", None, ["wizard", "trust", "--list", "--json"]),
+    ("POST", "/api/hosts/ct1/projects/review", {"path": "/home/u/my web/.sandbox-ai.json"},
+     ["wizard", "trust", "/home/u/my web/.sandbox-ai.json", "--show", "--json"]),
+    ("POST", "/api/hosts/ct1/projects/forget", {"path": "/home/u/web/.sandbox-ai.json", "confirm": True},
+     ["wizard", "forget", "/home/u/web/.sandbox-ai.json"]),
+    ("GET", "/api/hosts/ct1/mcp", None, ["mcp", "list", "--json"]),
+    ("POST", "/api/hosts/ct1/mcp/files/start", {}, ["mcp", "start", "files"]),
+    ("POST", "/api/hosts/ct1/mcp/files/start", {"backend": "bwrap", "vpn": "home"},
+     ["mcp", "start", "--backend=bwrap", "--vpn=home", "files"]),
+    ("POST", "/api/hosts/ct1/mcp/files/start", {"for": "web", "restart": True, "confirm": True},
+     ["mcp", "start", "--for=web", "--json", "--restart", "files"]),
+    ("POST", "/api/hosts/ct1/mcp/files/stop", {"confirm": True}, ["mcp", "stop", "files"]),
+    ("POST", "/api/hosts/ct1/mcp-catalog", {}, ["mcp", "catalog"]),
+    ("POST", "/api/hosts/ct1/mcp-catalog", {"catalogs": ["/home/u/catalog.json", "https://example.org/c.json"]},
+     ["mcp", "catalog", "--catalog=/home/u/catalog.json", "--catalog=https://example.org/c.json"]),
+    ("POST", "/api/hosts/ct1/mcp", {"entry": "hub:binwalk", "as": "bw", "mounts": [
+        {"target": "/mnt/samples", "host": "/home/u/samples", "mode": "ro"}], "env": ["VT_KEY"], "network": "full",
+        "memory": "2g", "pids": 256, "no_pull": True, "backend": "both", "vpn": "home"},
+     ["mcp", "add", "--as=bw", "--mount=/mnt/samples=/home/u/samples:ro", "--env=VT_KEY", "--network=full",
+      "--memory=2g", "--pids=256", "--no-pull", "--backend=both", "--vpn=home", "hub:binwalk"]),
+    ("GET", "/api/hosts/ct1/git-logins", None, ["git-logins", "list", "--json"]),
+    ("POST", "/api/hosts/ct1/git-logins", {"url": "http://localhost:3080", "secret": "GITEA", "user": "u.1",
+                                            "confirm": True},
+     ["git-logins", "add", "--secret=GITEA", "--user=u.1", "http://localhost:3080"]),
+    ("POST", "/api/hosts/ct1/git-logins/remove", {"url": "https://git.example.org", "confirm": True},
+     ["git-logins", "remove", "https://git.example.org"]),
+    ("POST", "/api/hosts/ct1/git-logins/check", {}, ["git-logins", "check"]),
+    ("POST", "/api/hosts/ct1/git-logins/check", {"url": "https://git.example.org"},
+     ["git-logins", "check", "https://git.example.org"]),
+    ("GET", "/api/hosts/ct1/publish-logins", None, ["publish-logins", "list", "--json"]),
+    ("GET", "/api/hosts/ct1/publish-logins/kinds", None, ["publish-logins", "kinds"]),
+    ("POST", "/api/hosts/ct1/publish-logins", {"kind": "npm", "secret": "NPM_TOKEN", "url": "https://npm.example.org"},
+     ["publish-logins", "add", "--secret=NPM_TOKEN", "--url=https://npm.example.org", "npm"]),
+    ("POST", "/api/hosts/ct1/publish-logins/pypi/remove", {"confirm": True}, ["publish-logins", "remove", "pypi"]),
+    ("POST", "/api/hosts/ct1/publish-logins/check", {"kind": "crates"}, ["publish-logins", "check", "crates"]),
+    ("GET", "/api/hosts/ct1/identities", None, ["identities", "list", "--json"]),
+    ("GET", "/api/hosts/ct1/identities/work", None, ["identities", "show", "--json", "work"]),
+    ("POST", "/api/hosts/ct1/identities", {"identity": "work", "name": "Ann Example", "email": "ann@example.org",
+                                            "description": "-the work account"},
+     ["identities", "add", "--name=Ann Example", "--email=ann@example.org", "--description=-the work account", "work"]),
+    ("POST", "/api/hosts/ct1/identities/work", {"email": "ann@example.com"},
+     ["identities", "set", "--email=ann@example.com", "work"]),
+    ("POST", "/api/hosts/ct1/identities/work/login", {"url": "https://github.com", "secret": "GH_WORK", "user": "ann"},
+     ["identities", "login", "--secret=GH_WORK", "--user=ann", "work", "https://github.com"]),
+    ("POST", "/api/hosts/ct1/identities/work/publish", {"kind": "pypi", "secret": "PYPI_WORK"},
+     ["identities", "publish", "--secret=PYPI_WORK", "work", "pypi"]),
+    ("POST", "/api/hosts/ct1/identities/work/logout", {"url": "https://github.com", "confirm": True},
+     ["identities", "logout", "work", "https://github.com"]),
+    ("POST", "/api/hosts/ct1/identities/work/unpublish", {"kind": "pypi", "confirm": True},
+     ["identities", "unpublish", "work", "pypi"]),
+    ("POST", "/api/hosts/ct1/identities-check", {}, ["identities", "check"]),
+    ("POST", "/api/hosts/ct1/identities-check", {"identity": "work"}, ["identities", "check", "work"]),
+    ("POST", "/api/hosts/ct1/net/web", {"op": "allow", "allow": ["192.0.2.0/24", "2001:db8::1"], "presets": ["pypi", "kernel-org"],
+                                        "nameservers": ["192.0.2.53"], "keep": True, "confirm": True,
+                                        "git_login": {"url": "https://git.example.org", "kind": "file",
+                                                      "ref": "/home/u/.config/git-token"}},
+     ["net", "allow", "web", "--allow=192.0.2.0/24", "--allow=2001:db8::1", "--allow-pypi", "--allow-kernel-org",
+      "--nameserver=192.0.2.53", "--git-token-file=https://git.example.org=/home/u/.config/git-token", "--keep"]),
+    ("POST", "/api/hosts/ct1/net/web", {"op": "revoke", "presets": ["npm"]}, ["net", "revoke", "web", "--allow-npm"]),
+    ("POST", "/api/hosts/ct1/net/web/keep", {"all": True, "confirm": True}, ["net", "show", "web", "--keep-all"]),
+    ("GET", "/api/hosts/ct1/starts/all", None, ["list", "--all", "--json"]),
+    ("POST", "/api/hosts/ct1/starts/web/stop", {"wait": 90, "confirm": True}, ["stop", "web", "--wait=90"]),
+    ("POST", "/api/hosts/ct1/starts/web/resume", {"workspaces": ["/home/u/lib"], "mounts": [
+        {"source": "/home/u/data", "destination": "/mnt/data", "mode": "ro"}], "mcp": ["files"], "confirm": True},
+     ["resume", "--workspace=/home/u/lib", "--mount=/home/u/data:/mnt/data:ro", "--mcp=files", "web"]),
+    ("GET", "/api/hosts/ct1/presets/development", None, ["presets", "show", "--json", "development"]),
+    ("POST", "/api/hosts/ct1/presets/hardware-analysis/check", {"values": {"device": "/dev/ttyUSB0", "port": ""},
+                                                                 "agent": "codex"},
+     ["presets", "check", "--value=device=/dev/ttyUSB0", "--agent=codex", "hardware-analysis"]),
+    ("GET", "/api/hosts/ct1/preset-dirs", None, ["presets", "dirs", "list", "--json"]),
+    ("POST", "/api/hosts/ct1/preset-dirs", {"directory": "/home/u/presets", "confirm": True},
+     ["presets", "dirs", "add", "/home/u/presets"]),
+    ("POST", "/api/hosts/ct1/preset-dirs/remove", {"directory": "/home/u/presets"},
+     ["presets", "dirs", "remove", "/home/u/presets"]),
+    ("GET", "/api/hosts/ct1/canaries/claude-1/list", None, ["canaries", "list", "claude-1", "--json"]),
+    ("GET", "/api/hosts/ct1/kits/team", None, ["kits", "show", "--json", "--", "team"]),
+    ("POST", "/api/hosts/ct1/kits/team/add-hook", {"file": "/home/u/hooks/guard.sh", "as": "guard.sh",
+                                                   "event": "PreToolUse", "matcher": "Bash|Write", "timeout": 30,
+                                                   "agents": ["claude"], "confirm": True},
+     ["kits", "add-hook", "--agent=claude", "--as=guard.sh", "--event=PreToolUse", "--matcher=Bash|Write",
+      "--timeout=30", "--", "team", "/home/u/hooks/guard.sh"]),
+    ("POST", "/api/hosts/ct1/kits/team/remove-hook", {"file": "guard.sh", "confirm": True},
+     ["kits", "remove-hook", "--", "team", "guard.sh"]),
+    ("GET", "/api/hosts/ct1/llm/gpu", None, ["llm", "show", "gpu", "--json"]),
+    ("POST", "/api/hosts/ct1/llm", {"name": "gw", "kind": "openai-compatible", "url": "https://gw.example.org",
+                                    "header_secrets": [{"header": "X-Gateway-Key", "secret": "GW_KEY"}],
+                                    "ca": "/home/u/ca.pem", "vpn": "home", "anthropic": True, "replace": True},
+     ["llm", "add", "gw", "--kind", "openai-compatible", "--url", "https://gw.example.org",
+      "--header-secret=X-Gateway-Key=GW_KEY", "--ca=/home/u/ca.pem", "--vpn=home", "--anthropic", "--replace"]),
+    ("GET", "/api/hosts/ct1/vpn/home", None, ["vpn", "show", "home", "--json"]),
+    ("POST", "/api/hosts/ct1/vpn", {"name": "tor", "kind": "tor", "bridge_secret": "TOR_BRIDGES", "exit_country": "de,nl"},
+     ["vpn", "add", "tor", "--tor", "--bridge-secret=TOR_BRIDGES", "--exit-country=de,nl"]),
+    ("POST", "/api/hosts/ct1/vpn", {"name": "ts", "kind": "tailscale", "hostname": "box-1", "ephemeral": True,
+                                    "tailnet_allow": ["100.64.0.0/10"], "dns": ["100.100.100.100"],
+                                    "check_urls": ["https://ip.example.org"], "provider": "mine", "force": True,
+                                    "no_dns_probe": True},
+     ["vpn", "add", "ts", "--tailscale", "--dns=100.100.100.100", "--check-url=https://ip.example.org",
+      "--provider=mine", "--no-dns-probe", "--force", "--ephemeral", "--hostname=box-1",
+      "--tailnet-allow=100.64.0.0/10"]),
+    ("POST", "/api/hosts/ct1/vpn", {"name": "mv", "kind": "mullvad", "no_ipv6": True},
+     ["vpn", "add", "mv", "--mullvad", "--no-ipv6"]),
+    ("POST", "/api/hosts/ct1/logs", {"project": "/home/u/src/web"}, ["logs", "--json", "--project=/home/u/src/web"]),
+    ("POST", "/api/hosts/ct1/logs", {"directory": "/home/u/.local/state/sandbox-ai/logs/web"},
+     ["logs", "--json", "/home/u/.local/state/sandbox-ai/logs/web"]),
+    ("POST", "/api/hosts/ct1/privacy-check", {"paths": ["/home/u/src/web"], "rules_dir": "/home/u/rules",
+                                              "project": "web", "all": True},
+     ["privacy-check", "--json", "--rules-dir=/home/u/rules", "--project=web", "--all", "/home/u/src/web"]),
+    ("POST", "/api/hosts/ct1/activity", {"tail": 50, "kinds": ["tool", "network"], "grep": "-rf", "since": "2h",
+                                         "run": "claude-1"},
+     ["activity", "--json", "--tail=50", "--kind=tool", "--kind=network", "--grep=-rf", "--since=2h", "claude-1"]),
+    ("POST", "/api/hosts/ct1/activity", {}, ["activity", "--json", "--tail=200"]),
+    ("GET", "/api/hosts/ct1/doctor/bwrap", None, ["doctor", "--json", "--backend=bwrap"]),
+    ("GET", "/api/hosts/ct1/version", None, ["version", "--verbose"]),
+    ("GET", "/api/hosts/ct1/images", None, ["images", "--json"]),
+    ("GET", "/api/hosts/ct1/demo-device", None, ["demo-device", "status"]),
+    ("POST", "/api/hosts/ct1/demo-device/start", {"port": 5555}, ["demo-device", "start", "--port=5555"]),
+    ("POST", "/api/hosts/ct1/demo-device/stop", {}, ["demo-device", "stop"]),
 ])
 def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     status, out = logged_in(method, path, data)
@@ -631,6 +749,127 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     ("POST", "/api/hosts/x;y/install", {"mode": "user", "confirm": True}, 400),
     ("POST", "/api/hosts/nowhere/install", {"mode": "user", "confirm": True}, 404),
     ("DELETE", "/api/hosts/ct1/install", {"confirm": True}, 405),
+    # the parity actions: nothing that would be read as an option, nothing unchecked
+    ("POST", "/api/hosts/ct1/projects/review", {"path": "relative/.sandbox-ai.json"}, 400),
+    ("POST", "/api/hosts/ct1/projects/review", {"path": "-x"}, 400),
+    ("POST", "/api/hosts/ct1/projects/review", {"path": "/a/../b/.sandbox-ai.json"}, 400),
+    ("POST", "/api/hosts/ct1/projects/trust", {"path": "/a/.sandbox-ai.json", "digest": "A" * 64, "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/projects/trust", {"path": "/a/.sandbox-ai.json", "digest": "--yes", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/projects/trust", {"path": "/a/.sandbox-ai.json", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/projects/trust", {"path": "/a/.sandbox-ai.json", "digest": "a" * 64}, 400),
+    ("POST", "/api/hosts/ct1/projects/forget", {"path": "/a/.sandbox-ai.json"}, 400),
+    ("POST", "/api/hosts/ct1/mcp/-x/start", {}, 400),
+    ("POST", "/api/hosts/ct1/mcp/files/start", {"backend": "docker"}, 400),
+    ("POST", "/api/hosts/ct1/mcp/files/start", {"vpn": "--x"}, 400),
+    ("POST", "/api/hosts/ct1/mcp/files/start", {"for": "web"}, 400),  # attaches: asked first
+    ("POST", "/api/hosts/ct1/mcp/files/start", {"for": "-x", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/mcp/files/start", {"restart": True}, 400),
+    ("POST", "/api/hosts/ct1/mcp/files/stop", {}, 400),
+    ("POST", "/api/hosts/ct1/mcp", {"entry": "--unsigned"}, 400),
+    ("POST", "/api/hosts/ct1/mcp", {"entry": "x", "unsigned": True}, 400),
+    ("POST", "/api/hosts/ct1/mcp", {"entry": "x", "unsigned": "yes", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/mcp", {"entry": "x", "mounts": [{"target": "/d", "host": "/h", "mode": "rw"}]}, 400),
+    ("POST", "/api/hosts/ct1/mcp", {"entry": "x", "mounts": [{"target": "/d", "host": "/h=/etc"}]}, 400),
+    ("POST", "/api/hosts/ct1/mcp", {"entry": "x", "mounts": [{"target": "d", "host": "/h"}]}, 400),
+    ("POST", "/api/hosts/ct1/mcp", {"entry": "x", "env": ["sk-the-value"]}, 400),
+    ("POST", "/api/hosts/ct1/mcp", {"entry": "x", "network": "allowlist"}, 400),
+    ("POST", "/api/hosts/ct1/mcp", {"entry": "x", "memory": "-1"}, 400),
+    ("POST", "/api/hosts/ct1/mcp", {"entry": "x", "pids": "many"}, 400),
+    ("POST", "/api/hosts/ct1/mcp", {"entry": "x", "catalogs": ["--catalog"]}, 400),
+    ("POST", "/api/hosts/ct1/mcp", {"entry": "x", "catalogs": ["http://plain.example.org/c.json"]}, 400),
+    ("POST", "/api/hosts/ct1/mcp-catalog", {"catalogs": ["relative.json"]}, 400),
+    ("POST", "/api/hosts/ct1/git-logins", {"url": "https://git.example.org", "secret": "glpat-value-itself!"}, 400),
+    ("POST", "/api/hosts/ct1/git-logins", {"url": "https://git.example.org", "secret": "T"}, 400),  # asked first
+    ("POST", "/api/hosts/ct1/git-logins", {"url": "-x", "secret": "T", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/git-logins", {"url": "https://g.org", "secret": "T", "user": "-u", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/git-logins/remove", {"url": "https://git.example.org"}, 400),
+    ("POST", "/api/hosts/ct1/git-logins/check", {"url": "--all"}, 400),
+    ("POST", "/api/hosts/ct1/publish-logins", {"kind": "docker", "secret": "T"}, 400),
+    ("POST", "/api/hosts/ct1/publish-logins", {"kind": "npm", "secret": "T", "url": "https://npm.example.org/path"}, 400),
+    ("POST", "/api/hosts/ct1/publish-logins", {"kind": "npm", "secret": "T", "url": "http://npm.example.org"}, 400),
+    ("POST", "/api/hosts/ct1/publish-logins/pypi/remove", {}, 400),
+    ("POST", "/api/hosts/ct1/publish-logins/-x/remove", {"confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/identities", {"identity": "Work"}, 400),
+    ("POST", "/api/hosts/ct1/identities", {"identity": "-w"}, 400),
+    ("POST", "/api/hosts/ct1/identities", {"identity": "w", "email": "not an address"}, 400),
+    ("POST", "/api/hosts/ct1/identities", {"identity": "w", "name": "two\nlines"}, 400),
+    ("POST", "/api/hosts/ct1/identities/work", {}, 400),  # nothing to change
+    ("POST", "/api/hosts/ct1/identities/work/login", {"url": "https://github.com", "secret": "ghp_x y"}, 400),
+    ("POST", "/api/hosts/ct1/identities/work/publish", {"kind": "maven", "secret": "T"}, 400),
+    ("POST", "/api/hosts/ct1/identities/work/logout", {"url": "https://github.com"}, 400),
+    ("POST", "/api/hosts/ct1/identities/work/unpublish", {"kind": "pypi"}, 400),
+    ("DELETE", "/api/hosts/ct1/identities/work", {}, 400),
+    ("DELETE", "/api/hosts/ct1/identities/-x", {"confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/net/web", {"op": "allow", "allow": ["0.0.0.0/99"], "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/net/web", {"op": "allow", "allow": ["--dns"], "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/net/web", {"op": "allow", "presets": ["everything"], "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/net/web", {"op": "allow", "nameservers": ["dns.example.org"], "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/net/web", {"op": "allow", "presets": ["pypi"]}, 400),  # widens: asked first
+    ("POST", "/api/hosts/ct1/net/web", {"op": "revoke", "presets": ["pypi"], "keep": True}, 400),
+    ("POST", "/api/hosts/ct1/net/web", {"op": "allow", "presets": ["pypi"], "keep": "yes", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/net/web", {"op": "allow", "git_login": {"url": "https://g.org", "kind": "file",
+                                                                     "ref": "relative"}, "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/net/web", {"op": "allow", "git_login": {"url": "https://g.org", "kind": "file",
+                                                                     "ref": "/a/../etc/shadow"}, "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/net/web/keep", {}, 400),
+    ("POST", "/api/hosts/ct1/net/-x/keep", {"confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/stop", {"wait": 0, "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/stop", {"wait": "--x", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/resume", {"restart": True}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/resume", {"workspaces": ["/home/u/lib"]}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/resume", {"mcp": ["files"]}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/resume", {"mounts": [{"source": "/a", "destination": "/b", "mode": "rw"}]}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/resume", {"workspaces": ["relative"], "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/resume", {"mcp": ["-x"], "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/resume", {"mounts": [{"source": "/a:b", "destination": "/b"}], "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/resume", {"restart": "yes", "confirm": True}, 400),
+    ("GET", "/api/hosts/ct1/presets/-x", None, 400),
+    ("POST", "/api/hosts/ct1/presets/dev/check", {"values": {"--x": "1"}}, 400),
+    ("POST", "/api/hosts/ct1/presets/dev/check", {"values": {"a": "two\nlines"}}, 400),
+    ("POST", "/api/hosts/ct1/presets/dev/check", {"agent": "bash"}, 400),
+    ("POST", "/api/hosts/ct1/preset-dirs", {"directory": "/home/u/presets"}, 400),  # asked first
+    ("POST", "/api/hosts/ct1/preset-dirs", {"directory": "relative", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/preset-dirs/remove", {"directory": "-x"}, 400),
+    ("GET", "/api/hosts/ct1/canaries/-x/list", None, 400),
+    ("POST", "/api/hosts/ct1/canaries/claude-1/tokens", {}, 400),
+    ("POST", "/api/hosts/ct1/canaries/claude-1/resume", {}, 400),
+    ("POST", "/api/hosts/ct1/canaries/-x/resume", {"confirm": True}, 400),
+    ("GET", "/api/hosts/ct1/kits/-x", None, 400),
+    ("POST", "/api/hosts/ct1/kits/team/add-hook", {"file": "/home/u/hook.sh"}, 400),  # asked first
+    ("POST", "/api/hosts/ct1/kits/team/add-hook", {"file": "hook.sh", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/kits/team/add-hook", {"file": "/h.sh", "event": "--x", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/kits/team/add-hook", {"file": "/h.sh", "timeout": 0, "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/kits/team/remove-hook", {"file": "guard.sh"}, 400),
+    ("POST", "/api/hosts/ct1/kits/team/remove-hook", {"file": "../guard.sh", "confirm": True}, 400),
+    ("GET", "/api/hosts/ct1/llm/-x", None, 400),
+    ("POST", "/api/hosts/ct1/llm", {"name": "a", "kind": "vllm", "url": "http://x", "insecure_http": True}, 400),
+    ("POST", "/api/hosts/ct1/llm", {"name": "a", "kind": "vllm", "url": "http://x", "header_secrets": [
+        {"header": "X-Key", "secret": "the value"}]}, 400),
+    ("POST", "/api/hosts/ct1/llm", {"name": "a", "kind": "vllm", "url": "http://x", "header_secrets": [
+        {"header": "-H", "secret": "K"}]}, 400),
+    ("POST", "/api/hosts/ct1/llm", {"name": "a", "kind": "vllm", "url": "http://x", "ca": "ca.pem"}, 400),
+    ("POST", "/api/hosts/ct1/llm", {"name": "a", "kind": "vllm", "url": "http://x", "anthropic": "yes"}, 400),
+    ("GET", "/api/hosts/ct1/vpn/-x", None, 400),
+    ("POST", "/api/hosts/ct1/vpn", {"name": "tor", "kind": "tor", "socks": True}, 400),  # asked first
+    ("POST", "/api/hosts/ct1/vpn", {"name": "tor", "kind": "tor", "bridges": "/b", "bridge_secret": "B"}, 400),
+    ("POST", "/api/hosts/ct1/vpn", {"name": "tor", "kind": "tor", "exit_country": "germany"}, 400),
+    ("POST", "/api/hosts/ct1/vpn", {"name": "home", "kind": "wireguard", "file": "/x", "split": True}, 400),
+    ("POST", "/api/hosts/ct1/vpn", {"name": "home", "kind": "wireguard", "file": "/x", "exit_country": "de"}, 400),
+    ("POST", "/api/hosts/ct1/vpn", {"name": "home", "kind": "wireguard", "file": "/x", "dns": ["-x"]}, 400),
+    ("POST", "/api/hosts/ct1/vpn", {"name": "ts", "kind": "tailscale", "check_urls": ["http://ip.example.org"]}, 400),
+    ("POST", "/api/hosts/ct1/logs", {"directory": "--json"}, 400),
+    ("POST", "/api/hosts/ct1/logs", {"project": "relative"}, 400),
+    ("POST", "/api/hosts/ct1/privacy-check", {}, 400),
+    ("POST", "/api/hosts/ct1/privacy-check", {"paths": ["--all"]}, 400),
+    ("POST", "/api/hosts/ct1/privacy-check", {"paths": ["/r"], "project": "-x"}, 400),
+    ("POST", "/api/hosts/ct1/activity", {"tail": 0}, 400),
+    ("POST", "/api/hosts/ct1/activity", {"kinds": ["everything"]}, 400),
+    ("POST", "/api/hosts/ct1/activity", {"run": "--follow"}, 400),
+    ("POST", "/api/hosts/ct1/activity", {"since": "yesterday"}, 400),
+    ("POST", "/api/hosts/ct1/activity", {"grep": "a\nb"}, 400),
+    ("GET", "/api/hosts/ct1/doctor/docker", None, 400),
+    ("POST", "/api/hosts/ct1/demo-device/start", {"port": 80}, 400),
+    ("POST", "/api/hosts/ct1/demo-device/start", {"port": "--x"}, 400),
 ])
 def test_what_is_refused_never_reaches_a_host(logged_in, method, path, data, status):
     assert logged_in(method, path, data)[0] == status
@@ -1485,6 +1724,30 @@ CONFIRM_CASES = {
     # run by this machine's sandbox-ai (it reaches the host over SSH)
     "host-install": ("POST", "/api/hosts/ct1/install", {"mode": "system", "prefix": "/opt/sai"},
                      ["hosts", "install", "ct1", "--system", "--prefix=/opt/sai", "--from-here", "--json"]),
+    # the parity actions
+    "project-trust": ("POST", "/api/hosts/ct1/projects/trust", {"path": "/home/u/web/.sandbox-ai.json", "digest": "a" * 64},
+                      ["wizard", "trust", "/home/u/web/.sandbox-ai.json", "--digest=" + "a" * 64]),
+    "project-forget": ("POST", "/api/hosts/ct1/projects/forget", {"path": "/home/u/web/.sandbox-ai.json"},
+                       ["wizard", "forget", "/home/u/web/.sandbox-ai.json"]),
+    "mcp-stop": ("POST", "/api/hosts/ct1/mcp/files/stop", {}, ["mcp", "stop", "files"]),
+    "mcp-unsigned": ("POST", "/api/hosts/ct1/mcp", {"entry": "hub:binwalk", "unsigned": True},
+                     ["mcp", "add", "--unsigned", "hub:binwalk"]),
+    "mcp-writable-mount": ("POST", "/api/hosts/ct1/mcp", {"entry": "duckduckgo", "mounts": [
+        {"target": "/data", "host": "/home/u/data", "mode": "rw"}]}, ["mcp", "add", "--mount=/data=/home/u/data:rw",
+                                                                     "duckduckgo"]),
+    "git-login-add": ("POST", "/api/hosts/ct1/git-logins", {"url": "https://git.example.org", "secret": "GITEA_TOKEN"},
+                      ["git-logins", "add", "--secret=GITEA_TOKEN", "https://git.example.org"]),
+    "login-remove": ("DELETE", "/api/hosts/ct1/identities/work", {}, ["identities", "remove", "work"]),
+    "net-keep": ("POST", "/api/hosts/ct1/net/web/keep", {}, ["net", "show", "web", "--keep"]),
+    "start-restart": ("POST", "/api/hosts/ct1/starts/web/resume", {"restart": True}, ["resume", "--restart", "web"]),
+    "canary-tokens": ("POST", "/api/hosts/ct1/canaries/claude-1/tokens", {},
+                      ["canaries", "list", "claude-1", "--tokens", "--json"]),
+    "canary-resume": ("POST", "/api/hosts/ct1/canaries/claude-1/resume", {}, ["canaries", "resume", "claude-1"]),
+    "llm-insecure": ("POST", "/api/hosts/ct1/llm", {"name": "gw", "kind": "vllm", "url": "http://203.0.113.5:8000",
+                                                    "insecure_http": True},
+                     ["llm", "add", "gw", "--kind", "vllm", "--url", "http://203.0.113.5:8000", "--insecure-http"]),
+    "vpn-socks": ("POST", "/api/hosts/ct1/vpn", {"name": "tor", "kind": "tor", "socks": True},
+                  ["vpn", "add", "tor", "--tor", "--socks"]),
 }
 # The actions whose command runs on this machine, not on the host they are about.
 RUN_HERE = {"host-install"}
@@ -1493,10 +1756,14 @@ READS = (["defaults", "show", "--json"], ["limits", "web", "--show", "--json"], 
 # has to be put here or in the table, deliberately.
 SAFE_POSTS = {r"/api/hosts", r"/api/hosts-status", r"/api/hosts/(?P<host>[^/]+)/test",
               r"/api/hosts/(?P<host>[^/]+)/update", r"/api/hosts/(?P<host>[^/]+)/starts/(?P<name>[^/]+)/rename",
-              r"/api/hosts/(?P<host>[^/]+)/llm",
-              r"/api/hosts/(?P<host>[^/]+)/llm/(?P<name>[^/]+)/check", r"/api/hosts/(?P<host>[^/]+)/vpn",
+              r"/api/hosts/(?P<host>[^/]+)/llm/(?P<name>[^/]+)/check",
               r"/api/hosts/(?P<host>[^/]+)/vpn/(?P<name>[^/]+)/check", r"/api/hosts/(?P<host>[^/]+)/kits",
-              r"/api/hosts/(?P<host>[^/]+)/devices/(?P<name>[^/]+)/remove"}
+              r"/api/hosts/(?P<host>[^/]+)/devices/(?P<name>[^/]+)/remove"} | {
+    r"/api/hosts/(?P<host>[^/]+)" + tail for tail in (
+        "/projects/review", "/mcp-catalog", "/git-logins/check", "/publish-logins", "/publish-logins/check",
+        "/identities", "/identities-check", "/identities/(?P<name>[^/]+)",
+        "/identities/(?P<name>[^/]+)/(?P<action>login|publish)", "/presets/(?P<name>[^/]+)/check",
+        "/preset-dirs/remove", "/logs", "/privacy-check", "/activity", "/demo-device/start", "/demo-device/stop")}
 
 
 @pytest.fixture
@@ -1527,7 +1794,8 @@ def test_the_confirmation_table_covers_every_route_that_ends_removes_or_weakens(
         for action in actions:
             case_method, path, _, _ = CONFIRM_CASES[action]
             assert any(m == case_method and re.fullmatch(p, path) and action in a for m, p, _, a in api.routes), action
-    assert named == set(w.NEEDS_CONFIRM) == set(CONFIRM_CASES)
+    assert named | set(w.TERMINAL_CONFIRM) == set(w.NEEDS_CONFIRM) == set(CONFIRM_CASES) | set(w.TERMINAL_CONFIRM)
+    assert not named & set(w.TERMINAL_CONFIRM), "a terminal's confirmation is asked by its query"
 
 
 @pytest.mark.parametrize("action", sorted(CONFIRM_CASES))
@@ -2820,8 +3088,8 @@ def test_the_page_splits_options_confirms_in_place_and_keeps_the_starts_table(tm
     assert result["asking"] == ["Delete web on ct1?Yes, delete itCancel", "Cancel"], "Cancel has the focus"
     assert result["cancelled"] == [True, 0], "Cancel puts back what was there, nothing is sent"
     assert result["yes"] == [[["POST", "/api/x", '{"confirm":true}']], True]
-    assert result["buttons"] == [["Attach", "Pause", "Stop", "Network…", "Resources…", "Rename…", "History"],
-                                 ["Stop", "Attach to…", "History"], ["Resume", "Delete", "Rename…", "History"]], \
+    assert result["buttons"] == [["Attach", "Pause", "Stop", "Network…", "Resources…", "Rename…", "More…", "History"],
+                                 ["Stop", "Attach to…", "History"], ["Resume", "Delete", "Rename…", "More…", "History"]], \
         "an MCP server has no Pause, Network, Resources or Rename"
     assert "Stop web on ct1?" in result["stopAsk"] and "its HOME is kept" in result["stopAsk"]
     same, asking, names, polled = result["refreshed"]
@@ -3576,3 +3844,168 @@ def test_the_starts_are_grouped_by_host_and_by_what_belongs_together(tmp_path):
                     ["[ct1]", "shown", ""], ["b", "shown", ""]]
     assert "this machine" in headers[0] and "2 start(s), 2 running" in headers[0]
     assert "1 start(s), 1 paused" in headers[1] and "answering" in headers[1]
+
+
+PARITY_DRIVER = FAKE_DOM + r"""
+const buttonIn = (node, text) => node.all().find(n => n.tagName === "button" && n.textContent === text);
+const byId = (id) => body.all().find(n => n.id === id);
+(async () => {
+  const result = {};
+  vm.runInContext('state.me = { user: "admin", csrf: "c", terminals: true }; state.host = "ct1"; state.hosts = [{ name: "local", kind: "local" }, { name: "ct1", kind: "ssh", ssh: "root@ct1" }]; var terminalsOpened = []; openTerminal = (params, title) => { terminalsOpened.push(params); };', context);
+  // the model of a new start: an LLM server of that host as --llm NAME[:MODEL]; --model goes; the agent's own
+  // arguments after -- stay; a server the agent cannot use is shown disabled
+  const model = (list, choice, only) => vm.runInContext(`withModel(${JSON.stringify(list)}, ${JSON.stringify(choice)}, ${only})`, context);
+  result.withModel = [model(["--mode", "high", "--model", "opus", "-mm", "x", "--model=y", "--llm", "old", "-nd"], "gpu:qwen3", true),
+    model(["--mode", "high", "--model", "opus"], "", false), model(["--allow-pypi", "--", "--model", "kept"], "gpu", false)];
+  vm.runInContext('state.page = "starts"; state.startsHost = "ct1";', context);
+  answer = (method, path) => (path.endsWith("/starts") ? [] : path.endsWith("/presets") ? [] : path.endsWith("/llm") ?
+    [{ name: "gpu", kind: "vllm", model: "qwen3", agents: ["codex", "opencode"] }, { name: "gw", kind: "openai-compatible", agents: ["claude", "codex", "opencode"] }]
+    : path.endsWith("/llm/gpu/models") ? [{ name: "qwen3" }, { name: "llama3" }] : path.endsWith("/llm/gw/models") ? [] : { output: "ok" });
+  await vm.runInContext("pages.starts(__main)", context); await settle();
+  byId("agent").value = "claude"; byId("agent").fire("change"); byId("name").value = ""; byId("workspace").value = "";
+  const select = byId("start-model");
+  result.models = select.children.map(o => [o.value, Boolean(o.attributes.disabled !== undefined), o.textContent]);
+  select.value = "gw"; byId("start-only-server").checked = true;
+  byId("options").value = "--mode high\n--model opus";
+  buttonIn(__main_of(), "Start in a terminal").fire("click");
+  result.started = vm.runInContext("terminalsOpened[terminalsOpened.length - 1]", context);
+  // a start refused for an untrusted project file: the path from what the terminal printed
+  result.untrusted = vm.runInContext(String.raw`[untrustedConfig("\u001b[31msandbox-ai: Project configuration /home/u/my web/.sandbox-ai.json is not trusted. Review it, then run: sandbox-ai wizard trust ..."), untrustedConfig("Project configuration /p/.sandbox-ai.json is changed since it was trusted. Review"), untrustedConfig("all fine")]`, context);
+  // Projects: reviewed, then trusted with exactly the digest shown, asked first naming the host
+  calls.length = 0;
+  answer = (method, path, sent) => (path.endsWith("/projects") ? [{ path: "/p/.sandbox-ai.json", digest: "a".repeat(64), state: "changed" }]
+    : path.endsWith("/projects/review") ? { path: "/p/.sandbox-ai.json", digest: "b".repeat(64), document: { version: 1, agent: "codex", options: ["--dns"] }, trusted: false, trusted_digest: "a".repeat(64), problem: null }
+    : { output: "Trusted." });
+  vm.runInContext('state.page = "projects"; state.review = { host: "ct1", path: "/p/.sandbox-ai.json" };', context);
+  await vm.runInContext("pages.projects(__main)", context); await settle();
+  const card = byId("project-review");
+  result.review = card.textContent.includes('"--dns"') && card.textContent.includes("changed since it was trusted");
+  buttonIn(card, "Trust exactly this…").fire("click");
+  result.trustAsk = card.all().find(n => n.className === "confirm").textContent;
+  result.beforeYes = calls.filter(c => c.method === "POST" && c.path.endsWith("/trust")).length;
+  buttonIn(card, "Yes, trust it").fire("click"); await settle();
+  result.trusted = calls.filter(c => c.path.endsWith("/projects/trust")).map(c => JSON.parse(c.body));
+  // Logins: logging out is asked first; then the terminal, confirmed
+  vm.runInContext('state.page = "logins"; terminalsOpened.length = 0;', context);
+  answer = (method, path) => (path.endsWith("/identities") ? {} : []);
+  clear_main();
+  await vm.runInContext("pages.logins(__main)", context); await settle();
+  buttonIn(__main_of(), "Log out…").fire("click");
+  result.logoutBefore = vm.runInContext("terminalsOpened.length", context);
+  buttonIn(__main_of(), "Yes, log out").fire("click"); await settle();
+  result.logout = vm.runInContext("terminalsOpened", context);
+  // MCP: an entry from an unsigned catalog is asked first
+  vm.runInContext('state.page = "mcp";', context);
+  calls.length = 0;
+  answer = (method, path) => (path.endsWith("/mcp") && method === "GET" ? [{ name: "files", status: "stopped", serves: [], command: "img" }] : { output: "added" });
+  clear_main();
+  await vm.runInContext("pages.mcp(__main)", context); await settle();
+  byId("mcp-entry").value = "hub:capa"; byId("mcp-unsigned").checked = true;
+  byId("mcp-as").value = ""; byId("mcp-mounts").value = "/data=/home/u/data:rw"; byId("mcp-env").value = ""; byId("mcp-memory").value = ""; byId("mcp-pids").value = "";
+  byId("mcp-catalogs").value = ""; byId("mcp-add-vpn").value = "";
+  buttonIn(__main_of(), "Add the server").fire("click"); await settle();
+  result.mcpAsk = (__main_of().all().find(n => n.className === "confirm") || { textContent: "" }).textContent;
+  result.mcpBefore = calls.filter(c => c.method === "POST").length;
+  buttonIn(__main_of(), "Yes, add it").fire("click"); await settle();
+  result.mcpSent = calls.filter(c => c.method === "POST").map(c => [c.path, JSON.parse(c.body)]);
+  console.log(JSON.stringify(result));
+})().catch(e => { console.error(e.stack); process.exit(1); });
+function __main_of() { return main; }
+function clear_main() { main.children = []; }
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_the_pages_of_the_clis_other_commands(tmp_path):
+    """In node: the model of a new start (--llm, --model taken out, a server the agent cannot use disabled), a start
+    refused for an untrusted project file offered for review, a project trusted with exactly the reviewed digest
+    (asked first), a logout asked first and then confirmed in its terminal, an unsigned MCP entry asked first."""
+    result = run_driver(tmp_path, PARITY_DRIVER, "parity")
+    assert result["withModel"] == [["--mode", "high", "--llm", "gpu:qwen3", "--no-provider-defaults"],
+                                   ["--mode", "high", "--model", "opus"],
+                                   ["--allow-pypi", "--llm", "gpu", "--", "--model", "kept"]]
+    values = {value: (disabled, text) for value, disabled, text in result["models"]}
+    assert values[""][0] is False and "provider" in values[""][1]
+    assert values["gpu"][0] is True and "Anthropic" in values["gpu"][1], "Claude Code cannot use a plain vLLM server"
+    assert values["gpu:qwen3"][0] is True and values["gw"][0] is False
+    assert result["started"]["kind"] == "start" and result["started"]["agent"] == "claude"
+    assert json.loads(result["started"]["options"]) == ["--mode", "high", "--llm", "gw", "--no-provider-defaults"]
+    assert result["untrusted"] == ["/home/u/my web/.sandbox-ai.json", "/p/.sandbox-ai.json", None]
+    assert result["review"] is True
+    assert "/p/.sandbox-ai.json on ct1" in result["trustAsk"] and result["beforeYes"] == 0
+    assert result["trusted"] == [{"path": "/p/.sandbox-ai.json", "digest": "b" * 64, "confirm": True}]
+    assert result["logoutBefore"] == 0
+    assert result["logout"] == [{"kind": "login", "host": "ct1", "agent": "claude", "logout": "1", "confirm": "1"}]
+    assert "hub:capa on ct1" in result["mcpAsk"]
+    assert "no trusted key signed" in result["mcpAsk"] and "/home/u/data writable" in result["mcpAsk"]
+    assert result["mcpBefore"] == 0
+    (path, sent), = result["mcpSent"]
+    assert path == "/api/hosts/ct1/mcp" and sent["entry"] == "hub:capa" and sent["unsigned"] is True and sent["confirm"] is True
+    assert sent["mounts"] == [{"target": "/data", "host": "/home/u/data", "mode": "rw"}]
+
+
+def test_the_net_presets_are_the_launchers():
+    spec_ = importlib.util.spec_from_file_location("launcher_for_web_tests", ROOT / "sandbox" / "agent_sandbox.py")
+    launcher = importlib.util.module_from_spec(spec_)
+    spec_.loader.exec_module(launcher)
+    assert tuple(launcher.PRESETS) == w.NET_PRESETS
+    assert "const NET_PRESETS = " + json.dumps(list(w.NET_PRESETS)) + ";" in (WEB / "app.js").read_text()
+
+
+def test_the_mcp_catalog_and_the_activity_are_read_as_the_commands_print_them(logged_in):
+    """mcp catalog has no --json: its lines are read (entry, network, title, published, signature); activity --json
+    prints JSON lines."""
+    logged_in.runner.answers[("mcp", "catalog")] = (0, "hub:binwalk  [none]  Binwalk firmware analysis  signed\n"
+                                                       "c0:duck  [full duckduckgo.com]  DuckDuckGo search  (not published yet)  unsigned\n"
+                                                       "garbage line\n", "sandbox-mcp: catalog not read: c1: 404\n")
+    status, out = logged_in("POST", "/api/hosts/ct1/mcp-catalog", {})
+    assert status == 200 and out["entries"] == [
+        {"entry": "hub:binwalk", "prefix": "hub", "name": "binwalk", "network": "none", "title": "Binwalk firmware analysis",
+         "published": True, "signature": "good"},
+        {"entry": "c0:duck", "prefix": "c0", "name": "duck", "network": "full duckduckgo.com", "title": "DuckDuckGo search",
+         "published": False, "signature": "none"}]
+    assert out["problems"] == ["sandbox-mcp: catalog not read: c1: 404"]
+    logged_in.runner.answers[("activity",)] = (0, '{"kind": "tool", "run": "r1"}\nnot json\n{"kind": "file"}\n', "")
+    status, out = logged_in("POST", "/api/hosts/ct1/activity", {"tail": 10})
+    assert status == 200 and out == {"events": [{"kind": "tool", "run": "r1"}, {"kind": "file"}]}
+
+
+def test_a_project_is_trusted_through_the_real_wizard_only_as_reviewed(tmp_path, monkeypatch):
+    """The web's review and trust against the real `sandbox-ai wizard trust` (a private HOME): the digest of the
+    review trusts the file; a file changed after the review is refused, nothing trusted."""
+    home = tmp_path / "home"
+    project = home / "src" / "web"
+    project.mkdir(parents=True)
+    config = project / ".sandbox-ai.json"
+    config.write_text(json.dumps({"version": 1, "agent": "codex", "options": ["--dns"]}))
+    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(tmp_path / "config"), "XDG_STATE_HOME": str(tmp_path / "state"),
+           "XDG_DATA_HOME": str(tmp_path / "data"), "PATH": os.environ.get("PATH", "")}
+
+    def runner(host, args, timeout=120, input=None):
+        run = subprocess.run([sys.executable, "-I", str(ROOT / "sandbox" / "main.py"), *args], capture_output=True,
+                             text=True, env=env, timeout=timeout)
+        return run.returncode, run.stdout, run.stderr
+    api = w.Api(runner)
+    shown = api.dispatch("POST", "/api/hosts/local/projects/review", {"path": str(config)})
+    assert shown["document"]["options"] == ["--dns"] and shown["trusted"] is False
+    config.write_text(json.dumps({"version": 1, "agent": "codex", "options": ["--egress-all-allow"]}))
+    with pytest.raises(w.Refused) as refused:
+        api.dispatch("POST", "/api/hosts/local/projects/trust", {"path": str(config), "digest": shown["digest"],
+                                                                 "confirm": True})
+    assert refused.value.status == 502 and "not what was reviewed" in str(refused.value)
+    assert api.dispatch("GET", "/api/hosts/local/projects", None) == [] or all(
+        e["path"] != str(config) for e in api.dispatch("GET", "/api/hosts/local/projects", None))
+    config.write_text(json.dumps({"version": 1, "agent": "codex", "options": ["--dns"]}))
+    assert "Trusted." in api.dispatch("POST", "/api/hosts/local/projects/trust", {"path": str(config),
+                                                                                  "digest": shown["digest"],
+                                                                                  "confirm": True})["output"]
+    assert api.dispatch("GET", "/api/hosts/local/projects", None) == [
+        {"path": str(config), "digest": shown["digest"], "state": "trusted"}]
+
+
+def test_the_starts_of_every_host_with_the_mcp_servers_that_do_not_run(logged_in):
+    """GET /api/starts/all: list --all --json on every host (a fan-out of its own, beside the plain list)."""
+    status, out = logged_in("GET", "/api/starts/all")
+    assert status == 200 and out["starts"] == [] and out["errors"] == {}
+    assert ("local", ["list", "--all", "--json"]) in logged_in.runner.calls
+    assert ("local", ["list", "--json"]) not in logged_in.runner.calls

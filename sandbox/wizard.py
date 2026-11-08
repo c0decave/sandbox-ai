@@ -1411,29 +1411,89 @@ def finish(p, project, target, answers, tokens, old=None):
     return target
 
 
-def trust(path, yes=False, prompt=None, out=print):
+def review(path):
+    """(key, data, document, problem) of the project configuration at PATH, read once: problem is why it cannot be
+    trusted (not UTF-8 JSON, control or invisible characters), else None."""
     path = launcher().config_key(path)
-    # Trust exactly the bytes shown, even if the file changes during the prompt.
     data = launcher().read_config_bytes(path)
     try:
         text = data.decode("utf-8")
         document = json.loads(text)
     except ValueError as exc:
-        out(f"{launcher().printable(path)} is not valid UTF-8 JSON: {launcher().printable(exc)}")
-        return 1
+        return path, data, None, f"{launcher().printable(path)} is not valid UTF-8 JSON: {launcher().printable(exc)}"
     # Raw bytes could hide options from view (carriage returns, escapes,
     # bidi controls); refuse those and show what will actually take effect.
     if not all(c in "\n\t" or c.isprintable() for c in text):
-        out(f"{launcher().printable(path)} contains control or invisible characters; refusing to trust it. "
-            "Remove them (e.g. Windows line endings) and try again.")
+        return path, data, document, (f"{launcher().printable(path)} contains control or invisible characters; "
+                                      "refusing to trust it. Remove them (e.g. Windows line endings) and try again.")
+    return path, data, document, None
+
+
+def trust(path, yes=False, prompt=None, out=print, digest=None):
+    """Show the configuration at PATH and trust exactly the bytes shown (asked first unless YES). With DIGEST (the
+    SHA-256 of what was reviewed elsewhere, e.g. `trust --show --json` in the web page) it is trusted only when the
+    file is exactly that now, without asking."""
+    if digest is not None and not re.fullmatch(r"[0-9a-f]{64}", digest):
+        out("--digest is a SHA-256 in hex (64 characters 0-9, a-f)")
+        return 2
+    # Trust exactly the bytes shown, even if the file changes during the prompt.
+    path, data, document, problem = review(path)
+    if problem:
+        out(problem)
+        return 1
+    found = hashlib.sha256(data).hexdigest()
+    if digest is not None and found != digest:
+        out(f"{launcher().printable(path)} is not what was reviewed (its SHA-256 is {found}, not {digest}): not "
+            "trusted. Review it again.")
         return 1
     out(f"{launcher().printable(path)} takes effect as:")
     out(json.dumps(document, indent=2, ensure_ascii=True))
-    if not yes and not Prompter(prompt or input, out).yes("Trust this configuration"):
+    if digest is None and not yes and not Prompter(prompt or input, out).yes("Trust this configuration"):
         out("Not trusted.")
         return 1
-    launcher().trust_config(path, hashlib.sha256(data).hexdigest())
+    launcher().trust_config(path, found)
     out("Trusted.")
+    return 0
+
+
+def show(path, as_json=False, out=print):
+    """What trusting PATH would trust, nothing trusted: {"path", "digest", "document", "trusted", "problem"} with
+    --json (document null when it is no JSON; trusted: whether the trusted list has exactly this digest)."""
+    path, data, document, problem = review(path)
+    digest = hashlib.sha256(data).hexdigest()
+    known = launcher().trusted_configs().get(str(path))
+    found = {"path": str(path), "digest": digest, "document": document, "trusted": known == digest,
+             "trusted_digest": known, "problem": problem}
+    if as_json:
+        out(json.dumps(found, indent=2))
+        return 0
+    out(problem or f"{launcher().printable(path)} takes effect as:")
+    if not problem:
+        out(json.dumps(document, indent=2, ensure_ascii=True))
+    out(f"SHA-256 {digest} ({'trusted' if found['trusted'] else 'changed since it was trusted' if known else 'not trusted'})")
+    return 0
+
+
+def trusted_list(as_json=False, out=print):
+    """The trusted project configurations: [{"path", "digest", "state"}], state trusted (the file is that now),
+    changed, missing or unreadable."""
+    found = []
+    for key, digest in sorted(launcher().trusted_configs().items()):
+        try:
+            now = hashlib.sha256(launcher().read_config_bytes(key)).hexdigest()
+            state = "trusted" if now == digest else "changed"
+        except FileNotFoundError:
+            state = "missing"
+        except (OSError, ValueError):
+            state = "unreadable"
+        found.append({"path": key, "digest": digest, "state": state})
+    if as_json:
+        out(json.dumps(found, indent=2))
+        return 0
+    if not found:
+        out("No trusted project configurations.")
+    for entry in found:
+        out(f"{entry['state']:<10}  {launcher().printable(entry['path'])}")
     return 0
 
 
@@ -1454,8 +1514,13 @@ def cli(argv):
     edit_parser.add_argument("path", nargs="?", type=Path, default=Path("."),
                              help=f"Project directory or its {launcher().CONFIG_NAME} (default: current directory)")
     trust_parser = commands.add_parser("trust", help="Review and trust a project configuration")
-    trust_parser.add_argument("path", type=Path)
+    trust_parser.add_argument("path", type=Path, nargs="?")
     trust_parser.add_argument("-y", "--yes", action="store_true", help="Trust without asking")
+    trust_parser.add_argument("--show", action="store_true", help="Only show what would be trusted, and its SHA-256")
+    trust_parser.add_argument("--digest", metavar="SHA256",
+                              help="Trust only if the file's SHA-256 is exactly this (what was reviewed); no question")
+    trust_parser.add_argument("--list", action="store_true", help="The trusted project configurations")
+    trust_parser.add_argument("-j", "--json", action="store_true", help="with --show or --list: as JSON")
     forget_parser = commands.add_parser("forget", help="Remove a configuration from the trusted list")
     forget_parser.add_argument("path", type=Path)
     models = commands.add_parser("models", help="List the models of a local LLM server, or of one registered "
@@ -1466,10 +1531,22 @@ def cli(argv):
     models.add_argument("-p", "--port", type=int)
     models.add_argument("-s", "--sort", choices=["name", "size", "loaded"], default="loaded")
     a = parser.parse_args(argv)
-    if a.command in (None, "new", "edit", "trust"):
+    if a.command in (None, "new", "edit") or a.command == "trust" and not (a.show or a.list or a.digest):
         enable_line_editing()
     if a.command == "trust":
-        return trust(a.path, a.yes)
+        if a.list:
+            if a.path is not None or a.show or a.digest or a.yes:
+                parser.error("trust --list takes no PATH, --show, --digest or --yes")
+            return trusted_list(a.json)
+        if a.path is None:
+            parser.error("trust needs PATH (or --list)")
+        if a.show:
+            if a.digest or a.yes:
+                parser.error("--show trusts nothing: no --digest or --yes with it")
+            return show(a.path, a.json)
+        if a.json:
+            parser.error("--json goes with --show or --list")
+        return trust(a.path, a.yes, digest=a.digest)
     if a.command == "forget":
         return forget(a.path)
     if a.command == "models":
