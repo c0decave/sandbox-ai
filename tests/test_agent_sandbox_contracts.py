@@ -3317,6 +3317,70 @@ def test_launch(scenario, tmp_path, monkeypatch, capsys):
         assert plan["agent"] == "codex" and (plan["gui"] is not None) == (scenario == "edge")
 
 
+def test_socket_locations(scenario, tmp_path, monkeypatch):
+    if scenario == "happy":
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
+        found = dict(s.socket_locations())
+        assert (tmp_path / "run").resolve() in found and Path(f"/run/user/{os.getuid()}").resolve() in found
+    elif scenario == "sad":
+        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+        assert all("XDG_RUNTIME_DIR" not in label for _, label in s.socket_locations())
+    else:
+        monkeypatch.setenv("TMPDIR", str(tmp_path / "t"))
+        assert (tmp_path / "t" / f"sandbox-ai-{os.getuid()}").resolve() in dict(s.socket_locations())
+
+
+def test_check_socket_location(scenario, tmp_path, monkeypatch):
+    """Security review round 2: a folder of the user's sockets (the shared SSH connections among them) never reaches
+    a sandbox, not even read-only."""
+    run = tmp_path / "run"
+    (run / "sandbox-ai" / "ssh").mkdir(parents=True)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(run))
+    if scenario == "happy":
+        s.check_socket_location((tmp_path / "project").resolve(), "Workspace")
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="lies in .*a socket there"):
+            s.check_socket_location((run / "sandbox-ai" / "ssh").resolve(), "--mount")
+    else:
+        with pytest.raises(ValueError, match="is or holds"):
+            s.check_socket_location(tmp_path.resolve(), "Workspace")  # holds it
+
+
+MOUNTINFO_SAMPLE = (
+    "22 1 0:21 / / rw - ext4 /dev/sda1 rw\n"
+    "40 22 0:5 / /srv/chroot/proc rw - proc proc rw\n"
+    "41 22 0:6 / /srv/chroot/sys rw - sysfs sysfs rw\n"
+    "42 22 0:7 / /srv/other\\040dir/proc rw - proc proc rw\n"
+    "43 22 0:8 / /srv/chroot/data rw - ext4 /dev/sdb1 rw\n")
+
+
+def test_kernel_mounts_below(scenario, tmp_path):
+    table = tmp_path / "mountinfo"
+    table.write_text(MOUNTINFO_SAMPLE)
+    if scenario == "happy":
+        assert s.kernel_mounts_below(Path("/srv/chroot"), table) == [("/srv/chroot/proc", "proc"),
+                                                                       ("/srv/chroot/sys", "sysfs")]
+    elif scenario == "sad":
+        assert s.kernel_mounts_below(Path("/srv/chroot/data"), table) == []
+        assert s.kernel_mounts_below(Path("/srv/chroot"), tmp_path / "missing") == []
+    else:
+        assert s.kernel_mounts_below(Path("/srv/other dir"), table) == [("/srv/other dir/proc", "proc")]
+        assert s.kernel_mounts_below(Path("/srv/chro"), table) == [], "a prefix of a name is not a parent"
+
+
+def test_check_kernel_mounts(scenario, tmp_path):
+    table = tmp_path / "mountinfo"
+    table.write_text(MOUNTINFO_SAMPLE)
+    if scenario == "happy":
+        s.check_kernel_mounts(Path("/srv/chroot/data"), "Workspace", table)
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="kernel's own: /srv/chroot/proc \\(proc\\)"):
+            s.check_kernel_mounts(Path("/srv/chroot"), "Workspace", table)
+    else:
+        with pytest.raises(ValueError, match="--mount"):
+            s.check_kernel_mounts(Path("/srv"), "--mount", table)
+
+
 def test_check_workspace_scope(scenario, tmp_path, monkeypatch):
     """Review finding: HOME, /, the temp directory or the launcher's own checkout must not become the workspace."""
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
@@ -5852,7 +5916,7 @@ def test_runs_dir(scenario, tmp_path, monkeypatch):
 
 
 def test_register_run(scenario, tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))  # beside the workspace: never around it
     a = s.parse_args(["claude", "--workspace", str(tmp_path / "app")])
     s.validate(a)
     if scenario == "happy":

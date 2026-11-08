@@ -3118,6 +3118,73 @@ def default_log_dir(project):
     return state / "sandbox-ai" / "logs" / f"{project.name or 'root'}-{digest}"
 
 
+# The kernel's own file systems (also read-only they hand out the host: /proc/PID/root, cgroup files, devices).
+KERNEL_FILESYSTEMS = frozenset({"proc", "sysfs", "cgroup", "cgroup2", "devtmpfs", "devpts", "mqueue", "debugfs",
+                                "tracefs", "securityfs", "bpf", "configfs", "fusectl", "pstore", "efivarfs",
+                                "binfmt_misc", "hugetlbfs"})
+
+
+def socket_locations():
+    """[(path, label)]: the folders that hold the user's sockets (XDG_RUNTIME_DIR, /run/user/UID: the session's bus,
+    Podman's and systemd's sockets, GnuPG's agent; sandbox-ai's own: the runs' control sockets and the shared SSH
+    connections to your hosts, also where hosts.py keeps them without XDG_RUNTIME_DIR). A socket can be connected
+    through a read-only mount too, so nothing given to a sandbox may be, hold or lie in one."""
+    found = []
+    if os.environ.get("XDG_RUNTIME_DIR"):
+        found.append((Path(os.environ["XDG_RUNTIME_DIR"]), "XDG_RUNTIME_DIR (the user's sockets)"))
+    found.append((Path(f"/run/user/{os.getuid()}"), "/run/user/UID (the user's sockets)"))
+    found.append((Path.home() / "Library" / "Caches" / "sandbox-ai", "sandbox-ai's SSH connections (macOS)"))
+    for temporary in {os.environ.get("TMPDIR") or "/tmp", "/tmp"}:
+        found.append((Path(temporary) / f"sandbox-ai-{os.getuid()}", "sandbox-ai's SSH connections"))
+    result = []
+    for path, label in found:
+        try:
+            result.append((Path(os.path.normpath(path.expanduser().absolute())).resolve(), label))
+        except (OSError, RuntimeError):
+            continue
+    return result
+
+
+def check_socket_location(path, option):
+    """Refuse a host PATH (resolved) given to a sandbox, read-only or not, that is, holds or lies in a folder of the
+    user's sockets (socket_locations)."""
+    for folder, label in socket_locations():
+        if path == folder or folder in path.parents or path in folder.parents and path != Path("/"):
+            raise ValueError(f"{option} {path} {'lies in' if folder in path.parents else 'is or holds'} {folder}, "
+                             f"{label}: a socket there reaches what runs as you (also on your other hosts) even "
+                             "through a read-only mount. Use a project directory.")
+
+
+def kernel_mounts_below(path, mountinfo=Path("/proc/self/mountinfo")):
+    """[(mount point, file system type)] of the kernel's own file systems (KERNEL_FILESYSTEMS) at or below PATH
+    (resolved) in this mount namespace: Podman's and Bubblewrap's binds are recursive, so a procfs, sysfs or cgroup
+    mounted below a workspace (a chroot, a build root) would reach the agent. An unreadable table: [] (the start
+    goes on as before; the live add refuses on its own)."""
+    try:
+        text = Path(mountinfo).read_text(errors="replace")
+    except OSError:
+        return []
+    prefix = str(path).rstrip("/") + "/"
+    found = []
+    for line in text.splitlines():
+        head, separator, tail = line.partition(" - ")
+        fields, kind = head.split(), tail.split()[:1]
+        if not separator or len(fields) < 5 or not kind or kind[0] not in KERNEL_FILESYSTEMS:
+            continue
+        point = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), fields[4])
+        if point == str(path) or point.startswith(prefix):
+            found.append((point, kind[0]))
+    return found
+
+
+def check_kernel_mounts(path, option, mountinfo=Path("/proc/self/mountinfo")):
+    found = kernel_mounts_below(path, mountinfo)
+    if found:
+        shown = ", ".join(f"{point} ({kind})" for point, kind in found[:5]) + (" ..." if len(found) > 5 else "")
+        raise ValueError(f"{option} {path} holds file systems of the kernel's own: {shown}; the sandbox would get "
+                         "them with it (its mounts are recursive). Unmount them, or give a directory beside them.")
+
+
 def check_workspace_scope(workspace):
     """Refuse workspaces that would hand the agent the launcher itself or the host user's world."""
     workspace = Path(workspace)
@@ -3139,6 +3206,8 @@ def check_workspace_scope(workspace):
             raise ValueError(f"Workspace {workspace} {'lies in' if tree in workspace.parents else 'is or holds'} "
                              f"{tree}: the kernel's and the devices' trees are never a workspace; use --device for "
                              "devices.")
+    check_socket_location(workspace, "Workspace")
+    check_kernel_mounts(workspace, "Workspace")
     check_private_location(workspace, "Workspace")
     check_package_location(workspace, "Workspace")
 
@@ -3243,12 +3312,16 @@ def check_host_sources(a):
     check_host_source(a, exposed_registry(), "The registry of exposed directories (XDG_STATE_HOME)")
     for value, src, _, mode in mounts:
         check_planted(value.rsplit(":", 2)[0], "--mount", before)
+        # Read-only too: a socket can be connected through it, a kernel file system read.
+        check_socket_location(Path(src).resolve(), "--mount")
+        check_kernel_mounts(Path(src).resolve(), "--mount")
         if mode == "rw":
             check_private_location(Path(src), "--mount")
             check_package_location(Path(src).resolve(), "--mount")
     if a.state_dir:
         check_planted(a.state_dir, "--state-dir", before)
         check_private_location(a.state_dir.expanduser().resolve(), "--state-dir")
+        check_socket_location(a.state_dir.expanduser().resolve(), "--state-dir")
         check_package_location(a.state_dir.expanduser().resolve(), "--state-dir")
     if a.log_dir:
         check_planted(a.log_dir, "--log-dir", before)

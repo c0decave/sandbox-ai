@@ -222,7 +222,7 @@ def test_running_finds_runs_registered_under_another_runtime_dir(tmp_path, monke
 
 
 def test_register_run_records_the_start_time_of_its_pid(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))  # beside the workspace: never around it
     l = net.launcher()
     a = l.parse_args(["claude", "--workspace", str(tmp_path / "app")])
     l.validate(a)
