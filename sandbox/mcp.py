@@ -61,6 +61,8 @@ import threading
 import time
 from types import SimpleNamespace
 
+LOADING = threading.RLock()  # the lazily loaded helper modules below
+
 HERE = Path(__file__).resolve().parent
 MCP_NAME_PATTERN = r"[A-Za-z0-9_-]{1,32}"
 PROC = Path("/proc")
@@ -94,8 +96,11 @@ def launcher():
     global _launcher
     if _launcher is None:
         spec = importlib.util.spec_from_file_location("agent_sandbox_for_mcp", HERE / "agent_sandbox.py")
-        _launcher = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_launcher)
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _launcher is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _launcher = loaded
     return _launcher
 
 
@@ -207,8 +212,11 @@ def rootfs_module():
     global _rootfs
     if _rootfs is None:
         spec = importlib.util.spec_from_file_location("mcp_rootfs_for_mcp", HERE / "mcp_rootfs.py")
-        _rootfs = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_rootfs)
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _rootfs is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _rootfs = loaded
     return _rootfs
 
 
@@ -343,8 +351,11 @@ def release_keys():
     global _keys
     if _keys is None:
         spec = importlib.util.spec_from_file_location("release_keys_for_mcp", HERE / "release_keys.py")
-        _keys = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_keys)
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _keys is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _keys = loaded
     return _keys
 
 
@@ -981,8 +992,11 @@ def starts_module():
     global _starts
     if _starts is None:
         spec = importlib.util.spec_from_file_location("starts_for_mcp", HERE / "starts.py")
-        _starts = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_starts)
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _starts is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _starts = loaded
     return _starts
 
 
@@ -1127,8 +1141,11 @@ def net_module():
     global _net
     if _net is None:
         spec = importlib.util.spec_from_file_location("net_for_mcp", HERE / "net.py")
-        _net = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_net)
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _net is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _net = loaded
     return _net
 
 

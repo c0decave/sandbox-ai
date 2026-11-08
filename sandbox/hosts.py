@@ -58,6 +58,8 @@ import tempfile
 import threading
 import time
 
+LOADING = threading.RLock()  # the lazily loaded helper modules below
+
 LOCAL = "local"
 NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 TARGET = re.compile(r"(?:[A-Za-z0-9_][A-Za-z0-9_.-]{0,31}@)?(?:[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])")
@@ -101,8 +103,11 @@ def printable(text):
         import importlib.util
         spec = importlib.util.spec_from_file_location("agent_sandbox_for_hosts",
                                                       Path(__file__).resolve().parent / "agent_sandbox.py")
-        _launcher = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_launcher)
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _launcher is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _launcher = loaded
     return _launcher.printable(str(text))
 
 

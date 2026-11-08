@@ -18,6 +18,9 @@ import os
 from pathlib import Path
 import re
 import sys
+import threading
+
+LOADING = threading.RLock()  # the lazily loaded helper modules below
 
 HERE = Path(__file__).resolve().parent
 _launcher = None
@@ -27,8 +30,11 @@ def launcher():
     global _launcher
     if _launcher is None:
         spec = importlib.util.spec_from_file_location("agent_sandbox_for_logs", HERE / "agent_sandbox.py")
-        _launcher = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_launcher)
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _launcher is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _launcher = loaded
     return _launcher
 
 

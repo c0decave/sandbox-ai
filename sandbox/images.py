@@ -38,6 +38,9 @@ import subprocess
 import sys
 import tempfile
 import time
+import threading
+
+LOADING = threading.RLock()  # the lazily loaded helper modules below
 
 HERE = Path(__file__).resolve().parent
 AGENTS = ("claude", "codex", "opencode")
@@ -152,8 +155,11 @@ def launcher():
     global _launcher
     if _launcher is None:
         spec = importlib.util.spec_from_file_location("agent_sandbox_for_images", HERE / "agent_sandbox.py")
-        _launcher = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_launcher)
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _launcher is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _launcher = loaded
     return _launcher
 
 
@@ -927,8 +933,11 @@ def user_bus(uid=None):
     global _doctor
     if _doctor is None:
         spec = importlib.util.spec_from_file_location("sandbox_ai_doctor_for_images", HERE / "doctor.py")
-        _doctor = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_doctor)
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _doctor is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _doctor = loaded
     return _doctor.user_bus(uid) is not None
 
 

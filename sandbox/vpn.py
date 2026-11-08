@@ -50,6 +50,8 @@ import urllib.parse
 import urllib.request
 import uuid
 
+LOADING = threading.RLock()  # the lazily loaded helper modules below
+
 HERE = Path(__file__).resolve().parent
 VPN_IMAGE = "localhost/sandbox-ai-vpn:latest"
 PROFILE_NAME = r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}"  # = agent_sandbox.VPN_PROFILE_NAME
@@ -74,8 +76,11 @@ def runtime():
     global _runtime
     if _runtime is None:
         spec = importlib.util.spec_from_file_location("sandbox_vpn_runtime", HERE / "vpn_runtime.py")
-        _runtime = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_runtime)
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _runtime is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _runtime = loaded
     return _runtime
 
 
@@ -84,8 +89,11 @@ def launcher():
     global _launcher
     if _launcher is None:
         spec = importlib.util.spec_from_file_location("agent_sandbox_for_vpn", HERE / "agent_sandbox.py")
-        _launcher = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_launcher)
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _launcher is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _launcher = loaded
     return _launcher
 
 

@@ -19,6 +19,7 @@ reach only the connection proxy, never the sandbox; the list holds names, addres
 The list is ~/.config/sandbox-ai/identities.json (mode 0600). Standard library only.
 """
 import argparse
+import contextlib
 import importlib.util
 import json
 import os
@@ -27,6 +28,21 @@ import re
 import sys
 
 HERE = Path(__file__).resolve().parent
+
+
+_filelock = None
+
+
+def settings_lock(file):
+    """The lock of a read-modify-write of the settings file FILE (filelock.py): commands that run at the same time
+    never lose each other's change."""
+    global _filelock
+    if _filelock is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_filelock", HERE / "filelock.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        _filelock = loaded
+    return _filelock.locked(file)
 NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 SECRET = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 USER = re.compile(r"[A-Za-z0-9._-]{1,64}")
@@ -40,8 +56,9 @@ def module(name):
     """A sibling module of sandbox-ai's (agent_sandbox, git_logins, publish_logins), loaded once."""
     if name not in _modules:
         spec = importlib.util.spec_from_file_location(f"sandbox_ai_identities_{name}", HERE / f"{name}.py")
-        _modules[name] = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_modules[name])
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        _modules[name] = loaded  # published only once loaded: another thread never sees a half-made module
     return _modules[name]
 
 
@@ -171,6 +188,16 @@ def main(argv, out=print):
     removed = commands.add_parser("remove")
     removed.add_argument("identity")
     args = p.parse_args(argv)
+    try:
+        with settings_lock(path()) if args.command in ("add", "set", "login", "logout", "publish", "unpublish", "remove") else contextlib.nullcontext():
+            return run_command(args, out)
+    except ValueError as exc:  # the lock not taken in time
+        print(f"sandbox-ai identities: {exc}", file=sys.stderr)
+        return 1
+
+
+def run_command(args, out):
+    """One command of main (the changing ones under the file's lock, from reading it to writing it back)."""
     try:
         identities = load()
         name = getattr(args, "identity", None)

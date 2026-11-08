@@ -42,6 +42,8 @@ import tempfile
 import threading
 import time
 
+LOADING = threading.RLock()  # the lazily loaded helper modules below
+
 HERE = Path(__file__).resolve().parent
 PROC = Path("/proc")
 # Where a login session's runtime directory lives (XDG_RUNTIME_DIR is /run/user/UID there).
@@ -58,8 +60,11 @@ def textout():
     global _textout
     if _textout is None:
         spec = importlib.util.spec_from_file_location("sandbox_ai_textout_for_net", HERE / "textout.py")
-        _textout = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_textout)
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _textout is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _textout = loaded
     return _textout
 
 
@@ -67,8 +72,11 @@ def launcher():
     global _launcher
     if _launcher is None:
         spec = importlib.util.spec_from_file_location("agent_sandbox_for_net", HERE / "agent_sandbox.py")
-        _launcher = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_launcher)
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _launcher is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _launcher = loaded
     return _launcher
 
 
@@ -974,8 +982,11 @@ def approvals_module():
     global _approvals_module
     if _approvals_module is None:
         spec = importlib.util.spec_from_file_location("sandbox_approvals_for_net", HERE / "approvals.py")
-        _approvals_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_approvals_module)
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _approvals_module is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _approvals_module = loaded
     return _approvals_module
 
 
@@ -1076,8 +1087,11 @@ def load_workspaces_module():
     global _workspaces_module
     if _workspaces_module is None:
         spec = importlib.util.spec_from_file_location("sandbox_workspaces_for_net", HERE / "workspaces.py")
-        _workspaces_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_workspaces_module)
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _workspaces_module is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _workspaces_module = loaded
     return _workspaces_module
 
 

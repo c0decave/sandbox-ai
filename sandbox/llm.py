@@ -22,6 +22,7 @@ the wire, so the agent only ever sees a placeholder. Endpoints are kept in ~/.co
 Standard library only.
 """
 import argparse
+import contextlib
 import importlib.util
 import ipaddress
 import json
@@ -38,6 +39,21 @@ import urllib.error
 import urllib.request
 
 HERE = Path(__file__).resolve().parent
+
+
+_filelock = None
+
+
+def settings_lock(file):
+    """The lock of a read-modify-write of the settings file FILE (filelock.py): commands that run at the same time
+    never lose each other's change."""
+    global _filelock
+    if _filelock is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_filelock", HERE / "filelock.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        _filelock = loaded
+    return _filelock.locked(file)
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
 SECRET = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 HEADER = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,63}")
@@ -616,12 +632,15 @@ def endpoint_models(endpoint, get=None, client=None):
 
 
 def remember_models(name, names):
-    store = load_store()
-    record = store["endpoints"].get(name)
-    if isinstance(record, dict):
-        record["models"] = names[:500]
-        record["checked"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        save_store(store)
+    """The models NAME lists now, in its record: read and written back under the store's lock, and only while NAME
+    is still there (an `llm remove` meanwhile is never undone)."""
+    with settings_lock(store_path()):
+        store = load_store()
+        record = store["endpoints"].get(name)
+        if isinstance(record, dict):
+            record["models"] = names[:500]
+            record["checked"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            save_store(store)
 
 
 # --- which agent can use which server --------------------------------------------------------------------
@@ -1269,7 +1288,8 @@ def main(argv, out=print, get=None):
     args = parser.parse_args(argv)
     try:
         if args.command == "add":
-            return add(args, out, get)
+            with settings_lock(store_path()):  # from reading the store to writing it back (and the CA)
+                return add(args, out, get)
         if args.command == "list":
             store = load_store()
             endpoints = []
@@ -1297,12 +1317,13 @@ def main(argv, out=print, get=None):
                 out(line)
             return 0
         if args.command == "remove":
-            store = load_store()
-            if store["endpoints"].pop(args.name, None) is None:
-                out(f"{printable(args.name)} was not there")
-                return 1
-            save_store(store)
-            (ca_dir() / f"{args.name}.pem").unlink(missing_ok=True)
+            with settings_lock(store_path()):
+                store = load_store()
+                if store["endpoints"].pop(args.name, None) is None:
+                    out(f"{printable(args.name)} was not there")
+                    return 1
+                save_store(store)
+                (ca_dir() / f"{args.name}.pem").unlink(missing_ok=True)
             out(f"{args.name} removed")
             return 0
         if args.command == "models":

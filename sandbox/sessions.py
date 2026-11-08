@@ -36,6 +36,9 @@ import secrets
 import tempfile
 import time
 from types import SimpleNamespace
+import threading
+
+LOADING = threading.RLock()  # the lazily loaded helper modules below
 
 HERE = Path(__file__).resolve().parent
 PROC = Path("/proc")
@@ -67,9 +70,12 @@ def starts():
     global _starts
     if _starts is None:
         spec = importlib.util.spec_from_file_location("sandbox_starts_for_sessions", HERE / "starts.py")
-        _starts = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_starts)
-        _starts._modules["agent_sandbox"] = launcher()
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _starts is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                loaded._modules["agent_sandbox"] = launcher()
+                _starts = loaded
     return _starts
 
 
@@ -77,8 +83,11 @@ def launcher():
     global _launcher
     if _launcher is None:
         spec = importlib.util.spec_from_file_location("agent_sandbox_for_sessions", HERE / "agent_sandbox.py")
-        _launcher = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_launcher)
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _launcher is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _launcher = loaded
     return _launcher
 
 

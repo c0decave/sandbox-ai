@@ -25,6 +25,9 @@ import socket
 import sys
 import tempfile
 import urllib.request
+import threading
+
+LOADING = threading.RLock()  # the lazily loaded helper modules below
 
 HERE = Path(__file__).resolve().parent
 SERVERS = {"ollama": ("Ollama", 11434), "lmstudio": ("LM Studio", 1234), "llamacpp": ("llama.cpp", 8080),
@@ -96,8 +99,11 @@ def llm():
     global _llm
     if _llm is None:
         spec = importlib.util.spec_from_file_location("sandbox_llm_for_wizard", HERE / "llm.py")
-        _llm = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_llm)
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _llm is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _llm = loaded
     return _llm
 
 
@@ -105,8 +111,11 @@ def launcher():
     global _launcher
     if _launcher is None:
         spec = importlib.util.spec_from_file_location("agent_sandbox_for_wizard", HERE / "agent_sandbox.py")
-        _launcher = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_launcher)
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _launcher is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _launcher = loaded
     return _launcher
 
 
@@ -765,8 +774,11 @@ def load_mcp():
     global _mcp
     if _mcp is None:
         spec = importlib.util.spec_from_file_location("sandbox_mcp_for_wizard", HERE / "mcp.py")
-        _mcp = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_mcp)
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _mcp is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _mcp = loaded
     return _mcp
 
 

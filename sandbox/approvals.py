@@ -42,6 +42,8 @@ import threading
 import time
 import urllib.parse
 
+LOADING = threading.RLock()  # the lazily loaded helper modules below
+
 HERE = Path(__file__).resolve().parent
 
 
@@ -53,8 +55,11 @@ def textout():
     global _textout
     if _textout is None:
         spec = importlib.util.spec_from_file_location("sandbox_ai_textout_for_approvals", Path(__file__).resolve().parent / "textout.py")
-        _textout = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_textout)
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _textout is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _textout = loaded
     return _textout
 ID = re.compile(r"[0-9]{1,12}-[0-9]{1,10}-[0-9]{1,10}")
 REQUEST_LIMIT = 8192  # one browser request from the sandbox: {"url": ...}

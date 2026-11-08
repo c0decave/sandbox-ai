@@ -30,6 +30,8 @@ import time
 import urllib.parse
 import uuid
 
+LOADING = threading.RLock()  # the lazily loaded helper modules below
+
 HERE = Path(__file__).resolve().parent
 
 
@@ -2218,9 +2220,12 @@ def load_git_logins_module():
     global _git_logins_module
     if _git_logins_module is None:
         spec = importlib.util.spec_from_file_location("sandbox_ai_git_logins", HERE / "git_logins.py")
-        _git_logins_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_git_logins_module)
-        _git_logins_module._launcher = RunningLauncher()
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _git_logins_module is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                loaded._launcher = RunningLauncher()
+                _git_logins_module = loaded
     return _git_logins_module
 
 
@@ -2252,11 +2257,14 @@ def load_identities_module():
     global _identities_module
     if _identities_module is None:
         spec = importlib.util.spec_from_file_location("sandbox_ai_identities", HERE / "identities.py")
-        _identities_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_identities_module)
-        _identities_module._modules["agent_sandbox"] = RunningLauncher()
-        _identities_module._modules["git_logins"] = load_git_logins_module()
-        _identities_module._modules["publish_logins"] = load_publish_logins_module()
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _identities_module is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                loaded._modules["agent_sandbox"] = RunningLauncher()
+                loaded._modules["git_logins"] = load_git_logins_module()
+                loaded._modules["publish_logins"] = load_publish_logins_module()
+                _identities_module = loaded
     return _identities_module
 
 
@@ -5619,9 +5627,12 @@ def load_publish_logins_module():
     global _publish_logins_module
     if _publish_logins_module is None:
         spec = importlib.util.spec_from_file_location("sandbox_ai_publish_logins", HERE / "publish_logins.py")
-        _publish_logins_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_publish_logins_module)
-        _publish_logins_module._launcher = RunningLauncher()
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _publish_logins_module is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                loaded._launcher = RunningLauncher()
+                _publish_logins_module = loaded
     return _publish_logins_module
 
 
@@ -7676,8 +7687,11 @@ def load_devices_module():
     global _devices_module
     if _devices_module is None:
         spec = importlib.util.spec_from_file_location("sandbox_devices", HERE / "devices.py")
-        _devices_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_devices_module)
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _devices_module is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _devices_module = loaded
     return _devices_module
 
 
@@ -7901,9 +7915,12 @@ def load_presets_module():
     global _presets_module
     if _presets_module is None:
         spec = importlib.util.spec_from_file_location("sandbox_ai_presets", HERE / "presets.py")
-        _presets_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_presets_module)
-        _presets_module.EXPOSED_BEFORE = exposed_before  # where sandboxes wrote: no preset directory there
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _presets_module is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                loaded.EXPOSED_BEFORE = exposed_before  # where sandboxes wrote: no preset directory there
+                _presets_module = loaded
     return _presets_module
 
 

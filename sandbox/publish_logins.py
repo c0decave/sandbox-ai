@@ -24,6 +24,7 @@ The list is ~/.config/sandbox-ai/publish-logins.json (mode 0600): kinds, hosts a
 Git pushes are sandbox-ai git-logins. Standard library only.
 """
 import argparse
+import contextlib
 import importlib.util
 import json
 import os
@@ -31,8 +32,26 @@ from pathlib import Path
 import re
 import sys
 import urllib.parse
+import threading
+
+LOADING = threading.RLock()  # the lazily loaded helper modules below
 
 HERE = Path(__file__).resolve().parent
+
+
+_filelock = None
+
+
+def settings_lock(file):
+    """The lock of a read-modify-write of the settings file FILE (filelock.py): commands that run at the same time
+    never lose each other's change."""
+    global _filelock
+    if _filelock is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_filelock", HERE / "filelock.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        _filelock = loaded
+    return _filelock.locked(file)
 SECRET = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 HOST = re.compile(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}")
 WRITES = ["POST", "PUT", "PATCH", "DELETE"]
@@ -90,8 +109,11 @@ def launcher():
     global _launcher
     if _launcher is None:
         spec = importlib.util.spec_from_file_location("agent_sandbox_for_publish_logins", HERE / "agent_sandbox.py")
-        _launcher = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_launcher)
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _launcher is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _launcher = loaded
     return _launcher
 
 
@@ -263,6 +285,16 @@ def main(argv, out=print):
     checked.add_argument("kind", nargs="?", choices=sorted(KINDS))
     commands.add_parser("kinds")
     args = p.parse_args(argv)
+    try:
+        with settings_lock(path()) if args.command in ("add", "remove") else contextlib.nullcontext():
+            return run_command(args, out)
+    except ValueError as exc:  # the lock not taken in time
+        print(f"sandbox-ai publish-logins: {exc}", file=sys.stderr)
+        return 1
+
+
+def run_command(args, out):
+    """One command of main (the changing ones under the file's lock, from reading it to writing it back)."""
     try:
         if args.command == "kinds":
             for kind, spec in KINDS.items():

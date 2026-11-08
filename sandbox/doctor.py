@@ -17,6 +17,9 @@ import stat
 import subprocess
 import sys
 import time
+import threading
+
+LOADING = threading.RLock()  # the lazily loaded helper modules below
 
 HERE = Path(__file__).resolve().parent
 AGENTS = ("codex", "claude", "opencode")
@@ -28,16 +31,20 @@ def launcher():
     global _launcher
     if _launcher is None:
         spec = importlib.util.spec_from_file_location("agent_sandbox_for_doctor", HERE / "agent_sandbox.py")
-        _launcher = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_launcher)
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _launcher is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _launcher = loaded
     return _launcher
 
 
 def textout():
     if "textout" not in _modules:
         spec = importlib.util.spec_from_file_location("sandbox_ai_textout_for_doctor", HERE / "textout.py")
-        _modules["textout"] = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_modules["textout"])
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        _modules["textout"] = loaded  # published only once loaded
     return _modules["textout"]
 
 
@@ -385,8 +392,9 @@ def check_installation():
 def kits():
     if "kits" not in _modules:
         spec = importlib.util.spec_from_file_location("sandbox_kits_for_doctor", HERE / "kits.py")
-        _modules["kits"] = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_modules["kits"])
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        _modules["kits"] = loaded  # published only once loaded
     return _modules["kits"]
 
 
