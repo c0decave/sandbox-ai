@@ -8,7 +8,9 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
+import threading
 
 import pytest
 
@@ -181,7 +183,7 @@ def test_stage_copies_follows_links_and_keeps_scripts_executable(tmp_path):
     checkout = make(tmp_path / "checkout/tool", {"SKILL.md": "tool", "scripts/helper.sh": "#!/bin/sh\necho hi\n",
                                                  "docs/x.txt": "x"})
     (checkout / "scripts/helper.sh").chmod(0o700)
-    (checkout / "docs/same").symlink_to(checkout / "scripts", target_is_directory=True)  # inside: followed
+    (checkout / "docs/same").symlink_to(checkout / "scripts", target_is_directory=True)  # below the entry: skipped
     (tmp_path / "secret").write_text("host secret")
     (checkout / "docs/key").symlink_to(tmp_path / "secret")  # out of the entry: skipped
     kit = make(tmp_path / "kit", {"skills/a/SKILL.md": "a", "commands/c.md": "c"})
@@ -196,10 +198,11 @@ def test_stage_copies_follows_links_and_keeps_scripts_executable(tmp_path):
     assert staged.read_text().startswith("#!/bin/sh") and not staged.is_symlink()
     assert staged.stat().st_mode & 0o777 == 0o755
     assert (tmp_path / "staging/commands/c.md").stat().st_mode & 0o777 == 0o644
-    assert (tmp_path / "staging/skills/tool/docs/same/helper.sh").is_file()
+    assert (tmp_path / "staging/skills/tool/docs/x.txt").read_text() == "x"
+    assert not (tmp_path / "staging/skills/tool/docs/same").exists()
     assert not (tmp_path / "staging/skills/tool/docs/key").exists()
     assert not (tmp_path / "staging/skills/a/up").exists()
-    assert sum("symlink out of its kit entry" in n for n in notes) == 2
+    assert sum("a symlink below a kit entry is not followed" in n for n in notes) == 3
     # The kit is untouched by staging.
     assert (kit / "skills/a/SKILL.md").read_text() == "a"
 
@@ -208,9 +211,17 @@ def test_stage_refuses_loops_limits_and_unsafe_sources(tmp_path, monkeypatch):
     kit = make(tmp_path / "kit", {"skills/a/SKILL.md": "a"})
     (kit / "skills/a/loop").symlink_to(kit / "skills/a", target_is_directory=True)
     (tmp_path / "s1").mkdir()
-    with pytest.raises(ValueError, match="links back"):
-        k.stage("claude", k.scan("claude", [("kit", kit)]), tmp_path / "s1", check_nothing)
+    _, notes = k.stage("claude", k.scan("claude", [("kit", kit)]), tmp_path / "s1", check_nothing)
+    assert any("loop skipped: a symlink" in n for n in notes) and not (tmp_path / "s1/skills/a/loop").exists()
     (kit / "skills/a/loop").unlink()
+    deep = kit / "skills/a"
+    for _ in range(k.KIT_DEPTH):
+        deep = deep / "d"
+    deep.mkdir(parents=True)
+    (tmp_path / "s1b").mkdir()
+    with pytest.raises(ValueError, match="nested deeper"):
+        k.stage("claude", k.scan("claude", [("kit", kit)]), tmp_path / "s1b", check_nothing)
+    shutil.rmtree(kit / "skills/a/d")
     (kit / "skills/a/dangling").symlink_to(tmp_path / "gone")
     os.mkfifo(kit / "skills/a/fifo")
     (tmp_path / "s2").mkdir()
@@ -229,11 +240,73 @@ def test_stage_refuses_loops_limits_and_unsafe_sources(tmp_path, monkeypatch):
     (kit / "skills/a/fifo").unlink()
     (kit / "skills/a/dangling").unlink()
     (kit / "skills/a/more.md").unlink()
-    (kit / "skills/a/link").symlink_to(tmp_path / "secret", target_is_directory=True)
+    (kit / "skills/link").symlink_to(tmp_path / "secret", target_is_directory=True)  # an entry: its target checked
     monkeypatch.setattr(k, "KIT_FILES", 5000)
     (tmp_path / "s4").mkdir()
     with pytest.raises(ValueError, match="lies inside a workspace"):
         k.stage("claude", k.scan("claude", [("kit", kit)]), tmp_path / "s4", refuse)
+
+
+@pytest.mark.parametrize("moment", ["after-listing", "after-lstat", "after-open", "thread"])
+def test_stage_never_copies_through_a_folder_swapped_for_a_symlink(tmp_path, monkeypatch, moment):
+    """Review 5, M4: a kit entry linked from a checkout an agent can write. While the copy runs, the agent swaps a
+    folder of the entry for a symlink to the host's ~/.ssh: whenever it does, nothing of ~/.ssh is copied."""
+    ssh = make(tmp_path / "host/.ssh", {"id_ed25519": "HOST-PRIVATE-KEY\n", "zz_id_ed25519": "HOST-PRIVATE-KEY\n"})
+    entry = make(tmp_path / "checkout/skill", {"SKILL.md": "x", "sub/zz_id_ed25519": "decoy\n"})
+    for i in range(3000 if moment == "thread" else 3):
+        (entry / f"sub/a{i:05d}").write_text("decoy\n")
+    kit = tmp_path / "kit"
+    (kit / "skills").mkdir(parents=True)
+    (kit / "skills/skill").symlink_to(entry, target_is_directory=True)
+    swapped = []
+
+    def swap():
+        if not swapped:
+            swapped.append(True)
+            os.rename(entry / "sub", entry / "sub.real")
+            os.symlink(ssh, entry / "sub")
+    if moment == "after-listing":
+        listdir = os.listdir
+        monkeypatch.setattr(k.os, "listdir", lambda fd: [listdir(fd), swap()][0])
+    elif moment == "after-lstat":
+        real_stat = os.stat
+
+        def stat_then_swap(name, *args, **kwargs):
+            info = real_stat(name, *args, **kwargs)
+            if name == "sub" and kwargs.get("dir_fd") is not None:
+                swap()
+            return info
+        monkeypatch.setattr(k.os, "stat", stat_then_swap)
+    elif moment == "after-open":
+        real_open = os.open
+
+        def open_then_swap(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if path == "sub":
+                swap()
+            return fd
+        monkeypatch.setattr(k.os, "open", open_then_swap)
+    else:  # the review's proof of concept: a thread, as an agent would do it
+        threading.Timer(0.02, swap).start()
+    plan = k.scan("claude", [("kit", kit)])
+    (tmp_path / "staging").mkdir()
+    _, notes = k.stage("claude", plan, tmp_path / "staging", check_nothing)
+    monkeypatch.undo()
+    if moment == "thread":
+        for _ in range(200):
+            if swapped:
+                break
+            threading.Event().wait(0.01)
+    assert swapped
+    copied = [path for path in (tmp_path / "staging").rglob("*") if path.is_file()]
+    assert copied and all(b"HOST-PRIVATE-KEY" not in path.read_bytes() for path in copied)
+    assert not any(path.is_symlink() for path in (tmp_path / "staging").rglob("*"))
+    assert not (tmp_path / "staging/skills/skill/sub/id_ed25519").exists()
+    if moment in ("after-listing", "after-lstat"):
+        assert not (tmp_path / "staging/skills/skill/sub").exists()
+        assert any("sub skipped" in note for note in notes)
+    if moment == "after-open":  # the folder it opened: the real one, wherever it was moved
+        assert (tmp_path / "staging/skills/skill/sub/zz_id_ed25519").read_text() == "decoy\n"
 
 
 def test_kit_inside_workspace_is_refused(tmp_path):

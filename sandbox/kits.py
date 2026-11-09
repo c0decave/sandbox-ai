@@ -214,8 +214,9 @@ def stage(agent, plan, staging, check):
     """Copy the kits' entries to STAGING (a fresh launcher-owned directory), one directory per kind;
     returns [(staged directory, sandbox path)] to mount read-only, and notes.
 
-    CHECK(path, label) raises for a host path the agent could change. Symlinks in kits are followed
-    (their targets checked too); loops, more than KIT_FILES files or KIT_BYTES bytes are errors."""
+    CHECK(path, label) raises for a host path the agent could change. A kit entry that is a symlink is followed
+    (its target checked too); below an entry nothing is followed (copy_tree); more than KIT_FILES files, KIT_BYTES
+    bytes or KIT_DEPTH levels are errors."""
     mounts, notes, budget = [], [], {"files": 0, "bytes": 0}
     for kind, items in plan["entries"].items():
         if not items:
@@ -223,15 +224,33 @@ def stage(agent, plan, staging, check):
         target = staging / kind
         target.mkdir(mode=0o755)
         for name, (label, source) in items.items():
-            copy_tree(source, target / name, check, label, budget, notes, (), None)
+            copy_tree(source, target / name, check, label, budget, notes)
         mounts.append((target, f"/root/{LAYOUT[agent][kind]}"))
     return mounts, notes
 
 
-def copy_tree(source, target, check, label, budget, notes, ancestors, entry_root):
-    """Copy SOURCE to TARGET. The kit entry itself may be a symlink the user made (to a skill in a Git
-    checkout, say); below it, a symlink is followed only while it stays inside that entry, so that a
-    file somebody else can change there (an agent in that checkout) cannot point at any host file."""
+def fd_path(fd, fallback):
+    """Where the open file FD really is (Linux: /proc/self/fd; macOS: F_GETPATH), else FALLBACK."""
+    try:
+        return Path(os.readlink(f"/proc/self/fd/{fd}"))
+    except OSError:
+        pass
+    getpath = getattr(fcntl, "F_GETPATH", None)
+    if getpath is not None:
+        try:
+            return Path(fcntl.fcntl(fd, getpath, bytes(1024)).split(b"\0", 1)[0].decode())
+        except (OSError, UnicodeDecodeError):
+            pass
+    return Path(fallback)
+
+
+def copy_tree(source, target, check, label, budget, notes):
+    """Copy the kit entry SOURCE to TARGET. The entry itself may be a symlink the user made (to a skill in a Git
+    checkout, say): it is resolved once, opened, and the place it was opened at is checked (CHECK). Below it the walk
+    goes from directory handle to directory handle with nothing followed as a symlink (O_NOFOLLOW, each handle
+    compared with what was listed by st_dev/st_ino), so that somebody who can change that checkout (an agent working
+    in it) cannot make the copy reach any other host file, not even by swapping a folder for a symlink while the
+    copy runs: symlinks, FIFOs, sockets and devices below the entry are skipped with a note."""
     check(source, label)
     try:
         resolved = source.resolve(strict=True)
@@ -240,37 +259,96 @@ def copy_tree(source, target, check, label, budget, notes, ancestors, entry_root
         return
     if resolved != source:
         check(resolved, label)
-    if entry_root is None:
-        entry_root = resolved
-    elif source.is_symlink() and resolved != entry_root and entry_root not in resolved.parents:
-        notes.append(f"{label}: {source} skipped: symlink out of its kit entry")
+    try:
+        listed = os.lstat(resolved)
+    except OSError as exc:
+        notes.append(f"{label}: {source} skipped: {exc.strerror}")
         return
-    info = resolved.stat()
-    if stat.S_ISDIR(info.st_mode):
-        if resolved in ancestors:
-            raise ValueError(f"{label}: {source} links back to a directory above it")
-        if len(ancestors) >= KIT_DEPTH:
-            raise ValueError(f"{label}: {source} is nested deeper than {KIT_DEPTH} directories")
-        target.mkdir(mode=0o755)
-        for child in sorted(os.scandir(resolved), key=lambda e: e.name):
-            problem = bad_name(child.name)
-            if problem:
-                notes.append(f"{label}: {Path(child.path)} skipped: {problem}")
-                continue
-            copy_tree(Path(child.path), target / child.name, check, label, budget, notes, (*ancestors, resolved),
-                      entry_root)
-    elif stat.S_ISREG(info.st_mode):
-        budget["files"] += 1
-        budget["bytes"] += info.st_size
-        if budget["files"] > KIT_FILES or budget["bytes"] > KIT_BYTES:
-            raise ValueError(f"The kits hold more than {KIT_FILES} files or {KIT_BYTES >> 20} MiB; "
-                             f"the last one counted was {source} ({label})")
-        with open(resolved, "rb") as src, open(target, "xb") as dst:
-            shutil.copyfileobj(src, dst)
-        # Scripts in skills stay executable; nothing else is writable in the sandbox anyway.
-        target.chmod(0o755 if info.st_mode & 0o111 else 0o644)
-    else:
+    if not (stat.S_ISDIR(listed.st_mode) or stat.S_ISREG(listed.st_mode)):
         notes.append(f"{label}: {source} skipped: not a regular file or directory")
+        return
+    try:
+        fd = os.open(resolved, os.O_RDONLY | os.O_NOCTTY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+    except OSError as exc:
+        notes.append(f"{label}: {source} skipped: {'swapped for a symlink' if exc.errno == errno.ELOOP else exc.strerror}")
+        return
+    try:
+        opened = fd_path(fd, resolved)
+        if opened != resolved:
+            check(opened, label)  # a folder above it was swapped meanwhile: the place it was really opened at
+        info = os.fstat(fd)
+        if (info.st_dev, info.st_ino) != (listed.st_dev, listed.st_ino):
+            notes.append(f"{label}: {source} skipped: changed while it was copied")
+        elif stat.S_ISDIR(info.st_mode):
+            copy_dir_at(fd, target, label, budget, notes, source, 0)
+        else:
+            copy_file_at(fd, info, target, label, budget, source)
+    finally:
+        os.close(fd)
+
+
+def copy_file_at(fd, info, target, label, budget, shown):
+    """Copy the open regular file FD (INFO: its fstat) to TARGET, counted against BUDGET."""
+    budget["files"] += 1
+    budget["bytes"] += info.st_size
+    if budget["files"] > KIT_FILES or budget["bytes"] > KIT_BYTES:
+        raise ValueError(f"The kits hold more than {KIT_FILES} files or {KIT_BYTES >> 20} MiB; "
+                         f"the last one counted was {shown} ({label})")
+    left = info.st_size
+    with os.fdopen(os.dup(fd), "rb") as src, open(target, "xb") as dst:
+        while left > 0:  # never more than it had when counted (a file that grows meanwhile is cut there)
+            chunk = src.read(min(left, 1 << 20))
+            if not chunk:
+                break
+            dst.write(chunk)
+            left -= len(chunk)
+    # Scripts in skills stay executable; nothing else is writable in the sandbox anyway.
+    target.chmod(0o755 if info.st_mode & 0o111 else 0o644)
+
+
+def copy_dir_at(directory, target, label, budget, notes, shown, depth):
+    """Copy the open directory DIRECTORY to TARGET; every child is opened relative to it, never through a
+    symlink, and must be what the listing saw (st_dev/st_ino), else it is skipped (it was swapped meanwhile)."""
+    if depth >= KIT_DEPTH:
+        raise ValueError(f"{label}: {shown} is nested deeper than {KIT_DEPTH} directories")
+    target.mkdir(mode=0o755)
+    for name in sorted(os.listdir(directory)):
+        path = Path(shown) / name
+        problem = bad_name(name)
+        if problem:
+            notes.append(f"{label}: {path} skipped: {problem}")
+            continue
+        try:
+            listed = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            continue  # removed meanwhile
+        if stat.S_ISLNK(listed.st_mode):
+            notes.append(f"{label}: {path} skipped: a symlink below a kit entry is not followed (the copy is a "
+                         "snapshot of the entry's own files)")
+            continue
+        if not (stat.S_ISDIR(listed.st_mode) or stat.S_ISREG(listed.st_mode)):
+            notes.append(f"{label}: {path} skipped: not a regular file or directory")
+            continue
+        flags = DIR_FLAGS if stat.S_ISDIR(listed.st_mode) else \
+            os.O_RDONLY | os.O_NOCTTY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+        try:
+            fd = os.open(name, flags, dir_fd=directory)
+        except OSError as exc:
+            notes.append(f"{label}: {path} skipped: changed while it was copied ("
+                         f"{'now a symlink' if exc.errno == errno.ELOOP else exc.strerror})")
+            continue
+        try:
+            info = os.fstat(fd)
+            if (info.st_dev, info.st_ino) != (listed.st_dev, listed.st_ino) or \
+                    stat.S_IFMT(info.st_mode) != stat.S_IFMT(listed.st_mode):
+                notes.append(f"{label}: {path} skipped: changed while it was copied")
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                copy_dir_at(fd, target / name, label, budget, notes, path, depth + 1)
+            else:
+                copy_file_at(fd, info, target / name, label, budget, path)
+        finally:
+            os.close(fd)
 
 
 def ensure_default_home(agent):
