@@ -10,6 +10,8 @@ The host chooser at the top shows and changes all of it on this machine or on a 
 ssh -tt)."""
 from __future__ import annotations
 
+import functools
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QLineEdit,
@@ -786,9 +788,10 @@ class CredentialsPage(QWidget):
             background(self.sai.set_secret, name, value, owner=self, work=True, source=self.secret_buttons, timeout=90,
                        done=self.secret_kept)
         else:
-            background(lambda: self.sai.set_secret(name, value, host=host), owner=self, source=self.secret_buttons,
-                       work=True, timeout=120, done=self.secret_kept)
-        value = None  # noqa: F841 - not kept
+            # (Handed over, not referred to by a closure: the line below would empty it before the thread reads it.)
+            background(functools.partial(self.sai.set_secret, name, value, host=host), owner=self,
+                       source=self.secret_buttons, work=True, timeout=120, done=self.secret_kept)
+        value = None  # noqa: F841 - not kept here (the call lets go of it once it has reported)
 
     def secret_kept(self, result, error):
         status, out, err = outcome(result, error)

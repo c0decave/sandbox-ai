@@ -404,3 +404,56 @@ def test_every_page_shows_within_a_bound(qapp, env, monkeypatch):
         assert threading.current_thread() is threading.main_thread()
     finally:
         close(w)
+
+
+def settle(qapp, seconds=0.3):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+
+
+def test_a_closed_window_goes_entirely(qapp, env, monkeypatch):
+    """CI killed the app's tests (exit 137, out of memory): every window the tests made stayed - its pages, its backend
+    and the sandbox-ai modules that backend had loaded, about 15 MB each. A QObject of Python's own (the project bar's
+    list of projects) had its signal connected to a lambda that referred back to its owner: held in C++, a cycle that
+    Python's collector cannot see; and caches kept every backend. Now a window shut down, closed and deleted leaves
+    nothing behind once the collector has run (the tests' conftest sweeps after every test)."""
+    import gc
+    import weakref
+    from conftest import sweep_widgets
+    from test_projects import make_window
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    before = set(qapp.topLevelWidgets())
+    backends, objects = [], []
+    for _ in range(4):
+        w = make_window(monkeypatch)
+        w.show()
+        for key in ("sandboxes", "kits", "hosts", "credentials"):
+            w.show_page(key, raise_window=False)
+            qapp.processEvents()
+        backends.append(weakref.ref(w.sai))
+        close(w)
+        del w
+        widgets.ThreadCall.wait_all(30)  # what still read when it closed reports (and is let go of) first
+        settle(qapp)
+        sweep_widgets(before)
+        gc.collect()
+        objects.append(len(gc.get_objects()))
+    assert [ref() for ref in backends[:-1]] == [None] * 3, "a closed window's backend is still alive"
+    assert objects[-1] - objects[1] < 3000, objects
+    assert not [w for w in qapp.topLevelWidgets() if w not in before and w.parentWidget() is None]
+
+
+def test_the_caches_keep_no_backend_alive(env):
+    import gc
+    import weakref
+    from sandbox_ai_app import board
+    sai = backend.SandboxAI()
+    board._options(sai)
+    backend.option_arity(sai.launcher)
+    ref = weakref.ref(sai)
+    del sai
+    gc.collect()
+    assert ref() is None
+

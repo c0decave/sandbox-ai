@@ -5141,8 +5141,8 @@ class KnownProjects(QObject):
     change when a newer read differs (changed)."""
     changed = Signal()
 
-    def __init__(self, sai):
-        super().__init__()
+    def __init__(self, sai, parent=None):
+        super().__init__(parent)
         self.sai, self.value, self.reading, self.again = sai, [], None, False
 
     def refresh(self):
@@ -5172,7 +5172,9 @@ class ProjectBar(QWidget):
     def __init__(self, sai):
         super().__init__()
         self.sai, self.path = sai, None
-        self.known = KnownProjects(sai)
+        # A child of the bar: a QObject of Python's own whose signal is connected to a lambda that refers to the bar
+        # would keep both alive for good (the connection is held in C++, where the cycle collector does not look).
+        self.known = KnownProjects(sai, self)
         self.known.changed.connect(lambda: self.fill(read=False))
         self.setObjectName("projectBar")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)

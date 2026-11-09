@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from .i18n import tr
+from .widgets import safe_tooltip
 
 UNLIMITED = (1 << 24) - 1  # QWIDGETSIZE_MAX
 SIDES = (Qt.DockWidgetArea.LeftDockWidgetArea, Qt.DockWidgetArea.RightDockWidgetArea)
@@ -86,7 +87,7 @@ class DockTitleBar(QWidget):
 
     def set_title(self, text):
         self.label.setText(text)
-        self.label.setToolTip(text)
+        self.label.setToolTip(safe_tooltip(text))  # (a panel's title: the app's words, shown as text)
         self.turned.set_text(text)
 
     def arrange(self, vertical):
@@ -125,13 +126,13 @@ class DockTitleBar(QWidget):
                 Qt.ArrowType.UpArrow: Qt.ArrowType.DownArrow, Qt.ArrowType.DownArrow: Qt.ArrowType.UpArrow}
         self.fold_button.setArrowType(away[towards] if folded else towards)
         fold_text = tr("Expand the panel") if folded else tr("Collapse the panel (a strip at the window's edge)")
-        self.fold_button.setToolTip(fold_text)
+        self.fold_button.setToolTip(safe_tooltip(fold_text))
         self.fold_button.setAccessibleName(fold_text)
         style = self.style()  # (the icons of Qt's own title bar)
         self.float_button.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_TitleBarNormalButton))
         float_text = tr("Dock the panel again (or drag its title to an edge of the window)") if floating else \
             tr("Undock the panel as a window of its own (or drag its title out of the window)")
-        self.float_button.setToolTip(float_text)
+        self.float_button.setToolTip(safe_tooltip(float_text))
         self.float_button.setAccessibleName(float_text)
         self.close_button.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_TitleBarCloseButton))
 

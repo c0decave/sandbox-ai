@@ -27,6 +27,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import weakref
 
 from . import backend
 from .files import printable
@@ -299,15 +300,18 @@ class Board:
 
 # -- options --
 
-_OPTIONS = {}  # id(sai): (sai, {long option: Option})
+_OPTIONS = weakref.WeakKeyDictionary()  # {sai: {long option: Option}} (a backend that went takes its entry along)
 
 
 def _options(sai):
     """The launcher's options by long name (cached per installation: the parser is built once)."""
-    cached = _OPTIONS.get(id(sai))
-    if cached is None or cached[0] is not sai:
-        cached = _OPTIONS[id(sai)] = (sai, {o.long: o for o in sai.options()})
-    return cached[1]
+    try:
+        cached = _OPTIONS.get(sai)
+    except TypeError:  # (a stand-in of the tests that takes no weak reference: not kept)
+        return {o.long: o for o in sai.options()}
+    if cached is None:
+        cached = _OPTIONS[sai] = {o.long: o for o in sai.options()}
+    return cached
 
 
 def _split_agent_args(agent_args):

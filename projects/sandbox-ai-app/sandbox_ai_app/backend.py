@@ -29,6 +29,7 @@ import sys
 import threading
 import time
 import urllib.parse
+import weakref
 
 from .files import printable
 
@@ -4216,21 +4217,27 @@ def summary(record):
 
 # Without the launcher's parser: which of the options read here take a value.
 KNOWN_ARITY = {"--workspace": True, "--state-dir": True, "--workspace-ro": False}
-_arity = {}  # id(launcher): (launcher, {option string: nargs})
+_arity = weakref.WeakKeyDictionary()  # {launcher: {option string: nargs}} (a launcher that went takes its entry along)
 
 
 def option_arity(launcher):
     """{option string (long and short): nargs} from the launcher's own parser (0 for a flag, None for one
     value, "?" for an optional one), or {} if it cannot be built."""
-    cached = _arity.get(id(launcher))
-    if cached is not None and cached[0] is launcher:
-        return cached[1]
+    try:
+        cached = _arity.get(launcher)
+    except TypeError:  # (a test double that takes no weak reference)
+        cached = None
+    if cached is not None:
+        return cached
     try:
         found = {option: action.nargs for action in launcher.build_parser()._actions
                  for option in action.option_strings}
     except Exception:  # noqa: BLE001 - an old launcher or a test double
         found = {}
-    _arity[id(launcher)] = (launcher, found)
+    try:
+        _arity[launcher] = found
+    except TypeError:
+        pass
     return found
 
 

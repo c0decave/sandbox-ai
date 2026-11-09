@@ -32,6 +32,15 @@ def state_file():
 
 
 def current():
+    """The State of the running window; None when there is none (or its window went: a closed window's State is
+    deleted with it)."""
+    if _current is not None:
+        try:
+            from shiboken6 import isValid
+            if not isValid(_current):
+                return None
+        except ImportError:  # pragma: no cover
+            pass
     return _current
 
 

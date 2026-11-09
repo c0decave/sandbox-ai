@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 import time
+import weakref
 
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import QComboBox, QCompleter, QMenu, QToolButton
@@ -50,7 +51,7 @@ class Hub(QObject):
 
 
 _hub = []
-_kept = {}  # (id(sai), kind, host) -> (sai, generation, time read, names or None, problem or None)
+_kept = {}  # (id(sai), kind, host) -> (weak reference to sai, generation, time read, names or None, problem or None)
 _waiting = {}  # (id(sai), kind, host, generation) -> [done(names, problem)]
 _generation = {}  # (kind, host) -> a number that grows with each change: a read begun before it is not kept
 
@@ -73,7 +74,7 @@ def forget(kind, host=LOCAL):
 def publish(sai, kind, host, names):
     """NAMES are what HOST has of KIND now (a page listed them): every field of that kind there offers them."""
     _generation[(kind, host)] = _generation.get((kind, host), 0) + 1
-    _kept[(id(sai), kind, host)] = (sai, _generation[(kind, host)], time.monotonic(),
+    _kept[(id(sai), kind, host)] = (_weak(sai), _generation[(kind, host)], time.monotonic(),
                                     valid(kind, names), None)
     hub().changed.emit(kind, host)
 
@@ -83,7 +84,7 @@ def names_of(sai, kind, host, done):
     key = (id(sai), kind, host)
     generation = _generation.get((kind, host), 0)
     kept = _kept.get(key)
-    if kept is not None and kept[0] is sai and kept[1] == generation and time.monotonic() - kept[2] < KEEP_SECONDS:
+    if kept is not None and kept[0]() is sai and kept[1] == generation and time.monotonic() - kept[2] < KEEP_SECONDS:
         done(kept[3], kept[4])
         return
     waiting = key + (generation,)
@@ -95,10 +96,19 @@ def names_of(sai, kind, host, done):
     def finished(result, error):
         names, problem = (result, None) if error is None else (None, printable(str(error))[-200:] or "?")
         if error is None and _generation.get((kind, host), 0) == generation:
-            _kept[key] = (sai, generation, time.monotonic(), names, None)
+            _kept[key] = (_weak(sai), generation, time.monotonic(), names, None)
         for callback in _waiting.pop(waiting, []):
             callback(names, problem)
     background(read_names, sai, kind, host, timeout=READ_SECONDS, done=finished)
+
+
+def _weak(sai):
+    """A weak reference to SAI (the backend that went must not be kept alive by what it read; a stand-in of the tests
+    that takes none: itself, as a callable that returns it)."""
+    try:
+        return weakref.ref(sai)
+    except TypeError:
+        return lambda: sai
 
 
 def where(host):
