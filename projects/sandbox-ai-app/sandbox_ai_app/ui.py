@@ -3428,7 +3428,6 @@ class ConnectionsPage(QWidget):
         self.hosts.changed.connect(lambda _host: self.host_changed())
         self.remote_sources, self.remote_token, self.remote_read_at = [], 0, 0.0
         self.directory = QComboBox()
-        self.directory.setMinimumWidth(320)
         self.directory.currentIndexChanged.connect(lambda _=0: self.source_changed())
         browse = QPushButton(tr("Other folder…"))
         browse.clicked.connect(self.browse)
@@ -4732,6 +4731,7 @@ PAGES = tuple(page for _, pages in SECTIONS for page in pages)
 SHORTCUT_PAGES = 9
 NOTIFY_AT_ONCE = 5  # new questions announced one by one at once; more are counted in one notification
 NAV_WIDTH, COMPACT_NAV_WIDTH = 224, 52  # the navigation with titles, and as a strip of icons
+NAV_MAX_WIDTH = 300  # the navigation with titles at most, however long a title is in the language chosen
 OWN_START_WINDOW = 120  # seconds in which a run that shows up is the one the app just started in its terminal
 
 
@@ -5015,11 +5015,15 @@ UNSCROLLED_PAGES = ("board", "terminals")
 # folder), Kits (what it uses), Teams (the workspace a new team is offered). On the others the tabs are hidden.
 PROJECT_TAB_PAGES = ("launch", "board", "sandboxes", "approvals", "connections", "statistics", "files", "kits", "team")
 SCROLL_MIN_HEIGHT = 220  # the height a scrolled page may shrink to before the window does
+# The width a scrolled page may shrink to before the window does: a wider page scrolls sideways there instead of
+# making the window wider than the screen (and Qt never shrinks a window back by itself).
+SCROLL_MIN_WIDTH = 640
 
 
 class PageScroll(QScrollArea):
-    """A page that scrolls up and down when the window is lower than the page needs, instead of squeezing its
-    sections (Settings, Credentials, long forms); as wide as the page needs, so that no text is cut off."""
+    """A page that scrolls when the window is lower or narrower than the page needs, instead of squeezing its
+    sections (Settings, Credentials, long forms) or cutting text off; it asks the window for at most
+    SCROLL_MIN_HEIGHT x SCROLL_MIN_WIDTH, so that no page makes the window larger than the screen."""
 
     def __init__(self, page):
         super().__init__()
@@ -5032,7 +5036,7 @@ class PageScroll(QScrollArea):
     def minimumSizeHint(self):  # noqa: N802
         hint = self.widget().minimumSizeHint()
         bar = self.verticalScrollBar().sizeHint().width()
-        return QSize(hint.width() + bar, min(hint.height(), SCROLL_MIN_HEIGHT))
+        return QSize(min(hint.width() + bar, SCROLL_MIN_WIDTH), min(hint.height(), SCROLL_MIN_HEIGHT))
 
     def sizeHint(self):  # noqa: N802
         return self.widget().sizeHint()
@@ -5879,11 +5883,15 @@ class MainWindow(QMainWindow):
     def fit_nav_width(self):
         """The strip of icons is COMPACT_NAV_WIDTH inside the theme's own frame (a border or margin of the
         navigation, e.g. win311, amber, fallout): its rows keep the room their icons need in every theme."""
+        margins = self.nav.contentsMargins()
         if self.compact_nav:
-            margins = self.nav.contentsMargins()
             self.nav.setFixedWidth(COMPACT_NAV_WIDTH + margins.left() + margins.right())
         else:
-            self.nav.setFixedWidth(NAV_WIDTH)
+            # Wide enough for the longest title in the language chosen (German "Sandboxen & Sitzungen" was cut off),
+            # at most NAV_MAX_WIDTH.
+            needed = self.nav.sizeHintForColumn(0) + margins.left() + margins.right() + 2 * self.nav.frameWidth() \
+                + self.nav.verticalScrollBar().sizeHint().width()
+            self.nav.setFixedWidth(max(NAV_WIDTH, min(needed, NAV_MAX_WIDTH)))
 
     def nav_title(self, key):
         return tr(next(title for _, pages in SECTIONS for k, title in pages if k == key))

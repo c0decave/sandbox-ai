@@ -460,7 +460,6 @@ class LlmPage(QWidget):
         self.servers.itemSelectionChanged.connect(self.update_buttons)
         self.servers.cellDoubleClicked.connect(lambda *_: self.edit())
         layout.addWidget(self.servers, 2)
-        row = QHBoxLayout()
         self.add_button = QPushButton(tr("Add…"))
         self.edit_button = QPushButton(tr("Edit…"))
         self.check_button = QPushButton(tr("Check"))
@@ -499,12 +498,9 @@ class LlmPage(QWidget):
         self.models_button.clicked.connect(self.models)
         self.remove_button.clicked.connect(self.remove)
         self.refresh_button.clicked.connect(self.refresh)
-        for widget in (self.add_button, self.edit_button, self.check_button, self.agent, self.models_button,
-                       self.sort, self.show_button, self.remove_button):
-            row.addWidget(widget)
-        row.addStretch(1)
-        row.addWidget(self.refresh_button)
-        layout.addLayout(row)
+        # A row that wraps when the window is narrow (it made the window 1300 px wide in German before).
+        layout.addWidget(flow(self.add_button, self.edit_button, self.check_button, self.agent, self.models_button,
+                              self.sort, self.show_button, self.remove_button, self.refresh_button))
         layout.addWidget(self.build_models(), 3)
         self.status = plain_label(role="secondary")
         self.status.setAccessibleName(tr("Status"))

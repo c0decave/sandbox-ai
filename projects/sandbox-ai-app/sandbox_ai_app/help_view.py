@@ -246,9 +246,24 @@ class Corner(QObject):
         self.button.raise_()
 
 
+HEADER_ROOM = SIZE + 10  # what the last column's title keeps free for a (?) in a table's corner
+
+
+def header_of(target):
+    """The visible column header of a table or tree TARGET, or None."""
+    from PySide6.QtWidgets import QTableView, QTreeView
+    header = target.horizontalHeader() if isinstance(target, QTableView) else \
+        target.header() if isinstance(target, QTreeView) else None
+    return header if header is not None and not header.isHidden() else None
+
+
 def corner(target, tip_id):
     button = HelpButton(tip_id, target)
     button.corner = Corner(target, button)
+    header = header_of(target)
+    if header is not None:
+        # The (?) sits over the last column's title: that title keeps room for it ("Runnin(?)g" before).
+        header.setStyleSheet(header.styleSheet() + f" QHeaderView::section:last {{ padding-right: {HEADER_ROOM}px; }}")
     button.show()
     return button
 

@@ -365,15 +365,13 @@ class HostsPage(QWidget):
             self.update_sudo.addItem(text, value)
         self.versions_button = button(tr("Check versions"), tr("Ask every host for its sandbox-ai version now"),
                                       lambda: self.load_versions(refresh=True))
+        compact_combo(self.update_sudo, 18)
+        # Rows that wrap when the window is narrow: the page never makes the window wider than the screen.
         for group in ((self.starts_button, self.questions_button, self.refresh_button),
                       (self.add_button, self.edit_button, self.remove_button, self.test_button),
                       (self.update_button, self.from_here_button, self.update_sudo),
                       (self.install_button, self.update_all_button, self.versions_button)):
-            row = QHBoxLayout()
-            for widget in group:
-                row.addWidget(widget)
-            row.addStretch(1)
-            left_layout.addLayout(row)
+            left_layout.addWidget(flow(*group))
         split.addWidget(left)
         right = QWidget()
         right_layout = QVBoxLayout(right)
@@ -413,6 +411,7 @@ class HostsPage(QWidget):
         # defaults (sandbox-ai defaults there): what every start on the host uses unless it says otherwise
         defaults = QWidget()
         form = QFormLayout(defaults)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)  # a long label above its field, not beside it
         self.mode = QComboBox()
         self.mode.setAccessibleName(tr("Security mode"))
         self.telemetry = QComboBox()
@@ -422,6 +421,7 @@ class HostsPage(QWidget):
                             ("strict", tr("strict: also no other calls than the model's")),
                             ("on", tr("on: the agents' own settings"))):
             self.telemetry.addItem(text, level)
+        compact_combo(self.telemetry, 22)  # "off: no usage statistics, …" alone was 560 px wide
         self.canaries = QComboBox()
         self.canaries.setAccessibleName(tr("Canaries"))
         self.canary_list = QLineEdit()

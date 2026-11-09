@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 from .files import printable
 from .i18n import N_, tr
 from .widgets import (
-    ask_first, background, fill, outcome, plain_label, selected_keys, set_enabled, table, warn,
+    ask_first, background, fill, flow, outcome, plain_label, safe_tooltip, selected_keys, set_enabled, table, warn,
 )
 
 LOCAL = "local"
@@ -205,7 +205,6 @@ class TeamPage(QWidget):
         split.addWidget(right)
         split.setSizes([420, 620])
         layout.addWidget(split, 1)
-        row = QHBoxLayout()
         self.refresh_button = QPushButton(tr("Refresh"))
         self.start_button = QPushButton(tr("Start a team…"))
         self.start_button.setProperty("role", "primary")
@@ -221,18 +220,15 @@ class TeamPage(QWidget):
                             (self.stop_button, tr("sandbox-ai team stop: every member and the board end")),
                             (self.delete_button, tr("sandbox-ai team delete: stopped, then its members' HOMEs and "
                                                     "the board removed"))):
-            button.setToolTip(tip)
+            button.setToolTip(safe_tooltip(tip))
         self.refresh_button.clicked.connect(lambda _=False: self.refresh())
         self.start_button.clicked.connect(lambda _=False: self.start())
         self.attach_button.clicked.connect(lambda _=False: self.attach())
         self.post_button.clicked.connect(lambda _=False: self.post())
         self.stop_button.clicked.connect(lambda _=False: self.stop())
         self.delete_button.clicked.connect(lambda _=False: self.delete())
-        for widget in (self.start_button, self.attach_button, self.post_button, self.stop_button, self.delete_button):
-            row.addWidget(widget)
-        row.addStretch()
-        row.addWidget(self.refresh_button)
-        layout.addLayout(row)
+        layout.addWidget(flow(self.start_button, self.attach_button, self.post_button, self.stop_button,
+                              self.delete_button, self.refresh_button))  # wraps when the window is narrow
         self.status = plain_label(role="secondary")
         self.status.setAccessibleName(tr("Status"))
         layout.addWidget(self.status)

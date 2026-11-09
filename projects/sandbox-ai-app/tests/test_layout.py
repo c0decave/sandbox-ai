@@ -15,8 +15,8 @@ def clipped(top):
     found = []
     for kind in KINDS:
         for w in top.findChildren(kind):
-            if not w.isVisibleTo(top) or not w.text().strip():
-                continue
+            if not w.isVisibleTo(top) or not w.text().strip() or getattr(w, "elides", False):
+                continue  # (an ElidedLabel cuts a long line on purpose, whole in its tooltip)
             if isinstance(w, QtWidgets.QLabel) and w.wordWrap():
                 if w.heightForWidth(w.width()) > w.height() + 2:
                     found.append(f"{type(w).__name__} {w.text()[:60]!r}: needs {w.heightForWidth(w.width())} px high, has {w.height()}")
@@ -63,6 +63,55 @@ def test_no_text_is_clipped_at_the_smallest_window(qapp, env, monkeypatch, langu
         found += [f"vpn dialog: {item}" for item in clipped(vpn)]
         vpn.close()
         window.close()
+        assert found == [], "\n".join(found)
+    finally:
+        i18n.set_language("en")
+        theme.apply("system", qapp)
+
+
+# The widest the window's minimum may be after every page was shown (review round 5, H1: the Hosts page alone made it
+# 1726 px wide in English and 1915 px in German, and Qt never shrinks a window back).
+WIDEST, WIDEST_COMPACT = 1024, 860
+WIDEST_PAGE = 900  # what a page itself needs at most before it scrolls sideways
+
+
+@pytest.mark.parametrize("language", ["en", "de"])
+@pytest.mark.parametrize("mode", ["light", "dark"])
+@pytest.mark.parametrize("compact", [False, True])
+def test_every_page_lets_the_window_shrink_back(qapp, env, monkeypatch, language, mode, compact):  # noqa: F811
+    """Every page shown once, the window still shrinks to a size that fits a small laptop screen, and no text is cut
+    off there: a page wider than the room scrolls sideways (PageScroll) instead of widening the window."""
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    i18n.set_language(language)
+    try:
+        theme.apply(mode, qapp)
+        window = ui.MainWindow(backend.SandboxAI())
+        window.show()
+        window.set_compact_nav(compact)
+        found = []
+        for key, _ in ui.PAGES:
+            window.show_page(key, raise_window=False)
+            qapp.processEvents()
+            page = getattr(window, key)
+            if page.minimumSizeHint().width() > WIDEST_PAGE:
+                found.append(f"page {key} needs {page.minimumSizeHint().width()} px")
+            if window.pages.minimumSizeHint().width() > ui.SCROLL_MIN_WIDTH and key not in ui.UNSCROLLED_PAGES:
+                found.append(f"page {key} asks the window for {window.pages.minimumSizeHint().width()} px")
+        for key, _ in ui.PAGES:  # back on each page after all were shown: the window shrinks to its minimum
+            window.show_page(key, raise_window=False)
+            for _ in range(2):  # the page's own minimum is known once it is laid out
+                qapp.processEvents()
+                window.resize(window.minimumSizeHint())
+            qapp.processEvents()
+            limit = WIDEST_COMPACT if compact else WIDEST
+            if window.width() > limit:
+                found.append(f"page {key}: the window stays {window.width()} px wide (at most {limit}; its minimum "
+                             f"{window.minimumSizeHint().width()}, the page asks {window.pages.minimumSizeHint().width()})")
+            found += [f"page {key} at {window.width()} px: {item}" for item in clipped(getattr(window, key))]
+        window.shutdown()  # timers, commands and terminals stop: many windows in one run
+        window.close()
+        window.deleteLater()
+        qapp.processEvents()
         assert found == [], "\n".join(found)
     finally:
         i18n.set_language("en")
