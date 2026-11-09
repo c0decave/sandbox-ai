@@ -358,7 +358,8 @@ def test_no_tooltip_or_dialog_label_takes_unescaped_text():
     escaped = {"safe_tooltip", "shown_as_text"}
     # The app's own words only (a help title, a page's name and shortcut): no value an agent or a host chose.
     OWN_WORDS = ("tr('What is this? {title}'", "tr('{page} (Ctrl+{number})'", "self.nav_tooltip(",
-                 "widget._tooltip if enabled")
+                 "widget._tooltip if enabled",
+                 "rules_tools.tooltip()")  # safe_tooltip(...) inside: the app's own example ruleset
     # The Kits page is rebuilt separately; its one label names a host of the hosts file (letters, digits, . _ -).
     LATER = {("kits_page.py", "QInputDialog.getText label")}
     found = []

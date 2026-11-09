@@ -7733,6 +7733,8 @@ TEXTS = {
         'en': 'Git logins (sandbox-ai git-logins)',
         'de': 'Git-Logins (sandbox-ai git-logins)'},
     'Publish logins (sandbox-ai publish-logins)': {
+        'en': 'Publish logins (sandbox-ai publish-logins)',
+        'de': 'Veröffentlichungs-Logins (sandbox-ai publish-logins)'},
     'The sandbox-ai that was checked': {
         'en': 'The sandbox-ai that was checked',
         'de': 'Das geprüfte sandbox-ai'},
@@ -7757,8 +7759,6 @@ TEXTS = {
     '(from the hosts list)': {
         'en': '(from the hosts list)',
         'de': '(aus der Liste der Hosts)'},
-        'en': 'Publish logins (sandbox-ai publish-logins)',
-        'de': 'Veröffentlichungs-Logins (sandbox-ai publish-logins)'},
     'Agent login': {
         'en': 'Agent login',
         'de': 'Login eines Agenten'},
