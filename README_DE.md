@@ -376,8 +376,8 @@ und passen so immer zur installierten Version.
 | `sandbox-ai wizard [new\|edit\|trust\|forget\|models] …` | `sandbox-wizard` (veraltet) | Projekt einrichten, bearbeiten und vertrauen |
 | `sandbox-ai login claude\|codex\|opencode` | | in einer Sandbox anmelden; das Login gilt für alle Sandboxes dieses Agenten ([Login-Speicher](#login-speicher-für-sandboxes)) |
 | `sandbox-ai login --status`, `sandbox-ai login AGENT --logout` | | welches Login die Sandboxes jedes Agenten bekommen; gespeichertes Login vergessen |
-| `sandbox-ai plugins claude [--update]`, `sandbox-ai plugins --status`, `sandbox-ai plugins claude -- ARGS`, `sandbox-ai plugins claude trust-hooks PLUGIN` | | die Claude-Plugins der Kits in den Plugin-Store installieren ([Plugins](#kits-projekt-memory-und-plugins)); deklariert vs. installiert zeigen; `claude plugin ARGS` auf dem Store ausführen; die Hooks eines Plugins freigeben ([Hooks in Kits](#hooks-in-kits)) |
-| `sandbox-ai kits [list\|show\|new\|add-skill\|new-skill\|add-plugin\|add-marketplace\|remove-skill\|remove-plugin\|add-hook\|remove-hook\|trust-hooks\|delete] …` | | alle Kits und was sie mitbringen (`--json` für Programme); eigene Kits anlegen, Skills kopieren oder schreiben, Plugins deklarieren, Hooks hinzufügen und freigeben ([Kits](#kits-verwalten-sandbox-ai-kits), [Hooks in Kits](#hooks-in-kits)) |
+| `sandbox-ai plugins claude [--update] [--marketplaces-only]`, `sandbox-ai plugins --status`, `sandbox-ai plugins marketplaces [MARKTPLATZ] [--agent A] [--json]`, `sandbox-ai plugins claude -- ARGS`, `sandbox-ai plugins claude trust-hooks PLUGIN` | | die Claude-Plugins der Kits in den Plugin-Store installieren ([Plugins](#kits-projekt-memory-und-plugins)); deklariert vs. installiert zeigen; jeden Marktplatz mit seinen Plugins und ihrem Zustand ([Marktplätze](#die-plugin-marktplätze-sandbox-ai-plugins-marketplaces)); `claude plugin ARGS` auf dem Store ausführen; die Hooks eines Plugins freigeben ([Hooks in Kits](#hooks-in-kits)) |
+| `sandbox-ai kits [list\|show\|new\|add-skill\|new-skill\|add-plugin\|enable-plugin\|disable-plugin\|add-marketplace\|remove-marketplace\|import-marketplace\|remove-skill\|remove-plugin\|add-hook\|remove-hook\|trust-hooks\|delete] …` | | alle Kits und was sie mitbringen (`--json` für Programme); eigene Kits anlegen, Skills kopieren oder schreiben, Plugins und Marktplätze deklarieren, ein- und ausschalten, den Marktplatz eines Agents importieren, Hooks hinzufügen und freigeben ([Kits](#kits-verwalten-sandbox-ai-kits), [Hooks in Kits](#hooks-in-kits)) |
 | `sandbox-ai build [--pin V] [--extension-only] AGENT\|all\|VARIANTE`, `sandbox-ai build team\|vpn` | `sandbox-build-image` (veraltet) | Images und ihre Erweiterungen bauen ([Erweiterungen](#erweiterungen-und-varianten)), das Team-Image für `--with` ([Andere Agenten in derselben Sandbox](#andere-agenten-in-derselben-sandbox)) oder den VPN-Container ([VPN](#vpn)) |
 | `sandbox-ai doctor [--backend podman\|bwrap\|both] [--plain] [--no-color] [--json]` | | eine Tabelle nach Bereichen (System, Engine, Agenten, Projekt), im Terminal farbig (ok grün, WARN orange, FAIL rot; ohne mit `--no-color` oder `NO_COLOR`; `--plain` eine Zeile je Prüfung); Host prüfen: Benutzer, Python, User-Namespaces, Podman (rootless), pasta, subuid/subgid, Images mit Agent-Versionen, Bubblewrap-Werkzeuge, TIOCSTI, Host-Logins (nur Ablauf), Standard-Kit und Kits mit ihren Skills, Agents, Commands und Prompts, Claude-Plugins deklariert vs. installiert, das Memory des Projekts im aktuellen Verzeichnis, Git-Identität, Projekt-Vertrauen; zu jedem Problem der Befehl, der es behebt; Exit 1 bei einem Fehler |
 | `sandbox-ai logs [VERZ\|--project P] [--json]` | | blockierte Verbindungen und Dateizugriffe eines `--log-dir` zusammenfassen und je blockiertem Ziel die passende Option vorschlagen (`--allow-pypi`, `--allow-host`, `--allow-tcp`, `--allow-host-port` …) |
@@ -1193,6 +1193,10 @@ sandbox-ai kits add-plugin review sandcastle@sandbox-ai           # deklariert a
 sandbox-ai kits add-plugin review tool@team --source team/plugins # deklariert den Marketplace team (GitHub)
 sandbox-ai kits add-plugin review some-plugin@1.2.3 --agent opencode
 sandbox-ai kits add-marketplace review team https://git.example.org/team/plugins.git
+sandbox-ai kits import-marketplace review acme --with-plugins     # einen, den Claude hier schon kennt, mit Plugins
+sandbox-ai kits disable-plugin review lint@acme  # deklariert (und installiert), aber aus; enable-plugin schaltet ein
+sandbox-ai kits remove-marketplace review acme --with-plugins
+sandbox-ai kits add-plugin default tool@team     # auch Plugins und Marktplätze des Standard-Kits ändern sich
 sandbox-ai kits remove-skill review lint-fix     # remove-plugin review PLUGIN ebenso
 sandbox-ai kits add-hook review ~/hooks/check.sh --matcher Bash   # ein PreToolUse-Hook (--event, --timeout)
 sandbox-ai kits trust-hooks review               # die Hooks des Kits prüfen, dann freigeben
@@ -1203,14 +1207,16 @@ sandbox-ai kits delete review --yes
 Desktop-App liest sie): jedes Kit mit seiner Art (`always` für den eingebauten
 Skill, `default`, `builtin`, `user`), seinem Pfad und ob `sandbox-ai kits` es
 ändern darf; pro Agent Skills, Agents, Commands, Prompts, Memory-Vorlage,
-Marketplaces, Plugins, Hinweise und Fehler; den Marketplace von sandbox-ai mit
+Marketplaces, Plugins (aktivierte und `disabled`: deklariert, aber aus), Hinweise und Fehler; den Marketplace von sandbox-ai mit
 den Kits, die jedes Plugin nennen; und was der Plugin-Store enthält. Ein
 beschädigtes Kit wird für diesen Agent gemeldet und hält die Liste nicht auf.
 
-Geändert werden nur Ihre Kits in `~/.local/share/sandbox-ai/kits`. Die
+Geändert werden nur Ihre Kits in `~/.local/share/sandbox-ai/kits` und die
+Plugins und Marktplätze des Standard-Kits (die Plugin- und Marktplatz-Befehle
+nehmen `default`; fehlt es, wird es zuerst aus seinen Beispielen angelegt). Die
 eingebauten Kits und der eingebaute Skill von sandbox-ai sind nur lesbar (ein
-eigenes Kit gleichen Namens ersetzt ein eingebautes Kit für seine Agents), das
-Standard-Kit bearbeiten Sie von Hand. Nichts wird über einen Symlink geändert:
+eigenes Kit gleichen Namens ersetzt ein eingebautes Kit für seine Agents), den
+Rest des Standard-Kits bearbeiten Sie von Hand. Nichts wird über einen Symlink geändert:
 Ein Kit, Agent-Verzeichnis, `skills/`-Verzeichnis oder `marketplaces.json`, das
 ein Symlink ist (etwa in einen Checkout), wird abgelehnt; ändern Sie es dort,
 wo es liegt. `delete` und `remove-skill` entfernen bei einem solchen Link nur
@@ -1228,6 +1234,64 @@ der Befehl das: Prüfen Sie die Kopie, ein Agent kann sie geschrieben haben.
 abgelehnt, weil Sandboxes nur den eigenen Marketplace von sandbox-ai als
 Verzeichnis bekommen: Veröffentlichen Sie Ihren auf einem Git-Server oder
 GitHub. Plugins für Codex werden noch nicht unterstützt.
+
+### Die Plugin-Marktplätze: `sandbox-ai plugins marketplaces`
+
+`sandbox-ai plugins marketplaces` listet jeden Plugin-Marktplatz auf diesem
+Rechner mit seinen Plugins und dem Zustand jedes Plugins: den eigenen von
+sandbox-ai, die, die Kits deklarieren (Ihre, die des Standard-Kits, die der
+eingebauten Kits), die im Plugin-Store von sandbox-ai, die Vorschläge des
+Standard-Kits und die, die die Agents selbst schon kennen:
+
+- **Claude**: `~/.claude/plugins/known_marketplaces.json` (mit den Kopien, die
+  Claude geholt hat), `extraKnownMarketplaces` und `enabledPlugins` in
+  `~/.claude/settings.json`, `~/.claude/plugins/installed_plugins.json`
+  (`CLAUDE_CONFIG_DIR` gilt).
+- **Codex**: `[marketplaces.NAME]` und `[plugins."NAME@MARKTPLATZ"] enabled` in
+  `~/.codex/config.toml`, die Kopien unter `~/.codex/.tmp/marketplaces`, der
+  kuratierte Marktplatz unter `~/.codex/.tmp/plugins` und die installierten
+  Plugins unter `~/.codex/plugins/cache` (`CODEX_HOME` gilt). Die Kits von
+  sandbox-ai geben Codex noch keine Plugins; sie werden daher so gezeigt, wie
+  Codex sie hat. Ein Git-Marktplatz, dessen Kopie im Format von Claude ist, lässt
+  sich für Claude importieren.
+- **OpenCode** hat keine Marktplätze: Seine Plugins sind npm-Pakete (`plugin` in
+  `opencode.json` oder `opencode.jsonc`), gelistet mit den Kits, die sie nennen,
+  dazu die Plugin-Module in seinem Ordner `plugin/` (ein Kit nimmt eines als
+  Hook).
+
+```bash
+sandbox-ai plugins marketplaces                 # jeder Marktplatz, seine benutzten Plugins
+sandbox-ai plugins marketplaces acme            # ein Marktplatz mit jedem Plugin und seiner Beschreibung
+sandbox-ai plugins marketplaces --agent codex   # nur die von Codex; --json für Programme (Web und App)
+sandbox-ai plugins claude --marketplaces-only   # die Marktplätze der Kits holen, damit ihre Plugin-Listen erscheinen
+```
+
+Die Liste holt, startet und ändert nichts, auch nicht die Konfiguration der
+Agents: Deren Dateien werden nur gelesen (eine reguläre Datei, höchstens 4 MiB,
+die Liste eines Marktplatzes höchstens 16 MiB; eine fehlende oder beschädigte
+ist ein Hinweis, nie ein Fehler). Eine Plugin-Liste stammt aus einer früher
+geholten Kopie (der von sandbox-ai, der des Plugin-Stores oder der des Agents);
+`sandbox-ai plugins claude --marketplaces-only` holt die Marktplätze der Kits in
+der Sandbox des Plugin-Stores, die nur deren Hosts erreicht, und installiert
+nichts. Was Sie auswählen, ändert ein Kit mit den Befehlen oben: `add-plugin`,
+`remove-plugin`, `enable-plugin`, `disable-plugin`, `add-marketplace`,
+`remove-marketplace` und `import-marketplace KIT MARKTPLATZ [--from
+claude|codex] [--with-plugins]`, das einen Marktplatz, den der Agent kennt, mit
+der Quelle deklariert, die er dort hat (`--with-plugins`: und die Plugins, die
+der Agent daraus aktiviert). Ein Marktplatz in einem Ordner auf diesem Rechner
+kann nicht in ein Kit (die Liste sagt, warum).
+
+Die `marketplaces.json` eines Kits listet unter `plugins`, was es aktiviert, und
+unter `disabled`, was es deklariert, aber ausgeschaltet hält: `sandbox-ai
+plugins claude` installiert beides, ein Start aktiviert nur das Erste. Von den
+Kits eines Starts entscheidet das letzte, das ein Plugin nennt; so kann ein Kit,
+das mit `--kit` kommt, ein Plugin ausschalten, das das Standard-Kit aktiviert
+(`sandbox-ai kits disable-plugin KIT PLUGIN`).
+
+Die Seite Kits im Web ist ein Browser darauf: einen Marktplatz wählen, seine
+Plugins mit ihrem Zustand sehen, eines zu einem Kit hinzufügen, es dort
+aktivieren, deaktivieren oder entfernen, einen Marktplatz hinzufügen oder
+entfernen oder einen importieren, den Claude oder Codex auf diesem Host kennt.
 
 ### Hooks in Kits
 
@@ -4667,11 +4731,14 @@ Siehe [Projektkonfiguration](#projektkonfiguration-und-wizard) und
 | `sandbox-ai wizard [new]` | Interaktive Projekteinrichtung; bietet an, eine vorhandene Konfiguration zu bearbeiten |
 | `sandbox-ai wizard edit [VERZ\|DATEI]` | Vorhandene Konfiguration eines Projekts ändern (Menü, Änderungen vor dem Schreiben) |
 | `sandbox-ai login AGENT [Launcher-Optionen] [-- Login-Argumente]`, `--status`, `AGENT --logout` | Login-Speicher für Sandboxes |
-| `sandbox-ai plugins [claude [--update] [Launcher-Optionen] [-- claude-plugin-Argumente]] [--status]` | Plugin-Store für Claude-Sandboxes |
+| `sandbox-ai plugins [claude [--update] [--marketplaces-only] [Launcher-Optionen] [-- claude-plugin-Argumente]] [--status]` | Plugin-Store für Claude-Sandboxes |
+| `sandbox-ai plugins marketplaces [MARKTPLATZ] [--agent claude\|codex\|opencode] [--json]` | Jeder Plugin-Marktplatz (der von sandbox-ai, der Kits, des Stores, von Claude, von Codex; die npm-Plugins von OpenCode) mit dem Zustand jedes Plugins; nur lesend |
 | `sandbox-ai kits [list [--json] [--agent A]]`, `show NAME [--json]` | Alle Kits und was sie pro Agent mitbringen; ein Kit (siehe [Kits verwalten](#kits-verwalten-sandbox-ai-kits)) |
 | `sandbox-ai kits new NAME [--agent A]...`, `delete NAME --yes` | Ein eigenes Kit anlegen oder löschen |
 | `sandbox-ai kits add-skill NAME PFAD [--agent A]... [--as SKILL]`, `new-skill NAME SKILL [--agent A]... [--description TEXT]`, `remove-skill NAME SKILL [--agent A]...` | Skill-Ordner ins Kit kopieren (Schnappschuss, kein Symlink wird verfolgt), einen aus einer Vorlage schreiben, einen entfernen |
-| `sandbox-ai kits add-plugin NAME PLUGIN [--agent claude\|opencode] [--source QUELLE]`, `remove-plugin NAME PLUGIN [--agent A]`, `add-marketplace NAME MARKETPLACE QUELLE` | Plugins und Marketplaces in der `marketplaces.json` eines Kits deklarieren (QUELLE: `OWNER/REPO`, `https://...`, `sandbox-ai`) |
+| `sandbox-ai kits add-plugin NAME PLUGIN [--agent claude\|opencode] [--source QUELLE]`, `remove-plugin NAME PLUGIN [--agent A]`, `add-marketplace NAME MARKETPLACE QUELLE` | Plugins und Marketplaces in der `marketplaces.json` eines Kits deklarieren (QUELLE: `OWNER/REPO`, `https://...`, `sandbox-ai`; NAME: ein eigenes Kit oder `default`) |
+| `sandbox-ai kits enable-plugin NAME PLUGIN [--agent A]`, `disable-plugin NAME PLUGIN [--agent A]` | Ein Plugin eines Kits ein- oder ausschalten (aus: deklariert und installiert, nicht aktiviert; auch über das eines früheren Kits) |
+| `sandbox-ai kits remove-marketplace NAME MARKTPLATZ [--with-plugins]`, `import-marketplace NAME MARKTPLATZ [--from claude\|codex] [--with-plugins]` | Einen Marktplatz aus einem Kit nehmen; einen, den Claude oder Codex auf diesem Rechner schon kennt, mit seiner dortigen Quelle deklarieren |
 | `sandbox-ai kits add-hook NAME DATEI [--agent A]... [--event E] [--matcher M] [--timeout S] [--as DATEI]`, `remove-hook NAME DATEI [--agent A]...` | Einen Hook ins Kit aufnehmen (ein Skript, eine `hooks.json`, ein OpenCode-Plugin) oder entfernen ([Hooks in Kits](#hooks-in-kits)) |
 | `sandbox-ai kits trust-hooks KIT [--agent A]... [--yes\|--revoke]` | Die Hooks eines Kits prüfen (jeder Hook und jede Datei wird gezeigt) und genau diesen Inhalt freigeben, oder die Freigabe zurücknehmen |
 | `sandbox-ai wizard trust DATEI [--yes]`, `sandbox-ai wizard forget DATEI` | Projektkonfiguration vertrauen bzw. von der Vertrauensliste entfernen |

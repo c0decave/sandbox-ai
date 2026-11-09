@@ -28,8 +28,8 @@ k = kc.kits()
 AGENTS = ("claude", "codex", "opencode")
 INVENTORY_KEYS = {"version", "kits_dir", "store", "kits", "marketplace", "installed"}
 KIT_KEYS = {"name", "kind", "path", "editable", "replaced", "description", "agents"}
-AGENT_KEYS = {"path", "skills", "agents", "commands", "prompts", "memory", "marketplaces", "plugins", "hooks", "notes",
-              "error"}
+AGENT_KEYS = {"path", "skills", "agents", "commands", "prompts", "memory", "marketplaces", "plugins", "disabled",
+              "hooks", "notes", "error"}
 PLUGIN_KEYS = {"name", "id", "description", "version", "source", "homepage", "kits"}
 SANDBOX_AI = {"source": "directory", "path": "/sandbox/marketplace"}
 EGM = {"$comment": "Built-in kit 'egm': enables the Elephant-Goldfish Model plugin.",
@@ -329,11 +329,15 @@ def test_built_in_default_and_always_on_kits_are_read_only(shipped, tmp_path, ca
     make(data(), {"home/claude/skills/sandbox-example/SKILL.md": "x"})
     source = skill(tmp_path / "src")
     before = tree(shipped), tree(data())
+    plugin_commands = (("add-plugin", "sandcastle@sandbox-ai"), ("remove-plugin", "egm@sandbox-ai"),
+                       ("enable-plugin", "egm@sandbox-ai"), ("disable-plugin", "egm@sandbox-ai"),
+                       ("add-marketplace", "m", "o/r"), ("remove-marketplace", "m"), ("import-marketplace", "m"))
     for name, reason in (("egm", "built-in kit of sandbox-ai"), ("default", "edit it by hand in"),
                          ("built-in", "ships with sandbox-ai and is read-only")):
         for argv in (("add-skill", name, str(source)), ("new-skill", name, "x"), ("remove-skill", name, "sandbox-ai"),
-                     ("add-plugin", name, "sandcastle@sandbox-ai"), ("remove-plugin", name, "egm@sandbox-ai"),
-                     ("add-marketplace", name, "m", "o/r"), ("delete", name, "--yes")):
+                     ("delete", name, "--yes"),
+                     # the default kit's plugins and marketplaces change (test_default_kit_plugins_and_marketplaces)
+                     *([] if name == "default" else [(command, name, *rest) for command, *rest in plugin_commands])):
             assert run(*argv)[0] == 1
             assert reason in capsys.readouterr().err
     assert run("add-skill", "default", str(source))[0] == 1

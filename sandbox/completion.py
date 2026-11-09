@@ -140,6 +140,25 @@ def kit_names():
     return quietly(lambda: sorted(set(module("kits").available_kits())))
 
 
+def plugin_kit_names():
+    """The kits whose plugins and marketplaces sandbox-ai kits changes: yours and the default kit."""
+    return quietly(lambda: sorted(set(module("kits").available_kits(builtin=False)) | {"default"}))
+
+
+def marketplace_names():
+    return quietly(lambda: module("plugins").marketplace_names())
+
+
+def plugin_ids():
+    def ids():
+        data = module("plugins").marketplaces()
+        for market in data["marketplaces"]:
+            if market["agent"] == "claude":
+                yield from (p["id"] for p in market["plugins"])
+        yield from (p["id"] for p in data["agents"].get("opencode", {}).get("plugins", []))
+    return quietly(lambda: sorted(set(ids())))
+
+
 def question_ids():
     return quietly(lambda: [q.get("id") for _, _, q in module("approvals").questions() if q.get("id")])
 
@@ -159,6 +178,14 @@ NAMED = {
     ("canaries", "*", "run"): run_names, ("activity", None, "run"): run_names,
     ("hosts", "*", "name"): host_names, ("mcp", "*", "name"): mcp_names, ("llm", "*", "name"): llm_names,
     ("vpn", "*", "name"): vpn_names, ("kits", "*", "name"): kit_names,
+    **{("kits", sub, "name"): plugin_kit_names for sub in ("add-plugin", "remove-plugin", "enable-plugin",
+                                                            "disable-plugin", "add-marketplace", "remove-marketplace",
+                                                            "import-marketplace")},
+    ("kits", "remove-plugin", "plugin"): plugin_ids, ("kits", "enable-plugin", "plugin"): plugin_ids,
+    ("kits", "disable-plugin", "plugin"): plugin_ids, ("kits", "add-plugin", "plugin"): plugin_ids,
+    ("kits", "remove-marketplace", "marketplace"): marketplace_names,
+    ("kits", "import-marketplace", "marketplace"): marketplace_names,
+    ("plugins", "marketplaces", "name"): marketplace_names,
     ("approvals", "allow", "id"): question_ids, ("approvals", "deny", "id"): question_ids,
     ("team", "*", "name"): team_names, ("approvals", "history", "run"): run_names,
     ("hosts", "update", "names"): host_names, ("mcp", "attach", "start"): start_names,
@@ -168,6 +195,10 @@ NAMED = {
 VALUES = {"--kit": kit_names, "--mcp": mcp_names, "--llm": llm_names, "--vpn": vpn_names,
           "--session": start_names, "--name": start_names, "--for": start_names, "--host": host_names, "--helper": lambda: list(AGENTS),
           "--with": lambda: list(AGENTS)}
+
+
+# A word of a command whose script reads the rest with a parser of its own: (command, word) -> that parser
+OWN_PARSERS = {("plugins", "marketplaces"): lambda: module("plugins").marketplaces_parser()}
 
 
 def named(command, sub, dest):
@@ -198,7 +229,11 @@ def complete(words):
     if parser is None:
         return [FILES]
     sub, used, expecting, after_dashes = None, 0, None, False
-    for word in done[1:]:
+    rest = done[1:]
+    own = quietly(lambda: [OWN_PARSERS[(command, rest[0])]()]) if rest and (command, rest[0]) in OWN_PARSERS else []
+    if own:
+        parser, sub, rest = own[0], rest[0], rest[1:]
+    for word in rest:
         if expecting is not None:
             expecting = None
             continue

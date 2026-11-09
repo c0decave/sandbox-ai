@@ -614,9 +614,11 @@ def test_plugins_sync_installs_the_builtin_kit_only_on_request(tmp_path, monkeyp
     assert any("built-in kit egm (--kit egm): egm@sandbox-ai" in line and "->" not in line for line in lines)
     # The command line: --kit is sandbox-ai plugins' own, not handed to the store sandbox.
     seen = []
-    monkeypatch.setattr(plugins, "sync", lambda options, update, builtin=(): seen.append((options, builtin)) or 0)
+    monkeypatch.setattr(plugins, "sync", lambda options, update, builtin=(), marketplaces_only=False:
+                        seen.append((options, builtin, marketplaces_only)) or 0)
     assert plugins.cli(["claude", "--kit", "egm", "--backend", "bwrap"]) == 0
-    assert seen == [(["--backend", "bwrap"], ["egm"])]
+    assert plugins.cli(["claude", "--marketplaces-only"]) == 0
+    assert seen == [(["--backend", "bwrap"], ["egm"], False), ([], [], True)]
     ran = []
     monkeypatch.setattr(plugins.subprocess, "run", lambda command: ran.append(command)
                         or subprocess.CompletedProcess(command, 0))

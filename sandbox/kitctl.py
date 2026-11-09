@@ -9,7 +9,12 @@
   sandbox-ai kits remove-skill NAME SKILL [--agent A]...
   sandbox-ai kits add-plugin NAME PLUGIN [--agent claude|opencode] [--source SOURCE]
   sandbox-ai kits remove-plugin NAME PLUGIN [--agent A]
+  sandbox-ai kits enable-plugin NAME PLUGIN [--agent A]           a disabled plugin of the kit on again
+  sandbox-ai kits disable-plugin NAME PLUGIN [--agent A]          declared (and installed) but off with this kit
   sandbox-ai kits add-marketplace NAME MARKETPLACE SOURCE        SOURCE: OWNER/REPO, https://..., sandbox-ai
+  sandbox-ai kits remove-marketplace NAME MARKETPLACE [--with-plugins]
+  sandbox-ai kits import-marketplace NAME MARKETPLACE [--from claude|codex] [--with-plugins]
+                                                                 one Claude (or Codex) already knows on this machine
   sandbox-ai kits add-hook NAME FILE [--agent A]... [--event E] [--matcher M] [--timeout S]
                                                                  a hook script, a hooks.json, or an OpenCode plugin
   sandbox-ai kits remove-hook NAME FILE [--agent A]...
@@ -18,8 +23,10 @@
 
 NAME is a kit of yours in ~/.local/share/sandbox-ai/kits; `show` also finds sandbox-ai's built-in kits
 and, when no kit of yours has that name, `default` (the default kit) and `built-in` (the built-in skill,
-part of every sandbox). Only your own kits are changed: built-in kits, the built-in skill and the default
-kit are read-only here (edit the default kit by hand). Nothing is followed through a symlink: a kit,
+part of every sandbox). Only your own kits are changed, and the default kit's plugins and marketplaces (the
+plugin and marketplace commands take `default`): built-in kits and the built-in skill are read-only here, and
+the rest of the default kit is edited by hand. Every marketplace with its plugins: sandbox-ai plugins
+marketplaces. Nothing is followed through a symlink: a kit,
 agent directory or skill that is a symlink (to a checkout, say) is changed where it lives. A copied skill
 is a snapshot: symlinks, FIFOs and devices in it are skipped, never followed or opened.
 
@@ -129,7 +136,7 @@ def agent_info(agent, label, directory):
     """What the kit DIRECTORY (one agent's part of a kit) holds; a ValueError lands in "error"."""
     k = kits()
     info = {"path": str(directory), **{kind: [] for kind in KINDS}, "memory": None, "marketplaces": {},
-            "plugins": [], "hooks": None, "notes": [], "error": None}
+            "plugins": [], "disabled": [], "hooks": None, "notes": [], "error": None}
     comment = None
     if Path(directory).is_symlink():
         info["notes"].append(f"{agent}/ is a symlink to {os.readlink(directory)}; change it where it lives")
@@ -147,6 +154,7 @@ def agent_info(agent, label, directory):
             declared = document.get("marketplaces", {})
             comment = document.get("$comment") if isinstance(document.get("$comment"), str) else None
             info["plugins"] = list(listed)
+            info["disabled"] = list(document.get("disabled", []))
             if agent == "claude":
                 info["marketplaces"] = {name: entry["source"] for name, entry in declared.items()}
                 elsewhere = [p for p in listed if p.split("@")[1] not in declared]
@@ -261,13 +269,17 @@ def agent_summary(agent, info, installed, detail):
         parts.append("marketplaces: " + ", ".join(
             f"{name} ({kits().source_argument(source)})" if detail else name
             for name, source in info["marketplaces"].items()))
-    if info["plugins"]:
+    off = info.get("disabled", [])
+    if info["plugins"] or off:
+        listed = [(p, "") for p in info["plugins"]] + [(p, "off") for p in off]
         if agent == "claude":
-            parts.append("plugins: " + ", ".join(p if p in installed else f"{p} (not installed)" for p in info["plugins"]))
+            parts.append("plugins: " + ", ".join(
+                p + (f" ({', '.join(w for w in (state, '' if p in installed else 'not installed') if w)})"
+                     if state or p not in installed else "") for p, state in listed))
         elif agent == "opencode":
-            parts.append("npm plugins: " + ", ".join(info["plugins"]))
+            parts.append("npm plugins: " + ", ".join(p + (" (off)" if state else "") for p, state in listed))
         else:
-            parts.append("plugins (ignored: not supported for Codex yet): " + ", ".join(info["plugins"]))
+            parts.append("plugins (ignored: not supported for Codex yet): " + ", ".join(p for p, _ in listed))
     return "; ".join(parts) or "empty"
 
 
@@ -291,8 +303,8 @@ def render(kit, data, out, detail=False):
     first = next(iter(kit["agents"]), "claude")
     path = printable(kit["path"])
     head = {"always": f"{name}: sandbox-ai's built-in skill, part of every sandbox; read-only ({path})",
-            "default": f"{name}: the default kit, part of every sandbox unless --no-default-kit; read-only here, "
-                       f"edit it by hand in {path}",
+            "default": f"{name}: the default kit, part of every sandbox unless --no-default-kit; its plugins and "
+                       f"marketplaces change with sandbox-ai kits add-plugin default ..., the rest by hand in {path}",
             "builtin": f"{name}: built-in kit of sandbox-ai, read-only ({path}); use: sandbox-ai {first} --kit {name}",
             "user": f"{name}: your kit ({path}); use: sandbox-ai {first} --kit {name}"}[kind]
     out(head)
@@ -397,7 +409,8 @@ def read_only_reason(name):
         return (f"{name} is a built-in kit of sandbox-ai ({builtin_kits_root() / name}) and read-only; a kit of yours "
                 f"of that name replaces it for its agents: sandbox-ai kits new {name}")
     if name == "default":
-        return (f"the default kit is not changed by sandbox-ai kits; edit it by hand in {default_root()}/AGENT "
+        return (f"sandbox-ai kits changes only the default kit's plugins and marketplaces (add-plugin, "
+                f"add-marketplace, import-marketplace, ...); edit it by hand in {default_root()}/AGENT "
                 f"(e.g. {k.default_home('claude')})")
     if name == k.BUILTIN_LABEL:
         return ("the built-in skill ships with sandbox-ai and is read-only; a skill named sandbox-ai in a kit of "
@@ -818,6 +831,18 @@ def cmd_remove_skill(a, out):
 
 
 # --- plugins and marketplaces ----------------------------------------------------------------------
+#
+# A kit's AGENT/marketplaces.json: "marketplaces" (Claude), "plugins" (enabled when the kit is used) and "disabled"
+# (declared, installed by `sandbox-ai plugins claude`, but off; the last kit of a start that names a plugin decides).
+# These commands change your kits and the default kit (`default`, part of every sandbox; created from its examples
+# first when missing); sandbox-ai's built-in kits stay read-only.
+
+def plugins_module():
+    """sandbox/plugins.py, on the same kits module as this one (so what a caller set there holds for both)."""
+    loaded = module("plugins")
+    loaded._modules["kits"] = kits()
+    return loaded
+
 
 def validate(agent, document, label):
     """The rules kits.declarations applies, on DOCUMENT (through a private temporary file)."""
@@ -825,6 +850,31 @@ def validate(agent, document, label):
         path = Path(directory) / kits().PLUGINS_FILE
         path.write_text(json.dumps(document))
         kits().declarations(agent, [(label, path)])
+
+
+def plugin_kit(name, agent, out):
+    """(root, the kit's folder below ROOT, label) of the kit NAME whose marketplaces.json the plugin and marketplace
+    commands change: a kit of yours, or `default`, the default kit (AGENT's part created from its examples first
+    when missing, as a start does: its suggestions are what is changed, not an empty kit)."""
+    check_kit_name(name)
+    k = kits()
+    if name == "default" and not os.path.lexists(k.kits_dir() / name):
+        if k.ensure_default_home(agent):
+            out(f"created the default kit {printable(k.default_home(agent))} with examples")
+        root = Path(os.path.realpath(k.data_root()))
+        if not (root / "home").is_dir():
+            raise ValueError(f"the default kit {k.default_home('claude').parent} does not exist yet (a start creates "
+                             "it)")
+        return root, "home", "the default kit"
+    root, _ = user_kit(name)
+    return root, name, f"kit {name}"
+
+
+def use_hint(name, agent):
+    """How a kit's plugin reaches a sandbox."""
+    if name == "default":
+        return f"every {agent} sandbox gets it (the default kit)"
+    return f"use it with: sandbox-ai {agent} --kit {name}"
 
 
 def read_plugins_file(root, name, agent):
@@ -851,11 +901,11 @@ def read_plugins_file(root, name, agent):
     return document, True
 
 
-def change_plugins_file(root, name, agent, change):
+def change_plugins_file(root, name, agent, change, label=None):
     """Read NAME/AGENT/marketplaces.json, apply CHANGE(document) (True if it changed something), check the
     result like the launcher does and write it atomically; "$comment" and other entries are kept."""
     k = kits()
-    label = f"kit {name}"
+    label = label or f"kit {name}"
     document, existed = read_plugins_file(root, name, agent)
     if existed:
         try:
@@ -864,7 +914,9 @@ def change_plugins_file(root, name, agent, change):
             raise ValueError(f"{exc} (fix {root / name / agent / k.PLUGINS_FILE} by hand first)") from None
     if not change(document):
         return False
-    ordered = {key: document[key] for key in ("$comment", "marketplaces", "plugins") if key in document}
+    if "disabled" in document and not document["disabled"]:
+        del document["disabled"]
+    ordered = {key: document[key] for key in ("$comment", "marketplaces", "plugins", "disabled") if key in document}
     ordered.update(document)
     validate(agent, ordered, label)
     k.write_at(root, f"{name}/{agent}/{k.PLUGINS_FILE}",
@@ -929,50 +981,70 @@ def own_plugin_names():
     return [entry["name"] for entry in own_marketplace_entries()]
 
 
+def enable_in(document, plugin):
+    """PLUGIN in DOCUMENT's "plugins" (taken out of "disabled"); True if that changed something."""
+    listed, off = document.setdefault("plugins", []), document.get("disabled", [])
+    changed = plugin in off
+    if changed:
+        document["disabled"] = [p for p in off if p != plugin]
+    if plugin not in listed:
+        listed.append(plugin)
+        changed = True
+    return changed
+
+
+def declare_marketplace(document, name, marketplace, source):
+    """MARKETPLACE with SOURCE in DOCUMENT; True if added, False if declared with it already, ValueError for another
+    source."""
+    declared = document.setdefault("marketplaces", {})
+    if marketplace in declared:
+        current = declared[marketplace].get("source") if isinstance(declared[marketplace], dict) else None
+        if current != source:
+            raise ValueError(f"{name} declares the marketplace {marketplace} already, with another source "
+                             f"({source_value(current) if isinstance(current, dict) else '?'}); remove it there first "
+                             f"(sandbox-ai kits remove-marketplace)")
+        return False
+    declared[marketplace] = {"source": source}
+    return True
+
+
 def cmd_add_plugin(a, out):
     k = kits()
     agent = a.agent or "claude"
     if agent == "codex":
         raise ValueError("plugins for Codex are not supported yet (a kit's codex/marketplaces.json is ignored)")
-    root, kit = user_kit(a.name)
     if agent == "opencode":
         if a.source:
             raise ValueError("OpenCode has no marketplaces; --source is for Claude plugins")
         if not re.fullmatch(k.NPM_PLUGIN, a.plugin):
             raise ValueError(f"{printable(a.plugin)!r} is not an npm package name (optionally @VERSION)")
-
-        def add_npm(document):
-            listed = document.setdefault("plugins", [])
-            if a.plugin in listed:
-                return False
-            listed.append(a.plugin)
-            return True
-
-        if not change_plugins_file(root, a.name, agent, add_npm):
-            out(f"kit {a.name} already lists {a.plugin} for opencode; nothing changed")
+        root, folder, label = plugin_kit(a.name, agent, out)
+        if not change_plugins_file(root, folder, agent, lambda document: enable_in(document, a.plugin), label):
+            out(f"{label} already lists {a.plugin} for opencode; nothing changed")
             return 0
-        out(f"kit {a.name}: npm plugin {a.plugin} added for opencode; OpenCode installs it itself, which needs "
-            f"--allow-host registry.npmjs.org (use: sandbox-ai opencode --kit {a.name})")
+        out(f"{label}: npm plugin {a.plugin} added for opencode; OpenCode installs it itself, which needs "
+            f"--allow-host registry.npmjs.org ({use_hint(a.name, 'opencode')})")
         return 0
     if not re.fullmatch(f"{k.PLUGIN_NAME}@{k.PLUGIN_NAME}", a.plugin):
         raise ValueError(f"{printable(a.plugin)!r}: a Claude plugin is NAME@MARKETPLACE, e.g. sandcastle@sandbox-ai")
     plugin_name, marketplace = a.plugin.split("@")
     wanted = parse_source(marketplace, a.source) if a.source else None
+    root, folder, label = plugin_kit(a.name, "claude", out)
     added = {}
 
     def add_claude(document):
         declared = document.setdefault("marketplaces", {})
         current = declared.get(marketplace, {}).get("source") if marketplace in declared else None
         if wanted and current and current != wanted:
-            raise ValueError(f"kit {a.name} declares the marketplace {marketplace} with another source "
+            raise ValueError(f"{label} declares the marketplace {marketplace} with another source "
                              f"({source_value(current)}); remove it there first or leave out --source")
         source = current or wanted
         if source is None and marketplace == MARKETPLACE_NAME:
             source = {"source": "directory", "path": k.MARKETPLACE_TARGET}
         if source is None:
             elsewhere = declared_elsewhere(marketplace, a.name)
-            hint = "".join(f"; {label} declares it: --source {source_value(s)}" for label, s in elsewhere[:3])
-            raise ValueError(f"kit {a.name} does not declare the marketplace {marketplace}; give its source with "
+            hint = "".join(f"; {where} declares it: --source {source_value(s)}" for where, s in elsewhere[:3])
+            raise ValueError(f"{label} does not declare the marketplace {marketplace}; give its source with "
                              f"--source OWNER/REPO|https://...{hint}")
         if source.get("source") == "directory":
             names = own_plugin_names()
@@ -984,44 +1056,100 @@ def cmd_add_plugin(a, out):
             declared[marketplace] = {"source": source}
             added["marketplace"] = source
             changed = True
-        listed = document.setdefault("plugins", [])
-        if a.plugin not in listed:
-            listed.append(a.plugin)
-            changed = True
-        return changed
+        return enable_in(document, a.plugin) or changed
 
-    if not change_plugins_file(root, a.name, "claude", add_claude):
-        out(f"kit {a.name} already lists {a.plugin} for claude; nothing changed")
+    if not change_plugins_file(root, folder, "claude", add_claude, label):
+        out(f"{label} already lists {a.plugin} for claude; nothing changed")
         return 0
     extra = (f"; declared the marketplace {marketplace} ({source_value(added['marketplace'])})"
              if "marketplace" in added else "")
-    out(f"kit {a.name}: plugin {a.plugin} added for claude{extra}")
-    out(f"install it with: sandbox-ai plugins claude; use it with: sandbox-ai claude --kit {a.name}")
+    out(f"{label}: plugin {a.plugin} added for claude{extra}")
+    out(f"install it with: sandbox-ai plugins claude; {use_hint(a.name, 'claude')}")
     return 0
 
 
-def cmd_remove_plugin(a, out):
-    root, kit = user_kit(a.name)
+def kit_agents_naming(root, folder, kit_path, plugin, wanted):
+    """The agents (WANTED, else all of the kit's) whose marketplaces.json names PLUGIN, enabled or disabled."""
     agents = []
-    for agent in chosen_agents([a.agent] if a.agent else [], agents_of(kit)):
+    for agent in chosen_agents([wanted] if wanted else [], agents_of(kit_path)):
         try:
-            document, _ = read_plugins_file(root, a.name, agent)
+            document, _ = read_plugins_file(root, folder, agent)
         except ValueError:
-            if a.agent:
+            if wanted:
                 raise
             continue  # another agent's file; this command is not about it
-        if a.plugin in (document.get("plugins") if isinstance(document.get("plugins"), list) else []):
+        named = [p for key in ("plugins", "disabled") if isinstance(document.get(key), list) for p in document[key]]
+        if plugin in named:
             agents.append(agent)
+    return agents
+
+
+def cmd_remove_plugin(a, out):
+    root, folder, label = plugin_kit(a.name, a.agent or "claude", out)
+    agents = kit_agents_naming(root, folder, root / folder, a.plugin, a.agent)
     if not agents:
-        raise ValueError(f"kit {a.name} does not list the plugin {printable(a.plugin)}"
+        raise ValueError(f"{label} does not list the plugin {printable(a.plugin)}"
                          + (f" for {a.agent}" if a.agent else ""))
     for agent in agents:
         def remove(document):
-            document["plugins"] = [p for p in document["plugins"] if p != a.plugin]
+            for key in ("plugins", "disabled"):
+                if isinstance(document.get(key), list):
+                    document[key] = [p for p in document[key] if p != a.plugin]
             return True
-        change_plugins_file(root, a.name, agent, remove)
-        out(f"kit {a.name}: removed the plugin {a.plugin} for {agent}"
+        change_plugins_file(root, folder, agent, remove, label)
+        out(f"{label}: removed the plugin {a.plugin} for {agent}"
             + ("; its marketplace stays declared" if agent == "claude" and "@" in a.plugin else ""))
+    return 0
+
+
+def cmd_enable_plugin(a, out):
+    """A plugin the kit keeps disabled is enabled again."""
+    if a.agent == "codex":
+        raise ValueError("plugins for Codex are not supported yet (a kit's codex/marketplaces.json is ignored)")
+    root, folder, label = plugin_kit(a.name, a.agent or "claude", out)
+    agents = kit_agents_naming(root, folder, root / folder, a.plugin, a.agent)
+    if not agents:
+        raise ValueError(f"{label} does not list the plugin {printable(a.plugin)}"
+                         + (f" for {a.agent}" if a.agent else "")
+                         + f"; add it with: sandbox-ai kits add-plugin {a.name} {printable(a.plugin)}")
+    for agent in agents:
+        if change_plugins_file(root, folder, agent, lambda document: enable_in(document, a.plugin), label):
+            out(f"{label}: plugin {a.plugin} enabled for {agent}; {use_hint(a.name, agent)}")
+        else:
+            out(f"{label}: plugin {a.plugin} is enabled for {agent} already; nothing changed")
+    return 0
+
+
+def cmd_disable_plugin(a, out):
+    """A plugin stays declared (and installed) but is off in the sandboxes of the kit; a plugin the kit does not
+    name is put in its "disabled" list, which turns it off where an earlier kit (the default kit) enables it."""
+    k = kits()
+    if a.agent == "codex":
+        raise ValueError("plugins for Codex are not supported yet (a kit's codex/marketplaces.json is ignored)")
+    root, folder, label = plugin_kit(a.name, a.agent or "claude", out)
+    agents = kit_agents_naming(root, folder, root / folder, a.plugin, a.agent)
+    if not agents:
+        agent = a.agent or "claude"
+        pattern = k.NPM_PLUGIN if agent == "opencode" else f"{k.PLUGIN_NAME}@{k.PLUGIN_NAME}"
+        if not re.fullmatch(pattern, a.plugin):
+            raise ValueError(f"{printable(a.plugin)!r}: " + ("not an npm package name" if agent == "opencode"
+                                                            else "a Claude plugin is NAME@MARKETPLACE"))
+        agents = [agent]
+
+    def disable(document):
+        listed, off = document.get("plugins", []), document.setdefault("disabled", [])
+        if a.plugin in off:
+            return False
+        document["plugins"] = [p for p in listed if p != a.plugin]
+        off.append(a.plugin)
+        return True
+    for agent in agents:
+        if change_plugins_file(root, folder, agent, disable, label):
+            out(f"{label}: plugin {a.plugin} disabled for {agent}: it stays "
+                + ("declared (and installed)" if agent == "claude" else "listed")
+                + " but is off in every sandbox with this kit, also where a kit before it enables it")
+        else:
+            out(f"{label}: plugin {a.plugin} is disabled for {agent} already; nothing changed")
     return 0
 
 
@@ -1029,31 +1157,111 @@ def cmd_add_marketplace(a, out):
     k = kits()
     agent = a.agent or "claude"
     if agent != "claude":
-        raise ValueError(f"only Claude has plugin marketplaces ({'OpenCode loads npm plugins' if agent == 'opencode' else 'Codex plugins are not supported yet'})")
+        raise ValueError(f"only Claude has plugin marketplaces in kits ({'OpenCode loads npm plugins' if agent == 'opencode' else 'Codex plugins are not supported yet'})")
     if not re.fullmatch(k.PLUGIN_NAME, a.marketplace):
         raise ValueError(f"marketplace name {printable(a.marketplace)!r}: 1-64 letters, digits, '_', '.', '-'")
-    root, kit = user_kit(a.name)
     source = parse_source(a.marketplace, a.source)
-
-    def add(document):
-        declared = document.setdefault("marketplaces", {})
-        if a.marketplace in declared:
-            current = declared[a.marketplace].get("source")
-            if current != source:
-                raise ValueError(f"kit {a.name} declares the marketplace {a.marketplace} already, with another source "
-                                 f"({source_value(current)})")
-            return False
-        declared[a.marketplace] = {"source": source}
-        return True
-
-    if not change_plugins_file(root, a.name, "claude", add):
-        out(f"kit {a.name} already declares the marketplace {a.marketplace} with that source; nothing changed")
+    root, folder, label = plugin_kit(a.name, "claude", out)
+    if not change_plugins_file(root, folder, "claude",
+                               lambda document: declare_marketplace(document, label, a.marketplace, source), label):
+        out(f"{label} already declares the marketplace {a.marketplace} with that source; nothing changed")
         return 0
-    out(f"kit {a.name}: declared the marketplace {a.marketplace} ({source_value(source)}) for claude; add plugins "
+    out(f"{label}: declared the marketplace {a.marketplace} ({source_value(source)}) for claude; add plugins "
         f"from it with: sandbox-ai kits add-plugin {a.name} PLUGIN@{a.marketplace}")
     if source["source"] != "directory":
         out("note: `sandbox-ai plugins claude` adds it in a sandbox that reaches only its host; the marketplace must "
-            f"call itself {a.marketplace} in its marketplace.json")
+            f"call itself {a.marketplace} in its marketplace.json; its plugin list: sandbox-ai plugins claude "
+            "--marketplaces-only, then sandbox-ai plugins marketplaces")
+    return 0
+
+
+def cmd_remove_marketplace(a, out):
+    k = kits()
+    if (a.agent or "claude") != "claude":
+        raise ValueError("only Claude has plugin marketplaces in kits")
+    if not re.fullmatch(k.PLUGIN_NAME, a.marketplace):
+        raise ValueError(f"marketplace name {printable(a.marketplace)!r}: 1-64 letters, digits, '_', '.', '-'")
+    root, folder, label = plugin_kit(a.name, "claude", out)
+    taken = []
+
+    def remove(document):
+        declared = document.get("marketplaces")
+        if not (isinstance(declared, dict) and a.marketplace in declared):
+            raise ValueError(f"{label} does not declare the marketplace {a.marketplace}")
+        users = [p for key in ("plugins", "disabled") for p in document.get(key, []) if p.endswith(f"@{a.marketplace}")]
+        if users and not a.with_plugins:
+            raise ValueError(f"{label} lists plugins of the marketplace {a.marketplace}: {', '.join(users)}; remove "
+                             "them first (sandbox-ai kits remove-plugin) or give --with-plugins")
+        del declared[a.marketplace]
+        for key in ("plugins", "disabled"):
+            if key in document:
+                document[key] = [p for p in document[key] if p not in users]
+        taken.extend(users)
+        return True
+    change_plugins_file(root, folder, "claude", remove, label)
+    out(f"{label}: removed the marketplace {a.marketplace} for claude"
+        + (f" with its plugins {', '.join(taken)}" if taken else "")
+        + "; what sandbox-ai's plugin store fetched of it stays there (sandbox-ai plugins claude -- marketplace "
+          f"remove {a.marketplace} removes it)")
+    return 0
+
+
+def cmd_import_marketplace(a, out):
+    """A marketplace Claude (or Codex, in Claude's format) already knows on this machine, declared in a kit with the
+    source it has there; with --with-plugins also the plugins the agent enables from it."""
+    k = kits()
+    agent = a.from_agent
+    if agent == "opencode":
+        raise ValueError("OpenCode has no marketplaces: its plugins are npm packages; add one with: sandbox-ai kits "
+                         f"add-plugin {a.name} PACKAGE --agent opencode (see: sandbox-ai plugins marketplaces "
+                         "--agent opencode)")
+    if not re.fullmatch(k.PLUGIN_NAME, a.marketplace):
+        raise ValueError(f"marketplace name {printable(a.marketplace)!r}: 1-64 letters, digits, '_', '.', '-'")
+    check_kit_name(a.name)
+    if a.name != "default" or os.path.lexists(k.kits_dir() / a.name):
+        user_kit(a.name)  # a kit that cannot change is said first
+    found = plugins_module().marketplaces(agent)
+    market = next((m for m in found["marketplaces"] if m["name"] == a.marketplace and m["agent"] == agent
+                   and (agent == "codex" or m["agent_config"])), None)
+    if market is None:
+        known = [m["name"] for m in found["marketplaces"] if m["agent"] == agent and (agent == "codex"
+                                                                                     or m["agent_config"])]
+        where = "Claude" if agent == "claude" else "Codex"
+        raise ValueError(f"{where} on this machine knows no marketplace {a.marketplace} (it knows: "
+                         f"{', '.join(known) or 'none'}); declare another one with: sandbox-ai kits add-marketplace "
+                         f"{a.name} NAME SOURCE")
+    if agent == "codex":
+        if not market["import"]:
+            raise ValueError(f"Codex's marketplace {a.marketplace} cannot be declared in a kit: {market['problem']}")
+        name, source = market["import"]["name"], market["import"]["source"]
+    else:
+        if not market["importable"]:
+            raise ValueError(f"Claude's marketplace {a.marketplace} cannot be declared in a kit: {market['problem']}")
+        name, source = a.marketplace, market["source"]
+    chosen = [f"{p['name']}@{name}" for p in market["plugins"] if (p.get("agent") or {}).get("enabled") is True] \
+        if a.with_plugins else []
+    root, folder, label = plugin_kit(a.name, "claude", out)
+    added = []
+
+    def change(document):
+        changed = declare_marketplace(document, label, name, source)
+        for plugin in chosen:
+            if enable_in(document, plugin):
+                added.append(plugin)
+                changed = True
+        return changed
+    if not change_plugins_file(root, folder, "claude", change, label):
+        out(f"{label} declares the marketplace {name} with that source already"
+            + (" and lists its plugins" if chosen else "") + "; nothing changed")
+        return 0
+    out(f"{label}: declared the marketplace {name} ({source_value(source)}) for claude, as "
+        f"{'Claude' if agent == 'claude' else 'Codex'} has it on this machine"
+        + (f" (Codex calls it {a.marketplace})" if name != a.marketplace else ""))
+    if added:
+        out(f"{label}: enabled {', '.join(added)}, as {'Claude' if agent == 'claude' else 'Codex'} enables them")
+    elif a.with_plugins:
+        out(f"{'Claude' if agent == 'claude' else 'Codex'} enables no plugin of it here")
+    out(f"install with: sandbox-ai plugins claude; {use_hint(a.name, 'claude')}")
     return 0
 
 
@@ -1343,20 +1551,45 @@ def parser():
     remove_skill.add_argument("skill")
     agent_option(remove_skill)
     add_plugin = commands.add_parser("add-plugin", help="enable a plugin in a kit")
-    add_plugin.add_argument("name")
+    add_plugin.add_argument("name", help="your kit, or default")
     add_plugin.add_argument("plugin", help="Claude: NAME@MARKETPLACE; OpenCode: an npm package")
     agent_option(add_plugin, many=False)
     add_plugin.add_argument("-s", "--source", metavar="SOURCE", help="declare the marketplace too: OWNER/REPO, "
                                                                      "https://..., sandbox-ai")
     remove_plugin = commands.add_parser("remove-plugin", help="take a plugin out of a kit")
-    remove_plugin.add_argument("name")
+    remove_plugin.add_argument("name", help="your kit, or default")
     remove_plugin.add_argument("plugin")
     agent_option(remove_plugin, many=False)
+    for command, text in (("enable-plugin", "enable a plugin the kit keeps disabled"),
+                          ("disable-plugin", "keep a plugin declared (and installed) but off with this kit")):
+        switch = commands.add_parser(command, help=text, description=text + (
+            "; a plugin the kit does not name is put in its \"disabled\" list: off where a kit before it (the "
+            "default kit) enables it" if command == "disable-plugin" else ""))
+        switch.add_argument("name", help="your kit, or default")
+        switch.add_argument("plugin", help="Claude: NAME@MARKETPLACE; OpenCode: an npm package")
+        agent_option(switch, many=False)
     add_market = commands.add_parser("add-marketplace", help="declare a Claude plugin marketplace in a kit")
-    add_market.add_argument("name")
+    add_market.add_argument("name", help="your kit, or default")
     add_market.add_argument("marketplace")
     add_market.add_argument("source", help="OWNER/REPO (GitHub), https://... (Git, or a marketplace.json), sandbox-ai")
     agent_option(add_market, many=False)
+    remove_market = commands.add_parser("remove-marketplace", help="take a Claude plugin marketplace out of a kit")
+    remove_market.add_argument("name", help="your kit, or default")
+    remove_market.add_argument("marketplace")
+    remove_market.add_argument("--with-plugins", action="store_true",
+                               help="also take out the kit's plugins of it (else they must be removed first)")
+    agent_option(remove_market, many=False)
+    import_market = commands.add_parser(
+        "import-marketplace", help="declare a marketplace Claude or Codex already knows on this machine",
+        description="Declare in a kit a marketplace Claude (~/.claude) or Codex (~/.codex/config.toml, if it is in "
+                    "Claude's format) already knows on this machine, with the source it has there. Nothing is "
+                    "fetched: `sandbox-ai plugins claude` does that in a sandbox. OpenCode has no marketplaces.")
+    import_market.add_argument("name", help="your kit, or default")
+    import_market.add_argument("marketplace", help="its name as the agent has it (sandbox-ai plugins marketplaces)")
+    import_market.add_argument("--from", dest="from_agent", choices=AGENTS, default="claude",
+                               help="whose configuration (default: claude)")
+    import_market.add_argument("--with-plugins", action="store_true",
+                               help="also enable in the kit the plugins of it the agent enables")
     add_hook = commands.add_parser("add-hook", help="add a hook to a kit (it runs once approved)")
     add_hook.add_argument("name")
     add_hook.add_argument("file", help="a hook script, a hooks.json (Claude Code's \"hooks\" format), or an "
@@ -1386,6 +1619,8 @@ def parser():
 COMMANDS = {"list": cmd_list, "show": cmd_show, "new": cmd_new, "add-skill": cmd_add_skill,
             "new-skill": cmd_new_skill, "remove-skill": cmd_remove_skill, "add-plugin": cmd_add_plugin,
             "remove-plugin": cmd_remove_plugin, "add-marketplace": cmd_add_marketplace, "delete": cmd_delete,
+            "enable-plugin": cmd_enable_plugin, "disable-plugin": cmd_disable_plugin,
+            "remove-marketplace": cmd_remove_marketplace, "import-marketplace": cmd_import_marketplace,
             "add-hook": cmd_add_hook, "remove-hook": cmd_remove_hook, "trust-hooks": cmd_trust_hooks}
 
 

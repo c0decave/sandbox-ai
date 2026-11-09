@@ -782,33 +782,41 @@ def read_declaration(label, path):
     return document
 
 
-def declarations(agent, plugin_files):
+def declarations(agent, plugin_files, with_disabled=False):
     """({marketplace name: source}, [plugin ids], notes) of the marketplaces.json files of the kits.
-    Claude: marketplaces + "NAME@MARKETPLACE" plugins; OpenCode: npm plugin names; Codex: not yet."""
-    marketplaces, origins, plugins, notes = {}, {}, [], []
+    Claude: marketplaces + "NAME@MARKETPLACE" plugins; OpenCode: npm plugin names; Codex: not yet.
+    "plugins" lists what a kit enables, "disabled" what it keeps declared but off; of the kits in PLUGIN_FILES'
+    order, the last that names a plugin decides (a kit given with --kit after the default kit can turn one of the
+    default kit's plugins off, or on again). WITH_DISABLED: every declared plugin, off or on (what the plugin
+    store installs)."""
+    marketplaces, origins, plugins, notes = {}, {}, {}, []
     for label, path in plugin_files:
         document = read_declaration(label, path)
-        unknown = set(document) - {"marketplaces", "plugins", "$comment"}
+        unknown = set(document) - {"marketplaces", "plugins", "disabled", "$comment"}
         if unknown:
-            raise ValueError(f"{label}: {path}: unknown keys {sorted(unknown)} (known: marketplaces, plugins)")
-        listed = document.get("plugins", [])
-        if not isinstance(listed, list) or not all(isinstance(p, str) for p in listed):
-            raise ValueError(f"{label}: {path}: \"plugins\" must be a list of strings")
+            raise ValueError(f"{label}: {path}: unknown keys {sorted(unknown)} (known: marketplaces, plugins, "
+                             "disabled)")
+        listed, off = document.get("plugins", []), document.get("disabled", [])
+        for key, value in (("plugins", listed), ("disabled", off)):
+            if not isinstance(value, list) or not all(isinstance(p, str) for p in value):
+                raise ValueError(f"{label}: {path}: \"{key}\" must be a list of strings")
+        both = sorted(set(listed) & set(off))
+        if both:
+            raise ValueError(f"{label}: {path}: {', '.join(both)} both in \"plugins\" and in \"disabled\"; keep one")
         declared = document.get("marketplaces", {})
         if not isinstance(declared, dict):
             raise ValueError(f"{label}: {path}: \"marketplaces\" must be an object")
         if agent == "codex":
-            if listed or declared:
+            if listed or declared or off:
                 notes.append(f"{label}: plugins and marketplaces are not supported for Codex yet; ignored")
             continue
         if agent == "opencode":
             if declared:
                 notes.append(f"{label}: OpenCode has no marketplaces; \"marketplaces\" ignored")
-            for plugin in listed:
+            for plugin, enabled in [(p, True) for p in listed] + [(p, False) for p in off]:
                 if not re.fullmatch(NPM_PLUGIN, plugin):
                     raise ValueError(f"{label}: {plugin!r} is not an npm package name (optionally @VERSION)")
-                if plugin not in plugins:
-                    plugins.append(plugin)
+                plugins[plugin] = enabled
             continue
         for name, entry in declared.items():
             if not re.fullmatch(PLUGIN_NAME, name):
@@ -820,16 +828,16 @@ def declarations(agent, plugin_files):
                 raise ValueError(f"marketplace {name} comes from both {origins[name]} and {label} with different "
                                  "sources; keep one")
             marketplaces[name], origins[name] = source, label
-        for plugin in listed:
+        for plugin, enabled in [(p, True) for p in listed] + [(p, False) for p in off]:
             if not re.fullmatch(f"{PLUGIN_NAME}@{PLUGIN_NAME}", plugin):
                 raise ValueError(f"{label}: plugin {plugin!r} must be NAME@MARKETPLACE")
-            if plugin not in plugins:
-                plugins.append(plugin)
-    for plugin in list(plugins):
+            plugins[plugin] = enabled
+    chosen = [plugin for plugin, enabled in plugins.items() if enabled or with_disabled]
+    for plugin in list(chosen):
         if agent == "claude" and plugin.split("@")[1] not in marketplaces:
             notes.append(f"plugin {plugin} skipped: no kit declares marketplace {plugin.split('@')[1]}")
-            plugins.remove(plugin)
-    return marketplaces, plugins, notes
+            chosen.remove(plugin)
+    return marketplaces, chosen, notes
 
 
 def all_plugin_files(agent, builtin=()):

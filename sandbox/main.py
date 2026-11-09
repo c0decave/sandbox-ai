@@ -9,8 +9,8 @@
   sandbox-ai session list|attach|pause|resume|stop|delete ...       the same for sessions (older form)
   sandbox-ai mcp list|start|stop|attach|detach ... [--live]         MCP server sandboxes (attach/detach: a start's, --live: while it runs)
   sandbox-ai login claude|codex|opencode | --status                  log in inside a sandbox; kept for all sandboxes
-  sandbox-ai plugins [claude [--update] | --status]                  install the plugins the kits declare
-  sandbox-ai kits [list|show|new|add-skill|new-skill|add-plugin|...] see and change kits (skills, plugins)
+  sandbox-ai plugins [claude [--update] | --status | marketplaces]   install the plugins the kits declare; every marketplace
+  sandbox-ai kits [list|show|new|add-skill|add-plugin|import-marketplace|...]  see and change kits (skills, plugins)
   sandbox-ai wizard [new|edit|trust|forget|models] ...               project setup
   sandbox-ai build [--pin VERSION] AGENT|all|VARIANT|team|vpn ...    build the images and their extensions
   sandbox-ai doctor [--backend podman|bwrap|both]                    check the host
