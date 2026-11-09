@@ -554,6 +554,16 @@ def kit_states(declared, plugin):
             for entry, document in declared if plugin in document["plugins"] or plugin in document["disabled"]]
 
 
+def toml_module():
+    """tomllib (Python 3.11 and later) or the tomli package; None without either."""
+    for name in ("tomllib", "tomli"):
+        try:
+            return importlib.import_module(name)
+        except ImportError:
+            continue
+    return None
+
+
 def codex_config(problems):
     """Codex's config.toml as a dict ({} when missing or unreadable, with a note)."""
     path = codex_home() / "config.toml"
@@ -563,10 +573,9 @@ def codex_config(problems):
         return {}
     if data is None:
         return {}
-    try:
-        import tomllib  # noqa: PLC0415 - Python 3.11 and later
-    except ImportError:
-        problems.append(f"{path}: reading TOML needs Python 3.11 or later; Codex's marketplaces are left out")
+    tomllib = toml_module()
+    if tomllib is None:
+        problems.append(f"{path}: reading TOML needs Python 3.11 or the tomli package; Codex's marketplaces are left out")
         return {}
     try:
         return tomllib.loads(data.decode("utf-8"))

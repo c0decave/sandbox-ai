@@ -23,6 +23,10 @@ AGENT_KEYS = {"marketplaces", "kits", "config", "about", "notes"}
 MARKET_KEYS = {"name", "agent", "builtin", "origins", "description", "source", "source_value", "importable", "problem",
                "import", "kits", "store", "agent_config", "listed_from", "plugins"}
 CODEX_MARKET_KEYS = MARKET_KEYS | {"codex_source"}
+# Codex's config.toml needs tomllib (Python 3.11 and later) or tomli; without either its marketplaces are left out
+# with a note (test_missing_or_damaged_agent_files_are_notes_never_failures checks that note)
+HAS_TOML = any(importlib.util.find_spec(name) for name in ("tomllib", "tomli"))
+needs_toml = pytest.mark.skipif(not HAS_TOML, reason="no TOML reader before Python 3.11 without tomli")
 PLUGIN_KEYS = {"name", "id", "listed", "description", "version", "category", "homepage", "source", "kits", "store",
                "agent"}
 OPENCODE_PLUGIN_KEYS = {"name", "id", "importable", "kits", "agent"}
@@ -97,6 +101,7 @@ def test_the_json_has_the_keys_the_web_and_the_app_read(home):
         assert set(entry) == OPENCODE_PLUGIN_KEYS
 
 
+@needs_toml
 def test_every_marketplace_with_its_plugins_and_their_state(home):
     markets = by_key(listing())
     own = markets[("claude", "sandbox-ai")]
@@ -135,6 +140,7 @@ def test_every_marketplace_with_its_plugins_and_their_state(home):
     assert opencode["config"] == str(home / ".config/opencode/opencode.jsonc")
 
 
+@needs_toml
 def test_one_marketplace_one_agent_and_the_text(home):
     data = listing("acme")
     assert [m["name"] for m in data["marketplaces"]] == ["acme"]
@@ -153,6 +159,7 @@ def test_one_marketplace_one_agent_and_the_text(home):
     assert status == 1 and "1-64 letters" in err
 
 
+@needs_toml
 def test_the_agents_own_directories_where_their_variables_say(home, tmp_path):
     claude, codex = tmp_path / "elsewhere-claude", tmp_path / "elsewhere-codex"
     (home / ".claude").rename(claude)
@@ -199,7 +206,7 @@ def test_missing_or_damaged_agent_files_are_notes_never_failures(home, damage):
     notes = " ".join(data["agents"]["claude"]["notes"] + data["agents"]["codex"]["notes"]
                      + data["agents"]["opencode"]["notes"])
     expected = {"invalid-json": "not valid JSON", "not-an-object": "not a JSON object", "fifo": "not a regular file",
-                "directory": "not a regular file", "too-large": "larger than 4 MiB", "toml": "not valid TOML",
+                "directory": "not a regular file", "too-large": "larger than 4 MiB", "toml": "not valid TOML" if HAS_TOML else "reading TOML needs Python 3.11",
                 "dangling-link": "", "binary": "not valid JSON", "missing": ""}[damage]
     assert expected in notes
     markets = by_key(data)
@@ -242,6 +249,7 @@ def test_the_plugin_store_s_copy_lists_a_marketplace_and_a_planted_symlink_is_no
     assert any("a symlink or not a directory" in note for note in data["agents"]["claude"]["notes"])
 
 
+@needs_toml
 def test_codex_marketplaces_that_cannot_go_into_a_kit_say_why(home):
     write(home, ".codex/config.toml", (home / ".codex/config.toml").read_text() + '''
 [marketplaces.pinned]
@@ -270,6 +278,7 @@ source = "%s"
 
 # --- changing kits -------------------------------------------------------------------------------------------
 
+@needs_toml
 def test_import_add_disable_enable_and_remove_change_only_the_kit(home):
     agents_before = snapshot(home)
     assert cli("kits", "new", "team", "--agent", "claude", "--agent", "opencode")[0] == 0
