@@ -331,7 +331,7 @@ class TerminalsPage(QWidget):
             layout.addWidget(split, 1)
             self.timer = QTimer(self)
             self.timer.timeout.connect(self.tick)
-            self.timer.start(backend_setting("sandboxes_interval"))
+            self.timer.setInterval(backend_setting("sandboxes_interval"))  # started while the page is shown
 
     # -- the running starts --
 
@@ -401,9 +401,16 @@ class TerminalsPage(QWidget):
         """Read when the page is shown, not when the window is built (no command, no SSH, for a page nobody
         opened)."""
         super().showEvent(event)
+        if self.starts is not None and not self.timer.isActive():
+            self.timer.start()  # (it only ticks while the page is shown: no wakeups for a page nobody sees)
         if self.starts is not None and not event.spontaneous():
             self.load_hosts()
             self.refresh_starts()
+
+    def hideEvent(self, event):  # noqa: N802 - Qt's name
+        super().hideEvent(event)
+        if self.starts is not None:
+            self.timer.stop()
 
     def tick(self):
         """The timer: while the page is shown; another host (SSH) every fifth time only."""

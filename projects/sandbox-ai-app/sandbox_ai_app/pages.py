@@ -399,8 +399,9 @@ class ApprovalsPage(QWidget):
             history_row.addWidget(widget)
         history_row.addStretch()
         history_layout.addLayout(history_row)
+        # A ModelTable: a long-running sandbox's history (hundreds of answers) is filled in one step.
         self.history = table([tr("Time"), tr("Sandbox"), tr("Question"), tr("Answer"), tr("Scope"), tr("Reason")],
-                             stretch=2, compact=(0, 3, 4))
+                             stretch=2, compact=(0, 3, 4), many=True)
         self.history.setAccessibleName(tr("History of the answers"))
         history_layout.addWidget(self.history)
         self.history_text = QPlainTextEdit()  # a host's history: its own table, escaped

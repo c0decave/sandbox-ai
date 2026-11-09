@@ -880,11 +880,12 @@ class ThreadCall(QObject):
 _collectors = []
 
 
-def collect_on_gui_thread(interval=250):
+def collect_on_gui_thread(interval=250, idle_interval=2000):
     """Python's cycle collector runs in whatever thread happens to allocate: in a worker thread it may delete a Qt
     object (a dialog or page that went, held in a reference cycle), which crashes. From this call on it runs only
     here, on the GUI thread (a QTimer every INTERVAL ms, as often as Python's own thresholds would); the app's start
-    and the tests call it once."""
+    and the tests call it once. While little is allocated (the app idles, in the tray say) the look comes less often,
+    up to every IDLE_INTERVAL ms (doubled each time nothing was due): fewer wakeups of an idle app."""
     if _collectors:
         return _collectors[0]
     import gc
@@ -898,6 +899,10 @@ def collect_on_gui_thread(interval=250):
             generation = 2 if counts[1] > thresholds[1] and counts[2] > thresholds[2] else \
                 1 if counts[1] > thresholds[1] else 0
             gc.collect(generation)
+            if timer.interval() != interval:
+                timer.setInterval(interval)
+        elif counts[0] < thresholds[0] // 2 and timer.interval() < idle_interval:
+            timer.setInterval(min(idle_interval, timer.interval() * 2))
     timer.timeout.connect(check)
     timer.start(interval)
     _collectors.append(timer)

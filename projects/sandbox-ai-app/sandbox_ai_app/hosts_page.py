@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QPushButton, QRadioButton, QSpinBox, QSplitter, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from . import backend
+from . import backend, theme
 from .files import printable
 from .host_choice import on_host
 from .i18n import tr
@@ -782,12 +782,18 @@ class HostsPage(QWidget):
                          tr("yes") if local else reach_text(info), version_text(self.versions.get(name)),
                          "" if count is None else str(count), "" if questions is None else str(questions)])
             colors.append("bad" if info and info.get("problem") else "warn" if questions else None)
+        tooltips = [printable(e.get("description") or "") or None for e in self.entries]
+        keys = [e["name"] for e in self.entries]
+        # Every look at the fleet (each few seconds) says it again: the table is filled only when a row changed.
+        shown = (rows, colors, tooltips, keys, theme.current(), theme.is_dark())
+        if shown == getattr(self, "shown_rows", None) and self.table.rowCount() == len(rows):
+            return
+        self.shown_rows = shown
         # The selection stays on its host (fill() keeps it by key) without a change of host on the way: the
         # defaults of the host shown are not asked again at every look at the fleet.
         self.table.blockSignals(True)
         try:
-            fill(self.table, rows, colors, tooltips=[printable(e.get("description") or "") or None
-                                                     for e in self.entries], keys=[e["name"] for e in self.entries])
+            fill(self.table, rows, colors, tooltips=tooltips, keys=keys)
         finally:
             self.table.blockSignals(False)
 

@@ -78,6 +78,7 @@ NET_OPTIONS_SECONDS = 600  # how long a host's `net allow --help` is kept when i
 BASE_NET_OPTIONS = frozenset({"--allow-host", "--allow-tcp", "--allow"})  # what every sandbox-ai since 0.1.70 takes
 RECENT_PROJECTS = 12  # projects the app's own list keeps
 RECENT_FOLDERS = 10  # recent project folders the wizard offers
+PODS_CACHE_SECONDS = 10  # how long the app keeps a Podman listing (sandbox-ai's own: 2 s); forget_pods() drops it
 KIT_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"  # kits.KIT_NAME
 SKILL_NAME = r"[a-z0-9][a-z0-9-]{0,63}"  # a new skill's name, as Claude wants it
 DRAIN = 2  # seconds call() still reads the output of a command it ended at its timeout
@@ -208,8 +209,23 @@ class SandboxAI:
                 if name == "presets" and hasattr(module, "EXPOSED_BEFORE"):
                     # Extra preset directories where sandboxes wrote are skipped: the launcher knows where.
                     module.EXPOSED_BEFORE = self.launcher.exposed_before
+                if name == "liveness" and isinstance(getattr(module, "CACHE_SECONDS", None), (int, float)):
+                    # The app asks every sandboxes_interval (3 s): a Podman listing (`podman pod ps`, a Go program
+                    # that may start Podman's service) is kept a little longer than one look; an action's own
+                    # look asks afresh (forget_pods).
+                    module.CACHE_SECONDS = max(module.CACHE_SECONDS, PODS_CACHE_SECONDS)
+                elif name != "liveness" and hasattr(module, "_liveness"):
+                    # One Podman listing for net (runs whose launcher is gone) and sessions (stopped Podman
+                    # sessions), as sandbox-ai's own starts.py shares it: half the `podman pod ps` per look.
+                    module._liveness = self.module("liveness")
                 self._modules[name] = module
             return self._modules[name]
+
+    def forget_pods(self):
+        """The next look asks Podman afresh (after an action: what it changed is shown at once)."""
+        cache = getattr(self._modules.get("liveness"), "_cache", None)
+        if isinstance(cache, dict):
+            cache.clear()
 
     @property
     def launcher(self):
@@ -262,13 +278,14 @@ class SandboxAI:
         finally:
             self._watch.value = previous
 
-    def call(self, *args, timeout=120, input=None):
+    def call(self, *args, timeout=120, input=None, argv=None):
         """(exit status, stdout, stderr) of a sandbox-ai command that does not need a terminal; INPUT, if
         given, is its standard input (how secrets are passed: never as an argument). The command leads a
         process group of its own, so stop_commands() (when the app quits) and a timeout end it with all it
         started. Its lead is reaped only under the signal lock: while a group is signalled, its number cannot
         have been given to another group. Inside watching(): its output is handed on as it comes, and it is
-        ended when cancelled."""
+        ended when cancelled. ARGV: the command line that does what `sandbox-ai ARGS` would (host_run's ssh), run
+        instead of it; it is never given with a runner of the tests."""
         output, cancelled, errors_only = getattr(self._watch, "value", None) or (None, None, False)
         if cancelled is not None and cancelled():
             return CANCELLED, "", "cancelled"
@@ -283,9 +300,17 @@ class SandboxAI:
                 output(said)
             return result.returncode, result.stdout, result.stderr
         try:
-            process = subprocess.Popen(self.command(*args), stdin=subprocess.PIPE if input is not None else
-                                       subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                       start_new_session=True)
+            try:
+                process = subprocess.Popen(argv or self.command(*args), stdin=subprocess.PIPE if input is not None
+                                           else subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                           start_new_session=True)
+            except OSError:
+                if not argv:
+                    raise
+                # (ssh not found, say: sandbox-ai's own command says so in its words)
+                process = subprocess.Popen(self.command(*args), stdin=subprocess.PIPE if input is not None else
+                                           subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                           start_new_session=True)
         except OSError as exc:
             return 127, "", f"sandbox-ai {' '.join(args[:2])}: {exc}"
         with self._signal_lock:
@@ -1045,12 +1070,14 @@ class SandboxAI:
                 return set(action.choices)
         return set()
 
-    def foreground_start(self, name):
+    def foreground_start(self, name, ident=None):
         """True if the kept start NAME runs (or ran) in the foreground of its own terminal (--no-tmux, a task):
-        no tmux, nothing to attach to. False when sandbox-ai cannot say (older versions: every session had tmux)."""
+        no tmux, nothing to attach to. False when sandbox-ai cannot say (older versions: every session had tmux).
+        IDENT: its id when known (session_ids): its own record is read, not every start's to find it by name."""
         try:
             sessions = self.module("sessions")
-            return bool(sessions.foreground(sessions.load(sessions.resolve(name))))
+            return bool(sessions.foreground(sessions.load(ident if ident and valid_run(ident) else
+                                                          sessions.resolve(name))))
         except Exception:  # noqa: BLE001 - an older sandbox-ai, or a damaged start: as before
             return False
 
@@ -1090,7 +1117,7 @@ class SandboxAI:
             found.append(Instance("session", f"session:{ident}", name, run=run, session=name, project=workspace,
                                   agent=agent, backend=engine, started=record.get("started") or created, state=state,
                                   proxy=record.get("proxy") if run else None, pid=record.get("pid"), record=record,
-                                  foreground=self.foreground_start(name), ident=ident))
+                                  foreground=self.foreground_start(name, ids.get(name)), ident=ident))
         for name, state in servers.items():
             run = f"mcp-{name}" if f"mcp-{name}" in runs else None
             record = runs.get(run, {}) if run else {}
@@ -1652,7 +1679,25 @@ class SandboxAI:
         extra = {} if input is None else {"input": input}
         if name == "local":
             return self.call(*args, timeout=timeout, **extra)
-        return self.call("hosts", "run", name, "--", *args, timeout=timeout, **extra)
+        return self.call("hosts", "run", name, "--", *args, timeout=timeout, argv=self.ssh_argv(name, args), **extra)
+
+    def ssh_argv(self, name, args):
+        """The command line `sandbox-ai hosts run NAME -- ARGS` runs (hosts.argv: ssh with the host's settings and the
+        remote command), built here with sandbox-ai's own hosts module: a read of another host - the polls ask each
+        host every few seconds - costs an ssh, not two Python starts (main.py, hosts.py: about 0.1 s of CPU) on top.
+        None - the command itself runs then - with a runner of the tests, an older sandbox-ai, or a host it does not
+        know (its own message says so)."""
+        if self.run is not subprocess.run:
+            return None
+        try:
+            hosts = self.module("hosts")
+            if not callable(getattr(hosts, "argv", None)):
+                return None
+            argv = hosts.argv(name, [str(arg) for arg in args])
+        except Exception:  # noqa: BLE001 - sandbox-ai's own command reports it
+            return None
+        return list(argv) if argv and isinstance(argv, (list, tuple)) and all(isinstance(a, str) for a in argv) \
+            else None
 
     def host_instances(self, name, timeout=60):
         """The starts on host NAME (`sandbox-ai list --json` there, over SSH) as [Instance] with HOST set: what the
@@ -4368,10 +4413,15 @@ def session_of(record):
 # -- approvals --
 
 class QuestionCache:
-    """Questions of the run directories, parsed once per file."""
+    """Questions of the run directories, parsed once per file; a run's folder whose listing did not change since a
+    scan (its modification time, older than QUIET seconds then) is not read again: the scan every second of a run
+    with a long history of answered questions costs a stat, not hundreds of lookups."""
+
+    QUIET = 2.0  # seconds a folder's modification time must lie back before its listing is reused (coarse clocks)
 
     def __init__(self, ident=re.compile(r"[0-9]{1,12}-[0-9]{1,10}-[0-9]{1,10}"), limit=64 << 10):
         self.ident, self.limit, self.parsed, self.results = ident, limit, {}, {}
+        self.listings = {}  # {folder: (its stat key, [(kind, question, result, paths)])} of folders that were quiet
 
     def _json(self, path, store):
         key = str(path)
@@ -4385,31 +4435,67 @@ class QuestionCache:
             store[key] = value if isinstance(value, dict) else None
         return store[key]
 
+    def _entries(self, directory):
+        """[(kind, question, result, paths)] of the folder DIRECTORY ("open" or "answered"; RESULT of an answered
+        one), and whether all of it could be read (a file in the middle of being written: no); None: no folder."""
+        try:
+            with os.scandir(directory) as entries:
+                names = {entry.name for entry in entries}
+        except OSError:
+            return None, False
+        found, complete = [], True
+        for file in sorted(names):
+            stem, dot, suffix = file.rpartition(".")
+            if suffix != "json" or not self.ident.fullmatch(stem):
+                continue
+            path = directory / file
+            paths = [str(path)]
+            question = self._json(path, self.parsed)
+            if question is None and str(path) not in self.parsed:
+                complete = False
+            if question is None or question.get("id") != stem:
+                found.append((None, None, None, paths))
+                continue
+            if f"{stem}.done" in names:
+                done = directory / f"{stem}.done"
+                result = self._json(done, self.results)
+                if result is None and str(done) not in self.results:
+                    complete = False
+                found.append(("answered", question, result or {}, paths))
+            elif f"{stem}.answer" in names:
+                found.append(("answered", question, {"reason": "answered, being applied"}, paths))
+            else:
+                found.append(("open", question, None, paths))
+        return found, complete
+
     def scan(self, runs):
-        pending, answered, live = [], [], set()
+        pending, answered, live, listings = [], [], set(), {}
+        now = time.time()
         for name, record in runs.items():
             directory = Path(record.get("directory", "")) / "approvals"
             try:
-                with os.scandir(directory) as entries:
-                    names = {entry.name for entry in entries}
+                stat = os.stat(directory)
             except OSError:
                 continue
-            for file in sorted(names):
-                stem, dot, suffix = file.rpartition(".")
-                if suffix != "json" or not self.ident.fullmatch(stem):
+            key = (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size)
+            kept = self.listings.get(str(directory))
+            if kept is not None and kept[0] == key:
+                entries = kept[1]
+            else:
+                entries, complete = self._entries(directory)
+                if entries is None:
                     continue
-                path = directory / file
-                live.add(str(path))
-                question = self._json(path, self.parsed)
-                if question is None or question.get("id") != stem:
-                    continue
-                if f"{stem}.done" in names:
-                    result = self._json(directory / f"{stem}.done", self.results)
-                    answered.append((name, record, {**question, "result": result or {}}))
-                elif f"{stem}.answer" in names:
-                    answered.append((name, record, {**question, "result": {"reason": "answered, being applied"}}))
-                else:
+                if not complete or now - stat.st_mtime < self.QUIET:
+                    key = None  # read again next time
+            if key is not None:
+                listings[str(directory)] = (key, entries)
+            for kind, question, result, paths in entries:
+                live.update(paths)
+                if kind == "answered":
+                    answered.append((name, record, {**question, "result": result}))
+                elif kind == "open":
                     pending.append((name, record, question))
+        self.listings = listings
         for store in (self.parsed, self.results):  # forget the files of ended runs
             for key in [k for k in store if k.rsplit(".", 1)[0] + ".json" not in live]:
                 del store[key]

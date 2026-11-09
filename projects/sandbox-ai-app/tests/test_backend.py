@@ -1030,7 +1030,7 @@ def test_a_kept_start_and_its_run_are_one_row(tmp_path, monkeypatch):
     monkeypatch.setattr(s, "runs", lambda: runs)
     monkeypatch.setattr(s, "sessions", lambda: [["web", "claude", "podman", "running", "/w", "2026-11-08T09:59:00Z"]])
     monkeypatch.setattr(s, "session_ids", lambda: {"web": "web-1a2b"})
-    monkeypatch.setattr(s, "foreground_start", lambda name: False)
+    monkeypatch.setattr(s, "foreground_start", lambda name, ident=None: False)
     real_module = s.module
     monkeypatch.setattr(s, "module", lambda name: (_ for _ in ()).throw(ValueError("no MCP servers here"))
                         if name == "mcp" else real_module(name))

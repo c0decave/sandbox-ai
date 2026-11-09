@@ -158,6 +158,7 @@ class StartTree(QTreeWidget):
         tables.setup(self, stretch, compact)  # widgets.fit_columns fits it
         header.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)  # the order given, until a header is clicked
         self.setSortingEnabled(True)
+        self.plan = self.items_by_id = self.structure = self.look = None  # what fill() shows
 
     # -- what a table offers (widgets.find_row, row_key, fit_columns, state.State.table) --
 
@@ -236,19 +237,7 @@ class StartTree(QTreeWidget):
         what it is, KEY the start it is (or stands for). COLOR: a theme colour name; TIP: the first cell's tooltip;
         SORT: values to sort by, column by column (None: the text)."""
         item = TreeItem()
-        for column, value in enumerate(cells):
-            text = "" if value is None else str(value)
-            item.setText(column, elide(text))
-            item.setData(column, SORT_ROLE, sort[column] if sort and column < len(sort) and sort[column] is not None
-                         else text.lower())
-            if len(text) > CELL_LIMIT or column == self.stretch or (tip and column == 0):
-                item.setToolTip(column, safe_tooltip(tip if tip and column == 0 else text))
-            if color:
-                item.setForeground(column, QBrush(QColor(theme.color(color))))
-            if bold:
-                font = item.font(column)
-                font.setBold(True)
-                item.setFont(column, font)
+        self.set_cells(item, cells, color, tip, sort, bold)
         item.setData(0, ID_ROLE, row_id)
         item.setData(0, KIND_ROLE, kind)
         item.setData(0, KEY_ROLE, key)
@@ -257,3 +246,72 @@ class StartTree(QTreeWidget):
         else:
             parent.addChild(item)
         return item
+
+    def set_cells(self, item, cells, color=None, tip=None, sort=None, bold=False):
+        """The cells of ITEM (add_row's CELLS, COLOR, TIP, SORT, BOLD); what an earlier call set and this one does
+        not (a tooltip, a colour, bold) goes."""
+        brush = QBrush(QColor(theme.color(color))) if color else None
+        for column, value in enumerate(cells):
+            text = "" if value is None else str(value)
+            item.setText(column, elide(text))
+            item.setData(column, SORT_ROLE, sort[column] if sort and column < len(sort) and sort[column] is not None
+                         else text.lower())
+            if len(text) > CELL_LIMIT or column == self.stretch or (tip and column == 0):
+                item.setToolTip(column, safe_tooltip(tip if tip and column == 0 else text))
+            elif item.data(column, Qt.ItemDataRole.ToolTipRole):
+                item.setData(column, Qt.ItemDataRole.ToolTipRole, None)
+            if brush is not None:
+                item.setForeground(column, brush)
+            elif item.data(column, Qt.ItemDataRole.ForegroundRole) is not None:
+                item.setData(column, Qt.ItemDataRole.ForegroundRole, None)
+            if bold or item.data(column, Qt.ItemDataRole.FontRole) is not None:
+                font = item.font(column)
+                if font.bold() != bool(bold):
+                    font.setBold(bool(bold))
+                    item.setFont(column, font)
+
+    def fill(self, plan, expanded):
+        """The tree as PLAN says: [(parent row id or None, row id, kind, key, {cells, color, tip, sort, bold})], parents
+        before their rows. When the tree holds these very rows already (the same ids under the same parents - what
+        the polls mostly find), only the cells that changed are set, in place: no rows taken down and built again (a
+        relayout and repaint of the whole tree every few seconds), selection, folds and scroll stay as they are.
+        Returns the new items' groups [(item, its row id)] to open or close (EXPANDED(row id) says), or None when the
+        rows were updated in place."""
+        structure = [(parent, ident, kind, key) for parent, ident, kind, key, _ in plan]
+        shown, items = self.plan, self.items_by_id
+        if self.same_rows(plan):
+            for _, ident, _, _, fields in plan:
+                if shown.get(ident) != fields:
+                    self.set_cells(items[ident], **fields)
+            self.plan = {ident: fields for _, ident, _, _, fields in plan}
+            return None
+        self.clear()
+        items = {}
+        for parent, ident, kind, key, fields in plan:
+            items[ident] = self.add_row(items.get(parent), ident, kind, key=key, **fields)
+        groups = [(items[ident], ident) for parent, ident, kind, _, _ in plan
+                  if kind == "host" or items[ident].childCount()]
+        for item, ident in groups:
+            item.setExpanded(expanded(ident, item))
+        self.structure, self.items_by_id, self.look = structure, items, _look()
+        self.plan = {ident: fields for _, ident, _, _, fields in plan}
+        return groups
+
+    def same_rows(self, plan):
+        """True when the tree shows PLAN's rows (ids, parents, order) in the colours of the theme in use."""
+        return self.plan is not None and self.look == _look() and len(self.plan) == len(plan) and \
+            self.structure == [(parent, ident, kind, key) for parent, ident, kind, key, _ in plan]
+
+    def shows(self, plan):
+        """True when the tree shows PLAN as it is: nothing to do."""
+        return self.same_rows(plan) and self.plan == {ident: fields for _, ident, _, _, fields in plan}
+
+    def clear(self):
+        """(Every row goes: fill() builds them again.)"""
+        self.plan = self.items_by_id = None
+        super().clear()
+
+
+def _look():
+    """The theme whose colours the cells were given."""
+    return theme.current(), theme.is_dark()

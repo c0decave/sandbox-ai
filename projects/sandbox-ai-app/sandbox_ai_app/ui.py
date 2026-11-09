@@ -1909,6 +1909,7 @@ class SandboxesPage(QWidget):
         self.sai, self.terminal = sai, terminal
         self.project, self.instances, self.problems, self.stoppable = None, {}, [], None
         self.reading, self.read_again, self.added, self.devices_token = None, False, [], 0
+        self.fresh = False  # the next read asks Podman afresh (refresh_soon(again=True): after an action)
         self.loaded = False  # the first read has come back (until then the summary says it reads)
         self.added_workspaces = []
         # (host, run) of the starts with an open question (the Approvals page's poller): marked "asking".
@@ -2102,6 +2103,7 @@ class SandboxesPage(QWidget):
         prunes what ended (it removes files), may ask Podman, and a disk that hangs must not hang the window. AGAIN
         (after an action, the Refresh button): when a read runs already, one more once it is done - what the action
         changed is shown."""
+        self.fresh = self.fresh or again  # after an action: Podman asked afresh, not the listing kept a while
         if self.reading is not None:
             self.read_again = self.read_again or again
             return
@@ -2110,6 +2112,11 @@ class SandboxesPage(QWidget):
 
     def read_instances(self):
         """In the reading thread: (instances, problems), and once whether `sandbox-ai net stop` exists."""
+        if self.fresh:
+            self.fresh = False
+            forget = getattr(self.sai, "forget_pods", None)
+            if callable(forget):
+                forget()
         if self.stoppable is None:
             try:
                 self.stoppable = "stop" in self.sai.net_commands()
@@ -2323,7 +2330,12 @@ class SandboxesPage(QWidget):
         self.show_instances()
 
     def fill_host_filter(self):
-        """All hosts, this machine, and each host of `sandbox-ai hosts`; the choice stays while its host does."""
+        """All hosts, this machine, and each host of `sandbox-ai hosts`; the choice stays while its host does. Filled
+        again only when the hosts changed (an open list must not close under the mouse at every look)."""
+        if self.host_filter.count() == len(self.remote_names) + 2 and \
+                [self.host_filter.itemData(i) for i in range(2, self.host_filter.count())] == list(self.remote_names):
+            self.host_filter.setVisible(bool(self.remote_names))
+            return
         chosen = self.host_filter.currentData()
         self.host_filter.blockSignals(True)
         self.host_filter.clear()
@@ -2492,39 +2504,46 @@ class SandboxesPage(QWidget):
         names = list(getattr(self, "remote_names", []))
         hosts = [LOCAL, *names, *sorted({i.host for i in shown} - {LOCAL} - set(names))] if chosen is None else [chosen]
         tree = self.table
-        selected_item = tree.selected_item()
-        previous = selected_item.data(0, ID_ROLE) if selected_item is not None else None
-        scroll = tree.verticalScrollBar().value()
-        tree.blockSignals(True)  # rebuilt: no selection or fold changes are said (selection_changed() below)
-        try:
-            tree.setSortingEnabled(False)
-            tree.clear()
-            groups = []
-            for host in hosts:
-                starts = [i for i in shown if i.host == host]
-                host_item = tree.add_row(None, row_id(host), "host", **self.host_row(host, starts))
-                groups.append((host_item, self.hosts_open))
-                parts = related([i for i in self.rows.values() if i.host == host])
-                for i in starts:
-                    item = tree.add_row(host_item, row_id(host, i.key), "start", key=i.key, bold=self.mine(i),
-                                        **self.start_row(i))
-                    for part in parts.get(i.key, []):
-                        tree.add_row(item, row_id(host, f"{i.key}\n{part['kind']}\n{part['name']}"), "part",
-                                     key=part["key"], **self.part_row(host, i, part))
-                    if item.childCount():
-                        groups.append((item, self.starts_open))
-            for item, default in groups:
-                item.setExpanded(self.open_groups.get(item.data(0, ID_ROLE), default))
-            tree.setSortingEnabled(True)  # the order the human chose by a header, if any
-            again = tree.find_item(previous) if previous else None
-            if again is not None:
-                tree.select_item(again, open_groups=False)
-        finally:
-            tree.blockSignals(False)
-        tree.verticalScrollBar().setValue(scroll)
+        plan = []  # (parent row id, row id, kind, key, cells...): StartTree.fill
+        for host in hosts:
+            starts = [i for i in shown if i.host == host]
+            host_id = row_id(host)
+            plan.append((None, host_id, "host", None, self.host_row(host, starts)))
+            parts = related([i for i in self.rows.values() if i.host == host])
+            for i in starts:
+                start_id = row_id(host, i.key)
+                plan.append((host_id, start_id, "start", i.key, {**self.start_row(i), "bold": self.mine(i)}))
+                for part in parts.get(i.key, []):
+                    plan.append((start_id, row_id(host, f"{i.key}\n{part['kind']}\n{part['name']}"), "part",
+                                 part["key"], self.part_row(host, i, part)))
+        expanded = (lambda ident, item: self.open_groups.get(
+            ident, self.hosts_open if item.data(0, KIND_ROLE) == "host" else self.starts_open))
+        same_rows, changed = tree.same_rows(plan), not tree.shows(plan)
+        if same_rows and changed:  # the same rows, some cells changed (a state, "seen 12 s ago"): set in place
+            tree.blockSignals(True)
+            try:
+                tree.fill(plan, expanded)
+            finally:
+                tree.blockSignals(False)
+        elif changed:  # other rows: the tree is built again, the selection, folds and scroll kept
+            selected_item = tree.selected_item()
+            previous = selected_item.data(0, ID_ROLE) if selected_item is not None else None
+            scroll = tree.verticalScrollBar().value()
+            tree.blockSignals(True)  # rebuilt: no selection or fold changes are said (selection_changed() below)
+            try:
+                tree.setSortingEnabled(False)
+                tree.fill(plan, expanded)
+                tree.setSortingEnabled(True)  # the order the human chose by a header, if any
+                again = tree.find_item(previous) if previous else None
+                if again is not None:
+                    tree.select_item(again, open_groups=False)
+            finally:
+                tree.blockSignals(False)
+            tree.verticalScrollBar().setValue(scroll)
         if getattr(self, "wanted", "") and tree.selected_item() is None and find_row(tree, self.wanted) >= 0:
             tree.selectRow(find_row(tree, self.wanted))
-        fit_columns(tree)  # bold text is wider
+        if changed:
+            fit_columns(tree)  # bold text is wider
         active = [i for i in self.instances.values() if i.state in ("running", "paused", "starting")]
         running = [i for i in active if getattr(i, "host", "local") == "local"]
         here = [i for i in running if self.mine(i)]
@@ -3727,7 +3746,7 @@ class ConnectionsPage(QWidget):
         self.wanted_log = None  # the end of the name of the log to choose once the logs are listed
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
-        self.timer.start(backend.setting("connections_interval"))
+        self.timer.setInterval(backend.setting("connections_interval"))  # started while the page is shown
         self.refresh_directories()
 
     # -- another host: its sandboxes' connections through sandbox-ai there (activity --kind=network, logs --json) --
@@ -3935,8 +3954,14 @@ class ConnectionsPage(QWidget):
 
     def showEvent(self, event):  # noqa: N802
         super().showEvent(event)
+        if not self.timer.isActive():
+            self.timer.start()  # it ticks only while the page is shown (tick() reads only then anyway)
         self.hosts.load()  # a host added on the Hosts page meanwhile (a small local file)
         self.load()
+
+    def hideEvent(self, event):  # noqa: N802
+        super().hideEvent(event)
+        self.timer.stop()
 
     def load(self, force=False):
         """Look at the chosen log in a thread - its state (inode, size, time: a stat may hang on a network file
@@ -6894,8 +6919,12 @@ class MainWindow(QMainWindow):
             tooltip("sandbox-ai" + (f"\n{said}" if said else ""))
 
     def questions_changed(self, count, new):
+        # Said every second (each scan of the questions): the entry and the tray only when the count changed - setting
+        # an item's icon again (a new QIcon each time) re-laid out and repainted the navigation every second.
+        changed = count != getattr(self, "pending_count", None)
         self.pending_count = count
-        self.show_question_count()
+        if changed:
+            self.show_question_count()
         if hasattr(self, "project_bar"):
             self.update_activity()
         # Which starts ask (marked on the Sandboxes page), and how many questions wait on each host (Hosts page).
