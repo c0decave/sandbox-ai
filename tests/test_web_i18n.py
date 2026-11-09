@@ -489,6 +489,7 @@ GLOSSARY = [
     (r"\b(?:immer )?blockier", "sperren (an approval); the browser's own blocking aside"),
     (r"\bAnhalten\b|\bAnhängen\b|angehängt|\bAnwenden\b", "Pausieren, Verbinden, Übernehmen (the buttons)"),
     (r"\S …", "… without a space, as the English has it"),
+    (r"\bMarketplaces?\b", "Marktplatz"),
 ]
 # what a browser does is its own word
 GLOSSARY_EXCEPT = {"Desktop notifications: blocked by the browser", "media: ffmpeg, PulseAudio, espeak-ng, Piper …"}
@@ -522,5 +523,5 @@ def test_the_german_words_are_the_apps():
     shared = {key: (entry["de"], app[key].get("de")) for key, entry in texts.items() if key in app and app[key].get("de")}
     assert len(shared) > 250
     differ = {key: pair for key, pair in shared.items() if pair[0] != pair[1]}
-    # another meaning on the page; the Kits page is being rebuilt
-    assert set(differ) <= {"Change", "Start", "Add marketplace"}, differ
+    # another meaning on the page
+    assert set(differ) <= {"Change", "Start"}, differ

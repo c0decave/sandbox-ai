@@ -21,6 +21,8 @@ import time
 
 import pytest
 
+from fake_agents import fake_agents
+
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("webui_for_tests", ROOT / "sandbox" / "webui.py")
 w = importlib.util.module_from_spec(spec)
@@ -436,6 +438,25 @@ def logged_in():
     ("POST", "/api/hosts/ct1/kits/team/remove-plugin", {"plugin": "egm@sandbox-ai", "confirm": True},
      ["kits", "remove-plugin", "--", "team", "egm@sandbox-ai"]),
     ("DELETE", "/api/hosts/ct1/kits/team", {"confirm": True}, ["kits", "delete", "--yes", "--", "team"]),
+    # the marketplace browser: every marketplace (read only), and each change of a kit (yours or the default kit)
+    ("GET", "/api/hosts/ct1/marketplaces", None, ["plugins", "marketplaces", "--json"]),
+    ("POST", "/api/hosts/ct1/kits/team/enable-plugin", {"plugin": "lint@acme", "agent": "claude", "confirm": True},
+     ["kits", "enable-plugin", "--agent=claude", "--", "team", "lint@acme"]),
+    ("POST", "/api/hosts/ct1/kits/team/disable-plugin", {"plugin": "@scope/pkg", "agent": "opencode", "confirm": True},
+     ["kits", "disable-plugin", "--agent=opencode", "--", "team", "@scope/pkg"]),
+    ("POST", "/api/hosts/ct1/kits/team/remove-marketplace", {"marketplace": "acme", "with_plugins": True,
+                                                              "confirm": True},
+     ["kits", "remove-marketplace", "--with-plugins", "--", "team", "acme"]),
+    ("POST", "/api/hosts/ct1/kits/team/import-marketplace", {"marketplace": "cx", "from": "codex", "confirm": True},
+     ["kits", "import-marketplace", "--from=codex", "--", "team", "cx"]),
+    ("POST", "/api/hosts/ct1/kits/team/import-marketplace", {"marketplace": "acme", "with_plugins": True,
+                                                              "confirm": True},
+     ["kits", "import-marketplace", "--with-plugins", "--", "team", "acme"]),
+    ("POST", "/api/hosts/ct1/kits/default/add-plugin", {"plugin": "egm@sandbox-ai", "confirm": True},
+     ["kits", "add-plugin", "--", "default", "egm@sandbox-ai"]),
+    ("POST", "/api/hosts/ct1/kits/default/remove-marketplace", {"marketplace": "claude-plugins-official",
+                                                                 "confirm": True},
+     ["kits", "remove-marketplace", "--", "default", "claude-plugins-official"]),
     # management: rename, a start's history, gc (preview, then confirmed), untaint, answers given before
     ("POST", "/api/hosts/ct1/starts/web/rename", {"new": "web-2"}, ["rename", "web", "web-2"]),
     ("GET", "/api/hosts/ct1/starts/web/history", None, ["list", "--history", "web", "--json"]),
@@ -752,6 +773,20 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     ("POST", "/api/hosts/ct1/kits/team/add-plugin", {"plugin": "-x"}, 400),
     ("POST", "/api/hosts/ct1/kits/team/add-skill", {"path": "/x", "create": "yes"}, 400),
     ("POST", "/api/hosts/ct1/kits/team/trust-hooks", {}, 404),
+    ("POST", "/api/hosts/ct1/kits/default/add-skill", {"path": "/x", "confirm": True}, 400),  # plugins only
+    ("POST", "/api/hosts/ct1/kits/default/add-plugin", {"plugin": "egm@sandbox-ai", "create": True,
+                                                        "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/kits/built-in/add-plugin", {"plugin": "egm@sandbox-ai", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/kits/team/enable-plugin", {"plugin": "lint@acme"}, 400),  # asked first
+    ("POST", "/api/hosts/ct1/kits/team/disable-plugin", {"plugin": "lint@acme"}, 400),
+    ("POST", "/api/hosts/ct1/kits/team/remove-marketplace", {"marketplace": "acme"}, 400),
+    ("POST", "/api/hosts/ct1/kits/team/import-marketplace", {"marketplace": "acme"}, 400),
+    ("POST", "/api/hosts/ct1/kits/team/import-marketplace", {"marketplace": "acme", "from": "opencode",
+                                                              "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/kits/team/import-marketplace", {"marketplace": "-x", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/kits/team/remove-marketplace", {"marketplace": "acme", "with_plugins": "yes",
+                                                              "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/kits/team/disable-plugin", {"plugin": "-rf", "confirm": True}, 400),
     ("DELETE", "/api/hosts/ct1/kits/team", None, 400),
     # what widens or removes, without its confirmation (W4, W7)
     ("POST", "/api/hosts/ct1/net/web", {"op": "allow", "dns": True}, 400),
@@ -1058,6 +1093,97 @@ def test_options_an_older_host_does_not_know_are_said_not_sent(logged_in):
                                                                      {"id": "1-2", "kind": "connect"}]), "")
     assert [q.get("host_too_old") for q in logged_in.svc.api.host_questions("ct1")] == ["0.1.77", None]
     assert [q.get("host_too_old") for q in logged_in.svc.api.host_questions("ct2")] == [None, None]
+
+
+def test_the_marketplace_browser_asks_an_older_host_to_be_updated(logged_in):
+    """sandbox-ai plugins marketplaces, the new kits commands, the default kit's plugins and the plugin lists fetched
+    in a terminal came with 0.1.78: a host whose last status names an older version is told to update, nothing runs
+    there; what 0.1.77 knows (add-plugin to a kit of yours) runs as before."""
+    hosts = w.module("hosts")
+    hosts.save({"ct1": hosts.check("ct1", {"ssh": "root@192.0.2.10"}), "ct2": hosts.check("ct2", {"ssh": "root@192.0.2.11"})})
+    hosts.save_statuses({"ct1": {"version": "0.1.77", "ssh": "root@192.0.2.10", "port": 22, "checked": 1},
+                         "ct2": {"version": "0.1.78", "ssh": "root@192.0.2.11", "port": 22, "checked": 1}})
+    newer = [("GET", "/marketplaces", None),
+             ("POST", "/kits/team/enable-plugin", {"plugin": "lint@acme", "confirm": True}),
+             ("POST", "/kits/team/disable-plugin", {"plugin": "lint@acme", "confirm": True}),
+             ("POST", "/kits/team/remove-marketplace", {"marketplace": "acme", "confirm": True}),
+             ("POST", "/kits/team/import-marketplace", {"marketplace": "acme", "confirm": True}),
+             ("POST", "/kits/default/add-plugin", {"plugin": "egm@sandbox-ai", "confirm": True}),
+             ("POST", "/kits/default/add-marketplace", {"marketplace": "m", "source": "o/r", "confirm": True})]
+    for method, path, body in newer:
+        status, said = logged_in(method, "/api/hosts/ct1" + path, body)
+        assert status == 409 and said.get("code") == "host-too-old", (path, status, said)
+        assert "update it on the page Hosts" in said["error"]
+    assert logged_in.runner.calls == [], "nothing ran on the older host"
+    assert logged_in("POST", "/api/hosts/ct1/kits/team/add-plugin", {"plugin": "egm@sandbox-ai", "confirm": True})[0] == 200
+    for method, path, body in newer:
+        assert logged_in(method, "/api/hosts/ct2" + path, body)[0] == 200, path
+    with pytest.raises(w.Refused) as refused:
+        w.terminal_command({"host": "ct1", "kind": "plugins", "marketplaces_only": "1"})
+    assert refused.value.code == "host-too-old"
+    assert w.terminal_command({"host": "ct1", "kind": "plugins"})[0] == "ct1"
+    assert w.terminal_command({"host": "ct2", "kind": "plugins", "marketplaces_only": "1"})[0] == "ct2"
+
+
+def test_the_marketplace_browser_end_to_end_through_the_real_commands(tmp_path):
+    """The Kits page's marketplace browser against the real `sandbox-ai plugins` and `sandbox-ai kits` in a private
+    HOME with Claude's, Codex's and OpenCode's own configuration: the listing, a marketplace Claude knows imported
+    into a kit of yours with the plugins Claude enables, one of them disabled and enabled, Codex's imported for
+    Claude, an OpenCode npm plugin added, the default kit's suggested marketplace taken out; the agents' own files
+    are never changed."""
+    home = tmp_path / "home"
+    fake_agents(home)
+    before = {path: path.read_bytes() for path in home.rglob("*") if path.is_file()}
+    env = {**os.environ, "HOME": str(home)}
+    for name in ("XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "CLAUDE_CONFIG_DIR",
+                 "CODEX_HOME"):
+        env.pop(name, None)
+
+    def runner(host, args, timeout=120, input=None):
+        done = subprocess.run([sys.executable, "-I", str(ROOT / "sandbox" / "main.py"), *args], env=env,
+                              capture_output=True, text=True, timeout=timeout)
+        return done.returncode, done.stdout, done.stderr
+    api = w.Api(runner)
+    listing = api.dispatch("GET", "/api/hosts/local/marketplaces", {})
+    markets = {(m["agent"], m["name"]): m for m in listing["marketplaces"]}
+    assert {("claude", "sandbox-ai"), ("claude", "acme"), ("claude", "team"), ("codex", "cx")} <= set(markets)
+    acme = markets[("claude", "acme")]
+    assert acme["importable"] and acme["source_value"] == "acme/plugins" and acme["listed_from"] == "claude"
+    lint = next(p for p in acme["plugins"] if p["id"] == "lint@acme")
+    assert lint["agent"] == {"installed": True, "enabled": True} and lint["kits"] == []
+    assert markets[("codex", "cx")]["import"]["name"] == "cx-claude"
+    assert [p["id"] for p in listing["agents"]["opencode"]["plugins"]] == ["opencode-foo@1.0"]
+
+    def change(kit, action, **body):
+        return api.dispatch("POST", f"/api/hosts/local/kits/{kit}/{action}", {**body, "confirm": True})["output"]
+    api.dispatch("POST", "/api/hosts/local/kits", {"name": "team", "agents": ["claude", "opencode"]})
+    assert "enabled lint@acme" in change("team", "import-marketplace", marketplace="acme", with_plugins=True)
+    assert "disabled" in change("team", "disable-plugin", plugin="lint@acme", agent="claude")
+    assert "enabled" in change("team", "enable-plugin", plugin="lint@acme", agent="claude")
+    change("team", "add-plugin", plugin="fmt@acme", agent="claude")
+    change("team", "disable-plugin", plugin="fmt@acme", agent="claude")
+    change("team", "import-marketplace", marketplace="cx", **{"from": "codex"})
+    change("team", "add-plugin", plugin="opencode-foo@1.0", agent="opencode")
+    change("default", "remove-marketplace", marketplace="claude-plugins-official")
+    listing = api.dispatch("GET", "/api/hosts/local/marketplaces", {})
+    markets = {(m["agent"], m["name"]): m for m in listing["marketplaces"]}
+    states = {p["id"]: p["kits"] for p in markets[("claude", "acme")]["plugins"]}
+    assert states["lint@acme"] == [{"kit": "team", "kind": "user", "enabled": True}]
+    assert states["fmt@acme"] == [{"kit": "team", "kind": "user", "enabled": False}]
+    assert [k["kit"] for k in markets[("claude", "cx-claude")]["kits"]] == ["team"]
+    assert not any(k["kit"] == "default" for k in markets[("claude", "claude-plugins-official")]["kits"])
+    assert listing["agents"]["opencode"]["plugins"][0]["kits"] == [{"kit": "team", "kind": "user", "enabled": True}]
+    kit = json.loads((home / ".local/share/sandbox-ai/kits/team/claude/marketplaces.json").read_text())
+    assert kit["plugins"] == ["lint@acme"] and kit["disabled"] == ["fmt@acme"]
+    assert set(kit["marketplaces"]) == {"acme", "cx-claude"}
+    with pytest.raises(w.Refused) as refused:
+        change("team", "remove-marketplace", marketplace="acme")
+    assert refused.value.status == 502 and "--with-plugins" in str(refused.value)
+    change("team", "remove-marketplace", marketplace="acme", with_plugins=True)
+    with pytest.raises(w.Refused) as refused:
+        change("team", "import-marketplace", marketplace="localdir")
+    assert "folder or file on this machine" in str(refused.value)
+    assert {path: path.read_bytes() for path in before} == before, "the agents' own files are never changed"
 
 
 def test_a_running_sandboxs_workspaces_and_devices_come_as_the_command_lists_them(logged_in):
@@ -3363,6 +3489,124 @@ PAGE_DRIVER = FAKE_DOM + r"""
   console.log(JSON.stringify(result));
 })().catch(e => { console.error(e.stack); process.exit(1); });
 """
+
+
+KITS_DRIVER = FAKE_DOM + r"""
+(async () => {
+  const result = {};
+  vm.runInContext('state.me = { user: "admin", csrf: "c" }; state.page = "kits"; state.host = "ct1";', context);
+  const kits = { kits_dir: "/h/kits", kits: [{ name: "default", kind: "default", agents: { claude: { plugins: ["sandcastle@sandbox-ai"], disabled: ["egm@sandbox-ai"], skills: [] } } },
+    { name: "team", kind: "user", agents: { claude: { plugins: ["lint@acme"], skills: [] } } }] };
+  const state = (kit, enabled) => ({ kit, kind: kit === "default" ? "default" : "user", enabled });
+  const markets = { version: 1, store: "/s", errors: [{ kit: "broken", agent: "claude", error: "bad file" }],
+    kits: [{ name: "default", kind: "default", editable: true, agents: ["claude"] }, { name: "egm", kind: "builtin", editable: false, agents: ["claude"] },
+      { name: "team", kind: "user", editable: true, agents: ["claude", "opencode"] }],
+    agents: { claude: { marketplaces: true, kits: true, config: "/h/.claude", about: null, notes: ["/h/.claude/settings.json: not valid JSON; left out"] },
+      codex: { marketplaces: true, kits: false, config: "/h/.codex/config.toml", about: "x", notes: [] },
+      opencode: { marketplaces: false, kits: true, config: null, about: "y", notes: [], modules: ["/h/.config/opencode/plugin/g.js"],
+        plugins: [{ name: "oc-foo", id: "oc-foo", importable: true, kits: [], agent: { configured: true } }] } },
+    marketplaces: [
+      { name: "acme", agent: "claude", builtin: false, origins: ["kit", "claude"], description: "Acme plugins", source_value: "acme/plugins", importable: true, problem: null, import: null,
+        kits: [{ kit: "team", kind: "user", source: "acme/plugins" }], store: { fetched: false }, agent_config: { known: true, settings: false, fetched: true }, listed_from: "claude",
+        plugins: [{ name: "lint", id: "lint@acme", listed: true, description: "Lints", kits: [state("team", true)], store: { installed: false }, agent: { installed: true, enabled: true } },
+          { name: "fmt", id: "fmt@acme", listed: true, description: "Formats", kits: [state("team", false)], store: { installed: true, version: "2" }, agent: {} },
+          { name: "new", id: "new@acme", listed: true, description: "New", kits: [], store: { installed: false }, agent: {} }] },
+      { name: "team-mk", agent: "claude", builtin: false, origins: ["claude"], description: null, source_value: "https://git.example.org/t.git", importable: true, problem: null, import: null,
+        kits: [], store: { fetched: false }, agent_config: { known: false, settings: true, fetched: false }, listed_from: null,
+        plugins: [{ name: "x", id: "x@team-mk", listed: false, description: "", kits: [state("default", true)], store: { installed: false }, agent: { enabled: true } }] },
+      { name: "localdir", agent: "claude", builtin: false, origins: ["claude"], source_value: null, importable: false, problem: "it is a folder", import: null, kits: [], store: { fetched: false }, agent_config: { known: true }, listed_from: null, plugins: [] },
+      { name: "cx", agent: "codex", builtin: false, origins: ["codex"], source_value: "https://github.com/a/cx.git", importable: true, problem: null,
+        import: { name: "cx-claude", source: {}, source_value: "a/cx" }, kits: [], store: null, agent_config: { known: true }, listed_from: "codex",
+        plugins: [{ name: "tool", id: "tool@cx", listed: true, description: "A tool", kits: [], store: null, agent: { installed: true, enabled: true } }] }] };
+  let older = false;
+  answer = (method, path) => {
+    if (method === "GET" && path === "/api/hosts/ct1/kits") return kits;
+    if (method === "GET" && path === "/api/hosts/ct1/marketplaces") return older ? { __status: 409, __error: "sandbox-ai 0.1.77 on ct1 does not know plugins marketplaces: update it on the page Hosts", __code: "host-too-old", __params: { host: "ct1", version: "0.1.77", what: "plugins marketplaces" } } : markets;
+    if (method === "GET") return {};
+    return { output: "kit changed" };
+  };
+  const section = () => body.all().find(n => n.id === "kit-marketplaces");
+  const rowOf = (text) => section().all().find(n => n.tagName === "tr" && n.children[1] && n.children[1].textContent.startsWith(text));
+  const buttons = (r) => r.all().filter(n => n.tagName === "button").map(b => b.textContent);
+  const posts = () => calls.filter(c => c.method === "POST").map(c => [c.path, JSON.parse(c.body)]);
+  const yes = async () => { const b = section().all().find(n => n.tagName === "button" && /^Yes, /.test(n.textContent)); b.fire("click"); await settle(); };
+  await vm.runInContext("pages.kits(__main)", context); await settle();
+  result.kitChoice = section().all().find(n => n.id === "market-kit").children.map(o => [o.value, o.textContent]);
+  result.markets = ["acme", "team-mk", "localdir", "cx"].map(n => buttons(rowOf(n)));
+  result.localdir = rowOf("localdir").textContent;
+  result.notes = section().all().filter(n => n.tagName === "li").map(n => n.textContent);
+  result.offInTable = body.all().some(n => n.textContent === " (off)");
+  // the plugins of acme, for the kit team (chosen: a kit of yours first)
+  button(rowOf("acme"), "Plugins").fire("click"); await settle();
+  const pluginRow = (id) => section().all().find(n => n.tagName === "tr" && n.children[0] && n.children[0].textContent.startsWith(id));
+  result.acme = ["lint", "fmt", "new"].map(id => [buttons(pluginRow(id)), pluginRow(id).children[2].textContent]);
+  calls.length = 0;
+  button(pluginRow("new"), "Add to the kit").fire("click");
+  result.askedAdd = section().all().find(n => n.className === "confirm").textContent;
+  result.beforeYes = posts().length;
+  await yes();
+  button(pluginRow("lint"), "Disable").fire("click"); await yes();
+  button(pluginRow("fmt"), "Enable").fire("click"); await yes();
+  button(pluginRow("fmt"), "Remove").fire("click"); await yes();
+  button(rowOf("acme"), "Remove from the kit").fire("click"); await yes();
+  button(rowOf("cx"), "Import for Claude").fire("click"); await yes();
+  button(rowOf("team-mk"), "Add to the kit").fire("click"); await yes();
+  // a plugin of a marketplace the kit does not declare: added with its source; one the default kit enables: off here
+  button(rowOf("team-mk"), "Plugins").fire("click"); await settle();
+  result.teamMk = buttons(pluginRow("x"));
+  button(pluginRow("x"), "Add to the kit").fire("click"); await yes();
+  button(pluginRow("x"), "Disable").fire("click"); await yes();
+  // OpenCode's npm plugin
+  const ocRow = section().all().find(n => n.tagName === "tr" && n.children[0] && n.children[0].textContent === "oc-foo");
+  button(ocRow, "Add to the kit").fire("click"); await yes();
+  // the default kit chosen
+  const choice = section().all().find(n => n.id === "market-kit");
+  choice.value = "default"; choice.fire("change"); await settle();
+  button(rowOf("acme"), "Add to the kit").fire("click"); await yes();
+  result.posts = posts();
+  // an older host: the section says to update it, the rest of the page is there
+  older = true;
+  await vm.runInContext("pages.kits(__main)", context); await settle();
+  result.older = [section().textContent.includes("update it on the page Hosts"), body.all().some(n => n.tagName === "h2" && n.textContent === "New kit")];
+  console.log(JSON.stringify(result));
+})().catch(e => { console.error(e.stack); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_the_kits_page_is_a_marketplace_browser(tmp_path):
+    """The Kits page's marketplace browser (app.js in node): every marketplace with what can be done with it for the
+    kit chosen (yours first, or the default kit), a marketplace picked shows its plugins with their state; adding,
+    enabling, disabling, removing and importing ask first, naming the kit and the host, and send the kit commands of
+    that host; a plugin of a marketplace the kit does not declare goes with its source; an older host's refusal
+    stays in that section."""
+    result = run_driver(tmp_path, KITS_DRIVER, "kits")
+    assert result["kitChoice"] == [["default", "the default kit (every sandbox)"], ["team", "team"]]
+    assert result["markets"] == [["Plugins", "Remove from the kit"],
+                                 ["Plugins", "Add to the kit", "Import with Claude's plugins"], ["Plugins"],
+                                 ["Plugins", "Import for Claude"]]
+    assert "not for a kit: it is a folder" in result["localdir"]
+    assert any("settings.json: not valid JSON" in n for n in result["notes"])
+    assert any("broken (claude): bad file" in n for n in result["notes"]) and result["offInTable"]
+    assert result["acme"] == [[["Disable", "Remove"], "on in team · the agent has it installed · the agent enables it"],
+                              [["Enable", "Remove"], "off in team · installed (2)"], [["Add to the kit"], "in no kit"]]
+    assert "Add new@acme to the kit team on ct1?" in result["askedAdd"] and result["beforeYes"] == 0
+    assert result["teamMk"] == ["Add to the kit", "Disable"]
+    k = "/api/hosts/ct1/kits/"
+    assert result["posts"] == [
+        [k + "team/add-plugin", {"plugin": "new@acme", "agent": "claude", "confirm": True}],
+        [k + "team/disable-plugin", {"plugin": "lint@acme", "agent": "claude", "confirm": True}],
+        [k + "team/enable-plugin", {"plugin": "fmt@acme", "agent": "claude", "confirm": True}],
+        [k + "team/remove-plugin", {"plugin": "fmt@acme", "agent": "claude", "confirm": True}],
+        [k + "team/remove-marketplace", {"marketplace": "acme", "with_plugins": True, "confirm": True}],
+        [k + "team/import-marketplace", {"marketplace": "cx", "from": "codex", "confirm": True}],
+        [k + "team/add-marketplace", {"marketplace": "team-mk", "source": "https://git.example.org/t.git", "confirm": True}],
+        [k + "team/add-plugin", {"plugin": "x@team-mk", "agent": "claude", "source": "https://git.example.org/t.git",
+                                 "confirm": True}],
+        [k + "team/disable-plugin", {"plugin": "x@team-mk", "agent": "claude", "confirm": True}],
+        [k + "team/add-plugin", {"plugin": "oc-foo", "agent": "opencode", "confirm": True}],
+        [k + "default/add-marketplace", {"marketplace": "acme", "source": "acme/plugins", "confirm": True}]]
+    assert result["older"] == [True, True]
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="needs node")

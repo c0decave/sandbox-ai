@@ -396,6 +396,13 @@ NEWER = (
     ((0, 1, 78), "mcp attach --live and --helper", lambda a: a[:2] == ["mcp", "attach"] and (
         "--live" in a or any(x.startswith("--helper") for x in a))),
     ((0, 1, 78), "mcp detach", lambda a: a[:2] == ["mcp", "detach"]),
+    ((0, 1, 78), "plugins marketplaces", lambda a: a[:2] == ["plugins", "marketplaces"]),
+    ((0, 1, 78), "plugins --marketplaces-only", lambda a: a[:1] == ["plugins"] and "--marketplaces-only" in a),
+    ((0, 1, 78), "kits enable-plugin, disable-plugin, remove-marketplace and import-marketplace",
+     lambda a: a[:1] == ["kits"] and a[1:2] and a[1] in KIT_NEW_ACTIONS),
+    ((0, 1, 78), "plugins and marketplaces of the default kit changed by sandbox-ai kits",
+     lambda a: a[:1] == ["kits"] and a[1:2] and a[1] in KIT_DEFAULT_ACTIONS and "--" in a
+     and a[a.index("--") + 1:a.index("--") + 2] == ["default"]),
 )
 
 
@@ -616,7 +623,15 @@ KIT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 KIT_SKILL = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")  # a new skill's name (Claude's rule)
 KIT_PLUGIN = re.compile(r"[A-Za-z0-9@][A-Za-z0-9@/._^~<>=*+-]{0,200}")  # NAME@MARKETPLACE or an npm package
 KIT_ACTIONS = ("add-skill", "new-skill", "add-plugin", "add-marketplace", "remove-skill", "remove-plugin",
-               "add-hook", "remove-hook")
+               "add-hook", "remove-hook", "enable-plugin", "disable-plugin", "remove-marketplace", "import-marketplace")
+KIT_NEW_ACTIONS = ("enable-plugin", "disable-plugin", "remove-marketplace", "import-marketplace")  # since 0.1.78
+# What sandbox-ai kits changes of the default kit (part of every sandbox): its plugins and marketplaces, nothing else
+KIT_DEFAULT_ACTIONS = ("add-plugin", "remove-plugin", "enable-plugin", "disable-plugin", "add-marketplace",
+                       "remove-marketplace", "import-marketplace")
+# What a kit change does to every later start with that kit: widens it (asked first: kit-add) or narrows it
+# (kit-remove)
+KIT_WIDENS = ("add-skill", "add-plugin", "add-marketplace", "add-hook", "enable-plugin", "import-marketplace")
+KIT_NARROWS = ("remove-skill", "remove-plugin", "remove-hook", "disable-plugin", "remove-marketplace")
 
 
 def kit_name(value, what="a kit's name"):
@@ -1074,6 +1089,7 @@ class Api:
             ("POST", H + r"/vpn/(?P<name>[^/]+)/check", self.vpn_check, ()),
             ("DELETE", H + r"/vpn/(?P<name>[^/]+)", self.vpn_remove, ("vpn-remove",)),
             ("GET", H + r"/kits", self.kits, ()),
+            ("GET", H + r"/marketplaces", self.marketplaces, ()),
             ("POST", H + r"/kits", self.kit_new, ()),
             ("POST", H + r"/kits/(?P<name>[^/]+)/(?P<action>[a-z-]+)", self.kit_change, ("kit-remove", "kit-add")),
             ("DELETE", H + r"/kits/(?P<name>[^/]+)", self.kit_delete, ("kit-delete",)),
@@ -2015,6 +2031,12 @@ class Api:
     def kits(self, params, body):
         return self.json_of(params["host"], ["kits", "list", "--json"], 60)
 
+    def marketplaces(self, params, body):
+        """Every plugin marketplace on that host (sandbox-ai plugins marketplaces --json): sandbox-ai's own, the
+        kits', the plugin store's and those Claude, Codex and OpenCode know there, with each plugin's state. Read
+        only: nothing is fetched or run there."""
+        return self.json_of(params["host"], ["plugins", "marketplaces", "--json"], 60, ok=(0,))
+
     def kit_new(self, params, body):
         return self.done(params["host"], ["kits", "new", *kit_agents(body), "--", kit_name(body.get("name"))], 60)
 
@@ -2022,10 +2044,15 @@ class Api:
         """add-skill {path, as?, agents?}, new-skill {skill, description?, agents?}, add-plugin {plugin, agent?,
         source?}, add-marketplace {marketplace, source, agent?}, remove-skill {skill, agents?}, remove-plugin
         {plugin, agent?}; with "create": true the kit is created first (sandbox-ai kits new), so what is added to
-        a built-in kit's selection lands in a new kit of yours."""
-        name, action = kit_name(params["name"]), params["action"]
+        a built-in kit's selection lands in a new kit of yours. enable-plugin, disable-plugin {plugin, agent?},
+        remove-marketplace {marketplace, with_plugins?}, import-marketplace {marketplace, from?: claude|codex,
+        with_plugins?}. The plugin and marketplace actions also take the kit "default" (the default kit, part of
+        every sandbox)."""
+        action = params["action"]
         if action not in KIT_ACTIONS:
             raise Refused(404, "no such action")
+        name = params["name"] if params["name"] == "default" and action in KIT_DEFAULT_ACTIONS \
+            else kit_name(params["name"])
         options, values = [], []
         if action == "add-skill":
             values = [host_path(body.get("path"), "path")]
@@ -2042,7 +2069,7 @@ class Api:
             options += kit_agents(body)
             if action == "new-skill" and body.get("description") not in (None, ""):
                 options.append(f"--description={one_line(body['description'], 'description')}")
-        elif action in ("add-plugin", "remove-plugin"):
+        elif action in ("add-plugin", "remove-plugin", "enable-plugin", "disable-plugin"):
             plugin = body.get("plugin")
             if not (isinstance(plugin, str) and KIT_PLUGIN.fullmatch(plugin)):
                 raise Refused(400, "a plugin is NAME@MARKETPLACE (Claude) or an npm package (OpenCode)")
@@ -2071,15 +2098,27 @@ class Api:
                 raise Refused(400, "file is the hook's file name in the kit")
             values = [hook]
             options += kit_agents(body)
+        elif action in ("remove-marketplace", "import-marketplace"):
+            values = [kit_name(body.get("marketplace"), "a marketplace's name")]
+            if body.get("with_plugins") not in (None, False, True):
+                raise Refused(400, "with_plugins is true or false")
+            if body.get("with_plugins") is True:
+                options.append("--with-plugins")
+            if action == "import-marketplace" and body.get("from") not in (None, ""):
+                if body["from"] not in ("claude", "codex"):
+                    raise Refused(400, "from is claude or codex (OpenCode has no marketplaces)")
+                options.append(f"--from={body['from']}")
         else:  # add-marketplace
             values = [kit_name(body.get("marketplace"), "a marketplace's name"),
                       one_line(body.get("source"), "source", 2048)]
             options += kit_agents(body, many=False)
         if body.get("create") not in (None, False, True):
             raise Refused(400, "create is true or false")
-        if action.startswith("remove-"):
+        if body.get("create") is True and name == "default":
+            raise Refused(400, "the default kit is never created here (a start, or its first change, creates it)")
+        if action in KIT_NARROWS:
             confirmed(body, "kit-remove", f"{values[0]} from {name}")
-        elif action in ("add-skill", "add-plugin", "add-marketplace", "add-hook"):
+        elif action in KIT_WIDENS:
             confirmed(body, "kit-add", f"{' '.join(values[:1])} to {name}")
         first = ""
         if body.get("create") is True:
@@ -3139,6 +3178,9 @@ def terminal_command(query):
     if args is None:
         raise Refused(400, "kind is attach, start, update, install, login, plugins, build, trust-hooks, team-start or "
                            "demo-device")
+    older = newer_needed(host, args)  # an option that host's sandbox-ai does not know: said, not run
+    if older:
+        raise older
     return host, hosts.argv(host, args, tty=True)
 
 
@@ -3177,7 +3219,11 @@ def tool_command(kind, query):
         kits = [k for k in (query.get("kits") or "").split(",") if k]
         if len(kits) > 8 or not all(KIT_NAME.fullmatch(k) for k in kits):
             raise Refused(400, "kits: names of built-in kits, comma-separated")
-        return ["plugins", *(["--update"] if update else []), *[f"--kit={k}" for k in kits], agent]
+        only = {"1": True, "0": False, None: False, "": False}.get(query.get("marketplaces_only"), "bad")
+        if only == "bad":
+            raise Refused(400, "marketplaces_only is 1 or 0")
+        return ["plugins", *(["--update"] if update else []), *(["--marketplaces-only"] if only else []),
+                *[f"--kit={k}" for k in kits], agent]
     if kind == "build":
         target = query.get("target")
         if not (isinstance(target, str) and BUILD_TARGET.fullmatch(target)):

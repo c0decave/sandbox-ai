@@ -3182,6 +3182,173 @@ pages.llm = async (main) => {
 // read-only: with one of them (or none) chosen, what is added goes to a kit of yours, or a new one created first.
 const KIT_KINDS = { always: N_("always (sandbox-ai)"), default: N_("always (default kit)"), builtin: N_("built-in"), user: N_("yours") };
 
+// The marketplace browser of the Kits page (sandbox-ai plugins marketplaces --json on that host): every marketplace
+// (sandbox-ai's own, the kits', the plugin store's, those Claude, Codex and OpenCode know there), one picked shows its
+// plugins with their state, and each action changes the kit chosen here (the default kit or one of yours) by
+// sandbox-ai kits on that host. The agents' own configuration is only read, never changed.
+const MARKET_ORIGINS = { "sandbox-ai": N_("sandbox-ai's own"), kit: N_("a kit"), store: N_("plugin store"), claude: N_("Claude on that host"),
+  codex: N_("Codex on that host"), "codex-curated": N_("Codex (curated)"), suggested: N_("suggested") };
+const marketView = { host: null, key: null, kit: null };
+
+function marketPluginState(p) {
+  const words = [];
+  for (const k of Array.isArray(p.kits) ? p.kits : []) words.push(k.enabled ? t("on in {kit}", { kit: k.kit }) : t("off in {kit}", { kit: k.kit }));
+  if (p.store && p.store.installed) words.push(p.store.version ? t("installed ({version})", { version: p.store.version }) : t("installed"));
+  const a = p.agent || {};
+  if (a.installed) words.push(t("the agent has it installed"));
+  if (a.enabled === true) words.push(t("the agent enables it"));
+  if (a.enabled === false) words.push(t("the agent has it off"));
+  if (a.configured) words.push(t("in opencode.json"));
+  return words.join(" · ");
+}
+
+async function kitMarketplaces(section, host, live) {
+  clear(section).append(el("h2", {}, t("Marketplaces")), el("p", { class: "hint" }, t("Loading…")));
+  let data;
+  try { data = await api("GET", hostPath("/marketplaces", host)); }
+  catch (e) { if (live()) clear(section).append(el("h2", {}, t("Marketplaces")), errorNotice(e)); return; }
+  if (!live()) return;
+  if (marketView.host !== host) Object.assign(marketView, { host, key: null, kit: null });
+  renderMarketplaces(section, host, data);
+}
+
+function renderMarketplaces(section, host, data) {
+  const again = () => renderMarketplaces(section, host, data);
+  const markets = (Array.isArray(data.marketplaces) ? data.marketplaces : []).filter(m => m && typeof m.name === "string" && typeof m.agent === "string");
+  const agents = data.agents && typeof data.agents === "object" ? data.agents : {};
+  const editable = (Array.isArray(data.kits) ? data.kits : []).filter(k => k && k.editable && typeof k.name === "string" && (k.kind === "default" || k.kind === "user"));
+  if (!editable.some(k => k.name === marketView.kit)) marketView.kit = editable.length ? (editable.find(k => k.kind === "user") || editable[0]).name : null;
+  const kitChoice = el("select", { id: "market-kit" }, editable.map(k => el("option", { value: k.name, selected: k.name === marketView.kit }, k.kind === "default" ? t("the default kit (every sandbox)") : k.name)));
+  if (marketView.kit) kitChoice.value = marketView.kit;
+  const status = el("div");
+  const ask = el("div", { class: "row" });
+  const kit = () => editable.find(k => k.name === kitChoice.value) || null;
+  const inKit = (entries) => { const k = kit(); return (Array.isArray(entries) ? entries : []).find(e => k && e.kit === k.name && e.kind === k.kind) || null; };
+  // one kit change: asked first when it widens (kit-add) or narrows (kit-remove) every later start with that kit
+  const change = (ev, action, body, question, confirmKey, title) => {
+    const k = kit();
+    if (!k) { toast("warning", t("Which kit?"), t("Create a kit of yours first, or use the default kit.")); return; }
+    const go = () => busy(ev.target, async () => {
+      clear(status);
+      try {
+        const r = await api("POST", hostPath(`/kits/${encodeURIComponent(k.name)}/${action}`, host), Object.assign({}, body, { confirm: true }));
+        toast("success", title, (r && r.output) || "");
+        show("kits");
+      } catch (e) { status.append(errorNotice(e)); }
+    });
+    if (!needsConfirm(confirmKey)) { go(); return; }
+    confirmIn(ask, question, confirmKey === "kit-add" ? t("Yes, change the kit") : t("Yes, take it out"), go, { kind: confirmKey === "kit-add" ? "primary" : undefined, trigger: ev.target });
+  };
+  const kitLabel = () => { const k = kit(); return k ? (k.kind === "default" ? t("the default kit") : k.name) : "?"; };
+  kitChoice.addEventListener("change", () => { marketView.kit = kitChoice.value; again(); });
+
+  clear(section).append(el("h2", {}, t("Marketplaces")),
+    el("p", { class: "hint" }, t("Every plugin marketplace on {host}: sandbox-ai's own, those the kits declare, and those Claude, Codex and OpenCode already know there. Pick one to see its plugins; what you add, enable, disable or remove changes the kit chosen here. The agents' own configuration is only read.", { host })),
+    el("div", { class: "card" }, el("div", { class: "form" }, el("label", { for: "market-kit" }, t("Kit")), kitChoice,
+      el("span"), el("div", { class: "row" },
+        el("button", { onclick: () => openTerminal({ kind: "plugins", host, agent: "claude", marketplaces_only: "1" }, t("plugins on {host}", { host })) }, t("Fetch the plugin lists")),
+        el("button", { onclick: () => openTerminal({ kind: "plugins", host, agent: "claude" }, t("plugins on {host}", { host })) }, t("Install the kits' plugins"))),
+      el("p", { class: "hint wide" }, t("A marketplace's plugin list comes from a copy fetched before: {command} fetches the kits' marketplaces in a sandbox that reaches only their hosts.", { command: "sandbox-ai plugins claude --marketplaces-only" })))),
+    ask, status);
+
+  const keyOf = (m) => `${m.agent}:${m.name}`;
+  const rows = markets.map(m => {
+    const declared = inKit(m.kits);
+    const actions = el("td", { class: "actions" });
+    actions.append(rowButton(marketView.key === keyOf(m) ? t("Shown") : t("Plugins"), m.name, host, { class: marketView.key === keyOf(m) ? "primary" : undefined,
+      onclick: () => { marketView.key = keyOf(m); again(); } }));
+    if (m.agent === "claude" && declared) {
+      actions.append(rowButton(t("Remove from the kit"), m.name, host, { class: "danger", onclick: (ev) => change(ev, "remove-marketplace", { marketplace: m.name, with_plugins: true },
+        t("Take the marketplace {marketplace} with its plugins out of {kit} on {host}? Every later start with that kit goes without them.", { marketplace: m.name, kit: kitLabel(), host }), "kit-remove", t("{kit}: removed {value}", { kit: kitLabel(), value: m.name })) }));
+    } else if (m.agent === "claude" && m.importable && m.source_value) {
+      actions.append(rowButton(t("Add to the kit"), m.name, host, { onclick: (ev) => change(ev, "add-marketplace", { marketplace: m.name, source: m.source_value },
+        t("Declare the marketplace {marketplace} ({source}) in {kit} on {host}? Its plugins can then be added there.", { marketplace: m.name, source: m.source_value, kit: kitLabel(), host }), "kit-add", t("Marketplace added to {kit}", { kit: kitLabel() })) }));
+      if (m.agent_config && (m.plugins || []).some(p => p.agent && p.agent.enabled === true)) {
+        actions.append(rowButton(t("Import with Claude's plugins"), m.name, host, { onclick: (ev) => change(ev, "import-marketplace", { marketplace: m.name, from: "claude", with_plugins: true },
+          t("Declare the marketplace {marketplace} in {kit} on {host} with the plugins Claude enables from it there? Every later start with that kit gets them.", { marketplace: m.name, kit: kitLabel(), host }), "kit-add", t("Marketplace added to {kit}", { kit: kitLabel() })) }));
+      }
+    } else if (m.agent === "codex" && m.import) {
+      actions.append(rowButton(t("Import for Claude"), m.name, host, { onclick: (ev) => change(ev, "import-marketplace", { marketplace: m.name, from: "codex" },
+        t("Declare Codex's marketplace {marketplace} for Claude, as {name}, in {kit} on {host}?", { marketplace: m.name, name: m.import.name, kit: kitLabel(), host }), "kit-add", t("Marketplace added to {kit}", { kit: kitLabel() })) }));
+    }
+    const origins = (Array.isArray(m.origins) ? m.origins : []).map(o => MARKET_ORIGINS[o] ? t(MARKET_ORIGINS[o]) : String(o)).join(", ");
+    const count = Array.isArray(m.plugins) ? m.plugins.length : 0;
+    return el("tr", {}, el("td", {}, m.agent), el("td", { class: "mono" }, m.name, m.description ? el("div", { class: "hint" }, m.description) : null),
+      el("td", { class: "mono" }, m.source_value || "?", m.problem ? el("div", { class: "hint" }, t("not for a kit: {why}", { why: m.problem })) : null),
+      el("td", {}, origins, declared ? el("div", { class: "hint" }, t("declared in {kit}", { kit: kitLabel() })) : null),
+      el("td", {}, m.listed_from ? String(count) : t("{count} (list not fetched)", { count })), actions);
+  });
+  section.append(table([t("Agent"), t("Marketplace"), t("Source"), t("From"), t("Plugins"), ""], rows, t("No marketplace on this host."), t("Marketplaces")));
+
+  // the plugins of the marketplace picked
+  const picked = markets.find(m => keyOf(m) === marketView.key);
+  if (picked) {
+    const marketDeclared = inKit(picked.kits);
+    const pluginRows = (Array.isArray(picked.plugins) ? picked.plugins : []).filter(p => p && typeof p.id === "string").map(p => {
+      const mine = inKit(p.kits);
+      const actions = el("td", { class: "actions" });
+      if (picked.agent === "claude") {
+        if (!mine) {
+          const body = { plugin: p.id, agent: "claude" };
+          if (!marketDeclared && picked.importable && picked.source_value) body.source = picked.source_value;
+          if (marketDeclared || body.source) actions.append(rowButton(t("Add to the kit"), p.id, host, { class: "primary", onclick: (ev) => change(ev, "add-plugin", body,
+            t("Add {what} to the kit {kit} on {host}? Every later start with that kit gets it.", { what: p.id, kit: kitLabel(), host }), "kit-add", t("Plugin added to {kit}", { kit: kitLabel() })) }));
+          const elsewhere = (p.kits || []).some(k => k.enabled && k.kind === "default");
+          if (elsewhere && kit() && kit().kind !== "default") actions.append(rowButton(t("Disable"), p.id, host, { onclick: (ev) => change(ev, "disable-plugin", { plugin: p.id, agent: "claude" },
+            t("Turn {plugin} off in every start with {kit} on {host}, though the default kit enables it?", { plugin: p.id, kit: kitLabel(), host }), "kit-remove", t("{kit}: {plugin} disabled", { kit: kitLabel(), plugin: p.id })) }));
+        } else {
+          actions.append(mine.enabled
+            ? rowButton(t("Disable"), p.id, host, { onclick: (ev) => change(ev, "disable-plugin", { plugin: p.id, agent: "claude" },
+              t("Turn {plugin} off in every start with {kit} on {host}? It stays in the kit (and installed).", { plugin: p.id, kit: kitLabel(), host }), "kit-remove", t("{kit}: {plugin} disabled", { kit: kitLabel(), plugin: p.id })) })
+            : rowButton(t("Enable"), p.id, host, { onclick: (ev) => change(ev, "enable-plugin", { plugin: p.id, agent: "claude" },
+              t("Turn {plugin} on in every start with {kit} on {host}?", { plugin: p.id, kit: kitLabel(), host }), "kit-add", t("{kit}: {plugin} enabled", { kit: kitLabel(), plugin: p.id })) }),
+          rowButton(t("Remove"), p.id, host, { class: "danger", onclick: (ev) => change(ev, "remove-plugin", { plugin: p.id, agent: "claude" },
+            t("Remove the {kind} {value} for {agent} from the kit {kit} on {host}?", { kind: "plugin", value: p.id, agent: "claude", kit: kitLabel(), host }), "kit-remove", t("{kit}: removed {value}", { kit: kitLabel(), value: p.id })) }));
+        }
+      }
+      return el("tr", {}, el("td", { class: "mono" }, p.name || p.id, p.version ? el("span", { class: "hint" }, ` ${p.version}`) : null),
+        el("td", {}, p.description || (p.listed === false ? t("not in its plugin list (named by a kit or the agent)") : "")),
+        el("td", {}, marketPluginState(p) || el("span", { class: "hint" }, t("in no kit"))), actions);
+    });
+    section.append(...[el("h3", {}, t("Plugins of {marketplace} ({agent})", { marketplace: picked.name, agent: picked.agent })),
+      picked.agent === "codex" ? el("p", { class: "hint" }, t("sandbox-ai's kits give Codex no plugins yet: shown as Codex has them on that host.")) : null,
+      picked.agent === "claude" && !marketDeclared && !picked.importable ? el("p", { class: "hint" }, t("Its plugins cannot go into a kit: {why}", { why: picked.problem || "?" })) : null,
+      picked.listed_from ? null : el("p", { class: "hint" }, t("Its plugin list is not fetched yet: only the plugins a kit or the agent names are shown.")),
+      table([t("Plugin"), t("Description"), t("State"), ""], pluginRows, t("No plugins known."))].filter(Boolean));
+  }
+
+  // OpenCode: no marketplaces; its npm plugins
+  const oc = agents.opencode;
+  if (oc && Array.isArray(oc.plugins)) {
+    const ocRows = oc.plugins.filter(p => p && typeof p.name === "string").map(p => {
+      const mine = inKit(p.kits);
+      const actions = el("td", { class: "actions" });
+      if (!mine && p.importable) actions.append(rowButton(t("Add to the kit"), p.name, host, { class: "primary", onclick: (ev) => change(ev, "add-plugin", { plugin: p.name, agent: "opencode" },
+        t("Add {what} to the kit {kit} on {host}? Every later start with that kit gets it.", { what: p.name, kit: kitLabel(), host }), "kit-add", t("Plugin added to {kit}", { kit: kitLabel() })) }));
+      if (mine) actions.append(mine.enabled
+        ? rowButton(t("Disable"), p.name, host, { onclick: (ev) => change(ev, "disable-plugin", { plugin: p.name, agent: "opencode" },
+          t("Turn {plugin} off in every start with {kit} on {host}? It stays in the kit (and installed).", { plugin: p.name, kit: kitLabel(), host }), "kit-remove", t("{kit}: {plugin} disabled", { kit: kitLabel(), plugin: p.name })) })
+        : rowButton(t("Enable"), p.name, host, { onclick: (ev) => change(ev, "enable-plugin", { plugin: p.name, agent: "opencode" },
+          t("Turn {plugin} on in every start with {kit} on {host}?", { plugin: p.name, kit: kitLabel(), host }), "kit-add", t("{kit}: {plugin} enabled", { kit: kitLabel(), plugin: p.name })) }),
+        rowButton(t("Remove"), p.name, host, { class: "danger", onclick: (ev) => change(ev, "remove-plugin", { plugin: p.name, agent: "opencode" },
+          t("Remove the {kind} {value} for {agent} from the kit {kit} on {host}?", { kind: "plugin", value: p.name, agent: "opencode", kit: kitLabel(), host }), "kit-remove", t("{kit}: removed {value}", { kit: kitLabel(), value: p.name })) }));
+      return el("tr", {}, el("td", { class: "mono" }, p.name), el("td", {}, marketPluginState(p) || el("span", { class: "hint" }, t("in no kit"))), actions);
+    });
+    section.append(el("h3", {}, t("OpenCode's npm plugins")),
+      el("p", { class: "hint" }, t("OpenCode has no marketplaces: its plugins are npm packages, which a kit lists and OpenCode installs itself (it needs {option}).", { option: "--allow-host registry.npmjs.org" })),
+      table([t("Plugin"), t("State"), ""], ocRows, t("No npm plugins in opencode.json or a kit.")));
+    const modules = (Array.isArray(oc.modules) ? oc.modules : []).filter(m => typeof m === "string");
+    if (modules.length) section.append(el("p", { class: "hint" }, t("OpenCode's plugin modules there (a kit takes one as a hook, below):")), el("ul", {}, modules.map(m => el("li", { class: "mono" }, m))));
+  }
+  const notes = [];
+  for (const [agent, info] of Object.entries(agents)) {
+    if (!info || !Array.isArray(info.notes)) continue;
+    for (const note of info.notes) if (typeof note === "string") notes.push(el("li", {}, el("strong", {}, `${agent}: `), note));
+  }
+  for (const e of Array.isArray(data.errors) ? data.errors : []) if (e && typeof e.error === "string") notes.push(el("li", { class: "status-bad" }, `${e.kit || "?"} (${e.agent || "?"}): ${e.error}`));
+  if (notes.length) section.append(el("ul", { class: "hint" }, notes));
+}
+
 pages.kits = async (main) => {
   main.append(el("h1", {}, t("Kits on {host}", { host: state.host })), el("p", { class: "hint" }, t("Loading…")));
   const live = pageLive();
@@ -3202,12 +3369,13 @@ pages.kits = async (main) => {
     for (const [agent, info] of Object.entries(k.agents || {})) {
       if (!info || typeof info !== "object") continue;
       const line = el("div", {}, el("strong", {}, `${agent}: `));
-      const entries = [...listOf(info.skills).map(s => ["skill", s]), ...listOf(info.plugins).map(p => ["plugin", p])];
+      const entries = [...listOf(info.skills).map(s => ["skill", s]), ...listOf(info.plugins).map(p => ["plugin", p]), ...listOf(info.disabled).map(p => ["plugin", p, true])];
       if (!entries.length) line.append(el("span", { class: "hint" }, t("nothing")));
-      for (const [kind, value] of entries) {
+      for (const [kind, value, off] of entries) {
         line.append(el("span", { class: "mono" }, `${kind} ${value}`));
+        if (off) line.append(el("span", { class: "hint" }, ` ${t("(off)")}`));
         const holder = el("span", { class: "inline-ask" });
-        if (own) line.append(" ", holder);
+        if (own || (k.kind === "default" && kind === "plugin")) line.append(" ", holder);
         const label = t("Remove the {kind} {value} for {agent}", { kind, value, agent });
         holder.append(el("button", { class: "danger small", title: label, "aria-label": label,
           onclick: () => confirmIn(holder, t("Remove the {kind} {value} for {agent} from the kit {kit} on {host}?", { kind, value, agent, kit: k.name, host }), t("Yes, remove it"), async () => {
@@ -3234,6 +3402,9 @@ pages.kits = async (main) => {
     return el("tr", {}, el("td", { class: "mono" }, k.name), el("td", {}, KIT_KINDS[k.kind] ? t(KIT_KINDS[k.kind]) : String(k.kind || "")), brings, kitActions);
   });
   main.append(table([t("Kit"), t("Kind"), t("Brings"), ""], rows, t("No kits on this host.")), output);
+  const marketSection = el("section", { id: "kit-marketplaces" });
+  main.append(marketSection);
+  kitMarketplaces(marketSection, host, live);  // its own request: an older host's refusal stays in that section
 
   // a new kit
   const newName = el("input", { id: "kit-new-name", placeholder: "my-kit", pattern: "[A-Za-z0-9][A-Za-z0-9_.-]{0,63}" });
