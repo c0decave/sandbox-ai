@@ -2745,8 +2745,9 @@ class Api:
         return found
 
     def activity(self, params, body):
-        """sandbox-ai activity --json --tail N [--kind K]... [--grep TEXT] [--since TIME] [RUN]: the last events
-        (JSON lines) as {"events": [...]}; the page polls it to follow."""
+        """sandbox-ai activity --json --tail N [--kind K]... [--grep TEXT] [--since TIME] [--session NAME |
+        --project PATH | --log-dir DIR | --home DIR] [RUN]: the last events (JSON lines) as {"events": [...]}; the
+        page polls it to follow."""
         args = ["activity", "--json", f"--tail={whole(body.get('tail', 200), 'tail', 1, 2000)}"]
         kinds = strings(body.get("kinds", []), "kinds", len(ACTIVITY_KINDS))
         if not set(kinds) <= set(ACTIVITY_KINDS):
@@ -2758,6 +2759,17 @@ class Api:
             if not (isinstance(body["since"], str) and ACTIVITY_SINCE.fullmatch(body["since"])):
                 raise Refused(400, "since is 10m, 2h, 3d, 14:30, 2026-11-04 or an ISO time")
             args.append(f"--since={body['since']}")
+        # where it is read (one of them; with none, sandbox-ai reads the log directory of the directory it runs in,
+        # this service's own or the SSH login's: the page always names one): a session's, a project's default log
+        # directory, a log directory, the transcripts of a sandbox HOME
+        where = [key for key in ("session", "project", "log_dir", "home") if body.get(key) not in (None, "")]
+        if len(where) > 1:
+            raise Refused(400, "one of session, project, log_dir and home")
+        if where == ["session"]:
+            args.append(f"--session={start_name(body['session'])}")
+        elif where:
+            option = {"project": "--project", "log_dir": "--log-dir", "home": "--home"}[where[0]]
+            args.append(f"{option}={clean_path(body[where[0]], where[0])}")
         if body.get("run") not in (None, ""):
             args.append(self.canary_run(body["run"]) if isinstance(body["run"], str) else self.canary_run(""))
         status, out, err = self.run(params["host"], args, 60)

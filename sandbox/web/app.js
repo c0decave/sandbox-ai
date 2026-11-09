@@ -2689,22 +2689,49 @@ pages.doctor = async (main) => {
     doctorView(results, { level: 2, host }));
 };
 
+// The logs of a host (sandbox-ai logs --json DIR | --project PATH): a log directory, a project's (its default log
+// directory), or one of that host's starts (its workspace is its project). Never the directory the service (or the
+// SSH login) runs in: with nothing chosen it shows the first start's, or asks for one. The form comes first; what
+// the command says (no logs there yet, an error) is shown below it.
 pages.logs = async (main) => {
-  const host = state.host, where = state.logsOf && state.logsOf.host === host ? state.logsOf : null;
-  main.append(el("h1", {}, t("Logs on {host}", { host: state.host })), el("p", { class: "hint" }, t("Loading…")));
+  const host = state.host;
+  main.append(el("h1", {}, t("Logs on {host}", { host })), el("p", { class: "hint" }, t("Loading…")));
   const live = pageLive();
-  const data = where ? await api("POST", hostPath("/logs"), { directory: where.directory, project: where.project }) : await api("GET", hostPath("/logs"));
+  let starts = [];
+  try { starts = await api("GET", hostPath("/starts", host)); } catch (e) { starts = []; }
   if (!live()) return;
+  const projects = [...new Set((Array.isArray(starts) ? starts : []).filter(x => x && typeof x.workspace === "string" && x.workspace.startsWith("/") && x.kind !== "mcp")
+    .map(x => x.workspace))];
+  const where = state.logsOf && state.logsOf.host === host ? state.logsOf : projects.length ? { host, directory: "", project: projects[0] } : null;
   const directory = el("input", { id: "logs-directory", class: "mono", placeholder: "/home/you/.local/state/sandbox-ai/logs/web", value: where ? where.directory : "" });
   const project = el("input", { id: "logs-project", class: "mono", placeholder: "/home/you/src/project", value: where ? where.project : "" });
-  clear(main).append(el("h1", {}, t("Logs on {host}", { host: state.host })),
-    el("div", { class: "card" }, el("div", { class: "form" }, el("label", { for: "logs-directory" }, t("Log directory")), directory, el("label", { for: "logs-project" }, t("Or a project")), project,
-      el("span"), el("div", { class: "row" }, el("button", { class: "primary", onclick: () => { state.logsOf = directory.value.trim() || project.value.trim() ? { host, directory: directory.value.trim(), project: project.value.trim() } : null; show("logs"); } }, t("Show")),
-        el("button", { onclick: () => { state.logsOf = null; show("logs"); } }, t("The default"))))));
+  const ofStart = el("select", { id: "logs-start", class: "mono" }, el("option", { value: "" }, projects.length ? t("choose…") : t("no start on {host}", { host })),
+    projects.map(path => el("option", { value: path, selected: Boolean(where && !where.directory && where.project === path) }, path)));
+  ofStart.addEventListener("change", () => { if (ofStart.value) { state.logsOf = { host, directory: "", project: ofStart.value }; show("logs"); } });
+  const box = el("div");
+  clear(main).append(el("h1", {}, t("Logs on {host}", { host })),
+    el("div", { class: "card" }, el("div", { class: "form" },
+      el("label", { for: "logs-start" }, t("A start's project")), ofStart,
+      el("label", { for: "logs-directory" }, t("Log directory")), directory, el("label", { for: "logs-project" }, t("Or a project")), project,
+      el("span"), el("div", { class: "row" }, el("button", { class: "primary", onclick: () => { state.logsOf = directory.value.trim() || project.value.trim() ? { host, directory: directory.value.trim(), project: project.value.trim() } : null; show("logs"); } }, t("Show"))))),
+    box);
   privacyCard(main, host);
+  if (!where) { box.append(notice(t("Choose a start's project, a log directory or a project folder on {host}.", { host }), "info")); return; }
+  const shown = where.directory || where.project;
+  box.append(el("p", { class: "hint" }, t("Loading…")));
+  let data;
+  try { data = await api("POST", hostPath("/logs", host), { directory: where.directory, project: where.project }); }
+  catch (e) {
+    if (!live()) return;
+    // the command's own words for a directory that is not there (logs.py): no start logged there yet
+    clear(box).append(/no log directory/.test(String(e && e.message)) ? notice(t("No logs yet for {where} on {host}: a start writes them with a log directory (--log-dir, the wizard's logging question).", { where: shown, host }), "info") : errorNotice(e));
+    return;
+  }
+  if (!live()) return;
+  clear(box);
   const summaries = Array.isArray(data) ? data : [data];
-  for (const s of summaries) {
-    main.append(el("div", { class: "card" },
+  for (const s of summaries.filter(x => x && typeof x === "object")) {
+    box.append(el("div", { class: "card" },
       el("div", { class: "mono hint" }, s.directory || ""),
       el("p", {}, t("{denied} refused connection(s), {events} file event(s)", { denied: s.denied ?? 0, events: s.file_events ?? 0 })),
       (s.targets || []).length ? table([t("Refused destination"), t("Count")], s.targets.slice(0, 20).map(([target, n]) => el("tr", {}, el("td", { class: "mono" }, target), el("td", {}, n)))) : null,
@@ -4848,23 +4875,55 @@ pages.images = async (main) => {
 
 // Activity (sandbox-ai activity --json): the last events of the runs, filtered; Follow asks again every few seconds.
 const ACTIVITY_KINDS = ["prompt", "reply", "tool", "command", "file", "network", "approval", "mcp", "session", "tokens"];
+// What the agents did (sandbox-ai activity --json): of a start of that host (a session by its name, a run by its
+// name), a project (its default log directory), a log directory, or a sandbox HOME's transcripts. Never the
+// directory the service (or the SSH login) runs in: with nothing chosen it shows the first running start's (else
+// the first start's), or asks for one.
 pages.activity = async (main) => {
   const host = state.host;
-  const run = el("input", { id: "activity-run", class: "mono", placeholder: t("every run") }), tail = el("input", { id: "activity-tail", type: "number", min: 1, max: 2000, value: 100 });
-  const grep = el("input", { id: "activity-grep" }), since = el("input", { id: "activity-since", placeholder: "2h" });
+  main.append(el("h1", {}, t("Activity on {host}", { host })), el("p", { class: "hint" }, t("Loading…")));
+  const live = pageLive();
+  let starts = [];
+  try { starts = await api("GET", hostPath("/starts", host)); } catch (e) { starts = []; }
+  if (!live()) return;
+  starts = (Array.isArray(starts) ? starts : []).filter(x => x && typeof x.name === "string" && x.kind !== "mcp" && x.state !== "damaged");
+  const first = starts.find(x => x.state === "running") || starts[0];
+  const start = el("select", { id: "activity-start", class: "mono" }, el("option", { value: "" }, starts.length ? t("none") : t("no start on {host}", { host })),
+    starts.map(x => el("option", { value: x.name, selected: x === first }, `${x.name} (${stateText(x.state)})`)));
+  const where = el("select", { id: "activity-where" }, [["", N_("none")], ["project", N_("a project (its default log directory)")], ["log_dir", N_("a log directory")], ["home", N_("a sandbox HOME (its transcripts)")]]
+    .map(([v, label]) => el("option", { value: v }, t(label))));
+  start.value = first ? first.name : ""; where.value = "";  // what is shown first (a browser takes it from the options too)
+  const path = el("input", { id: "activity-path", class: "mono", placeholder: "/home/you/src/project", value: "" });
+  const run = el("input", { id: "activity-run", class: "mono", placeholder: t("every run there"), value: "" }), tail = el("input", { id: "activity-tail", type: "number", min: 1, max: 2000, value: 100 });
+  const grep = el("input", { id: "activity-grep", value: "" }), since = el("input", { id: "activity-since", placeholder: "2h", value: "" });
   const kinds = ACTIVITY_KINDS.map(k => el("input", { type: "checkbox", id: `activity-${k}`, value: k }));
   const follow = el("input", { id: "activity-follow", type: "checkbox" });
   const box = el("div");
+  // which one is read: a path given (with its kind), else the start chosen (a session by --session, a run by its
+  // name), else nothing
+  const source = () => {
+    const value = path.value.trim();
+    if (where.value && value) return { [where.value]: value };
+    const chosen = starts.find(x => x.name === start.value);
+    if (!chosen) return null;
+    return chosen.directory ? { session: chosen.name } : { run: chosen.name };
+  };
   const load = async () => {
+    const from = source();
+    if (!from) { clear(box).append(notice(t("Choose a start, or a project, log directory or sandbox HOME on {host}.", { host }), "info")); return; }
+    const body = Object.assign({ tail: Number(tail.value) || 100, kinds: kinds.filter(k => k.checked).map(k => k.value), grep: grep.value.trim(), since: since.value.trim() }, from);
+    if (run.value.trim() && !from.run) body.run = run.value.trim();
     let r;
-    try { r = await api("POST", hostPath("/activity", host), { run: run.value.trim(), tail: Number(tail.value) || 100, kinds: kinds.filter(k => k.checked).map(k => k.value), grep: grep.value.trim(), since: since.value.trim() }, { background: follow.checked }); }
-    catch (e) { clear(box).append(errorNotice(e)); return; }
+    try { r = await api("POST", hostPath("/activity", host), body, { background: follow.checked }); }
+    catch (e) { clear(box).append(/no activity|no log directory|no directory/.test(String(e && e.message)) ? notice(t("No activity recorded there yet: {error}", { error: errorText(e) }), "info") : errorNotice(e)); return; }
     const events = Array.isArray(r.events) ? r.events : [];
     clear(box).append(table([t("Time"), t("Run"), t("Kind"), t("What")], events.slice().reverse().map(e => el("tr", {}, el("td", {}, String(e.time || "").replace("T", " ").replace("Z", "")),
       el("td", { class: "mono" }, String(e.run || "")), el("td", {}, String(e.kind || "")), el("td", { class: "mono" }, String(e.summary || e.text || e.command || e.path || JSON.stringify(e))))), t("No activity found.")));
   };
   const tick = () => { if (state.page !== "activity" || state.host !== host || !box.isConnected) return; if (follow.checked) load().finally(() => setTimeout(tick, 5000)); else setTimeout(tick, 5000); };
   clear(main).append(el("h1", {}, t("Activity on {host}", { host })), el("div", { class: "card" }, el("div", { class: "form" },
+    el("label", { for: "activity-start" }, t("noun|Start")), start,
+    el("label", { for: "activity-where" }, t("Or read")), el("div", { class: "row" }, where, path),
     el("label", { for: "activity-run" }, t("Run")), run, el("label", { for: "activity-tail" }, t("Last events")), tail,
     el("span", {}, t("Kinds")), el("div", { class: "row" }, kinds.map((k, i) => el("label", {}, k, " ", ACTIVITY_KINDS[i]))),
     el("label", { for: "activity-grep" }, t("Containing")), grep, el("label", { for: "activity-since" }, t("Since")), since,

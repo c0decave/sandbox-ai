@@ -578,6 +578,12 @@ def logged_in():
                                          "run": "claude-1"},
      ["activity", "--json", "--tail=50", "--kind=tool", "--kind=network", "--grep=-rf", "--since=2h", "claude-1"]),
     ("POST", "/api/hosts/ct1/activity", {}, ["activity", "--json", "--tail=200"]),
+    # where it is read (review 5 W3/W6): a session, a project, a log directory, a sandbox HOME
+    ("POST", "/api/hosts/ct1/activity", {"tail": 10, "session": "web"}, ["activity", "--json", "--tail=10", "--session=web"]),
+    ("POST", "/api/hosts/ct1/activity", {"project": "/srv/p"}, ["activity", "--json", "--tail=200", "--project=/srv/p"]),
+    ("POST", "/api/hosts/ct1/activity", {"log_dir": "/srv/logs", "run": "claude-1"},
+     ["activity", "--json", "--tail=200", "--log-dir=/srv/logs", "claude-1"]),
+    ("POST", "/api/hosts/ct1/activity", {"home": "/srv/h"}, ["activity", "--json", "--tail=200", "--home=/srv/h"]),
     ("GET", "/api/hosts/ct1/doctor/bwrap", None, ["doctor", "--json", "--backend=bwrap"]),
     ("GET", "/api/hosts/ct1/version", None, ["version", "--verbose"]),
     ("GET", "/api/hosts/ct1/images", None, ["images", "--json"]),
@@ -969,6 +975,10 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     ("POST", "/api/hosts/ct1/privacy-check", {"paths": ["--all"]}, 400),
     ("POST", "/api/hosts/ct1/privacy-check", {"paths": ["/r"], "project": "-x"}, 400),
     ("POST", "/api/hosts/ct1/activity", {"tail": 0}, 400),
+    ("POST", "/api/hosts/ct1/activity", {"session": "web", "project": "/srv/p"}, 400),
+    ("POST", "/api/hosts/ct1/activity", {"session": "--all"}, 400),
+    ("POST", "/api/hosts/ct1/activity", {"log_dir": "relative"}, 400),
+    ("POST", "/api/hosts/ct1/activity", {"home": "/srv/../etc"}, 400),
     ("POST", "/api/hosts/ct1/activity", {"kinds": ["everything"]}, 400),
     ("POST", "/api/hosts/ct1/activity", {"run": "--follow"}, 400),
     ("POST", "/api/hosts/ct1/activity", {"since": "yesterday"}, 400),
@@ -4979,6 +4989,66 @@ def test_every_secret_value_field_has_show_value_shown_by_default(tmp_path):
     assert pressed["type"] == "text" and pressed["toggle"][2] == "true" and kept == "1" and back == "password"
     assert kept_after == "1", "the login's toggle is not remembered for the secret fields"
     assert result["blocked"] == ["text", "password"], "no storage: shown by default, the toggle still works"
+
+
+LOGS_DRIVER = FAKE_DOM + r"""
+const byId = (id) => document.getElementById(id);
+const posts = () => calls.filter(c => c.method !== "GET").map(c => [c.path, JSON.parse(c.body)]);
+(async () => {
+  const result = {};
+  vm.runInContext('state.me = { user: "admin", csrf: "c" }; state.host = "ct1"; state.page = "logs"; state.hosts = [{ name: "ct1", kind: "ssh", ssh: "root@ct1", port: 22 }];', context);
+  let starts = [{ name: "mcp-files", kind: "mcp", state: "running", workspace: "/srv/m" }, { name: "web", kind: "session", state: "stopped", workspace: "/srv/web", directory: "/d" },
+    { name: "plain", kind: "run", state: "running", workspace: "/srv/plain", directory: null }];
+  answer = (method, path) => {
+    if (path.endsWith("/starts")) return starts;
+    if (path.endsWith("/logs")) return { __status: 502, __error: "sandbox-ai logs on ct1: exit status 1: sandbox-ai logs: no log directory /root/.local/state/sandbox-ai/logs/web-0123; start the agent with --log-dir" };
+    if (path.endsWith("/activity")) return { events: [{ time: "2026-11-09T10:00:00Z", run: "r1", kind: "tool", summary: "ls" }] };
+    return {};
+  };
+  // Logs: the first start's project, never the service's directory; "no logs yet" below the form
+  await vm.runInContext("pages.logs(__main)", context); await settle();
+  result.logs = [posts(), Boolean(byId("logs-directory")), byId("logs-start").children.map(o => o.value), main.textContent.includes("No logs yet for /srv/web on ct1"),
+    main.all().some(n => n.tagName === "h2" && n.textContent === "Privacy check of repositories")];
+  calls.length = 0; main.children = [];
+  vm.runInContext('state.logsOf = null', context);
+  starts = [];
+  await vm.runInContext("pages.logs(__main)", context); await settle();
+  result.logsNone = [posts(), main.textContent.includes("Choose a start's project, a log directory or a project folder on ct1.")];
+  // Activity: the first running start (a run by its name, a session by --session), a project path instead
+  calls.length = 0; main.children = [];
+  starts = [{ name: "web", kind: "session", state: "stopped", workspace: "/srv/web", directory: "/d" }, { name: "plain", kind: "run", state: "running", workspace: "/srv/plain", directory: null }];
+  vm.runInContext('state.page = "activity"', context);
+  await vm.runInContext("pages.activity(__main)", context); await settle();
+  result.activityFirst = posts();
+  byId("activity-start").value = "web";
+  calls.length = 0; button(main, "Show").fire("click"); await settle();
+  result.activitySession = posts();
+  byId("activity-where").value = "project"; byId("activity-path").value = "/srv/p";
+  calls.length = 0; button(main, "Show").fire("click"); await settle();
+  result.activityProject = posts();
+  calls.length = 0; main.children = []; starts = [];
+  await vm.runInContext("pages.activity(__main)", context); await settle();
+  result.activityNone = [posts(), main.textContent.includes("Choose a start, or a project, log directory or sandbox HOME on ct1.")];
+  console.log(JSON.stringify(result));
+})().catch(e => { console.error(e.stack); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_logs_and_activity_never_read_the_services_own_directory(tmp_path):
+    """Review 5 W3: the Logs page read the web service's own directory by default and replaced the whole page with
+    the error when it had no logs. Now Logs and Activity read a start of that host (its project, its session or
+    run), or ask for one; the form comes first, "no logs yet" is said below it."""
+    result = run_driver(tmp_path, LOGS_DRIVER, "logs")
+    sent, form, choices, said, privacy = result["logs"]
+    assert sent == [["/api/hosts/ct1/logs", {"directory": "", "project": "/srv/web"}]]
+    assert form and choices == ["", "/srv/web", "/srv/plain"] and said and privacy, "the page stays, the MCP server's not offered"
+    assert result["logsNone"] == [[], True]
+    base = {"tail": 100, "kinds": [], "grep": "", "since": ""}
+    assert result["activityFirst"] == [["/api/hosts/ct1/activity", {**base, "run": "plain"}]], "the running one, by its name"
+    assert result["activitySession"] == [["/api/hosts/ct1/activity", {**base, "session": "web"}]]
+    assert result["activityProject"] == [["/api/hosts/ct1/activity", {**base, "project": "/srv/p"}]]
+    assert result["activityNone"] == [[], True]
 
 
 MORE_DRIVER = FAKE_DOM + r"""
