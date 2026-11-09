@@ -77,12 +77,15 @@ Dann:
 
 ```bash
 ./sandbox-ai claude --workspace "$HOME/src/sandbox-demo"
+cd ~/src/sandbox-demo && sandbox-ai claude   # dasselbe: das Verzeichnis, in dem Sie starten, ist /work
 ```
 
-Die Startzeilen zeigen, was in die Sandbox kopiert wurde, und für Claude, wie
-lange die Anmeldung gültig ist:
+Die Startzeilen sagen, welcher Ordner `/work` ist und welche Projektkonfiguration
+gilt, was in die Sandbox kopiert wurde und, für Claude, wie lange die Anmeldung
+gültig ist:
 
 ```text
+agent-sandbox: /work is /home/ich/src/sandbox-demo; configuration: none
 agent-sandbox: auth copied: /home/ich/.claude/.credentials.json -> /root/.claude/.credentials.json
 agent-sandbox: auth copied: /home/ich/.claude.json -> /root/.claude.json
 agent-sandbox: Claude access token valid for 7.4 h
@@ -137,7 +140,7 @@ Further options (read-only workspaces, persistent HOME, mounts, variables, MCP, 
 Write configuration [Y/n]:
 Wrote the token to /home/ich/.config/sandbox-ai/tokens/https-git.example.org (mode 0600; the project configuration names only this file)
 Wrote and trusted /home/ich/src/sandbox-demo/.sandbox-ai.json
-Start with: ./sandbox-ai claude --workspace /home/ich/src/sandbox-demo
+Start with: sandbox-ai claude --workspace /home/ich/src/sandbox-demo
 ```
 
 Antworten lassen sich wie in einer Shell bearbeiten (Backspace, Pfeiltasten,
@@ -156,8 +159,9 @@ in einem Geheimnis von `sandbox-ai secrets`. Für HTTPS-Server bietet der Git-Bl
 auch `--token-proxy` an: Der Verbindungs-Proxy setzt den Token in die Anfragen von
 Git ein, und der Agent liest ihn nie.
 
-Ab jetzt wendet der Starter diese Einstellungen automatisch an; Optionen auf
-der Kommandozeile haben weiterhin Vorrang. Später ändern Sie die Konfiguration
+Ab jetzt wendet der Starter diese Einstellungen automatisch an (auch bei
+`cd ~/src/sandbox-demo && sandbox-ai claude`: Ein Verzeichnis mit Projektdatei ist
+immer `/work`); Optionen auf der Kommandozeile haben weiterhin Vorrang. Später ändern Sie die Konfiguration
 mit `sandbox-ai wizard edit ~/src/sandbox-demo`: Es zeigt die Teile als Menü,
 fragt mit den aktuellen Werten als Vorgabe erneut und zeigt vor dem Schreiben,
 was sich ändert. Ändert sich die Datei oder klonen
@@ -178,7 +182,7 @@ Codenamen wie `brisk-otter-lantern` (der Start gibt ihn aus, `sandbox-ai list`
 zeigt ihn mit seinem Arbeitsordner).
 
 ```bash
-./sandbox-ai list                  # NAME  KIND  AGENT  STATE  HOME  STARTED  WORKSPACE
+./sandbox-ai list                  # NAME  KIND  AGENT  STATE  HOME  STARTED (UTC)  WORKSPACE
 ./sandbox-ai attach demo           # wieder verbinden
 ./sandbox-ai pause demo            # alles einfrieren, z. B. um die CPU freizugeben
 ./sandbox-ai resume demo           # genau dort weitermachen

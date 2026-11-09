@@ -74,12 +74,15 @@ Then:
 
 ```bash
 ./sandbox-ai claude --workspace "$HOME/src/sandbox-demo"
+cd ~/src/sandbox-demo && sandbox-ai claude   # the same: the directory you start in is /work
 ```
 
-The start lines show what was copied into the sandbox and, for Claude, how long
-the login is valid:
+The start lines say which folder is `/work` and which project configuration
+applies, what was copied into the sandbox and, for Claude, how long the login
+is valid:
 
 ```text
+agent-sandbox: /work is /home/me/src/sandbox-demo; configuration: none
 agent-sandbox: auth copied: /home/me/.claude/.credentials.json -> /root/.claude/.credentials.json
 agent-sandbox: auth copied: /home/me/.claude.json -> /root/.claude.json
 agent-sandbox: Claude access token valid for 7.4 h
@@ -134,7 +137,7 @@ Further options (read-only workspaces, persistent HOME, mounts, variables, MCP, 
 Write configuration [Y/n]:
 Wrote the token to /home/me/.config/sandbox-ai/tokens/https-git.example.org (mode 0600; the project configuration names only this file)
 Wrote and trusted /home/me/src/sandbox-demo/.sandbox-ai.json
-Start with: ./sandbox-ai claude --workspace /home/me/src/sandbox-demo
+Start with: sandbox-ai claude --workspace /home/me/src/sandbox-demo
 ```
 
 Edit answers like in a shell (Backspace, arrow keys, Tab completes paths).
@@ -151,8 +154,9 @@ that file. Choose `variable` instead to keep the token in a host variable, or
 `--token-proxy`: the connection proxy adds the token to Git's requests, and the
 agent never reads it.
 
-From now on the launcher applies these settings automatically. Options on the
-command line still win. To change the configuration later, run
+From now on the launcher applies these settings automatically (also to
+`cd ~/src/sandbox-demo && sandbox-ai claude`: a directory with a project file is
+always `/work`). Options on the command line still win. To change the configuration later, run
 `sandbox-ai wizard edit ~/src/sandbox-demo`: it shows the parts as a menu, asks
 again with the current values as defaults and shows what changed before
 writing. If the file changes, or you clone a project that
@@ -172,7 +176,7 @@ Every start works like this; without `--name` it gets a codename such as `brisk-
 (the start prints it, `sandbox-ai list` shows it with its workspace).
 
 ```bash
-./sandbox-ai list                  # NAME  KIND  AGENT  STATE  HOME  STARTED  WORKSPACE
+./sandbox-ai list                  # NAME  KIND  AGENT  STATE  HOME  STARTED (UTC)  WORKSPACE
 ./sandbox-ai attach demo           # back in
 ./sandbox-ai pause demo            # freeze everything, e.g. to free the CPU
 ./sandbox-ai resume demo           # continue exactly where it was
