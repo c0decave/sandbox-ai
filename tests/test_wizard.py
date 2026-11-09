@@ -1008,6 +1008,26 @@ def test_cli_models_of_a_registered_server(monkeypatch, capsys):
         w.cli(["models", "--kind", "ollama"])
 
 
+def test_cli_models_of_a_url_with_the_ca_a_registered_server_keeps(monkeypatch, capsys):
+    """Review 5 M7: the web's Test connection of an edited server with a CA of its own: --ca-of NAME tests the URL
+    in the form with the CA stored for NAME (the form cannot send the file again); a server without one says so."""
+    module = registered(monkeypatch, lambda endpoint: [])
+    module.save_store({"version": 1, "endpoints": {
+        "lan": {"kind": "openai-compatible", "url": "https://lan.example.org", "ca": "lan.pem"},
+        "gpu": {"kind": "vllm", "url": "http://10.0.0.5:8000"}}})
+    seen = []
+    monkeypatch.setattr(module, "ca_text", lambda endpoint: "PEM of " + endpoint["name"] if endpoint.get("ca") else None)
+    monkeypatch.setattr(module, "discover_url", lambda kind, url, **kw: seen.append((kind, url, kw["ca"], kw["ca_text"])) or [])
+    assert w.cli(["models", "--kind", "openai-compatible", "--url", "https://lan2.example.org", "--ca-of", "lan",
+                  "--json"]) == 0
+    assert seen == [("openai-compatible", "https://lan2.example.org", None, "PEM of lan")]
+    with pytest.raises(ValueError, match="gpu has no CA of its own"):
+        w.cli(["models", "--kind", "vllm", "--url", "https://x.example.org", "--ca-of", "gpu"])
+    with pytest.raises(SystemExit):
+        w.cli(["models", "--kind", "vllm", "--url", "https://x.example.org", "--ca-of", "lan", "--ca", "/x.pem"])
+    capsys.readouterr()
+
+
 def recorded(answers, asked):
     """scripted(), keeping every question in ASKED."""
     prompt = scripted(answers)

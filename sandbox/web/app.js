@@ -890,8 +890,10 @@ function startRow(s, starts, main, all) {
     const rename = rowButton(t("Rename…"), s.name, host, { onclick: () => askRename(actions, s, main, rename) });
     actions.append(rename);
   }
-  if (!mcp && ["running", "paused", "stopped"].includes(s.state) && (s.state !== "stopped" || s.keep))
-    actions.append(rowButton(t("More…"), s.name, host, { title: t("resume with directories, mounts or MCP servers added, restart, stop with a longer wait"), onclick: () => moreCard(main, s) }));
+  // More… starts it again with more only when it keeps its start (a run without one has nothing to start again
+  // with: the CLI refuses); a running or paused one without it still gets the longer stop
+  if (!mcp && (s.keep ? ["running", "paused", "stopped"].includes(s.state) : ["running", "paused"].includes(s.state)))
+    actions.append(rowButton(t("More…"), s.name, host, { title: s.keep ? t("resume with directories, mounts or MCP servers added, restart, stop with a longer wait") : t("stop with a longer wait"), onclick: () => moreCard(main, s) }));
   actions.append(rowButton(t("History"), s.name, host, { onclick: () => historyCard(main, s) }));
   // which MCP servers a start reaches (or will at its next start), and whom a server serves
   const mcpNote = mcp ? ((s.serves || []).length ? t("serves {starts}", { starts: s.serves.join(", ") }) : t("serves no start yet"))
@@ -953,37 +955,55 @@ function revealCard(card) {
 }
 
 // What happened to a start (sandbox-ai list --history NAME on its host).
+// It follows a rename (cardRef: read again under the new name), and is switched off once the start is gone.
 async function historyCard(main, s) {
+  let name = s.name;
   const old = document.getElementById("history-card");
   if (old) dropCard(old);
-  const body = el("div", {}, el("p", { class: "hint" }, t("Loading…")));
-  const card = el("div", { class: "card", id: "history-card" }, el("h2", {}, t("History of {name} on {host}", { name: s.name, host: s.host })), body,
+  const body = el("div", {}, el("p", { class: "hint" }, t("Loading…"))), notes = el("div");
+  const title = () => t("History of {name} on {host}", { name, host: s.host });
+  const heading = el("h2", {}, title());
+  const card = el("div", { class: "card", id: "history-card" }, heading, notes, body,
     el("button", { onclick: () => dropCard(card) }, t("Close")));
   openCard(main, card, s);
-  let found;
-  try { found = await api("GET", hostPath(`/starts/${encodeURIComponent(s.name)}/history`, s.host)); } catch (e) { clear(body).append(errorNotice(e)); return; }
   const details = (e) => {
     if (e.event === "exit") return typeof e.status === "number" ? t("status {status}", { status: e.status }) : t("status unknown");
     if (e.event === "rename") return e.to ? t("renamed to {name}", { name: e.to }) : t("renamed from {name}", { name: e.from || "?" });
     return [e.agent, e.workspace, e.note].filter(Boolean).map(String).join(" ");
   };
-  const rows = (Array.isArray(found) ? found : []).filter(e => e && typeof e === "object").slice().reverse().map(e =>
-    el("tr", {}, el("td", {}, String(e.time || "").replace("T", " ").replace("Z", "")), el("td", {}, String(e.event || "")), el("td", { class: "mono" }, String(e.run || "-")), el("td", {}, details(e))));
-  clear(body).append(table([t("Time"), t("Event"), t("Run"), t("Detail")], rows, t("No history of {name}.", { name: s.name }), t("History of {name} on {host}", { name: s.name, host: s.host })));
+  const load = async () => {
+    const asked = name;
+    let found;
+    try { found = await api("GET", hostPath(`/starts/${encodeURIComponent(asked)}/history`, s.host)); }
+    catch (e) { if (asked === name) clear(body).append(errorNotice(e)); return; }
+    if (asked !== name || !card.isConnected) return;  // renamed meanwhile: the reading under the new name counts
+    const rows = (Array.isArray(found) ? found : []).filter(e => e && typeof e === "object").slice().reverse().map(e =>
+      el("tr", {}, el("td", {}, String(e.time || "").replace("T", " ").replace("Z", "")), el("td", {}, String(e.event || "")), el("td", { class: "mono" }, String(e.run || "-")), el("td", {}, details(e))));
+    clear(body).append(table([t("Time"), t("Event"), t("Run"), t("Detail")], rows, t("No history of {name}.", { name }), title()));
+  };
+  registerCard(card, notes, cardRef(s, () => name, (fresh) => { name = fresh; load(); }, heading, title, () => true));
+  await load();
 }
 
 // More of resume and stop (sandbox-ai resume NAME --workspace DIR --mount SRC:DST[:ro|rw] --mcp NAME --restart;
 // sandbox-ai stop NAME --wait SECONDS): what is added is kept for its later starts; what widens it is asked first.
+// A running or paused start takes what is added only at a start: it is restarted (--restart, ticked for both); a
+// stopped one is resumed after the review of its kept HOME, as Resume does (reviewThenResume). A start that keeps
+// nothing to start again with gets only the longer stop. The card follows a rename and is switched off once the
+// start's state is another than the one it was opened for (its offers are that state's).
 function moreCard(main, s) {
   const host = s.host;
+  let name = s.name;
   const old = document.getElementById("more-card");
   if (old) dropCard(old);
+  const again = Boolean(s.keep);  // it can start again (resume with more, a restart)
+  const live = s.state === "running" || s.state === "paused";
   const workspaces = el("textarea", { id: "more-workspaces", rows: 2, class: "mono", placeholder: "/home/you/src/lib" });
   const mounts = el("textarea", { id: "more-mounts", rows: 2, class: "mono", placeholder: "/home/you/data:/mnt/data:ro" });
   const servers = el("input", { id: "more-mcp", class: "mono", placeholder: "files" });
-  const restart = el("input", { id: "more-restart", type: "checkbox", checked: s.state === "running" });
+  const restart = el("input", { id: "more-restart", type: "checkbox", checked: live });
   const wait = el("input", { id: "more-wait", type: "number", min: 1, max: 600, value: 30 });
-  const status = el("div", { class: "wide" }), row = el("div", { class: "row" });
+  const status = el("div", { class: "wide" }), row = el("div", { class: "row" }), notes = el("div");
   const lines = (input) => input.value.split("\n").map(x => x.trim()).filter(Boolean);
   const request = () => {
     const body = { workspaces: lines(workspaces), mcp: servers.value.split(/\s+/).filter(Boolean), mounts: [] };
@@ -992,9 +1012,12 @@ function moreCard(main, s) {
       if (parts.length < 2 || parts.length > 3 || (parts[2] && !["ro", "rw"].includes(parts[2]))) throw new Error(t("A mount is SOURCE:DESTINATION or SOURCE:DESTINATION:ro|rw: {line}", { line }));
       body.mounts.push({ source: parts[0], destination: parts[1], mode: parts[2] || "ro" });
     }
-    if (s.state === "running" && restart.checked) body.restart = true;
+    if (live && restart.checked) body.restart = true;
+    const added = body.workspaces.length || body.mounts.length || body.mcp.length;
+    if (live && added && !body.restart) throw new Error(t("{name} is {state}: it takes directories, mounts and MCP servers only at a start. Tick “Restart it now”.", { name, state: stateText(s.state) }));
     return body;
   };
+  const done = (r) => { toast("success", t("{name} on {host} resumed", { name, host }), (r && r.output) || ""); dropCard(card); if (state.page === "starts") refreshStarts(main, true); };
   const resume = (event) => {
     clear(status);
     let body;
@@ -1004,46 +1027,59 @@ function moreCard(main, s) {
       body.mounts.length ? t("the mounts {mounts}", { mounts: body.mounts.map(m => `${m.source}:${m.destination}:${m.mode}`).join(", ") }) : null,
       body.mcp.length ? t("the MCP servers {servers}", { servers: body.mcp.join(", ") }) : null].filter(Boolean);
     if (!what.length) { toast("warning", t("Nothing to add"), t("Name directories, mounts or MCP servers, or restart it.")); return; }
-    confirmIn(row, t("Resume {name} on {host} with {what}? What is added is kept for its later starts.", { name: s.name, host, what: what.join(t(" and ")) }), t("Yes, resume it"), async () => {
-      try { const r = await api("POST", hostPath(`/starts/${encodeURIComponent(s.name)}/resume`, host), Object.assign(body, { confirm: true })); toast("success", t("{name} on {host} resumed", { name: s.name, host }), (r && r.output) || ""); dropCard(card); if (state.page === "starts") refreshStarts(main, true); }
+    const trigger = event.target;
+    confirmIn(row, t("Resume {name} on {host} with {what}? What is added is kept for its later starts.", { name, host, what: what.join(t(" and ")) }), t("Yes, resume it"), async () => {
+      Object.assign(body, { confirm: true });
+      if (s.state === "stopped") {  // its kept HOME is reviewed first, as Resume does
+        await reviewThenResume(main, Object.assign({}, s, { name }), trigger, { body, done, fail: (e) => clear(status).append(errorNotice(e)) });
+        return;
+      }
+      try { done(await api("POST", hostPath(`/starts/${encodeURIComponent(name)}/resume`, host), body)); }
       catch (e) { status.append(errorNotice(e)); }
-    }, { kind: "primary", trigger: event.target });
+    }, { kind: "primary", trigger });
   };
   const stop = (event) => {
     const seconds = Number(wait.value);  // what the question names is what is sent, whatever the field says by then
     if (!Number.isInteger(seconds) || seconds < 1 || seconds > 600) { clear(status).append(notice(t("Wait 1 to 600 seconds."), "error")); return; }
-    confirmIn(row, t("Stop {name} on {host}, waiting up to {seconds} seconds for it to end? What runs in it ends.", { name: s.name, host, seconds }), t("Yes, stop it"), async () => {
-      try { const r = await api("POST", hostPath(`/starts/${encodeURIComponent(s.name)}/stop`, host), { wait: seconds, confirm: true }); toast("success", t("{name} on {host} stopped", { name: s.name, host }), (r && r.output) || ""); dropCard(card); if (state.page === "starts") refreshStarts(main, true); }
+    confirmIn(row, t("Stop {name} on {host}, waiting up to {seconds} seconds for it to end? What runs in it ends.", { name, host, seconds }), t("Yes, stop it"), async () => {
+      try { const r = await api("POST", hostPath(`/starts/${encodeURIComponent(name)}/stop`, host), { wait: seconds, confirm: true }); toast("success", t("{name} on {host} stopped", { name, host }), (r && r.output) || ""); dropCard(card); if (state.page === "starts") refreshStarts(main, true); }
       catch (e) { status.append(errorNotice(e)); }
     }, { trigger: event.target });
   };
-  row.append(el("button", { class: "primary", onclick: resume }, s.state === "running" ? t("Restart with these…") : t("Resume with these…")),
-    s.state !== "stopped" ? el("button", { onclick: stop }, t("Stop and wait…")) : null, el("button", { onclick: () => dropCard(card) }, t("Close")));
-  const card = el("div", { class: "card", id: "more-card" }, el("h2", {}, t("More for {name} on {host}", { name: s.name, host })),
+  row.append(...[again ? el("button", { class: "primary", onclick: resume }, live ? t("Restart with these…") : t("Resume with these…")) : null,
+    live ? el("button", { onclick: stop }, t("Stop and wait…")) : null, el("button", { onclick: () => dropCard(card) }, t("Close"))].filter(Boolean));
+  const title = () => t("More for {name} on {host}", { name, host });
+  const heading = el("h2", {}, title());
+  const card = el("div", { class: "card", id: "more-card" }, heading, notes,
+    again ? null : el("p", { class: "hint" }, t("{name} keeps nothing to start again with (a run without a kept start): directories, mounts and MCP servers go with a new start.", { name })),
     el("div", { class: "form" },
-      el("label", { for: "more-workspaces" }, t("Directories (one per line)")), workspaces,
-      el("label", { for: "more-mounts" }, t("Mounts (one per line)")), mounts,
-      el("label", { for: "more-mcp" }, t("MCP servers")), servers,
-      s.state === "running" ? el("label", { for: "more-restart" }, t("Restart it now")) : null, s.state === "running" ? restart : null,
-      s.state !== "stopped" ? el("label", { for: "more-wait" }, t("Stop: wait up to (seconds)")) : null, s.state !== "stopped" ? wait : null,
+      again ? el("label", { for: "more-workspaces" }, t("Directories (one per line)")) : null, again ? workspaces : null,
+      again ? el("label", { for: "more-mounts" }, t("Mounts (one per line)")) : null, again ? mounts : null,
+      again ? el("label", { for: "more-mcp" }, t("MCP servers")) : null, again ? servers : null,
+      again && live ? el("label", { for: "more-restart" }, t("Restart it now")) : null, again && live ? restart : null,
+      live ? el("label", { for: "more-wait" }, t("Stop: wait up to (seconds)")) : null, live ? wait : null,
       status, el("span"), row));
   openCard(main, card, s);
+  const opened = s.state;
+  registerCard(card, notes, cardRef(s, () => name, (fresh) => { name = fresh; }, heading, title, (now) => now === opened));
 }
 
 // A stopped start with a kept HOME: first what changed in the files of that HOME that decide what runs at a start
 // (resume --review-home); when something did, or not everything could be checked, it is shown and asked first.
-async function reviewThenResume(main, s, button) {
+// WITH (More…): {body: what the resume adds (asked for already), done(result), fail(error)}.
+async function reviewThenResume(main, s, button, withMore) {
   const host = s.host;
   const old = document.getElementById("review-card");
   if (old) dropCard(old);
   const resume = async () => {
     try {
-      const r = await api("POST", hostPath(`/starts/${encodeURIComponent(s.name)}/resume`, host), {});
-      toast("success", t("{name} on {host} resumed", { name: s.name, host }), (r && r.output) || "");
+      const r = await api("POST", hostPath(`/starts/${encodeURIComponent(s.name)}/resume`, host), withMore ? withMore.body : {});
       const card = document.getElementById("review-card");
       if (card) dropCard(card);
+      if (withMore) { withMore.done(r); return; }
+      toast("success", t("{name} on {host} resumed", { name: s.name, host }), (r && r.output) || "");
       if (state.page === "starts") refreshStarts(main, true);
-    } catch (e) { failed(t("Could not resume {name} on {host}", { name: s.name, host }))(e); }
+    } catch (e) { if (withMore) withMore.fail(e); else failed(t("Could not resume {name} on {host}", { name: s.name, host }))(e); }
   };
   let found;
   try { found = await busy(button, () => api("GET", hostPath(`/starts/${encodeURIComponent(s.name)}/review`, host))); }
@@ -1752,7 +1788,8 @@ function gcCard(main, host) {
   openCard(main, card, null);
 }
 
-// A card about one running start (its network, its resources): switched off once the start stops or goes (a later
+// A card about one start (its network, its resources while it runs; More, its history): switched off once the start
+// is in a state the card does not fit (REF.alive; for network and resources: no longer running) or goes (a later
 // listing says so), with a notice and its Close.
 // REF: {host, id, name (a getter), rename(new)}: the card follows its start by host and id, so a rename (here or
 // elsewhere) keeps it attached, under the new name.
@@ -1777,15 +1814,16 @@ function retireCards(starts, stale) {
     if (stale(entry.ref.host)) continue;
     const s = starts.find(x => x.host === entry.ref.host && startId(x) === entry.ref.id);
     if (s && s.name !== entry.ref.name && !entry.retired) entry.ref.rename(s.name);
-    if (!s || s.state !== "running") entry.retire(s ? s.state : null);
+    if (!s || !entry.ref.alive(s.state)) entry.retire(s ? s.state : null);
   }
 }
 
 // What a card keeps of its start: its host, its id, and its name, which a rename changes (NAME is read anew each
 // time; HEADING(name) gives the card's title).
-function cardRef(s, getName, setName, heading, title) {
+// ALIVE(state): whether the card still fits a start in that state (by default: while it runs).
+function cardRef(s, getName, setName, heading, title, alive) {
   return { host: s.host || state.host, id: startId(s), get name() { return getName(); },
-    rename: (fresh) => { setName(fresh); heading.textContent = title(); } };
+    rename: (fresh) => { setName(fresh); heading.textContent = title(); }, alive: alive || ((now) => now === "running") };
 }
 
 const NET_PRESETS = ["pypi", "github", "gitlab", "kernel-org", "duckduckgo", "npm"];
@@ -2097,7 +2135,8 @@ function resourcesCard(main, s) {
         const r = await api("POST", hostPath(`/starts/${encodeURIComponent(name)}/mcp-live`, host), Object.assign({}, body, { confirm: true }));
         toast(r && r.attached === "already" ? "warning" : "success", t("{server} → {where}", { server: shownServer(body), where }), (r && r.message) || "");
         mcpResult.append(el("p", { class: "hint" }, String((r && r.message) || "")));
-        if (r && (r.agent_restart === "required" || r.agent_restart === "maybe")) mcpResult.append(restartAgent());
+        if (r && (r.agent_restart === "required" || r.agent_restart === "maybe"))  // a restart needs a kept start (resume --restart)
+          mcpResult.append(s.keep ? restartAgent() : el("p", { class: "hint" }, t("{name} keeps nothing to start again with: the agent sees it after a new start.", { name })));
         loadMcp();
       } catch (e) { failed(t("Could not add {server} to {where}", { server: shownServer(body), where }))(e); }
     }, { kind: "primary", trigger: addMcp });
@@ -3019,7 +3058,9 @@ pages.llm = async (main) => {
     if (!address) { status.append(notice(t("Which URL? {example} of the server to test.", { example: "http://192.168.1.20:1234" }), "error")); return; }
     const secret = keySecret.value.trim();
     if (secret && !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(secret)) { status.append(notice(t("A secret's name: letters, digits and _ (up to 64), not starting with a digit."), "error")); return; }
-    const sent = Object.assign({ kind: kind.value, url: address }, textOf(ca) ? { ca: textOf(ca) } : {}, secret ? { api_key_secret: secret } : {},
+    // an edited server's own CA is kept unless a file replaces it: the test uses it too (named; read on that host)
+    const caOf = !textOf(ca) && editing && editing.ca && address.toLowerCase().startsWith("https://") ? { ca_of: editing.name } : {};
+    const sent = Object.assign({ kind: kind.value, url: address }, textOf(ca) ? { ca: textOf(ca) } : caOf, secret ? { api_key_secret: secret } : {},
       insecureConfirmed ? { insecure_http: true, confirm: true } : {});
     clear(testBox).append(el("p", { class: "hint" }, t("Testing {url}…", { url: address })));
     let models;

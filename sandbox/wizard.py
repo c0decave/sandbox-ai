@@ -1605,6 +1605,9 @@ def cli(argv):
                                                            "registered yet (with --kind)")
     models.add_argument("-c", "--ca", metavar="FILE", help="with --url https://...: the PEM CA that signed its "
                                                             "certificate")
+    models.add_argument("--ca-of", metavar="NAME", dest="ca_of",
+                        help="with --url https://...: the CA stored for the LLM server NAME (llm add --ca), as an edit "
+                             "of it keeps it")
     models.add_argument("-s", "--api-key-secret", metavar="NAME", dest="api_key_secret",
                         help="with --url: the secret (sandbox-ai secrets) holding its API key")
     models.add_argument("--insecure-http", action="store_true", dest="insecure_http",
@@ -1639,8 +1642,15 @@ def cli(argv):
             # app's and the web's "Test connection" asks before anything is stored.
             if not a.kind:
                 parser.error("--url needs --kind")
+            stored = None
+            if a.ca_of:  # an edited server's own CA, which the form cannot send again (the front ends' edit)
+                if a.ca:
+                    parser.error("--ca-of goes without --ca")
+                stored = llm().ca_text(llm().endpoint(a.ca_of))
+                if stored is None:
+                    raise ValueError(f"the LLM server {launcher().printable(a.ca_of)} has no CA of its own")
             found = llm().discover_url(a.kind, a.url, ca=a.ca, api_key_secret=a.api_key_secret,
-                                       insecure_http=a.insecure_http)
+                                       insecure_http=a.insecure_http, ca_text=stored)
         elif a.kind and a.host:
             port = a.port or (SERVERS[a.kind][1] if a.kind in SERVERS else None)
             if port is None:

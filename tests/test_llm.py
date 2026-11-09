@@ -583,6 +583,22 @@ def test_discover_url_lists_a_server_that_is_not_registered():
         llm.discover_url("lmstudio", "127.0.0.1:1234")
 
 
+def test_discover_url_takes_the_text_of_a_stored_ca(monkeypatch):
+    """wizard models --ca-of NAME (review 5 M7): the CA a registered server keeps goes with the test as its text."""
+    carried = []
+
+    class FakeClient:
+        def __init__(self, endpoint):
+            carried.append(endpoint["ca_text"])
+
+        def json(self, path):
+            return {"data": []}
+    monkeypatch.setattr(llm, "Client", lambda endpoint, get=None: FakeClient(endpoint))
+    llm.discover_url("openai-compatible", "https://gpu.example", ca_text="-----BEGIN CERTIFICATE-----")
+    llm.discover_url("openai-compatible", "https://gpu.example")
+    assert carried == ["-----BEGIN CERTIFICATE-----", None]
+
+
 def test_test_connection_sends_no_key_over_plain_http_to_a_public_address(monkeypatch):
     """Review 5 M3 (PoC llm_plain_http.py): "Test connection" (wizard models --url, the web's and the app's) sent
     the API key over plain http to a public address, which `llm add` refuses: now refused the same way, before

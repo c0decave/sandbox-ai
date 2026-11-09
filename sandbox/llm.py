@@ -618,11 +618,13 @@ def name_refusal(name):
     return f"an LLM endpoint's name is 1-32 letters, digits, _ or -: {printable(name)!r}"
 
 
-def discover_url(kind, url, get=None, client=None, ca=None, api_key_secret=None, insecure_http=False, resolver=None):
+def discover_url(kind, url, get=None, client=None, ca=None, api_key_secret=None, insecure_http=False, resolver=None,
+                 ca_text=None):
     """The models a server of KIND at URL lists, before it is registered anywhere (the "test connection" of the app
     and the web): the URL is checked as `llm add` checks it, nothing is stored. The key of API_KEY_SECRET is sent
     only where `llm add` would accept the URL: plain http to a public address (or a name that resolves to one)
-    needs INSECURE_HTTP, as `llm add --insecure-http`."""
+    needs INSECURE_HTTP, as `llm add --insecure-http`. CA_TEXT: a CA's PEM text already checked (a registered
+    server's own, ca_text), in place of the file CA."""
     if kind not in KINDS:
         raise ValueError(f"Unknown server type: {printable(kind)}")
     parsed = parse_url(url)
@@ -634,7 +636,7 @@ def discover_url(kind, url, get=None, client=None, ca=None, api_key_secret=None,
         problem, _ = plain_http_resolved(parsed, resolver)  # a name that does not resolve is not reached either
         if problem:
             raise ValueError(f"{problem} (the API key would go with it)")
-    text = None
+    text = ca_text
     if ca is not None:
         text = read_private(Path(ca).expanduser(), CA_LIMIT, f"--ca {ca}").decode("ascii", "strict")
         check_ca(text, ca)

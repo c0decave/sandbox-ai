@@ -310,6 +310,9 @@ def logged_in():
                                             "ca": "/home/you/ca.pem", "api_key_secret": "GW_KEY"},
      ["wizard", "models", "--kind=openai-compatible", "--url=https://gw.example.org", "--ca=/home/you/ca.pem",
       "--api-key-secret=GW_KEY", "--json"]),
+    # an edited server's own CA (the form cannot send it again): named, read on that host (review 5 M7)
+    ("POST", "/api/hosts/ct1/llm-models", {"kind": "openai-compatible", "url": "https://gw.example.org", "ca_of": "lan"},
+     ["wizard", "models", "--kind=openai-compatible", "--url=https://gw.example.org", "--ca-of=lan", "--json"]),
     # review 5 M3: the key over plain http outside the local networks only when asked for and confirmed
     ("POST", "/api/hosts/ct1/llm-models", {"kind": "ollama", "url": "http://93.184.216.34:11434",
                                             "api_key_secret": "GW_KEY", "insecure_http": True, "confirm": True},
@@ -629,6 +632,7 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     ("POST", "/api/hosts/ct1/llm", {"name": "--replace", "kind": "lmstudio", "url": "http://x"}, 400),
     ("POST", "/api/hosts/ct1/llm-models", {"kind": "anthropic", "url": "https://x.example.org"}, 400),
     ("POST", "/api/hosts/ct1/llm-models", {"kind": "ollama"}, 400),
+    ("POST", "/api/hosts/ct1/llm-models", {"kind": "vllm", "url": "https://x.example.org", "ca_of": "--ca=/etc/x"}, 400),
     ("POST", "/api/hosts/ct1/llm-models", {"kind": "ollama", "url": "http://93.184.216.34:11434",
                                             "api_key_secret": "K", "insecure_http": True}, 400),  # not confirmed
     ("POST", "/api/hosts/ct1/llm-models", {"url": "https://x.example.org"}, 400),
@@ -4229,7 +4233,7 @@ const byId = (id) => document.getElementById(id);
     if (method === "GET") return path.includes("/limits/") ? {} : [];
     return { output: "ok" };
   };
-  vm.runInContext('resourcesCard(__main, { name: "web", id: "web-1", host: "ct1", state: "running", kind: "session", directory: "/d" })', context);
+  vm.runInContext('resourcesCard(__main, { name: "web", id: "web-1", host: "ct1", state: "running", kind: "session", directory: "/d", keep: true })', context);
   await settle();
   const card = byId("resources-card");
   const tables = card.all().filter(n => n.tagName === "table");
@@ -4933,6 +4937,111 @@ def test_every_secret_value_field_has_show_value_shown_by_default(tmp_path):
     assert result["blocked"] == ["text", "password"], "no storage: shown by default, the toggle still works"
 
 
+MORE_DRIVER = FAKE_DOM + r"""
+const confirmText = (node) => { const c = node.all().find(n => n.className === "confirm"); return c ? c.textContent : null; };
+const posts = () => calls.filter(c => c.method !== "GET").map(c => [c.path, JSON.parse(c.body)]);
+const gets = () => calls.filter(c => c.method === "GET").map(c => c.path);
+const byId = (id) => document.getElementById(id);
+const reset = () => { calls.length = 0; main.children = []; };
+const fields = () => { for (const id of ["more-workspaces", "more-mounts", "more-mcp"]) if (byId(id)) byId(id).value = ""; };  // a browser's are ""
+(async () => {
+  const result = {};
+  vm.runInContext('state.me = { user: "admin", csrf: "c" }; state.host = "ct1"; state.page = "logs"; state.hosts = [{ name: "ct1", kind: "ssh", ssh: "root@ct1", port: 22 }];', context);
+  let review = { name: "kept", id: "kept-1", state: "stopped", pending: true, review: { since: "2026-11-01", complete: true, changes: [{ change: "changed", path: ".bashrc" }] } };
+  answer = (method, path) => (path.endsWith("/review") ? review : path.endsWith("/history") ? [{ time: "t", event: "start", run: "r1" }] : { output: "ok" });
+  // (1) paused, kept: the restart is offered and ticked; what is added goes with it
+  vm.runInContext('moreCard(__main, { name: "web", id: "web-1", host: "ct1", state: "paused", keep: true })', context);
+  fields();
+  result.pausedForm = [Boolean(byId("more-restart")), "checked" in byId("more-restart").attributes, Boolean(button(main, "Restart with these…")), Boolean(button(main, "Stop and wait…"))];
+  byId("more-workspaces").value = "/srv/lib";
+  byId("more-restart").checked = false;
+  button(main, "Restart with these…").fire("click");
+  result.noRestart = [byId("more-card").textContent.includes("Tick “Restart it now”"), posts().length, confirmText(main)];
+  byId("more-restart").checked = true;
+  button(main, "Restart with these…").fire("click");
+  button(main, "Yes, resume it").fire("click"); await settle();
+  result.pausedPost = posts();
+  // (2) stopped, kept: asked, then its HOME reviewed as Resume does; the resume only after "Resume anyway"
+  reset();
+  vm.runInContext('moreCard(__main, { name: "kept", id: "kept-1", host: "ct1", state: "stopped", keep: true })', context);
+  fields();
+  result.stoppedForm = [Boolean(byId("more-restart")), Boolean(button(main, "Resume with these…")), Boolean(button(main, "Stop and wait…"))];
+  byId("more-mcp").value = "files";
+  button(main, "Resume with these…").fire("click");
+  button(main, "Yes, resume it").fire("click"); await settle();
+  result.reviewed = [gets(), posts().length, Boolean(byId("review-card")) && byId("review-card").textContent.includes(".bashrc")];
+  button(byId("review-card"), "Resume anyway").fire("click"); await settle();
+  result.stoppedPost = posts();
+  result.closed = [Boolean(byId("more-card")), Boolean(byId("review-card"))];
+  // nothing changed in its HOME: resumed at once
+  reset();
+  review = { name: "kept", id: "kept-1", state: "stopped", pending: true, review: { since: "x", complete: true, changes: [] } };
+  vm.runInContext('moreCard(__main, { name: "kept", id: "kept-1", host: "ct1", state: "stopped", keep: true })', context);
+  fields(); byId("more-workspaces").value = "/srv/lib";
+  button(main, "Resume with these…").fire("click");
+  button(main, "Yes, resume it").fire("click"); await settle();
+  result.cleanPost = posts();
+  // (3) a run without a kept start: only the longer stop; no More for it once stopped
+  reset();
+  vm.runInContext('moreCard(__main, { name: "plain", id: "run-1", host: "ct1", state: "running", keep: false, kind: "run" })', context);
+  result.plain = [Boolean(button(main, "Restart with these…")), Boolean(byId("more-workspaces")), Boolean(button(main, "Stop and wait…")), byId("more-card").textContent.includes("keeps nothing to start again with")];
+  result.rows = vm.runInContext(`[{ state: "running", keep: false }, { state: "paused", keep: true }, { state: "stopped", keep: true }, { state: "stopped", keep: false }]
+    .map(x => Boolean(startRow(Object.assign({ name: "x", host: "ct1", kind: "session" }, x), [], __main, false).all().find(n => n.tagName === "button" && n.textContent === "More…")))`, context);
+  // (4) More follows a rename and is switched off once the state is another
+  reset();
+  vm.runInContext('moreCard(__main, { name: "web", id: "web-1", host: "ct1", state: "running", keep: true })', context);
+  vm.runInContext('retireCards([{ name: "web2", id: "web-1", host: "ct1", state: "running" }], () => false)', context);
+  result.renamed = byId("more-card").children.find(n => n.tagName === "h2").textContent;
+  button(main, "Stop and wait…").fire("click");
+  button(main, "Yes, stop it").fire("click"); await settle();
+  result.renamedPost = posts().map(p => p[0]);
+  reset();
+  vm.runInContext('moreCard(__main, { name: "web", id: "web-1", host: "ct1", state: "running", keep: true })', context);
+  vm.runInContext('retireCards([{ name: "web", id: "web-1", host: "ct1", state: "paused" }], () => false)', context);
+  result.retired = [byId("more-card").textContent.includes("web on ct1 is paused now"), button(main, "Restart with these…").disabled];
+  // History: read again under the new name; a state change keeps it, gone switches it off
+  reset();
+  await vm.runInContext('historyCard(__main, { name: "web", id: "web-1", host: "ct1", state: "running" })', context);
+  vm.runInContext('retireCards([{ name: "web3", id: "web-1", host: "ct1", state: "stopped" }], () => false)', context); await settle();
+  result.history = [gets(), byId("history-card").children.find(n => n.tagName === "h2").textContent, byId("history-card").textContent.includes("nothing here changes it")];
+  vm.runInContext('retireCards([], () => false)', context);
+  result.historyGone = byId("history-card").textContent.includes("web3 on ct1 is gone");
+  console.log(JSON.stringify(result));
+})().catch(e => { console.error(e.stack); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_more_resumes_a_paused_start_with_a_restart_and_reviews_a_stopped_ones_home(tmp_path):
+    """Review 5 M5/W4, M6, M8: More… on a paused start offers and sends the restart (the CLI adds nothing to a
+    paused start without one); on a stopped start the kept HOME is reviewed first, as Resume does; a run without a
+    kept start gets only the longer stop; the More and History cards follow a rename, More is switched off when
+    the state changes, History when the start is gone."""
+    result = run_driver(tmp_path, MORE_DRIVER, "more")
+    assert result["pausedForm"] == [True, True, True, True]
+    shown, before, asked = result["noRestart"]
+    assert shown and before == 0 and asked is None, "added without the restart: said in the card, nothing asked or sent"
+    assert result["pausedPost"] == [["/api/hosts/ct1/starts/web/resume", {"workspaces": ["/srv/lib"], "mcp": [], "mounts": [],
+                                                                          "restart": True, "confirm": True}]]
+    assert result["stoppedForm"] == [False, True, False]
+    reviewed, before, card = result["reviewed"]
+    assert reviewed == ["/api/hosts/ct1/starts/kept/review"] and before == 0 and card, "the review first, nothing resumed"
+    assert result["stoppedPost"] == [["/api/hosts/ct1/starts/kept/resume", {"workspaces": [], "mcp": ["files"], "mounts": [],
+                                                                            "confirm": True}]]
+    assert result["closed"] == [False, False]
+    assert result["cleanPost"] == [["/api/hosts/ct1/starts/kept/resume", {"workspaces": ["/srv/lib"], "mcp": [], "mounts": [],
+                                                                          "confirm": True}]]
+    assert result["plain"] == [False, False, True, True]
+    assert result["rows"] == [True, True, True, False]
+    assert result["renamed"] == "More for web2 on ct1"
+    assert result["renamedPost"] == ["/api/hosts/ct1/starts/web2/stop"]
+    assert result["retired"] == [True, True]
+    history, heading, retired = result["history"]
+    assert history == ["/api/hosts/ct1/starts/web/history", "/api/hosts/ct1/starts/web3/history"]
+    assert heading == "History of web3 on ct1" and not retired
+    assert result["historyGone"]
+
+
 LOGIN_TOKENS_DRIVER = FAKE_DOM + r"""
 const byId = (id) => document.getElementById(id);
 const confirmText = (node) => { const c = node.all().find(n => n.className === "confirm"); return c ? c.textContent : null; };
@@ -5114,6 +5223,9 @@ const LONG = "a-model-with-a-name-far-longer-than-the-table-shows-q8";
   calls.length = 0;
   rowButtonIn(rowOf("lan"), "Edit…").fire("click"); await settle();
   result.caNote = byId("llm-ca-note").textContent;
+  rowButtonIn(main, "Test connection").fire("click"); await settle();  // its own CA goes with the test, by name
+  result.caTest = posts().filter(p => p[0].endsWith("/llm-models"));
+  calls.length = 0;
   rowButtonIn(main, "Save").fire("click");
   result.caAsk = confirmText(main);
   rowButtonIn(main, "Cancel").fire("click");
@@ -5216,6 +5328,8 @@ def test_the_llm_page_models_edit_test_and_names(tmp_path):
                                     "api_key_secret": "GW_KEY", "header_secrets": [{"header": "X-Org", "secret": "ORG_KEY"}],
                                     "vpn": "home", "anthropic": True, "replace": True, "confirm": True}]]
     assert "It has a CA certificate of its own (lan.pem), which is kept" in result["caNote"]
+    assert result["caTest"] == [["/api/hosts/ct1/llm-models", {"kind": "openai-compatible", "url": "https://lan.example.org",
+                                 "ca_of": "lan"}]], "review 5 M7: the CA it keeps goes with the test"
     assert "CA" not in result["caAsk"] and "Replace the LLM server lan on ct1?" in result["caAsk"]
     assert "CA" not in result["caUseAsk"] and result["caUseAsk"].startswith("Make only the default model of lan on ct1?")
     assert result["caUsePosts"] == [["/api/hosts/ct1/llm", {"name": "lan", "kind": "openai-compatible",

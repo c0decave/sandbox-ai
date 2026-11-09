@@ -2141,8 +2141,9 @@ class Api:
         return self.json_of(params["host"], ["llm", "list", "--json"], 30)
 
     def llm_models_of_url(self, params, body):
-        """sandbox-ai wizard models --kind KIND --url URL [--ca FILE] [--api-key-secret NAME] --json: what a server
-        at that URL lists, before anything is registered (the page's "Test connection"). Nothing is stored on the
+        """sandbox-ai wizard models --kind KIND --url URL [--ca FILE | --ca-of NAME] [--api-key-secret NAME] --json:
+        what a server at that URL lists, before anything is registered (the page's "Test connection"; CA_OF: the CA
+        an edited server keeps, by its name). Nothing is stored on the
         host; the key is named, never sent (the command reads that secret there), and no header secret goes with it,
         so a server that wants one of those answers as it answers an anonymous caller. The command refuses to send the
         key over plain http to a public address, as `llm add` does, unless insecure_http (confirmed as llm-insecure)."""
@@ -2152,6 +2153,11 @@ class Api:
         args = ["wizard", "models", f"--kind={kind}", f"--url={url}"]
         if body.get("ca") not in (None, ""):
             args.append(f"--ca={clean_path(body['ca'], 'ca')}")
+        elif body.get("ca_of") not in (None, ""):
+            # an edited server's own CA, which the form cannot send again: named, read on that host
+            if not (isinstance(body["ca_of"], str) and MCP_NAME.fullmatch(body["ca_of"])):
+                raise Refused(400, "ca_of is the name of an LLM server (1-32 letters, digits, '_' or '-')")
+            args.append(f"--ca-of={body['ca_of']}")
         if body.get("api_key_secret") not in (None, ""):
             args.append(f"--api-key-secret={secret_name(body['api_key_secret'])}")
             if flag(body, "insecure_http"):
