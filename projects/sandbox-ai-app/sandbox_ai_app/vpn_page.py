@@ -389,7 +389,7 @@ class VpnBox(QGroupBox):
         self.sai, self.entries, self.on_change, self.host, self.token = sai, [], None, LOCAL, 0
         self.host_label = lambda host: tr("{name} (this machine)", name=LOCAL) if host == LOCAL else printable(host)
         layout = QVBoxLayout(self)
-        self.profiles = table([tr("Profile"), tr("Kind"), tr("Provider")])
+        self.profiles = table([tr("Profile"), tr("Kind"), tr("Provider")], stretch=0, compact=(1,))
         layout.addWidget(self.profiles)
         row = QHBoxLayout()
         self.add_button, self.show_button, self.check_button, self.remove_button = \

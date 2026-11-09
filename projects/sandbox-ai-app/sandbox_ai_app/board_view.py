@@ -26,13 +26,13 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QGraphicsEllipseItem,
     QGraphicsItem, QGraphicsPathItem, QGraphicsRectItem, QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView,
-    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QPlainTextEdit, QPushButton,
+    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QPlainTextEdit, QPushButton,
     QScrollArea, QSizePolicy, QSplitter, QStyledItemDelegate, QStyleOptionViewItem, QTableWidget, QTableWidgetItem,
     QToolButton, QVBoxLayout, QWidget,
 )
 
 from . import backend, board as B
-from . import help_view, labels as OL, project_trust as PT, rules_tools, theme
+from . import help_view, labels as OL, project_trust as PT, rules_tools, tables, theme
 from .files import printable
 from .name_fields import NameButton, NameField, add_line
 from .state import choose_file, choose_folder
@@ -989,7 +989,7 @@ class RulesEdit(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels([tr("Host"), tr("Methods"), tr("Path")])
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        tables.keep(tables.setup(self.table, 2, (1,)), "board-rules")
         self.table.verticalHeader().setVisible(False)
         self.table.setMaximumHeight(150)
         for rule in rules or []:
@@ -1014,6 +1014,7 @@ class RulesEdit(QWidget):
         for column, value in enumerate((host, methods, path)):
             self.table.setItem(row, column, QTableWidgetItem(str(value)))
         self.table.blockSignals(False)
+        tables.fit_columns(self.table)
         if emit:
             self.changed.emit(self.rules())
 

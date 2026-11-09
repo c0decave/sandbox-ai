@@ -520,7 +520,7 @@ class ImagesPage(QWidget):
         images = QGroupBox(tr("Images and variants"))
         images_layout = QVBoxLayout(images)
         self.images = table([tr("Image"), tr("Agent"), tr("Built"), tr("Extension"), tr("Agent version"),
-                             tr("Created"), tr("Size"), tr("Name")])
+                             tr("Created"), tr("Size"), tr("Name")], stretch=0, compact=(1, 2, 4, 5, 6))
         self.images.setAccessibleName(tr("Images"))
         self.images.itemSelectionChanged.connect(self.selection_changed)
         self.asking = False  # selection_changed's question is open
@@ -571,7 +571,7 @@ class ImagesPage(QWidget):
         self.filter.setAccessibleName(tr("Filter"))
         self.filter.textChanged.connect(self.show_packages)
         packages_layout.addWidget(self.filter)
-        self.packages = table([tr("Kind"), tr("Name"), tr("Version")])
+        self.packages = table([tr("Kind"), tr("Name"), tr("Version")], stretch=1, compact=(0, 2))
         self.packages.setAccessibleName(tr("Installed packages"))
         packages_layout.addWidget(self.packages)
         self.tabs.addTab(packages, tr("Installed packages"))
@@ -604,7 +604,8 @@ class ImagesPage(QWidget):
             self.editor_tabs.addTab(self.lists[kind], label)
         files = QWidget()
         files_layout = QVBoxLayout(files)
-        self.files = table([tr("File"), tr("Path in the image"), tr("Mode"), tr("State")], stretch=1)
+        self.files = table([tr("File"), tr("Path in the image"), tr("Mode"), tr("State")], stretch=1,
+                           compact=(2, 3))
         self.files.setAccessibleName(tr("Files"))
         files_layout.addWidget(self.files)
         row = QHBoxLayout()

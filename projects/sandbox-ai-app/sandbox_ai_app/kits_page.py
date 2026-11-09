@@ -415,7 +415,8 @@ class KitsPage(QWidget):
         split = self.split = QSplitter(Qt.Orientation.Horizontal)
         kits_box = QGroupBox(tr("Kits"))
         kits_layout = QVBoxLayout(kits_box)
-        self.table = table([tr("Kit"), tr("Kind"), tr("Agents"), tr("Brings"), tr("This project")], stretch=3)
+        self.table = table([tr("Kit"), tr("Kind"), tr("Agents"), tr("Brings"), tr("This project")], stretch=3,
+                           compact=(1, 2, 4))
         self.table.setAccessibleName(tr("Kits"))
         self.table.itemSelectionChanged.connect(self.selection_changed)
         kits_layout.addWidget(self.table, 1)
@@ -501,7 +502,8 @@ class KitsPage(QWidget):
         top = QWidget()
         top_layout = QVBoxLayout(top)
         top_layout.setContentsMargins(0, 0, 0, 0)
-        self.market = table([tr("Marketplace"), tr("Agent"), tr("From"), tr("Plugins"), tr("Source")], stretch=2)
+        self.market = table([tr("Marketplace"), tr("Agent"), tr("From"), tr("Plugins"), tr("Source")], stretch=2,
+                            compact=(1, 3))
         self.market.setAccessibleName(tr("Marketplaces"))
         self.market.setMinimumHeight(90)
         self.market.itemSelectionChanged.connect(self.market_selected)
@@ -532,7 +534,8 @@ class KitsPage(QWidget):
         self.filter.setAccessibleName(tr("Filter the plugins"))
         self.filter.setClearButtonEnabled(True)
         self.filter.textChanged.connect(lambda _text: self.show_plugins())
-        self.plugins = table([tr("Plugin"), tr("This kit"), tr("State"), tr("Description")], stretch=3)
+        self.plugins = table([tr("Plugin"), tr("This kit"), tr("State"), tr("Description")], stretch=3,
+                             compact=(1, 2))
         self.plugins.setAccessibleName(tr("Plugins of the marketplace"))
         self.plugins.setMinimumHeight(90)
         self.plugins.itemSelectionChanged.connect(self.update_market_buttons)

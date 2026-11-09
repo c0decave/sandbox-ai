@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QComboBox, QHBoxLayout, QPlainTextEdit, QPushButton, QSplitter, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import backend, theme
+from . import backend, tables, theme
 from .activity_page import detail_text, short_time
 from .files import printable
 from .i18n import N_, tr
@@ -144,8 +144,7 @@ class CanariesView(QWidget):
         self.tree.setHeaderLabels([tr(title) for title in COLUMNS])
         self.tree.setAlternatingRowColors(True)
         self.tree.setUniformRowHeights(True)
-        for column, width in enumerate((130, 120, 260, 300)):
-            self.tree.setColumnWidth(column, width)
+        tables.setup(self.tree, 4, (0, 1))
         self.tree.currentItemChanged.connect(lambda *_: self.show_details())
         self.detail = QPlainTextEdit()
         self.detail.setReadOnly(True)
@@ -318,6 +317,7 @@ class CanariesView(QWidget):
             self.tree.addTopLevelItem(item)
             for index in range(item.childCount()):
                 item.child(index).setFirstColumnSpanned(True)
+        tables.fit_columns(self.tree)
         runs = len({e.get("run") for e in events})
         self.status.setText(tr("{count} canary event(s) in {runs} run(s)", count=len(events), runs=runs) if events
                             else tr("No canary was touched: no decoy file opened, no token sent."))

@@ -7,7 +7,7 @@ from __future__ import annotations
 import re
 
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLineEdit,
+    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QLineEdit,
     QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
@@ -16,6 +16,7 @@ from .files import printable
 from .i18n import tr
 from .host_choice import on_host
 from .name_fields import NameField
+from . import tables
 from .widgets import ask_first, background, fill, outcome, plain_label, selected, show_text, table
 
 LOCAL = "local"
@@ -41,7 +42,7 @@ class IdentitiesBox(QGroupBox):
         layout.addWidget(plain_label(tr("Who a sandbox works as: commit name and address, Git and publish logins under "
                                         "one name; a start uses one with --identity NAME. Without it: default (your "
                                         "git-logins and publish-logins)."), role="secondary"))
-        self.list = table([tr("Identity"), tr("Commits as"), tr("Git servers"), tr("Publishes to")])
+        self.list = table([tr("Identity"), tr("Commits as"), tr("Git servers"), tr("Publishes to")], stretch=2)
         layout.addWidget(self.list)
         row = QHBoxLayout()
         self.add_button, self.edit_button, self.remove_button = \
@@ -185,13 +186,15 @@ class IdentityDialog(QDialog):
         self.secret_names = list(secret_names)
         layout.addWidget(plain_label(tr("Git logins (the token is a secret of sandbox-ai secrets; the proxy adds it)"),
                                      role="section"))
-        self.git = self.make_table([tr("Git server"), tr("User"), tr("Secret")])
+        self.git = self.make_table([tr("Git server"), tr("User"), tr("Secret")], 0)
         for login in identity.get("git", []):
             self.add_git(login["url"], login["user"], login["secret"])
         layout.addWidget(self.git)
         layout.addLayout(self.buttons_for(self.git, lambda: self.add_git("https://github.com", "", "")))
         layout.addWidget(plain_label(tr("Publish logins (used with --publish KIND)"), role="section"))
-        self.publish = self.make_table([tr("Kind"), tr("Secret"), tr("Own server (optional)")])
+        self.publish = self.make_table([tr("Kind"), tr("Secret"), tr("Own server (optional)")], 2, (0,))
+        tables.keep(self.git, "identity-git")
+        tables.keep(self.publish, "identity-publish")
         for login in identity.get("publish", []):
             default = SandboxAI.PUBLISH_HOSTS.get(login["kind"])
             self.add_publish(login["kind"], login["secret"], "" if login["host"] == default else f"https://{login['host']}")
@@ -206,10 +209,10 @@ class IdentityDialog(QDialog):
         layout.addWidget(buttons)
 
     @staticmethod
-    def make_table(headers):
+    def make_table(headers, stretch, compact=()):
         widget = QTableWidget(0, len(headers))
         widget.setHorizontalHeaderLabels(headers)
-        widget.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        tables.setup(widget, stretch, compact)
         widget.verticalHeader().setVisible(False)
         widget.setMaximumHeight(150)
         return widget
@@ -242,6 +245,7 @@ class IdentityDialog(QDialog):
         self.git.setItem(row, 0, QTableWidgetItem(url))
         self.git.setItem(row, 1, QTableWidgetItem(user))
         self.git.setCellWidget(row, 2, self.secret_edit(secret))
+        tables.fit_columns(self.git)
 
     def add_publish(self, kind, secret, url):
         row = self.publish.rowCount()
@@ -252,6 +256,7 @@ class IdentityDialog(QDialog):
         self.publish.setCellWidget(row, 0, kinds)
         self.publish.setCellWidget(row, 1, self.secret_edit(secret))
         self.publish.setItem(row, 2, QTableWidgetItem(url))
+        tables.fit_columns(self.publish)
 
     def result_identity(self):
         git = []

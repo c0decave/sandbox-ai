@@ -19,7 +19,7 @@ import time
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QProcess, QSortFilterProxyModel, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
+    QAbstractItemView, QCheckBox, QComboBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
     QMenu,
     QPlainTextEdit, QPushButton, QSplitter, QTableView, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
@@ -324,11 +324,7 @@ class ActivityPage(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(26)
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        header.setStretchLastSection(True)
-        for column, width in enumerate((92, 92, 150)):
-            header.resizeSection(column, width)
+        widgets.tables.setup(self.table, 3, (0, 1, 2))  # What takes the rest
         self.table.selectionModel().selectionChanged.connect(lambda *_: self.show_details())
         self.table.doubleClicked.connect(lambda _index: self.jump())
         self.detail = QPlainTextEdit()
@@ -645,6 +641,7 @@ class ActivityPage(QWidget):
             return
         follow = self.follow.isChecked() and self.at_bottom()
         self.model.add(records)
+        widgets.tables.fit_columns(self.table)
         self.update_status()
         if follow:
             self.table.scrollToBottom()

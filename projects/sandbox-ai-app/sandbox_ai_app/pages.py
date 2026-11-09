@@ -201,7 +201,9 @@ class QuestionsWindow(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(plain_label(tr("A sandbox asks while a dialog is open. Answer here, or close this window "
                                         "and answer on the Approvals page.")))
-        self.table = table([tr("Sandbox"), tr("Question")])
+        self.table = table([tr("Sandbox"), tr("Question")], stretch=1)
+        from .tables import keep
+        keep(self.table, "dialog-questions")
         self.table.itemSelectionChanged.connect(self.update_buttons)
         layout.addWidget(self.table, 1)
         row = QHBoxLayout()
@@ -307,7 +309,8 @@ class ApprovalsPage(QWidget):
         filter_row.addWidget(self.host_filter)
         filter_row.addStretch()
         open_layout.addLayout(filter_row)
-        self.open = table([tr("Sandbox"), tr("Kind"), tr("Question"), tr("Asked"), tr("Refused in"), tr("Host")])
+        self.open = table([tr("Sandbox"), tr("Kind"), tr("Question"), tr("Asked"), tr("Refused in"), tr("Host")],
+                          stretch=2, compact=(1, 3, 4, 5))
         self.open.setAccessibleName(tr("Open questions"))
         self.open.itemSelectionChanged.connect(self.selection_changed)
         open_layout.addWidget(self.open)
@@ -395,7 +398,8 @@ class ApprovalsPage(QWidget):
             history_row.addWidget(widget)
         history_row.addStretch()
         history_layout.addLayout(history_row)
-        self.history = table([tr("Time"), tr("Sandbox"), tr("Question"), tr("Answer"), tr("Scope"), tr("Reason")])
+        self.history = table([tr("Time"), tr("Sandbox"), tr("Question"), tr("Answer"), tr("Scope"), tr("Reason")],
+                             stretch=2, compact=(0, 3, 4))
         self.history.setAccessibleName(tr("History of the answers"))
         history_layout.addWidget(self.history)
         self.history_text = QPlainTextEdit()  # a host's history: its own table, escaped
@@ -408,7 +412,7 @@ class ApprovalsPage(QWidget):
         self.history_token = 0
         always_box = QGroupBox(tr("Allowed or blocked always (per project)"))
         always_layout = QVBoxLayout(always_box)
-        self.always = table([tr("Project"), tr("Allowed"), tr("Kind")])
+        self.always = table([tr("Project"), tr("Allowed"), tr("Kind")], stretch=0, compact=(2,))
         self.always.setAccessibleName(tr("Allowed or blocked always"))
         always_layout.addWidget(self.always)
         row = QHBoxLayout()
@@ -1302,7 +1306,9 @@ class StatisticsPage(QWidget):
         for index, (key, title, headers) in enumerate(sections):
             box = QGroupBox(title)
             box_layout = QVBoxLayout(box)
-            widget = table(headers)
+            # The bars take the rest of the width; a table without bars: its first text column.
+            stretch = len(headers) - 1 if not headers[-1] else 1 if len(headers) > 2 else 0
+            widget = table(headers, stretch=stretch, compact=[c for c in range(1, len(headers)) if c != stretch])
             widget.setAccessibleName(title)
             widget.setMinimumHeight(160)
             box_layout.addWidget(widget)

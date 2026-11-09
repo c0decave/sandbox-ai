@@ -1925,7 +1925,8 @@ class SandboxesPage(QWidget):
         # A tree: each host, under it its starts, under each start what belongs to it (start_tree.py); the buttons
         # act on the start rows only. Which groups are open is kept per host and start (open_groups).
         self.table = StartTree([tr("Kind"), tr("Name"), tr("Project"), tr("Agent"), tr("Backend"), tr("Started"),
-                                tr("State"), tr("Proxy"), tr("Host"), tr("Memory")], stretch=2)
+                                tr("State"), tr("Proxy"), tr("Host"), tr("Memory")], stretch=2,
+                               compact=(0, 3, 4, 5, 6, 7, 9))
         self.table.setAccessibleName(tr("Sandboxes and sessions"))
         self.table.itemSelectionChanged.connect(self.selection_changed)
         self.table.itemExpanded.connect(lambda item: self.group_toggled(item, True))
@@ -3640,7 +3641,8 @@ class ConnectionsPage(QWidget):
         self.remote_note.hide()
         layout.addWidget(self.remote_note)
         split = self.split = QSplitter(Qt.Orientation.Vertical)
-        self.table = table([tr("Time"), tr("Event"), tr("Method"), tr("Status"), tr("Target"), tr("Bytes")])
+        self.table = table([tr("Time"), tr("Event"), tr("Method"), tr("Status"), tr("Target"), tr("Bytes")],
+                           stretch=4, compact=(0, 1, 2, 3, 5))
         self.table.setAccessibleName(tr("Connections"))
         self.table.itemSelectionChanged.connect(self.details)
         self.detail = QPlainTextEdit()
@@ -4255,7 +4257,7 @@ class McpPage(QWidget):
         layout.addWidget(flow(self.host_choice, self.host_note))
         servers = QGroupBox(tr("Your MCP servers (use them with --mcp NAME)"))
         servers_layout = QVBoxLayout(servers)
-        self.servers = table([tr("Name"), tr("Status"), tr("Serves"), tr("Runs"), tr("Catalog")])
+        self.servers = table([tr("Name"), tr("Status"), tr("Serves"), tr("Runs"), tr("Catalog")], stretch=2, compact=(1,))
         self.servers.setAccessibleName(tr("MCP servers"))
         servers_layout.addWidget(self.servers)
         row = QHBoxLayout()
@@ -4279,7 +4281,7 @@ class McpPage(QWidget):
         catalog = QGroupBox(tr("Catalogs: sandbox-ai-mcp (mcp:) and axross-mcp-hub (hub:)"))
         catalog_layout = QVBoxLayout(catalog)
         self.catalog = table([tr("Entry"), tr("Network"), tr("Title"), tr("Published"), tr("Signature"),
-                              tr("Catalog")])
+                              tr("Catalog")], stretch=2, compact=(1, 3, 5))
         self.catalog.setAccessibleName(tr("Catalog"))
         catalog_layout.addWidget(self.catalog)
         self.catalog_source = QLineEdit()
@@ -4644,7 +4646,8 @@ class PrivacyResults(QDialog):
         self.resize(980, 520)
         layout = QVBoxLayout(self)
         rows = privacy_rows(results)
-        self.table = table([tr(column) for column in PRIVACY_COLUMNS], stretch=5)
+        self.table = table([tr(column) for column in PRIVACY_COLUMNS], stretch=5, compact=(3, 4, 6))
+        widgets.tables.keep(self.table, "dialog-privacy")
         fill(self.table, rows, ["bad" if row[4] == "block" else "warn" if row[4] else "ok" for row in rows])
         layout.addWidget(self.table, 1)
         notes = [printable(str(note)) for result in results for note in result.get("notes") or []][:20] + \
@@ -6080,6 +6083,8 @@ class MainWindow(QMainWindow):
         tables += [(f"statistics-{key}", widget) for key, widget in self.statistics.tables.items()]
         for key, widget in tables:
             s.table(key, widget)
+        from . import tables as fitted
+        fitted.keep_tables(s, {key: getattr(self, key, None) for key, _ in PAGES})  # every other table, as PAGE-NAME
         saved = s.section("splitters").get("files")
         self.files.keep_split = isinstance(saved, list) and len(saved) == self.files.split.count()  # kept: it wins
         for key, splitter in (("approvals", self.approvals.split), ("connections", self.connections.split),

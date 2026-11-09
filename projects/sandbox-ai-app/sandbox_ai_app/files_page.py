@@ -48,7 +48,6 @@ LINK_COLUMN = 4
 PROGRESS_INTERVAL = 250  # ms
 # A folder is listed in a thread (a slow or hung file system never holds up the window); the pane waits up to
 # LIST_WAIT ms for it, the window answering meanwhile, so a fast folder shows at once - a slow one fills in later.
-NARROW = 150  # px: the widest a column other than the Name gets by itself
 LIST_WAIT = 1500
 LIST_TIMEOUT = 120  # s: a listing that never comes back is given up (the pane says so)
 
@@ -147,7 +146,8 @@ class Pane(QWidget):
         where.addWidget(self.path, 1)
         where.addWidget(nav_button(tr("Refresh"), tr("List the folder again (Ctrl+R)"), self.list))
         layout.addLayout(where)
-        self.table = table([tr(column) for column in COLUMNS], multi=True, stretch=0)  # the Name takes the room
+        self.table = table([tr(column) for column in COLUMNS], multi=True, stretch=0,  # the Name takes the room
+                           compact=(1, 2, 3, 5, 6))
         self.table.setAccessibleName(tr("Files of the sandbox") if side == "sandbox" else tr("Files of this machine"))
         self.table.setTabKeyNavigation(False)
         self.table.cellDoubleClicked.connect(self.open_row)
@@ -156,16 +156,6 @@ class Pane(QWidget):
         self.note = plain_label(role="secondary")
         self.note.hide()
         layout.addWidget(self.note)
-
-    def narrow_columns(self):
-        """The Name takes the room: "Points to (not followed)" and the others at most NARROW px each (a link's
-        target in full in its tooltip), unless the human sized them."""
-        if getattr(self.table, "user_sized", False):
-            return
-        header = self.table.horizontalHeader()
-        for column in range(1, self.table.columnCount()):
-            if header.sectionSize(column) > NARROW:
-                header.resizeSection(column, NARROW)
 
     # -- where --
 
@@ -349,7 +339,6 @@ class Pane(QWidget):
             colors.append("warn" if entry.kind == "link" or entry.mode & files.SPECIAL_BITS and self.untrusted()
                           else "muted" if entry.kind == "other" else None)
         fill(self.table, rows, colors, keys=[entry.name for entry in self.entries])
-        self.narrow_columns()
         if self.side == "host":
             inside = self.untrusted()
             self.note.setText(tr("This folder belongs to a sandbox: what is copied from here is treated like the "

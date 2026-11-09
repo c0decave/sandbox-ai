@@ -26,7 +26,7 @@ from .backend import setting as backend_setting
 from .files import printable
 from .i18n import N_, tr
 from .pty_bridge import PtyBridge
-from .widgets import ThreadCall, ask_first, background, fill, inform, plain_label, row_key, safe_tooltip, table, warn
+from .widgets import ThreadCall, ask_first, background, fill, fit_columns, inform, plain_label, row_key, safe_tooltip, table, warn
 
 WEB = Path(__file__).resolve().with_name("web")
 # The vendoring script next to the package (a checkout or sandbox-ai's installation; not in a wheel).
@@ -340,7 +340,8 @@ class TerminalsPage(QWidget):
         top.addWidget(self.summary, 1)
         top.addWidget(self.refresh_button)
         box_layout.addLayout(top)
-        self.list = table([tr("Name"), tr("Agent"), tr("State"), tr("Workspace"), tr("Terminal")], stretch=4,
+        self.list = table([tr("Name"), tr("Agent"), tr("State"), tr("Workspace"), tr("Terminal")], stretch=3,
+                          compact=(1, 2, 4),
                           sortable=False)
         self.list.setAccessibleName(tr("Running starts"))
         self.list.cellDoubleClicked.connect(lambda row, _column: self.attach_row(row))
@@ -471,7 +472,7 @@ class TerminalsPage(QWidget):
             cell_layout.addWidget(button)
             cell_layout.addStretch(1)
             self.list.setCellWidget(row, 4, cell)
-        self.list.resizeColumnToContents(4)
+        fit_columns(self.list)  # the buttons too
 
     def attach_row(self, row):
         name = row_key(self.list, row)

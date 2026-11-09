@@ -18,7 +18,7 @@ import re
 import time
 
 from PySide6.QtCore import QByteArray, QDir, QObject, Qt, QTimer
-from PySide6.QtWidgets import QApplication, QFileDialog
+from PySide6.QtWidgets import QApplication, QFileDialog, QHeaderView
 
 from . import backend
 
@@ -158,12 +158,13 @@ class State(QObject):
     # -- widgets --
 
     def table(self, key, widget):
-        """Keep the sort column and order and the widths the human gave the columns of WIDGET."""
-        header = widget.horizontalHeader()
+        """Keep the sort column and order and the widths the human gave the columns of WIDGET (a table or a tree)."""
+        header = widget.horizontalHeader() if hasattr(widget, "horizontalHeader") else widget.header()
         saved = self.section("tables").get(key)
         if isinstance(saved, dict) and isinstance(saved.get("header"), str):
-            header.restoreState(QByteArray.fromBase64(saved["header"].encode()))
+            # Sized by the human: known before the restore, whose sort order would have the columns fitted (tables.py).
             widget.user_sized = bool(saved.get("sized"))
+            header.restoreState(QByteArray.fromBase64(saved["header"].encode()))
             column, order = saved.get("sort"), saved.get("order")
             if isinstance(column, int) and 0 <= column < widget.columnCount() and order in (0, 1):
                 widget.setSortingEnabled(True)
@@ -176,13 +177,18 @@ class State(QObject):
             self.section("tables")[key] = entry
             self.schedule()
 
-        def resized(*_):
-            if dragging():
+        def resized(column, *_):
+            # The human dragged a column's edge: not the app fitting the columns (tables.py), nor the column that
+            # takes the rest of the width following a splitter or the window.
+            if dragging() and not getattr(widget, "fitting", False) and \
+                    header.sectionResizeMode(column) != QHeaderView.ResizeMode.Stretch and \
+                    not (header.stretchLastSection() and header.visualIndex(column) == header.count() - 1):
                 widget.user_sized = True
                 remember(True)
         header.sortIndicatorChanged.connect(lambda *_: remember())
         header.sectionResized.connect(resized)
         widget.remember_state = remember
+        widget.state_key = key
         return widget
 
     def splitter(self, key, splitter):

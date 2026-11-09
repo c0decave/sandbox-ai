@@ -17,12 +17,12 @@ import time
 from PySide6.QtCore import QItemSelectionModel, QObject, QProcess, QRect, QSize, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QFont, QPainter, QPalette, QTextDocument, QTextOption
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QHeaderView, QLabel, QLayout,
+    QAbstractItemView, QApplication, QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QLabel, QLayout,
     QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QStyle, QStyledItemDelegate,
     QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget, QWidgetItem,
 )
 
-from . import i18n, theme
+from . import i18n, tables, theme
 from . import applog
 from .i18n import tr
 
@@ -1075,8 +1075,9 @@ class SortItem(QTableWidgetItem):
         return super().__lt__(other)
 
 
-def table(headers, multi=False, stretch=None, numeric=(), sortable=True):
-    """A read-only table; STRETCH is the column that takes the free width, NUMERIC columns are right-aligned.
+def table(headers, multi=False, stretch=None, numeric=(), sortable=True, compact=()):
+    """A read-only table; STRETCH is the column that takes the free width, NUMERIC columns are right-aligned;
+    NUMERIC and COMPACT columns are as wide as their content (tables.py fits the columns at every fill()).
     A SORTABLE table keeps the order fill() was given until the user clicks a column header; rows may then
     be in any order, so pages find what a row stands for with row_key(), never from its position."""
     widget = QTableWidget(0, len(headers))
@@ -1089,14 +1090,8 @@ def table(headers, multi=False, stretch=None, numeric=(), sortable=True):
     widget.setWordWrap(False)
     widget.setTextElideMode(Qt.TextElideMode.ElideMiddle)
     header = widget.horizontalHeader()
-    header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-    header.setMaximumSectionSize(520)
-    header.setMinimumSectionSize(48)
-    header.setStretchLastSection(stretch is None)
-    if stretch is not None:
-        header.setSectionResizeMode(stretch, QHeaderView.ResizeMode.Stretch)
+    tables.setup(widget, stretch, set(compact) | set(numeric))
     widget.numeric = set(numeric)
-    widget.stretch = stretch
     widget.setSortingEnabled(False)
     header.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)  # no column yet: the order given to fill()
     widget.sortable = sortable
@@ -1187,17 +1182,10 @@ def append_rows(widget, rows, colors=None, keys=(), drop=None):
     return True
 
 
-def fit_columns(widget):
-    """Columns as wide as their content (within limits); the stretch column takes the rest. Columns the human
-    sized (state.State.table) keep their widths."""
-    if getattr(widget, "user_sized", False):
-        return
-    header = widget.horizontalHeader()
-    for c in range(widget.columnCount()):
-        if c != getattr(widget, "stretch", None):
-            widget.resizeColumnToContents(c)
-            if header.sectionSize(c) > 360:
-                header.resizeSection(c, 360)
+def fit_columns(widget, force=False):
+    """Columns as wide as their titles and content, the stretch column takes the rest (tables.fit_columns): in full
+    when the first rows arrive, later only wider. Columns the human sized (state.State.table) keep their widths."""
+    return tables.fit_columns(widget, force=force)
 
 
 def row_texts(widget, row):

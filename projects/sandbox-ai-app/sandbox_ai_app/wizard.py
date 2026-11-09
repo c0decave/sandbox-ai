@@ -19,7 +19,7 @@ import time
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QHeaderView, QLineEdit,
+    QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLineEdit,
     QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QRadioButton, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWizard, QWizardPage,
 )
@@ -268,7 +268,7 @@ class ModelPage(Page):
         self.form.addRow(tr("Model"), self.model)
         self.form.addRow(tr("Effort"), self.effort)
         # An own server.
-        self.servers = widgets.table([tr("Server"), tr("Kind"), tr("URL"), tr("Agents")], stretch=2)
+        self.servers = widgets.table([tr("Server"), tr("Kind"), tr("URL"), tr("Agents")], stretch=2, compact=(1, 3))
         self.servers.setAccessibleName(tr("Model servers"))
         self.servers.setMaximumHeight(170)
         self.servers.itemSelectionChanged.connect(self.server_chosen)
@@ -1060,7 +1060,7 @@ class GitPage(Page):
         self.form.addRow("", self.identity)
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels([tr("Git server"), tr("Token from"), tr("Name, file or token")])
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        widgets.tables.keep(widgets.tables.setup(self.table, 2, (1,)), "wizard-git")
         self.table.verticalHeader().setVisible(False)
         self.table.setMaximumHeight(170)
         self.form.addRow(self.table)
@@ -1126,6 +1126,7 @@ class GitPage(Page):
         combo.currentIndexChanged.connect(kind_changed)
         kind_changed()
         self.table.setCellWidget(row, 2, cell)
+        widgets.tables.fit_columns(self.table)
 
     def entries(self):
         found = []

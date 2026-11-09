@@ -35,6 +35,7 @@ class LoginsBox(QGroupBox):
     command = ""
     title = ""
     headers = ()
+    stretch, compact = 0, ()  # the column of long text; the short ones (tables.py)
 
     def __init__(self, sai, changed):
         super().__init__(tr(self.title))
@@ -42,7 +43,7 @@ class LoginsBox(QGroupBox):
         self.secrets_known = False  # whether secret_names are what the host said (else a replace is asked about)
         layout = QVBoxLayout(self)
         layout.addWidget(plain_label(self.about(), role="secondary"))
-        self.list = table([tr(h) for h in self.headers])
+        self.list = table([tr(h) for h in self.headers], stretch=self.stretch, compact=self.compact)
         layout.addWidget(self.list, 1)
         row = QHBoxLayout()
         self.add_button, self.remove_button, self.check_button = \
@@ -145,6 +146,7 @@ class GitLoginsBox(LoginsBox):
     command = "git-logins"
     title = N_("Git logins (sandbox-ai git-logins)")
     headers = (N_("Git server"), N_("User"), N_("Secret"), N_("State"))
+    compact = (3,)
 
     def about(self):
         return tr("The connection proxy of every sandbox logs in to these Git servers on the wire (clone, fetch, push); "
@@ -186,6 +188,7 @@ class PublishLoginsBox(LoginsBox):
     command = "publish-logins"
     title = N_("Publish logins (sandbox-ai publish-logins)")
     headers = (N_("Kind"), N_("Server"), N_("Secret"), N_("State"))
+    stretch, compact = 1, (0, 3)
 
     def about(self):
         return tr("Package registries and forges a start may publish to with --publish KIND; the proxy adds the token "
@@ -361,7 +364,7 @@ class CredentialsPage(QWidget):
         overview_layout = QVBoxLayout(overview)
         overview_layout.addWidget(plain_label(tr("Everything configured, with its state. Click a row to open its "
                                                  "tab."), role="secondary"))
-        self.overview = table([tr("Kind"), tr("Name"), tr("Where / used by"), tr("State")])
+        self.overview = table([tr("Kind"), tr("Name"), tr("Where / used by"), tr("State")], stretch=2, compact=(0, 3))
         self.overview.setAccessibleName(tr("Overview"))
         self.overview.cellClicked.connect(lambda row, _column: self.open_row(row))
         self.overview.cellActivated.connect(lambda row, _column: self.open_row(row))
@@ -371,7 +374,7 @@ class CredentialsPage(QWidget):
         # agent logins
         logins = QGroupBox(tr("Agent logins for sandboxes"))
         logins_layout = QVBoxLayout(logins)
-        self.logins = table([tr("Agent"), tr("Login from"), tr("State"), tr("File")])
+        self.logins = table([tr("Agent"), tr("Login from"), tr("State"), tr("File")], stretch=3, compact=(0, 1, 2))
         logins_layout.addWidget(self.logins)
         row = QHBoxLayout()
         login = QPushButton(tr("Log in…"))
@@ -398,7 +401,7 @@ class CredentialsPage(QWidget):
         # Where a secret kept now goes on the chosen host (`sandbox-ai secrets backend` there: keyring or file).
         self.store_label, self.store_token = plain_label(role="secondary"), 0
         secrets_layout.addWidget(self.store_label)
-        self.secrets = table([tr("Name"), tr("Kept in"), tr("Used by")])
+        self.secrets = table([tr("Name"), tr("Kept in"), tr("Used by")], stretch=2, compact=(1,))
         self.secrets.itemSelectionChanged.connect(lambda: self.name.setText(selected(self.secrets) or self.name.text()))
         secrets_layout.addWidget(self.secrets, 1)
         form = QFormLayout()

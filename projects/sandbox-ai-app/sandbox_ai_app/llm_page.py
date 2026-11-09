@@ -530,7 +530,7 @@ class LlmPage(QWidget):
         top.addWidget(self.host_box, 1)
         layout.addLayout(top)
         self.servers = table([tr("Name"), tr("Kind"), tr("URL"), tr("Model"), tr("Key"), tr("VPN"), tr("Agents")],
-                             stretch=2)
+                             stretch=2, compact=(1, 5, 6))
         self.servers.setAccessibleName(tr("LLM servers"))
         self.servers.itemSelectionChanged.connect(self.update_buttons)
         self.servers.cellDoubleClicked.connect(lambda *_: self.edit())
@@ -610,7 +610,8 @@ class LlmPage(QWidget):
         self.model_filter.textChanged.connect(lambda *_: self.apply_filter())
         head.addWidget(self.model_filter, 1)
         box.addLayout(head)
-        self.model_table = table([tr(title) for _, title in WL.MODEL_COLUMNS], stretch=0)
+        self.model_table = table([tr(title) for _, title in WL.MODEL_COLUMNS], stretch=0,
+                                 compact=range(1, len(WL.MODEL_COLUMNS)))
         self.model_table.setAccessibleName(tr("Models"))
         self.model_table.itemSelectionChanged.connect(self.update_model_buttons)
         self.model_table.horizontalHeader().sortIndicatorChanged.connect(lambda *_: self.apply_filter())

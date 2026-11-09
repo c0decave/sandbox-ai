@@ -315,7 +315,7 @@ class WebPanel(QWidget):
         layout.addWidget(plain_label(tr("The host's web interface (sandbox-ai web there): who may log in, its "
                                         "certificate and the service itself. Passwords and TOTP codes are typed in a "
                                         "terminal, never through the app."), role="secondary"))
-        self.users = table([tr("Login"), tr("Since")], stretch=0)
+        self.users = table([tr("Login"), tr("Since")], stretch=0, compact=(1,))
         self.users.setAccessibleName(tr("Logins of the web interface"))
         self.users.itemSelectionChanged.connect(self.update_buttons)
         layout.addWidget(self.users, 1)
@@ -547,7 +547,7 @@ class HostsPage(QWidget):
         left = QWidget()
         left_layout = QVBoxLayout(left)
         self.table = table([tr("Host"), tr("SSH"), tr("Answers"), tr("sandbox-ai"), tr("Running"), tr("Questions")],
-                           stretch=1)
+                           stretch=0, compact=(2, 3, 4, 5))
         self.table.setAccessibleName(tr("Hosts"))
         self.table.itemSelectionChanged.connect(self.host_changed)
         left_layout.addWidget(self.table, 1)

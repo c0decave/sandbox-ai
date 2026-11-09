@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from PySide6.QtCore import QItemSelectionModel, Qt, Signal
 from PySide6.QtGui import QBrush, QColor
-from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QTreeWidget, QTreeWidgetItem
+from PySide6.QtWidgets import QAbstractItemView, QTreeWidget, QTreeWidgetItem
 
-from . import theme
+from . import tables, theme
 from .widgets import CELL_LIMIT, SORT_ROLE, elide, safe_tooltip
 
 ID_ROLE = Qt.ItemDataRole.UserRole + 20  # row_id(host, id) of a row: what its selection and its fold are kept by
@@ -142,7 +142,7 @@ class StartTree(QTreeWidget):
     """The tree of the Sandboxes page; see the module. FOLDED(bool) after View › Fold all / Unfold all."""
     folded = Signal(bool)
 
-    def __init__(self, headers, stretch=None):
+    def __init__(self, headers, stretch=None, compact=()):
         super().__init__()
         self.setColumnCount(len(headers))
         self.setHeaderLabels(headers)
@@ -155,13 +155,7 @@ class StartTree(QTreeWidget):
         self.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.setAllColumnsShowFocus(True)
         header = self.header()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        header.setMaximumSectionSize(520)
-        header.setMinimumSectionSize(48)
-        header.setStretchLastSection(stretch is None)
-        if stretch is not None:
-            header.setSectionResizeMode(stretch, QHeaderView.ResizeMode.Stretch)
-        self.stretch = stretch
+        tables.setup(self, stretch, compact)  # widgets.fit_columns fits it
         header.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)  # the order given, until a header is clicked
         self.setSortingEnabled(True)
 
