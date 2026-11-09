@@ -16,7 +16,7 @@ import shlex
 import sys
 import weakref
 
-from PySide6.QtCore import QCoreApplication, QEvent, QTimer, QUrl, Qt, Signal
+from PySide6.QtCore import QCoreApplication, QEvent, QEventLoop, QTimer, QUrl, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox, QGroupBox, QHBoxLayout, QLabel, QPushButton, QSplitter, QTabWidget, QVBoxLayout, QWidget,
 )
@@ -26,7 +26,7 @@ from .backend import setting as backend_setting
 from .files import printable
 from .i18n import N_, tr
 from .pty_bridge import PtyBridge
-from .widgets import ask_first, background, fill, inform, plain_label, row_key, safe_tooltip, table, warn
+from .widgets import ThreadCall, ask_first, background, fill, inform, plain_label, row_key, safe_tooltip, table, warn
 
 WEB = Path(__file__).resolve().with_name("web")
 # The vendoring script next to the package (a checkout or sandbox-ai's installation; not in a wheel).
@@ -543,7 +543,7 @@ class TerminalsPage(QWidget):
         (chromium.check, logged) every time, as namespaces come and go. If not, no web view is made (Chromium would
         end the whole app): why and what to do are shown on this page, in the status bar and, the first time, in a
         message; the caller opens a terminal window instead."""
-        result = chromium.check()
+        result = self.checked_off_thread()
         if result.ok:
             if self.sandbox_problem:
                 self.sandbox_problem = ""
@@ -559,6 +559,22 @@ class TerminalsPage(QWidget):
             TerminalsPage.told = True
             inform(window, tr("A terminal window instead of a tab"), self.sandbox_problem, warning=True, modal=False)
         return False
+
+    @staticmethod
+    def checked_off_thread():
+        """chromium.check() in a thread (it starts a child process: up to its timeout), waited for in a local event
+        loop that goes on with everything but the human's input: the window keeps painting, its timers (the
+        approvals) keep running, and no second click starts a second terminal meanwhile."""
+        box = {}
+        loop = QEventLoop()
+        call = ThreadCall(chromium.check)
+        call.finished.connect(lambda result, error: (box.update(result=result, error=error), loop.quit()))
+        call.start()
+        if not box:
+            loop.exec(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        if box.get("error") is not None:
+            raise box["error"]
+        return box["result"]
 
     def open(self, argv, title, cwd=None):
         """A tab running ARGV (or the tab attached to that start already); None when Chromium's sandbox cannot start

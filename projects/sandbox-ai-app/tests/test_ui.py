@@ -588,6 +588,7 @@ def test_files_page_browses_copies_and_never_follows_links(window, env, tmp_path
     page = window.files
     left, right = page.left, page.right
     page.refresh_roots()
+    assert wait(lambda: not page.roots_reading), "the roots are read in the background"
     titles = [left.roots.itemText(i) for i in range(left.roots.count())]
     assert titles[0].startswith("Running sandbox claude-abc: workspace")
     assert any(t.startswith(("Current project", "Folder the app was started in")) for t in titles)
@@ -663,6 +664,7 @@ def test_files_page_warns_about_copied_files_that_tools_run(window, env, tmp_pat
     (repo / "README").write_text("x")
     page = window.files
     page.refresh_roots()
+    assert wait(lambda: not page.roots_reading)
     page.roots.setCurrentIndex(0)
     host = tmp_path / "out"
     host.mkdir()
@@ -680,7 +682,7 @@ def test_files_page_warns_about_copied_files_that_tools_run(window, env, tmp_pat
     assert widgets.SHOWN == []
 
 
-def test_files_selection_does_not_follow_a_name_into_a_subfolder(window, env):
+def test_files_selection_does_not_follow_a_name_into_a_subfolder(window, env, wait):
     fake_run(env)
     project = env / "project"
     (project / "src" / "src").mkdir(parents=True)
@@ -688,6 +690,7 @@ def test_files_selection_does_not_follow_a_name_into_a_subfolder(window, env):
     (project / "src" / "other.txt").write_text("2")
     page = window.files
     page.refresh_roots()
+    assert wait(lambda: not page.roots_reading)
     page.roots.setCurrentIndex(0)
     page.table.selectRow(row_of(page.table, "src"))
     page.open_row(row_of(page.table, "src"))
@@ -1256,13 +1259,14 @@ def test_results_of_background_jobs_do_not_block(window, monkeypatch, wait):
     net = close_modals_after(3)
     began = time.monotonic()
     ui.report(window.sandboxes, "session stop", (0, "stopped", ""), None)
-    window.kits.done("sandbox-ai kits new", (0, "created", ""), None)
+    window.kits.done("local", "sandbox-ai kits new", (0, "created", ""), None)  # in the page's message area
     assert time.monotonic() - began < 1.5, "nothing waited for a click"
+    assert window.kits.message.text() == "sandbox-ai kits new: created"
     widgets.show_text(window.system, "Privacy check", "nothing found", modal=False)
     assert QtWidgets.QApplication.activeModalWidget() is None
     shown = [w for w in QtWidgets.QApplication.topLevelWidgets() if w.isVisible()
              and isinstance(w, (QtWidgets.QMessageBox, QtWidgets.QDialog))]
-    assert len(shown) >= 3
+    assert len(shown) >= 2
     for widget in shown:
         widget.close()
     widgets.AUTO_ANSWER = True
@@ -1465,11 +1469,12 @@ def test_without_a_tray_closing_warns_that_questions_will_be_refused(window, env
     assert f"refused after {window.sai.approval_seconds} seconds" in text
 
 
-def test_autostart_is_a_setting_written_only_when_ticked(window, env):
+def test_autostart_is_a_setting_written_only_when_ticked(window, env, wait):
     path = env / "config" / "autostart" / "sandbox-ai-app.desktop"
     assert not path.exists() and not window.system.autostart_box.isChecked()
     window.system.autostart_box.setChecked(True)
-    assert path.exists() and "--hidden" in path.read_text()
+    assert wait(path.exists), "written once the folders sandboxes can write are read (in the background)"
+    assert "--hidden" in path.read_text()
     window.system.autostart_box.setChecked(False)
     assert not path.exists()
 
@@ -1776,9 +1781,10 @@ def test_the_board_applies_devices_and_limits_live(window, env, monkeypatch, wai
     calls = []
     monkeypatch.setattr(window.sai, "run_for", lambda workspace: "claude-abc")
     monkeypatch.setattr(window.sai, "add_device", lambda run, path: calls.append((run, path)) or (0, "ok", ""))
+    board.inspect_timer.stop()  # (no other part inspected meanwhile: the live rows come for this look)
     board.inspect(board.board.first("devices"))
-    labels = [w.text() for w in board.inspector_holder.findChildren(QtWidgets.QLabel)]
-    assert any("Live, until the sandbox ends" in t for t in labels)
+    assert wait(lambda: any("Live, until the sandbox ends" in w.text()
+                            for w in board.inspector_holder.findChildren(QtWidgets.QLabel))), "looked up in a thread"
     button = next(b for b in board.inspector_holder.findChildren(QtWidgets.QPushButton) if "now" in b.text())
     button.click()
     assert wait(lambda: calls == [("claude-abc", "/dev/video0")], 20)

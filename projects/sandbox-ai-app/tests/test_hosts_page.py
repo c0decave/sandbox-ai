@@ -24,6 +24,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(widgets, "background", lambda function, *args, done, **kw: done(function(*args), None))
     import sandbox_ai_app.hosts_page as hp
     monkeypatch.setattr(hp, "background", lambda function, *args, done, **kw: done(function(*args), None))
+    monkeypatch.setattr(hp.Task, "call_watched", lambda task, sai, function, done, *a, **kw: done(function(), None)
+                        or True)  # an update or installation (its streaming and Cancel: test_responsive.py)
     return tmp_path
 
 

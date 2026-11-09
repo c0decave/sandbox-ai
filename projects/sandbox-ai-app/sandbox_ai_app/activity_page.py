@@ -390,13 +390,16 @@ class ActivityPage(QWidget):
         if self.started:
             self.refresh_sources()
 
-    remote_sources = ()
+    remote_sources = local_sources = ()
 
     def sources(self):
-        """[(title, arguments of sandbox-ai activity)]: running sandboxes, sessions, project log folders (another
-        host's: what its listing said, see refresh_sources)."""
-        if self.host() != LOCAL:
-            return list(self.remote_sources)
+        """[(title, arguments of sandbox-ai activity)]: running sandboxes, sessions, project log folders (as the last
+        read in the background found them: read_sources here, another host's listing there; see refresh_sources)."""
+        return list(self.remote_sources if self.host() != LOCAL else self.local_sources)
+
+    def read_sources(self):
+        """This machine's sources (in a thread: sandbox-ai's registry read asks Podman about runs whose launcher is
+        gone, and prunes what ended)."""
         found = []
         try:
             runs = self.sai.runs()
@@ -422,7 +425,13 @@ class ActivityPage(QWidget):
 
     def refresh_sources(self, select=None):
         host = self.host()
-        if host != LOCAL and select is None:
+        if host == LOCAL:
+            self.listing_token += 1
+            token = self.listing_token
+            widgets.background(self.read_sources, owner=self, timeout=90, work=False,
+                               done=lambda result, error: self.local_listed(token, select, result, error))
+            return
+        if select is None:
             # That host's running starts and sessions (`sandbox-ai list --json` there, in the background).
             self.listing_token += 1
             token = self.listing_token
@@ -430,6 +439,14 @@ class ActivityPage(QWidget):
             widgets.background(lambda: self.sai.host_instances(host), owner=self, timeout=90,
                                done=lambda result, error: self.remote_listed(host, token, result, error))
             return
+        self.fill_sources(select)
+
+    def local_listed(self, token, select, result, error):
+        if token != self.listing_token or self.host() != LOCAL:
+            return  # read for this machine before another host was chosen: dropped
+        self.local_sources = result if error is None else []
+        if error is not None:
+            self.status.setText(printable(error)[:300])
         self.fill_sources(select)
 
     def remote_listed(self, host, token, result, error):
@@ -799,19 +816,23 @@ class ActivityPage(QWidget):
         root, relative = found
         page = window.files
         real = os.path.realpath(root)
-        if page.roots.findData(real) < 0:
-            page.others.append(("other", "", root))
-            page.refresh_roots()
-        page.roots.setCurrentIndex(page.roots.findData(real))
         parts = [p for p in relative.split("/") if p]
         details = record.get("details") if isinstance(record.get("details"), dict) else {}
         if details.get("path"):
             folder, name = parts[:-1], parts[-1] if parts else None
         else:
             folder, name = parts, None
-        page.go("/".join(folder))
-        if name and Path(real, *folder, name).exists():
-            widgets.select_keys(page.table, [name])
+
+        def go():
+            page.roots.setCurrentIndex(page.roots.findData(real))
+            page.go("/".join(folder))
+            if name and Path(real, *folder, name).exists():
+                widgets.select_keys(page.table, [name])
+        if page.roots.findData(real) < 0:  # its folder is listed once the roots are read again (in the background)
+            page.others.append(("other", "", root))
+            page.refresh_roots(select=real, then=go)
+        else:
+            go()
         window.show_page("files")
         return True
 

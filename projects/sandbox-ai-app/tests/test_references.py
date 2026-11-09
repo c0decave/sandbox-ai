@@ -81,7 +81,8 @@ def test_the_check_catches_a_missing_name(tmp_path):
 # -- nothing slow on the GUI thread --
 
 # SandboxAI methods that run a command, ask the keyring or read big logs (the window must keep polling the
-# approvals meanwhile, or questions are refused after a minute).
+# approvals meanwhile, or questions are refused after a minute). Declared here; test_every_slow_backend_method_is_declared
+# finds every method of backend.py that runs a process, sleeps or calls one of these, and wants it here too.
 BLOCKING_SAI = {"call", "answer", "dry_run", "doctor", "mcp_catalog", "statistics", "set_secret", "delete_secret",
                 "secrets", "login_status", "remembered", "forget_remembered", "question_context", "run_log",
                 "devices_added", "device_check", "device_candidates", "add_device", "remove_device", "set_limits",
@@ -111,17 +112,51 @@ BLOCKING_SAI = {"call", "answer", "dry_run", "doctor", "mcp_catalog", "statistic
                 "host_mcp_attach_live", "host_mcp_detach_live", "mcp_live", "host_llm_endpoints", "host_llm_models",
                 "host_llm_servers", "host_connections", "host_log_summary",
                 # every plugin marketplace of a host (the Kits page's browser) and its version check over SSH
-                "marketplaces", "host_marketplaces", "require_marketplaces"}
+                "marketplaces", "host_marketplaces", "require_marketplaces",
+                # a host's presets, start choices, project files and trust, the web interface's logins and
+                # certificate, an answer sent there, MCP servers stopped or detached, starts stopped, secrets' backend,
+                # a login added, and the known-options check (`COMMAND --help` there) under each of them
+                "host_preset", "host_presets", "host_start_choices", "host_project_show", "host_project_trust",
+                "host_trust_defaults", "host_web_users", "host_web_user_remove", "host_web_cert", "host_answer",
+                "host_mcp_detach", "stop_mcp", "stop_run", "secrets_backend", "add_login", "checked",
+                "host_command_options", "require_options", "host_image_variants",
+                # sandbox-ai's registry of what runs (net.running) asks Podman whether the pod of a run whose launcher
+                # is gone still runs (up to its timeout) and removes the directories of runs that ended; the sessions'
+                # rows ask Podman about stopped ones: so does everything that reads them
+                "runs", "sessions", "instances", "run_for", "file_roots", "known_projects", "sandbox_folders",
+                "rw_mounts", "autostart_risk"}
+# (approvals_snapshot and questions read the registry with live_runs: files and /proc only, never Podman.)
 # (host_statuses(cached=True) reads what `sandbox-ai hosts list` kept, without SSH: the Hosts page lists it at once.)
-# (stop_commands runs on the GUI thread on purpose: only when quitting, bounded by one grace period.)
+# Slow, but on the GUI thread on purpose (each call site says so with a comment "on the GUI thread on purpose"):
+# stop_commands only when quitting, bounded by one grace period; end_groups is its part.
+ON_PURPOSE = {"stop_commands", "end_groups"}
+ON_PURPOSE_MARK = "on the GUI thread on purpose"
 BLOCKING_MODULES = {"subprocess"}
+BLOCKING_TIME = {"sleep"}  # time.sleep: never in a handler (a QTimer waits instead)
+# QProcess's waits (and QThread.wait) block the event loop until the process (thread) is done: AsyncCommand's signals
+# instead. Matched by the name alone.
+BLOCKING_WAITS = {"waitForFinished", "waitForStarted", "waitForReadyRead", "waitForBytesWritten"}
 BLOCKING_BACKEND = {"read_connections"}
 # files.py: copies (up to 1 GiB), moves, deletes and owner changes of whole trees, podman unshare (the Files page
 # runs them in Task.thread). Called as root.NAME(...) or files.NAME(...): matched by the name alone.
 BLOCKING_FILES = {"copy_out", "copy_in", "copy_entry", "move_entry", "delete_entry", "chown_entry", "take_ownership"}
-# wizard_llm's functions that run `sandbox-ai llm list|add|check|models` (called as WL.NAME or wizard_llm.NAME).
-BLOCKING_WIZARD_LLM = {"list_endpoints", "add_and_check", "list_models"}
-WRAPPERS = {"background", "ThreadCall", "thread"}  # widgets.background, widgets.ThreadCall, Task.thread
+# wizard_llm's functions that run `sandbox-ai llm list|add|check|models` (called as WL.NAME or wizard_llm.NAME), and
+# presets' host_documents (`sandbox-ai presets list --json` on a host: PR.NAME or presets.NAME).
+BLOCKING_HELPERS = {"WL": {"list_endpoints", "add_and_check", "list_models"},
+                    "wizard_llm": {"list_endpoints", "add_and_check", "list_models"},
+                    "PR": {"host_documents"}, "presets": {"host_documents"},
+                    # chromium.check: a child process tries Chromium's namespaces (up to its timeout)
+                    "chromium": {"check", "probe"},
+                    # name_fields.read_names: a host's secrets or VPN profiles (`secrets list`, `vpn list` there)
+                    "name_fields": {"read_names"}, "NF": {"read_names"}}
+# widgets.background, ThreadCall, Task.thread and call_watched; the Kits page's start_change (its Task.call_watched)
+WRAPPERS = {"background", "ThreadCall", "thread", "call_watched", "start_change"}
+# The modules not checked call by call: backend.py (what is slow is declared above), widgets.py (background, ThreadCall
+# and Task themselves; the waits of the app's end), and the helpers whose slow functions the pages may only hand to a
+# wrapper (files.py, wizard_llm.py, presets.py, name_fields.py, chromium.py: BLOCKING_FILES, BLOCKING_HELPERS) or that
+# start a terminal's command (pty_bridge.py: a fork and exec, read with a QSocketNotifier).
+HELPER_MODULES = {"backend.py", "widgets.py", "files.py", "wizard_llm.py", "presets.py", "pty_bridge.py",
+                  "name_fields.py", "chromium.py"}
 
 
 def call_name(node):
@@ -129,28 +164,52 @@ def call_name(node):
         node.func.attr if isinstance(node.func, ast.Attribute) else None
 
 
+def holds_sai(node):
+    """sai, self.sai, or any X.sai (self.page.sai, self.wizard_.sai, self.parent().sai): a page's SandboxAI."""
+    return (isinstance(node, ast.Name) and node.id == "sai") or (isinstance(node, ast.Attribute) and node.attr == "sai")
+
+
 def blocking(node):
     """A description if NODE (a Call) blocks, else None."""
     func = node.func
     if isinstance(func, ast.Attribute):
-        if is_sai(func.value) and func.attr in BLOCKING_SAI:
+        if holds_sai(func.value) and func.attr in BLOCKING_SAI:
             return f"sai.{func.attr}()"
         if isinstance(func.value, ast.Name) and func.value.id in BLOCKING_MODULES:
             return f"{func.value.id}.{func.attr}()"
+        if isinstance(func.value, ast.Name) and func.value.id == "time" and func.attr in BLOCKING_TIME:
+            return f"time.{func.attr}()"
+        if func.attr in BLOCKING_WAITS:
+            return f"{func.attr}()"
         if isinstance(func.value, ast.Name) and func.value.id == "backend" and func.attr in BLOCKING_BACKEND:
             return f"backend.{func.attr}()"
         if func.attr in BLOCKING_FILES:
             return f"{func.attr}()"
-        if isinstance(func.value, ast.Name) and func.value.id in ("WL", "wizard_llm") and \
-                func.attr in BLOCKING_WIZARD_LLM:
-            return f"wizard_llm.{func.attr}()"
+        if isinstance(func.value, ast.Name) and func.attr in BLOCKING_HELPERS.get(func.value.id, ()):
+            return f"{func.value.id}.{func.attr}()"
     if isinstance(func, ast.Name) and func.id in BLOCKING_BACKEND:
         return f"{func.id}()"
     return None
 
 
-def deferred(node, parents):
-    """True if NODE lies in a lambda handed to a wrapper, or in a nested function whose name is."""
+def handed_methods(tree):
+    """The names of methods handed to a wrapper as self.NAME (background(self.scan, ...)) and never called directly
+    (self.NAME(...)) in the module: their body runs in the wrapper's thread."""
+    handed, called = set(), set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and call_name(node) in WRAPPERS:
+            for value in [*node.args, *(k.value for k in node.keywords)]:
+                if isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name) and value.value.id == "self":
+                    handed.add(value.attr)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and \
+                isinstance(node.func.value, ast.Name) and node.func.value.id == "self":
+            called.add(node.func.attr)
+    return handed - called
+
+
+def deferred(node, parents, handed=frozenset()):
+    """True if NODE lies in a lambda handed to a wrapper, in a nested function whose name is, or in a method that is
+    (HANDED: handed_methods)."""
     child, parent = node, parents.get(node)
     while parent is not None:
         if isinstance(child, ast.Lambda) and isinstance(parent, ast.Call) and call_name(parent) in WRAPPERS \
@@ -161,11 +220,14 @@ def deferred(node, parents):
             return True
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and isinstance(parent, (ast.FunctionDef,
                                                                                             ast.AsyncFunctionDef)):
-            handed = any(isinstance(n, ast.Call) and call_name(n) in WRAPPERS and any(
+            handed_here = any(isinstance(n, ast.Call) and call_name(n) in WRAPPERS and any(
                 isinstance(a, ast.Name) and a.id == child.name for a in [*n.args, *(k.value for k in n.keywords)])
                 for n in ast.walk(parent))
-            if handed:
+            if handed_here:
                 return True
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and isinstance(parent, ast.ClassDef) and \
+                child.name in handed:
+            return True
         child, parent = parent, parents.get(parent)
     return False
 
@@ -173,19 +235,89 @@ def deferred(node, parents):
 def blocking_calls(source):
     tree = ast.parse(source)
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    handed, lines = handed_methods(tree), source.splitlines()
     return [(node.lineno, what) for node in ast.walk(tree) if isinstance(node, ast.Call)
-            for what in [blocking(node)] if what and not deferred(node, parents)]
+            for what in [blocking(node)] if what and not deferred(node, parents, handed)
+            and ON_PURPOSE_MARK not in lines[node.lineno - 1]]
 
 
 def test_pages_run_commands_and_slow_reads_only_in_the_background():
-    found = [f"{name}:{line} {what}"
-             for name in ("pages.py", "images_page.py", "ui.py", "board_view.py", "wizard.py", "settings.py",
-                          "hosts_page.py", "llm_page.py", "terminal.py", "preset_gallery.py", "vpn_page.py",
-                          "files_page.py", "kits_page.py", "credentials_page.py", "identities_page.py",
-                          "activity_page.py", "canaries_view.py", "team_page.py", "host_choice.py")
-             if (PACKAGE / name).exists()
+    """Every module of the app but the helpers (HELPER_MODULES): pages, dialogs, the window, tours, menus."""
+    names = sorted(path.name for path in PACKAGE.glob("*.py") if path.name not in HELPER_MODULES)
+    assert {"ui.py", "kits_page.py", "hosts_page.py", "tours.py", "intro.py", "main.py"} <= set(names)
+    found = [f"{name}:{line} {what}" for name in names
              for line, what in blocking_calls((PACKAGE / name).read_text())]
     assert not found, "on the GUI thread (use widgets.background, ThreadCall or Task):\n" + "\n".join(found)
+
+
+# What makes a method of backend.py slow by itself: a process (subprocess, the runner of call()), a pipe served until
+# its end (Pipes), a sleep.
+SLOW_PRIMITIVES = {("subprocess", None), ("time", "sleep"), ("self", "run"), (None, "Pipes")}
+
+
+def backend_calls(function):
+    """{("self", NAME)} of the methods FUNCTION calls on self, {(None, NAME)} of the module's functions it calls, and
+    ("subprocess", ATTR) / ("time", ATTR) of what it calls of those modules."""
+    found = set()
+    for node in ast.walk(function):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            found.add((func.value.id, func.attr))
+        elif isinstance(func, ast.Name):
+            found.add((None, func.id))
+    return found
+
+
+def slow_methods(tree):
+    """The SandboxAI methods that run a process or sleep, or call (through self, or a function of the module) one
+    that does or one BLOCKING_SAI declares slow."""
+    cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "SandboxAI")
+    graph = {("self", n.name): backend_calls(n) for n in cls.body if isinstance(n, ast.FunctionDef)}
+    graph.update({(None, n.name): backend_calls(n) for n in tree.body if isinstance(n, ast.FunctionDef)})
+
+    def primitive(call):
+        return call in SLOW_PRIMITIVES or (call[0] == "subprocess")
+    slow = {key for key, calls in graph.items() if any(primitive(c) for c in calls)}
+    slow |= {("self", name) for name in BLOCKING_SAI if ("self", name) in graph}
+    while True:
+        more = {key for key, calls in graph.items() if key not in slow and calls & slow}
+        if not more:
+            break
+        slow |= more
+    return {name for kind, name in slow if kind == "self"}
+
+
+def test_every_slow_backend_method_is_declared():
+    """A method that runs `sandbox-ai ...` (here or over SSH), a process, or reads what asks Podman is declared in
+    BLOCKING_SAI (or ON_PURPOSE), so the check above holds the pages to the background for it."""
+    tree = ast.parse((PACKAGE / "backend.py").read_text())
+    known = class_attributes(tree, "SandboxAI")
+    assert not (BLOCKING_SAI | ON_PURPOSE) - known, f"not in backend.py: {sorted((BLOCKING_SAI | ON_PURPOSE) - known)}"
+    undeclared = sorted(slow_methods(tree) - BLOCKING_SAI - ON_PURPOSE)
+    assert not undeclared, "slow (a process, SSH, Podman), not declared in BLOCKING_SAI:\n" + "\n".join(undeclared)
+
+
+def test_the_slow_method_check_follows_calls():
+    tree = ast.parse('''
+class SandboxAI:
+    def call(self, *args):
+        return subprocess.run(args)
+    def wrapper(self):
+        return self.call("x")
+    def deeper(self):
+        return helper(self)
+    def fast(self):
+        return 1
+    def runs(self):
+        return self.module("net").running()
+    def users(self):
+        return self.runs()
+def helper(sai):
+    return sai.wrapper()
+''')
+    assert slow_methods(tree) >= {"call", "wrapper", "users", "runs"} and "fast" not in slow_methods(tree)
 
 
 def test_the_blocking_check_knows_the_file_operations():
@@ -210,6 +342,9 @@ class Page:
         status, out, err = self.sai.call("net", "show")
         subprocess.run(["x"])
         records = backend.read_connections(path)
+        self.page.sai.file_roots()
+        self.process.waitForFinished(5000)
+        time.sleep(1)
 
     def good(self):
         background(self.sai.call, "net", "show", done=self.done)
@@ -219,6 +354,13 @@ class Page:
         self.task.thread(work, self.done, "text")
         ThreadCall(self.sai.answer, "1-1-1", "allow", "once").start()
         background(lambda: WL.add_and_check(sai, fields, "opencode"), done=self.done)
+        background(self.scan, done=self.done)
+        self.task.call_watched(self.sai, lambda: self.sai.host_install("h"), self.done, "text")
+        self.sai.stop_commands()  # on the GUI thread on purpose: quitting
+        background(PR.host_documents, self.sai, "h", done=self.done)
+
+    def scan(self):
+        return self.sai.instances()
 
     def also_bad(self):
         def helper():
@@ -226,10 +368,18 @@ class Page:
         return helper()
 
     def models(self):
-        return WL.list_models(self.sai, "lmstudio")
+        return WL.list_models(self.sai, "lmstudio") + PR.host_documents(self.sai, "h")
+
+    def read(self):
+        return self.sai.runs()
+
+    def again(self):
+        background(self.read, done=self.done)
+        return self.read()
 '''
     assert sorted(what for _, what in blocking_calls(source)) == sorted([
-        "sai.call()", "subprocess.run()", "backend.read_connections()", "sai.doctor()", "wizard_llm.list_models()"])
+        "sai.call()", "subprocess.run()", "backend.read_connections()", "sai.file_roots()", "waitForFinished()",
+        "time.sleep()", "sai.doctor()", "WL.list_models()", "PR.host_documents()", "sai.runs()"])
 
 
 # -- one confirmation policy: every call path that ends, removes or weakens something asks first --

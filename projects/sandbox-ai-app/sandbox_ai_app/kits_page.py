@@ -26,6 +26,7 @@ from __future__ import annotations
 import re
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout,
     QInputDialog, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSplitter, QTabWidget, QTreeWidget,
@@ -33,14 +34,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import backend
+from . import backend, theme
 from .files import printable
 from .host_choice import on_host
 from .state import choose_file, choose_folder
 from .i18n import N_, tr
 from .widgets import (
-    ask_first, background, busy, compact_combo, fill, flow, inform, outcome, plain_label, row_key, safe_tooltip,
-    select_keys, selected_keys, selected_rows, set_enabled, show_text, table, warn,
+    MessageText, Task, ask_first, background, busy, compact_combo, fill, flow, inform, outcome, plain_label, row_key,
+    safe_tooltip, select_keys, selected_keys, selected_rows, set_enabled, show_text, table, warn,
 )
 
 LOCAL = "local"
@@ -389,6 +390,14 @@ class KitsPage(QWidget):
         for widget in (self.refresh_button, new, self.install_button, self.update_button, self.status_button):
             top.addWidget(widget)
         layout.addLayout(top)
+        # A kit change runs in the background (cloning a marketplace takes a while): a busy bar with what runs and
+        # Cancel, what sandbox-ai writes as it comes, then what came of it in the message area (wrapped, plain text).
+        self.task = Task(output=True)
+        self.task.setAccessibleName(tr("Kit change running"))
+        layout.addWidget(self.task)
+        self.message = MessageText()
+        self.message.setAccessibleName(tr("Message"))
+        layout.addWidget(self.message)
         self.tabs = QTabWidget()
         self.tabs.setAccessibleName(tr("Kits & plugins"))
         self.tabs.addTab(self.kits_tab(), tr("Kits"))
@@ -1234,6 +1243,8 @@ class KitsPage(QWidget):
         (nothing more runs when that fails). What widens every later start with the kit is asked first (kit-add),
         what narrows it too (kit-remove): QUESTION, naming the host and the kit. MARKET: from the marketplace browser
         (whose rows must be the host's chosen)."""
+        if self.busy_change():
+            return
         host = self.host()
         shown = self.market_host if market else self.kits_host
         if shown not in (None, host):  # rows of another host: never acted on here
@@ -1261,11 +1272,28 @@ class KitsPage(QWidget):
                 first = out
             status, out, err = self.sai.host_kit_command(host, action, name, *arguments, options=options)
             return status, first + out, err
-        background(work, owner=self,
-                   source=[self.refresh_button, self.use_button, *self.edit_buttons, *self.market_buttons,
-                           *self.plugin_buttons],
-                   timeout=600, done=lambda result, error: self.done(self.on_host(title or f"sandbox-ai kits {action}"),
-                                                                     result, error))
+        self.start_change(work, title or f"sandbox-ai kits {action}", tr("sandbox-ai kits {action} {name} is running…",
+                                                                         action=action, name=printable(name)))
+
+    def change_sources(self):
+        """The buttons that change kits (or read them): off while a change runs, so two clicks never start two."""
+        return [self.refresh_button, self.use_button, *self.edit_buttons, self.trust_button, self.revoke_button,
+                *self.market_buttons, *self.plugin_buttons]
+
+    def busy_change(self):
+        """True (and said in the message area) while a change runs: one at a time."""
+        if self.task.running:
+            self.message.setText(tr("A change is running: wait for it, or cancel it."))
+            return True
+        return False
+
+    def start_change(self, work, title, text):
+        """WORK (sandbox-ai commands) in the background with the busy bar, its output as it comes and Cancel; the
+        outcome in the message area of this host's page (a late one, after another host was chosen, is dropped)."""
+        host, title = self.host(), self.on_host(title)
+        self.message.setText("")
+        self.task.call_watched(self.sai, work, lambda result, error: self.done(host, title, result, error), text,
+                               source=self.change_sources())
 
     def user_kits(self):
         return sorted(kit["name"] for kit in self.kits.values() if kit.get("kind") == "user")
@@ -1294,16 +1322,33 @@ class KitsPage(QWidget):
         new = new and name not in self.user_kits()
         return name, new, self.kits.get(f"user:{name}")
 
-    def done(self, title, result, error):
+    def done(self, host, title, result, error):
+        """What a change said, in the message area (wrapped, plain text; an error in its colour); the kits are read
+        again. For a host no longer chosen: only read again (its rows went when the host changed)."""
         status, out, err = outcome(result, error)
-        text = (out + err).strip()
-        if status != 0:
-            warn(self, title, text or tr("Failed (exit status {status}).", status=status))
-        elif text:
-            inform(self, title, text, modal=False)  # a result: never blocks the window
+        text = printable((out + err).strip())[-4000:]
         self.update_buttons()
         self.update_market_buttons()
+        if host != self.host():
+            return
+        if self.task.cancelled or status == backend.CANCELLED:
+            self.show_message(tr("{title}: cancelled. What sandbox-ai did up to then stays; Refresh shows the kits.",
+                                 title=title), "notice-warn")
+        elif status != 0:
+            self.show_message(title + ": " + (text or tr("Failed (exit status {status}).", status=status)), "bad")
+        else:
+            self.show_message(title + (": " + text if text else ""), "secondary")
         self.refresh()
+
+    def show_message(self, text, role="secondary"):
+        """TEXT in the message area; ROLE "bad" (an error) or "notice-warn" (cancelled) in that status colour."""
+        self.message.setProperty("role", role)
+        palette = self.message.palette()
+        status = {"bad": "bad", "notice-warn": "warn"}.get(role)
+        palette.setColor(QPalette.ColorRole.Text, QColor(theme.color(status)) if status else
+                         self.palette().color(QPalette.ColorRole.Text))
+        self.message.setPalette(palette)
+        self.message.setText(text)
 
     def valid_name(self, name, pattern=backend.KIT_NAME):
         if re.fullmatch(pattern, name or ""):
@@ -1460,9 +1505,10 @@ class KitsPage(QWidget):
         if kit is None:
             return
         name = kit["name"]
-        background(lambda: self.sai.revoke_hooks(host, name), owner=self, source=[self.revoke_button],
-                   timeout=150, done=lambda result, error: self.done(self.on_host(tr("Take the approval back")), result,
-                                                                     error))
+        if self.busy_change():
+            return
+        self.start_change(lambda: self.sai.revoke_hooks(host, name), tr("Take the approval back"),
+                          tr("sandbox-ai kits trust-hooks --revoke {name} is running…", name=printable(name)))
 
     def plugin_status(self):
         """`sandbox-ai plugins --status` on the host chosen, shown as it says it."""

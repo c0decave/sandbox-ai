@@ -97,6 +97,17 @@ def mode_text(mode):
     return f"{stat.filemode(mode)} {stat.S_IMODE(mode):04o}" if mode else ""
 
 
+def nav_button(text, tooltip, slot):
+    """A button that goes somewhere (Home, Up, Refresh): an action, never a toggle, and it takes no focus from a
+    click (a focused button looks pressed in some themes, as if Home stayed on); Tab still reaches it. Where the
+    pane is shows in its path bar."""
+    widget = button(text, tooltip, slot)
+    widget.setCheckable(False)
+    widget.setAutoDefault(False)
+    widget.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+    return widget
+
+
 class Pane(QWidget):
     """One side: a folder below a root, its list and its path bar. SIDE "sandbox" (roots to choose from) or
     "host" (this machine, Root("/") walked down to the folder shown)."""
@@ -118,23 +129,23 @@ class Pane(QWidget):
             self.roots.setMinimumWidth(240)
             self.roots.currentIndexChanged.connect(lambda _=0: self.choose_root())
             top.addWidget(self.roots, 1)
-            top.addWidget(button(tr("Refresh"), tr("Look for sandboxes and sessions again"), self.refresh_roots))
-            top.addWidget(button(tr("Other folder…"), tr("Browse another folder as an agent's"), self.add_other))
+            top.addWidget(nav_button(tr("Refresh"), tr("Look for sandboxes and sessions again"), self.refresh_roots))
+            top.addWidget(nav_button(tr("Other folder…"), tr("Browse another folder as an agent's"), self.add_other))
         else:
             self.roots = None
             top.addStretch()
-            top.addWidget(button(tr("Home"), tr("Your HOME folder"), self.home))
+            top.addWidget(nav_button(tr("Home"), tr("Your HOME folder"), self.home))
             self.root = files.Root("/", label=tr("This machine"), sandbox=False)
             self.relative = host_relative(os.path.realpath(os.path.expanduser("~")))
         layout.addLayout(top)
         where = QHBoxLayout()
-        where.addWidget(button(tr("Up"), tr("The folder above (Backspace)"), self.up))
+        where.addWidget(nav_button(tr("Up"), tr("The folder above (Backspace)"), self.up))
         self.path = QLineEdit()
         self.path.setAccessibleName(tr("Folder"))
         self.path.setToolTip(tr("Type a folder and press Enter"))
         self.path.returnPressed.connect(self.go_path)
         where.addWidget(self.path, 1)
-        where.addWidget(button(tr("Refresh"), tr("List the folder again (Ctrl+R)"), self.list))
+        where.addWidget(nav_button(tr("Refresh"), tr("List the folder again (Ctrl+R)"), self.list))
         layout.addLayout(where)
         self.table = table([tr(column) for column in COLUMNS], multi=True, stretch=0)  # the Name takes the room
         self.table.setAccessibleName(tr("Files of the sandbox") if side == "sandbox" else tr("Files of this machine"))
@@ -213,13 +224,23 @@ class Pane(QWidget):
 
     # -- the sandbox side's roots --
 
-    def refresh_roots(self, select=None):
+    def refresh_roots(self, select=None, then=None):
+        """The folders of sandboxes, sessions and projects, read in the background (sandbox-ai's registry may ask
+        Podman); the list changes when they are known. SELECT: the folder to show then; THEN() after that."""
         if self.roots is None:
             return
-        keep = select or self.roots.currentData()
+        self.roots_token, self.roots_reading = getattr(self, "roots_token", 0) + 1, True
+        token, keep = self.roots_token, select or self.roots.currentData()
+        extra = list(self.page.projects()) + self.page.others
+        background(lambda: self.page.sai.file_roots(extra=extra), owner=self.page, timeout=60, work=False,
+                   done=lambda roots, error: token == self.roots_token and self.show_roots(
+                       roots if error is None else [entry for entry in extra if os.path.isdir(entry[2])], keep, then))
+
+    def show_roots(self, roots, keep, then=None):
+        self.roots_reading = False
         self.roots.blockSignals(True)
         self.roots.clear()
-        for kind, label, path in self.page.sai.file_roots(extra=list(self.page.projects()) + self.page.others):
+        for kind, label, path in roots:
             self.roots.addItem(root_title(kind, label, path), path)
         remote = self.page.remote_hosts()
         for name in remote:
@@ -235,13 +256,14 @@ class Pane(QWidget):
         self.roots.setCurrentIndex(index if index >= 0 else 0)
         self.roots.blockSignals(False)
         self.choose_root()
+        if then is not None:
+            then()
 
     def add_other(self):
         path = choose_folder(self, tr("Folder to browse"), "browse")
         if path:
             self.page.others.append(("other", "", path))
-            self.refresh_roots()
-            self.roots.setCurrentIndex(self.roots.findData(os.path.realpath(path)))
+            self.refresh_roots(select=os.path.realpath(path))
 
     def choose_root(self):
         path = self.roots.currentData() if self.roots is not None else None
@@ -418,10 +440,16 @@ class FilesPage(QWidget):
         self.right = Pane(self, "host")
         self.active = self.left
         layout = QVBoxLayout(self)
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        # The two panes half and half (a width the human dragged, or the one the app kept from before, stays).
+        splitter = self.split = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.left)
         splitter.addWidget(self.right)
         splitter.setChildrenCollapsible(False)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([1, 1])
+        self.keep_split = False  # True: a position moved by the human or kept by the app (state.splitter) wins
+        splitter.splitterMoved.connect(lambda *_: setattr(self, "keep_split", True))
         layout.addWidget(splitter, 1)
         self.buttons = {
             "copy": button(tr("Copy (F5)"), tr("Copy the selected items into the other pane's folder"),
@@ -443,6 +471,8 @@ class FilesPage(QWidget):
         self.replace = QCheckBox(tr("Replace existing files"))
         self.replace.setToolTip(tr("Without it, names that exist in the target are left alone; with it, you are "
                                    "asked before they are replaced"))
+        for widget in self.buttons.values():  # a toolbar's actions: no focus from a click (it would look pressed)
+            widget.setFocusPolicy(Qt.FocusPolicy.TabFocus)
         layout.addWidget(flow(*self.buttons.values(), self.replace))
         # Copies (up to 1 GiB), moves, deletes and owner changes run in a thread with Cancel; one at a time.
         self.task = Task()
@@ -510,8 +540,24 @@ class FilesPage(QWidget):
     def add_other(self):
         self.left.add_other()
 
-    def refresh_roots(self, select=None):
-        self.left.refresh_roots(select)
+    def showEvent(self, event):  # noqa: N802
+        """Shown with its real width at last: the panes half and half, unless their division was moved or kept."""
+        super().showEvent(event)
+        if not self.keep_split:
+            QTimer.singleShot(0, self, self.halve)  # once the layout gave the splitter its width
+
+    def halve(self):
+        total = sum(self.split.sizes())
+        if not self.keep_split and total > 0:
+            self.split.setSizes([total - total // 2, total // 2])
+
+    def refresh_roots(self, select=None, then=None):
+        self.left.refresh_roots(select, then)
+
+    @property
+    def roots_reading(self):
+        """The sandbox side's folders are being read (in the background)."""
+        return getattr(self.left, "roots_reading", False)
 
     def set_project(self, path):
         """Show the current project's folder."""

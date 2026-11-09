@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import html
 import os
+import re
 import signal
 import sys
 import threading
@@ -138,6 +139,22 @@ def title(text, subtitle=None):
 
 def section(text):
     return plain_label(text, word_wrap=False, role="section")
+
+
+def disclosure(widget):
+    """WIDGET (a checkable QToolButton that shows or hides something) drawn as a disclosure: an arrow beside its
+    text (right: folded, down: open), flat, so its checked state never looks like a button stuck pressed. The
+    property "disclosure" marks it (tests/test_buttons.py: the only checkable buttons besides check boxes)."""
+    widget.setCheckable(True)
+    widget.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+    widget.setAutoRaise(True)
+    widget.setProperty("disclosure", True)
+
+    def arrow(on):
+        widget.setArrowType(Qt.ArrowType.DownArrow if on else Qt.ArrowType.RightArrow)
+    widget.toggled.connect(arrow)
+    arrow(widget.isChecked())
+    return widget
 
 
 def button(text, tooltip, slot=None, role=None, shortcut=None):
@@ -548,7 +565,7 @@ class Notice(QWidget):
         self.toggle = QToolButton()
         self.toggle.setText(tr("Details"))
         self.toggle.setToolTip(tr("Show or hide what sandbox-ai printed"))
-        self.toggle.setCheckable(True)
+        disclosure(self.toggle)
         self.toggle.toggled.connect(lambda on: self.details.setVisible(on))
         close = QToolButton()
         close.setText("×")
@@ -786,7 +803,7 @@ class ThreadCall(QObject):
                 call.abandoned = True
 
 
-def background(function, *args, done, source=None, owner=None, timeout=None):
+def background(function, *args, done, source=None, owner=None, timeout=None, work=True):
     """Run FUNCTION(*args) in a thread, never on the GUI thread (which must keep answering approvals);
     DONE(result, error) runs on the GUI thread, once. SOURCE (a widget or a list of them, e.g. the button
     that started it) is disabled meanwhile; OWNER (a page) counts its running calls for busy(). After
@@ -795,8 +812,10 @@ def background(function, *args, done, source=None, owner=None, timeout=None):
     sources = [w for w in (source if isinstance(source, (list, tuple)) else [source]) if w is not None]
     for widget in sources:
         widget.setEnabled(False)
-    if owner is not None:
+    counted = owner is not None and work  # not WORK: a read, only dropped when OWNER is gone (not "work running")
+    if counted:
         owner._background = getattr(owner, "_background", 0) + 1
+        activity().changed.emit()  # the window's busy indicator: which pages have work running
     call = ThreadCall(function, *args)
     timer = None
     began, name = time.monotonic(), getattr(function, "__qualname__", None) or repr(function)
@@ -820,8 +839,9 @@ def background(function, *args, done, source=None, owner=None, timeout=None):
                 widget.setEnabled(True)
             except RuntimeError:  # deleted meanwhile
                 pass
-        if owner is not None:
+        if counted:
             owner._background -= 1
+            activity().changed.emit()
         done(result, error)
     call.finished.connect(finish)
     if timeout:
@@ -837,8 +857,33 @@ def background(function, *args, done, source=None, owner=None, timeout=None):
 
 
 def busy(owner):
-    """True while background() calls of OWNER run."""
-    return getattr(owner, "_background", 0) > 0
+    """True while background() calls of OWNER run (or its Task runs)."""
+    task = getattr(owner, "task", None)
+    return getattr(owner, "_background", 0) > 0 or (isinstance(task, Task) and task.running)
+
+
+class Activity(QObject):
+    """changed: a page's background() call or Task began or ended (the window shows what runs, with a busy bar)."""
+    changed = Signal()
+
+
+_activity = []
+
+
+def activity():
+    if not _activity:
+        _activity.append(Activity())
+    return _activity[0]
+
+
+ANSI = re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_])")
+
+
+def output_text(text):
+    """What a command wrote, for a plain-text output area: terminal escapes (colours, cursor moves) left out, a
+    carriage return (a progress line drawn again) as a new line, other control characters dropped."""
+    text = ANSI.sub("", str(text)).replace("\r\n", "\n").replace("\r", "\n")
+    return "".join(c for c in text if c in "\n\t" or (ord(c) >= 32 and ord(c) != 127 and not 0x80 <= ord(c) < 0xa0))
 
 
 def outcome(result, error):
@@ -847,26 +892,49 @@ def outcome(result, error):
 
 
 class Task(QWidget):
-    """Inline progress of a page's background job: a busy bar, what runs, Cancel. While it runs, the button
-    that started it is disabled; results go to DONE(status, out, err) or DONE(result, error)."""
+    """Inline progress of a page's background job: a busy bar, what runs, Cancel, and (OUTPUT True: an output area of
+    its own, kept after the end until the next job; or the page's own QPlainTextEdit) what the job's commands write as
+    they come (feed(), call_watched()). While it runs, the buttons that started it are disabled and no second job
+    starts (run/thread/call_watched return False); results go to DONE(status, out, err) or DONE(result, error), on
+    the GUI thread."""
     changed = Signal(bool)
+    _fed = Signal(str)  # from the worker thread: queued to the GUI thread
+    OUTPUT_LINES = 2000  # lines the output area keeps (the oldest go)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, output=False):
         super().__init__(parent)
-        layout = QHBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.row = QWidget()
+        layout = QHBoxLayout(self.row)
         layout.setContentsMargins(0, 0, 0, 0)
         self.bar = QProgressBar()
         self.bar.setRange(0, 0)
         self.bar.setMaximumWidth(140)
         self.bar.setMaximumHeight(12)
         self.bar.setTextVisible(False)
+        self.bar.setAccessibleName(tr("Running"))
         self.label = plain_label(role="secondary")
         self.cancel_button = button(tr("Cancel"), tr("Stop what runs now"), self.cancel)
         layout.addWidget(self.bar)
         layout.addWidget(self.label, 1)
         layout.addWidget(self.cancel_button)
-        self.command, self.call, self.source, self.done = None, None, None, None
+        outer.addWidget(self.row)
+        self.output, self.own_output = (output, False) if isinstance(output, QPlainTextEdit) else (None, True)
+        if output is True:
+            self.output = QPlainTextEdit()
+            self.output.setReadOnly(True)
+            self.output.setFont(MONO)
+            self.output.setMaximumBlockCount(self.OUTPUT_LINES)
+            self.output.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+            self.output.setMaximumHeight(160)
+            self.output.setAccessibleName(tr("Output"))
+            self.output.hide()
+            outer.addWidget(self.output)
+        self._fed.connect(self._append)
+        self.command, self.call, self.source, self.done = None, None, [], None
         self.cancel_event = threading.Event()
+        self.cancelled = False
         self.hide()
 
     @property
@@ -876,22 +944,52 @@ class Task(QWidget):
     def _begin(self, text, source, cancellable):
         self.label.setText(text)
         self.cancel_button.setVisible(cancellable)
-        self.source = source
-        if source is not None:
-            source.setEnabled(False)
+        self.cancel_button.setEnabled(True)
+        self.cancelled = False
+        self.source = [w for w in (source if isinstance(source, (list, tuple)) else [source]) if w is not None]
+        for widget in self.source:
+            widget.setEnabled(False)
+        if self.output is not None and self.own_output:
+            self.output.clear()
+            self.output.hide()
+        self.row.show()
         self.show()
         self.changed.emit(True)
+        activity().changed.emit()
 
     def _end(self):
         self.command, self.call = None, None
-        if self.source is not None:
+        for widget in self.source:
             try:
-                self.source.setEnabled(True)
+                widget.setEnabled(True)
             except RuntimeError:
                 pass
-        self.source = None
-        self.hide()
+        self.source = []
+        self.row.hide()
+        if not self.own_output or self.output is None or not self.output.toPlainText():
+            self.hide()  # (what it wrote in its own area stays readable until the next job)
         self.changed.emit(False)
+        activity().changed.emit()
+
+    def feed(self, text):
+        """Output of the job (any thread): shown in the output area, the last line beside the busy bar."""
+        try:
+            self._fed.emit(str(text))
+        except RuntimeError:  # the page is gone (the window closed)
+            pass
+
+    @Slot(str)
+    def _append(self, text):
+        text = output_text(text)
+        if not text or self.output is None:
+            return
+        if self.own_output:
+            self.output.show()
+        cursor = self.output.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        cursor.insertText(text)
+        self.output.setTextCursor(cursor)
+        self.output.ensureCursorVisible()
 
     def run(self, argv, done, text, source=None, timeout=120, input=None):
         if self.running:
@@ -921,6 +1019,16 @@ class Task(QWidget):
         self.call.start()
         return True
 
+    def call_watched(self, sai, function, done, text, source=None, cancellable=True, errors_only=False):
+        """FUNCTION() in a thread, its sandbox-ai commands watched (SandboxAI.watching): what they write (ERRORS_ONLY:
+        stderr, beside a --json stdout) comes into the output area as it comes, and Cancel ends the command that runs
+        (with everything it started), so FUNCTION gets status backend.CANCELLED from it. DONE(result, error);
+        self.cancelled tells a cancelled job."""
+        def work(cancelled):
+            with sai.watching(output=self.feed, cancelled=cancelled, errors_only=errors_only):
+                return function()
+        return self.thread(work, done, text, source, cancellable)
+
     def _thread_done(self, result, error):
         done = self.done
         self._end()
@@ -929,9 +1037,12 @@ class Task(QWidget):
 
     def cancel(self):
         if self.command is not None:
+            self.cancelled = True
             self.command.stop()
         elif self.call is not None:
+            self.cancelled = True
             self.cancel_event.set()
+            self.cancel_button.setEnabled(False)  # once: the job ends at its next look
             self.label.setText(tr("Cancelling…"))
 
 

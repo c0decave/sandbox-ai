@@ -189,7 +189,8 @@ def test_jumps_to_connections_and_files(window, env, wait):
     assert page.host_path(page.current()) == (str(workspace), "src/a.py")
     assert page.show_file()
     files = window.files
-    assert window.pages.currentWidget() is files and files.relative == "src"
+    assert wait(lambda: files.relative == "src"), "its folder is listed once the roots are read (in the background)"
+    assert window.pages.currentWidget() is files
     assert [files.entry_at(r).name for r in widgets.selected_rows(files.table)] == ["a.py"]
     # A path outside the workspaces, or one that climbs out, has no place in the file browser.
     outside = record("file", "x", "f9", path="/etc/passwd")
@@ -197,10 +198,11 @@ def test_jumps_to_connections_and_files(window, env, wait):
     assert page.host_path(outside) is None and page.host_path(climbing) is None
 
 
-def test_without_logs_and_with_an_old_sandbox_ai(window, env, monkeypatch, tmp_path):
+def test_without_logs_and_with_an_old_sandbox_ai(window, env, monkeypatch, tmp_path, wait):
     page = window.activity
     window.show_page("activity")
-    assert page.source.count() == 0 and "No sandbox has recorded activity" in page.status.text()
+    assert wait(lambda: "No sandbox has recorded activity" in page.status.text()), "read in the background"
+    assert page.source.count() == 0
     old = tmp_path / "old-sandbox-ai"
     old.mkdir()
     monkeypatch.setattr(page.sai, "directory", old)

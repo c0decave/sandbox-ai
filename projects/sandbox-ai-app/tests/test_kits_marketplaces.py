@@ -20,6 +20,14 @@ from sandbox_ai_app import backend, kits_page, widgets  # noqa: E402
 
 from test_projects import env, window  # noqa: E402,F401,F811 - shared fixtures
 
+
+@pytest.fixture
+def wait(qapp, window):
+    """conftest's wait, and the Kits page's change (a Task: one at a time) has ended too: the next action may go."""
+    from conftest import wait_until
+    return lambda condition, timeout=10.0: wait_until(qapp, lambda: condition() and not window.kits.task.running,
+                                                      timeout)
+
 pytestmark = pytest.mark.skipif(not os.environ.get("SANDBOX_AI_HOME") and not backend.shutil.which("sandbox-ai"),
                                 reason="set SANDBOX_AI_HOME to a sandbox-ai checkout")
 
@@ -382,6 +390,8 @@ def remote(env, monkeypatch):
             return None
         done(result, None)
     monkeypatch.setattr(kits_page, "background", synchronous)
+    monkeypatch.setattr(kits_page.Task, "call_watched", lambda task, sai, function, done, *a, **k: synchronous(
+        function, done=done) or True)  # a kit change too
     monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
     monkeypatch.setattr(widgets, "SHOWN", [])
     sai = backend.SandboxAI()

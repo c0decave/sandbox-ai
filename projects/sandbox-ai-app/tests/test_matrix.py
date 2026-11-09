@@ -725,6 +725,7 @@ def test_files_in_and_out_of_a_sandbox(window, env, tmp_path, wait, where, repla
     (root / "planted").symlink_to(precious)
     page = window.files
     page.refresh_roots()
+    assert wait(lambda: not page.roots_reading), "the roots are read in the background"
     titles = {page.roots.itemData(i): page.roots.itemText(i) for i in range(page.roots.count())}
     assert titles[str(env / "project")].startswith(f"Running sandbox {run}: workspace")
     assert titles[str(home)].startswith("Session work: HOME")

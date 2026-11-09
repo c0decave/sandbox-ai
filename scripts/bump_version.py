@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Raise the version of sandbox-ai (__version__ in sandbox/agent_sandbox.py).
 
-  scripts/bump_version.py            next patch: 0.1.17 -> 0.1.18; after 0.1.250 comes 0.2.0
-  scripts/bump_version.py --minor    next minor: 0.1.17 -> 0.2.0
+  scripts/bump_version.py            next patch: 0.1.17 -> 0.1.18; after 0.1.249 comes 0.2.0, after 0.49.249 1.0.0
+  scripts/bump_version.py --minor    next minor: 0.1.17 -> 0.2.0; after 0.49.x comes 1.0.0
   scripts/bump_version.py --major    next major: 0.4.3 -> 1.0.0
   scripts/bump_version.py --set X.Y.Z
   scripts/bump_version.py --show     print the current version, change nothing
@@ -16,7 +16,8 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "sandbox" / "agent_sandbox.py"
-PATCH_LIMIT = 250
+PATCH_LIMIT = 250  # the patch number stays below it: 0.1.249 -> 0.2.0
+MINOR_LIMIT = 50  # the minor number stays below it: 0.49.249 -> 1.0.0
 LINE = re.compile(r'^__version__ = "([^"]+)"$', re.M)
 SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 
@@ -30,11 +31,11 @@ def parse(text):
 
 def next_version(current, part="patch"):
     major, minor, patch = parse(current)
-    if part == "major":
-        return f"{major + 1}.0.0"
-    if part == "minor" or patch >= PATCH_LIMIT:
+    if part == "patch" and patch + 1 < PATCH_LIMIT:
+        return f"{major}.{minor}.{patch + 1}"
+    if part in ("patch", "minor") and minor + 1 < MINOR_LIMIT:
         return f"{major}.{minor + 1}.0"
-    return f"{major}.{minor}.{patch + 1}"
+    return f"{major + 1}.0.0"
 
 
 def main(argv=None):

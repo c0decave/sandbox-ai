@@ -22,7 +22,7 @@ from . import widgets
 from .i18n import N_, tr
 from .host_choice import on_host
 from .widgets import (
-    ask_first, background, fill, outcome, plain_label, selected, show_text, table, shown_as_text,
+    ask_first, background, disclosure, fill, outcome, plain_label, selected, show_text, table, shown_as_text,
 )
 
 LOCAL = "local"
@@ -221,7 +221,7 @@ class VpnDialog(QDialog):
         # The options every kind has, folded away.
         self.more = QToolButton()
         self.more.setText(tr("Advanced options"))
-        self.more.setCheckable(True)
+        disclosure(self.more)  # an arrow that opens, not a button that stays pressed
         self.more.setAccessibleName(tr("Advanced options"))
         layout.addWidget(self.more)
         self.advanced = QWidget()

@@ -11,6 +11,14 @@ from sandbox_ai_app import backend, kits_page, widgets  # noqa: E402
 
 from test_projects import env, project, window  # noqa: E402,F401 - shared fixtures
 
+
+@pytest.fixture
+def wait(qapp, window):
+    """conftest's wait, and the Kits page's change (a Task: one at a time) has ended too: the next action may go."""
+    from conftest import wait_until
+    return lambda condition, timeout=10.0: wait_until(qapp, lambda: condition() and not window.kits.task.running,
+                                                      timeout)
+
 pytestmark = pytest.mark.skipif(not os.environ.get("SANDBOX_AI_HOME") and not backend.shutil.which("sandbox-ai"),
                                 reason="set SANDBOX_AI_HOME to a sandbox-ai checkout")
 
@@ -168,7 +176,8 @@ def test_a_skill_added_with_a_built_in_kit_selected_goes_to_a_kit_of_yours(fake,
                                                                  (1, "", "sandbox-ai kits: no space left"))
     select_kit(page, "builtin", "egm")
     page.add_skill()
-    assert wait(lambda: widgets.SHOWN and "no space left" in widgets.SHOWN[-1][1], 10)
+    assert wait(lambda: "no space left" in page.message.text(), 10), "said in the page's message area"
+    assert page.message.property("role") == "bad" and page.message.isVisibleTo(page)
     assert calls == [("new", "other")]
 
 
@@ -272,7 +281,7 @@ def test_every_change_runs_sandbox_ai_kits(fake, env, monkeypatch, wait):
     fake.sai.kit_command = lambda *a, **k: (1, "", "sandbox-ai kits: a marketplace from a folder is not supported")
     select_kit(page, "user", "mine")
     page.add_marketplace()
-    assert wait(lambda: widgets.SHOWN and "folder is not supported" in widgets.SHOWN[-1][1], 10)
+    assert wait(lambda: "folder is not supported" in page.message.text(), 10)
 
 
 def test_names_are_checked_before_anything_runs(fake, monkeypatch):

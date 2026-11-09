@@ -3826,6 +3826,46 @@ TEXTS = {
     'Cancelling…': {
         'en': 'Cancelling…',
         'de': 'Wird abgebrochen…'},
+    # == work in the background: the busy bar, Cancel and the output of a Task, the window's busy indicator ==
+    'Output': {
+        'en': 'Output',
+        'de': 'Ausgabe'},
+    '(open)': {
+        'en': '(open)',
+        'de': '(geöffnet)'},
+    'Running: {pages}…': {
+        'en': 'Running: {pages}…',
+        'de': 'Läuft: {pages}…'},
+    'Kit change running': {
+        'en': 'Kit change running',
+        'de': 'Änderung am Kit läuft'},
+    'sandbox-ai kits {action} {name} is running…': {
+        'en': 'sandbox-ai kits {action} {name} is running…',
+        'de': 'sandbox-ai kits {action} {name} läuft…'},
+    'sandbox-ai kits trust-hooks --revoke {name} is running…': {
+        'en': 'sandbox-ai kits trust-hooks --revoke {name} is running…',
+        'de': 'sandbox-ai kits trust-hooks --revoke {name} läuft…'},
+    'A change is running: wait for it, or cancel it.': {
+        'en': 'A change is running: wait for it, or cancel it.',
+        'de': 'Eine Änderung läuft: Warten Sie darauf, oder brechen Sie sie ab.'},
+    '{title}: cancelled. What sandbox-ai did up to then stays; Refresh shows the kits.': {
+        'en': '{title}: cancelled. What sandbox-ai did up to then stays; Refresh shows the kits.',
+        'de': '{title}: abgebrochen. Was sandbox-ai bis dahin getan hat, bleibt; Neu laden zeigt die Kits.'},
+    'Update or installation running': {
+        'en': 'Update or installation running',
+        'de': 'Aktualisierung oder Installation läuft'},
+    'An update or installation is running: wait for it, or cancel it.': {
+        'en': 'An update or installation is running: wait for it, or cancel it.',
+        'de': 'Eine Aktualisierung oder Installation läuft: Warten Sie darauf, oder brechen Sie sie ab.'},
+    '{host}: cancelled': {
+        'en': '{host}: cancelled',
+        'de': '{host}: abgebrochen'},
+    'cancelled': {
+        'en': 'cancelled',
+        'de': 'abgebrochen'},
+    'Which folders sandboxes can write is not known ({error}): nothing is written.': {
+        'en': 'Which folders sandboxes can write is not known ({error}): nothing is written.',
+        'de': 'Welche Ordner Sandboxen schreiben können, ist nicht bekannt ({error}): Es wird nichts geschrieben.'},
     'Close': {
         'en': 'Close',
         'de': 'Schließen'},

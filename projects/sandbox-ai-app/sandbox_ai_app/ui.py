@@ -8,12 +8,12 @@ from pathlib import Path
 import shlex
 import time
 
-from PySide6.QtCore import QByteArray, QEvent, QPoint, QProcess, QRect, QSize, Qt, QTimer, Signal, qVersion
+from PySide6.QtCore import QByteArray, QEvent, QObject, QPoint, QProcess, QRect, QSize, Qt, QTimer, Signal, qVersion
 from PySide6.QtGui import QAction, QActionGroup, QBrush, QCloseEvent, QColor, QFont, QKeySequence, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout,
     QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
-    QPlainTextEdit,
+    QPlainTextEdit, QProgressBar,
     QPushButton,
     QDockWidget, QFrame, QScrollArea, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QStyle, QSystemTrayIcon, QTabBar,
     QTabWidget, QToolButton, QTreeView, QVBoxLayout, QWidget,
@@ -149,9 +149,10 @@ class ListField(QWidget):
     the names the chosen host has (set_choices: its MCP servers for --mcp, its kits for --kit)."""
     changed = Signal()
 
-    def __init__(self, path=False, choices=False):
+    def __init__(self, path=False, choices=False, option=None):
         super().__init__()
         layout = QHBoxLayout(self)
+        self.option = option
         layout.setContentsMargins(0, 0, 0, 0)
         self.edit = QPlainTextEdit()
         self.edit.setFixedHeight(52)
@@ -187,7 +188,10 @@ class ListField(QWidget):
         self.pick.setToolTip(safe_tooltip(tr("Add one that {host} has", host=where) if where else tr("Add one")))
 
     def add(self, value):
-        if value not in self.value():
+        if self.option in OptionsForm.SECRET_CHOICES:  # a secret's name: HOST=NAME, URL=NAME or NAME (name_fields)
+            from .name_fields import add_line
+            self.edit.setPlainText(add_line(self.edit.toPlainText(), value, self.option))
+        elif value not in self.value():
             self.edit.appendPlainText(value)
 
     def set_local(self, local):
@@ -324,7 +328,9 @@ class OptionsForm(QTabWidget):
 
     # The options whose values the chosen host lists (backend.host_start_choices): a chooser filled from its lists,
     # the value still typed in where it has none (or the list could not be read).
-    HOST_CHOICES = ("--vpn", "--kit", "--identity", "--mcp", "--image-variant")
+    HOST_CHOICES = ("--vpn", "--kit", "--identity", "--mcp", "--image-variant", "--secret-env", "--api-key",
+                    "--git-token-secret")
+    SECRET_CHOICES = ("--secret-env", "--api-key", "--git-token-secret")  # their values name a secret of that host
 
     def widget_for(self, option):
         from . import hardware
@@ -345,7 +351,7 @@ class OptionsForm(QTabWidget):
             self.limit_hint(widget, option, "local")
             return widget
         if option.long in self.HOST_CHOICES and option.kind == "list":
-            widget = ListField(choices=True)
+            widget = ListField(choices=True, option=option.long)
             widget.changed.connect(self.changed)
             return widget
         if option.long in self.HOST_CHOICES and option.kind == "value":
@@ -588,6 +594,9 @@ class LaunchPage(QWidget):
         self.preset_catalogue, self.presets_host, self.presets_reading = PR.Catalogue(), None, None
         self.choices_host, self.choices_read_at, self.choices_token = None, 0.0, 0
         self.form = OptionsForm(self.options)
+        # A secret or VPN profile added or removed (Credentials page): the choosers are read again when shown next.
+        from .name_fields import hub
+        hub().changed.connect(self.names_changed)
         try:
             self.form.apply_policy(sai.forbidden())
         except Exception:  # noqa: BLE001 - a broken policy is shown on the System page
@@ -850,6 +859,10 @@ class LaunchPage(QWidget):
                    done=lambda result, error: alive(self) and self.host_choices_read(token, host, result, error))
 
     def host_choices_read(self, token, host, result, error):
+    def names_changed(self, _kind, host):
+        if host == self.choices_host:
+            self.choices_read_at = 0.0
+
         if token != self.choices_token or host != self.host():
             return
         self.choices_read_at = time.monotonic()
@@ -1996,7 +2009,7 @@ class SandboxesPage(QWidget):
         else reads with refresh_soon(): sandbox-ai's registry read also prunes what ended (it removes files), and
         a disk that hangs must not hang the window."""
         try:
-            result, error = self.sai.instances(), None
+            result, error = self.sai.instances(), None  # on the GUI thread on purpose: the first look (see above)
         except Exception as exc:  # noqa: BLE001 - shown, read again
             result, error = None, exc
         self.apply(result, error)
@@ -4714,10 +4727,19 @@ class SystemPage(QWidget):
         layout.addWidget(settings)
 
     def choose_autostart(self, on):
-        """Written or removed only here, when the human ticks the box."""
+        """Written or removed only here, when the human ticks the box. Before it is written, the folders sandboxes
+        can write are read in the background (sandbox-ai's registry may ask Podman)."""
+        if not on:
+            return self.write_autostart(False, ())
+        background(self.sai.sandbox_folders, owner=self, source=self.autostart_box, timeout=60,
+                   done=lambda folders, error: self.write_autostart(True, folders, error))
+
+    def write_autostart(self, on, forbidden, error=None):
         try:
-            backend.set_autostart(bool(on), forbidden=self.sai.sandbox_folders() if on else (),
-                                  also=[str(self.sai.directory)])
+            if error is not None:
+                raise OSError(tr("Which folders sandboxes can write is not known ({error}): nothing is written.",
+                                 error=printable(error)))
+            backend.set_autostart(bool(on), forbidden=forbidden, also=[str(self.sai.directory)])
         except backend.InsideSandbox as exc:
             warn(self, tr("Start at login"), tr("Not written: the app runs from {path}, inside {folder}, which a "
                                                 "sandbox can write (it could change what starts at your next "
@@ -4954,6 +4976,32 @@ class ProjectBar(QWidget):
     """The current project, large, at the top of the window; the switcher lists the projects sandbox-ai and the
     app know (SandboxAI.known_projects), then Open folder… and New project (wizard)…."""
     chosen = Signal(str)
+class KnownProjects(QObject):
+    """SandboxAI.known_projects() as last read, read again in the background (it reads sandbox-ai's registry, which
+    may ask Podman, and the folders of sessions): the project switcher and the menus show at once what is known and
+    change when a newer read differs (changed)."""
+    changed = Signal()
+
+    def __init__(self, sai):
+        super().__init__()
+        self.sai, self.value, self.reading, self.again = sai, [], None, False
+
+    def refresh(self):
+        if self.reading is not None:
+            self.again = True
+            return
+        self.again = False
+        self.reading = background(self.sai.known_projects, timeout=60, done=self.read)
+
+    def read(self, result, error):
+        self.reading = None
+        if error is None and list(result) != self.value:
+            self.value = list(result)
+            self.changed.emit()
+        if self.again:
+            self.refresh()
+
+
     open_folder = Signal()
     new_project = Signal()
     OPEN, NEW = ":open", ":new"  # never a project: those are absolute paths
@@ -4965,6 +5013,8 @@ class ProjectBar(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(18, 8, 18, 8)
+        self.known = KnownProjects(sai)
+        self.known.changed.connect(lambda: self.fill(read=False))
         self.icon = QLabel()
         self.icon.setPixmap(theme.glyph("project", theme.colors()["title"], 26).pixmap(26, 26))
         texts = QVBoxLayout()
@@ -5011,12 +5061,12 @@ class ProjectBar(QWidget):
     def restyle(self):
         self.icon.setPixmap(theme.glyph("project", theme.colors()["title"], 26).pixmap(26, 26))
 
-    def fill(self):
-        """The known projects (read again), the current one selected; then the two actions."""
-        try:
-            known = self.sai.known_projects()
-        except Exception:  # noqa: BLE001 - the actions still work
-            known = []
+    def fill(self, read=True):
+        """The known projects (as last read; READ: read again, in the background), the current one selected; then
+        the two actions."""
+        if read:
+            self.known.refresh()
+        known = self.known.value
         self.combo.blockSignals(True)
         self.combo.clear()
         if self.path is None:
@@ -5452,6 +5502,7 @@ class MainWindow(QMainWindow):
         strip_layout.addWidget(self.add_tab_button)
         # Hidden on the pages the project does not change (PROJECT_TAB_PAGES), keeping their place: nothing below moves.
         for widget in (self.tabs, self.add_tab_button):
+        self.project_bar.known.changed.connect(self.known_projects_changed)
             policy = widget.sizePolicy()
             policy.setRetainSizeWhenHidden(True)
             widget.setSizePolicy(policy)
@@ -5483,6 +5534,7 @@ class MainWindow(QMainWindow):
         self.session_timer.setSingleShot(True)
         self.session_timer.timeout.connect(self.session_goes_on)
         self.make_window_controls()
+        self.make_busy_indicator()
         self.make_menus()
         if QSystemTrayIcon.isSystemTrayAvailable():
             self.make_tray()
@@ -5891,12 +5943,20 @@ class MainWindow(QMainWindow):
         for key, item in getattr(self, "theme_actions", {}).items():
             item.setChecked(key == current)
 
-    def fill_switch_menu(self):
+    def known_projects_changed(self):
+        """A newer read of the known projects: a menu open now lists them."""
+        if self.add_tab_menu.isVisible():
+            self.fill_add_tab_menu(read=False)
+        if getattr(self, "switch_menu", None) is not None and self.switch_menu.isVisible():
+            self.fill_switch_menu(read=False)
+
+    def fill_switch_menu(self, read=True):
         self.switch_menu.clear()
-        try:
-            known = self.sai.known_projects()
-        except Exception:  # noqa: BLE001
-            known = []
+        if read:
+            self.project_bar.known.refresh()  # an open menu is filled again when a newer read differs
+        known = self.project_bar.known.value
+        group = QActionGroup(self.switch_menu)  # one current project: a radio choice
+        group.setExclusive(True)
         for path, _ in known:
             item = self.switch_menu.addAction(menu_text(f"{Path(path).name or path}  —  {middle(path, 60)}"))
             item.setCheckable(True)
@@ -5906,6 +5966,7 @@ class MainWindow(QMainWindow):
             self.switch_menu.addAction(tr("No project known yet")).setEnabled(False)
 
     def about(self):
+            group.addAction(item)
         import platform
         import PySide6
         from . import __version__
@@ -5944,10 +6005,13 @@ class MainWindow(QMainWindow):
         for key, widget in tables:
             s.table(key, widget)
         for key, splitter in (("approvals", self.approvals.split), ("connections", self.connections.split),
-                              ("kits", self.kits.split), ("kits-marketplaces", self.kits.market_split)):
+                              ("kits", self.kits.split), ("kits-marketplaces", self.kits.market_split),
+                              ("files", self.files.split)):
             s.splitter(key, splitter)
         s.text("connections-filter", self.connections.filter)
         s.check("connections-refused", self.connections.refused)
+        saved = s.section("splitters").get("files")
+        self.files.keep_split = isinstance(saved, list) and len(saved) == self.files.split.count()  # kept: it wins
         s.check("connections-follow", self.connections.follow)
         s.text("images-filter", self.images.filter)
         s.check("sandboxes-only-project", self.sandboxes.only_project)
@@ -6454,20 +6518,20 @@ class MainWindow(QMainWindow):
         if row >= 0:
             self.sandboxes.table.selectRow(row)
 
-    def fill_add_tab_menu(self):
+    def fill_add_tab_menu(self, read=True):
         """"+": the known projects, the sessions and sandboxes of the account not open yet, Open folder…, New
         project…."""
         menu = self.add_tab_menu
         menu.clear()
         menu.addSection(tr("Projects"))
-        try:
-            known = self.sai.known_projects()
-        except Exception:  # noqa: BLE001
-            known = []
+        if read:
+            self.project_bar.known.refresh()
+        known = self.project_bar.known.value
         for path, _ in known:
-            action = menu.addAction(menu_text(f"{Path(path).name or path}  —  {middle(path, 60)}"))
-            action.setCheckable(True)
-            action.setChecked(self.tabs.find(project_entry(path)["key"]) >= 0)
+            # An action that opens (or shows) the project's tab, not a toggle: an open one says so in its text.
+            shown = self.tabs.find(project_entry(path)["key"]) >= 0
+            action = menu.addAction(menu_text(f"{Path(path).name or path}  —  {middle(path, 60)}" +
+                                              (" " + tr("(open)") if shown else "")))
             action.triggered.connect(lambda _=False, p=path: self.set_project(p))
         waiting = [i for i in self.sandboxes.instances.values() if i.kind in ("session", "run")
                    and getattr(i, "host", "local") == "local" and self.tabs.find(i.key) < 0]
@@ -6701,9 +6765,7 @@ class MainWindow(QMainWindow):
 
     def running_work(self):
         """The titles of the pages with work in the background (commands, copies, an answer being sent)."""
-        found = [key for key, _ in PAGES if busy(getattr(self, key))]
-        if self.files.task.running:
-            found.append("files")
+        found = [key for key, _ in PAGES if busy(getattr(self, key))]  # busy(): its background calls and its Task
         if self.approvals.answering is not None:
             found.append("approvals")
         return [tr(title) for key, title in PAGES if key in found]
@@ -6714,8 +6776,33 @@ class MainWindow(QMainWindow):
         seconds for the background threads to end; the calls still running."""
         self.stopped = True
         self.files.task.cancel()
-        self.sai.stop_commands()
+        self.sai.stop_commands()  # on the GUI thread on purpose: quitting, bounded by one grace period
         return ThreadCall.wait_all(QUIT_WAIT if timeout is None else timeout)
+
+    def make_busy_indicator(self):
+        """At the right of the status bar, while a page has work in the background (a command, a copy, an install): a
+        busy bar and which pages ("Running: Kits & plugins…"), so a click that takes a while is seen to be working
+        while the window stays usable; gone when nothing runs."""
+        self.busy_bar = QProgressBar()
+        self.busy_bar.setRange(0, 0)
+        self.busy_bar.setMaximumWidth(90)
+        self.busy_bar.setMaximumHeight(10)
+        self.busy_bar.setTextVisible(False)
+        self.busy_bar.setAccessibleName(tr("Running"))
+        self.busy_label = widgets.plain_label(word_wrap=False, role="secondary")
+        self.statusBar().addPermanentWidget(self.busy_label)
+        self.statusBar().addPermanentWidget(self.busy_bar)
+        widgets.activity().changed.connect(self.show_busy)
+        self.show_busy()
+
+    def show_busy(self):
+        try:
+            pages = self.running_work()
+        except (AttributeError, RuntimeError):  # still being built, or closing
+            return
+        self.busy_label.setText(tr("Running: {pages}…", pages=", ".join(pages)) if pages else "")
+        self.busy_label.setVisible(bool(pages))
+        self.busy_bar.setVisible(bool(pages))
 
     def terminate(self):
         """SIGTERM (logout, systemctl stop): no question, the work is stopped (bounded), the app quits."""
@@ -6793,9 +6880,10 @@ class MainWindow(QMainWindow):
             self.sai.save_setting("tray_notice_shown", True)
 
     def questions_refused_without_window(self):
-        """Without a tray, closing ends the answering: True if nothing runs or the human quits anyway."""
+        """Without a tray, closing ends the answering: True if nothing runs or the human quits anyway. What runs: as the
+        registry's files and /proc (live_runs: never Podman, so quitting never waits for it)."""
         try:
-            runs = self.sai.runs()
+            runs = self.sai.live_runs()
         except Exception:  # noqa: BLE001 - nothing known to run
             runs = {}
         if not runs:

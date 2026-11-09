@@ -29,7 +29,7 @@ def current(window):
 # -- tabs --
 
 
-def test_projects_open_in_tabs_and_the_pages_follow_the_tab(window, env):
+def test_projects_open_in_tabs_and_the_pages_follow_the_tab(window, env, wait):
     one, two = project(env, "one"), project(env, "two")
     assert window.tabs.count() == 0
     window.set_project(one)
@@ -38,7 +38,8 @@ def test_projects_open_in_tabs_and_the_pages_follow_the_tab(window, env):
     assert window.tabs.tabText(0) == "one" and window.tabs.tabToolTip(0)
     window.tabs.setCurrentIndex(0)
     assert window.project == str(one) and window.board.directory == str(one)
-    assert window.launch.form.values()["--workspace"] == [str(one)] and window.files.roots.currentData() == str(one)
+    assert window.launch.form.values()["--workspace"] == [str(one)]
+    assert wait(lambda: window.files.roots.currentData() == str(one)), "the roots are read in the background"
     assert window.statistics.directory.currentData() == str(window.sai.launcher.default_log_dir(one))
     assert window.project_bar.name.text() == "one"
     window.set_project(two)  # an open project is reused, not opened twice
@@ -167,6 +168,8 @@ def test_the_plus_menu_and_a_tabs_context_menu(window, env, monkeypatch, wait):
     fake_session(env, "work", two)
     window.sandboxes.refresh()
     window.fill_add_tab_menu()
+    assert wait(lambda: window.project_bar.known.reading is None)  # the projects are read in the background
+    window.fill_add_tab_menu(read=False)
     texts = [a.text() for a in window.add_tab_menu.actions() if a.text()]
     assert any(t.startswith("one") for t in texts) and any(t.startswith("two") for t in texts)
     session = next(a for a in window.add_tab_menu.actions() if a.text().startswith("Session work"))

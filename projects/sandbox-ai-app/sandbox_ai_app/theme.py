@@ -450,7 +450,8 @@ def _hacker(c, a):
     return f"""
 QLabel[role="title"] {{ border-bottom: 1px dashed {c['border']}; padding-bottom: 4px; }}
 QPushButton {{ background: transparent; border: 1px solid {c['border']}; border-radius: 0; padding: 4px 14px; }}
-QPushButton:hover, QPushButton:focus {{ background: {c['accent']}; color: {c['accent_text']}; border-color: {c['accent']}; }}
+QPushButton:hover, QPushButton:pressed {{ background: {c['accent']}; color: {c['accent_text']}; border-color: {c['accent']}; }}
+QPushButton:focus {{ border-color: {c['accent']}; }}
 QPushButton[role="primary"] {{ background: transparent; color: {c['accent']}; border: 1px solid {c['accent']}; }}
 QPushButton[role="primary"]:hover {{ background: {c['accent']}; color: {c['accent_text']}; }}
 QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{ border: none; border-bottom: 1px solid {c['border']}; border-radius: 0;
@@ -497,8 +498,9 @@ def _amber(c, a):
     return f"""
 QPushButton {{ border: 3px double {c['border']}; border-radius: 0; background: {c['window']}; padding: 3px 14px; }}
 QPushButton:hover {{ border-color: {c['border']}; }}
-QPushButton:focus, QPushButton:pressed, QPushButton[role="primary"] {{ background: {c['accent']}; color: {c['accent_text']};
+QPushButton:pressed, QPushButton[role="primary"] {{ background: {c['accent']}; color: {c['accent_text']};
     border-color: {c['accent']}; }}
+QPushButton:focus {{ border-color: {c['accent']}; }}
 QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit {{ border: 1px solid {c['border']}; border-radius: 0; }}
 QTableWidget, QTableView, QTreeView, QListView, QGroupBox, QFrame[role="kpi"], QFrame[role="card"] {{
     border: 3px double {c['border']}; border-radius: 0; }}

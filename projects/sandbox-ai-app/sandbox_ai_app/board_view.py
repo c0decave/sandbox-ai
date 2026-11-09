@@ -1746,9 +1746,18 @@ class BoardPage(QWidget):
 
     def live_rows(self, node):
         """A running sandbox of this project can get the devices and limits now (sandbox-ai devices add /
-        limits): clearly marked as live, until that sandbox ends; the project file is not changed by it."""
+        limits): clearly marked as live, until that sandbox ends; the project file is not changed by it. Which
+        sandbox runs it is read in the background (sandbox-ai's registry may ask Podman); the rows come when it is
+        known, if the inspector still shows this node."""
         workspaces = self.board.of_kind("workspace")
-        run = self.sai.run_for(workspaces[0].props.get("path")) if workspaces else None
+        self.live_token = getattr(self, "live_token", 0) + 1
+        if not workspaces:
+            return
+        token = self.live_token
+        background(self.sai.run_for, workspaces[0].props.get("path"), owner=self, timeout=60, work=False,
+                   done=lambda run, error: token == self.live_token and error is None and self.live_rows_found(node, run))
+
+    def live_rows_found(self, node, run):
         if not run:
             return
         label = plain_label(tr("Live, until the sandbox ends: {run} runs this project now.", run=printable(run)),
@@ -1758,6 +1767,7 @@ class BoardPage(QWidget):
             button = QPushButton(tr("Add these devices to {run} now", run=printable(run)))
             button.clicked.connect(lambda: self.live_devices(run, list(node.props.get("--device", [])), button))
         else:
+        self.live_token = getattr(self, "live_token", 0) + 1  # a live row still being looked up is for another look
             button = QPushButton(tr("Apply these limits to {run} now", run=printable(run)))
             button.clicked.connect(lambda: self.live_limits(run, node.props, button))
         self.inspector.addRow(button)

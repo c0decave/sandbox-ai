@@ -25,7 +25,7 @@ class FakeSai:
 
 
 @pytest.fixture
-def setup(qapp, tmp_path, monkeypatch):
+def setup(qapp, tmp_path, monkeypatch, wait):
     monkeypatch.setattr(widgets, "AUTO_ANSWER", True)  # confirm() says yes; what was asked is collected
     monkeypatch.setattr(widgets, "SHOWN", [])
     ws, host, outside = tmp_path / "ws", tmp_path / "host", tmp_path / "outside"
@@ -40,6 +40,7 @@ def setup(qapp, tmp_path, monkeypatch):
     (ws / "escape").symlink_to(outside)
     sai = FakeSai([("run", "claude-abc", str(ws.resolve()))], hosts={"lab": {"version": "0.1.76"}})
     page = files_page.FilesPage(sai)
+    assert wait(lambda: page.roots.count() > 0 and not page.roots_reading), "the roots are read in the background"
     page.right.go_path(str(host))
     return page, ws.resolve(), host.resolve(), outside
 
@@ -204,3 +205,44 @@ def test_permissions_and_owners(setup, wait):
     page.activate(page.right)
     assert not page.buttons["own"].isEnabled()
     assert page.own_selected(page.right) is False and "only below a sandbox" in page.message.text()
+
+
+def test_the_two_panes_split_half_and_half_and_a_moved_division_stays(setup, qapp, wait):
+    """User request: the panes are half and half when the page is shown, and stay where the human dragged them."""
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+    page = setup[0]
+    page.resize(1400, 600)  # (the sandbox pane needs some 500 px: its folder list and buttons)
+    page.show()
+    assert wait(lambda: page.isVisible() and abs(page.split.sizes()[0] - page.split.sizes()[1]) <= 4), \
+        page.split.sizes()
+    assert page.split.childrenCollapsible() is False and not page.keep_split
+    handle = page.split.handle(1)
+    middle = QPoint(handle.width() // 2, handle.height() // 2)
+    QTest.mousePress(handle, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, middle)
+    QTest.mouseMove(handle, middle - QPoint(200, 0))
+    QTest.mouseRelease(handle, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, middle - QPoint(200, 0))
+    moved = page.split.sizes()
+    assert moved[0] < moved[1] - 100 and page.keep_split, moved
+    page.hide()
+    page.show()
+    qapp.processEvents()
+    assert page.split.sizes() == moved, "a moved division stays"
+    page.hide()
+
+
+def test_home_up_and_refresh_are_actions_not_toggles(setup, qapp, wait):
+    """User report: after a click on Home the button looked pressed (it kept the focus, which some themes draw as
+    pressed). The pane's buttons go somewhere and stay plain: never checked or down, no focus from a click."""
+    from PySide6.QtTest import QTest
+    page = setup[0]
+    page.show()
+    buttons = {b.text(): b for b in page.right.findChildren(QtWidgets.QPushButton)}
+    for name in ("Home", "Up", "Refresh"):
+        widget = buttons[name]
+        QTest.mouseClick(widget, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert not widget.isCheckable() and not widget.isChecked() and not widget.isDown() and not widget.hasFocus()
+        assert widget.focusPolicy() == Qt.FocusPolicy.TabFocus, "still reached with Tab"
+    assert page.right.path_text() == os.path.realpath(os.path.expanduser("~")) or page.right.path_text()
+    page.hide()

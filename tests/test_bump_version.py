@@ -1,4 +1,4 @@
-"""scripts/bump_version.py: patch steps, the rollover after .250, explicit parts and bad input."""
+"""scripts/bump_version.py: patch steps, the rollovers (patch below 250, minor below 50), explicit parts and bad input."""
 import importlib.util
 from pathlib import Path
 
@@ -13,8 +13,13 @@ spec.loader.exec_module(bump)
 @pytest.mark.parametrize("current, part, expected", [
     ("0.1.0", "patch", "0.1.1"),
     ("0.1.17", "patch", "0.1.18"),
-    ("0.1.249", "patch", "0.1.250"),
+    ("0.1.248", "patch", "0.1.249"),
+    ("0.1.249", "patch", "0.2.0"),
     ("0.1.250", "patch", "0.2.0"),
+    ("0.49.248", "patch", "0.49.249"),
+    ("0.49.249", "patch", "1.0.0"),
+    ("0.49.3", "minor", "1.0.0"),
+    ("0.48.3", "minor", "0.49.0"),
     ("0.1.17", "minor", "0.2.0"),
     ("0.4.3", "major", "1.0.0"),
 ])

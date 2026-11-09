@@ -137,7 +137,7 @@ def test_navigation_has_sections_shortcuts_and_a_glyph_per_page(window, qapp):
 # -- projects --
 
 
-def test_known_projects_come_from_sandbox_ais_records_and_the_apps_list(window, env):
+def test_known_projects_come_from_sandbox_ais_records_and_the_apps_list(window, env, wait):
     sai = window.sai
     trusted, ran, sess, recent, gone = (project(env, n) for n in ("trusted", "ran", "sess", "recent", "gone"))
     (trusted / ".sandbox-ai.json").write_text(json.dumps({"version": 1, "agent": "claude", "options": []}))
@@ -151,8 +151,9 @@ def test_known_projects_come_from_sandbox_ais_records_and_the_apps_list(window, 
     assert known[str(trusted)] == {"trusted"} and known[str(ran)] == {"running"} and known[str(sess)] == {"session"}
     assert known[str(recent)] == {"recent"} and str(gone) not in known, "only folders that exist"
     assert [path for path, _ in sai.known_projects()][0] == str(recent), "the app's own list first, newest first"
-    window.project_bar.fill()
+    window.project_bar.fill()  # read in the background: the list changes when it is known
     combo = window.project_bar.combo
+    assert wait(lambda: str(trusted) in [combo.itemData(i) for i in range(combo.count())])
     items = [combo.itemData(i) for i in range(combo.count())]
     assert str(trusted) in items and str(ran) in items and items[-2:] == [":open", ":new"]
     tip = combo.itemData(items.index(str(trusted)), QtCore.Qt.ItemDataRole.ToolTipRole)
@@ -167,7 +168,7 @@ def test_switching_the_project_drives_the_pages_and_is_kept(window, env, monkeyp
     assert wait(lambda: "no .sandbox-ai.json yet" in window.project_bar.state.text())  # read in a thread
     assert window.launch.form.values()["--workspace"] == [str(one)]
     assert window.board.directory == str(one) and window.board.notice.isVisibleTo(window.board)
-    assert window.files.roots.currentData() == str(one)
+    assert wait(lambda: window.files.roots.currentData() == str(one))  # read in a thread
     log_dir = str(window.sai.launcher.default_log_dir(one))
     assert wait(lambda: window.connections.directory.currentData() == log_dir)  # listed in a thread
     assert window.statistics.directory.currentData() == log_dir
@@ -176,6 +177,7 @@ def test_switching_the_project_drives_the_pages_and_is_kept(window, env, monkeyp
     fake_run(env, "codex-two", two)
     bar = window.project_bar
     bar.fill()
+    assert wait(lambda: bar.combo.findData(str(two)) >= 0)
     bar.activated(bar.combo.findData(str(two)))
     assert window.project == str(two) and window.board.board.first("agent").props["agent"] == "codex"
     assert wait(lambda: "not trusted yet" in bar.state.text() and window.launch.review_button.isVisibleTo(window.launch))

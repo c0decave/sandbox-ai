@@ -558,10 +558,19 @@ class SettingsDialog(QDialog):
         self.changed.emit("telemetry")
 
     def choose_autostart(self, on):
-        """Written or removed only here or on the System page, when the human ticks the box."""
+        """Written or removed only here or on the System page, when the human ticks the box (the folders sandboxes
+        can write, which it must not start from, read in the background first)."""
+        if not on:
+            return self.write_autostart(False, ())
+        background(self.sai.sandbox_folders, owner=self, source=self.autostart, timeout=60,
+                   done=lambda folders, error: self.write_autostart(True, folders, error))
+
+    def write_autostart(self, on, forbidden, error=None):
         try:
-            backend.set_autostart(bool(on), forbidden=self.sai.sandbox_folders() if on else (),
-                                  also=[str(self.sai.directory)])
+            if error is not None:
+                raise OSError(tr("Which folders sandboxes can write is not known ({error}): nothing is written.",
+                                 error=printable(error)))
+            backend.set_autostart(bool(on), forbidden=forbidden, also=[str(self.sai.directory)])
         except (OSError, ValueError) as exc:
             warn(self, tr("Start at login"), printable(exc))
             self.autostart.blockSignals(True)

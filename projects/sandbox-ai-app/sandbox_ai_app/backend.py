@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import codecs
+import contextlib
 import hashlib
 import importlib.util
 import inspect
@@ -79,6 +81,8 @@ RECENT_FOLDERS = 10  # recent project folders the wizard offers
 KIT_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"  # kits.KIT_NAME
 SKILL_NAME = r"[a-z0-9][a-z0-9-]{0,63}"  # a new skill's name, as Claude wants it
 DRAIN = 2  # seconds call() still reads the output of a command it ended at its timeout
+CANCELLED = -2  # the exit status call() gives a command cancelled inside watching() (as Task.run says it)
+CANCEL_POLL = 0.1  # seconds between two looks at a watching() call's cancel
 KIT_ACTIONS = {"show", "new", "add-skill", "new-skill", "add-plugin", "add-marketplace", "remove-skill",
                "remove-plugin", "add-hook", "remove-hook", "delete", "enable-plugin", "disable-plugin",
                "remove-marketplace", "import-marketplace"}
@@ -213,18 +217,41 @@ class SandboxAI:
         """argv of a sandbox-ai command, run with this Python like the installed entry points."""
         return [sys.executable, "-I", str(self.directory / "main.py"), *args]
 
+    _watch = threading.local()  # what watching() set for the calls of the current thread
+
+    @contextlib.contextmanager
+    def watching(self, output=None, cancelled=None, errors_only=False):
+        """While in it, every call() of this thread (also inside host_run, host_kit_command, host_install, ...) hands
+        what its command writes to OUTPUT(text) as it comes (stdout and stderr, decoded; ERRORS_ONLY: stderr, for a
+        command whose stdout is --json), and ends the command with everything it started once CANCELLED() is true: it
+        then returns (CANCELLED, out, err + "cancelled"). How a page's Task shows a long command's progress and offers
+        Cancel, without a terminal."""
+        previous = getattr(self._watch, "value", None)
+        self._watch.value = (output, cancelled, errors_only)
+        try:
+            yield
+        finally:
+            self._watch.value = previous
+
     def call(self, *args, timeout=120, input=None):
         """(exit status, stdout, stderr) of a sandbox-ai command that does not need a terminal; INPUT, if
         given, is its standard input (how secrets are passed: never as an argument). The command leads a
         process group of its own, so stop_commands() (when the app quits) and a timeout end it with all it
         started. Its lead is reaped only under the signal lock: while a group is signalled, its number cannot
-        have been given to another group."""
+        have been given to another group. Inside watching(): its output is handed on as it comes, and it is
+        ended when cancelled."""
+        output, cancelled, errors_only = getattr(self._watch, "value", None) or (None, None, False)
+        if cancelled is not None and cancelled():
+            return CANCELLED, "", "cancelled"
         if self.run is not subprocess.run:  # a runner given for tests
             streams = {"input": input} if input is not None else {"stdin": subprocess.DEVNULL}
             try:
                 result = self.run(self.command(*args), capture_output=True, text=True, timeout=timeout, **streams)
             except subprocess.TimeoutExpired:
                 return 124, "", f"sandbox-ai {' '.join(args[:2])}: no answer within {timeout} s"
+            said = (result.stderr or "") if errors_only else (result.stdout or "") + (result.stderr or "")
+            if output is not None and said:
+                output(said)
             return result.returncode, result.stdout, result.stderr
         try:
             process = subprocess.Popen(self.command(*args), stdin=subprocess.PIPE if input is not None else
@@ -236,12 +263,13 @@ class SandboxAI:
             self._processes.add(process)
         # Its output is read in this thread (no reader threads: closing a pipe under a blocked read() never
         # returns, and a descendant that left the group - a daemon, ssh, dbus - may keep the pipes open).
-        pipes = Pipes(process, None if input is None else str(input).encode())
+        pipes = Pipes(process, None if input is None else str(input).encode(), output, errors_only)
         deadline = time.monotonic() + timeout
-        timed_out = False
+        timed_out = stopped = False
         try:
-            if not pipes.pump(deadline):  # still open past the deadline: end the group, take what is left
-                timed_out = True
+            if not pipes.pump(deadline, cancelled):  # still open past the deadline (or cancelled): end the group,
+                stopped = pipes.cancelled            # take what is left
+                timed_out = not stopped
                 self.end_groups([process])
                 pipes.pump(time.monotonic() + DRAIN)
         finally:
@@ -252,11 +280,17 @@ class SandboxAI:
                     process.wait()
                     self._processes.discard(process)
                     break
-            if not timed_out and time.monotonic() > deadline:  # it closed its output but goes on
-                timed_out = True
-                self.end_groups([process])
+            if not timed_out and not stopped:  # it closed its output but goes on
+                if cancelled is not None and cancelled():
+                    stopped = True
+                    self.end_groups([process])
+                elif time.monotonic() > deadline:
+                    timed_out = True
+                    self.end_groups([process])
             time.sleep(0.02)
         text = pipes.text()
+        if stopped:
+            return CANCELLED, text[0], text[1] + "cancelled"
         if timed_out:
             return 124, text[0], text[1] + f"sandbox-ai {' '.join(args[:2])}: no answer within {timeout} s"
         return process.returncode, text[0], text[1]
@@ -659,7 +693,32 @@ class SandboxAI:
 
     def questions(self, answered=False, runs=None):
         """[(run, record, question)] of the running sandboxes (open ones unless ANSWERED)."""
-        return self.module("approvals").questions(self.runs() if runs is None else runs, answered=answered)
+        return self.module("approvals").questions(self.live_runs() if runs is None else runs, answered=answered)
+
+    def live_runs(self):
+        """{run: record} of the sandboxes whose launcher runs, as runs() lists them, without what runs() does about a
+        run whose launcher is gone (asking Podman whether its pod still runs, removing the directories of one that
+        ended; runs() leaves such a run out too): only the registry's files and /proc, so the approvals' scan (on the
+        GUI thread too, every second) never waits for Podman."""
+        net = self.module("net")
+        if not hasattr(net, "run_dirs") or not hasattr(net, "alive"):  # an older sandbox-ai: its running() is this
+            return net.running()
+        runs = {}
+        for directory in net.run_dirs():
+            try:
+                entries = sorted(directory.iterdir())
+            except OSError:
+                continue
+            for entry in entries:
+                try:
+                    record = json.loads((entry / "run.json").read_text())
+                except (OSError, ValueError):
+                    continue
+                if not isinstance(record, dict) or not net.alive(record.get("pid"), record.get("pid_start")):
+                    continue
+                record["directory"] = str(entry)
+                runs.setdefault(record.get("run", entry.name), record)
+        return runs
 
     def describe(self, question):
         return printable(self.module("approvals").describe(question))
@@ -674,7 +733,7 @@ class SandboxAI:
         try:
             if not hasattr(self, "_questions"):
                 self._questions = QuestionCache(self.question_id)
-            return self._questions.scan(self.runs() if runs is None else runs)
+            return self._questions.scan(self.live_runs() if runs is None else runs)
         finally:
             self._questions_lock.release()
 
@@ -3492,7 +3551,7 @@ class Pipes:
     written to its stdin (then closed), stdout and stderr are read as they come. Nothing blocks: a pipe is
     only read or written when select() says it is ready, so a deadline always holds."""
 
-    def __init__(self, process, data=None):
+    def __init__(self, process, data=None, watch=None, errors_only=False):
         self.process = process
         self.output = ([], [])  # chunks of stdout and stderr
         self.chunks = dict(zip((process.stdout.fileno(), process.stderr.fileno()), self.output))
@@ -3510,12 +3569,16 @@ class Pipes:
         self.data = None
         if self.process.stdin is not None:
             try:
+        self.watch, self.cancelled = watch, False  # WATCH(text): what comes, as it comes (SandboxAI.watching)
+        self.watched = {process.stderr.fileno()} if errors_only else {process.stdout.fileno(), process.stderr.fileno()}
+        self.decoders = {}
                 self.process.stdin.close()
             except OSError:
                 pass
 
-    def pump(self, deadline):
-        """Read (and write) until stdout and stderr reach their end - True - or DEADLINE passes - False."""
+    def pump(self, deadline, cancelled=None):
+        """Read (and write) until stdout and stderr reach their end - True - or DEADLINE passes or CANCELLED() is
+        true - False (self.cancelled says which)."""
         with selectors.DefaultSelector() as selector:
             for fd in self.reading:
                 selector.register(fd, selectors.EVENT_READ)
@@ -3526,7 +3589,10 @@ class Pipes:
                 left = deadline - time.monotonic()
                 if left <= 0:
                     return False
-                for key, _ in selector.select(left):
+                if cancelled is not None and cancelled():
+                    self.cancelled = True
+                    return False
+                for key, _ in selector.select(left if cancelled is None else min(left, CANCEL_POLL)):
                     if key.fd == stdin:
                         try:
                             self.data = self.data[os.write(stdin, self.data[:1 << 16]):]
@@ -3562,6 +3628,11 @@ class Pipes:
                 pass
 
     def text(self):
+                        if self.watch is not None and key.fd in self.watched:
+                            decoder = self.decoders.setdefault(key.fd, codecs.getincrementaldecoder("utf-8")("replace"))
+                            text = decoder.decode(chunk)
+                            if text:
+                                self.watch(text)
         """[stdout, stderr] as read so far."""
         return [b"".join(chunks).decode("utf-8", "replace") for chunks in self.output]
 

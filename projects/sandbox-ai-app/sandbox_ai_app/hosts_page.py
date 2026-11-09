@@ -33,7 +33,7 @@ from .files import printable
 from .host_choice import on_host
 from .i18n import tr
 from .widgets import (
-    MONO, ask_first, background, compact_combo, confirm, fill, flow, inform, plain_label, row_key, safe_tooltip,
+    MONO, Task, ask_first, background, compact_combo, confirm, fill, flow, inform, plain_label, row_key, safe_tooltip,
     selected_rows, set_enabled, table, warn,
 )
 
@@ -704,6 +704,11 @@ class HostsPage(QWidget):
         split.addWidget(right)
         split.setStretchFactor(1, 3)
         layout.addWidget(split, 1)
+        # An update or an installation (minutes each): a busy bar naming the host, Cancel, and what sandbox-ai says
+        # meanwhile in the Updates tab, as it comes.
+        self.task = Task(output=self.updates)
+        self.task.setAccessibleName(tr("Update or installation running"))
+        layout.addWidget(self.task)
         self.status = plain_label(role="secondary")
         layout.addWidget(self.status)
         self.entries, self.versions, self.queue, self.results = [], {}, [], []
@@ -1100,9 +1105,16 @@ class HostsPage(QWidget):
                             tr("Every host answered is up to date."))
         self.load_hosts()
 
+    def busy_updating(self):
+        """True (and said) while an update or installation runs: one at a time."""
+        if self.task.running:
+            self.status.setText(tr("An update or installation is running: wait for it, or cancel it."))
+            return True
+        return False
+
     def update_host(self):
         name = self.host()
-        if name is None:
+        if name is None or self.busy_updating():
             return
         if name == "local":
             warn(self, tr("Update"), tr("This machine updates on the page System (or: sandbox-ai update)."))
@@ -1115,7 +1127,7 @@ class HostsPage(QWidget):
 
     def update_all(self):
         names = [entry["name"] for entry in self.entries if is_remote(entry)]
-        if not names:
+        if not names or self.busy_updating():
             return
         self.results, self.queue = [], list(names)
         self.updates.clear()
@@ -1134,7 +1146,7 @@ class HostsPage(QWidget):
         """`sandbox-ai hosts update NAME --from-here`: this machine's copy on the chosen host, as the same kind of
         installation (sudo as chosen beside Update), after a question naming the host."""
         name = self.host()
-        if name is None:
+        if name is None or self.busy_updating():
             return
         if name == "local":
             warn(self, tr("Update"), tr("This machine updates on the page System (or: sandbox-ai update)."))
@@ -1156,11 +1168,19 @@ class HostsPage(QWidget):
         self.status.setText(tr("Updating {host} ({index} of {count})…", host=name, index=len(self.results) + 1,
                                count=total))
         from_here = [True] if getattr(self, "queue_from_here", False) else []  # host_update's FROM_HERE
-        background(self.sai.host_update, name, sudo, *from_here, owner=self,
-                   source=[self.update_button, self.from_here_button, self.update_all_button], timeout=1200,
-                   done=lambda result, error: self.updated(name, result, error))
+        self.task.call_watched(self.sai, lambda: self.sai.host_update(name, sudo, *from_here),
+                               lambda result, error: self.updated(name, result, error),
+                               tr("Updating {host} ({index} of {count})…", host=name, index=len(self.results) + 1,
+                                  count=total),
+                               source=[self.update_button, self.from_here_button, self.update_all_button,
+                                       self.install_button], errors_only=True)
 
     def updated(self, name, result, error):
+        if self.task.cancelled:  # Cancel: this host's update was ended, the rest of the queue does not run
+            self.updates.appendPlainText(printable(tr("{host}: cancelled", host=name)))
+            self.results.append({"name": name, "error": tr("cancelled")})
+            self.queue = []
+            return self.updates_done()
         if error:
             result = {"name": name, "error": str(error)}
         if result.get("needs_sudo") and len(self.results) + len(self.queue) == 1 and confirm(
@@ -1218,7 +1238,7 @@ class HostsPage(QWidget):
         the choice and a question naming the host, where and as whom; sudo that wants a password: the same in a
         terminal tab, where it asks."""
         name = self.host()
-        if name in (None, "local") or not self.sai.host_install_supported():
+        if name in (None, "local") or not self.sai.host_install_supported() or self.busy_updating():
             return
         try:
             version = self.sai.version()
@@ -1240,11 +1260,19 @@ class HostsPage(QWidget):
         self.tabs.setCurrentWidget(self.updates)
         self.updates.appendPlainText(printable(tr("{host}: installing {how}…", host=name, how=dialog.words())))
         self.status.setText(tr("Installing sandbox-ai on {host}…", host=name))
-        background(lambda: self.sai.host_install(name, **values), owner=self,
-                   source=[self.install_button, self.update_button, self.update_all_button], timeout=1200,
-                   done=lambda result, error: self.installed(name, values, result, error))
+        self.task.call_watched(self.sai, lambda: self.sai.host_install(name, **values),
+                               lambda result, error: self.installed(name, values, result, error),
+                               tr("Installing sandbox-ai on {host}…", host=name),
+                               source=[self.install_button, self.update_button, self.from_here_button,
+                                       self.update_all_button], errors_only=True)
 
     def installed(self, name, values, result, error):
+        if self.task.cancelled:
+            text = tr("{host}: cancelled", host=name)
+            self.updates.appendPlainText(printable(text))
+            self.status.setText(text)
+            self.load_versions(refresh=True)
+            return
         if error is not None:
             result = {"name": name, "error": str(error)}
         text = install_text(name, result)
