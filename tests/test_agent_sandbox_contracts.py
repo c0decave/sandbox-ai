@@ -10643,6 +10643,34 @@ def test_workspace_checks_record_own_folders(tmp_path):
     """Finding L2: a later workspace add refuses sandbox-ai's own folders as this start saw them."""
     checks = s.workspace_checks(exposure_args(tmp_path), tmp_path / "session")
     assert str((Path.home() / ".config/sandbox-ai").resolve()) in checks["own_folders"]
+    # Review 6, L-1: and the launcher this start runs, and its package (none here).
+    assert checks["launcher"] == [str(path) for path in s.launcher_trees()] and checks["packages"] == []
+
+
+def test_review6_launcher_trees_of_a_venv_install(monkeypatch, tmp_path):
+    """Review 6, L-2: installed with pip into a virtualenv, the environment is a launcher tree: its bin/ holds the
+    sandbox-ai entry script (a --mount VENV/bin:rw would let the agent rewrite it); installed with pip --user, the
+    user's script folder. A venv that merely runs the launcher of a checkout is not."""
+    venv = tmp_path / "venv"
+    here = venv / "lib/python3.12/site-packages/sandbox"
+    here.mkdir(parents=True)
+    (venv / "bin").mkdir()
+    monkeypatch.setattr(s, "HERE", here)
+    monkeypatch.setattr(s.sys, "prefix", str(venv))
+    monkeypatch.setattr(s.sys, "base_prefix", "/usr")
+    assert s.launcher_trees() == [here, venv]
+    with pytest.raises(ValueError, match="bin lies in sandbox-ai's own launcher"):
+        s.check_launcher_location(venv / "bin", "--mount")
+    monkeypatch.setattr(s.sys, "prefix", str(tmp_path / "other-venv"))  # another venv runs it: not that one
+    assert s.launcher_trees() == [here]
+    user_site = tmp_path / "home/.local/lib/python3.12/site-packages"
+    (user_site / "sandbox").mkdir(parents=True)
+    monkeypatch.setattr(s, "HERE", user_site / "sandbox")
+    import site
+    import sysconfig
+    monkeypatch.setattr(site, "getusersitepackages", lambda: str(user_site))
+    monkeypatch.setattr(sysconfig, "get_path", lambda name, scheme=None: str(tmp_path / "home/.local/bin"))
+    assert s.launcher_trees() == [user_site / "sandbox", tmp_path / "home/.local/bin"]
 
 
 def test_control_peer_refused(scenario):

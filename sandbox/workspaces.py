@@ -730,6 +730,12 @@ def judged(record, real, read_only=False, kind="dir"):
     # sandbox-ai's own folders as the start saw them too (another XDG_* environment than this command's).
     l.check_workspace_scope(real, refused=[Path(value) for value in checks.get("own_folders", [])
                                           if isinstance(value, str) and os.path.isabs(value)])
+    # The launcher the start runs (a checkout, a venv) and its package, not only this command's.
+    l.check_package_location(real, "Workspace", [(Path(value), str(label)) for value, label in (
+        entry for entry in checks.get("packages", []) if isinstance(entry, list) and len(entry) == 2)
+        if isinstance(value, str) and os.path.isabs(value)])
+    l.check_launcher_location(real, "Workspace", [Path(value) for value in checks.get("launcher", [])
+                                                  if isinstance(value, str) and os.path.isabs(value)])
     # A start lets a workspace hold the project's own .venv/bin or node_modules/.bin on your PATH, and checks what
     # the agent changed there after the run (tool_dirs_state); for a workspace added later nothing would.
     for directory in l.private_locations()[1]:

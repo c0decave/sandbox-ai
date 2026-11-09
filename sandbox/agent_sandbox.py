@@ -1544,12 +1544,22 @@ def check_private_location(path, option, warn=None, own=(), refused=()):
 def launcher_trees():
     """[path]: sandbox-ai's own launcher (HERE, the sandbox/ folder) and, when it runs from a sandbox-ai tree (a
     checkout or an installed version: install.sh beside sandbox/), that whole tree (the app in projects/, install.sh,
-    scripts/): an agent given any of it could rewrite what runs on the host at the next start."""
+    scripts/); installed with pip into a virtualenv, that environment (its bin/ holds the sandbox-ai entry script and
+    the Python that runs it); installed with pip --user, the folder of the user's entry scripts (~/.local/bin). An
+    agent given any of it could rewrite what runs on the host at the next start."""
+    import site
+    import sysconfig
     trees = [HERE]
     root = HERE.parent
     if (root / "install.sh").is_file() and (root / "sandbox" / "agent_sandbox.py").is_file():
         trees.append(root)
-    return trees
+    with contextlib.suppress(OSError, RuntimeError, KeyError, AttributeError):
+        prefix = Path(sys.prefix).resolve()
+        if sys.prefix != sys.base_prefix and prefix in HERE.parents:
+            trees.append(prefix)
+        if Path(site.getusersitepackages()).resolve() in HERE.parents:
+            trees.append(Path(sysconfig.get_path("scripts", f"{os.name}_user")).resolve())
+    return list(dict.fromkeys(trees))
 
 
 def in_launcher_tree(path):
@@ -6498,7 +6508,11 @@ def workspace_checks(a, session):
             "stores": [[str(path), label] for path, label in host_stores(a)],
             # sandbox-ai's own folders as this start saw them (its XDG_* values): a later add from another
             # environment (the app, the web UI) refuses them too.
-            "own_folders": [str(path) for path in sandbox_ai_folders()]}
+            "own_folders": [str(path) for path in sandbox_ai_folders()],
+            # The launcher this start runs (a checkout, say) and its package: a later add through another sandbox-ai
+            # (the installed CLI, the app, the web UI) refuses them too, not only its own.
+            "launcher": [str(path) for path in launcher_trees()],
+            "packages": [[str(path), label] for path, label in package_paths()]}
 
 
 def run_name(a):

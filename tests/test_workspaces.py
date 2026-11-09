@@ -1138,6 +1138,29 @@ def test_the_starts_own_folders_are_refused_later_too(run, monkeypatch):
     assert w.judged(record, Path(make(tmp / "project")).resolve()) == "rw"
 
 
+def test_review6_the_starts_launcher_is_refused_later_too(run, monkeypatch):
+    """Review 6, L-1: a sandbox started from a checkout (~/c0de/sandbox-ai) gets ~/c0de added during the run through
+    the installed CLI, the web or the app: the start recorded its launcher and package, and the add refuses them."""
+    record, tmp = run
+    monkeypatch.undo()  # the real checks
+    monkeypatch.setattr(L, "load_policy", lambda path=None: {})
+    monkeypatch.setattr(L, "exposed_before", lambda: [])
+    checkout = Path(make(tmp / "c0de" / "sandbox-ai" / "sandbox")).parent
+    package = Path(make(tmp / "pkg" / "copy"))
+    record["workspace_checks"]["launcher"] = [str(checkout / "sandbox"), str(checkout)]
+    record["workspace_checks"]["packages"] = [[str(package), "the copy sandbox-ai runs in"]]
+    with pytest.raises(ValueError, match="contains .*c0de/sandbox-ai, sandbox-ai's own launcher|"
+                                         "contains .*sandbox-ai's own launcher"):
+        w.judged(record, (tmp / "c0de").resolve())
+    with pytest.raises(ValueError, match="sandbox-ai's own launcher"):
+        w.judged(record, Path(make(checkout / "scripts")).resolve())
+    with pytest.raises(ValueError, match="the copy sandbox-ai runs in"):
+        w.judged(record, (tmp / "pkg").resolve())
+    assert w.judged(record, Path(make(tmp / "project")).resolve()) == "rw"
+    del record["workspace_checks"]["launcher"], record["workspace_checks"]["packages"]  # a start before 0.1.78
+    assert w.judged(record, Path(make(tmp / "project2")).resolve()) == "rw"
+
+
 def test_a_replaced_file_is_listed_so_and_added_again(run, monkeypatch):
     """Round 4: an editor's atomic save replaces the host file; the list says "replaced" and an add of the path takes
     the old one out first instead of refusing it as an overlap."""
