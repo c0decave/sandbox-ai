@@ -9244,4 +9244,59 @@ TEXTS = {
     'Not pasted: a board has only one of each of these parts, and this one has it already: {parts}.': {
         'en': 'Not pasted: a board has only one of each of these parts, and this one has it already: {parts}.',
         'de': 'Nicht eingefügt: Eine Tafel hat jedes dieser Teile nur einmal, und diese hat es schon: {parts}.'},
+    # == ruleset files (--rules): placeholder, example, New from example…, Check (rules_tools.py) ==
+    '~/.config/sandbox-ai/github.json — JSON: allow, ask or deny per HTTP request and MCP tool call': {
+        'en': '~/.config/sandbox-ai/github.json — JSON: allow, ask or deny per HTTP request and MCP tool call',
+        'de': '~/.config/sandbox-ai/github.json — JSON: erlauben, fragen oder verweigern je HTTP-Anfrage und MCP-Werkzeugaufruf'},
+    'New from example…': {
+        'en': 'New from example…',
+        'de': 'Neu aus Beispiel…'},
+    'Write a starter ruleset (GitHub without gists and issue writes) to a file outside every workspace and add it': {
+        'en': 'Write a starter ruleset (GitHub without gists and issue writes) to a file outside every workspace and add it',
+        'de': 'Ein Start-Regelwerk (GitHub ohne Gists und ohne Schreiben in Issues) in eine Datei außerhalb jedes Arbeitsordners schreiben und hinzufügen'},
+    'Ask the launcher (a dry run) whether it reads these ruleset files': {
+        'en': 'Ask the launcher (a dry run) whether it reads these ruleset files',
+        'de': 'Den Launcher fragen (ein Probelauf), ob er diese Regelwerk-Dateien liest'},
+    'Written: {path}. Change it to your needs; Check reads it.': {
+        'en': 'Written: {path}. Change it to your needs; Check reads it.',
+        'de': 'Geschrieben: {path}. Passen Sie es an Ihre Bedürfnisse an; Prüfen liest es.'},
+    'The launcher reads the rulesets…': {
+        'en': 'The launcher reads the rulesets…',
+        'de': 'Der Launcher liest die Regelwerke…'},
+    'One ruleset file per line, outside every workspace. A ruleset allows, asks or denies each HTTP request and MCP tool call; the strictest decision of all rulesets wins. For example, GitHub without gists and issue writes, a release asked first:': {
+        'en': 'One ruleset file per line, outside every workspace. A ruleset allows, asks or denies each HTTP request and MCP tool call; the strictest decision of all rulesets wins. For example, GitHub without gists and issue writes, a release asked first:',
+        'de': 'Eine Regelwerk-Datei pro Zeile, außerhalb jedes Arbeitsordners. Ein Regelwerk erlaubt, fragt oder verweigert jede HTTP-Anfrage und jeden MCP-Werkzeugaufruf; die strengste Entscheidung aller Regelwerke gilt. Zum Beispiel GitHub ohne Gists und ohne Schreiben in Issues, ein Release wird zuerst gefragt:'},
+    'The start is on another host: write the ruleset there, then name its file here.': {
+        'en': 'The start is on another host: write the ruleset there, then name its file here.',
+        'de': 'Der Start ist auf einem anderen Host: Schreiben Sie das Regelwerk dort und nennen Sie seine Datei hier.'},
+    'New ruleset from the example': {
+        'en': 'New ruleset from the example',
+        'de': 'Neues Regelwerk aus dem Beispiel'},
+    'New from example': {
+        'en': 'New from example',
+        'de': 'Neu aus Beispiel'},
+    '{path} lies inside the workspace {workspace}: the agent could change its own rules there, so the launcher refuses it. Choose a place outside every workspace, such as ~/.config/sandbox-ai/.': {
+        'en': '{path} lies inside the workspace {workspace}: the agent could change its own rules there, so the launcher refuses it. Choose a place outside every workspace, such as ~/.config/sandbox-ai/.',
+        'de': '{path} liegt im Arbeitsordner {workspace}: Der Agent könnte dort seine eigenen Regeln ändern, deshalb lehnt der Launcher es ab. Wählen Sie einen Ort außerhalb jedes Arbeitsordners, etwa ~/.config/sandbox-ai/.'},
+    'Add a ruleset file first (or New from example…).': {
+        'en': 'Add a ruleset file first (or New from example…).',
+        'de': 'Fügen Sie zuerst eine Regelwerk-Datei hinzu (oder Neu aus Beispiel…).'},
+    'The start is on another host: its launcher checks the files at the start.': {
+        'en': 'The start is on another host: its launcher checks the files at the start.',
+        'de': 'Der Start ist auf einem anderen Host: Sein Launcher prüft die Dateien beim Start.'},
+    '{name}: {http} HTTP and {mcp} MCP rules': {
+        'en': '{name}: {http} HTTP and {mcp} MCP rules',
+        'de': '{name}: {http} HTTP- und {mcp} MCP-Regeln'},
+    'Not checked: {error}': {
+        'en': 'Not checked: {error}',
+        'de': 'Nicht geprüft: {error}'},
+    'The launcher refused them, without saying why.': {
+        'en': 'The launcher refused them, without saying why.',
+        'de': 'Der Launcher hat sie abgelehnt, ohne zu sagen, warum.'},
+    'The launcher reads them:': {
+        'en': 'The launcher reads them:',
+        'de': 'Der Launcher liest sie:'},
+    '(no rules of their own)': {
+        'en': '(no rules of their own)',
+        'de': '(keine eigenen Regeln)'},
 }

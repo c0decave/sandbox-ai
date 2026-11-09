@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import backend, board as B
-from . import help_view, project_trust as PT, theme
+from . import help_view, project_trust as PT, rules_tools, theme
 from .files import printable
 from .name_fields import NameButton, NameField, add_line
 from .state import choose_file, choose_folder
@@ -2488,6 +2488,20 @@ class BoardPage(QWidget):
             row.addWidget(lines, 1)
             row.addWidget(pick, alignment=Qt.AlignmentFlag.AlignTop)
             lines.setToolTip(safe_tooltip(option.help))
+        elif long == "--rules":  # ruleset files: what to enter, a starter from the example, the launcher's check
+            lines = LinesEdit(value or [])
+            lines.setPlaceholderText(rules_tools.placeholder())
+            lines.changed.connect(lambda values: self.set_prop(node_id, long, values))
+            widget = QWidget()
+            column = QVBoxLayout(widget)
+            column.setContentsMargins(0, 0, 0, 0)
+            column.addWidget(lines)
+            agent = self.board.first("agent")
+            self.rules_tools = rules_tools.RulesetTools(
+                self.sai, lines.values, lambda path, e=lines: e.appendPlainText(path),
+                lambda: [n.props.get("path") for n in self.board.of_kind("workspace") if n.props.get("path")],
+                local=lambda: self.host() == LOCAL, agent=lambda: agent.props.get("agent") if agent else "claude")
+            column.addWidget(self.rules_tools)
         elif option.kind == "list":
             widget = LinesEdit(value or [])
             widget.changed.connect(lambda values: self.set_prop(node_id, long, values))
@@ -2504,6 +2518,8 @@ class BoardPage(QWidget):
         widget.setToolTip(safe_tooltip(option.help))
         label = QLabel(long + (f"  ({option.short})" if option.short else ""))
         label.setToolTip(safe_tooltip(option.help))
+        if long == "--rules":  # an example in the tooltip of its lines
+            lines.setToolTip(rules_tools.tooltip())
         if None in self.forbidden.get(long, set()):
             self.disable_if_forbidden(widget, long)
         self.inspector.addRow(label, widget)

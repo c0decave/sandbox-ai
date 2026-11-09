@@ -146,6 +146,35 @@ class DeviceField(QWidget):
         self.edit.setPlainText("\n".join(values or []))
 
 
+class RulesField(QWidget):
+    """The Start page's ruleset files (--rules): one per line (a ListField, read like one: value, set_value), with
+    New from example… and Check below (rules_tools)."""
+    changed = Signal()
+
+    def __init__(self, form):
+        super().__init__()
+        from . import rules_tools
+        column = QVBoxLayout(self)
+        column.setContentsMargins(0, 0, 0, 0)
+        self.field = ListField(path=False)
+        self.field.edit.setPlaceholderText(rules_tools.placeholder())
+        self.field.edit.setToolTip(rules_tools.tooltip())
+        self.field.changed.connect(self.changed)
+        column.addWidget(self.field)
+        values = lambda: form.values() if len(form.widgets) >= len(form.options) else {}  # noqa: E731
+        self.tools = rules_tools.RulesetTools(
+            backend.SandboxAI(), self.field.value, lambda path: self.field.add(path),
+            lambda: values().get("--workspace") or [],
+            local=lambda: getattr(form, "host", LOCAL) in (None, "", LOCAL))
+        column.addWidget(self.tools)
+
+    def value(self):
+        return self.field.value()
+
+    def set_value(self, values):
+        self.field.set_value(values)
+
+
 class ListField(QWidget):
     """One value per line; for path options with a button that adds a folder; with CHOICES a button that adds one of
     the names the chosen host has (set_choices: its MCP servers for --mcp, its kits for --kit)."""
@@ -379,6 +408,9 @@ class OptionsForm(QTabWidget):
         elif option.kind == "multi":
             widget = MultiChoice(option.choices)
             widget.changed.connect(self.changed)
+        elif option.kind == "list" and option.long == "--rules":  # what to enter, a starter, the launcher's check
+            widget = RulesField(self)
+            widget.changed.connect(self.changed)
         elif option.kind == "list":
             widget = ListField(path=option.is_path)
             widget.changed.connect(self.changed)
@@ -432,6 +464,7 @@ class OptionsForm(QTabWidget):
     def set_host(self, host):
         """The fields that depend on where it starts: --gpu's kinds, the limits' hints, the choosers (emptied until
         set_choices gives that host's lists)."""
+        self.host = host
         for option in self.options:
             widget = self.widgets.get(option.long)
             if option.long == "--gpu" and isinstance(widget, QComboBox):
@@ -475,7 +508,7 @@ class OptionsForm(QTabWidget):
                 result[option.long] = widget.isChecked()
             elif isinstance(widget, QComboBox):
                 result[option.long] = widget.currentText()
-            elif isinstance(widget, (ListField, DeviceField, PathField, MultiChoice)):
+            elif isinstance(widget, (ListField, RulesField, DeviceField, PathField, MultiChoice)):
                 result[option.long] = widget.value()
             else:
                 result[option.long] = widget.text()
@@ -520,7 +553,7 @@ class OptionsForm(QTabWidget):
                                            Qt.ItemDataRole.ToolTipRole)
                     widget.setEnabled(True)
                 widget.setCurrentText(text)
-            elif isinstance(widget, (ListField, DeviceField, MultiChoice)):
+            elif isinstance(widget, (ListField, RulesField, DeviceField, MultiChoice)):
                 widget.set_value(value or [])
             elif isinstance(widget, PathField):
                 widget.set_value(value)

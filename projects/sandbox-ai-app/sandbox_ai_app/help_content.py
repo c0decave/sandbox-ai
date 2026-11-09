@@ -1512,7 +1512,20 @@ SECTIONS = (
          "the firewall. Rules are enforced by the connection proxy and the relay in front of each MCP server, "
          "which the agent cannot reach; rules for the agent's own tools go through its hooks, a guard rail, not a "
          "boundary. `--dry-run` with `--rules` lists the rulesets and stops on errors. On the Board, rulesets are "
-         "a part of their own.",
+         "a part of their own.\n\n"
+         "A short example, `~/.config/sandbox-ai/github.json`: `--allow-github` opens every request to "
+         "api.github.com; this keeps gists and issue writes out and asks before a release:\n\n"
+         "```json\n"
+         "{\"version\": 1, \"http\": [\n"
+         "  {\"id\": \"no-gists\", \"host\": \"api.github.com\", \"path\": \"/gists/**\", \"decision\": \"deny\"},\n"
+         "  {\"id\": \"no-issue-writes\", \"host\": \"api.github.com\", \"methods\": [\"POST\", \"PATCH\", \"PUT\", "
+         "\"DELETE\"], \"path\": \"/repos/*/*/issues/**\", \"decision\": \"deny\"},\n"
+         "  {\"id\": \"releases\", \"host\": \"api.github.com\", \"methods\": \"POST\", \"path\": "
+         "\"/repos/*/*/releases\", \"decision\": \"ask\"}]}\n"
+         "```\n\n"
+         "In the app, the ruleset files field (the Approvals and rules part on the Board, Ruleset file on the Start "
+         "page) has New from example…, which writes this starter (and an MCP example) to a file you choose outside "
+         "every workspace, and Check, which asks the launcher whether it reads the files.",
          "Die Netzwerkoptionen entscheiden, welche Hosts der Agent erreicht. Regelwerke entscheiden, was er dort "
          "darf: Sie erlauben, erfragen oder verbieten jede HTTP-Anfrage (nach Host, Methode, Pfad, Query, Headern "
          "und Body), jeden MCP-Aufruf (nach Werkzeug und Argumenten), jedes Gerät und die eigenen Werkzeuge des "
@@ -1527,7 +1540,21 @@ SECTIONS = (
          "Keine Regel öffnet die Firewall. Durchgesetzt werden die Regeln vom Verbindungs-Proxy und vom Relay vor "
          "jedem MCP-Server, die der Agent nicht erreicht; Regeln für die eigenen Werkzeuge des Agenten laufen über "
          "seine Hooks, eine Leitplanke, keine Grenze. `--dry-run` mit `--rules` listet die Regelwerke und stoppt "
-         "bei Fehlern. Auf der Tafel sind Regelwerke ein eigenes Teil."),
+         "bei Fehlern. Auf der Tafel sind Regelwerke ein eigenes Teil.\n\n"
+         "Ein kurzes Beispiel, `~/.config/sandbox-ai/github.json`: `--allow-github` öffnet jede Anfrage an "
+         "api.github.com; dies hält Gists und Schreiben in Issues fern und fragt vor einem Release:\n\n"
+         "```json\n"
+         "{\"version\": 1, \"http\": [\n"
+         "  {\"id\": \"no-gists\", \"host\": \"api.github.com\", \"path\": \"/gists/**\", \"decision\": \"deny\"},\n"
+         "  {\"id\": \"no-issue-writes\", \"host\": \"api.github.com\", \"methods\": [\"POST\", \"PATCH\", \"PUT\", "
+         "\"DELETE\"], \"path\": \"/repos/*/*/issues/**\", \"decision\": \"deny\"},\n"
+         "  {\"id\": \"releases\", \"host\": \"api.github.com\", \"methods\": \"POST\", \"path\": "
+         "\"/repos/*/*/releases\", \"decision\": \"ask\"}]}\n"
+         "```\n\n"
+         "In der App hat das Feld der Regelwerk-Dateien (das Teil Freigaben und Regeln auf der Tafel, "
+         "Regelwerk-Datei auf der Seite Start) Neu aus Beispiel…, das diesen Anfang (und ein MCP-Beispiel) in eine "
+         "Datei schreibt, die Sie außerhalb jedes Arbeitsordners wählen, und Prüfen, das den Launcher fragt, ob er "
+         "die Dateien liest."),
         cli=("--rules FILE", "--allow-http", "--dry-run"),
         see=("taint", "approvals", "proxy", "mcp", "policy"),
         tours=()),
