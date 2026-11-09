@@ -91,6 +91,22 @@ def launcher():
     return _launcher
 
 
+_liveness = None
+
+
+def liveness():
+    """liveness.py: whether a session's last run still runs without its supervisor (its Podman pod)."""
+    global _liveness
+    if _liveness is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_liveness_for_sessions", HERE / "liveness.py")
+        with LOADING:
+            if _liveness is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _liveness = loaded
+    return _liveness
+
+
 def root():
     return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "sandbox-ai" / "sessions"
 
@@ -220,9 +236,34 @@ def foreground(data):
 
 
 def status(name, data):
+    """running, paused, stopped, or orphaned: its supervisor is gone (killed without its cleanup) but its Podman pod
+    still runs the sandbox (lost). An orphaned session is attached to as a running one; `stop` ends its pod and
+    records the end, after which it is resumed as any stopped one."""
     if not alive(name, data):
-        return "stopped"
+        return "orphaned" if lost(name, data) else "stopped"
     return "paused" if (session_dir(name) / "paused").exists() else "running"
+
+
+def lost(name, data):
+    """The session's last run still runs without its supervisor: True when its Podman pod (session.json "pod") runs
+    a container although the supervisor is gone, False when it does not (or the run's end was recorded: exit.json
+    of that run; or no Podman pod), None when Podman does not answer. Asked only once the supervisor is gone."""
+    pod = data.get("pod") if isinstance(data, dict) else None
+    if data.get("backend") != "podman" or not isinstance(pod, str) or not liveness().POD_NAME.fullmatch(pod):
+        return False
+    if ended_run(name, data):
+        return False
+    url = data.get("podman_url") if isinstance(data.get("podman_url"), str) else None
+    return liveness().pod_live(pod, url)
+
+
+def ended_run(name, data):
+    """exit.json records the end of the session's current run (its launcher, or `stop`, wrote it)."""
+    try:
+        ended = json.loads((session_dir(name) / "exit.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(ended, dict) and ended.get("run") == current_run(name, data)
 
 
 def descendants(pid):
@@ -416,6 +457,7 @@ def begin(a, argv):
                 "cwd_project": getattr(a, "cwd_project", None),
                 "ready": True, "name": a.start_name, "project": launcher().project_label(a), "keep": True,
                 "mode": "foreground", "pid": pid, "pid_start": launcher().process_start(pid, PROC), "started": now(),
+                "pid_ns": liveness().pid_namespace(),
                 "run": a.run_id, "pod": launcher().pod_name(a) if a.backend == "podman" else None}
         claim_name(key, a.start_name, data)
 
@@ -448,6 +490,9 @@ def prune(name, locked=False):
         data = load(name)
         if keeps_home(data) or status(name, data) != "stopped":
             return False
+        if not alive(name, data) and (lost(name, data) is None
+                                      or not liveness().same_namespace(data.get("pid_ns"))):
+            return False  # Podman did not answer, or its supervisor's PIDs are not visible here: it may still run
         shutil.rmtree(session_dir(name), onerror=make_writable_and_retry)
         return True
     try:
@@ -465,6 +510,10 @@ def after_attach(name):
     data = load(name)
     shown = launcher().printable(display(name, data))
     socket_path = session_dir(name) / "tmux" / "attach.sock"
+    if not alive(name, data) and lost(name, data):
+        print(f"agent-sandbox: detached from {shown}; it runs on without its supervisor. End it with: sandbox-ai stop "
+              f"{shown}, then continue it with: sandbox-ai resume {shown}", file=sys.stderr)
+        return 0
     deadline = time.monotonic() + DETACH_GRACE
     while alive(name, data) and relay_listening(socket_path):
         if time.monotonic() >= deadline:
@@ -588,7 +637,8 @@ def launch(name, data, agent_args, a=None, event="rebirth"):
         # Own session: closing the terminal no longer ends the sandbox.
         process = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                                    start_new_session=True, cwd=data["cwd"])
-    data.update(pid=process.pid, pid_start=launcher().process_start(process.pid, PROC), started=now())
+    data.update(pid=process.pid, pid_start=launcher().process_start(process.pid, PROC), started=now(),
+                pid_ns=liveness().pid_namespace())  # only a process in this PID namespace judges it by its PID
     save(name, data)
     shown = display(name, data)
     starts().record(shown, event, name, run, agent=data["agent"], workspace=data.get("workspace"))
@@ -638,6 +688,9 @@ def start_locked(a, argv, key=None):
     if (directory / "session.json").exists():
         data = load(name)
         state = status(name, data)
+        if state == "orphaned":
+            stop_orphaned(name, data)  # asked to start it again: its pod first (said), then as any stopped one
+            data, state = load(name), status(name, load(name))
         if state != "stopped":
             raise ValueError(f"Session {launcher().printable(display(name, data))} is {state}; attach with: "
                              f"sandbox-ai attach {launcher().printable(display(name, data))}")
@@ -677,7 +730,11 @@ def attach(name):
     if foreground(data) and state != "stopped":
         raise ValueError(f"{shown} runs without tmux (a task, no terminal, or --no-tmux): there is no terminal to "
                          f"attach to; it ends with its task, or with: sandbox-ai stop {shown}")
-    if state != "running":
+    if state == "orphaned":
+        print(f"agent-sandbox: {shown} runs without its supervisor (it ended unexpectedly): its terminal is reached, "
+              f"but approvals, net allow and workspace add are not. Save your work, then: sandbox-ai stop {shown} && "
+              f"sandbox-ai resume {shown}", file=sys.stderr)
+    elif state != "running":
         raise ValueError(f"Session {shown} is {state}; run: sandbox-ai resume {shown}")
     # Only terminal bytes cross: the tmux client runs inside the sandbox, so
     # nothing the agent's tmux server requests can execute on the host.
@@ -812,6 +869,11 @@ def resume_locked(name, workspaces=(), mounts=(), mcp=()):
     if state == "running":
         print(f"agent-sandbox: session {shown} is already running", file=sys.stderr)
         return 0, False
+    if state == "orphaned":
+        print(f"agent-sandbox: {shown} still runs without its supervisor; ending its pod first, then it starts again",
+              file=sys.stderr)
+        stop_orphaned(name, data)
+        data = load(name)
     if not keeps_home(data):
         prune(name, locked=True)  # resume holds the session's lock
         raise ValueError(f"{shown} has ended and its HOME was discarded (it was started with --no-keep); "
@@ -919,6 +981,8 @@ def stop_locked(name, timeout):
     if state == "stopped":
         print(f"agent-sandbox: session {shown} is not running", file=sys.stderr)
         return 0
+    if state == "orphaned":
+        return stop_orphaned(name, data, timeout)
     if state == "paused":
         thaw(name, data)
     activity_event(name, "stop")
@@ -940,6 +1004,41 @@ def stop_locked(name, timeout):
         except (ValueError, subprocess.CalledProcessError) as exc:
             print(f"agent-sandbox: {exc}", file=sys.stderr)
     print(f"agent-sandbox: session {shown} stopped; state kept in {session_dir(name)}", file=sys.stderr)
+    return 0
+
+
+def stop_orphaned(name, data, timeout=30):
+    """End the session NAME whose supervisor is gone while its Podman pod runs on: stop the pod (its supervisor in
+    the sandbox gets SIGTERM and ends the agent, as at any stop; after TIMEOUT seconds Podman kills it), remove it,
+    record the end (exit.json, history) so that resume works, and remove the run directory left behind. Only the
+    pod this session's directory labelled (a session's) or recorded (a task's) is touched."""
+    shown = launcher().printable(display(name, data))
+    pod, run = data["pod"], current_run(name, data)
+    url = parsed(data).podman_url
+    found = liveness().pods(url, fresh=True)
+    if found is None:
+        raise ValueError(f"Podman does not answer: {shown} cannot be stopped now (its pod is {pod})")
+    labels = (found.get(pod) or {}).get("labels") or {}
+    owner = str((session_dir(name) / "tmux").resolve())
+    if pod in found and not foreground(data) and labels.get(launcher().SESSION_LABEL) != owner:
+        print(f"agent-sandbox: warning: the Podman pod {pod} does not carry {shown}'s label (another state directory's, "
+              "or an older version's); stopping it as you asked", file=sys.stderr)
+    activity_event(name, "stop")
+    starts().record(display(name, data), "stop", name, run)
+    print(f"agent-sandbox: {shown} runs without its supervisor; stopping its pod {pod} (up to {timeout:g} s)",
+          file=sys.stderr)
+    stopped, said = liveness().stop_pod(pod, url, timeout)
+    if not stopped:
+        raise ValueError(f"{shown}: its pod {pod} could not be stopped ({launcher().printable(said) or 'it still runs'});"
+                         f" try: podman pod stop {pod} && podman pod rm {pod}")
+    starts().write_exit(name, run, None)
+    starts().record(display(name, data), "exit", name, run, status=None)
+    (session_dir(name) / "paused").unlink(missing_ok=True)
+    left = launcher().runs_dir() / run  # its launcher's run directory, if a killed launcher left it
+    if left.is_dir() and not left.is_symlink():
+        liveness().discard(left)
+    print(f"agent-sandbox: session {shown} stopped; state kept in {session_dir(name)}"
+          + (f"; continue it with: sandbox-ai resume {shown}" if keeps_home(data) else ""), file=sys.stderr)
     return 0
 
 

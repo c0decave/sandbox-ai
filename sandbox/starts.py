@@ -46,6 +46,10 @@ Sources: the run registry (run.json of every running launcher, see net.py), the 
 ($XDG_STATE_HOME/sandbox-ai/mcp/NAME/mcp.json). Names, workspaces and everything else read from them are
 passed through printable() before they are shown.
 
+A start whose launcher (its supervisor on the host) was killed without its cleanup while its Podman pod runs on is
+"orphaned": its terminal can still be attached to (a session), but approvals, net allow and workspace add do not
+reach it. stop ends its pod and records the end; a kept start is then resumed as any stopped one (liveness.py).
+
 Standard library only.
 """
 import argparse
@@ -65,7 +69,7 @@ import time
 from types import SimpleNamespace
 
 HERE = Path(__file__).resolve().parent
-STATE_ORDER = {"running": 0, "paused": 1, "stopped": 2, "ended": 3, "damaged": 4}
+STATE_ORDER = {"running": 0, "paused": 1, "orphaned": 1, "stopped": 2, "ended": 3, "damaged": 4}
 HISTORY_LIMIT = 256 << 10  # bytes of one name's history; beyond, the oldest entries go
 HISTORY_KEEP = 400         # entries kept when a history is trimmed
 _modules = {}
@@ -80,6 +84,8 @@ def module(name):
         spec.loader.exec_module(loaded)
         if name != "agent_sandbox" and hasattr(loaded, "_launcher"):
             loaded._launcher = module("agent_sandbox")  # one launcher for all of them
+        if name != "liveness" and hasattr(loaded, "_liveness"):
+            loaded._liveness = module("liveness")  # one Podman listing (cached) for all of them
         _modules[name] = loaded
     return _modules[name]
 
@@ -285,6 +291,9 @@ def write_exit(key, run, status):
         return
     if not directory.is_dir() or directory.is_symlink():
         return
+    current = read_json(directory / "session.json")
+    if current is not None and isinstance(current.get("run"), str) and current["run"] != run:
+        return  # the end of an earlier run, found late (net.forget_ended): the start runs again since
     fd, temporary = tempfile.mkstemp(prefix=".exit-", dir=directory)
     with os.fdopen(fd, "w") as stream:
         json.dump({"run": run, "status": status, "ended": now()}, stream)
@@ -380,9 +389,9 @@ def start_entries(prune=True):
                       "kind": "run" if sessions.foreground(data) else "session", "agent": data["agent"],
                       "backend": text(data.get("backend")), "state": state,
                       "home": "kept" if keep else "discarded", "keep": keep,
-                      "attachable": state == "running" and not sessions.foreground(data),
+                      "attachable": state in ("running", "orphaned") and not sessions.foreground(data),
                       "run": text(data.get("run")) if state != "stopped" or sessions.foreground(data) else None,
-                      "pid": data.get("pid") if state != "stopped" else None,
+                      "pid": data.get("pid") if state not in ("stopped", "orphaned") else None,
                       "started": text(data.get("started")) or text(data.get("created")),
                       "created": text(data.get("created")), "ended": text(ended.get("ended")),
                       "status": status if isinstance(status, int) and not isinstance(status, bool) else None,
@@ -463,6 +472,8 @@ def attach_why(entry):
         return "mcp"
     if entry.get("state") == "damaged":
         return "damaged"
+    if entry.get("state") == "orphaned":
+        return "orphaned"
     if entry.get("state") not in ("running", "paused"):
         return "stopped"
     if entry.get("kind") == "run":
@@ -524,7 +535,23 @@ def entries(include_all=False, prune=True):
     by_pid = {entry["pid"]: entry for entry in servers.values() if entry["pid"]}
     legacy = {f"session-{key}": entry for key, entry in starts.items()}  # sessions of versions before 0.1.30
     plain = []
-    records = module("net").running()
+    orphans = {}
+    records = module("net").running(orphans)
+    for run, record_ in orphans.items():  # their launcher was killed; their pod runs on (liveness.py)
+        if not isinstance(run, str) or not isinstance(record_, dict) or record_.get("kind") == "mcp" or \
+                run.startswith("mcp-"):
+            continue
+        session = starts.get(text(record_.get("start")) or "") or legacy.get(run)
+        if session is not None:
+            session["run"], session["run_dir"] = run, record_.get("directory")
+            continue
+        name = record_.get("name") if valid_name(record_.get("name")) else run
+        plain.append({"name": name, "id": run, "kind": "run", "agent": text(record_.get("agent")),
+                      "backend": text(record_.get("backend")), "state": "orphaned",
+                      "home": "own" if record_.get("own_home") else "discarded", "keep": False,
+                      "mode": mode_of(record_), "attachable": False, "run": run, "pid": None,
+                      "started": text(record_.get("started")), "workspace": text(record_.get("workspace")),
+                      "mcp": record_mcp(record_) or [], "directory": None, "run_dir": record_.get("directory")})
     for run, record_ in records.items():
         if not isinstance(run, str) or not isinstance(record_, dict):
             continue  # a damaged run.json ("run": 5): not one of ours to list
@@ -667,6 +694,9 @@ def act(command, name, out=print, wait=None, yes=False, review=False, as_json=Fa
     try:
         entry = find(name)
     except ValueError:
+        pod = stray_pod(name) if command == "stop" else None
+        if pod is not None:
+            return stop_stray_pod(pod, module("net").STOP_WAIT if wait is None else wait, out)
         if command == "resume" and valid_name(name) and history(name):
             raise ValueError(f"{printable(name)} has ended and its HOME was discarded; see: sandbox-ai list "
                              f"--history {printable(name)}") from None
@@ -689,11 +719,16 @@ def act(command, name, out=print, wait=None, yes=False, review=False, as_json=Fa
         if command == "stop":
             return sessions.stop(key) if wait is None else sessions.stop(key, wait)
         if command == "resume" and (workspaces or mounts or mcp or restart):
-            if restart and entry["state"] in ("running", "paused"):
+            if restart and entry["state"] in ("running", "paused", "orphaned"):
                 out(f"{shown}: stopping it to start it again")
                 sessions.stop(key)
             return sessions.resume(key, list(workspaces), list(mounts), list(mcp))
         return {"attach": sessions.attach, "pause": sessions.pause, "resume": sessions.resume}[command](key)
+    if entry["state"] == "orphaned":
+        if command == "stop":
+            return stop_orphaned_run(entry, module("net").STOP_WAIT if wait is None else wait, out)
+        raise ValueError(f"{shown} runs without its launcher (that ended unexpectedly; its Podman pod runs on): end it "
+                         f"with: sandbox-ai stop {shown}")
     if workspaces or mounts or mcp or restart:
         raise ValueError(f"{shown} keeps nothing to start again with (a run without a kept start): end it and start "
                          "anew with " + ("--mcp " + " --mcp ".join(mcp) if mcp and not (workspaces or mounts)
@@ -715,6 +750,50 @@ def act(command, name, out=print, wait=None, yes=False, review=False, as_json=Fa
         record(entry["name"], "stop", entry["id"], entry["run"])
         return result
     return pause_run(entry, record_, command == "pause")
+
+
+def stray_pod(name):
+    """The running Podman pod NAME names (agent-RUN, or RUN) that no start knows (its launcher is gone, and an older
+    version removed its run directory: gc names these), or None."""
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", name):
+        return None
+    pod = name if name.startswith("agent-") else f"agent-{name}"
+    return pod if module("liveness").pod_live(pod, fresh=True) else None
+
+
+def stop_stray_pod(pod, wait, out=print):
+    """End the running pod POD that no start knows, as asked by its name: stop it, then remove it."""
+    printable = launcher().printable
+    print(f"agent-sandbox: warning: no start knows {printable(pod)} (its launcher is gone); stopping and removing the "
+          "Podman pod as you asked", file=sys.stderr)
+    stopped, said = module("liveness").stop_pod(pod, None, wait)
+    if not stopped:
+        raise ValueError(f"the pod {printable(pod)} could not be stopped ({printable(said) or 'it still runs'})")
+    out(f"{printable(pod)}: stopped")
+    return 0
+
+
+def stop_orphaned_run(entry, wait, out=print):
+    """End the run ENTRY (no kept start) whose launcher is gone while its Podman pod runs on: stop and remove the pod,
+    then record the end and remove the run's directory (net.running does, now that it has ended)."""
+    shown = launcher().printable(entry["name"])
+    orphans = {}
+    module("net").running(orphans)
+    record_ = orphans.get(entry["run"])
+    if record_ is None:
+        raise ValueError(f"{shown} has ended meanwhile")
+    liveness = module("liveness")
+    pod = liveness.pod_of(record_)
+    url = text(record_.get("podman_url"))
+    record(entry["name"], "stop", entry["id"], entry["run"])
+    out(f"{shown}: its launcher is gone; stopping its pod {pod} (up to {wait:g} s)")
+    stopped, said = liveness.stop_pod(pod, url, wait)
+    if not stopped:
+        raise ValueError(f"{shown}: its pod {pod} could not be stopped ({launcher().printable(said) or 'it still runs'});"
+                         f" try: podman pod stop {pod} && podman pod rm {pod}")
+    module("net").running()  # ended now: its end is recorded and its directory goes (net.forget_ended)
+    out(f"{shown}: stopped")
+    return 0
 
 
 def pause_run(entry, record_, freeze):
@@ -748,14 +827,16 @@ def pause_run(entry, record_, freeze):
 def gc(days=None, dry_run=False, expired_only=False):
     """Remove what is no longer needed: sessions that ended without keeping their HOME (leftovers of a supervisor
     that died); with DAYS (else keep_days) also the stopped kept starts unused for more than DAYS days, and the
-    histories of names no start uses whose last entry is that old. EXPIRED_ONLY: only those kept starts (what a
-    new start does with keep_days). DRY_RUN: say what would go, remove nothing."""
+    histories of names no start uses whose last entry is that old; and the Podman pods of sandbox-ai's that nothing
+    runs in any more and no start uses (leftovers of launchers that were killed, a reboot). EXPIRED_ONLY: only those
+    kept starts (what a new start does with keep_days). DRY_RUN: say what would go, remove nothing. Pods that still
+    run a container are never removed: those no start knows are named ("orphaned_pods")."""
     days = days if days is not None else keep_days()
     # 0 days (--older-than 0) is every stopped kept start, not "no expiry"
     cutoff = time.time() - days * 86400 if days is not None else None
     sessions = module("sessions")
     result = {"days": days, "dry_run": dry_run, "removed": [], "leftovers": [], "histories": [], "damaged": [],
-              "skipped": []}
+              "skipped": [], "pods": [], "orphaned_pods": []}
     if not expired_only:
         for key, entry in start_entries(prune=False).items():
             if entry["state"] == "damaged":
@@ -765,6 +846,8 @@ def gc(days=None, dry_run=False, expired_only=False):
                 if not dry_run:
                     sessions.prune(key)
     found = entries(True, prune=not dry_run)
+    if not expired_only:
+        leftover_pods(found, result, dry_run)
     for entry in found:
         if cutoff is None or entry["kind"] == "mcp" or entry["state"] != "stopped" or not entry.get("keep"):
             continue
@@ -797,6 +880,30 @@ def gc(days=None, dry_run=False, expired_only=False):
     return result
 
 
+def leftover_pods(found, result, dry_run):
+    """The leftover pods of the local Podman (liveness.leftover_pods) into RESULT["pods"], removed unless DRY_RUN; the
+    pods that still run although no start of FOUND uses them into RESULT["orphaned_pods"]. Nothing without Podman."""
+    liveness = module("liveness")
+    in_use = {entry["pod"] for entry in found if isinstance(entry.get("pod"), str)}
+    in_use |= {liveness.pod_of({"run": entry["run"]}) for entry in found
+               if isinstance(entry.get("run"), str) and entry.get("state") in ("running", "paused", "orphaned")}
+    orphans = {}
+    records = module("net").running(orphans)
+    in_use |= {liveness.pod_of(record_) for record_ in [*records.values(), *orphans.values()]}
+    for directory in module("sessions").root().glob("*/session.json"):
+        data = read_json(directory)
+        if data is not None and isinstance(data.get("pod"), str):
+            in_use_live = liveness.pod_live(data["pod"], text(data.get("podman_url")))
+            if in_use_live is not False:  # running (or Podman did not say): never a leftover
+                in_use.add(data["pod"])
+    pods = liveness.leftover_pods(in_use)
+    if pods is None:
+        return
+    names = [name for name, _ in pods]
+    result["pods"] = names if dry_run else liveness.remove_pods(names)
+    result["orphaned_pods"] = liveness.unknown_live_pods(in_use) or []
+
+
 def show_gc(result, out=print, as_json=False):
     if as_json:
         out(json.dumps(result, indent=2))
@@ -810,11 +917,16 @@ def show_gc(result, out=print, as_json=False):
             f"{shown_time(entry.get('last_used'))} UTC)")
     if result["histories"]:
         out(f"{verb} the history of {', '.join(printable(name) for name in result['histories'])}")
+    if result.get("pods"):
+        out(f"{verb} {len(result['pods'])} Podman pod(s) of ended runs: {', '.join(map(printable, result['pods']))}")
+    for pod in result.get("orphaned_pods") or []:
+        out(f"left alone: the Podman pod {printable(pod)} still runs, but no start uses it (its launcher is gone); end "
+            f"it with: sandbox-ai stop {printable(pod)}")
     for entry in result["skipped"]:
         out(f"left alone: {printable(entry['name'])}: {printable(entry['reason'])}")
     for directory in result["damaged"]:
         out(f"left alone: {printable(directory)} is damaged (no readable session.json); remove it by hand")
-    if not (result["leftovers"] or result["removed"] or result["histories"]):
+    if not (result["leftovers"] or result["removed"] or result["histories"] or result.get("pods")):
         out("nothing to remove" + ("" if result["days"] is not None else "; kept starts never expire on their own: "
                                    "--older-than DAYS removes those unused for that long"))
 
@@ -827,7 +939,7 @@ def shown_time(value):
 
 
 HEADERS = ["NAME", "KIND", "AGENT", "STATE", "HOME", "STARTED (UTC)", "WORKSPACE"]
-STATE_STYLES = {"running": "ok", "paused": "warn", "damaged": "bad"}  # any other state (stopped, ended): muted
+STATE_STYLES = {"running": "ok", "paused": "warn", "orphaned": "bad", "damaged": "bad"}  # any other state (stopped, ended): muted
 KIND_STYLES = {"session": "accent", "run": "blue", "mcp": "magenta"}
 HELPER_PREFIX = "mcp-helper-"  # an MCP server that is another agent, a lead's helper (agent_sandbox.HELPER_PREFIX)
 TREE = ("├─ ", "└─ ")

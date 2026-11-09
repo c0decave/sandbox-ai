@@ -720,13 +720,15 @@ def test_pod_commands(scenario, tmp_path, monkeypatch):
         assert "-T,3000" in create[create.index("--network") + 1]
     assert ("--tty" in run) == (scenario == "edge")
     assert not any(v.startswith("--publish") for v in run)
-    assert "--label" not in create
+    # Every pod is marked as sandbox-ai's with its run (gc removes only such leftovers); no session label here.
+    assert [create[i + 1] for i, v in enumerate(create) if v == "--label"] == [f"{s.RUN_LABEL}=owned-fixture"]
     if scenario == "happy":
         # Session pods carry their session's tmux directory, so a stale one can be recognised.
         session = s.parse_args(["codex", "--workspace", str(tmp_path), "--pod-name", "agent-session-x",
                                 "--tmux-socket-dir", str(tmp_path / "sess" / "tmux")])
         create, _ = s.pod_commands(session, "agent-session-x", tmp_path / "session", tmp_path / "home")
-        assert create[create.index("--label") + 1] == f"{s.SESSION_LABEL}={(tmp_path / 'sess' / 'tmux').resolve()}"
+        assert [create[i + 1] for i, v in enumerate(create) if v == "--label"] == [
+            f"{s.SESSION_LABEL}={(tmp_path / 'sess' / 'tmux').resolve()}", f"{s.RUN_LABEL}=session-x"]
     assert f"type=bind,src={tmp_path},dst=/work,{'ro' if scenario == 'edge' else 'rw'},nodev" in run
     assert "--device" not in run
     if scenario == "happy":

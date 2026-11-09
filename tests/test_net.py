@@ -22,8 +22,15 @@ rt = net.launcher().RUNTIME
 
 @pytest.fixture(autouse=True)
 def no_login_runtime(tmp_path, monkeypatch):
-    """The runs of a real login session (/run/user/UID) stay out of these tests."""
+    """The runs of a real login session (/run/user/UID) stay out of these tests. PIDs are judged as on the host
+    (these tests may run inside a sandbox, where nothing is removed: liveness.py), and Podman is never asked."""
     monkeypatch.setattr(net, "USER_RUNTIME", tmp_path / "run-user")
+    monkeypatch.setattr(net.liveness(), "inside_sandbox", lambda *a, **k: False)
+
+    def no_podman(*args, **kwargs):
+        raise FileNotFoundError("podman")
+    monkeypatch.setattr(net.liveness(), "RUNNER", no_podman)
+    net.liveness()._cache.clear()
 
 
 @pytest.fixture

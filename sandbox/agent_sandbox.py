@@ -227,6 +227,7 @@ CONFIG_NAME = ".sandbox-ai.json"
 RULES_NAME = "rules.json"  # ~/.config/sandbox-ai/rules.json: your own rules, for every start
 # Label on session pods: the session's tmux directory, so a stale pod can be told apart from someone else's.
 SESSION_LABEL = "sandbox-ai.session"
+RUN_LABEL = "sandbox-ai.run"  # every pod a launcher creates: its run (liveness.RUN_LABEL)
 CONFIG_KEYS = {"version", "agent", "options", "agent_args", "workspaces", "description", "mcp_servers", "rules",
                "log_debug", "mode", "canaries", "name", "keep"}
 MCP_NAME = r"[A-Za-z0-9_-]{1,32}"
@@ -6639,6 +6640,9 @@ def register_run(a, run, session):
         "run": run, "agent": a.agent, "backend": a.backend, "workspace": a.workspaces[0], "pid": os.getpid(),
         # The PID's start time: `sandbox-ai net stop` signals this process only, never a later one of that PID.
         "pid_start": process_start(os.getpid()),
+        # Its PID namespace: only a process in the same one may conclude from a missing PID that this run ended
+        # (liveness.py; from inside a sandbox the host's PIDs are not visible).
+        "pid_ns": os.readlink("/proc/self/ns/pid") if os.path.exists("/proc/self/ns/pid") else None,
         "session": a.session or (a.pod_name if a.tmux_socket_dir else None), "session_dir": str(session),
         # sandbox-ai list, rename and the other commands find a run by its name; "start" links it to its
         # start directory (sessions.py), "pod" is what pause and resume freeze with Podman.
@@ -7146,6 +7150,8 @@ def pod_commands(a, name, session, home):
     owner = pod_owner(a)
     if owner:
         create += ["--label", f"{SESSION_LABEL}={owner}"]
+    # sandbox-ai's own pod (liveness.py): `sandbox-ai gc` removes it once it is left over, never anyone else's.
+    create += ["--label", f"{RUN_LABEL}={name[len('agent-'):] if name.startswith('agent-') else name}"]
     if a.ip:
         create += ["--ip", a.ip]
     if a.ip6:
@@ -7761,8 +7767,20 @@ def run_pod(a, session, home):
         if owned:
             # --time 0: the infra container's sleep ignores SIGTERM; waiting for it only costs 10 seconds.
             with signals_deferred():
-                subprocess.run(podman_command(a, "pod", "rm", "--force", "--time", "0", name), check=False,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                removed = subprocess.run(podman_command(a, "pod", "rm", "--force", "--time", "0", name), check=False,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                said = str(getattr(removed, "stderr", "") or "").strip()
+                def failed(done):
+                    return isinstance(getattr(done, "returncode", None), int) and done.returncode != 0
+                if failed(removed) and "no such pod" not in said.lower():
+                    # Once more without --time (Podman before 4.0 knows none); a pod still left is said, not hidden.
+                    removed = subprocess.run(podman_command(a, "pod", "rm", "--force", name), check=False,
+                                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                    said = str(getattr(removed, "stderr", "") or "").strip()
+                    if failed(removed) and "no such pod" not in said.lower():
+                        print(f"agent-sandbox: could not remove the pod {name} "
+                              f"({printable(said.splitlines()[-1] if said else '?')}); remove it with: podman pod rm "
+                              f"--force {name}", file=sys.stderr)
 
 
 def bwrap_command(a, session, home):

@@ -31,7 +31,6 @@ import json
 import os
 from pathlib import Path
 import shlex
-import shutil
 import signal
 import re
 import socket
@@ -78,6 +77,22 @@ def launcher():
                 spec.loader.exec_module(loaded)
                 _launcher = loaded
     return _launcher
+
+
+_liveness = None
+
+
+def liveness():
+    """liveness.py: whether a run whose launcher is gone has ended, and what is left of it."""
+    global _liveness
+    if _liveness is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_liveness_for_net", HERE / "liveness.py")
+        with LOADING:
+            if _liveness is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _liveness = loaded
+    return _liveness
 
 
 def alive(pid, start=None):
@@ -127,9 +142,13 @@ def run_dirs():
     return found
 
 
-def running():
-    """{run: record} of the sandboxes registered and still running (the first of a name wins); stale
-    entries are removed."""
+def running(orphans=None):
+    """{run: record} of the sandboxes registered whose launcher still runs (the first of a name wins). A run whose
+    launcher is gone is removed only when it has ended for certain (liveness.verdict: where this process sees the
+    launcher's processes, and with Podman once no container of its pod runs): its end is recorded, its pod and its
+    directories go. One whose pod still runs a container ("orphaned": the launcher was killed without its cleanup)
+    is kept, and put into ORPHANS (a dict, when given) with "orphaned": True; one this process cannot judge (inside
+    a sandbox, Podman not answering) is kept and left out."""
     runs = {}
     for directory in run_dirs():
         try:
@@ -144,11 +163,27 @@ def running():
             if not isinstance(record, dict):
                 continue
             if not alive(record.get("pid"), record.get("pid_start")):
-                shutil.rmtree(entry, ignore_errors=True)
+                verdict = liveness().verdict(record)
+                if verdict == "dead":
+                    forget_ended(entry, record)
+                elif verdict == "orphaned" and orphans is not None:
+                    orphans.setdefault(record.get("run", entry.name), {**record, "directory": str(entry),
+                                                                       "orphaned": True})
                 continue
             record["directory"] = str(entry)
             runs.setdefault(record.get("run", entry.name), record)
     return runs
+
+
+def forget_ended(directory, record):
+    """The run in DIRECTORY (RECORD: its run.json) ended without its launcher's cleanup (the launcher was killed):
+    its end goes into its name's history and its start's exit.json (once), its pod goes if Podman still lists it
+    with nothing running, then its directory and its browser directory."""
+    with contextlib.suppress(Exception):  # the record is read from disk: whatever it holds, the cleanup goes on
+        launcher().load_starts_module().run_event(directory, "exit")
+    with contextlib.suppress(Exception):
+        liveness().remove_ended_pod(record)
+    liveness().discard(directory)
 
 
 _sessions = None
