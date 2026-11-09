@@ -381,12 +381,63 @@ def check_git_identity():
     return "ok", "Git identity", f"{name} <{email}>", ""
 
 
-def check_installation():
+VERSION_CHECK = "sandbox-ai"  # the title of the first check: this sandbox-ai, where it is installed, its Python
+VERSION_ID = "sandbox-ai-version"  # its "id" in --json (with "version", "kind", "path", "prefix", "python")
+PACKAGINGS = ("pyz", "appimage", "macos-app")  # PACKAGING beside sandbox/ of a ready-made package (main.PACKAGES)
+WHERE = {"system": "system installation in {prefix}", "user": "the user's own installation", "checkout": "a checkout",
+         "pip": "a pip installation", "package": "a package ({package})", "unknown": "installed"}
+
+
+def hosts_module():
+    if "hosts" not in _modules:
+        spec = importlib.util.spec_from_file_location("sandbox_hosts_for_doctor", HERE / "hosts.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        _modules["hosts"] = loaded  # published only once loaded
+    return _modules["hosts"]
+
+
+def installation_facts(here=None):
+    """{"version", "kind", "path", "prefix", "package", "python", "python_path"} of this running copy of sandbox-ai,
+    read as `sandbox-ai hosts` reads another host's `version --verbose` (hosts.installation): KIND "system" (PREFIX/
+    lib/sandbox-ai/versions/X), "user" (the user's own), "package", "pip", "checkout" or "unknown". Nothing is asked
+    over the network: whether an update is there is `sandbox-ai update --check`'s (and the hosts list's) to say."""
+    here = Path(here or HERE.parent)
     version = launcher().__version__
-    checkout = (HERE.parent / ".git").exists()
-    where = "checkout" if checkout else str(HERE.parent)
+    lines = [f"sandbox-ai {version}", f"installed in: {here}"]
+    try:
+        package = (here / "PACKAGING").read_text().strip()
+    except (OSError, UnicodeDecodeError):
+        package = None
+    if package in PACKAGINGS:
+        lines.append(f"package: {package}")
+    elif not (here / "install.sh").is_file():
+        lines.append("updates: not through install.sh")
+    try:
+        info = hosts_module().installation("\n".join(lines))
+    except Exception:  # noqa: BLE001 - the doctor still says the version and the place
+        info = {"kind": "unknown", "path": str(here), "prefix": None}
+    return {"version": version, "kind": info.get("kind") or "unknown", "path": info.get("path") or str(here),
+            "prefix": info.get("prefix"), "package": info.get("package"),
+            "python": ".".join(map(str, sys.version_info[:3])), "python_path": sys.executable or ""}
+
+
+def where_text(facts):
+    """Where FACTS (installation_facts) say this sandbox-ai is, in a few words with its path."""
+    words = WHERE.get(facts.get("kind"), WHERE["unknown"]).format(prefix=facts.get("prefix") or "?",
+                                                                  package=facts.get("package") or "?")
+    return f"{words} ({facts.get('path')})"
+
+
+def check_installation(here=None):
+    """The first check: this sandbox-ai's version, where it is installed (the user's own or a system installation and
+    its prefix, a package, pip, a checkout) and the Python it runs with; a checkout is a warning (no workspace)."""
+    facts = installation_facts(here)
+    python = f"Python {facts['python']}" + (f" ({facts['python_path']})" if facts["python_path"] else "")
+    detail = f"{facts['version']}, {where_text(facts)}; {python}"
+    checkout = (Path(here or HERE.parent) / ".git").exists()
     hint = "install it (./install.sh --from .) and never use the checkout as a workspace" if checkout else ""
-    return ("warn" if checkout else "ok"), "sandbox-ai", f"{version} ({where})", hint
+    return ("warn" if checkout else "ok"), VERSION_CHECK, detail, hint
 
 
 def kits():
@@ -540,13 +591,13 @@ def checks(backend="podman", podman_url=None, cwd=None):
     if sys.platform == "darwin" and not podman_url:
         # macOS: Podman in podman machine's Linux VM; user namespaces, systemd, pasta, subuids and Bubblewrap are
         # the VM's (or Linux only), not this host's.
-        result = [check_user(), check_python(), check_installation(), check_machine(), check_podman(podman_url)]
+        result = [check_installation(), check_user(), check_python(), check_machine(), check_podman(podman_url)]
         result += [check_image(agent, podman_url) for agent in AGENTS] + [check_vpn(podman_url)]
         result += [check_login(agent) for agent in AGENTS]
         result += [check_kit(agent) for agent in AGENTS] + [check_kits(), check_plugins(), check_memory(cwd)]
         result += [check_git_identity(), check_project(cwd), check_mode(cwd)]
         return result
-    result = [check_user(), check_python(), check_installation(), check_userns(),
+    result = [check_installation(), check_user(), check_python(), check_userns(),
               check_user_session(backend=backend, podman_url=podman_url), check_proxy_nat()]
     if backend in ("podman", "both"):
         result += [check_podman(podman_url), check_pasta(podman_url)]
@@ -567,7 +618,7 @@ SYMBOLS = {"ok": "ok  ", "warn": "WARN", "fail": "FAIL", "skip": "--  "}
 # ok green, warnings orange, problems red, what was not checked grey.
 KINDS = {"ok": "ok", "warn": "orange", "fail": "bad", "skip": "muted"}
 # The table's sections, by the checks' titles (a title that fits none goes to the last).
-GROUPS = (("System", ("Ordinary user", "Python", "sandbox-ai", "User namespaces", "systemd user session",
+GROUPS = (("System", ("sandbox-ai", "Ordinary user", "Python", "User namespaces", "systemd user session",
                       "Connection proxy")),
           ("Engine", ("Podman", "podman machine", "pasta", "Delegated UID/GID ranges", "newuidmap", "Image ", "VPN", "Bubblewrap",
                       "TIOCSTI", "Firejail", "nft", "setpriv", "slirp")),
@@ -638,9 +689,16 @@ def cli(argv):
     a = parser.parse_args(argv)
     results = checks(a.backend, a.podman_url)
     if a.json:
-        # "group": the area of the table (System, Engine, Agents, Project), for the app and other readers.
-        print(json.dumps([{**dict(zip(("status", "check", "detail", "hint"), r)), "group": group_of(r[1])}
-                          for r in results], indent=2))
+        # "group": the area of the table (System, Engine, Agents, Project), for the app and other readers. The first
+        # check, this sandbox-ai, also has "id": "sandbox-ai-version" and its facts (version, kind, path, prefix,
+        # package, python, python_path): the Hosts page heads a host's doctor with them.
+        entries = []
+        for r in results:
+            entry = {**dict(zip(("status", "check", "detail", "hint"), r)), "group": group_of(r[1])}
+            if r[1] == VERSION_CHECK:
+                entry = {"id": VERSION_ID, **entry, **installation_facts()}
+            entries.append(entry)
+        print(json.dumps(entries, indent=2))
         return 1 if any(r[0] == "fail" for r in results) else 0
     colour = False if a.no_color else None
     status = report(results, colour=colour, plain=a.plain)

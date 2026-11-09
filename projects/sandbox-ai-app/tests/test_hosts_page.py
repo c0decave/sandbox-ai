@@ -264,6 +264,32 @@ def test_versions_update_and_update_all(qapp, env, monkeypatch):
     page.close()
 
 
+
+def test_a_hosts_doctor_is_headed_by_its_sandbox_ai_version(qapp, env, monkeypatch):
+    """The Doctor tab names the sandbox-ai that answered: its version, where it is installed, its Python (the doctor's
+    first check); for an older host whose doctor lacks it, the version the hosts list knows, said so."""
+    sai = backend.SandboxAI()
+    if not sai.hosts_supported():
+        pytest.skip("this sandbox-ai has no hosts.py")
+    sai.host_add("ct1", "admin@192.0.2.10", 22, "", "")
+    monkeypatch.setattr(sai, "host_statuses", lambda refresh=False, cached=True: {
+        "ct1": {"version": "0.1.60", "available": "0.1.66", "update": True, "kind": "system", "prefix": "/usr/local"}})
+    monkeypatch.setattr(sai, "host_run", lambda name, *args, timeout=120: (0, "{}", ""))
+    answers = [[{"status": "ok", "check": "Python", "detail": "3.11", "group": "System"}]]
+    monkeypatch.setattr(sai, "host_doctor", lambda name, engine="podman": answers[-1])
+    page = HostsPage(sai, lambda argv, title: None)
+    choose(page, "ct1")
+    page.check_host()
+    assert page.doctor.version_line.text() == \
+        "sandbox-ai 0.1.60 on ct1 — system installation in /usr/local (from the hosts list)"
+    answers.append([{"id": "sandbox-ai-version", "status": "ok", "check": "sandbox-ai", "detail": "0.1.80, …",
+                     "group": "System", "version": "0.1.80", "kind": "user",
+                     "path": "/home/admin/.local/share/sandbox-ai/versions/0.1.80", "python": "3.12.3"}])
+    page.check_host()
+    assert page.doctor.version_line.text() == ("sandbox-ai 0.1.80 on ct1 — the user's own installation "
+                                               "(/home/admin/.local/share/sandbox-ai/versions/0.1.80), Python 3.12.3")
+    page.close()
+
 def test_update_from_this_machines_copy_asks_first_and_is_offered_when_no_release_is_published(qapp, env, monkeypatch):
     """User request: next to the release update, `sandbox-ai hosts update NAME --from-here` (this machine's copy, as
     the installation the host has), asked first like an install and with the sudo choice beside Update; an update

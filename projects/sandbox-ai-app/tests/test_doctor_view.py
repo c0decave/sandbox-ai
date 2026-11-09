@@ -114,3 +114,32 @@ def test_a_narrow_pane_stays_readable_and_an_unknown_answer_is_shown_as_it_came(
     view.set_text("")
     assert view.summary.text() == "The doctor found nothing to check."
     view.deleteLater()
+
+
+INSTALLED = {"id": "sandbox-ai-version", "status": "ok", "check": "sandbox-ai", "group": "System", "hint": "",
+             "detail": "0.1.80, system installation in /usr/local (/usr/local/lib/sandbox-ai/versions/0.1.80); Python 3.12.3",
+             "version": "0.1.80", "kind": "system", "prefix": "/usr/local",
+             "path": "/usr/local/lib/sandbox-ai/versions/0.1.80", "python": "3.12.3"}
+
+
+def test_the_sandbox_ai_that_answered_heads_the_checks(qapp):
+    """Above the checks: the doctor's first check (sandbox-ai's version, where it is installed, its Python); from an
+    older doctor that only says "0.1.70 (PATH)", that; without it, the version the hosts list knows, said so; from the
+    doctor module of this machine (tuples), its detail."""
+    view = D.DoctorView()
+    view.set_results([INSTALLED, {"status": "ok", "check": "Python", "detail": "3.12.3"}], host="ct1",
+                     known={"version": "0.1.1"})
+    assert view.version_line.text() == ("sandbox-ai 0.1.80 on ct1 — system installation in /usr/local "
+                                        "(/usr/local/lib/sandbox-ai/versions/0.1.80), Python 3.12.3")
+    assert not view.version_line.isHidden() and view.count() == 2, "the entry is a check as well"
+    view.set_results([{"status": "ok", "check": "sandbox-ai", "detail": "0.1.70 (/opt/sandbox-ai)"}], host="ct1")
+    assert view.version_line.text() == "sandbox-ai 0.1.70 on ct1 — (/opt/sandbox-ai)"
+    view.set_results([{"status": "ok", "check": "Python"}], host="ct1",
+                     known={"version": "0.1.60", "kind": "user", "update": True})
+    assert view.version_line.text() == "sandbox-ai 0.1.60 on ct1 — the user's own installation (from the hosts list)"
+    view.set_text("FAIL  Podman   not found", host="old1", known={"version": "0.1.50"})
+    assert view.version_line.text() == "sandbox-ai 0.1.50 on old1 (from the hosts list)"
+    view.set_results([("ok", "sandbox-ai", "0.1.79, a checkout (/work); Python 3.11.2", "")])
+    assert view.version_line.text() == "sandbox-ai 0.1.79 — a checkout (/work); Python 3.11.2"
+    view.set_results([{"status": "ok", "check": "Python"}], host="ct1")
+    assert view.version_line.isHidden() and view.version_line.text() == "", "no version known: no line"

@@ -4187,8 +4187,19 @@ const byClass = (node, cls) => node.all().filter(n => (n.className || "").split(
   // an older sandbox-ai's text: as it is, with a note
   const text = vm.runInContext('doctorView("ok    Python   3.12\\nFAIL  Podman   not found", { host: "old1" })', context);
   result.text = [text.all().find(n => n.tagName === "pre").textContent, byClass(text, "notice")[0].textContent];
+  // above the checks: which sandbox-ai answered (the doctor's first check), else the hosts list's version
+  const versionLine = (code) => { const v = vm.runInContext(code, context); const p = byClass(v, "doctor-version")[0]; return p ? p.textContent : null; };
+  context.__installed = [{ id: "sandbox-ai-version", status: "ok", check: "sandbox-ai", detail: "0.1.80, …", group: "System", version: "0.1.80",
+    kind: "system", prefix: "/usr/local", path: "/usr/local/lib/sandbox-ai/versions/0.1.80", python: "3.12.3" }, { status: "ok", check: "Python" }];
+  context.__older = [{ status: "ok", check: "sandbox-ai", detail: "0.1.70 (/opt/sandbox-ai)" }];
+  context.__none = [{ status: "ok", check: "Python" }];
+  result.versionLines = [versionLine("doctorView(__installed, { host: 'ct1', known: { version: '0.1.1' } })"),
+    versionLine("doctorView(__older, { host: 'ct1' })"),
+    versionLine("doctorView(__none, { host: 'ct1', known: { version: '0.1.60', kind: 'user' } })"),
+    versionLine("doctorView('FAIL  Podman', { host: 'old1', known: { version: '0.1.50' } })"),
+    versionLine("doctorView(__none, { host: 'ct1' })")];
   // the doctor page and a host's test: the same view
-  answer = (method, path) => (path.endsWith("/doctor") ? checks.slice(0, 3) : path.endsWith("/test") ? { version: "sandbox-ai 0.1.80", doctor: "FAIL  Podman" } : path === "/api/hosts-status" ? {} : path === "/api/hosts-activity" ? {} : {});
+  answer = (method, path) => (path.endsWith("/doctor") ? checks.slice(0, 3) : path.endsWith("/test") ? { version: "sandbox-ai 0.1.80", doctor: "FAIL  Podman" } : path === "/api/hosts-status" ? { ct1: { version: "0.1.60", kind: "system", prefix: "/usr/local" } } : path === "/api/hosts-activity" ? {} : {});
   vm.runInContext('state.page = "doctor";', context);
   await vm.runInContext("pages.doctor(__main)", context); await settle();
   result.page = [byClass(main, "doctor").length, main.all().filter(n => n.tagName === "table").length];
@@ -4196,7 +4207,8 @@ const byClass = (node, cls) => node.all().filter(n => (n.className || "").split(
   await vm.runInContext("pages.hosts(__main)", context); await settle();
   const test = main.all().find(n => n.tagName === "button" && n.textContent === "Test" && n.parent.parent.children[0].textContent === "ct1");
   test.fire("click"); await settle();
-  result.hostTest = [byClass(main, "doctor").length, main.all().some(n => n.tagName === "pre" && n.textContent === "FAIL  Podman")];
+  result.hostTest = [byClass(main, "doctor").length, main.all().some(n => n.tagName === "pre" && n.textContent === "FAIL  Podman"),
+    byClass(main, "doctor-version").map(n => n.textContent)];
   console.log(JSON.stringify(result));
 })().catch(e => { console.error(e.stack); process.exit(1); });
 """
@@ -4208,6 +4220,11 @@ def test_the_doctor_is_readable_by_area_with_its_commands_to_copy(tmp_path):
     status as an icon and a word, what was found, the advice, the fix command in a block of its own with Copy; the
     fine ones folded away; an older sandbox-ai's text as it is, with a note."""
     result = run_driver(tmp_path, DOCTOR_DRIVER, "doctor")
+    assert result["versionLines"] == [
+        "sandbox-ai 0.1.80 on ct1 — system installation in /usr/local (/usr/local/lib/sandbox-ai/versions/0.1.80), "
+        "Python 3.12.3", "sandbox-ai 0.1.70 on ct1 — (/opt/sandbox-ai)",
+        "sandbox-ai 0.1.60 on ct1 — the user's own installation (from the hosts list)",
+        "sandbox-ai 0.1.50 on old1 (from the hosts list)", None]
     assert result["groupOf"] == ["Agents", "Engine", "Engine", "System", "Project", "Agents"]
     assert result["commands"] == ["podman system migrate", "sandbox-ai build claude", "sudo modprobe tun", "",
                                   "loginctl enable-linger you", "sysctl -w x=1", "apt install podman", ""]
@@ -4229,7 +4246,8 @@ def test_the_doctor_is_readable_by_area_with_its_commands_to_copy(tmp_path):
     pre, note = result["text"]
     assert pre == "ok    Python   3.12\nFAIL  Podman   not found" and "old1 answered with text" in note
     assert result["page"] == [1, 0], "the doctor page: the view, no table"
-    assert result["hostTest"] == [1, True], "a host's test: the same view, an older one's text as it is"
+    assert result["hostTest"] == [1, True, ["sandbox-ai 0.1.60 on ct1 — system installation in /usr/local (from the hosts list)"]], \
+        "a host's test: the same view, an older one's text as it is, headed by the version the hosts list knows"
     css = (WEB / "app.css").read_text()
     for rule in (".doctor-check {", "overflow-wrap: anywhere", ".command-block code", "white-space: pre-wrap",
                  "@media (max-width: 760px)"):

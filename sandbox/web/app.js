@@ -2723,14 +2723,49 @@ function doctorItem(c) {
 function doctorView(results, options) {
   const opts = options || {};
   const heading = `h${opts.level || 2}`, sub = `h${(opts.level || 2) + 1}`;
+// The doctor's first check, sandbox-ai itself (id "sandbox-ai-version", with version, kind, path, prefix, python);
+// where a sandbox-ai is installed, by the kind the doctor and the hosts list give (the app's doctor_view.WHERE).
+const DOCTOR_VERSION_ID = "sandbox-ai-version";
+const DOCTOR_WHERE = { system: N_("system installation in {prefix}"), user: N_("the user's own installation"), checkout: N_("a checkout"),
+  pip: N_("a pip installation"), package: N_("a package ({package})") };
+const VERSION_PATTERN = /[0-9]+\.[0-9]+\.[0-9]+(?:[.+-][0-9A-Za-z.+-]+)?/;
+
+function doctorWhere(info) {
+  if (!info || typeof info !== "object" || !Object.prototype.hasOwnProperty.call(DOCTOR_WHERE, info.kind)) return "";
+  return t(DOCTOR_WHERE[info.kind], { prefix: String(info.prefix || "?"), package: String(info.package || "?") });
+}
+
+// The line above a doctor's checks: "sandbox-ai 0.1.80 on HOST — system installation in /usr/local (PATH), Python
+// 3.12.3" from its first check; from an older doctor that only says "0.1.70 (PATH)", that; without such a check KNOWN
+// (the hosts list's status of HOST) marked "(from the hosts list)"; "" when no version is known.
+function doctorVersionLine(results, host, known) {
+  const entry = (Array.isArray(results) ? results : []).find(r => r && typeof r === "object" && (r.id === DOCTOR_VERSION_ID || r.check === "sandbox-ai"));
+  let version = null, where = "", source = "";
+  if (entry) {
+    const detail = String(entry.detail || "");
+    const found = VERSION_PATTERN.exec(detail);
+    version = entry.version ? String(entry.version) : found ? found[0] : null;
+    if (entry.version && entry.kind) {
+      where = doctorWhere(entry);
+      if (entry.path) where = where ? `${where} (${entry.path})` : String(entry.path);
+      if (entry.python) where += `, ${t("Python {version}", { version: String(entry.python) })}`;
+    } else if (found && found.index === 0) where = detail.slice(found[0].length).replace(/^[\s,;]+/, "");
+  }
+  if (!version && known && typeof known === "object" && known.version) {
+    version = String(known.version); where = doctorWhere(known); source = t("(from the hosts list)");
+  }
+  if (!version) return "";
+  return t("sandbox-ai {version} on {host}", { version, host: host || state.host }) + (where ? ` — ${where}` : "") + (source ? ` ${source}` : "");
+}
+
   if (typeof results === "string") {
-    return el("div", { class: "doctor" }, notice(t("The sandbox-ai of {host} answered with text (an older version without the doctor's list): shown as it is. An update gives the readable list.", { host: opts.host || state.host }), "warn"),
+    return el("div", { class: "doctor" }, versionLine, notice(t("The sandbox-ai of {host} answered with text (an older version without the doctor's list): shown as it is. An update gives the readable list.", { host: opts.host || state.host }), "warn"),
       el("pre", { class: "doctor-text" }, results));
   }
   const checks = doctorChecks(results);
   const count = (status) => checks.filter(c => c.status === status).length;
   const problems = count("fail"), warnings = count("warn"), fine = count("ok"), skipped = count("skip");
-  const view = el("div", { class: "doctor" });
+  const view = el("div", { class: "doctor" }, versionLine);
   if (!checks.length) { view.append(notice(t("The doctor found nothing to check."), "")); return view; }
   view.append(el("p", { class: `doctor-summary notice ${problems ? "error" : warnings ? "warn" : "ok"}` },
     problems || warnings ? t("{problems} problem(s), {warnings} warning(s), {fine} fine: each says how to fix it.", { problems, warnings, fine })
@@ -2743,6 +2778,8 @@ function doctorView(results, options) {
     const failedHere = open.filter(c => c.status === "fail").length, warnedHere = open.length - failedHere;
     view.append(el("section", { class: "doctor-group", "data-group": key }, el(heading, {}, t(title), " ",
       el("span", { class: "hint" }, t("{problems} problem(s), {warnings} warning(s)", { problems: failedHere, warnings: warnedHere }))),
+  const line = doctorVersionLine(results, opts.host, opts.known);
+  const versionLine = line ? el("p", { class: "doctor-version" }, el("strong", {}, line)) : null;
     el("ul", { class: "doctor-checks" }, open.map(doctorItem))));
   }
   // the fine ones, and those not checked here, folded away, by area
@@ -2770,7 +2807,7 @@ pages.doctor = async (main) => {
   clear(main).append(el("h1", {}, t("Doctor on {host}", { host })),
     el("div", { class: "row" }, el("label", { for: "doctor-backend" }, t("Backend")), choice),
     el("p", { class: "hint" }, t("Each command is only shown to copy: run it yourself in a terminal on {host}.", { host })),
-    doctorView(results, { level: 2, host }));
+    doctorView(results, { level: 2, host, known: (state.hostVersions || {})[host] }));
 };
 
 // The logs of a host (sandbox-ai logs --json DIR | --project PATH): a log directory, a project's (its default log
@@ -4238,6 +4275,7 @@ pages.hosts = async (main) => {
   // the starts and the open questions of each host, as the fleet's last listings found them (nothing is asked for it)
   const activityCells = {};
   const loadActivity = async () => {
+    state.hostVersions = Object.assign(state.hostVersions || {}, found);  // the doctor page's version of an older host
     let found;
     try { found = await api("GET", "/api/hosts-activity", undefined, { background: true }); } catch (e) { found = {}; }
     for (const [name, [starts, questions]] of Object.entries(activityCells)) {
@@ -4268,7 +4306,7 @@ pages.hosts = async (main) => {
             const r = await api("POST", `/api/hosts/${encodeURIComponent(h.name)}/test`);
             output.append(...keyNotices(r));
             output.append(notice(r.error ? `${h.name}: ${r.error}` : `${h.name}: ${r.version}${(r.fixed || []).length ? t(" (tried again after making the key private)") : ""}`, r.error ? "error" : "ok"));
-            if (r.doctor) output.append(el("h2", {}, t("Doctor on {host}", { host: h.name })), doctorView(r.doctor, { level: 3, host: h.name }));
+            if (r.doctor) output.append(el("h2", {}, t("Doctor on {host}", { host: h.name })), doctorView(r.doctor, { level: 3, host: h.name, known: versions[h.name] }));
           } catch (e) { output.append(errorNotice(e)); }
         }) }, t("Test")),
         el("button", { title: t("version --verbose: where it is installed, its release keys"), onclick: (ev) => busy(ev.target, async () => {

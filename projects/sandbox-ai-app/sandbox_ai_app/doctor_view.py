@@ -3,7 +3,9 @@ icon in the theme's colours, what was found in plain words and how to fix it, th
 
 The results come from sandbox-ai's doctor module in this process ((status, check, detail, hint) tuples), from
 `sandbox-ai doctor --json` (another host: a list of {status, check, detail, hint, group}), or, from an older
-sandbox-ai, as its text output (parse_text). No result is ever run: a fix command is only copied.
+sandbox-ai, as its text output (parse_text). No result is ever run: a fix command is only copied. Above the checks:
+which sandbox-ai answered (the doctor's first check, id "sandbox-ai-version": its version, where it is installed, its
+Python), or for an older one without it, the version the hosts list knows (version_header).
 """
 from __future__ import annotations
 
@@ -34,6 +36,11 @@ PREFIXES = {"System": ("Ordinary user", "Python", "sandbox-ai", "User namespaces
             "Engine": ("Podman", "podman machine", "pasta", "Delegated UID/GID ranges", "newuidmap", "Image ", "VPN",
                        "Bubblewrap", "TIOCSTI", "Firejail", "nft", "setpriv", "slirp"),
             "Agents": ("Login ", "Kit ", "Kits", "Plugins")}
+VERSION_ID = "sandbox-ai-version"  # doctor --json: the first check, sandbox-ai itself (with "version", "kind", ...)
+VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:[.+-][0-9A-Za-z.+-]+)?")
+# Where a sandbox-ai is installed, by the kind the doctor and the hosts list give (hosts.installation).
+WHERE = {"system": N_("system installation in {prefix}"), "user": N_("the user's own installation"),
+         "checkout": N_("a checkout"), "pip": N_("a pip installation"), "package": N_("a package ({package})")}
 COMMAND_WORDS = ("sandbox-ai", "sudo", "podman", "systemctl", "loginctl", "modprobe", "sysctl", "apt", "apt-get", "dnf",
                  "pacman", "zypper", "brew", "usermod", "git", "echo", "chmod", "mkdir")
 
@@ -82,6 +89,51 @@ def normalize(results, groups=None):
     return found
 
 
+def version_entry(results):
+    """The doctor's check of sandbox-ai itself in RESULTS (tuples, --json dicts or parse_text's dicts), or None."""
+    for result in results or []:
+        if isinstance(result, dict) and (result.get("id") == VERSION_ID or result.get("check") == "sandbox-ai"):
+            return result
+        if isinstance(result, (list, tuple)) and len(result) >= 3 and result[1] == "sandbox-ai":
+            return {"status": result[0], "check": result[1], "detail": result[2]}
+    return None
+
+
+def where_words(info):
+    """Where INFO (the doctor's entry or the hosts list's status of a host) says sandbox-ai is installed, or ""."""
+    kind = info.get("kind") if isinstance(info, dict) else None
+    if kind not in WHERE:
+        return ""
+    return tr(WHERE[kind], prefix=printable(str(info.get("prefix") or "?")),
+              package=printable(str(info.get("package") or "?")))
+
+
+def version_header(results, host=None, known=None):
+    """The line above a doctor's checks: "sandbox-ai 0.1.80 on HOST — system installation in /usr/local (PATH),
+    Python 3.12.3" from the doctor's first check; from an older doctor that only says "0.1.70 (PATH)", that; without
+    such a check, KNOWN (the hosts list's {version, kind, ...} of HOST) marked "(from the hosts list)"; "" when no
+    version is known."""
+    entry, where, source, version = version_entry(results), "", "", None
+    if entry is not None:
+        detail = str(entry.get("detail") or "")
+        found = VERSION.search(detail)
+        version = entry.get("version") or (found.group(0) if found else None)
+        if entry.get("version") and entry.get("kind"):
+            where = where_words(entry) or ""
+            if entry.get("path"):
+                where = f"{where} ({entry['path']})" if where else str(entry["path"])
+            if entry.get("python"):
+                where += f", Python {entry['python']}"
+        elif found and found.start() == 0:
+            where = detail[found.end():].lstrip(" ,;")
+    if not version and isinstance(known, dict) and known.get("version"):
+        version, where, source = known["version"], where_words(known), tr("(from the hosts list)")
+    if not version:
+        return ""
+    head = tr("sandbox-ai {version} on {host}", version=version, host=host) if host else f"sandbox-ai {version}"
+    return printable(head + (f" — {where}" if where else "") + (f" {source}" if source else ""))
+
+
 LINE = re.compile(r"^\s*(ok|WARN|FAIL|--)\s+(.+?)\s{2,}(.*)$")
 
 
@@ -127,6 +179,15 @@ class DoctorView(QWidget):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        # Which sandbox-ai answered: its version, where it is installed, its Python (version_header).
+        self.version_line = plain_label()
+        self.version_line.setAccessibleName(tr("The sandbox-ai that was checked"))
+        self.version_line.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        font = QFont(self.version_line.font())
+        font.setBold(True)
+        self.version_line.setFont(font)
+        self.version_line.setVisible(False)
+        layout.addWidget(self.version_line)
         top = QHBoxLayout()
         self.summary = plain_label(tr("Not checked yet: press Check."), role="secondary")
         self.only_problems = QCheckBox(tr("Only problems and warnings"))
@@ -177,15 +238,19 @@ class DoctorView(QWidget):
         layout.addWidget(split, 1)
         self.checks, self.raw = [], ""
 
-    def set_results(self, results, groups=None):
-        """Show RESULTS (doctor tuples or --json dicts); GROUPS: the doctor module's group_of, if any."""
+    def set_results(self, results, groups=None, host=None, known=None):
+        """Show RESULTS (doctor tuples or --json dicts); GROUPS: the doctor module's group_of, if any; HOST: whose
+        doctor it is; KNOWN: the hosts list's status of HOST, for the version above when the doctor does not say it."""
         self.checks, self.raw = normalize(results, groups), ""
+        header = version_header(results, host, known)
+        self.version_line.setText(header)
+        self.version_line.setVisible(bool(header))
         self.show_checks()
 
-    def set_text(self, text):
+    def set_text(self, text, host=None, known=None):
         """Show doctor's text output (an older sandbox-ai without --json); a text that holds no check it can read
         is shown as it came (escaped)."""
-        self.set_results(parse_text(text))
+        self.set_results(parse_text(text), host=host, known=known)
         if not self.checks and (text or "").strip():
             self.raw = "\n".join(printable(line) for line in str(text).strip().splitlines())
             self.summary.setText(tr("The doctor answered in a form this app does not read: its text is below, as it "

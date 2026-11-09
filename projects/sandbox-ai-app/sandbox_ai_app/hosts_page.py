@@ -928,7 +928,7 @@ class HostsPage(QWidget):
                 self.status.setText(printable("\n".join([f"{name}: {result['error']}", *keys])))
             else:
                 self.status.setText(printable("\n".join([f"{name}: {result.get('version')}", *keys])))
-            self.show_doctor(result.get("doctor") or [])
+            self.show_doctor(result.get("doctor") or [], name)
         background(self.sai.host_test, name, owner=self, source=self.test_button, timeout=180, done=done)
 
     def check_host(self):
@@ -944,7 +944,7 @@ class HostsPage(QWidget):
                 self.status.setText(printable(f"{name}: {error}"))
                 return
             self.status.setText(tr("{host}: checked for {backend}", host=name, backend=engine))
-            self.show_doctor(result)
+            self.show_doctor(result, name)
         background(self.sai.host_doctor, name, engine, owner=self, source=self.doctor_button, timeout=330, done=done)
 
     # -- the chosen host's defaults --
@@ -1292,10 +1292,12 @@ class HostsPage(QWidget):
                                                        modal=False)
         self.load_versions(refresh=True)
 
-    def show_doctor(self, results):
-        """The host's doctor (--json: a list of checks; an older one's text output as a string)."""
+    def show_doctor(self, results, name=None):
+        """The host's doctor (--json: a list of checks; an older one's text output as a string), headed by its
+        sandbox-ai version (the doctor's first check; from an older doctor without it, the hosts list's)."""
+        known = (getattr(self, "versions", None) or {}).get(name) if name else None
         if isinstance(results, str):
-            self.doctor.set_text(results)
+            self.doctor.set_text(results, host=name, known=known)
         else:
-            self.doctor.set_results([r for r in results if isinstance(r, dict)])
+            self.doctor.set_results([r for r in results if isinstance(r, dict)], host=name, known=known)
         self.tabs.setCurrentWidget(self.doctor_tab)

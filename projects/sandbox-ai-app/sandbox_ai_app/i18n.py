@@ -7730,6 +7730,30 @@ TEXTS = {
         'en': 'Git logins (sandbox-ai git-logins)',
         'de': 'Git-Logins (sandbox-ai git-logins)'},
     'Publish logins (sandbox-ai publish-logins)': {
+    'The sandbox-ai that was checked': {
+        'en': 'The sandbox-ai that was checked',
+        'de': 'Das geprüfte sandbox-ai'},
+    'sandbox-ai {version} on {host}': {
+        'en': 'sandbox-ai {version} on {host}',
+        'de': 'sandbox-ai {version} auf {host}'},
+    'system installation in {prefix}': {
+        'en': 'system installation in {prefix}',
+        'de': 'Systeminstallation in {prefix}'},
+    "the user's own installation": {
+        'en': "the user's own installation",
+        'de': 'eigene Installation des Benutzers'},
+    'a checkout': {
+        'en': 'a checkout',
+        'de': 'ein Checkout'},
+    'a pip installation': {
+        'en': 'a pip installation',
+        'de': 'eine pip-Installation'},
+    'a package ({package})': {
+        'en': 'a package ({package})',
+        'de': 'ein Paket ({package})'},
+    '(from the hosts list)': {
+        'en': '(from the hosts list)',
+        'de': '(aus der Liste der Hosts)'},
         'en': 'Publish logins (sandbox-ai publish-logins)',
         'de': 'Veröffentlichungs-Logins (sandbox-ai publish-logins)'},
     'Agent login': {
