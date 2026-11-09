@@ -2239,9 +2239,13 @@ hash of the catalog, and sandbox-ai-mcp's `scripts/sign_catalog.py` makes it
 only for servers built from their pinned sources, audited, and passed their
 smoke tests with sandbox-ai's own run lines under Podman and Bubblewrap.
 `sandbox-ai mcp catalog` shows `signed` or `unsigned` per entry; a definition
-records the key that signed it (`signed_by`). A catalog that is not signed (one
-of your own) needs `--unsigned`; a signature that does not verify is refused
-whatever you pass.
+records the key that signed it (`signed_by`) and the catalog it came from
+(`catalog`, its URL or path), and `sandbox-ai mcp list` shows both (CATALOG;
+`--json`: `catalog`, `catalog_source`, `signed`; a server added before 0.1.78
+says `unknown`). A catalog that is not signed (one of your own) needs
+`--unsigned`; a signature that does not verify is refused whatever you pass.
+The app and the web show such a refusal and offer to add the server anyway,
+asked first (`mcp-unsigned`).
 
 **Bubblewrap.** Without Podman (or with `--backend bwrap`), `add` takes the
 entry's rootfs instead of its image (from `rootfs.json` beside the catalog,

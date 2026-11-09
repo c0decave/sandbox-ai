@@ -14,7 +14,7 @@ import threading
 import time
 
 from PySide6.QtCore import QItemSelectionModel, QObject, QProcess, QRect, QSize, Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QColor, QFont, QPainter, QPalette
+from PySide6.QtGui import QColor, QFont, QPainter, QPalette, QTextDocument, QTextOption
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QHeaderView, QLabel, QLayout,
     QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QStyle, QStyledItemDelegate,
@@ -163,35 +163,220 @@ def set_enabled(widget, enabled, why=None, tooltip=None):
 
 # -- dialogs (plain text only) --
 
-LONG_MESSAGE = (24, 160)  # lines, characters in a line: a message beyond either scrolls (long_message)
+LONG_MESSAGE = (24, 160)  # lines, characters in a line: a message beyond either goes to a MessageDialog
+LONG_WORD = 60  # characters without a space (a URL, a path): a message with one goes to a MessageDialog too
+MESSAGE_SIZE = (640, 360)  # the most a MessageDialog's text takes before it scrolls (less on a smaller screen)
 
 
 def long_message(text):
-    """Whether TEXT is too long for a plain message box: it is shown in a scrolling area then, never cut."""
+    """Whether TEXT is too long for a plain message box: a line of more than LONG_MESSAGE characters, more lines
+    than it, or a word a line cannot hold (a URL). Such a message is shown in a MessageDialog: wrapped (inside the
+    word too), selectable, scrolling beyond a screenful, never cut and never wider than the screen."""
     lines = str(text).split("\n")
-    return len(lines) > LONG_MESSAGE[0] or any(len(line) > LONG_MESSAGE[1] for line in lines)
+    return len(lines) > LONG_MESSAGE[0] or any(len(line) > LONG_MESSAGE[1] for line in lines) or \
+        any(len(word) > LONG_WORD for word in str(text).split())
 
 
-def _scrolling(box, label):
-    """The message LABEL of the QMessageBox BOX inside a scroll area in its place: a long question (every workspace
-    and option of a project file) is all there to read, the buttons stay on the screen."""
-    layout = box.layout()
-    index = layout.indexOf(label) if layout is not None else -1
-    if index < 0:
-        return
-    row, column, rows, columns = layout.getItemPosition(index)
-    layout.removeWidget(label)
-    area = QScrollArea(box)
-    area.setObjectName("message_scroll")
-    area.setWidgetResizable(True)
-    area.setFrameShape(QFrame.Shape.NoFrame)
-    area.setWidget(label)
-    area.setMinimumSize(640, 360)
-    area.setAccessibleName(tr("Message"))
-    layout.addWidget(area, row, column, rows, columns)
+class WrapText(QPlainTextEdit):
+    """wrapping_text's field: its size hint is the one given (HINT), not QPlainTextEdit's fixed 256x192."""
+    hint = None
+
+    def sizeHint(self):  # noqa: N802
+        return self.hint if self.hint is not None else super().sizeHint()
+
+
+def wrapping_text(text="", role=None):
+    """A read-only plain-text field for a message (a refusal of sandbox-ai, a URL in it): it wraps at word
+    boundaries and inside a word longer than a line, so it never asks for more width than it gets; it is
+    selectable, and Qt never reads its text as rich text. MessageDialog's text; MessageText is the one that
+    grows with its text in a page."""
+    field = WrapText()
+    field.setReadOnly(True)
+    field.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse |
+                                  Qt.TextInteractionFlag.TextSelectableByKeyboard)
+    field.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+    field.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+    field.setFrameShape(QFrame.Shape.NoFrame)
+    field.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)  # it wraps: never wider than it is
+    field.setStyleSheet("QPlainTextEdit { background: transparent; border: none; }")
+    field.document().setDocumentMargin(0)
+    if role:
+        field.setProperty("role", role)
+    field.setPlainText(str(text))
+    return field
+
+
+def text_height(text, font, width):
+    """The height TEXT takes in FONT at WIDTH pixels, wrapped as wrapping_text wraps it."""
+    document = QTextDocument()
+    document.setDefaultFont(font)
+    option = document.defaultTextOption()
+    option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+    document.setDefaultTextOption(option)
+    document.setDocumentMargin(0)
+    document.setPlainText(str(text))
+    document.setTextWidth(max(1, width))
+    return int(document.size().height()) + 2
+
+
+class MessageText(QPlainTextEdit):
+    """A page's message area for what sandbox-ai said (its refusals, a catalog's problems): wrapping_text that is
+    as high as its text at the width it gets, without a scroll bar, so a long one-line refusal with a URL wraps in
+    the page instead of widening the window; empty, it takes no room."""
+
+    def __init__(self, text="", role=None):
+        super().__init__()
+        field = wrapping_text("", role)  # its settings, taken over
+        self.setReadOnly(True)
+        self.setTextInteractionFlags(field.textInteractionFlags())
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setStyleSheet(field.styleSheet())
+        self.document().setDocumentMargin(0)
+        field.deleteLater()
+        if role:
+            self.setProperty("role", role)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.setText(text)
+
+    def setText(self, text):  # noqa: N802 - QLabel's name: the pages set it as they set a label
+        self.setPlainText(str(text or ""))
+        self.setHidden(not str(text or "").strip())
+        self.fit()
+
+    def text(self):
+        return self.toPlainText()
+
+    def needed_height(self, width=None):
+        width = self.viewport().width() if width is None else width
+        margins = self.contentsMargins()
+        return text_height(self.toPlainText(), self.font(), width) + margins.top() + margins.bottom()
+
+    def fit(self):
+        """As high as its text needs at its width; while it has no real width yet (not laid out), one line: a height
+        for a width of a few pixels would make the window as high as the text is long."""
+        if not self.toPlainText():
+            height = 0
+        elif self.viewport().width() < 8 * max(1, self.fontMetrics().averageCharWidth()):
+            height = self.fontMetrics().lineSpacing() + self.contentsMargins().top() + self.contentsMargins().bottom()
+        else:
+            height = self.needed_height()
+        if height != self.height() or self.minimumHeight() != height:
+            self.setFixedHeight(height)
+
+    def minimumSizeHint(self):  # noqa: N802
+        return QSize(0, self.height())
+
+    def sizeHint(self):  # noqa: N802
+        return QSize(0, self.height())
+
+    def resizeEvent(self, event):  # noqa: N802
+        super().resizeEvent(event)
+        self.fit()
+
+
+class MessageDialog(QDialog):
+    """A message box for a long message (long_message): its icon, the text in wrapping_text (wrapped inside a URL
+    too, selectable, scrolling beyond MESSAGE_SIZE), the details behind a button, the buttons below. It offers
+    what inform() and confirm() use of QMessageBox (addButton, setDefaultButton, setEscapeButton, clickedButton,
+    setDetailedText), so a QMessageBox, whose own sizing would cut such a message or shift it out of its place,
+    is never asked to show one."""
+
+    def __init__(self, parent, icon, title_text, text, details=None):
+        super().__init__(parent)
+        self.setWindowTitle(str(title_text))
+        self.setObjectName("message_dialog")
+        self._clicked, self._escape = None, None
+        layout = QVBoxLayout(self)
+        row = QHBoxLayout()
+        pixmap = QLabel()
+        standard = {QMessageBox.Icon.Warning: QStyle.StandardPixmap.SP_MessageBoxWarning,
+                    QMessageBox.Icon.Question: QStyle.StandardPixmap.SP_MessageBoxQuestion,
+                    QMessageBox.Icon.Critical: QStyle.StandardPixmap.SP_MessageBoxCritical}.get(
+            icon, QStyle.StandardPixmap.SP_MessageBoxInformation)
+        pixmap.setPixmap(self.style().standardIcon(standard).pixmap(32, 32))
+        row.addWidget(pixmap, 0, Qt.AlignmentFlag.AlignTop)
+        self.text = wrapping_text(text)
+        self.text.setObjectName("message_text")
+        self.text.setAccessibleName(tr("Message"))
+        row.addWidget(self.text, 1)
+        layout.addLayout(row, 1)
+        self.details = None
+        self.details_button = QPushButton(tr("Show details…"))
+        self.details_button.setVisible(False)
+        self.details_button.clicked.connect(self._toggle_details)
+        self.buttons = QDialogButtonBox()
+        bottom = QHBoxLayout()
+        bottom.addWidget(self.details_button)
+        bottom.addWidget(self.buttons, 1)
+        layout.addLayout(bottom)
+        self._fit(str(text))
+        if details:
+            self.setDetailedText(details)
+
+    def _fit(self, text):
+        """The text's room: as wide as its longest line (at most MESSAGE_SIZE and the screen less a margin), as
+        high as it needs there (at most MESSAGE_SIZE); beyond that it scrolls."""
+        screen = (self.screen() or QApplication.primaryScreen())
+        room = screen.availableGeometry().size() if screen is not None else QSize(*MESSAGE_SIZE) * 2
+        metrics = self.text.fontMetrics()
+        widest = max((metrics.horizontalAdvance(line) for line in text.split("\n")), default=0) + 8
+        width = max(min(widest, MESSAGE_SIZE[0], room.width() - 160), min(320, room.width() - 160), 120)
+        # (measured a scroll bar narrower, with a line to spare: QPlainTextEdit lays out a little differently)
+        height = min(text_height(text, self.text.font(), width - 24) + metrics.lineSpacing(), MESSAGE_SIZE[1],
+                     max(120, room.height() // 2))
+        self.text.setMinimumSize(width, max(height, metrics.lineSpacing()))
+        self.text.hint = QSize(width, max(height, metrics.lineSpacing()))
+
+    def addButton(self, text, role):  # noqa: N802
+        accepting = role == QMessageBox.ButtonRole.AcceptRole
+        found = self.buttons.addButton(str(text), QDialogButtonBox.ButtonRole.AcceptRole if accepting else
+                                       QDialogButtonBox.ButtonRole.RejectRole)
+        found.clicked.connect(lambda _=False, b=found, a=accepting: self._chosen(b, a))
+        return found
+
+    def _chosen(self, chosen, accepting):
+        self._clicked = chosen
+        (self.accept if accepting else super().reject)()
+
+    def setDefaultButton(self, chosen):  # noqa: N802
+        chosen.setDefault(True)
+        chosen.setFocus()
+
+    def setEscapeButton(self, chosen):  # noqa: N802
+        self._escape = chosen
+
+    def reject(self):
+        """Escape or the window closed: the escape button counts as chosen (as in a QMessageBox)."""
+        self._clicked = self._escape
+        super().reject()
+
+    def clickedButton(self):  # noqa: N802
+        return self._clicked
+
+    def setDetailedText(self, details):  # noqa: N802
+        if self.details is None:
+            self.details = wrapping_text("")
+            self.details.setObjectName("message_details")
+            self.details.setFont(MONO)
+            self.details.setMinimumHeight(120)
+            self.details.setVisible(False)
+            self.layout().insertWidget(1, self.details, 1)
+        self.details.setPlainText(str(details))
+        self.details_button.setVisible(True)
+
+    def _toggle_details(self):
+        shown = not self.details.isVisible()
+        self.details.setVisible(shown)
+        self.details_button.setText(tr("Hide details…") if shown else tr("Show details…"))
 
 
 def _box(parent, icon, title_text, text, details=None):
+    if long_message(text):
+        return MessageDialog(parent, icon, title_text, text, details)
     box = QMessageBox(icon, str(title_text), str(text), QMessageBox.StandardButton.NoButton, parent)
     box.setTextFormat(Qt.TextFormat.PlainText)
     label = box.findChild(QLabel, "qt_msgbox_label")
@@ -199,8 +384,6 @@ def _box(parent, icon, title_text, text, details=None):
         label.setTextFormat(Qt.TextFormat.PlainText)
         label.setOpenExternalLinks(False)
         label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        if long_message(text):
-            _scrolling(box, label)
     if details:
         box.setDetailedText(str(details))  # always plain text
     return box

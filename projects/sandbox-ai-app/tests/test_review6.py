@@ -106,15 +106,16 @@ def test_the_details_keep_their_lines_and_escape_the_rest():
 
 
 def test_a_long_question_scrolls_and_a_short_one_does_not(qapp):
-    from PySide6.QtWidgets import QLabel, QMessageBox, QScrollArea
+    from PySide6.QtWidgets import QMessageBox, QPlainTextEdit
     text = "\n".join(f"    ⚠ /home/u/workspace-{index}" for index in range(80))
     box = widgets._box(None, QMessageBox.Icon.Warning, "Trust", text)
-    area = box.findChild(QScrollArea, "message_scroll")
-    assert area is not None and isinstance(area.widget(), QLabel) and area.widget().text() == text
+    area = box.findChild(QPlainTextEdit, "message_text")
+    assert isinstance(box, widgets.MessageDialog) and area is not None and area.toPlainText() == text
+    assert area.minimumHeight() <= widgets.MESSAGE_SIZE[1], "beyond a screenful it scrolls"
     short = widgets._box(None, QMessageBox.Icon.Warning, "Trust", "Trust it?")
-    assert short.findChild(QScrollArea, "message_scroll") is None
+    assert isinstance(short, QMessageBox) and short.findChild(QPlainTextEdit, "message_text") is None
     wide = widgets._box(None, QMessageBox.Icon.Warning, "Trust", "x" * 400)
-    assert wide.findChild(QScrollArea, "message_scroll") is not None
+    assert wide.findChild(QPlainTextEdit, "message_text") is not None
     for item in (box, short, wide):
         item.deleteLater()
 

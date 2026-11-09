@@ -77,6 +77,7 @@ const ERROR_TEXTS = {
   "changed-meanwhile": N_("{host} was changed meanwhile: nothing was done. Look again, then ask again."),
   "nothing-checked": N_("Nothing was checked on {host}: there is no all-clear."),
   "host-too-old": N_("sandbox-ai {version} on {host} does not know {what} yet: update it on the page Hosts (Update, or Update from this machine's copy)."),
+  "mcp-unsigned-catalog": N_("{entry} was not added on {host}: its catalog is not signed by a trusted key."),
 };
 
 // E's text in the page's language: the page's own words for a known code, else its message.
@@ -4475,6 +4476,14 @@ pages.projects = async (main) => {
   if (state.review && state.review.host === host) { const wanted = state.review.path; state.review = null; path.value = wanted; review(wanted); }
 };
 
+// The catalog an MCP server was added from (mcp list --json: "catalog", "signed"; a host older than 0.1.78 names
+// none), with whether its signature was verified.
+function mcpOriginCell(x) {
+  const catalog = typeof x.catalog === "string" ? x.catalog : t("unknown");
+  const signed = x.signed === true ? t("signed") : x.signed === false ? t("unsigned") : "";
+  return el("td", {}, catalog, signed ? el("div", { class: x.signed ? "hint" : "hint status-warn" }, signed) : null);
+}
+
 // MCP servers (sandbox-ai mcp): every defined one, running or not; start (for a start: attached to it), stop, the
 // catalogs and adding from them.
 pages.mcp = async (main) => {
@@ -4507,13 +4516,13 @@ pages.mcp = async (main) => {
       el("label", { for: "mcp-backend" }, t("Backend")), backend, el("label", { for: "mcp-vpn" }, t("VPN profile")), vpn,
       el("label", { for: "mcp-for" }, t("For the start")), forStart, el("label", { for: "mcp-restart" }, t("Restart that start now")), restart, el("span"), row)));
   };
-  main.append(table([t("Name"), t("State"), t("Serves"), t("Command"), ""], servers.map(x => {
+  main.append(table([t("Name"), t("State"), t("Serves"), t("Catalog"), t("Command"), ""], servers.map(x => {
     const actions = el("td", { class: "actions" });
     const stop = rowButton(t("Stop"), x.name, host, { class: "danger", onclick: () => confirmIn(actions, t("Stop the MCP server {name} on {host}? The starts it serves lose it until it starts again.", { name: x.name, host }), t("Yes, stop it"), async () => {
       try { await api("POST", hostPath(`/mcp/${encodeURIComponent(x.name)}/stop`, host), { confirm: true }); show("mcp"); } catch (e) { failed(t("Could not stop {name} on {host}", { name: x.name, host }))(e); }
     }, { trigger: stop }) });
     actions.append(rowButton(t("Start…"), x.name, host, { onclick: () => startForm(x.name) }), stop);
-    return el("tr", {}, el("td", { class: "mono" }, x.name), statusCell(x.status), el("td", {}, (x.serves || []).join(", ")), el("td", { class: "mono" }, String(x.command || "")), actions);
+    return el("tr", {}, el("td", { class: "mono" }, x.name), statusCell(x.status), el("td", {}, (x.serves || []).join(", ")), mcpOriginCell(x), el("td", { class: "mono" }, String(x.command || "")), actions);
   }), t("No MCP servers on this host yet: add one from a catalog below.")), startBox);
 
   // the catalogs, and adding an entry with its options
@@ -4534,8 +4543,9 @@ pages.mcp = async (main) => {
     let r;
     try { r = await api("POST", hostPath("/mcp-catalog", host), { catalogs: wordsOf(catalogs.value) }); } catch (e) { clear(catalogBox).append(errorNotice(e)); return; }
     const SIGNED = { good: N_("signed"), bad: N_("signature bad"), none: N_("unsigned") };
-    clear(catalogBox).append(...(r.problems || []).map(x => notice(x, "warn")), table([t("Entry"), t("Network"), t("Title"), t("Signature"), ""], (r.entries || []).map(x =>
+    clear(catalogBox).append(...(r.problems || []).map(x => notice(x, "warn")), table([t("Entry"), t("Network"), t("Title"), t("Catalog"), t("Signature"), ""], (r.entries || []).map(x =>
       el("tr", {}, el("td", { class: "mono" }, x.entry), el("td", { class: "mono" }, x.network), el("td", {}, x.title, x.published ? "" : ` (${t("not published yet")})`),
+        el("td", {}, typeof x.catalog === "string" ? x.catalog : ""),
         el("td", { class: x.signature === "good" ? "status-ok" : "status-fail" }, t(SIGNED[x.signature] || N_("unsigned"))),
         el("td", { class: "actions" }, el("button", { onclick: () => { entry.value = x.entry; unsigned.checked = false; entry.focus(); } }, t("Add…"))))), t("The catalogs list no servers.")));
   });
@@ -4550,7 +4560,26 @@ pages.mcp = async (main) => {
     }
     const send = async (confirm) => {
       try { const r = await api("POST", hostPath("/mcp", host), Object.assign({}, body, confirm ? { confirm: true } : {})); toast("success", t("{name} added on {host}", { name: body.entry, host }), (r && r.output) || ""); show("mcp"); }
-      catch (e) { addStatus.append(errorNotice(e)); }
+      catch (e) {
+        clear(addStatus);
+        // refused only because no trusted key signed its catalog: said, and offered to add it anyway (--unsigned)
+        if (e instanceof ApiError && e.code === "mcp-unsigned-catalog" && !body.unsigned) { offerUnsigned(e); return; }
+        addStatus.append(errorNotice(e));
+      }
+    };
+    const offerUnsigned = (e) => {
+      const catalog = String((e.params && e.params.catalog) || ""), name = body.entry;
+      const question = [catalog ? t("{name} was not added: its catalog {catalog} is not signed by a trusted key.", { name, catalog })
+        : t("{name} was not added: its catalog is not signed by a trusted key.", { name }),
+      t("Unsigned means that nobody vouched that the server is built from its pinned sources and works with sandbox-ai; it runs in a sandbox of its own all the same."),
+      t("Add {name} anyway (--unsigned)?", { name })].join(" ");
+      const offer = el("div", { class: "row" });
+      addStatus.append(el("div", { class: "notice warn" }, offer, el("div", { class: "hint mono error-detail", lang: "en" }, e.message || "")));
+      confirmIn(offer, t("On {host}: {text}", { host, text: question }), t("Add unsigned"), async () => {
+        body.unsigned = true;
+        unsigned.checked = true;
+        await send(true);
+      }, { kind: "primary", onCancel: () => { clear(addStatus).append(errorNotice(e)); } });
     };
     const writable = body.mounts.filter(m => m.mode === "rw").map(m => m.host);
     const what = [body.unsigned ? t("from a catalog no trusted key signed") : null, writable.length ? t("with {dirs} writable", { dirs: writable.join(", ") }) : null].filter(Boolean);

@@ -8976,4 +8976,58 @@ TEXTS = {
     '{path} cannot be read: {error}': {
         'en': '{path} cannot be read: {error}',
         'de': '{path} kann nicht gelesen werden: {error}'},
+    '{name} was not added: its catalog {catalog} is not signed by a trusted key.': {
+        'en': '{name} was not added: its catalog {catalog} is not signed by a trusted key.',
+        'de': '{name} wurde nicht hinzugefügt: Sein Katalog {catalog} ist nicht mit einem vertrauenswürdigen Schlüssel signiert.'},
+    '{name} was not added: its catalog is not signed by a trusted key.': {
+        'en': '{name} was not added: its catalog is not signed by a trusted key.',
+        'de': '{name} wurde nicht hinzugefügt: Sein Katalog ist nicht mit einem vertrauenswürdigen Schlüssel signiert.'},
+    'Unsigned means that nobody vouched that the server is built from its pinned sources and works with sandbox-ai; it runs in a sandbox of its own all the same.': {
+        'en': 'Unsigned means that nobody vouched that the server is built from its pinned sources and works with sandbox-ai; it runs in a sandbox of its own all the same.',
+        'de': 'Nicht signiert heißt: Niemand hat dafür gebürgt, dass der Server aus seinen festgelegten Quellen gebaut ist und mit sandbox-ai funktioniert; er läuft trotzdem in einer eigenen Sandbox.'},
+    'Add {name} anyway (--unsigned)?': {
+        'en': 'Add {name} anyway (--unsigned)?',
+        'de': '{name} trotzdem hinzufügen (--unsigned)?'},
+    'signed': {
+        'en': 'signed',
+        'de': 'signiert'},
+    'unsigned': {
+        'en': 'unsigned',
+        'de': 'nicht signiert'},
+    'signature bad': {
+        'en': 'signature bad',
+        'de': 'Signatur ungültig'},
+    'Signature': {
+        'en': 'Signature',
+        'de': 'Signatur'},
+    'Show details…': {
+        'en': 'Show details…',
+        'de': 'Details zeigen…'},
+    'Hide details…': {
+        'en': 'Hide details…',
+        'de': 'Details ausblenden…'},
+    'Adding {name}…': {
+        'en': 'Adding {name}…',
+        'de': '{name} wird hinzugefügt…'},
+    '{name} added: it is in the list above; use it with --mcp {local}.': {
+        'en': '{name} added: it is in the list above; use it with --mcp {local}.',
+        'de': '{name} hinzugefügt: Er steht in der Liste oben; nutzen Sie ihn mit --mcp {local}.'},
+    '{name} was not added.': {
+        'en': '{name} was not added.',
+        'de': '{name} wurde nicht hinzugefügt.'},
+    '{name} was not added': {
+        'en': '{name} was not added',
+        'de': '{name} wurde nicht hinzugefügt'},
+    '{name} was not added: its catalog is not signed by a trusted key (Add… with --unsigned takes it anyway).': {
+        'en': '{name} was not added: its catalog is not signed by a trusted key (Add… with --unsigned takes it anyway).',
+        'de': '{name} wurde nicht hinzugefügt: Sein Katalog ist nicht mit einem vertrauenswürdigen Schlüssel signiert (Hinzufügen… mit --unsigned nimmt ihn trotzdem).'},
+    'own (mcp.json)': {
+        'en': 'own (mcp.json)',
+        'de': 'eigener (mcp.json)'},
+    'team': {
+        'en': 'team',
+        'de': 'Team'},
+    'unknown (added before 0.1.78)': {
+        'en': 'unknown (added before 0.1.78)',
+        'de': 'unbekannt (vor 0.1.78 hinzugefügt)'},
 }

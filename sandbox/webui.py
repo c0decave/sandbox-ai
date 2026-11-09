@@ -380,7 +380,7 @@ class Sessions:
 # its message. A code is never a reason to pass anything: it only says which of these it is.
 ERROR_CODES = ("no-host", "confirm-needed", "bad-path", "bad-name", "host-unreachable", "timeout", "command-failed",
                "unknown-preset-value", "no-preset", "login-needed", "page-outdated", "too-many-logins", "busy",
-               "changed-meanwhile", "nothing-checked", "host-too-old")
+               "changed-meanwhile", "nothing-checked", "host-too-old", "mcp-unsigned-catalog")
 
 # What the page sends that only newer sandbox-ai versions know: (since, what, test of the argv). A host whose last
 # status (hosts list, kept; never asked for this) names an older version is told so before anything runs there
@@ -686,6 +686,12 @@ PUBLISH_URL = re.compile(r"https://[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252})/?")  # pu
 MCP_ENTRY = re.compile(r"(?:[a-z0-9][a-z0-9-]{0,31}:)?[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")  # duckduckgo, hub:binwalk
 MCP_CATALOG_LINE = re.compile(r"(?P<prefix>[^:\s]+):(?P<name>\S+)  \[(?P<network>[^\]]*)\]  (?P<title>.*?)"
                               r"(?P<unpublished>  \(not published yet\))?  (?P<signature>signed|SIGNATURE BAD|unsigned)")
+# What `sandbox-ai mcp add` says when it refuses an entry only because its catalog no trusted key signed
+# (mcp.check_signature; the app's backend.MCP_UNSIGNED_HINT the same): `mcp add` has no --json, its words are the
+# signal. The page then offers to add it anyway (--unsigned, asked: mcp-unsigned); a signature that does not verify
+# is a different refusal, never offered.
+MCP_UNSIGNED_HINT = "--unsigned adds it anyway"
+MCP_UNSIGNED_SOURCE = re.compile(r"\((?P<catalog>(?:https://|/)\S+?)\.sig cannot be read\)")
 SIZE_VALUE = re.compile(r"[0-9]{1,12}(?:\.[0-9]{1,6})?[kmgtKMGT]?")
 NET_PRESETS = ("pypi", "github", "gitlab", "kernel-org", "duckduckgo", "npm")  # agent_sandbox.PRESETS (a test agrees)
 NETWORK = re.compile(r"[0-9A-Fa-f:.]{2,45}(?:/[0-9]{1,3})?")
@@ -761,6 +767,17 @@ def ip_value(value, what, network=False):
 def clean_path(value, what):
     """An absolute path on the host, printable, without . or .. parts (never read as an option)."""
     return no_dots(host_path(value, what), what)
+
+
+def catalog_name(prefix, given=()):
+    """The catalog behind PREFIX of `mcp catalog`'s lines, for people: sandbox-ai-mcp (mcp:) or axross-mcp-hub
+    (hub:) of the default ones, the Nth catalog GIVEN for cN: (mcp.catalog_label)."""
+    mcp = module("mcp")
+    numbered = re.fullmatch(r"c([0-9]{1,2})", str(prefix))
+    if numbered and int(numbered[1]) < len(given) and isinstance(given[int(numbered[1])], str):
+        return printable(mcp.catalog_label(given[int(numbered[1])]))[:300]
+    source = dict(mcp.CATALOGS).get(prefix)
+    return printable(mcp.catalog_label(source))[:300] if source else printable(str(prefix))[:300]
 
 
 def catalog_sources(body):
@@ -2534,7 +2551,8 @@ class Api:
                                 "name": match["name"], "network": printable(match["network"]),
                                 "title": printable(match["title"]), "published": not match["unpublished"],
                                 "signature": {"signed": "good", "SIGNATURE BAD": "bad"}.get(match["signature"],
-                                                                                           "none")})
+                                                                                           "none"),
+                                "catalog": catalog_name(match["prefix"], body.get("catalogs") or [])})
         return {"entries": entries, "problems": [printable(line)[:600] for line in (err or "").splitlines()
                                                  if line.strip()][:20],
                 "output": printable(out.strip()[-20000:])}
@@ -2592,7 +2610,18 @@ class Api:
             defined = self.json_of(params["host"], ["mcp", "list", "--json"], 60, ok=(0,))
             if any(isinstance(server, dict) and server.get("name") == local for server in defined or []):
                 confirmed(body, "mcp-replace", local)
-        return self.done(params["host"], [*args, entry], 900)  # it pulls the image: that takes its time
+        status, out, err = self.run(params["host"], [*args, entry], 900)  # it pulls the image: that takes its time
+        if status != 0:
+            said = (err or out).strip()
+            if "--unsigned" not in args and MCP_UNSIGNED_HINT in said and "not signed by a trusted key" in said:
+                # refused only for its unsigned catalog: the page offers to add it anyway (mcp-unsigned)
+                source = MCP_UNSIGNED_SOURCE.search(said)
+                raise Refused(502, f"sandbox-ai mcp on {params['host']}: {printable(said[-600:])}",
+                              code="mcp-unsigned-catalog",
+                              params={"host": params["host"], "entry": entry,
+                                      "catalog": source["catalog"] if source else ""})
+            raise self.failed(params["host"], args, status, out, err)
+        return {"output": printable(out.strip()[-4000:])}
 
     # logins and identities: the token is always a secret of that host, named, never a value here
     def git_logins(self, params, body):

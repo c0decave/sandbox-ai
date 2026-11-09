@@ -4534,6 +4534,33 @@ const byId = (id) => body.all().find(n => n.id === id);
   result.mcpBefore = calls.filter(c => c.method === "POST").length;
   buttonIn(__main_of(), "Yes, add it").fire("click"); await settle();
   result.mcpSent = calls.filter(c => c.method === "POST").map(c => [c.path, JSON.parse(c.body)]);
+  // refused only for its unsigned catalog: said, offered (asked first), sent again with unsigned and confirm
+  const REFUSAL = "sandbox-ai mcp on ct1: crtsh: its catalog is not signed by a trusted key (https://raw.githubusercontent.com/c0decave/axross-mcp-hub/main/catalog.json.sig cannot be read), so nobody vouched that it is built from its pinned sources and works with sandbox-ai; --unsigned adds it anyway";
+  calls.length = 0;
+  let refuse = true;
+  answer = (method, path, sent) => (path.endsWith("/mcp") && method === "GET" ? [{ name: "files", status: "stopped", serves: [], command: "img", catalog: "axross-mcp-hub (github.com/c0decave)", signed: false }, { name: "old", status: "stopped", serves: [], command: "img2" }]
+    : path.endsWith("/mcp") && method === "POST" && refuse ? (refuse = false, { __status: 502, __error: REFUSAL, __code: "mcp-unsigned-catalog", __params: { host: "ct1", entry: "hub:crtsh", catalog: "https://raw.githubusercontent.com/c0decave/axross-mcp-hub/main/catalog.json" } })
+    : { output: "added" });
+  clear_main();
+  await vm.runInContext("pages.mcp(__main)", context); await settle();
+  result.mcpOrigins = __main_of().all().filter(n => n.tagName === "tr").map(r => r.children.map(c => c.textContent));
+  byId("mcp-entry").value = "hub:crtsh"; byId("mcp-unsigned").checked = false;
+  byId("mcp-as").value = ""; byId("mcp-env").value = ""; byId("mcp-memory").value = ""; byId("mcp-pids").value = ""; byId("mcp-catalogs").value = ""; byId("mcp-add-vpn").value = ""; byId("mcp-mounts").value = "";
+  buttonIn(__main_of(), "Add the server").fire("click"); await settle();
+  result.offer = (__main_of().all().find(n => n.className === "confirm") || { textContent: "" }).textContent;
+  result.offerBefore = calls.filter(c => c.method === "POST").length;
+  buttonIn(__main_of(), "Add unsigned").fire("click"); await settle();
+  result.offerSent = calls.filter(c => c.method === "POST").map(c => JSON.parse(c.body));
+  // another refusal: shown, never offered
+  calls.length = 0;
+  answer = (method, path) => (path.endsWith("/mcp") && method === "GET" ? [] : method === "POST" ? { __status: 502, __error: "sandbox-ai mcp on ct1: exit status 1: the catalog's signature does not verify", __code: "command-failed", __params: { host: "ct1", command: "sandbox-ai mcp", status: 1 } } : {});
+  clear_main();
+  await vm.runInContext("pages.mcp(__main)", context); await settle();
+  byId("mcp-entry").value = "hub:crtsh"; byId("mcp-unsigned").checked = false;
+  byId("mcp-as").value = ""; byId("mcp-env").value = ""; byId("mcp-memory").value = ""; byId("mcp-pids").value = ""; byId("mcp-catalogs").value = ""; byId("mcp-add-vpn").value = ""; byId("mcp-mounts").value = "";
+  buttonIn(__main_of(), "Add the server").fire("click"); await settle();
+  result.otherOffer = Boolean(buttonIn(__main_of(), "Add unsigned"));
+  result.otherSaid = __main_of().all().some(n => (n.className || "").includes("notice error") && n.textContent.includes("does not verify"));
   console.log(JSON.stringify(result));
 })().catch(e => { console.error(e.stack); process.exit(1); });
 function __main_of() { return main; }
@@ -4580,6 +4607,18 @@ def test_the_pages_of_the_clis_other_commands(tmp_path):
     (path, sent), = result["mcpSent"]
     assert path == "/api/hosts/ct1/mcp" and sent["entry"] == "hub:capa" and sent["unsigned"] is True and sent["confirm"] is True
     assert sent["mounts"] == [{"target": "/data", "host": "/home/u/data", "mode": "rw"}]
+    # the catalog each server came from (mcp list --json since 0.1.78; an older host's: unknown)
+    origins = {row[0]: row[3] for row in result["mcpOrigins"] if len(row) > 3}
+    assert origins["files"] == "axross-mcp-hub (github.com/c0decave)unsigned" and origins["old"] == "unknown"
+    # refused for its unsigned catalog: offered, naming the server, the catalog's URL and what unsigned means
+    offer = result["offer"]
+    assert offer.startswith("On ct1: hub:crtsh was not added: its catalog https://raw.githubusercontent.com/c0decave/")
+    assert "nobody vouched" in offer and "sandbox of its own" in offer and "(--unsigned)?" in offer
+    assert result["offerBefore"] == 1
+    first, again = result["offerSent"]
+    assert first["unsigned"] is False and "confirm" not in first
+    assert again["unsigned"] is True and again["confirm"] is True and again["entry"] == "hub:crtsh"
+    assert result["otherOffer"] is False and result["otherSaid"] is True
 
 
 def test_the_net_presets_are_the_launchers():
@@ -4599,13 +4638,41 @@ def test_the_mcp_catalog_and_the_activity_are_read_as_the_commands_print_them(lo
     status, out = logged_in("POST", "/api/hosts/ct1/mcp-catalog", {})
     assert status == 200 and out["entries"] == [
         {"entry": "hub:binwalk", "prefix": "hub", "name": "binwalk", "network": "none", "title": "Binwalk firmware analysis",
-         "published": True, "signature": "good"},
+         "published": True, "signature": "good", "catalog": "axross-mcp-hub (github.com/c0decave)"},
         {"entry": "c0:duck", "prefix": "c0", "name": "duck", "network": "full duckduckgo.com", "title": "DuckDuckGo search",
-         "published": False, "signature": "none"}]
+         "published": False, "signature": "none", "catalog": "c0"}]
+    status, out = logged_in("POST", "/api/hosts/ct1/mcp-catalog", {"catalogs": ["https://example.org/mine/catalog.json"]})
+    assert status == 200 and [e["catalog"] for e in out["entries"]] == ["axross-mcp-hub (github.com/c0decave)",
+                                                                       "example.org/mine/catalog.json"]
     assert out["problems"] == ["sandbox-mcp: catalog not read: c1: 404"]
     logged_in.runner.answers[("activity",)] = (0, '{"kind": "tool", "run": "r1"}\nnot json\n{"kind": "file"}\n', "")
     status, out = logged_in("POST", "/api/hosts/ct1/activity", {"tail": 10})
     assert status == 200 and out == {"events": [{"kind": "tool", "run": "r1"}, {"kind": "file"}]}
+
+
+def test_an_mcp_add_refused_for_its_unsigned_catalog_says_so_by_its_code(logged_in):
+    """`mcp add` refused only because no trusted key signed the entry's catalog: the code mcp-unsigned-catalog with
+    the entry and the catalog's URL (the page offers --unsigned then); any other refusal stays command-failed."""
+    url = "https://raw.githubusercontent.com/c0decave/axross-mcp-hub/main/catalog.json"
+    logged_in.runner.answers[("mcp", "list")] = (0, "[]", "")
+    logged_in.runner.answers[("mcp", "add")] = (1, "", f"sandbox-ai mcp: crtsh: its catalog is not signed by a trusted "
+                                                       f"key ({url}.sig cannot be read), so nobody vouched that it is "
+                                                       "built from its pinned sources and works with sandbox-ai; "
+                                                       "--unsigned adds it anyway\n")
+    status, out = logged_in("POST", "/api/hosts/ct1/mcp", {"entry": "hub:crtsh"})
+    assert status == 502 and out["code"] == "mcp-unsigned-catalog"
+    assert out["params"] == {"host": "ct1", "entry": "hub:crtsh", "catalog": url}
+    assert "--unsigned adds it anyway" in out["error"]
+    status, out = logged_in("POST", "/api/hosts/ct1/mcp", {"entry": "hub:crtsh", "unsigned": True, "confirm": True})
+    assert status == 502 and out["code"] == "command-failed", "asked for --unsigned already: not offered again"
+    assert logged_in.runner.calls[-1][1][-2:] == ["--unsigned", "hub:crtsh"]
+    logged_in.runner.answers[("mcp", "add")] = (1, "", "sandbox-ai mcp: crtsh: the catalog's signature does not "
+                                                       "verify (wrong key); nothing of it is used\n")
+    status, out = logged_in("POST", "/api/hosts/ct1/mcp", {"entry": "hub:crtsh"})
+    assert status == 502 and out["code"] == "command-failed"
+    logged_in.runner.answers[("mcp", "add")] = (0, "sandbox-mcp: crtsh added\n", "")
+    status, out = logged_in("POST", "/api/hosts/ct1/mcp", {"entry": "hub:crtsh"})
+    assert status == 200 and "crtsh added" in out["output"]
 
 
 def test_a_project_is_trusted_through_the_real_wizard_only_as_reviewed(tmp_path, monkeypatch):

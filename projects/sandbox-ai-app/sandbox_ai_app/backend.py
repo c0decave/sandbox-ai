@@ -2684,15 +2684,27 @@ class SandboxAI:
         argv = self.host_as_given(name, agent, argv)
         return parse_dry_run(*self.host_run(name, agent, *argv, "--dry-run", timeout=90))
 
+    def mcp_origins(self):
+        """{name: the catalog it was added from, with "signed"/"unsigned"} of this machine's MCP servers
+        (mcp.origin); {} for a sandbox-ai that does not record it."""
+        mcp = self.module("mcp")
+        if not hasattr(mcp, "origin"):
+            return {}
+        return {name: origin_text(mcp.origin(name, d)) for name, d in mcp.definitions().items()}
+
     def host_mcp_servers(self, name):
-        """[(name, status, the starts it serves, what runs)] of the MCP servers defined on host NAME (`sandbox-ai mcp
-        list --json` there; this machine's from sandbox-ai's own module)."""
+        """[(name, status, the starts it serves, what runs, the catalog it came from)] of the MCP servers defined on
+        host NAME (`sandbox-ai mcp list --json` there; this machine's from sandbox-ai's own module)."""
         if name == "local":
             try:
                 served = self.mcp_serving()
             except Exception:  # noqa: BLE001 - the starts could not be read: the servers are listed anyway
                 served = {}
-            return [(server, state, ", ".join(served.get(server, [])), what)
+            try:
+                origins = self.mcp_origins()
+            except Exception:  # noqa: BLE001 - the origin is only shown
+                origins = {}
+            return [(server, state, ", ".join(served.get(server, [])), what, origins.get(server, ""))
                     for server, state, what in self.mcp_servers()]
         data = self.host_json(name, "mcp", "list", "--json", timeout=60)
         if not isinstance(data, list):
@@ -2704,7 +2716,8 @@ class SandboxAI:
             serves = entry.get("serves") if isinstance(entry.get("serves"), list) else []
             rows.append((entry["name"], printable(str(entry.get("status") or ""))[:20],
                          printable(", ".join(str(s) for s in serves))[:300],
-                         printable(str(entry.get("image") or entry.get("command") or ""))[:300]))
+                         printable(str(entry.get("image") or entry.get("command") or ""))[:300],
+                         origin_text(entry) if "catalog" in entry else ""))
         return rows
 
     def host_mcp_catalog(self, name, catalogs=()):
@@ -2712,7 +2725,11 @@ class SandboxAI:
         NAME lists them (its lines read; an entry: {"name", "network", "hosts", "title", "digest" (only "published" is
         known), "_signature": {"state"}}). This machine without CATALOGS: sandbox-ai's own module (every field)."""
         if name == "local" and not catalogs:
-            return self.mcp_catalog()
+            entries, problems = self.mcp_catalog()
+            label = getattr(self.module("mcp"), "catalog_label", None)
+            return [(prefix, {**entry, "_catalog_name": printable(label(entry["_catalog"]))[:300]}
+                     if label and isinstance(entry.get("_catalog"), str) else entry)
+                    for prefix, entry in entries], problems
         status, out, err = self.host_run(name, "mcp", "catalog", *catalog_options(catalogs), timeout=150)
         if status != 0:
             raise ValueError((err or out).strip()[-500:] or f"exit status {status}")
@@ -2726,9 +2743,23 @@ class SandboxAI:
                 "name": match["name"], "network": printable(network), "hosts": printable(hosts).split(),
                 "title": printable(match["title"]), "digest": None if match["unpublished"] else "published",
                 "_signature": {"state": {"signed": "good", "SIGNATURE BAD": "bad"}.get(match["signature"], "unsigned")},
-                "_listed": True}))
+                "_listed": True, "_catalog_name": self.catalog_name(match["prefix"], catalogs)}))
         problems = [printable(line)[:600] for line in (err or "").splitlines() if line.strip()][:20]
         return found, problems
+
+    def catalog_name(self, prefix, catalogs=()):
+        """The catalog behind PREFIX of `mcp catalog`'s lines, for people (webui.catalog_name): sandbox-ai-mcp (mcp:),
+        axross-mcp-hub (hub:), the Nth of CATALOGS for cN:."""
+        try:
+            mcp = self.module("mcp")
+            label, defaults = mcp.catalog_label, dict(mcp.CATALOGS)
+        except Exception:  # noqa: BLE001 - an older sandbox-ai: the prefix
+            label, defaults = (lambda source: source), {}
+        numbered = re.fullmatch(r"c([0-9]{1,2})", str(prefix))
+        catalogs = list(catalogs or ())
+        if numbered and int(numbered[1]) < len(catalogs):
+            return printable(label(str(catalogs[int(numbered[1])])))[:300]
+        return printable(label(defaults[prefix]) if prefix in defaults else str(prefix))[:300]
 
     def host_mcp_targets(self, name):
         """The agent starts on host NAME an MCP server can be attached to: the kept ones (mcp_attach_targets here,
@@ -4605,6 +4636,35 @@ def mcp_add_args(entry, name_as=None, mounts=(), env=(), network=None, memory=No
     if unsigned:
         args.append("--unsigned")
     return args + [entry], writable
+
+
+# What `sandbox-ai mcp add` says when it refuses an entry only because its catalog is not signed by a trusted key
+# (mcp.check_signature; webui.MCP_UNSIGNED_HINT the same): `mcp add` has no --json, so its words are the signal. A
+# signature that does not verify is a different refusal, never offered to be taken anyway.
+MCP_UNSIGNED_HINT = "--unsigned adds it anyway"
+MCP_UNSIGNED_SOURCE = re.compile(r"\((?P<catalog>(?:https://|/)\S+?)\.sig cannot be read\)")
+
+
+def origin_text(origin):
+    """What the MCP list shows of where a server comes from (mcp list --json's "catalog" and "signed"): the catalog,
+    and whether its signature was verified."""
+    from .i18n import N_, tr  # (no Qt) the words sandbox-ai uses for a server not from a catalog, translated
+    catalog = origin.get("catalog") if isinstance(origin.get("catalog"), str) else ""
+    if catalog in (N_("built-in"), N_("own (mcp.json)"), N_("team"), N_("unknown (added before 0.1.78)")):
+        catalog = tr(catalog)
+    signed = origin.get("signed")
+    return printable(catalog + (", " + tr("signed") if signed is True else ", " + tr("unsigned") if signed is False
+                                else ""))[:300]
+
+
+def mcp_unsigned_refusal(text):
+    """None, or {"catalog": the catalog's URL or path, else ""} when TEXT (what a failed `sandbox-ai mcp add` said)
+    is the refusal of an entry whose catalog no trusted key signed, which `mcp add --unsigned` takes."""
+    text = str(text or "")
+    if MCP_UNSIGNED_HINT not in text or "not signed by a trusted key" not in text:
+        return None
+    match = MCP_UNSIGNED_SOURCE.search(text)
+    return {"catalog": printable(match["catalog"])[:2048] if match else ""}
 
 
 def mcp_start_args(name, engine=None, vpn=None, for_start=None, restart=False):

@@ -61,7 +61,7 @@ pre { background: var(--base); border: 1px solid var(--border); border-radius: v
 .status-fail, .status-bad { color: var(--bad); font-weight: 600; }
 .status-skip, .status-muted { color: var(--muted); }
 .form { display: grid; grid-template-columns: max-content 1fr; gap: 8px 12px; align-items: center; max-width: 720px; }
-.form .wide { grid-column: 1 / 3; }
+.form .wide { grid-column: 1 / 3; min-width: 0; }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 /* a secret's value and its "Show value" beside it (secretInput); pressed: the value is shown */
 .secret-field { display: flex; gap: 6px; align-items: center; min-width: 0; }
@@ -70,7 +70,8 @@ pre { background: var(--base); border: 1px solid var(--border); border-radius: v
 .secret-toggle[aria-pressed="true"] { background: var(--nav_selected); color: var(--nav_selected_text); border-color: var(--accent); }
 /* a field of a form shown only for one choice (the Logins page's token or stored secret, the LLM page's models) */
 .form [hidden] { display: none; }
-.notice { padding: 10px 12px; border-radius: var(--radius); border: 1px solid var(--border); margin: 0 0 12px; background: var(--base); }
+/* a long refusal of sandbox-ai (a URL in it) wraps inside its words, never widening the page or its form */
+.notice { padding: 10px 12px; border-radius: var(--radius); border: 1px solid var(--border); margin: 0 0 12px; background: var(--base); overflow-wrap: anywhere; min-width: 0; }
 .notice.error { border-color: var(--danger); color: var(--danger); }
 .notice.ok { border-color: var(--ok); color: var(--ok); }
 .notice.warn { border-color: var(--warn); color: var(--warn); }

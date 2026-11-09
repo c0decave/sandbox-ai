@@ -783,6 +783,36 @@ def test_an_unsigned_catalog_only_on_request(tmp_path):
     assert definition["signed_by"] is None and any("added unsigned" in line for line in out)
 
 
+def test_the_catalog_a_server_came_from_is_kept_and_listed(tmp_path, capsys):
+    """mcp add records the catalog (its URL or path) beside signed_by; mcp list names it (CATALOG, --json: catalog,
+    catalog_source, signed), and says so of a server added before 0.1.78, a built-in one and one of mcp.json."""
+    sources = catalog(tmp_path, [ENTRY], signed=False)
+    m.add("duckduckgo", network="full", catalogs=sources, pull=False, out=lambda line: None, unsigned=True)
+    path = m.config_file()
+    document = json.loads(path.read_text())
+    assert document["duckduckgo"]["catalog"] == sources[0][1] and document["duckduckgo"]["signed_by"] is None
+    document["older"] = {key: value for key, value in document["duckduckgo"].items() if key != "catalog"}
+    document["mine"] = {"command": ["python3", "-I", "/opt/x.py"]}
+    path.write_text(json.dumps(document))
+    assert m.cli(["list", "--json"]) == 0
+    listed = {e["name"]: (e["catalog"], e["catalog_source"], e["signed"]) for e in json.loads(capsys.readouterr().out)}
+    assert listed == {"duckduckgo": (sources[0][1], sources[0][1], False),
+                      "older": ("unknown (added before 0.1.78)", None, False),
+                      "mine": ("own (mcp.json)", None, None), "demo": ("built-in", None, None)}
+    assert m.cli(["list"]) == 0
+    rows = capsys.readouterr().out.splitlines()
+    assert rows[0].split()[:5] == ["NAME", "STATUS", "SERVES", "CATALOG", "COMMAND"]
+    assert f"{sources[0][1]}, unsigned" in next(row for row in rows if row.startswith("duckduckgo"))
+
+
+def test_a_catalogs_name_for_people():
+    assert m.catalog_label(dict(m.CATALOGS)["hub"]) == "axross-mcp-hub (github.com/c0decave)"
+    assert m.catalog_label(dict(m.CATALOGS)["mcp"]) == "sandbox-ai-mcp (github.com/c0decave)"
+    assert m.catalog_label("/opt/sandbox-ai/projects/axross-mcp-hub/catalog.json") == "axross-mcp-hub (sandbox-ai's copy)"
+    assert m.catalog_label("https://example.org/mine/catalog.json") == "example.org/mine/catalog.json"
+    assert m.catalog_label("/srv/catalog.json") == "/srv/catalog.json"
+
+
 TELEGRAM = {"id": "mcp:telegram", "name": "telegram", "title": "Telegram bot", "kind": "oci",
             "image": "ghcr.io/c0decave/sandbox-ai-mcp-telegram", "network": "allowlist", "hosts": ["api.telegram.org:443"],
             "env": [{"name": "TELEGRAM_BOT_TOKEN", "required": True, "secret": True},

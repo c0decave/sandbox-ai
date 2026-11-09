@@ -165,12 +165,18 @@ def test_net_keep_privacy_check_doctor_and_the_mcp_catalog_on_a_host(sai):
     entries, problems = sai.host_mcp_catalog("ct1", ["/srv/catalog.json"])
     assert sai.asked[-1] == ("ct1", "mcp", "catalog", "--catalog=/srv/catalog.json") and not problems
     assert entries == [("hub", {"name": "binwalk", "network": "none", "hosts": [], "title": "binwalk", "digest":
-                                "published", "_signature": {"state": "unsigned"}, "_listed": True}),
+                                "published", "_signature": {"state": "unsigned"}, "_listed": True,
+                                "_catalog_name": "axross-mcp-hub (github.com/c0decave)"}),
                        ("hub", {"name": "crtsh", "network": "allowlist", "hosts": ["crt.sh:443"], "title": "crt.sh",
-                                "digest": None, "_signature": {"state": "good"}, "_listed": True})]
+                                "digest": None, "_signature": {"state": "good"}, "_listed": True,
+                                "_catalog_name": "axross-mcp-hub (github.com/c0decave)"})]
     sai.answers[("mcp", "list")] = (0, json.dumps([{"name": "demo", "status": "running", "command": "python3 x",
-                                                    "serves": ["api"]}, {"name": "--bad"}]), "")
-    assert sai.host_mcp_servers("ct1") == [("demo", "running", "api", "python3 x")]
+                                                    "serves": ["api"]}, {"name": "--bad"},
+                                                   {"name": "crtsh", "status": "stopped", "command": "x",
+                                                    "catalog": "axross-mcp-hub (github.com/c0decave)", "signed": False}]),
+                                    "")
+    assert sai.host_mcp_servers("ct1") == [("demo", "running", "api", "python3 x", ""),
+                                           ("crtsh", "stopped", "", "x", "axross-mcp-hub (github.com/c0decave), unsigned")]
 
 
 @needs_sai

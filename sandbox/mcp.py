@@ -69,7 +69,7 @@ PROC = Path("/proc")
 READY_TIMEOUT = 120
 KEYS = {"command", "options", "agent", "workspace", "description"}
 IMAGE_KEYS = {"image", "network", "mounts", "env", "memory", "pids", "description", "source", "vpn", "signed_by",
-              "rootfs"}
+              "rootfs", "catalog"}
 IMAGE_REF = re.compile(r"[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[0-9]{1,5})?(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)+"
                        r"@sha256:[0-9a-f]{64}")
 MOUNT_TARGET = re.compile(r"/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*")
@@ -194,7 +194,7 @@ def validated_image(definition, where):
     pids = definition.get("pids", 128)
     if isinstance(pids, bool) or not isinstance(pids, int) or not 16 <= pids <= 4096:
         raise ValueError(f"{where}: pids must be 16-4096")
-    for key in ("description", "source"):
+    for key in ("description", "source", "catalog"):
         if key in definition and not isinstance(definition[key], str):
             raise ValueError(f"{where}: {key} must be text")
     if "vpn" in definition:
@@ -442,7 +442,7 @@ def catalog_entries(sources=None, fetch=None):
             rootfs, problem = read_rootfs(source, signature, fetch)
             if problem:
                 problems.append(problem)
-            found += [(prefix, {**entry, "_signature": signature,
+            found += [(prefix, {**entry, "_signature": signature, "_catalog": source,
                                 **({"rootfs": rootfs[entry.get("name")]} if entry.get("name") in rootfs else {})})
                       for entry in entries]
         except OSError as exc:
@@ -547,7 +547,8 @@ def add(name, local=None, mounts=(), env=(), network=None, memory=None, pids=Non
     backend = backend or ("podman" if shutil.which("podman") or not entry.get("rootfs") else "bwrap")
     if backend not in ("podman", "bwrap", "both"):
         raise ValueError("--backend is podman, bwrap or both")
-    definition = {**definition_from_entry(entry, mounts, env, network, memory, pids, vpn), **signed}
+    definition = {**definition_from_entry(entry, mounts, env, network, memory, pids, vpn), **signed,
+                  **({"catalog": entry["_catalog"]} if isinstance(entry.get("_catalog"), str) else {})}
     if backend in ("bwrap", "both"):
         definition = validated_image({**definition, "rootfs": entry_rootfs(entry, fetch)}, entry["name"])
     if backend == "bwrap":
@@ -580,6 +581,37 @@ def add(name, local=None, mounts=(), env=(), network=None, memory=None, pids=Non
                         ([f"rootfs {definition['rootfs']['sha256'][:12]} (Bubblewrap)"] if "rootfs" in definition else []))
     out(f"sandbox-mcp: {local} added ({form}); use it with --mcp {local}")
     return definition
+
+
+def catalog_label(source):
+    """A catalog's name for people, from its URL or path: REPO (github.com/OWNER) for a catalog on GitHub,
+    NAME (sandbox-ai's copy) for the copy in sandbox-ai's own tree, else the address itself."""
+    source = str(source)
+    github = re.fullmatch(r"https://(?:raw\.githubusercontent\.com|github\.com)/([^/]+)/([^/]+)/.*", source)
+    if github:
+        return f"{github[2]} (github.com/{github[1]})"
+    path = Path(source)
+    if not source.startswith("https://") and path.name == "catalog.json" and \
+            path.parent.name in LOCAL_CATALOGS.values() and path.parent.parent.name == "projects":
+        return f"{path.parent.name} (sandbox-ai's copy)"
+    return source.removeprefix("https://")
+
+
+def origin(name, definition):
+    """Where server NAME's DEFINITION comes from, for mcp list: {"catalog": a name for people, "catalog_source":
+    the catalog's URL or path (None if not from a catalog or not known), "signed": True (its catalog's signature
+    verified), False (added --unsigned), None (not from a catalog, or not known)}. `mcp add` records the catalog
+    since 0.1.78; an image server added before says so."""
+    if name in BUILTIN and definition == BUILTIN[name]:
+        return {"catalog": "built-in", "catalog_source": None, "signed": None}
+    if "image" not in definition and "rootfs" not in definition:
+        return {"catalog": "team" if name.startswith("team-") else "own (mcp.json)", "catalog_source": None,
+                "signed": None}
+    signed = (definition["signed_by"] is not None) if "signed_by" in definition else None
+    if isinstance(definition.get("catalog"), str):
+        return {"catalog": catalog_label(definition["catalog"]), "catalog_source": definition["catalog"],
+                "signed": signed}
+    return {"catalog": "unknown (added before 0.1.78)", "catalog_source": None, "signed": signed}
 
 
 def config_file():
@@ -1643,16 +1675,18 @@ def cli(argv):
         found = [{"name": name, "status": status(name),
                   "command": (d["image"] if "image" in d else f"rootfs {d['rootfs']['sha256'][:12]}" if "rootfs" in d
                               else " ".join(d["command"])) + (f"  (vpn {d['vpn']})" if d.get("vpn") else ""),
-                  "serves": served.get(name, [])} for name, d in sorted(definitions().items())]
+                  "serves": served.get(name, []), **origin(name, d)} for name, d in sorted(definitions().items())]
         if a.json:
             print(json.dumps(found, indent=2))
             return 0
         printable = launcher().printable
-        rows = [["NAME", "STATUS", "SERVES", "COMMAND"]] + [
-            [e["name"], e["status"], printable(", ".join(e["serves"]) or "-"), printable(e["command"])] for e in found]
-        widths = [max(len(row[i]) for row in rows) for i in range(3)]
+        rows = [["NAME", "STATUS", "SERVES", "CATALOG", "COMMAND"]] + [
+            [e["name"], e["status"], printable(", ".join(e["serves"]) or "-"),
+             printable(e["catalog"] + {True: ", signed", False: ", unsigned", None: ""}[e["signed"]]),
+             printable(e["command"])] for e in found]
+        widths = [max(len(row[i]) for row in rows) for i in range(4)]
         for row in rows:
-            print(f"{row[0].ljust(widths[0])}  {row[1].ljust(widths[1])}  {row[2].ljust(widths[2])}  {row[3]}")
+            print("  ".join(cell.ljust(width) for cell, width in zip(row[:4], widths)) + f"  {row[4]}")
         return 0
     if a.command == "start" and a.for_start is None:
         if a.restart or a.json:

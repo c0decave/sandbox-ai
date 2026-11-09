@@ -2375,8 +2375,13 @@ sie nur für Server, die aus ihren gepinnten Quellen gebaut, geprüft und deren
 Smoke-Tests mit den Startzeilen von sandbox-ai unter Podman und Bubblewrap
 bestanden sind. `sandbox-ai mcp catalog` zeigt je Eintrag `signed` oder
 `unsigned`; eine Definition hält den Schlüssel fest, der sie signiert hat
-(`signed_by`). Ein unsignierter Katalog (ein eigener) braucht `--unsigned`;
-eine Signatur, die nicht prüft, wird immer abgelehnt.
+(`signed_by`) und den Katalog, aus dem sie kam (`catalog`, seine URL oder sein
+Pfad); `sandbox-ai mcp list` zeigt beides (CATALOG; `--json`: `catalog`,
+`catalog_source`, `signed`; ein vor 0.1.78 hinzugefügter Server sagt
+`unknown`). Ein unsignierter Katalog (ein eigener) braucht `--unsigned`;
+eine Signatur, die nicht prüft, wird immer abgelehnt. App und Web zeigen eine
+solche Ablehnung und bieten an, den Server trotzdem hinzuzufügen, mit
+Rückfrage (`mcp-unsigned`).
 
 **Bubblewrap.** Ohne Podman (oder mit `--backend bwrap`) nimmt `add` statt des
 Images das Rootfs des Eintrags (aus `rootfs.json` neben dem Katalog, signiert

@@ -38,8 +38,8 @@ from .reviews import home_review, review_refusal
 from .start_tree import ID_ROLE, KEY_ROLE, KIND_ROLE, StartTree, id_host, related, row_id
 from . import wizard_llm as WL
 from .widgets import (
-    MONO, AsyncCommand, ThreadCall, append_rows, ask_first, background, busy, fill, find_row, fit_columns, flow,
-    inform, local_time, outcome, plain_label, row_key, safe_tooltip, selected, selected_rows, set_enabled,
+    MONO, AsyncCommand, MessageText, ThreadCall, append_rows, ask_first, background, busy, fill, find_row, fit_columns,
+    flow, inform, local_time, outcome, plain_label, row_key, safe_tooltip, selected, selected_rows, set_enabled,
     show_text, table, warn, shown_as_text, tame_combos,
 )
 
@@ -4183,7 +4183,7 @@ class McpPage(QWidget):
         layout.addWidget(flow(self.host_choice, self.host_note))
         servers = QGroupBox(tr("Your MCP servers (use them with --mcp NAME)"))
         servers_layout = QVBoxLayout(servers)
-        self.servers = table([tr("Name"), tr("Status"), tr("Serves"), tr("Runs")])
+        self.servers = table([tr("Name"), tr("Status"), tr("Serves"), tr("Runs"), tr("Catalog")])
         self.servers.setAccessibleName(tr("MCP servers"))
         servers_layout.addWidget(self.servers)
         row = QHBoxLayout()
@@ -4206,7 +4206,8 @@ class McpPage(QWidget):
         layout.addWidget(servers)
         catalog = QGroupBox(tr("Catalogs: sandbox-ai-mcp (mcp:) and axross-mcp-hub (hub:)"))
         catalog_layout = QVBoxLayout(catalog)
-        self.catalog = table([tr("Entry"), tr("Network"), tr("Title"), tr("Published")])
+        self.catalog = table([tr("Entry"), tr("Network"), tr("Title"), tr("Published"), tr("Signature"),
+                              tr("Catalog")])
         self.catalog.setAccessibleName(tr("Catalog"))
         catalog_layout.addWidget(self.catalog)
         self.catalog_source = QLineEdit()
@@ -4224,18 +4225,24 @@ class McpPage(QWidget):
         row.addWidget(load)
         row.addWidget(add)
         catalog_layout.addLayout(row)
-        self.catalog_status = plain_label(role="secondary")
-        self.catalog_status.setWordWrap(True)
+        # The page's message area: what loading the catalogs and adding said (a refusal of sandbox-ai with a URL in
+        # it too), wrapped in the page, selectable, never widening the window.
+        self.catalog_status = MessageText()
+        self.catalog_status.setAccessibleName(tr("Message"))
         catalog_layout.addWidget(self.catalog_status)
         layout.addWidget(catalog)
-        self.entries, self.catalog_requested, self.catalog_of = {}, False, None
+        self.entries, self.catalog_requested, self.catalog_of, self.shown_before = {}, False, None, False
         self.refresh()
 
     def showEvent(self, event):  # noqa: N802
         """The catalogs load by themselves the first time the page is shown (in the background); the hosts are read
-        again (one added on the Hosts page meanwhile)."""
+        again (one added on the Hosts page meanwhile), and so are the servers each time it is shown again (one added
+        with sandbox-ai mcp add meanwhile)."""
         self.host_choice.reload()
         super().showEvent(event)
+        if self.shown_before:
+            self.refresh()
+        self.shown_before = True
         if not self.catalog_requested:
             self.load_catalog(auto=True)
 
@@ -4262,7 +4269,7 @@ class McpPage(QWidget):
 
     def servers_read(self, rows, error):
         if error is not None:
-            rows = [(tr("(error)"), "", "", str(error))]
+            rows = [(tr("(error)"), "", "", str(error), "")]
         fill(self.servers, rows, ["ok" if r[1] == "running" else None for r in rows])
 
     def attach(self):
@@ -4384,9 +4391,23 @@ class McpPage(QWidget):
         if auto:
             problems = []  # loaded by itself: said on the page, not in a dialog
         self.entries = {f"{prefix}:{e.get('name')}": e for prefix, e in entries}
+        rows = sorted(self.entries.items())
+        signatures = [(e.get("_signature") or {}).get("state", "unsigned") for _key, e in rows]
         fill(self.catalog, [[key, e.get("network", "") + (" " + ",".join(e.get("hosts", [])) if e.get("hosts") else ""),
-                             e.get("title", ""), tr("yes") if e.get("digest") else tr("not yet")]
-                            for key, e in sorted(self.entries.items())])
+                             e.get("title", ""), tr("yes") if e.get("digest") else tr("not yet"),
+                             tr("signed") if signature == "good" else tr("signature bad") if signature == "bad" else
+                             tr("unsigned"), e.get("_catalog_name") or key.partition(":")[0]]
+                            for (key, e), signature in zip(rows, signatures)],
+             tooltips=[None if signature == "good" else tr(
+                 "Its catalog is not signed by a trusted key (sandbox/mcp-signers): sandbox-ai adds it only with "
+                 "--unsigned.") if signature != "bad" else tr("Its catalog's signature does not verify: sandbox-ai "
+                                                              "refuses it.") for signature in signatures])
+        # the signature as a badge: only its cell in the colour of its state
+        colors = {tr("signature bad"): "bad", tr("unsigned"): "warn", tr("signed"): "ok"}
+        for row in range(self.catalog.rowCount()):
+            item = self.catalog.item(row, 4)
+            if item is not None and item.text() in colors:
+                item.setForeground(QColor(theme.color(colors[item.text()])))
         if problems:
             warn(self, tr("Catalogs"), "\n".join(printable(problem) for problem in problems))
 
@@ -4422,12 +4443,59 @@ class McpPage(QWidget):
                 "An MCP server {name} is there already: replace its definition for every start that uses it?",
                 name=printable(values["name_as"])), tr("Replace")):
             return
-        background(lambda: self.sai.host_run(host, *args, timeout=900), owner=self, source=self.add_button,
-                   timeout=930, done=lambda result, error: self.added(result, error))
+        self.run_add(host, key, values, args)
 
-    def added(self, result, error):
-        report(self, "mcp add", result, error)
+    def run_add(self, host, key, values, args):
+        self.catalog_status.setText(tr("Adding {name}…", name=printable(key)))
+        background(lambda: self.sai.host_run(host, *args, timeout=900), owner=self, source=self.add_button,
+                   timeout=930, done=lambda result, error: self.added(host, key, values, result, error))
+
+    def added(self, host, key, values, result, error):
+        """What `mcp add` said: on success the servers are read again (it is in the list above then); a refusal says
+        on the page that nothing was added, and one only for an unsigned catalog offers to add it anyway."""
+        status, out, err = outcome(result, error)
+        said = printable((out + err).strip())
         self.refresh()
+        if status == 0:
+            self.catalog_status.setText(tr("{name} added: it is in the list above; use it with --mcp {local}.",
+                                           name=printable(key), local=printable(values["name_as"])))
+            report(self, "mcp add", result, error)
+            return
+        refusal = None if values["unsigned"] else backend.mcp_unsigned_refusal(said)
+        if refusal is None:
+            self.catalog_status.setText(tr("{name} was not added.", name=printable(key)) + "\n" + said)
+            warn(self, tr("{name} was not added", name=printable(key)), said, modal=False)
+            return
+        self.offer_unsigned(host, key, values, refusal, said)
+
+    def offer_unsigned(self, host, key, values, refusal, said):
+        """`mcp add` refused KEY only because its catalog is not signed by a trusted key: asked first (mcp-unsigned),
+        it is added anyway with --unsigned (the human knows the catalog: one of their own, say)."""
+        title = tr("Add {name}", name=printable(key)) if host == LOCAL else \
+            tr("Add {name} on {host}", name=printable(key), host=printable(host))
+        catalog = refusal.get("catalog") or (self.catalog_of or ("", ""))[1]
+        if not catalog and host == LOCAL:
+            try:
+                catalog = dict(self.sai.module("mcp").CATALOGS).get(key.partition(":")[0] if ":" in key else "", "")
+            except Exception:  # noqa: BLE001 - only the address for the question
+                catalog = ""
+        where = tr("On {host}: ", host=printable(host)) if host != LOCAL else ""
+        question = tr("{name} was not added: its catalog {catalog} is not signed by a trusted key.",
+                      name=printable(key), catalog=printable(catalog)) if catalog else \
+            tr("{name} was not added: its catalog is not signed by a trusted key.", name=printable(key))
+        question += " " + tr("Unsigned means that nobody vouched that the server is built from its pinned sources and "
+                             "works with sandbox-ai; it runs in a sandbox of its own all the same.") + " " + \
+            tr("Add {name} anyway (--unsigned)?", name=printable(key))
+        if not ask_first(self, "mcp-unsigned", title, where + question, tr("Add unsigned"), details=said):
+            self.catalog_status.setText(tr("{name} was not added: its catalog is not signed by a trusted key "
+                                           "(Add… with --unsigned takes it anyway).", name=printable(key)))
+            return
+        try:
+            args, _writable = backend.mcp_add_args(**{**values, "unsigned": True})
+        except ValueError as exc:
+            warn(self, title, printable(exc))
+            return
+        self.run_add(host, key, {**values, "unsigned": True}, args)
 
 
 class PrivacyDialog(QDialog):

@@ -1445,7 +1445,15 @@ const TEXTS = {
   "the project defines its own MCP servers (programs with their own folders and network)": { "de": "das Projekt legt eigene MCP-Server fest (Programme mit eigenen Ordnern und Netzwerk)" },
   "further folders the agent sees in every start of the project": { "de": "weitere Ordner, die der Agent in jedem Start des Projekts sieht" },
   "arguments for the agent itself: they can change what it does": { "de": "Argumente für den Agenten selbst: Damit lässt sich ändern, was er tut" },
-  "Lines marked {mark} weaken the sandbox: trust them only if you chose them.": { "de": "Mit {mark} markierte Zeilen schwächen die Sandbox: Vertrauen Sie ihnen nur, wenn Sie sie selbst gewählt haben." }
+  "Lines marked {mark} weaken the sandbox: trust them only if you chose them.": { "de": "Mit {mark} markierte Zeilen schwächen die Sandbox: Vertrauen Sie ihnen nur, wenn Sie sie selbst gewählt haben." },
+  "{name} was not added: its catalog {catalog} is not signed by a trusted key.": { "de": "{name} wurde nicht hinzugefügt: Sein Katalog {catalog} ist nicht mit einem vertrauenswürdigen Schlüssel signiert." },
+  "{name} was not added: its catalog is not signed by a trusted key.": { "de": "{name} wurde nicht hinzugefügt: Sein Katalog ist nicht mit einem vertrauenswürdigen Schlüssel signiert." },
+  "Unsigned means that nobody vouched that the server is built from its pinned sources and works with sandbox-ai; it runs in a sandbox of its own all the same.": { "de": "Nicht signiert heißt: Niemand hat dafür gebürgt, dass der Server aus seinen festgelegten Quellen gebaut ist und mit sandbox-ai funktioniert; er läuft trotzdem in einer eigenen Sandbox." },
+  "Add {name} anyway (--unsigned)?": { "de": "{name} trotzdem hinzufügen (--unsigned)?" },
+  "Add unsigned": { "de": "Unsigniert hinzufügen" },
+  "On {host}: {text}": { "de": "Auf {host}: {text}" },
+  "Catalog": { "de": "Katalog" },
+  "{entry} was not added on {host}: its catalog is not signed by a trusted key.": { "de": "{entry} wurde auf {host} nicht hinzugefügt: Sein Katalog ist nicht mit einem vertrauenswürdigen Schlüssel signiert." }
 };
 
 translateDocument();
