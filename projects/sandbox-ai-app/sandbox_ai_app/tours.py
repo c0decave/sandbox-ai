@@ -335,6 +335,15 @@ AREA_TOURS = {
               "freigegeben haben."),
              ("Read a kit's hooks before approving them.", "Lesen Sie die Hooks eines Kits, bevor Sie sie "
               "freigeben.")),
+        step("market", ("Marketplaces", "Marktplätze"),
+             ("Every plugin marketplace of the host with its plugins and their state: add a plugin to the kit chosen "
+              "(the default kit or one of yours), turn it on or off, or take it out; the agents' own configuration "
+              "is only read.",
+              "Jeder Plugin-Marktplatz des Hosts mit seinen Plugins und deren Zustand: ein Plugin zum gewählten Kit "
+              "(dem Standard-Kit oder einem Ihrer Kits) hinzufügen, ein- oder ausschalten oder herausnehmen; die "
+              "eigene Konfiguration der Agenten wird nur gelesen."),
+             ("Pick a marketplace and look at its plugins.", "Wählen Sie einen Marktplatz und sehen Sie seine "
+              "Plugins an.")),
     ),
     "mcp": (
         step("servers", ("Your MCP servers", "Ihre MCP-Server"),

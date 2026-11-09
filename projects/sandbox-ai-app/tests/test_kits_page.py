@@ -48,6 +48,18 @@ INVENTORY = {
          "kits": ["egm"]}]},
     "installed": {"marketplaces": ["sandbox-ai"], "plugins": ["sandcastle@sandbox-ai"]},
 }
+# (what `sandbox-ai plugins marketplaces --json` prints, small: the marketplace browser's own tests have the rest)
+MARKETPLACES = {"version": 1, "store": "/s", "errors": [],
+                "kits": [{"name": "default", "kind": "default", "editable": True, "agents": ["claude"]},
+                         {"name": "egm", "kind": "builtin", "editable": False, "agents": ["claude"]},
+                         {"name": "mine", "kind": "user", "editable": True, "agents": ["claude", "codex"]}],
+                "agents": {"claude": {"marketplaces": True, "kits": True, "config": None, "about": None, "notes": []}},
+                "marketplaces": [{"name": "sandbox-ai", "agent": "claude", "builtin": True, "origins": ["sandbox-ai"],
+                                  "description": None, "source": None, "source_value": "sandbox-ai",
+                                  "importable": True, "problem": None, "import": None, "kits": [], "store": None,
+                                  "agent_config": None, "listed_from": "sandbox-ai", "plugins": [
+                                      {"name": "egm", "id": "egm@sandbox-ai", "listed": True, "kits": [],
+                                       "store": None, "agent": {"installed": False, "enabled": None}}]}]}
 
 
 @pytest.fixture
@@ -56,11 +68,13 @@ def fake(window, monkeypatch, wait):
     calls = []
     monkeypatch.setattr(window.sai, "has_kits_command", lambda: True)
     monkeypatch.setattr(window.sai, "kits_inventory", lambda: copy.deepcopy(INVENTORY))
+    monkeypatch.setattr(window.sai, "has_marketplaces", lambda: True)
+    monkeypatch.setattr(window.sai, "marketplaces", lambda: copy.deepcopy(MARKETPLACES))
     monkeypatch.setattr(window.sai, "kit_command",
                         lambda action, name, *args, options=(): calls.append((action, name, *args, *options)) or
                         (0, "", ""))
     window.kits.refresh()
-    assert wait(lambda: window.kits.table.rowCount() == 4, 10)
+    assert wait(lambda: window.kits.table.rowCount() == 4 and window.kits.market.rowCount() > 0, 10)
     window.calls = calls
     return window
 
@@ -85,11 +99,8 @@ def test_the_page_lists_every_kit_what_it_brings_and_the_marketplace(fake):
     texts = {top.text(0): [top.child(c).text(0) for c in range(top.childCount())] for top in tree}
     assert "Skills: 1" in texts["claude"] and "Plugins: 1" in texts["claude"]
     assert any(t.startswith("✘") and "symlink" in t for t in texts["codex"])
-    market = {widgets.row_key(page.market, r): [page.market.item(r, c).text() for c in range(5)]
-              for r in range(page.market.rowCount())}
-    assert market["egm@sandbox-ai"][2] == "github:google/elephant-goldfish-model" and market["egm@sandbox-ai"][3] == "no"
-    assert market["sandcastle@sandbox-ai"][3] == "yes" and market["egm@sandbox-ai"][4] == "egm"
-    assert "sandcastle@sandbox-ai" in page.store.text()
+    assert "sandcastle@sandbox-ai" in page.summary.toolTip(), "the plugin store's plugins"
+    assert widgets.find_row(page.market, "claude:sandbox-ai") >= 0, "the marketplace browser (its own tests below)"
 
 
 def test_only_your_kits_can_be_changed_and_why(fake, env):
@@ -104,7 +115,9 @@ def test_only_your_kits_can_be_changed_and_why(fake, env):
     select_kit(page, "builtin", "egm")
     assert page.use_button.isEnabled()
     select_kit(page, "default", "default")
-    assert "edited in its folder" in page.remove_button.toolTip() and not page.use_button.isEnabled()
+    assert page.remove_button.isEnabled(), "the default kit's plugins can be removed"
+    assert not page.delete_button.isEnabled() and "not deleted" in page.delete_button.toolTip()
+    assert "edited in its folder" in page.add_hint.text() and not page.use_button.isEnabled()
     select_kit(page, "user", "mine")
     assert all(b.isEnabled() for b in page.edit_buttons) and page.use_button.isEnabled()
     assert page.add_hint.text() == ""
@@ -249,11 +262,12 @@ def test_every_change_runs_sandbox_ai_kits(fake, env, monkeypatch, wait):
     page.delete()
     assert wait(lambda: calls[-1] == ("delete", "mine", "--yes"), 10)
     assert widgets.SHOWN[-1][0] == "Delete kit" and "mine" in widgets.SHOWN[-1][1], "asked first"
-    # A marketplace plugin goes into one of your kits.
-    page.market.selectRow(widgets.find_row(page.market, "egm@sandbox-ai"))
-    monkeypatch.setattr(kits_page, "TargetKitDialog", fake_target("mine", False))
-    page.add_to_kit()
-    assert wait(lambda: calls[-1] == ("add-plugin", "mine", "egm@sandbox-ai", "--agent=claude"), 10)
+    # With the default kit selected, a plugin goes into it (no kit of yours asked for).
+    monkeypatch.setattr(kits_page, "TargetKitDialog", None)
+    select_kit(page, "default", "default")
+    page.add_plugin()
+    assert wait(lambda: calls[-1] == ("add-plugin", "default", "egm@sandbox-ai", "--agent=claude"), 10)
+    assert "the kit default" in widgets.SHOWN[-1][1] and "On this computer" in widgets.SHOWN[-1][1], "asked first"
     # sandbox-ai's refusal is shown as it is.
     fake.sai.kit_command = lambda *a, **k: (1, "", "sandbox-ai kits: a marketplace from a folder is not supported")
     select_kit(page, "user", "mine")
@@ -398,6 +412,8 @@ def hooked(window, monkeypatch, wait):
     monkeypatch.setattr(window.sai, "has_kits_command", lambda: True)
     monkeypatch.setattr(window.sai, "has_kit_hooks", lambda: True)
     monkeypatch.setattr(window.sai, "kits_inventory", lambda: copy.deepcopy(inventory))
+    monkeypatch.setattr(window.sai, "has_marketplaces", lambda: True)
+    monkeypatch.setattr(window.sai, "marketplaces", lambda: copy.deepcopy(MARKETPLACES))
     monkeypatch.setattr(window.sai, "kit_command",
                         lambda action, name, *args, options=(): calls.append((action, name, *args, *options)) or
                         (0, "", ""))

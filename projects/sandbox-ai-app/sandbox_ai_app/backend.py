@@ -80,7 +80,14 @@ KIT_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"  # kits.KIT_NAME
 SKILL_NAME = r"[a-z0-9][a-z0-9-]{0,63}"  # a new skill's name, as Claude wants it
 DRAIN = 2  # seconds call() still reads the output of a command it ended at its timeout
 KIT_ACTIONS = {"show", "new", "add-skill", "new-skill", "add-plugin", "add-marketplace", "remove-skill",
-               "remove-plugin", "add-hook", "remove-hook", "delete"}
+               "remove-plugin", "add-hook", "remove-hook", "delete", "enable-plugin", "disable-plugin",
+               "remove-marketplace", "import-marketplace"}
+# What came with sandbox-ai 0.1.78 (with `plugins marketplaces` and `plugins --marketplaces-only`): the kit actions
+# below, and the plugins and marketplaces of the default kit changed by `sandbox-ai kits` (webui's KIT_NEW_ACTIONS and
+# KIT_DEFAULT_ACTIONS). Another host is asked first (require_marketplaces) and an older one told to update.
+KIT_NEW_ACTIONS = {"enable-plugin", "disable-plugin", "remove-marketplace", "import-marketplace"}
+KIT_DEFAULT_ACTIONS = {"add-plugin", "remove-plugin", "enable-plugin", "disable-plugin", "add-marketplace",
+                       "remove-marketplace", "import-marketplace"}
 
 
 class Unavailable(RuntimeError):
@@ -1222,9 +1229,29 @@ class SandboxAI:
             raise ValueError(f"{name!r} is not a kit name")
         return self.command("kits", "trust-hooks", "--", name)
 
-    def plugins_argv(self, update=False, kits=()):
-        """`sandbox-ai plugins claude [--update] [--kit NAME]...` (built-in kits when this sandbox-ai can)."""
-        argv = ["plugins", "claude"] + (["--update"] if update else [])
+    def has_marketplaces(self):
+        """This sandbox-ai lists every marketplace (`sandbox-ai plugins marketplaces`, since 0.1.78)."""
+        try:
+            return "def marketplaces_cli(" in (self.directory / "plugins.py").read_text()
+        except OSError:
+            return False
+
+    def marketplaces(self):
+        """`sandbox-ai plugins marketplaces --json` (version 1): every plugin marketplace (sandbox-ai's own, the kits',
+        the plugin store's, Claude's and Codex's) with its plugins and their state, OpenCode's npm plugins, each
+        agent's about and notes, the kits that can be chosen and the errors of kits. Read only: nothing is fetched,
+        run or changed (the agents' own configuration is only read)."""
+        status, out, err = self.call("plugins", "marketplaces", "--json", timeout=90)
+        if status != 0:
+            raise ValueError((err or out).strip()[-500:] or f"sandbox-ai plugins marketplaces: exit status {status}")
+        return marketplaces_document(json.loads(out))
+
+    def plugins_argv(self, update=False, kits=(), marketplaces_only=False):
+        """`sandbox-ai plugins claude [--update] [--marketplaces-only] [--kit NAME]...` (built-in kits when this
+        sandbox-ai can). --marketplaces-only fetches the kits' marketplaces (their plugin lists) in the plugin store's
+        sandbox and installs nothing."""
+        argv = ["plugins", "claude"] + (["--update"] if update else []) + \
+            (["--marketplaces-only"] if marketplaces_only else [])
         try:
             supports = "--kit" in (self.directory / "plugins.py").read_text()
         except OSError:
@@ -2186,14 +2213,36 @@ class SandboxAI:
         return document
 
     def host_kit_command(self, host, action, name, *arguments, options=()):
-        """kit_command on HOST: `sandbox-ai kits ACTION [OPTIONS] -- NAME ARGUMENTS` there."""
+        """kit_command on HOST: `sandbox-ai kits ACTION [OPTIONS] -- NAME ARGUMENTS` there. What came with 0.1.78 (the
+        new actions, the default kit's plugins and marketplaces) goes to another host only when its sandbox-ai has
+        it; an older one is told to update (said, not sent)."""
         if host == "local":
             return self.kit_command(action, name, *arguments, options=options)
         if action not in KIT_ACTIONS or not re.fullmatch(KIT_NAME, str(name)):
             return 2, "", "invalid kit or action"
         if any(not isinstance(a, str) or not a or "\0" in a for a in arguments):
             return 2, "", "invalid argument"
+        if action in KIT_NEW_ACTIONS or (name == "default" and action in KIT_DEFAULT_ACTIONS):
+            try:
+                self.require_marketplaces(host)
+            except HostTooOld as exc:
+                return 2, "", str(exc)
         return self.host_run(host, "kits", action, *options, "--", name, *arguments, timeout=300)
+
+    def require_marketplaces(self, host):
+        """HostTooOld when the sandbox-ai on HOST predates the marketplace browser (0.1.78: `plugins marketplaces`,
+        `plugins --marketplaces-only`, kits enable-plugin, disable-plugin, remove-marketplace, import-marketplace and
+        the default kit's plugins): its `plugins --help` does not list --marketplaces-only. Over SSH: never on the
+        GUI thread."""
+        self.require_options(host, ("plugins",), ["--marketplaces-only"])
+
+    def host_marketplaces(self, host):
+        """marketplaces() on HOST (`sandbox-ai plugins marketplaces --json` there). HostTooOld: that host's sandbox-ai
+        has no marketplace browser yet (update it); ValueError: no answer, or not that document."""
+        if host == "local":
+            return self.marketplaces()
+        self.require_marketplaces(host)
+        return marketplaces_document(self.host_json(host, "plugins", "marketplaces", "--json", timeout=90))
 
     def host_trust_hooks_argv(self, host, name):
         """`sandbox-ai kits trust-hooks -- NAME` on HOST, for a terminal: the review and the yes are there."""
@@ -2209,11 +2258,13 @@ class SandboxAI:
             return 2, "", "invalid kit"
         return self.host_run(host, "kits", "trust-hooks", "--revoke", "--", name, timeout=120)
 
-    def host_plugins_argv(self, host, update=False, kits=()):
-        """`sandbox-ai plugins claude [--update] [--kit NAME]...` on HOST, for a terminal."""
+    def host_plugins_argv(self, host, update=False, kits=(), marketplaces_only=False):
+        """`sandbox-ai plugins claude [--update] [--marketplaces-only] [--kit NAME]...` on HOST, for a terminal (the
+        page offers --marketplaces-only only where the host's marketplaces could be read)."""
         if host == "local":
-            return self.plugins_argv(update=update, kits=kits)
+            return self.plugins_argv(update=update, kits=kits, marketplaces_only=marketplaces_only)
         return self.host_terminal(host, "plugins", "claude", *(["--update"] if update else []),
+                                  *(["--marketplaces-only"] if marketplaces_only else []),
                                   *[token for kit in kits if re.fullmatch(KIT_NAME, kit) for token in ("--kit", kit)])
 
     def plugins_status(self, host):
@@ -2899,6 +2950,16 @@ def web_listen_problem(value):
 def web_listen_beyond(value):
     """Whether the web interface on LISTEN can be reached from other machines (any address but the loopback)."""
     return not web_listen_address(value).is_loopback
+
+
+def marketplaces_document(document):
+    """DOCUMENT if it is what `sandbox-ai plugins marketplaces --json` prints (version 1: marketplaces, agents and
+    kits), else ValueError."""
+    if not isinstance(document, dict) or document.get("version") != 1 or not isinstance(
+            document.get("marketplaces"), list) or not isinstance(document.get("agents"), dict) \
+            or not isinstance(document.get("kits"), list):
+        raise ValueError("sandbox-ai plugins marketplaces --json: not a list of marketplaces (version 1)")
+    return document
 
 
 class HostTooOld(ValueError):

@@ -47,6 +47,341 @@ def tr(key, **values):
 
 
 TEXTS = {
+    # == the Kits page's marketplace browser (kits_page.py): `plugins marketplaces --json`, kit actions asked first;
+    # the texts the web's Kits page has too read the same (tests/test_web_i18n.py) ==
+    '(off)': {
+        'en': '(off)',
+        'de': '(aus)'},
+    "--with-plugins: the kit's plugins of that marketplace go too (else they must be removed first)": {
+        'en': "--with-plugins: the kit's plugins of that marketplace go too (else they must be removed first)",
+        'de': '--with-plugins: Die Plugins des Kits aus diesem Marktplatz gehen mit (sonst müssen sie zuerst entfernt werden)'},
+    'A Codex marketplace does not go into a kit: Import for Claude, if it can.': {
+        'en': 'A Codex marketplace does not go into a kit: Import for Claude, if it can.',
+        'de': 'Ein Marktplatz von Codex kommt nicht in ein Kit: Für Claude importieren, wenn das geht.'},
+    'Add a marketplace to the kit by its source': {
+        'en': 'Add a marketplace to the kit by its source',
+        'de': 'Einen Marktplatz über seine Quelle zum Kit hinzufügen'},
+    'Add the marketplace to the kit': {
+        'en': 'Add the marketplace to the kit',
+        'de': 'Den Marktplatz zum Kit hinzufügen'},
+    'Add the plugin to the kit': {
+        'en': 'Add the plugin to the kit',
+        'de': 'Das Plugin zum Kit hinzufügen'},
+    'Add to the kit': {
+        'en': 'Add to the kit',
+        'de': 'Zum Kit hinzufügen'},
+    'Add {what} to the kit {kit} on {host}? Every later start with that kit gets it.': {
+        'en': 'Add {what} to the kit {kit} on {host}? Every later start with that kit gets it.',
+        'de': '{what} zum Kit {kit} auf {host} hinzufügen? Jeder spätere Start mit diesem Kit bekommt es.'},
+    'Cannot list the marketplaces: {error}': {
+        'en': 'Cannot list the marketplaces: {error}',
+        'de': 'Die Marktplätze lassen sich nicht auflisten: {error}'},
+    'Claude enables no plugin of it here: add the marketplace to the kit instead.': {
+        'en': 'Claude enables no plugin of it here: add the marketplace to the kit instead.',
+        'de': 'Claude schaltet hier kein Plugin daraus ein: Fügen Sie stattdessen den Marktplatz zum Kit hinzu.'},
+    'Claude on that host': {
+        'en': 'Claude on that host',
+        'de': 'Claude auf diesem Host'},
+    'Codex (curated)': {
+        'en': 'Codex (curated)',
+        'de': 'Codex (kuratiert)'},
+    'Codex on that host': {
+        'en': 'Codex on that host',
+        'de': 'Codex auf diesem Host'},
+    'Create a kit of yours first, or use the default kit.': {
+        'en': 'Create a kit of yours first, or use the default kit.',
+        'de': 'Legen Sie zuerst ein eigenes Kit an, oder nehmen Sie das Standard-Kit.'},
+    "Declare Codex's marketplace {marketplace} for Claude, as {name}, in {kit} on {host}?": {
+        'en': "Declare Codex's marketplace {marketplace} for Claude, as {name}, in {kit} on {host}?",
+        'de': 'Den Marktplatz {marketplace} von Codex für Claude als {name} in {kit} auf {host} angeben?'},
+    'Declare the marketplace {marketplace} ({source}) in {kit} on {host}? Its plugins can then be added there.': {
+        'en': 'Declare the marketplace {marketplace} ({source}) in {kit} on {host}? Its plugins can then be added there.',
+        'de': 'Den Marktplatz {marketplace} ({source}) in {kit} auf {host} angeben? Seine Plugins lassen sich dort dann hinzufügen.'},
+    'Declare the marketplace {marketplace} in {kit} on {host} with the plugins Claude enables from it there? Every later start with that kit gets them.': {
+        'en': 'Declare the marketplace {marketplace} in {kit} on {host} with the plugins Claude enables from it there? Every later start with that kit gets them.',
+        'de': 'Den Marktplatz {marketplace} in {kit} auf {host} angeben, mit den Plugins, die Claude dort daraus einschaltet? Jeder spätere Start mit diesem Kit bekommt sie.'},
+    'Disable': {
+        'en': 'Disable',
+        'de': 'Ausschalten'},
+    'Disable the plugin in the kit': {
+        'en': 'Disable the plugin in the kit',
+        'de': 'Das Plugin im Kit ausschalten'},
+    'Enable': {
+        'en': 'Enable',
+        'de': 'Einschalten'},
+    'Enable the plugin in the kit': {
+        'en': 'Enable the plugin in the kit',
+        'de': 'Das Plugin im Kit einschalten'},
+    "Every plugin marketplace on {host}: sandbox-ai's own, those the kits declare, and those Claude, Codex and OpenCode already know there. Pick one to see its plugins; what you add, enable, disable or remove changes the kit chosen here. The agents' own configuration is only read.": {
+        'en': "Every plugin marketplace on {host}: sandbox-ai's own, those the kits declare, and those Claude, Codex and OpenCode already know there. Pick one to see its plugins; what you add, enable, disable or remove changes the kit chosen here. The agents' own configuration is only read.",
+        'de': 'Jeder Plugin-Marktplatz auf {host}: der eigene von sandbox-ai, die, die die Kits angeben, und die, die Claude, Codex und OpenCode dort schon kennen. Wählen Sie einen, um seine Plugins zu sehen; was Sie hinzufügen, einschalten, ausschalten oder entfernen, ändert das hier gewählte Kit. Die eigene Konfiguration der Agents wird nur gelesen.'},
+    'Fetch the plugin lists': {
+        'en': 'Fetch the plugin lists',
+        'de': 'Plugin-Listen holen'},
+    'Filter by name or description': {
+        'en': 'Filter by name or description',
+        'de': 'Nach Name oder Beschreibung filtern'},
+    'Filter the plugins': {
+        'en': 'Filter the plugins',
+        'de': 'Plugins filtern'},
+    'Import for Claude': {
+        'en': 'Import for Claude',
+        'de': 'Für Claude importieren'},
+    "Import with Claude's plugins": {
+        'en': "Import with Claude's plugins",
+        'de': 'Mit den Plugins von Claude importieren'},
+    'It is in the kit already.': {
+        'en': 'It is in the kit already.',
+        'de': 'Es ist schon im Kit.'},
+    'It is off in this kit already.': {
+        'en': 'It is off in this kit already.',
+        'de': 'Es ist in diesem Kit schon aus.'},
+    'It is on in this kit already.': {
+        'en': 'It is on in this kit already.',
+        'de': 'Es ist in diesem Kit schon an.'},
+    'Its plugin list is not fetched yet: only the plugins a kit or the agent names are shown.': {
+        'en': 'Its plugin list is not fetched yet: only the plugins a kit or the agent names are shown.',
+        'de': 'Seine Plugin-Liste ist noch nicht geholt: Nur die Plugins, die ein Kit oder der Agent nennt, werden gezeigt.'},
+    'Its plugins cannot go into a kit: {why}': {
+        'en': 'Its plugins cannot go into a kit: {why}',
+        'de': 'Seine Plugins können nicht in ein Kit: {why}'},
+    'Marketplace': {
+        'en': 'Marketplace',
+        'de': 'Marktplatz'},
+    'Marketplace added to {kit}': {
+        'en': 'Marketplace added to {kit}',
+        'de': 'Marktplatz zu {kit} hinzugefügt'},
+    'Marketplaces': {
+        'en': 'Marketplaces',
+        'de': 'Marktplätze'},
+    'Not an npm package a kit can name.': {
+        'en': 'Not an npm package a kit can name.',
+        'de': 'Kein npm-Paket, das ein Kit nennen kann.'},
+    "Not in Claude's format: it cannot be imported for Claude.": {
+        'en': "Not in Claude's format: it cannot be imported for Claude.",
+        'de': 'Nicht im Format von Claude: Er lässt sich nicht für Claude importieren.'},
+    'Not in this kit (and the default kit does not enable it).': {
+        'en': 'Not in this kit (and the default kit does not enable it).',
+        'de': 'Nicht in diesem Kit (und das Standard-Kit schaltet es nicht ein).'},
+    'Not in this kit.': {
+        'en': 'Not in this kit.',
+        'de': 'Nicht in diesem Kit.'},
+    'Not in this kit: add it first.': {
+        'en': 'Not in this kit: add it first.',
+        'de': 'Nicht in diesem Kit: Fügen Sie es zuerst hinzu.'},
+    'OpenCode has no marketplaces: add its npm plugins below.': {
+        'en': 'OpenCode has no marketplaces: add its npm plugins below.',
+        'de': 'OpenCode hat keine Marktplätze: Fügen Sie seine npm-Plugins unten hinzu.'},
+    "OpenCode's npm plugins": {
+        'en': "OpenCode's npm plugins",
+        'de': 'Die npm-Plugins von OpenCode'},
+    "OpenCode's plugin modules there (a kit takes one as a hook, below):": {
+        'en': "OpenCode's plugin modules there (a kit takes one as a hook, below):",
+        'de': 'Die Plugin-Module von OpenCode dort (ein Kit nimmt eines als Hook, unten):'},
+    'Plugin added to {kit}': {
+        'en': 'Plugin added to {kit}',
+        'de': 'Plugin zu {kit} hinzugefügt'},
+    'Plugins': {
+        'en': 'Plugins',
+        'de': 'Plugins'},
+    'Plugins of the marketplace': {
+        'en': 'Plugins of the marketplace',
+        'de': 'Plugins des Marktplatzes'},
+    'Plugins of {marketplace} ({agent})': {
+        'en': 'Plugins of {marketplace} ({agent})',
+        'de': 'Plugins von {marketplace} ({agent})'},
+    'Reading the marketplaces of {host}…': {
+        'en': 'Reading the marketplaces of {host}…',
+        'de': 'Die Marktplätze von {host} werden gelesen…'},
+    'Remove from the kit…': {
+        'en': 'Remove from the kit…',
+        'de': 'Aus dem Kit entfernen…'},
+    'Remove the marketplace from the kit': {
+        'en': 'Remove the marketplace from the kit',
+        'de': 'Den Marktplatz aus dem Kit entfernen'},
+    'Remove the plugin from the kit': {
+        'en': 'Remove the plugin from the kit',
+        'de': 'Das Plugin aus dem Kit entfernen'},
+    'Remove the {kind} {value} for {agent} from the kit {kit} on {host}?': {
+        'en': 'Remove the {kind} {value} for {agent} from the kit {kit} on {host}?',
+        'de': '{kind} {value} für {agent} aus dem Kit {kit} auf {host} entfernen?'},
+    'Select a marketplace first.': {
+        'en': 'Select a marketplace first.',
+        'de': 'Zuerst einen Marktplatz wählen.'},
+    'Select a marketplace to see its plugins.': {
+        'en': 'Select a marketplace to see its plugins.',
+        'de': 'Wählen Sie einen Marktplatz, um seine Plugins zu sehen.'},
+    'Select a plugin first.': {
+        'en': 'Select a plugin first.',
+        'de': 'Zuerst ein Plugin wählen.'},
+    'Take a skill, plugin or hook out of the kit (of the default kit: a plugin)': {
+        'en': 'Take a skill, plugin or hook out of the kit (of the default kit: a plugin)',
+        'de': 'Einen Skill, ein Plugin oder einen Hook aus dem Kit nehmen (aus dem Standard-Kit: ein Plugin)'},
+    'Take the marketplace {marketplace} out of {kit} on {host}? A plugin of it the kit still names must be removed first.': {
+        'en': 'Take the marketplace {marketplace} out of {kit} on {host}? A plugin of it the kit still names must be removed first.',
+        'de': 'Den Marktplatz {marketplace} aus {kit} auf {host} nehmen? Ein Plugin daraus, das das Kit noch nennt, muss zuerst entfernt werden.'},
+    'Take the marketplace {marketplace} with its plugins out of {kit} on {host}? Every later start with that kit goes without them.': {
+        'en': 'Take the marketplace {marketplace} with its plugins out of {kit} on {host}? Every later start with that kit goes without them.',
+        'de': 'Den Marktplatz {marketplace} mit seinen Plugins aus {kit} auf {host} nehmen? Jeder spätere Start mit diesem Kit kommt ohne sie aus.'},
+    'Take {what} out of the kit {name}? Every later start with this kit is without it.': {
+        'en': 'Take {what} out of the kit {name}? Every later start with this kit is without it.',
+        'de': '{what} aus dem Kit {name} nehmen? Jeder spätere Start mit diesem Kit ist ohne.'},
+    'The default kit is part of every sandbox: it is not deleted; its skills are edited in its folder: {path}': {
+        'en': 'The default kit is part of every sandbox: it is not deleted; its skills are edited in its folder: {path}',
+        'de': 'Das Standard-Kit gehört zu jeder Sandbox: Es wird nicht gelöscht; seine Skills werden in seinem Ordner bearbeitet: {path}'},
+    "The default kit's plugins and marketplaces change here; its skills and hooks are edited in its folder: {path}. A skill or hook you add goes to a kit of yours: you choose it (or a new one) first.": {
+        'en': "The default kit's plugins and marketplaces change here; its skills and hooks are edited in its folder: {path}. A skill or hook you add goes to a kit of yours: you choose it (or a new one) first.",
+        'de': 'Plugins und Marktplätze des Standard-Kits ändern sich hier; seine Skills und Hooks werden in seinem Ordner bearbeitet: {path}. Ein Skill oder Hook, den Sie hinzufügen, kommt in ein eigenes Kit: Sie wählen es (oder ein neues) zuerst.'},
+    'The kit declares it already.': {
+        'en': 'The kit declares it already.',
+        'de': 'Das Kit gibt ihn schon an.'},
+    'The kit does not declare it.': {
+        'en': 'The kit does not declare it.',
+        'de': 'Das Kit gibt ihn nicht an.'},
+    'The kit the marketplace actions change': {
+        'en': 'The kit the marketplace actions change',
+        'de': 'Das Kit, das die Aktionen der Marktplätze ändern'},
+    'The marketplaces are not read yet: Refresh.': {
+        'en': 'The marketplaces are not read yet: Refresh.',
+        'de': 'Die Marktplätze sind noch nicht gelesen: Neu laden.'},
+    'The plugin lists are fetched in the terminal (nothing is installed); Refresh afterwards.': {
+        'en': 'The plugin lists are fetched in the terminal (nothing is installed); Refresh afterwards.',
+        'de': 'Die Plugin-Listen werden im Terminal geholt (nichts wird installiert); danach Neu laden.'},
+    'The sandbox-ai on {host} has no marketplace browser yet (it came with 0.1.78): update the host (Hosts › Update). Its kits on the tab Kits work as before.': {
+        'en': 'The sandbox-ai on {host} has no marketplace browser yet (it came with 0.1.78): update the host (Hosts › Update). Its kits on the tab Kits work as before.',
+        'de': 'Das sandbox-ai auf {host} hat noch keinen Marktplatz-Browser (er kam mit 0.1.78): Aktualisieren Sie den Host (Hosts › Aktualisieren). Seine Kits auf dem Reiter Kits funktionieren wie bisher.'},
+    'This host has no marketplace browser yet: update it.': {
+        'en': 'This host has no marketplace browser yet: update it.',
+        'de': 'Dieser Host hat noch keinen Marktplatz-Browser: Aktualisieren Sie ihn.'},
+    'This kit': {
+        'en': 'This kit',
+        'de': 'Dieses Kit'},
+    'This sandbox-ai has no marketplace browser yet (it came with 0.1.78); update it with: sandbox-ai update': {
+        'en': 'This sandbox-ai has no marketplace browser yet (it came with 0.1.78); update it with: sandbox-ai update',
+        'de': 'Dieses sandbox-ai hat noch keinen Marktplatz-Browser (er kam mit 0.1.78); aktualisieren Sie es mit: sandbox-ai update'},
+    'Turn {plugin} off in every start with {kit} on {host}, though the default kit enables it?': {
+        'en': 'Turn {plugin} off in every start with {kit} on {host}, though the default kit enables it?',
+        'de': '{plugin} in jedem Start mit {kit} auf {host} ausschalten, obwohl das Standard-Kit es einschaltet?'},
+    'Turn {plugin} off in every start with {kit} on {host}? It stays in the kit (and installed).': {
+        'en': 'Turn {plugin} off in every start with {kit} on {host}? It stays in the kit (and installed).',
+        'de': '{plugin} in jedem Start mit {kit} auf {host} ausschalten? Es bleibt im Kit (und installiert).'},
+    'Turn {plugin} on in every start with {kit} on {host}?': {
+        'en': 'Turn {plugin} on in every start with {kit} on {host}?',
+        'de': '{plugin} in jedem Start mit {kit} auf {host} einschalten?'},
+    "What you add, enable, disable or remove below changes this kit: the default kit (every sandbox) or one of yours; sandbox-ai's built-in kits are read-only": {
+        'en': "What you add, enable, disable or remove below changes this kit: the default kit (every sandbox) or one of yours; sandbox-ai's built-in kits are read-only",
+        'de': 'Was Sie unten hinzufügen, einschalten, ausschalten oder entfernen, ändert dieses Kit: das Standard-Kit (jede Sandbox) oder eines Ihrer Kits; die eingebauten Kits von sandbox-ai sind schreibgeschützt'},
+    'With its plugins': {
+        'en': 'With its plugins',
+        'de': 'Mit seinen Plugins'},
+    'a kit': {
+        'en': 'a kit',
+        'de': 'ein Kit'},
+    'declared in {kit}': {
+        'en': 'declared in {kit}',
+        'de': 'angegeben in {kit}'},
+    'in no kit': {
+        'en': 'in no kit',
+        'de': 'in keinem Kit'},
+    'in opencode.json': {
+        'en': 'in opencode.json',
+        'de': 'in opencode.json'},
+    'installed ({version})': {
+        'en': 'installed ({version})',
+        'de': 'installiert ({version})'},
+    'kit {kit} ({agent}): {error}': {
+        'en': 'kit {kit} ({agent}): {error}',
+        'de': 'Kit {kit} ({agent}): {error}'},
+    'not for a kit: {why}': {
+        'en': 'not for a kit: {why}',
+        'de': 'nicht für ein Kit: {why}'},
+    'not in its plugin list (named by a kit or the agent)': {
+        'en': 'not in its plugin list (named by a kit or the agent)',
+        'de': 'nicht in seiner Plugin-Liste (von einem Kit oder dem Agent genannt)'},
+    'off in {kit}': {
+        'en': 'off in {kit}',
+        'de': 'aus in {kit}'},
+    'off: {list}': {
+        'en': 'off: {list}',
+        'de': 'aus: {list}'},
+    'on in {kit}': {
+        'en': 'on in {kit}',
+        'de': 'an in {kit}'},
+    'plugin store': {
+        'en': 'plugin store',
+        'de': 'Plugin-Store'},
+    'sandbox-ai kits add-marketplace: a Claude plugin marketplace from GitHub (OWNER/REPO) or a Git server (https://…)': {
+        'en': 'sandbox-ai kits add-marketplace: a Claude plugin marketplace from GitHub (OWNER/REPO) or a Git server (https://…)',
+        'de': 'sandbox-ai kits add-marketplace: ein Plugin-Marktplatz für Claude von GitHub (OWNER/REPO) oder einem Git-Server (https://…)'},
+    'sandbox-ai kits add-marketplace: the kit declares the marketplace with the source it has here; its plugins can then be added': {
+        'en': 'sandbox-ai kits add-marketplace: the kit declares the marketplace with the source it has here; its plugins can then be added',
+        'de': 'sandbox-ai kits add-marketplace: Das Kit gibt den Marktplatz mit der Quelle an, die er hier hat; seine Plugins lassen sich dann hinzufügen'},
+    'sandbox-ai kits add-plugin: every later start with the kit gets it': {
+        'en': 'sandbox-ai kits add-plugin: every later start with the kit gets it',
+        'de': 'sandbox-ai kits add-plugin: Jeder spätere Start mit dem Kit bekommt es'},
+    'sandbox-ai kits disable-plugin: declared (and installed) but off with the kit; it can turn off a plugin the default kit enables': {
+        'en': 'sandbox-ai kits disable-plugin: declared (and installed) but off with the kit; it can turn off a plugin the default kit enables',
+        'de': 'sandbox-ai kits disable-plugin: angegeben (und installiert), aber aus mit dem Kit; so lässt sich auch ein Plugin ausschalten, das das Standard-Kit einschaltet'},
+    'sandbox-ai kits enable-plugin: on again in every start with the kit': {
+        'en': 'sandbox-ai kits enable-plugin: on again in every start with the kit',
+        'de': 'sandbox-ai kits enable-plugin: wieder an in jedem Start mit dem Kit'},
+    "sandbox-ai kits import-marketplace: the marketplace as Claude has it here (with the plugins Claude enables from it), or a Codex marketplace in Claude's format, for Claude": {
+        'en': "sandbox-ai kits import-marketplace: the marketplace as Claude has it here (with the plugins Claude enables from it), or a Codex marketplace in Claude's format, for Claude",
+        'de': 'sandbox-ai kits import-marketplace: der Marktplatz, wie Claude ihn hier hat (mit den Plugins, die Claude daraus einschaltet), oder ein Marktplatz von Codex im Format von Claude, für Claude'},
+    'sandbox-ai kits remove-marketplace: asked first': {
+        'en': 'sandbox-ai kits remove-marketplace: asked first',
+        'de': 'sandbox-ai kits remove-marketplace: mit Rückfrage'},
+    'sandbox-ai kits remove-plugin: out of the kit': {
+        'en': 'sandbox-ai kits remove-plugin: out of the kit',
+        'de': 'sandbox-ai kits remove-plugin: aus dem Kit'},
+    "sandbox-ai plugins claude --marketplaces-only, in a terminal: fetches the kits' marketplaces (their plugin lists) in the plugin store's sandbox, which reaches only their hosts. It installs nothing; Refresh afterwards.": {
+        'en': "sandbox-ai plugins claude --marketplaces-only, in a terminal: fetches the kits' marketplaces (their plugin lists) in the plugin store's sandbox, which reaches only their hosts. It installs nothing; Refresh afterwards.",
+        'de': 'sandbox-ai plugins claude --marketplaces-only, in einem Terminal: holt die Marktplätze der Kits (ihre Plugin-Listen) in der Sandbox des Plugin-Speichers, die nur deren Hosts erreicht. Es installiert nichts; danach Neu laden.'},
+    "sandbox-ai's kits give Codex no plugins yet: shown as Codex has them on that host.": {
+        'en': "sandbox-ai's kits give Codex no plugins yet: shown as Codex has them on that host.",
+        'de': 'Die Kits von sandbox-ai geben Codex noch keine Plugins: gezeigt, wie Codex sie auf diesem Host hat.'},
+    "sandbox-ai's own": {
+        'en': "sandbox-ai's own",
+        'de': 'der eigene von sandbox-ai'},
+    'suggested': {
+        'en': 'suggested',
+        'de': 'vorgeschlagen'},
+    'the agent enables it': {
+        'en': 'the agent enables it',
+        'de': 'beim Agent eingeschaltet'},
+    'the agent has it installed': {
+        'en': 'the agent has it installed',
+        'de': 'beim Agent installiert'},
+    'the agent has it off': {
+        'en': 'the agent has it off',
+        'de': 'beim Agent ausgeschaltet'},
+    'the default kit': {
+        'en': 'the default kit',
+        'de': 'das Standard-Kit'},
+    'the default kit (every sandbox)': {
+        'en': 'the default kit (every sandbox)',
+        'de': 'das Standard-Kit (jede Sandbox)'},
+    '{count} (list not fetched)': {
+        'en': '{count} (list not fetched)',
+        'de': '{count} (Liste nicht geholt)'},
+    '{count} marketplaces on {host}': {
+        'en': '{count} marketplaces on {host}',
+        'de': '{count} Marktplätze auf {host}'},
+    "{kit} is one of sandbox-ai's built-in kits and read-only: choose the default kit or one of yours (New kit…).": {
+        'en': "{kit} is one of sandbox-ai's built-in kits and read-only: choose the default kit or one of yours (New kit…).",
+        'de': '{kit} ist eines der eingebauten Kits von sandbox-ai und schreibgeschützt: Wählen Sie das Standard-Kit oder eines Ihrer Kits (Neues Kit…).'},
+    '{kit}: removed {value}': {
+        'en': '{kit}: removed {value}',
+        'de': '{kit}: {value} entfernt'},
+    '{kit}: {plugin} disabled': {
+        'en': '{kit}: {plugin} disabled',
+        'de': '{kit}: {plugin} ausgeschaltet'},
+    '{kit}: {plugin} enabled': {
+        'en': '{kit}: {plugin} enabled',
+        'de': '{kit}: {plugin} eingeschaltet'},
+    '{name} (built-in, read-only)': {
+        'en': '{name} (built-in, read-only)',
+        'de': '{name} (eingebaut, schreibgeschützt)'},
     # == the LLM servers page: a models table with Use as default, Edit…, Test connection, the name checked as
     # it is typed (llm_page.py, wizard_llm.py) ==
     'the CA kept now': {
@@ -2294,9 +2629,6 @@ TEXTS = {
     'No kit of yours is selected.': {
         'en': 'No kit of yours is selected.',
         'de': 'Kein eigenes Kit ausgewählt.'},
-    'Declare {plugin} in a kit of yours:': {
-        'en': 'Declare {plugin} in a kit of yours:',
-        'de': '{plugin} in einem eigenen Kit eintragen:'},
     # >>> canary log (Activity, tab Canaries) >>>
     'unknown ({why})': {
         'en': 'unknown ({why})',
@@ -4807,9 +5139,6 @@ TEXTS = {
     'Add skill from a folder…': {
         'en': 'Add skill from a folder…',
         'de': 'Skill aus einem Ordner…'},
-    'Add to a kit…': {
-        'en': 'Add to a kit…',
-        'de': 'Zu einem Kit hinzufügen…'},
     'Agents': {
         'en': 'Agents',
         'de': 'Agenten'},
@@ -4831,15 +5160,9 @@ TEXTS = {
     "Claude: NAME@MARKETPLACE (a plugin of sandbox-ai's own marketplace needs no source); OpenCode: an npm package name.": {
         'en': "Claude: NAME@MARKETPLACE (a plugin of sandbox-ai's own marketplace needs no source); OpenCode: an npm package name.",
         'de': 'Claude: NAME@MARKTPLATZ (ein Plugin aus dem eigenen Marktplatz von sandbox-ai braucht keine Quelle); OpenCode: ein npm-Paketname.'},
-    'Comes from': {
-        'en': 'Comes from',
-        'de': 'Herkunft'},
     'Commands': {
         'en': 'Commands',
         'de': 'Befehle'},
-    'Declare the selected plugin in one of your kits (sandbox-ai kits add-plugin)': {
-        'en': 'Declare the selected plugin in one of your kits (sandbox-ai kits add-plugin)',
-        'de': 'Das gewählte Plugin in einem Ihrer Kits eintragen (sandbox-ai kits add-plugin)'},
     'Delete kit…': {
         'en': 'Delete kit…',
         'de': 'Kit löschen…'},
@@ -4864,18 +5187,12 @@ TEXTS = {
     'For': {
         'en': 'For',
         'de': 'Für'},
-    'In kits': {
-        'en': 'In kits',
-        'de': 'In Kits'},
     'Insight': {
         'en': 'Insight',
         'de': 'Einblick'},
     'Install plugins': {
         'en': 'Install plugins',
         'de': 'Plugins installieren'},
-    'Installed': {
-        'en': 'Installed',
-        'de': 'Installiert'},
     'It does not run.': {
         'en': 'It does not run.',
         'de': 'Sie läuft nicht.'},
@@ -5023,9 +5340,6 @@ TEXTS = {
     'Select a kit to see what it brings.': {
         'en': 'Select a kit to see what it brings.',
         'de': 'Ein Kit wählen, um zu sehen, was es mitbringt.'},
-    'Select a plugin of the marketplace first.': {
-        'en': 'Select a plugin of the marketplace first.',
-        'de': 'Zuerst ein Plugin des Marktplatzes wählen.'},
     'Select a row first.': {
         'en': 'Select a row first.',
         'de': 'Zuerst eine Zeile wählen.'},
@@ -5206,9 +5520,6 @@ TEXTS = {
     "sandbox-ai's own kits are read-only: create a kit of your own (New kit…).": {
         'en': "sandbox-ai's own kits are read-only: create a kit of your own (New kit…).",
         'de': 'Die eigenen Kits von sandbox-ai sind schreibgeschützt: legen Sie ein eigenes Kit an (Neues Kit…).'},
-    "sandbox-ai's plugin marketplace (sandbox-ai)": {
-        'en': "sandbox-ai's plugin marketplace (sandbox-ai)",
-        'de': 'Plugin-Marktplatz von sandbox-ai (sandbox-ai)'},
     'skill {name} ({agent})': {
         'en': 'skill {name} ({agent})',
         'de': 'Skill {name} ({agent})'},

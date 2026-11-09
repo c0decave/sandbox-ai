@@ -497,7 +497,15 @@ SECTIONS = (
         ("Kits & plugins shows every kit: sandbox-ai's own kit and the default kit (both in every sandbox), "
          "built-in kits such as `egm` and yours. For each agent it lists what a kit brings (skills, agents, "
          "commands, prompts, the memory template, marketplaces and plugins) and whether the current project uses "
-         "it. sandbox-ai's plugin marketplace shows where each plugin comes from.\n\n"
+         "it. The tab Marketplaces is the marketplace browser of the host chosen (`sandbox-ai plugins "
+         "marketplaces`): choose a kit (the default kit or one of yours; the built-in ones are read-only) and a "
+         "marketplace, and its plugins show with their state (in which kits, on or off, installed in the plugin "
+         "store, installed or enabled in the agent's own configuration), with a filter. Add to the kit, Enable, "
+         "Disable and Remove change that kit; a marketplace is added, imported from Claude (with the plugins Claude "
+         "enables) or from Codex (for Claude), or removed (with its plugins, if you tick that). OpenCode's npm "
+         "plugins are listed and switched the same way. Fetch the plugin lists runs `sandbox-ai plugins claude "
+         "--marketplaces-only` in a terminal: it installs nothing. Every change is asked first, naming the host and "
+         "the kit; the agents' own configuration is only read.\n\n"
          "- New kit…, Add skill from a folder…, New skill…, Add plugin…, Add marketplace…, Add hook…, Remove… "
          "and Delete kit… run `sandbox-ai kits`. sandbox-ai's own and the built-in kits are read-only: with one "
          "of them selected, what you add goes to a kit of yours, which you choose (or name, and it is created) "
@@ -512,7 +520,16 @@ SECTIONS = (
          "Kits & Plugins zeigt jedes Kit: das eigene Kit von sandbox-ai und das Standard-Kit (beide in jeder "
          "Sandbox), eingebaute Kits wie `egm` und Ihre eigenen. Je Agent steht da, was ein Kit mitbringt (Skills, "
          "Agenten, Befehle, Prompts, die Memory-Vorlage, Marktplätze und Plugins) und ob das aktuelle Projekt es "
-         "nutzt. Der Plugin-Marktplatz von sandbox-ai zeigt, woher jedes Plugin kommt.\n\n"
+         "nutzt. Der Reiter Marktplätze ist der Marktplatz-Browser des gewählten Hosts (`sandbox-ai plugins "
+         "marketplaces`): Wählen Sie ein Kit (das Standard-Kit oder eines Ihrer Kits; die eingebauten sind "
+         "schreibgeschützt) und einen Marktplatz, dann zeigen sich seine Plugins mit ihrem Zustand (in welchen Kits, "
+         "an oder aus, im Plugin-Speicher installiert, in der eigenen Konfiguration des Agenten installiert oder "
+         "eingeschaltet), mit einem Filter. Zum Kit hinzufügen, Einschalten, Ausschalten und Entfernen ändern dieses "
+         "Kit; ein Marktplatz wird hinzugefügt, von Claude (mit den Plugins, die Claude einschaltet) oder von Codex "
+         "(für Claude) importiert oder entfernt (mit seinen Plugins, wenn Sie das ankreuzen). Die npm-Plugins von "
+         "OpenCode werden genauso gelistet und geschaltet. Plugin-Listen holen führt `sandbox-ai plugins claude "
+         "--marketplaces-only` in einem Terminal aus: Es installiert nichts. Jede Änderung wird zuerst erfragt, mit "
+         "Host und Kit; die eigene Konfiguration der Agenten wird nur gelesen.\n\n"
          "- Neues Kit…, Skill aus einem Ordner…, Neuer Skill…, Plugin hinzufügen…, Marktplatz hinzufügen…, Hook "
          "hinzufügen…, Entfernen… und Kit löschen… führen `sandbox-ai kits` aus. Das eigene Kit von sandbox-ai und "
          "die eingebauten Kits sind schreibgeschützt: Ist eines davon ausgewählt, kommt, was Sie hinzufügen, in "
@@ -526,7 +543,8 @@ SECTIONS = (
          "Ein Hook führt Code bei Ereignissen des Agenten aus, ein Plugin in jeder Sandbox, die es aktiviert: "
          "Geben Sie nur frei und installieren Sie nur, was Sie für vertrauenswürdig halten."),
         cli=("sandbox-ai kits", "sandbox-ai kits show NAME", "sandbox-ai kits trust-hooks KIT",
-             "sandbox-ai plugins claude", "sandbox-ai plugins --status", "--kit", "--no-default-kit"),
+             "sandbox-ai plugins claude", "sandbox-ai plugins --status", "sandbox-ai plugins marketplaces",
+             "sandbox-ai plugins claude --marketplaces-only", "--kit", "--no-default-kit"),
         see=("kits", "page-board"),
         tours=("area:kits",)),
     section(
@@ -1372,6 +1390,16 @@ SECTIONS = (
          "`--no-memory` starts without it.\n"
          "- Claude plugins are declared in a kit and installed into a plugin store with `sandbox-ai plugins "
          "claude`; a sandbox enables exactly the plugins its kits list.\n"
+         "- The Kits page is a marketplace browser: every marketplace on that host (sandbox-ai's own, the kits', the "
+         "plugin store's, Claude's and Codex's) with its plugins and their state; add a plugin to a kit or the "
+         "default kit, enable, disable or remove it there; add, remove or import a marketplace. The agents' own "
+         "configuration is only read.\n"
+         "- Disabled: a kit can keep a plugin declared and installed but off; the last kit of a start that names a "
+         "plugin decides, so a kit given with --kit can turn off one the default kit enables.\n"
+         "- A plugin list comes from a copy fetched before; Fetch the plugin lists runs `sandbox-ai plugins claude "
+         "--marketplaces-only` (network only to the marketplaces' hosts, installs nothing).\n"
+         "- OpenCode has no marketplaces (npm plugins); Codex plugins don't go into kits yet; a Codex marketplace in "
+         "Claude's format can be imported for Claude; a marketplace in a local folder cannot go into a kit.\n"
          "- Hooks in a kit run only after `sandbox-ai kits trust-hooks KIT` and only while nothing in them "
          "changes.\n\n"
          "A plugin or hook runs code in every sandbox that enables it; install and approve only what you trust.",
@@ -1386,12 +1414,27 @@ SECTIONS = (
          "zurückgenommen; `--no-memory` startet ohne.\n"
          "- Claude-Plugins werden in einem Kit erklärt und mit `sandbox-ai plugins claude` in einen Plugin-Speicher "
          "installiert; eine Sandbox aktiviert genau die Plugins, die ihre Kits nennen.\n"
+         "- Die Seite Kits ist ein Marktplatz-Browser: jeder Marktplatz auf diesem Host (der eigene von sandbox-ai, "
+         "die der Kits, der des Plugin-Speichers, die von Claude und Codex) mit seinen Plugins und deren Zustand; "
+         "ein Plugin zu einem Kit oder dem Standard-Kit hinzufügen, dort einschalten, ausschalten oder entfernen; "
+         "einen Marktplatz hinzufügen, entfernen oder importieren. Die eigene Konfiguration der Agenten wird nur "
+         "gelesen.\n"
+         "- Ausgeschaltet: Ein Kit kann ein Plugin angegeben und installiert, aber aus halten; das letzte Kit eines "
+         "Starts, das ein Plugin nennt, entscheidet, so kann ein mit --kit gegebenes Kit eines ausschalten, das das "
+         "Standard-Kit einschaltet.\n"
+         "- Eine Plugin-Liste stammt aus einer früher geholten Kopie; Plugin-Listen holen führt `sandbox-ai plugins "
+         "claude --marketplaces-only` aus (Netzwerk nur zu den Hosts der Marktplätze, installiert nichts).\n"
+         "- OpenCode hat keine Marktplätze (npm-Plugins); Plugins von Codex kommen noch nicht in Kits; ein "
+         "Marktplatz von Codex im Format von Claude lässt sich für Claude importieren; ein Marktplatz in einem "
+         "lokalen Ordner kann nicht in ein Kit.\n"
          "- Hooks in einem Kit laufen erst nach `sandbox-ai kits trust-hooks KIT` und nur, solange sich nichts an "
          "ihnen ändert.\n\n"
          "Ein Plugin oder Hook führt Code in jeder Sandbox aus, die es aktiviert; installieren und geben Sie nur "
          "frei, was Sie für vertrauenswürdig halten."),
         cli=("--kit", "--kit-dir", "--no-default-kit", "--no-memory", "--no-plugins", "sandbox-ai kits",
-             "sandbox-ai kits trust-hooks KIT", "sandbox-ai plugins claude"),
+             "sandbox-ai kits trust-hooks KIT", "sandbox-ai plugins claude", "sandbox-ai plugins marketplaces",
+             "sandbox-ai plugins claude --marketplaces-only", "sandbox-ai kits enable-plugin",
+             "sandbox-ai kits disable-plugin", "sandbox-ai kits import-marketplace"),
         see=("page-kits", "rulesets"),
         tours=()),
     section(

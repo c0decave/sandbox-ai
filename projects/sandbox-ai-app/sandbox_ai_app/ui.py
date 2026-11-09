@@ -5865,7 +5865,8 @@ class MainWindow(QMainWindow):
         tables = [("sandboxes", self.sandboxes.table), ("connections", self.connections.table),
                   ("approvals-open", self.approvals.open), ("approvals-history", self.approvals.history),
                   ("approvals-always", self.approvals.always), ("files", self.files.table),
-                  ("kits", self.kits.table), ("kits-market", self.kits.market), ("mcp", self.mcp.servers),
+                  ("kits", self.kits.table), ("kits-marketplaces", self.kits.market),
+                  ("kits-plugins", self.kits.plugins), ("mcp", self.mcp.servers),
                   ("mcp-catalog", self.mcp.catalog), ("images", self.images.images),
                   ("images-packages", self.images.packages), ("credentials-logins", self.credentials.logins),
                   ("credentials-secrets", self.credentials.secrets)]
@@ -5873,7 +5874,7 @@ class MainWindow(QMainWindow):
         for key, widget in tables:
             s.table(key, widget)
         for key, splitter in (("approvals", self.approvals.split), ("connections", self.connections.split),
-                              ("kits", self.kits.split)):
+                              ("kits", self.kits.split), ("kits-marketplaces", self.kits.market_split)):
             s.splitter(key, splitter)
         s.text("connections-filter", self.connections.filter)
         s.check("connections-refused", self.connections.refused)

@@ -109,7 +109,9 @@ BLOCKING_SAI = {"call", "answer", "dry_run", "doctor", "mcp_catalog", "statistic
                 "llm_endpoints", "vpn_profiles", "listing",
                 # MCP servers into a running start and out (--live), a host's model servers and connection logs
                 "host_mcp_attach_live", "host_mcp_detach_live", "mcp_live", "host_llm_endpoints", "host_llm_models",
-                "host_llm_servers", "host_connections", "host_log_summary"}
+                "host_llm_servers", "host_connections", "host_log_summary",
+                # every plugin marketplace of a host (the Kits page's browser) and its version check over SSH
+                "marketplaces", "host_marketplaces", "require_marketplaces"}
 # (host_statuses(cached=True) reads what `sandbox-ai hosts list` kept, without SSH: the Hosts page lists it at once.)
 # (stop_commands runs on the GUI thread on purpose: only when quitting, bounded by one grace period.)
 BLOCKING_MODULES = {"subprocess"}
