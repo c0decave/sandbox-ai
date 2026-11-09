@@ -10,8 +10,8 @@
   sandbox-ai net revoke [RUN] (the same options)       take back what `allow` gave
   sandbox-ai net untaint [RUN]                         take back the run's taint (untrusted content entered it)
 
-RUN is the name a sandbox shows to its agent as $SANDBOX_AI_RUN, or the name of its start (see `list`,
-`sandbox-ai list`); it may be left out
+RUN is the name a sandbox shows to its agent as $SANDBOX_AI_RUN, or the name of its start as `sandbox-ai list`
+(ps) shows it, also after a rename; it may be left out
 when only one sandbox runs, or only one for the current directory (not for `stop`). Changes last until
 the sandbox ends; to keep them, add the same options to its start command or its .sandbox-ai.json. Only
 you can make them: the agent cannot reach the control socket. Connections that are already open stay
@@ -151,21 +151,156 @@ def running():
     return runs
 
 
-def choose(runs, name, cwd=None):
-    """The record of run NAME (its id, or the name of its start), or of the only one (for CWD) when NAME is
-    None."""
+_sessions = None
+_starts = None
+
+
+def sessions_module():
+    global _sessions
+    if _sessions is None:
+        spec = importlib.util.spec_from_file_location("sandbox_sessions_for_net", HERE / "sessions.py")
+        with LOADING:
+            if _sessions is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _sessions = loaded
+    return _sessions
+
+
+def starts_module():
+    global _starts
+    if _starts is None:
+        spec = importlib.util.spec_from_file_location("sandbox_starts_for_net", HERE / "starts.py")
+        with LOADING:
+            if _starts is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _starts = loaded
+    return _starts
+
+
+def label(run, record):
+    """The name `sandbox-ai list` (ps) shows for the running RUN (RECORD: its run.json): the current name of its
+    start (session.json, renamed perhaps), else the name its run.json says, else RUN itself (an MCP server: mcp-NAME).
+    As starts.entries names it, also for a session of a version before 0.1.30 (run session-KEY)."""
+    start = record.get("start") if isinstance(record.get("start"), str) else None
+    if start is None and isinstance(run, str) and run.startswith("session-"):
+        start = run[len("session-"):]
+    if start:
+        try:
+            sessions = sessions_module()
+            return sessions.display(start, sessions.load(start))
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+    name = record.get("name")
+    return name if isinstance(name, str) and name else run
+
+
+def labels(runs):
+    """{run: what to call it}: its name as `sandbox-ai list` shows it, with "(run RUN)" when that name is not unique
+    among RUNS."""
+    named = {run: label(run, record) for run, record in runs.items()}
+    counts = {}
+    for name in named.values():
+        counts[name] = counts.get(name, 0) + 1
+    return {run: name if counts[name] == 1 or name == run else f"{name} (run {run})" for run, name in named.items()}
+
+
+def running_names(runs):
+    """"running: A, B" (the names `sandbox-ai list` shows), or "nothing runs"."""
+    printable = launcher().printable
+    shown = [printable(str(name)) for name in labels(runs).values()]
+    return f"running: {', '.join(shown)}" if shown else "nothing runs"
+
+
+class NotRunning(ValueError):
+    """A command for a running sandbox named one that does not run. ENTRY: what `sandbox-ai list` knows of that name
+    (a stopped kept start, an MCP server that does not run; starts.entries), None when it knows nothing of it."""
+
+    def __init__(self, message, entry=None):
+        super().__init__(message)
+        self.entry = entry
+
+
+# What a command for a running sandbox says to do instead when the start it names is stopped (a kept start: sandbox-ai
+# resume starts it again); {name} is its name. The phrase follows "NAME is stopped: ".
+STOPPED_HINTS = {
+    "workspace add": "start it with the folder: sandbox-ai resume {name} --workspace DIR",
+    "workspace remove": "start it again first: sandbox-ai resume {name}",
+    "workspace list": "its workspaces are listed while it runs; it starts again with: sandbox-ai resume {name}",
+    "net allow": "start it first (sandbox-ai resume {name}), then: sandbox-ai net allow {name} ... (with --keep it "
+                 "goes into its project file for every later start too)",
+    "net revoke": "what was allowed during its run ended with it; start it again with: sandbox-ai resume {name}",
+    "net show": "what was allowed during its run ended with it; start it again with: sandbox-ai resume {name}",
+    "net untaint": "its taint ended with its run; start it again with: sandbox-ai resume {name}",
+    "net stop": "nothing to stop",
+    "limits": "start it first (sandbox-ai resume {name}), then: sandbox-ai limits {name} --memory|--cpus|--pids ...",
+    "devices add": "start it first (sandbox-ai resume {name}), then: sandbox-ai devices add {name} DEVICE",
+    "devices remove": "what was added during its run ended with it; start it again with: sandbox-ai resume {name}",
+    "devices list": "its devices are listed while it runs; it starts again with: sandbox-ai resume {name}",
+    "canaries resume": "only a running sandbox a canary paused waits to continue",
+    "approvals history": "the questions of a run are kept while it runs; what happened during its last run: "
+                         "sandbox-ai activity {name}",
+}
+
+
+def not_running(name, runs, command=None):
+    """The NotRunning for NAME, which names none of the running RUNS: what it is (a stopped kept start, an MCP server
+    that does not run, a start whose HOME was discarded, nothing), what COMMAND ("workspace add", "net allow", ...:
+    STOPPED_HINTS) can do instead, and for an unknown name the running ones by the names `sandbox-ai list` shows."""
+    printable = launcher().printable
+    shown = printable(str(name))
+    entry, last = None, None
+    try:
+        starts = starts_module()
+        found = starts.entries(True, prune=False)
+        for key in ("name", "id", "run"):
+            matches = [e for e in found if e.get(key) == name]
+            if len(matches) == 1:
+                entry = matches[0]
+                break
+        if entry is None and starts.valid_name(name):
+            last = (starts.history(name) or [None])[-1]
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, ImportError):
+        entry = None  # the registry unreadable: only the message's details are lost (it says "no start named")
+    if entry is not None:
+        what = printable(str(entry.get("name") or name))
+        state = entry.get("state")
+        if entry.get("kind") == "mcp":
+            return NotRunning(f"{what} is an MCP server sandbox that does not run now: it starts with the agents that "
+                              "use it (sandbox-ai mcp list)", entry)
+        if state == "damaged":
+            return NotRunning(f"{what} is damaged (see sandbox-ai list): repair or delete it", entry)
+        if state == "stopped":
+            hint = STOPPED_HINTS.get(command, "start it again first: sandbox-ai resume {name}")
+            return NotRunning(f"{what} is stopped: " + hint.format(name=what), entry)
+        return NotRunning(f"{what} does not run now ({printable(str(state))}; see sandbox-ai list)", entry)
+    if isinstance(last, dict) and last.get("event") == "rename" and isinstance(last.get("to"), str):
+        return NotRunning(f"{shown} was renamed: it is {printable(last['to'])} now; {running_names(runs)} (see "
+                          "sandbox-ai list)")
+    if isinstance(last, dict):
+        return NotRunning(f"{shown} has ended and its HOME was discarded: nothing of it runs or is kept (see "
+                          f"sandbox-ai list --history {shown}); {running_names(runs)}")
+    return NotRunning(f"no start named {shown}; {running_names(runs)} (see sandbox-ai list)")
+
+
+def choose(runs, name, cwd=None, command=None):
+    """The record of the running sandbox NAME (of RUNS: running()), or of the only one (for CWD) when NAME is None.
+    NAME is what `sandbox-ai list` (ps) shows: the name of its start (also after a rename), its start's id, or its run
+    id. A name of none of them raises NotRunning, which says what NAME is and what COMMAND can do instead
+    (not_running); one several running sandboxes share names them by their run ids."""
+    printable = launcher().printable
     if name is not None:
         if name in runs:
             return runs[name]
-        named = [record for record in runs.values() if record.get("name") == name]
+        named = [record for run, record in runs.items()
+                 if name in (label(run, record), record.get("start"))]
         if len(named) == 1:
             return named[0]
-        printable = launcher().printable
         if named:
-            raise ValueError(f"several sandboxes are named {printable(name)}; name one by its run: "
-                             f"{', '.join(printable(r.get('run', '?')) for r in named)}")
-        raise ValueError(f"no running sandbox '{printable(name)}'; running: "
-                         f"{', '.join(printable(r) for r in runs) or 'none'}")
+            raise ValueError(f"several running sandboxes are named {printable(name)}; name one by its run id: "
+                             f"{', '.join(printable(str(r.get('run', '?'))) for r in named)}")
+        raise not_running(name, runs, command)
     if len(runs) == 1:
         return next(iter(runs.values()))
     cwd = str(Path(cwd or os.getcwd()).resolve())
@@ -174,7 +309,7 @@ def choose(runs, name, cwd=None):
         return here[0]
     if not runs:
         raise ValueError("no sandbox is running")
-    raise ValueError(f"several sandboxes run; name one: {', '.join(runs)}")
+    raise ValueError(f"several sandboxes run; name one: {', '.join(printable(str(n)) for n in labels(runs).values())}")
 
 
 def resolve(hosts):
@@ -316,7 +451,12 @@ def ask(directory, request, timeout=ASK_SECONDS, fds=()):
     (paused, or busy longer than TIMEOUT) or the socket fails. FDS: descriptors handed over with it (SCM_RIGHTS;
     sandbox-ai mcp attach --live hands over an MCP server's socket directory)."""
     if (Path(directory) / "paused").exists():
-        raise ValueError("the sandbox is paused: resume it first (sandbox-ai resume NAME), then change it")
+        try:
+            record = json.loads((Path(directory) / "run.json").read_text())
+            name = launcher().printable(str(label(record.get("run") or Path(directory).name, record)))
+        except (OSError, ValueError, AttributeError):
+            name = "NAME"
+        raise ValueError(f"the sandbox is paused: resume it first (sandbox-ai resume {name}), then change it")
     try:
         return ask_socket(directory, request, timeout, fds)
     except (OSError, TimeoutError) as exc:  # socket.timeout is an OSError
@@ -1219,12 +1359,13 @@ def main(argv, out=print, resolver=resolve):
                                  "session": r.get("session")} for name, r in runs.items()], indent=2))
                 return 0
             textout().table(["RUN", "NAME", "AGENT", "SINCE", "WORKSPACE"],
-                            [[printable(name), printable(str(r.get("name") or r.get("session") or "-")),
+                            [[printable(name), printable(str(label(name, r) if label(name, r) != name else
+                                                             r.get("session") or "-")),
                               printable(r.get("agent", "")), printable(r.get("started", "")),
                               printable(r.get("workspace", ""))]
                              for name, r in runs.items()], out, indent=0, empty="no sandbox is running")
             return 0
-        record = choose(runs, args.run)
+        record = choose(runs, args.run, command=f"net {args.command}")
         if args.command == "stop":
             if sys.stderr.isatty() and not os.environ.get("SANDBOX_AI_NO_DEPRECATION"):
                 print(f"note: sandbox-ai net stop is the older form; sandbox-ai stop "

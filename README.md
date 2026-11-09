@@ -790,6 +790,20 @@ and the privacy check after the run looks at it too.
 Runs started by 0.1.75 or older have no place for it: restart them with
 `resume NAME --restart --workspace DIR`.
 
+RUN is the name `sandbox-ai list` (`ps`) shows, also after a `rename`, or its
+run id; this holds for every command that changes a running sandbox
+(`workspace`, `net`, `limits`, `devices`, `approvals history`, `canaries
+resume`). A name that does not run says what it is and what to do instead:
+`claude-axross-de39 is stopped: start it with the folder: sandbox-ai resume
+claude-axross-de39 --workspace DIR` (for `net allow`, `limits` and `devices`:
+start it first, then change it), `no start named X; running: ...` with the
+running ones by the names `list` shows (a run id in parentheses only where two
+share a name). For a **stopped** kept start, `workspace add NAME DIR [--name
+AS]` keeps DIR for its next start instead (as `resume NAME --workspace DIR`
+would, nothing is mounted now: the next `sandbox-ai resume NAME` mounts it,
+with the checks of a start), and `workspace remove NAME DIR|AS` takes such a
+kept one out again; a file or `--ro` waits for a running start.
+
 `--name NAME` puts it at `/workspaces/NAME` instead of its directory's name
 (1-64 letters, digits, `_`, `.`, `-`, starting with a letter or digit; refused
 when a workspace of the run holds that name, or a workspace the session keeps

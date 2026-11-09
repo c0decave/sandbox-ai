@@ -1009,8 +1009,14 @@ def main(argv, out=print):
             return 0
         if args.command == "history":
             t, rows = textout(), []
+            wanted = None
+            if args.run:  # a run id, or the name `sandbox-ai list` shows (net.choose says what a stopped one is)
+                loaded = net()
+                runs = {**loaded.running(), **mcp_runs()}
+                chosen = loaded.choose(runs, args.run, command="approvals history")
+                wanted = next((key for key, record in runs.items() if record is chosen), args.run)
             for name, _, question in questions(answered=True):
-                if args.run and name != args.run:
+                if wanted and name != wanted:
                     continue
                 result = question.get("result", {})
                 decision = shown(result.get("decision", "open"))

@@ -1571,12 +1571,7 @@ def resume(run, out=print):
     spec = importlib.util.spec_from_file_location("sandbox_net_for_canaries", HERE / "net.py")
     net = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(net)
-    try:
-        record = net.choose(net.running(), run)  # its run id, or the name of its start
-    except ValueError:
-        record = None
-    if record is None:
-        raise ValueError(f"no running sandbox {shown(run)} (see sandbox-ai net list)")
+    record = net.choose(net.running(), run, command="canaries resume")  # its run id, or its name (sandbox-ai list)
     run = record.get("run", run)
     (Path(record["directory"]) / RESUME_NAME).write_text("1\n")
     out(f"asked {shown(run)} to continue")

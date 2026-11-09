@@ -137,7 +137,7 @@ def test_choose_and_stale_runs(tmp_path, monkeypatch):
     assert net.choose(found, None, cwd="/w/b")["run"] == "b"
     with pytest.raises(ValueError, match="several sandboxes"):
         net.choose(found, None, cwd="/elsewhere")
-    with pytest.raises(ValueError, match="no running sandbox"):
+    with pytest.raises(net.NotRunning, match="no start named zzz; running: a, b"):
         net.choose(found, "zzz")
 
 
@@ -147,9 +147,10 @@ def test_choose_by_name(tmp_path):
             "codex-3": {"run": "codex-3", "name": "twin"}}
     assert net.choose(runs, "review")["run"] == "claude-1"
     assert net.choose(runs, "codex-2")["run"] == "codex-2"  # the id wins
-    with pytest.raises(ValueError, match="several sandboxes are named twin; name one by its run: codex-2, codex-3"):
+    with pytest.raises(ValueError, match="several running sandboxes are named twin; name one by its run id: codex-2, "
+                                         "codex-3"):
         net.choose(runs, "twin")
-    with pytest.raises(ValueError, match=r"no running sandbox 'x\\x1b'"):
+    with pytest.raises(ValueError, match=r"no start named x\\x1b; running: review, twin \(run codex-2\)"):
         net.choose(runs, "x\x1b")  # escaped in the message
 
 
@@ -241,7 +242,7 @@ def test_stop_ends_a_one_off_sandbox(child, capsys):
     assert lines == [f"claude-0badc0de: stopped (its launcher, PID {process.pid}, cleaned up and ended)"]
     # Gone now; RUN is required (no guessing).
     assert net.main(["stop", "claude-0badc0de"], out=lines.append) == 1
-    assert "no running sandbox" in capsys.readouterr().err
+    assert "no start named claude-0badc0de" in capsys.readouterr().err
     with pytest.raises(SystemExit) as exit_:
         net.main(["stop"])
     assert exit_.value.code == 2
@@ -271,7 +272,7 @@ def test_stop_refusals(child, monkeypatch, capsys):
     register(runs, "mcp-ddg", pid=process.pid, pid_start=start, started=now())
     # A PID given out again after the run ended (another start time) is no running sandbox at all any more: its
     # stale entry goes, so nothing is ever signalled (net.alive).
-    expected = {"claude-reused": "no running sandbox 'claude-reused'",
+    expected = {"claude-reused": "no start named claude-reused",
                 "claude-other": "does not run a sandbox-ai launcher",
                 "web": "use: sandbox-ai stop web",
                 "mcp-ddg": "use: sandbox-ai mcp stop ddg"}

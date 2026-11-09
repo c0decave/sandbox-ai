@@ -1428,7 +1428,7 @@ def main(argv, out=print, prog="devices"):
         parser.error("--json goes with --show")
     try:
         if prog == "limits":
-            record = net.choose(net.running(), args.run)
+            record = net.choose(net.running(), args.run, command="limits")
             if args.show:
                 limits = current_limits(record)
                 out(json.dumps(limits) if args.json else limits_line(limits))
@@ -1440,14 +1440,14 @@ def main(argv, out=print, prog="devices"):
             if args.json and not args.run and not runs:
                 out("[]")  # nothing runs: nothing to list (as net list --json), for the front ends to read
                 return 0
-            record = net.choose(runs, args.run)
+            record = net.choose(runs, args.run, command="devices list")
             entries = listing(record)
             out(json.dumps(entries, indent=2) if args.json else "\n".join(list_lines(record, entries)))
             return 0
         if len(args.args) > 2:
             raise ValueError("give [RUN] DEVICE")
         run, value = args.args if len(args.args) == 2 else (None, args.args[0])
-        record = net.choose(net.running(), run)
+        record = net.choose(net.running(), run, command=f"devices {args.command}")
         (add if args.command == "add" else remove)(record, value, out=out)
         return 0
     except (ValueError, OSError) as exc:

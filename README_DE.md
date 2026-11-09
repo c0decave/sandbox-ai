@@ -824,6 +824,22 @@ nach dem Lauf sieht ihn auch an. Läufe, die
 0.1.75 oder älter gestartet hat, haben dafür keinen Platz: mit `resume NAME
 --restart --workspace VERZ` neu starten.
 
+LAUF ist der Name, den `sandbox-ai list` (`ps`) zeigt, auch nach einem
+`rename`, oder seine Lauf-ID; das gilt für jeden Befehl, der eine laufende
+Sandbox ändert (`workspace`, `net`, `limits`, `devices`, `approvals history`,
+`canaries resume`). Ein Name, der nicht läuft, sagt, was er ist und was statt
+dessen zu tun ist: `claude-axross-de39 is stopped: start it with the folder:
+sandbox-ai resume claude-axross-de39 --workspace DIR` (bei `net allow`,
+`limits` und `devices`: erst starten, dann ändern), `no start named X;
+running: ...` mit den laufenden unter den Namen, die `list` zeigt (eine
+Lauf-ID in Klammern nur, wo zwei denselben Namen tragen). Für einen
+**gestoppten** behaltenen Start behält `workspace add NAME VERZ [--name ALS]`
+VERZ statt dessen für seinen nächsten Start (wie `resume NAME --workspace
+VERZ`, jetzt wird nichts eingehängt: das nächste `sandbox-ai resume NAME`
+hängt es ein, mit den Prüfungen eines Starts), und `workspace remove NAME
+VERZ|ALS` nimmt einen so behaltenen wieder heraus; eine Datei oder `--ro`
+warten auf einen laufenden Start.
+
 `--name NAME` legt ihn unter `/workspaces/NAME` statt unter dem Namen seines
 Verzeichnisses ab (1-64 Buchstaben, Ziffern, `_`, `.`, `-`, beginnend mit
 Buchstabe oder Ziffer; abgelehnt, wenn ein Workspace des Laufs diesen Namen

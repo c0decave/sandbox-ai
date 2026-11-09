@@ -7,7 +7,10 @@
                                                        (default NAME: its own name) while the sandbox runs
   sandbox-ai workspace remove [RUN] DIR|FILE|NAME [--force] take an added workspace away again
 
-RUN as for `sandbox-ai net` (its run id or the name of its start; may be left out when only one sandbox runs).
+RUN as for `sandbox-ai net` (its run id or the name `sandbox-ai list` shows; may be left out when only one sandbox
+runs). For a stopped kept start, add keeps DIR for its next start instead (as resume NAME --workspace DIR would:
+nothing is mounted now, `sandbox-ai resume NAME` mounts it with the checks of a start) and remove takes such a one
+out again; a FILE and --ro wait for a running start.
 A directory added gets the checks of --workspace at a start (no HOME, temporary or run directory, no private
 location, nothing a sandbox may have planted a link in, no overlap with the run's workspaces, mounts and HOME,
 none of the files the launcher reads inside it, no directory of your PATH in it); it is read-only with --ro, and
@@ -985,6 +988,115 @@ def keep(record, host, add=True, named=None):
     return True
 
 
+# --- a stopped kept start: what its next start mounts --------------------------------------------------------------
+
+
+def stopped_start(entry):
+    """True if ENTRY (sandbox-ai list: starts.entries) is a stopped start that keeps its HOME and options, so that
+    `workspace add|remove` change what its next start (sandbox-ai resume) mounts."""
+    return isinstance(entry, dict) and entry.get("state") == "stopped" and bool(entry.get("directory")) and \
+        entry.get("kind") != "mcp" and bool(entry.get("keep"))
+
+
+def next_start_targets(data, options):
+    """[(host path, sandbox path)] the session whose session.json is DATA mounts when it starts with OPTIONS."""
+    l = module("agent_sandbox")
+    sessions = module("sessions")
+    with sessions.in_directory(data["cwd"]):
+        try:
+            given = l.parse_args([data["agent"], *options])
+        except SystemExit:
+            raise ValueError("these options do not go with the session's own; see sandbox-ai claude --help") from None
+    return l.workspace_targets(given)
+
+
+def keep_for_next_start(entry, value, read_only=False, name=None, out=print):
+    """`workspace add NAME DIR` for the stopped kept start ENTRY (stopped_start): DIR goes into its saved options as
+    `sandbox-ai resume NAME --workspace DIR` would put it there (--workspace DIR; with NAME also --workspace-name
+    NAME=DIR), so that its next start mounts it at /workspaces/<name>, with every check of a start then. Nothing is
+    mounted now. A file (a start takes none) and --ro (it would come back writable, unless the start keeps every
+    workspace read-only) are refused with what to do instead."""
+    sessions = module("sessions")
+    key, shown_start = entry["id"], shown(entry["name"])
+    fd, real, _identity, kind = opened(value)
+    os.close(fd)
+    if kind != "dir":
+        raise ValueError(f"{shown_start} is stopped, and a file lasts for a run only (a start takes no file as a "
+                         f"workspace): start it first (sandbox-ai resume {shown_start}), then add the file")
+    if name is not None and (not NAME.fullmatch(name) or name in (".", "..")):
+        raise ValueError(f"--name {shown(name)!r}: 1-64 letters, digits, '_', '.' or '-', starting with a letter or "
+                         "a digit")
+    with sessions.session_lock(key):
+        data = sessions.load(key)
+        still_stopped(key, data, shown_start)
+        options = list(data.get("options", []))
+        if read_only and not any(option in ("--workspace-ro", "-W") for option in options):
+            raise ValueError(f"{shown_start} is stopped, and a workspace kept for its next start is mounted as its "
+                             f"start mounts the others (writable: it is not started with --workspace-ro): start it "
+                             f"first (sandbox-ai resume {shown_start}), then add it with --ro for that run")
+        before = next_start_targets(data, options)
+        if any(os.path.realpath(os.path.expanduser(host)) == str(real) for host, _ in before):
+            raise ValueError(f"{shown(real)} is one of {shown_start}'s workspaces already (sandbox-ai resume "
+                             f"{shown_start} mounts it)")
+        if name is not None and any(PurePosixPath(place).name == name for _, place in before[1:]):
+            raise ValueError(f"{WORKSPACES_DIR}/{name} is where another workspace of {shown_start} is mounted at its "
+                             "next start: choose another --name")
+        options = sessions.added_options(data, workspaces=[str(real)])
+        if name is not None:
+            options += ["--workspace-name", f"{name}={real}"]
+        place = next((target for host, target in next_start_targets(data, options)
+                      if os.path.realpath(os.path.expanduser(host)) == str(real)), None)
+        data["options"] = options
+        sessions.save(key, data)
+    out(f"{shown_start} is stopped: {shown(real)} is kept for its next start, at {place or WORKSPACES_DIR} (rw); it "
+        f"is mounted, with the checks of a start, when it starts again: sandbox-ai resume {shown_start}")
+    return 0
+
+
+def forget_for_next_start(entry, value, out=print):
+    """`workspace remove NAME DIR|NAME` for the stopped kept start ENTRY (stopped_start): a workspace that `workspace
+    add` (or resume --workspace) kept in its saved options (--workspace DIR) comes out of them, with its
+    --workspace-name, so that its next start goes without it. The workspaces it was started with stay."""
+    sessions = module("sessions")
+    key, shown_start = entry["id"], shown(entry["name"])
+    with sessions.session_lock(key):
+        data = sessions.load(key)
+        still_stopped(key, data, shown_start)
+        options = list(data.get("options", []))
+        real = lambda path: os.path.realpath(os.path.expanduser(path))  # noqa: E731
+        # Only a --workspace DIR of its own (what add and resume put there), never the first workspace option: that
+        # one (or its comma list) is what the start was started with.
+        given = [index for index, option in enumerate(options) if option in ("-w", "--workspace")
+                 or option.startswith("--workspace=") or (option.startswith("-w") and not option.startswith("--"))]
+        removable = {real(options[index + 1]): index for index in given[1:]
+                     if options[index] == "--workspace" and index + 1 < len(options)}
+        kept = [(host, place) for host, place in next_start_targets(data, options)[1:] if real(host) in removable]
+        wanted = real(value) if "/" in value and not value.startswith(f"{WORKSPACES_DIR}/") else None
+        host = next((host for host, place in kept if real(host) == wanted or place == value
+                     or PurePosixPath(place).name == value), None)
+        if host is None:
+            raise ValueError(f"{shown_start} is stopped, and no workspace kept for its next start is {shown(value)} "
+                             f"(kept: {', '.join(shown(place) for _, place in kept) or 'none'}; the workspaces it was "
+                             "started with stay)")
+        index = removable[real(host)]
+        del options[index:index + 2]
+        names = [index for index in range(len(options) - 1) if options[index] == "--workspace-name"
+                 and real(options[index + 1].partition("=")[2]) == real(host)]
+        for index in reversed(names):
+            del options[index:index + 2]
+        data["options"] = options
+        sessions.save(key, data)
+    out(f"{shown_start} is stopped: {shown(host)} is no longer kept for its next start (sandbox-ai resume "
+        f"{shown_start} starts without it)")
+    return 0
+
+
+def still_stopped(key, data, shown_start):
+    """ValueError when the start KEY (session.json DATA) has started since the command found it stopped."""
+    if module("sessions").status(key, data) != "stopped":
+        raise ValueError(f"{shown_start} has started meanwhile: run the command again")
+
+
 # --- add, remove, list ----------------------------------------------------------------------------------------
 
 
@@ -1302,14 +1414,22 @@ def main(argv, out=print):
             if args.json and not args.run and not runs:
                 out("[]")  # nothing runs: nothing to list (as net list --json), for the front ends to read
                 return 0
-            record = net.choose(runs, args.run)
+            record = net.choose(runs, args.run, command="workspace list")
             entries = listing(record)
             out(json.dumps(entries, indent=2) if args.json else "\n".join(list_lines(record, entries)))
             return 0
         if len(args.args) > 2:
             raise ValueError("give [RUN] DIR|FILE" if args.command == "add" else "give [RUN] DIR|NAME")
         run, value = args.args if len(args.args) == 2 else (None, args.args[0])
-        record = net.choose(net.running(), run)
+        try:
+            record = net.choose(net.running(), run, command=f"workspace {args.command}")
+        except net.NotRunning as exc:
+            # A stopped kept start: what its next start mounts (as resume --workspace would add it).
+            if not stopped_start(exc.entry):
+                raise
+            if args.command == "add":
+                return keep_for_next_start(exc.entry, value, args.ro, name=args.name, out=out)
+            return forget_for_next_start(exc.entry, value, out=out)
         if args.command == "add":
             add(record, value, args.ro, out=out, name=args.name)
         else:
