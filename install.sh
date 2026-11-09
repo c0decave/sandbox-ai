@@ -432,7 +432,8 @@ def release(source, version):
                 listing = json.loads(fetch(f"{api}/releases?limit=20", host))
                 data = next((r for r in listing if not r.get("draft") and not r.get("prerelease")), None)
                 if data is None:
-                    fail(f"{source} has no published release")
+                    fail(f"{source} has no published release yet; to install or update from a checkout of it: "
+                         "./install.sh --from DIR (DIR: the checkout, e.g. --from .)")
     except LookupError as exc:
         fail(str(exc))
 
