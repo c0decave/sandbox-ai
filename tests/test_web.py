@@ -846,6 +846,12 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     ("POST", "/api/hosts/ct1/git-logins", {"url": "https://git.example.org", "secret": "T"}, 400),  # asked first
     ("POST", "/api/hosts/ct1/git-logins", {"url": "-x", "secret": "T", "confirm": True}, 400),
     ("POST", "/api/hosts/ct1/git-logins", {"url": "https://g.org", "secret": "T", "user": "-u", "confirm": True}, 400),
+    # review 5 M4: a server sandbox-ai would refuse is refused here, before any token is stored for it
+    ("POST", "/api/hosts/ct1/git-logins", {"url": "http://git.example.org", "secret": "T", "confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/git-logins", {"url": "http://git.example.org", "secret": "T", "check_only": True}, 400),
+    ("POST", "/api/hosts/ct1/git-logins", {"url": "https://bad_host.example.org", "secret": "T", "check_only": True}, 400),
+    ("POST", "/api/hosts/ct1/git-logins", {"url": "https://git.example.org", "secret": "T", "check_only": "yes"}, 400),
+    ("POST", "/api/hosts/ct1/publish-logins", {"kind": "npm", "secret": "T", "url": "https://npm.example.org:8443", "check_only": True}, 400),
     ("POST", "/api/hosts/ct1/git-logins/remove", {"url": "https://git.example.org"}, 400),
     ("POST", "/api/hosts/ct1/git-logins/check", {"url": "--all"}, 400),
     ("POST", "/api/hosts/ct1/publish-logins", {"kind": "pypi", "secret": "pypi-AgEIcHlwaS5vcmc-the-token-itself"}, 400),
@@ -974,6 +980,27 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
 def test_what_is_refused_never_reaches_a_host(logged_in, method, path, data, status):
     assert logged_in(method, path, data)[0] == status
     assert logged_in.runner.calls == []
+
+
+def test_a_login_is_checked_before_its_token_is_stored(logged_in):
+    """Review 5 M4: check_only checks a Git or publish login as sandbox-ai checks its server, and runs nothing on
+    the host (a publish login only lists the logins there, to ask before one is replaced); the page sends it before
+    it stores the token."""
+    assert logged_in("POST", "/api/hosts/ct1/git-logins", {"url": "https://git.example.org:3000", "secret": "T",
+                                                            "check_only": True}) == (200, {"ok": True})
+    assert logged_in("POST", "/api/hosts/ct1/git-logins", {"url": "http://localhost:3080", "secret": "T",
+                                                            "check_only": True}) == (200, {"ok": True})
+    status, said = logged_in("POST", "/api/hosts/ct1/git-logins", {"url": "http://git.lan", "secret": "T", "check_only": True})
+    assert status == 400 and "plain http would send the token unencrypted" in said["error"]
+    assert logged_in.runner.calls == [], "nothing asked of the host, nothing confirmed"
+    logged_in.runner.answers[("publish-logins", "list")] = (0, json.dumps([{"kind": "npm", "secret": "OLD"}]), "")
+    assert logged_in("POST", "/api/hosts/ct1/publish-logins", {"kind": "pypi", "secret": "T", "check_only": True}) == \
+        (200, {"ok": True})
+    status, said = logged_in("POST", "/api/hosts/ct1/publish-logins", {"kind": "npm", "secret": "T", "check_only": True})
+    assert status == 400 and said.get("confirm") == "login-replace", "a replacement is asked before the token is stored"
+    assert logged_in("POST", "/api/hosts/ct1/publish-logins", {"kind": "npm", "secret": "T", "check_only": True,
+                                                                "confirm": True}) == (200, {"ok": True})
+    assert {tuple(args[:2]) for _, args in logged_in.runner.calls} == {("publish-logins", "list")}, "nothing added"
 
 
 def test_a_running_sandboxs_workspaces_and_devices_come_as_the_command_lists_them(logged_in):
@@ -5070,23 +5097,23 @@ context.URL = URL;  // the browser's, for the suggested name of a Git server's t
 (async () => {
   const result = {};
   vm.runInContext('state.me = { user: "admin", csrf: "c" }; state.host = "ct1"; state.page = "logins"; state.hosts = [{ name: "local", kind: "local" }, { name: "ct1", kind: "ssh", ssh: "root@ct1", port: 22 }];', context);
-  let secretAnswer = () => ({ output: "kept" });
+  let secretAnswer = () => ({ output: "kept" }), checkAnswer = () => ({ ok: true }), addAnswer = () => ({ output: "added" });
   answer = (method, path, sent) => {
     if (method === "GET") return path.endsWith("/secrets") ? [{ name: "GITEA_TOKEN", store: "file" }, { name: "PYPI_TOKEN", store: "file" }] : path.endsWith("/identities") ? {} : [];
-    if (path.includes("/secrets/")) return secretAnswer(path, sent);
-    return { output: "added" };
+    if (path.includes("/secrets/")) return secretAnswer(path, sent, method);
+    return JSON.parse(sent).check_only ? checkAnswer(path, sent) : addAnswer(path, sent);
   };
   vm.runInContext("show('logins')", context); await settle();
   const TOKEN = "glpat-" + "x".repeat(300);
   // Git: "Enter the token" at first, the name suggested from the server, the token shown while typed, no length limit
   result.gitStart = [byId("git-source").value, byId("git-secret").value, byId("git-token").attributes.type,
     toggleOf("git-token").attributes["aria-pressed"], "maxlength" in byId("git-token").attributes, byId("git-stored").hidden, byId("git-token").parent.hidden];
-  fire("git-url", "input", "https://git.example.org:3000/team/x.git");
+  fire("git-url", "input", "https://git.example.org:3000");
   result.gitSuggested = byId("git-secret").value;
   const typed = byId("git-token"); typed.value = TOKEN; fire("git-user", "input", "");
   const gitForm = () => formOf("git-url");  // drawn anew after each login added (show("logins"))
-  button(gitForm(), "Add…").fire("click");
-  result.gitAsk = [confirmText(gitForm()), posts().length];
+  button(gitForm(), "Add…").fire("click"); await settle();
+  result.gitAsk = [confirmText(gitForm()), posts()];
   button(gitForm(), "Yes, add it").fire("click"); await settle();
   result.gitPosts = posts(); result.gitCleared = [typed.value, byId("git-token") !== typed && !byId("git-token").value];
   // an edited name stays when the server changes; a pasted token as the name is refused here
@@ -5104,7 +5131,7 @@ context.URL = URL;  // the browser's, for the suggested name of a Git server's t
   secretAnswer = () => { if (first) { first = false; return { __status: 400, __error: 'NEW_GIT: a secret of that name exists: its value is replaced: send {"confirm": true}', __confirm: "secret-replace" }; } return { output: "kept" }; };
   fire("git-secret", "input", "NEW_GIT");
   byId("git-token").value = "tok-2";
-  button(gitForm(), "Add…").fire("click");
+  button(gitForm(), "Add…").fire("click"); await settle();
   button(gitForm(), "Yes, add it").fire("click"); await settle();
   result.reasked = confirmText(gitForm());
   button(gitForm(), "Yes, do it").fire("click"); await settle();
@@ -5130,6 +5157,21 @@ context.URL = URL;  // the browser's, for the suggested name of a Git server's t
   button(publishForm(), "Add").fire("click"); await settle();
   result.storedPosts = posts();
   result.hint = byId("git-secret-hint").textContent;
+  // review 5 M4: a server sandbox-ai refuses is said before anything is stored, the form kept as typed
+  calls.length = 0; secretAnswer = () => ({ output: "kept" });
+  checkAnswer = () => ({ __status: 400, __error: "the Git server: plain http would send the token unencrypted; use https: 'http://git.lan'" });
+  fire("git-url", "input", "http://git.lan"); fire("git-secret", "input", "LAN_TOKEN"); byId("git-token").value = "tok-3"; byId("git-user").value = "";
+  button(gitForm(), "Add…").fire("click"); await settle();
+  result.refusedUrl = [posts(), confirmText(gitForm()), gitForm().textContent.includes("plain http would send the token unencrypted"),
+    byId("git-url").value, byId("git-secret").value, byId("git-token").value];
+  // the add refused after all (the host's own check): the secret stored for it under a new name goes again
+  calls.length = 0; checkAnswer = () => ({ ok: true });
+  addAnswer = () => ({ __status: 502, __error: "sandbox-ai git-logins on ct1: exit status 1: refused" });
+  fire("git-url", "input", "https://git.lan");
+  button(gitForm(), "Add…").fire("click"); await settle();
+  button(gitForm(), "Yes, add it").fire("click"); await settle();
+  result.orphan = [calls.filter(c => c.method !== "GET").map(c => [c.method, c.path, JSON.parse(c.body)]), gitForm().textContent.includes("The secret LAN_TOKEN stored for it was removed again."),
+    gitForm().textContent.includes("refused")];
   console.log(JSON.stringify(result));
 })().catch(e => { console.error(e.stack); process.exit(1); });
 """
@@ -5141,34 +5183,49 @@ def test_a_login_token_is_typed_and_stored_as_a_secret_first(tmp_path):
     limit) under a suggested secret name (GIT_TOKEN_<HOST>, PYPI_TOKEN...) that can be changed and is checked; the
     page stores it with POST /secrets/NAME (secrets set NAME, the token on standard input) and only then adds the
     login naming it; a secret that exists is asked about first. Or a stored secret of that host is chosen. The token
-    goes in no other request."""
+    goes in no other request. Review 5 M4: the login is checked first (check_only: its server as sandbox-ai checks
+    it), so nothing is stored for one that is refused; the form keeps what was typed; a secret stored for a login
+    the host refuses after all is removed again."""
     result = run_driver(tmp_path, LOGIN_TOKENS_DRIVER, "login_tokens")
     assert result["gitStart"] == ["token", "GIT_TOKEN", "text", "true", False, True, False]
     assert result["gitSuggested"] == "GIT_TOKEN_GIT_EXAMPLE_ORG"
     ask, before = result["gitAsk"]
-    assert "the Git login of the secret GIT_TOKEN_GIT_EXAMPLE_ORG?" in ask and before == 0
+    assert "the Git login of the secret GIT_TOKEN_GIT_EXAMPLE_ORG?" in ask
+    check = ["/api/hosts/ct1/git-logins", {"url": "https://git.example.org:3000", "secret": "GIT_TOKEN_GIT_EXAMPLE_ORG", "user": "",
+                                           "check_only": True}]
+    assert before == [check], "checked first, nothing stored before the question"
     assert "The token is stored first as the secret GIT_TOKEN_GIT_EXAMPLE_ORG on ct1, for good." in ask
     token = "glpat-" + "x" * 300
-    assert result["gitPosts"] == [
+    assert result["gitPosts"] == [check,
         ["/api/hosts/ct1/secrets/GIT_TOKEN_GIT_EXAMPLE_ORG", {"secret": token}],
-        ["/api/hosts/ct1/git-logins", {"url": "https://git.example.org:3000/team/x.git", "secret": "GIT_TOKEN_GIT_EXAMPLE_ORG",
+        ["/api/hosts/ct1/git-logins", {"url": "https://git.example.org:3000", "secret": "GIT_TOKEN_GIT_EXAMPLE_ORG",
                                        "user": "", "confirm": True}]]
     assert result["gitCleared"] == ["", True], "the token is gone from the page once stored, the page drawn anew"
     assert result["gitEdited"] == "MY_GIT", "a name the user chose is not overwritten"
     assert result["badName"] == [0, True], "a token pasted as the name is refused before anything is sent"
     assert result["reasked"].startswith("The service asks first: NEW_GIT: a secret of that name exists")
     assert result["reaskedPosts"] == [
+        ["/api/hosts/ct1/git-logins", {"url": "https://gitlab.example.com", "secret": "NEW_GIT", "user": "", "check_only": True}],
         ["/api/hosts/ct1/secrets/NEW_GIT", {"secret": "tok-2"}], ["/api/hosts/ct1/secrets/NEW_GIT", {"secret": "tok-2", "confirm": True}],
         ["/api/hosts/ct1/git-logins", {"url": "https://gitlab.example.com", "secret": "NEW_GIT", "user": "", "confirm": True}]]
     assert result["kinds"] == {"npm": "NPM_TOKEN", "pypi": "PYPI_TOKEN", "testpypi": "TESTPYPI_TOKEN", "crates": "CARGO_TOKEN",
                                "gitlab": "GITLAB_TOKEN", "github": "GITHUB_TOKEN"}
     ask, before = result["publishAsk"]
     assert ask.startswith("Replace the value of PYPI_TOKEN on ct1?") and before == 0
-    assert result["publishPosts"] == [["/api/hosts/ct1/secrets/PYPI_TOKEN", {"secret": "pypi-the-token", "confirm": True}],
+    assert result["publishPosts"] == [["/api/hosts/ct1/publish-logins", {"kind": "pypi", "secret": "PYPI_TOKEN", "url": "", "check_only": True}],
+                                      ["/api/hosts/ct1/secrets/PYPI_TOKEN", {"secret": "pypi-the-token", "confirm": True}],
                                       ["/api/hosts/ct1/publish-logins", {"kind": "pypi", "secret": "PYPI_TOKEN", "url": ""}]]
     assert result["storedShown"] == [True, True, False, ["GITEA_TOKEN", "PYPI_TOKEN"]]
-    assert result["storedPosts"] == [["/api/hosts/ct1/publish-logins", {"kind": "gitlab", "secret": "GITEA_TOKEN", "url": ""}]]
+    assert result["storedPosts"] == [["/api/hosts/ct1/publish-logins", {"kind": "gitlab", "secret": "GITEA_TOKEN", "url": "", "check_only": True}],
+                                     ["/api/hosts/ct1/publish-logins", {"kind": "gitlab", "secret": "GITEA_TOKEN", "url": ""}]]
     assert "A secret's name is what the token is stored under" in result["hint"]
+    sent, asked, said, *kept = result["refusedUrl"]
+    assert sent == [["/api/hosts/ct1/git-logins", {"url": "http://git.lan", "secret": "LAN_TOKEN", "user": "", "check_only": True}]]
+    assert asked is None and said and kept == ["http://git.lan", "LAN_TOKEN", "tok-3"], "nothing stored, nothing asked, all kept"
+    sent, removed, said = result["orphan"]
+    assert [c[:2] for c in sent] == [["POST", "/api/hosts/ct1/git-logins"], ["POST", "/api/hosts/ct1/secrets/LAN_TOKEN"],
+                                     ["POST", "/api/hosts/ct1/git-logins"], ["DELETE", "/api/hosts/ct1/secrets/LAN_TOKEN"]]
+    assert sent[-1][2] == {"confirm": True} and removed and said
 
 
 LLM_PAGE_DRIVER = FAKE_DOM + r"""

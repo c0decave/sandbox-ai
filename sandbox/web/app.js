@@ -4385,6 +4385,45 @@ pages.logins = async (main) => {
     return { fields, ready, store, refresh, typed: () => source.value === "token" };
   };
 
+  // A login is checked first (check_only: its server as sandbox-ai checks it, a publish login that replaces one
+  // asked), then asked (QUESTION, if any), then its token stored (token.store), then added: nothing is stored for a
+  // login that is refused. When the add still fails, a token stored for it under a new name is removed again.
+  // Errors are said in RESULT, below the form, which keeps what was typed.
+  // O: {token, row, result, path, body, secret, replace (ready's), question, trigger}
+  const addLogin = (o) => {
+    clear(o.result);
+    const send = (confirm) => api("POST", hostPath(o.path, host), Object.assign({}, o.body, confirm ? { confirm: true } : {}));
+    const orphan = async () => {  // what became of a secret stored for this login that was then refused
+      if (o.replace !== false) return null;
+      try {
+        await api("DELETE", hostPath(`/secrets/${encodeURIComponent(o.secret)}`, host), { confirm: true });
+        secretNames = secretNames.filter(n => n !== o.secret);
+        return t("The secret {name} stored for it was removed again.", { name: o.secret });
+      } catch (e) { return t("The secret {name} stored for it stays: remove it on the page Secrets if it is not needed.", { name: o.secret }); }
+    };
+    const refused = async (e) => { const note = await orphan(); o.result.append(errorNotice(e, t("The login was not added"))); if (note) o.result.append(el("p", { class: "hint" }, note)); };
+    const add = (confirm) => o.token.store(o.row, o.secret, o.replace, async () => {
+      try { await send(confirm); show("logins"); }
+      catch (e) {
+        if (!confirm && confirmable(e)) {  // a login of that kind came meanwhile: asked now
+          askRefused(o.row, e, async () => { try { await send(true); show("logins"); } catch (err) { await refused(err); } }, { trigger: o.trigger });
+          return;
+        }
+        await refused(e);
+      }
+    });
+    const checked = (confirm) => (o.question ? confirmIn(o.row, o.question, t("Yes, add it"), () => add(true), { kind: "primary", trigger: o.trigger }) : add(confirm));
+    return busy(o.trigger, async () => {
+      try { await api("POST", hostPath(o.path, host), Object.assign({}, o.body, { check_only: true })); }
+      catch (e) {
+        if (confirmable(e)) { askRefused(o.row, e, () => checked(true), { trigger: o.trigger }); return; }
+        o.result.append(errorNotice(e, t("The login was not added; nothing was stored")));
+        return;
+      }
+      checked(false);
+    });
+  };
+
   await section(t("Git logins (every sandbox's proxy)"), "/git-logins", (box, list) => {
     const rows = (Array.isArray(list) ? list : []).filter(x => x && x.url).map(x => {
       const actions = el("td", { class: "actions" });
@@ -4398,8 +4437,8 @@ pages.logins = async (main) => {
     const add = (event) => token.ready(row, event.target, (secret, replace) => {
       const body = { url: url.value.trim(), secret, user: user.value.trim() };
       const question = t("Give every sandbox on {host} that reaches {url} the Git login of the secret {secret}? The connection proxy adds it; the token never enters a sandbox.", { host, url: body.url, secret });
-      confirmIn(row, replace === null ? question : `${question} ${t("The token is stored first as the secret {secret} on {host}, for good.", { secret, host })}`, t("Yes, add it"),
-        () => token.store(row, secret, replace, () => sendAsking(row, "POST", hostPath("/git-logins", host), Object.assign(body, { confirm: true }), () => show("logins"))), { kind: "primary", trigger: event.target });
+      addLogin({ token, row, result, path: "/git-logins", body, secret, replace, trigger: event.target,
+        question: replace === null ? question : `${question} ${t("The token is stored first as the secret {secret} on {host}, for good.", { secret, host })}` });
     });
     row.append(el("button", { class: "primary", onclick: add }, t("Add…")), el("button", { onclick: check("/git-logins/check", () => ({ url: url.value.trim() })) }, t("Check")));
     clear(box).append(table([t("Server"), t("User"), t("Secret"), ""], rows, t("No Git logins on this host.")), el("div", { class: "card" }, el("div", { class: "form" },
@@ -4417,8 +4456,8 @@ pages.logins = async (main) => {
     const token = tokenSource("publish", () => PUBLISH_TOKEN_NAMES[kind.value] || "PUBLISH_TOKEN");
     kind.addEventListener("change", token.refresh);
     const row = el("div", { class: "row" }), result = el("div", { class: "wide check-result" });
-    const add = (event) => token.ready(row, event.target, (secret, replace) => busy(event.target, () => token.store(row, secret, replace,
-      () => sendAsking(row, "POST", hostPath("/publish-logins", host), { kind: kind.value, secret, url: url.value.trim() }, () => show("logins"), event.target))));
+    const add = (event) => token.ready(row, event.target, (secret, replace) => addLogin({ token, row, result, path: "/publish-logins",
+      body: { kind: kind.value, secret, url: url.value.trim() }, secret, replace, trigger: event.target }));
     row.append(el("button", { class: "primary", onclick: add }, t("Add")),
       el("button", { onclick: check("/publish-logins/check", () => ({ kind: kind.value })) }, t("Check")),
       el("button", { onclick: (event) => busy(event.target, async () => { try { clear(result).append(outputBlock(await api("GET", hostPath("/publish-logins/kinds", host)))); } catch (e) { clear(result).append(errorNotice(e)); } }) }, t("What each kind opens")));

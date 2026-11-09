@@ -2460,13 +2460,32 @@ class Api:
     def git_logins(self, params, body):
         return self.json_of(params["host"], ["git-logins", "list", "--json"], 30)
 
+    @staticmethod
+    def login_server_checked(url, kind=None):
+        """The server of a Git login (KIND None) or a publish login of KIND checked as sandbox-ai checks it
+        (git_server: http(s)://[USER@]HOST[:PORT] without a path, plain http only to this machine; publish:
+        https://HOST): 400 with its words otherwise. The page asks this first (check_only), before it stores a
+        token for the login: a login refused afterwards would leave that token behind as a secret."""
+        try:
+            if kind is None:
+                module("agent_sandbox").git_server(url, "the Git server")
+            elif url is not None:
+                module("publish_logins").server_host(kind, url)
+        except ValueError as exc:
+            raise Refused(400, printable(str(exc))) from None
+
     def git_login_add(self, params, body):
+        """git-logins add --secret NAME [--user USER] URL (asked first: git-login-add). With {"check_only": true}
+        only what is sent is checked (the URL as sandbox-ai checks it): nothing runs on the host."""
         url = git_url(body.get("url"))
         args = ["git-logins", "add", f"--secret={secret_name(body.get('secret'))}"]
         if body.get("user") not in (None, ""):
             if not (isinstance(body["user"], str) and LOGIN_USER.fullmatch(body["user"])):
                 raise Refused(400, "user is 1-64 letters, digits, '.', '_' or '-'")
             args.append(f"--user={body['user']}")
+        self.login_server_checked(url)
+        if flag(body, "check_only"):
+            return {"ok": True}
         confirmed(body, "git-login-add", url)
         return self.done(params["host"], [*args, url], 30)
 
@@ -2495,13 +2514,18 @@ class Api:
         return [f"--url={url}"]
 
     def publish_login_add(self, params, body):
-        """publish-logins add: one that replaces the login of that kind is asked first (login-replace)."""
+        """publish-logins add: one that replaces the login of that kind is asked first (login-replace). With
+        {"check_only": true} it is checked (its server as sandbox-ai checks it, the replacement asked) and nothing is
+        added: the page asks this before it stores the token."""
         kind = publish_kind(body.get("kind"))
         args = ["publish-logins", "add", f"--secret={secret_name(body.get('secret'))}", *self.publish_url(body), kind]
+        self.login_server_checked(body.get("url") or None, kind)
         if body.get("confirm") is not True and any(isinstance(entry, dict) and entry.get("kind") == kind for entry in
                                                    self.json_of(params["host"], ["publish-logins", "list", "--json"],
                                                                 30, ok=(0,))):
             confirmed(body, "login-replace", kind)
+        if flag(body, "check_only"):
+            return {"ok": True}
         return self.done(params["host"], args, 30)
 
     def publish_login_remove(self, params, body):
