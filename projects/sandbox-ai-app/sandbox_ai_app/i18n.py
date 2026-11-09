@@ -3216,6 +3216,9 @@ TEXTS = {
     'Image': {
         'en': 'Image',
         'de': 'Image'},
+    'App {app} · sandbox-ai {sai}': {
+        'en': 'App {app} · sandbox-ai {sai}',
+        'de': 'App {app} · sandbox-ai {sai}'},
     'Version': {
         'en': 'Version',
         'de': 'Version'},

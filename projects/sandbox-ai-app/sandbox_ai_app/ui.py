@@ -7358,8 +7358,26 @@ class MainWindow(QMainWindow):
         self.busy_label = widgets.plain_label(word_wrap=False, role="secondary")
         self.statusBar().addPermanentWidget(self.busy_label)
         self.statusBar().addPermanentWidget(self.busy_bar)
+        self.version_label = self.make_version_label()
+        self.statusBar().addPermanentWidget(self.version_label)
         widgets.activity().changed.connect(self.show_busy)
         self.show_busy()
+
+    def make_version_label(self):
+        """Bottom right, always: the app's version, and sandbox-ai's where it differs; where it is installed on hover."""
+        from . import __version__
+        try:
+            launcher = self.sai.version()
+        except Exception:  # noqa: BLE001 - a launcher that does not load: the app's version alone
+            launcher = None
+        text = f"v{__version__}" if launcher in (None, __version__) else \
+            tr("App {app} · sandbox-ai {sai}", app=__version__, sai=printable(launcher))
+        label = widgets.plain_label(text, word_wrap=False, role="secondary")
+        label.setObjectName("version_label")
+        label.setAccessibleName(tr("Version"))
+        label.setToolTip(widgets.safe_tooltip(tr("sandbox-ai {version} from {path}", version=launcher or "?",
+                                                 path=printable(self.sai.directory))))
+        return label
 
     def show_busy(self):
         if getattr(self, "stopping", False):  # "Stop and quit": says that, until the window closes

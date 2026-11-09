@@ -3111,3 +3111,11 @@ def test_the_sandboxes_tree_keeps_its_folds_and_selection_across_reads(window, m
     assert all(item.isExpanded() for item in page.table.every_item() if item.childCount())
     assert window.state.data["sandboxes-groups"] == {"open": {}, "hosts": True, "starts": True}
     assert page.current().key == backend.remote_key("ct1", "web")
+
+
+def test_the_version_shows_at_the_bottom_right(window):
+    from sandbox_ai_app import __version__
+    label = window.findChild(QtWidgets.QLabel, "version_label")
+    assert label is not None and label.isVisibleTo(window)
+    assert __version__ in label.text() and label.toolTip()
+    assert window.statusBar().layout() is not None
