@@ -89,6 +89,12 @@ def printable(text):
                    for c in str(text))
 
 
+def printable_text(text):
+    """Text of several lines for the screen (a file, a diff): its line breaks and tabs kept, every other control
+    character shown escaped as printable() does."""
+    return "".join(c if c in "\n\t" else printable(c) for c in str(text))
+
+
 def parts(relative):
     """The components of a path relative to a root; '..', absolute paths and NUL bytes are refused."""
     if relative is None:

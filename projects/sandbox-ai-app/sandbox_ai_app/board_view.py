@@ -811,6 +811,10 @@ class BoardPage(QWidget):
         self.check_token, self.restoring, self.inspected, self.launcher_ok = 0, False, None, None
         self.problems = []
         self.untrusted = {}  # {project key: path} of boards loaded from a project file nobody trusted yet
+        # {project key: {"digest", "trusted"}}: the project file each board was read from (digest None: none read), kept
+        # with a draft; a draft from another or an untrusted version is asked about again (restore_saved)
+        self.sources = {}
+        self.reasked = None  # the notice of a draft asked about again (restore_saved), shown once the project is open
         self.ghost = None  # the drop indicator while something is dragged over the board
         self.project_request = None  # the window: open a folder dropped on the board as the project (in its tab)
         self.kit_inventory, self.kit_loading = None, False  # sandbox-ai kits list --json, once read
@@ -1981,13 +1985,17 @@ class BoardPage(QWidget):
             return False
         if not quiet and self.key_of(directory) == self.key_of(self.directory) and not self.may_discard():
             return False
+        self.reasked = None
+        self.sources[self.key_of(directory)] = {"digest": None, "trusted": True}  # a board of nothing read from a file
         try:
             review = self.sai.review_project(directory)
         except FileNotFoundError:
             board = B.from_argv(self.sai, self.default_agent(), [], workspaces=[directory])
+            self.untrusted.pop(self.key_of(directory), None)
             self.load(board, directory)
             text = tr("{path} has no .sandbox-ai.json yet: Apply writes one.", path=printable(directory))
             self.show_notice(text) if quiet else inform(self, tr("Board"), text)
+            self.show_reasked()
             return True
         except (OSError, ValueError) as exc:
             if quiet:
@@ -2007,13 +2015,15 @@ class BoardPage(QWidget):
                  details=review.text())
             return False
         board = B.from_project(self.sai, review.document, directory)
-        self.load(board, directory)
         # A project file nobody trusted is shown, never started as it is: the agent can write it (it lies in the
-        # workspace), and Start passes --no-config. Apply (written and trusted after you looked) lifts this.
+        # workspace), and Start passes --no-config. Apply (written and trusted after you looked) lifts this. Decided
+        # before the board is loaded: a draft restored then may be asked about again (restore_saved).
+        self.sources[self.key_of(directory)] = {"digest": review.digest, "trusted": bool(review.trusted)}
         if review.trusted:
             self.untrusted.pop(self.key_of(directory), None)
         else:
             self.untrusted[self.key_of(directory)] = str(review.path)
+        self.load(board, directory)
         # Keys no part of the board shows (the security mode, canaries, a kept HOME, ...): named here, and again in
         # Apply's question, which trusts them too.
         weak = PT.weakening(self.sai, review.document)
@@ -2028,7 +2038,13 @@ class BoardPage(QWidget):
         elif also:
             risky = weak.keys() & PT.unshown(review.document).keys()
             self.show_notice(also.strip(), "notice-warn" if risky else "secondary")
+        self.show_reasked()
         return True
+
+    def show_reasked(self):
+        if self.reasked:
+            self.show_notice(self.reasked, "notice-warn")
+            self.reasked = None
 
     def load(self, board, directory, positioned=False):
         """Show BOARD for the project DIRECTORY, laid out (its saved layout, if any) unless POSITIONED (a
@@ -2049,7 +2065,7 @@ class BoardPage(QWidget):
         key = self.key_of(directory)
         if key and self.state is not None and key not in self.restored:
             self.restored.add(key)
-            self.restore_saved(self.saved_boards.get(key))
+            self.restore_saved(self.saved_boards.get(key), key, directory)
         if directory:
             self.opened.emit(str(directory))
 
@@ -2080,6 +2096,8 @@ class BoardPage(QWidget):
             entry = {"zoom": round(session["transform"].m11(), 4), "center": [round(center.x(), 1), round(center.y(), 1)]}
             if not session["stack"].isClean():
                 entry["draft"] = scrub_board(session["board"].state())
+                if self.sources.get(key):
+                    entry["source"] = dict(self.sources[key])
             boards[key] = entry
         for key, entry in self.saved_boards.items():
             if key not in boards and key not in self.restored:
@@ -2087,9 +2105,12 @@ class BoardPage(QWidget):
         self.state.data["boards"] = boards
         self.state.data["board_host"] = self.host()
 
-    def restore_saved(self, entry):
+    def restore_saved(self, entry, key=None, directory=None):
         """The draft kept for this project (as an undo step: Undo goes back to the file; Discard drops it),
-        and its zoom and scroll position."""
+        and its zoom and scroll position. A draft of a board read from another version of the project file than the
+        one there now, or from one nobody trusted, carries what that version set (also what no part of the board
+        shows: the security mode, canaries, options no node holds): the project counts as not trusted then, so Start
+        waits for Apply, which names all of it and asks."""
         if not isinstance(entry, dict):
             return
         draft = entry.get("draft")
@@ -2105,6 +2126,12 @@ class BoardPage(QWidget):
                                        "back to the project's file, Discard drops them.")
                 self.show_notice(self.draft_notice, "notice-warn")
                 self.discard_button.show()
+                source, now = entry.get("source"), self.sources.get(key)
+                if key and directory and not (isinstance(source, dict) and source == now and source.get("trusted")):
+                    self.untrusted[key] = PT.path_text(directory)
+                    self.reasked = self.draft_notice + "\n" + tr(
+                        "These changes were made to a version of the project file that is not trusted or no longer "
+                        "there: Apply (it shows everything that will be trusted and asks) before you start them.")
         zoom, center = entry.get("zoom"), entry.get("center")
         if isinstance(zoom, (int, float)) and 0.05 <= zoom <= 20:
             self.fitted = True  # not fitted again when first shown
@@ -2266,6 +2293,10 @@ class BoardPage(QWidget):
         self.undo.setClean()
         self.show_notice("")
         self.untrusted.pop(self.key_of(main), None)
+        try:  # the file just written and trusted is the source of the board's next draft
+            self.sources[self.key_of(main)] = {"digest": self.sai.review_project(main).digest, "trusted": True}
+        except (OSError, ValueError):
+            self.sources.pop(self.key_of(main), None)
         self.opened.emit(str(main))
         if then is not None:  # the start waited for the file: it goes on now (no second message in between)
             then()
@@ -2335,11 +2366,32 @@ class BoardPage(QWidget):
         (Cancel the default) whether exactly the board shown may start there - the file itself is neither written
         nor trusted (Apply is this machine's), and nothing of it is read on that host."""
         host = printable(self.host())
-        return ask_first(self, "project-trust", tr("Start on {host}", host=host), tr(
+        hidden = self.hidden_settings()
+        text = tr(
             "The board comes from {path}, which is not trusted. Apply (write and trust) is for this machine only, so "
             "on {host} the board starts as it is shown, without any project file (--no-config). Look at every part of "
             "the board first: whoever could write that folder chose it. Start it on {host} as shown?",
-            path=printable(path), host=host), tr("Start as shown"))
+            path=printable(path), host=host)
+        if hidden:
+            text += "\n\n" + tr("It also passes what no part of the board shows:") + "\n" + "\n".join(hidden)
+            if any(PT.WARN in line for line in hidden):
+                text += "\n\n" + tr("Lines marked {mark} weaken the sandbox: trust them only if you chose them.",
+                                     mark=PT.WARN)
+        return ask_first(self, "project-trust", tr("Start on {host}", host=host), text, tr("Start as shown"))
+
+    def hidden_settings(self):
+        """Lines naming what a start of the board passes that no part of the board shows: the project file's own keys
+        (the security mode, canaries, a kept HOME, debug logs, its name: PT.unshown) and the options no node holds
+        (Board.extra), each in full, what weakens the sandbox marked."""
+        keys = PT.unshown(self.board.document_extra)
+        weak = PT.weakening(self.sai, keys)
+        lines = [f"  {PT.WARN + ' ' if key in weak else ''}{printable(key)}: {PT.whole(value)}"
+                 for key, value in keys.items()]
+        if self.board.extra:
+            lines.append("  options: " + " ".join(printable(str(token)) for token in self.board.extra))
+            lines += [f"    {PT.WARN} {printable(widening)}: " + tr("widens what the sandbox may do or see")
+                      for widening in PT.option_warnings(self.sai, self.board.extra)]
+        return lines
 
     def run_start(self, options, embedded, session):
         """Run the start in a terminal; a failure to start it is a message, never an exception in a slot."""

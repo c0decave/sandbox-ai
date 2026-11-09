@@ -2063,14 +2063,8 @@ class SandboxAI:
             review.problems.append("relative paths: " + ", ".join(printable(r) for r in relative))
         review.workspaces = list(document.get("workspaces", []))
         review.agent_args = list(document.get("agent_args", []))
-        index = 0
-        while index < len(options):
-            name = options[index].split("=", 1)[0]
-            takes_value = "=" not in options[index] and index + 1 < len(options) and not options[index + 1].startswith("-")
-            value = options[index + 1] if takes_value else options[index].partition("=")[2]
-            if name in WIDENING:
-                review.widening.append((name, printable(value)))
-            index += 2 if takes_value else 1
+        review.widening = [(name, printable(value or "")) for name, value in
+                           weakening_options(launcher, document.get("options", []))]
         return review
 
     def trust_project(self, review):
@@ -2911,17 +2905,15 @@ class SandboxAI:
     # == end of the start/host agent's section ==
 
 
-# Options that widen what a sandbox may do or see: listed first when a project configuration is reviewed.
-WIDENING = {
-    "--dangerously-skip-permissions", "--egress-all-allow", "--mount", "--copy", "--device", "--gpu", "--gui-wayland",
-    "--gui-vnc", "--allow", "--allow-tcp", "--allow-host", "--allow-http", "--allow-host-port", "--allow-pypi", "--allow-github",
-    "--allow-gitlab", "--allow-kernel-org", "--allow-duckduckgo", "--frontier", "--profile", "--dns", "--nameserver",
-    "--network", "--ip", "--ip6", "--no-proxy", "--no-inspect", "--ask", "--env", "--secret-env", "--api-key", "--publish", "--git-token-env",
-    "--git-token-file", "--git-token-secret", "--git-credentials", "--git-identity", "--auth-file",
-    "--import-codex-auth", "--copy-auth", "--local-config", "--runtime", "--binary", "--image", "--image-variant", "--podman-url",
-    "--kit", "--kit-dir", "--mcp", "--state-dir", "--privacy-check", "--memory", "--cpus", "--pids", "--backend",
-    "--vpn-check",  # warn: a VPN whose checks fail is used anyway
-}
+def weakening_options(launcher, options):
+    """[(long name, value or None)] of the start OPTIONS (as a project file has them) that weaken the sandbox or widen
+    what it may do or see, however they are written (short forms, bundles, -x=VALUE): the launcher's own table and
+    parser (modes.weakening_options). A launcher without that table: every option is named (none goes unmarked)."""
+    modes = getattr(launcher, "MODES", None)
+    if modes is not None and hasattr(modes, "weakening_options"):
+        return modes.weakening_options(launcher, options)
+    return [(str(word).split("=", 1)[0], str(word).partition("=")[2] or None) for word in options
+            if str(word).startswith("-")]
 
 
 WEB_USER = re.compile(r"[a-z][a-z0-9_.-]{0,31}")  # webui.USER_NAME: a login of the web interface

@@ -39,7 +39,7 @@ from .host_choice import on_host
 from .state import choose_file, choose_folder
 from .i18n import N_, tr
 from .widgets import (
-    ask_first, background, busy, compact_combo, fill, flow, inform, outcome, plain_label, row_key,
+    ask_first, background, busy, compact_combo, fill, flow, inform, outcome, plain_label, row_key, safe_tooltip,
     select_keys, selected_keys, selected_rows, set_enabled, show_text, table, warn,
 )
 
@@ -658,7 +658,7 @@ class KitsPage(QWidget):
         self.summary.setText(tr("{count} kits ({user} of yours) in {path}", count=len(self.kits), user=user,
                                 path=printable(inventory.get("kits_dir") or "")) +
                              ("" if self.host() == LOCAL else f" · {self.hosts.label()}"))
-        self.summary.setToolTip(self.store_text)
+        self.summary.setToolTip(safe_tooltip(self.store_text))
         self.inventory_loaded.emit(inventory)
         self.selection_changed()
 

@@ -8753,6 +8753,28 @@ TEXTS = {
     'widens what the sandbox may do or see': {
         'en': 'widens what the sandbox may do or see',
         'de': 'erweitert, was die Sandbox darf oder sieht'},
+    # == review round 6: the trust question names every workspace, agent argument and weakening option ==
+    'Message': {
+        'en': 'Message',
+        'de': 'Nachricht'},
+    'read-only for the agent, outside the project': {
+        'en': 'read-only for the agent, outside the project',
+        'de': 'für den Agenten nur lesbar, außerhalb des Projekts'},
+    'writable for the agent, outside the project': {
+        'en': 'writable for the agent, outside the project',
+        'de': 'für den Agenten beschreibbar, außerhalb des Projekts'},
+    'further folders the agent sees in every start of the project': {
+        'en': 'further folders the agent sees in every start of the project',
+        'de': 'weitere Ordner, die der Agent in jedem Start des Projekts sieht'},
+    'arguments for the agent itself: they can change what it does': {
+        'en': 'arguments for the agent itself: they can change what it does',
+        'de': 'Argumente für den Agenten selbst: Damit lässt sich ändern, was er tut'},
+    'It also passes what no part of the board shows:': {
+        'en': 'It also passes what no part of the board shows:',
+        'de': 'Außerdem wird übergeben, was kein Teil der Tafel zeigt:'},
+    'These changes were made to a version of the project file that is not trusted or no longer there: Apply (it shows everything that will be trusted and asks) before you start them.': {
+        'en': 'These changes were made to a version of the project file that is not trusted or no longer there: Apply (it shows everything that will be trusted and asks) before you start them.',
+        'de': 'Diese Änderungen wurden an einer Fassung der Projektdatei vorgenommen, der nicht vertraut wird oder die nicht mehr da ist: Wählen Sie Übernehmen (es zeigt alles, dem vertraut wird, und fragt), bevor Sie sie starten.'},
     '{start} has no MCP server in its options.': {
         'en': '{start} has no MCP server in its options.',
         'de': '{start} hat keinen MCP-Server in seinen Optionen.'},

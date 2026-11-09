@@ -19,13 +19,12 @@ import os
 from pathlib import Path
 
 from . import backend
-from .files import printable
+from .files import printable, printable_text
 from .i18n import tr
 
 WARN = "⚠"  # marks a line that weakens the sandbox (the question is plain text: no colour there)
 ORDER = ("agent", "options", "workspaces", "agent_args", "mcp_servers", "rules", "mode", "canaries", "keep",
          "log_debug", "name", "description")
-CANARY_DEFAULT = ("credentials",)
 
 
 def user_defaults(sai):
@@ -39,54 +38,48 @@ def user_defaults(sai):
     return document if isinstance(document, dict) else {}
 
 
-def default_mode(sai, defaults=None):
-    names = list(getattr(getattr(sai.launcher, "MODES", None), "NAMES", ())) or ["lax", "low", "medium", "high",
-                                                                                 "paranoid"]
-    chosen = (user_defaults(sai) if defaults is None else defaults).get("mode")
-    return (chosen if chosen in names else "medium"), names
+def marks(sai, document, defaults=None):
+    """What in DOCUMENT weakens the sandbox, as the launcher judges it (modes.project_marks: options read as the
+    launcher reads them, every workspace): [{"key", "why", ...}]. DEFAULTS: those of the host the file is on
+    ({"mode", "canaries"}); None: this machine's. A launcher without that judgement: every key is marked."""
+    defaults = user_defaults(sai) if defaults is None else defaults
+    judge = getattr(getattr(sai.launcher, "MODES", None), "project_marks", None)
+    if judge is None:
+        return [{"key": key, "why": "unknown"} for key in document if key not in ("version", "agent")]
+    return judge(sai.launcher, document, defaults)
+
+
+def why_text(mark):
+    why = mark.get("why")
+    if why == "mode":
+        return tr("a laxer security mode than your default ({mode})", mode=printable(mark.get("default", "")))
+    if why == "workspace":
+        return (tr("read-only for the agent, outside the project") if mark.get("read_only")
+                else tr("writable for the agent, outside the project"))
+    return {
+        "canaries": tr("fewer canary tokens: a secret leaving is noticed less often"),
+        "keep": tr("the sandbox HOME is kept after the start: what the agent wrote there stays and runs again"),
+        "log_debug": tr("debug logs: the logs keep much more of what passes"),
+        "rules": tr("the project's own ruleset decides requests (it may allow what is asked otherwise)"),
+        "mcp_servers": tr("the project defines its own MCP servers (programs with their own folders and network)"),
+        "workspaces": tr("further folders the agent sees in every start of the project"),
+        "agent_args": tr("arguments for the agent itself: they can change what it does"),
+    }.get(why, tr("widens what the sandbox may do or see"))
 
 
 def weakening(sai, document, defaults=None):
     """{key: why} of the top-level keys of DOCUMENT that weaken the sandbox against the defaults (DEFAULTS: those of
     the host the file is on, {"mode", "canaries"}; None: this machine's); options are in option_warnings()."""
-    defaults = user_defaults(sai) if defaults is None else defaults
-    found = {}
-    mode = document.get("mode")
-    default, names = default_mode(sai, defaults)
-    if isinstance(mode, str) and mode in names and names.index(mode) < names.index(default):
-        found["mode"] = tr("a laxer security mode than your default ({mode})", mode=default)
-    canaries = document.get("canaries")
-    if "canaries" in document:
-        wanted = defaults.get("canaries", list(CANARY_DEFAULT))
-        wanted = set(wanted) if isinstance(wanted, list) else set()
-        chosen = set(canaries) if isinstance(canaries, list) else set()
-        if canaries is False or not chosen or not wanted <= chosen:
-            found["canaries"] = tr("fewer canary tokens: a secret leaving is noticed less often")
-    if document.get("keep") is True:
-        found["keep"] = tr("the sandbox HOME is kept after the start: what the agent wrote there stays and runs again")
-    if document.get("log_debug") is True:
-        found["log_debug"] = tr("debug logs: the logs keep much more of what passes")
-    if document.get("rules") is not None:
-        found["rules"] = tr("the project's own ruleset decides requests (it may allow what is asked otherwise)")
-    if document.get("mcp_servers"):
-        found["mcp_servers"] = tr("the project defines its own MCP servers (programs with their own folders and "
-                                  "network)")
-    return found
+    return {mark["key"]: why_text(mark) for mark in marks(sai, document, defaults)
+            if mark.get("why") not in ("option", "workspace")}
 
 
 def option_warnings(sai, options):
-    """The options of OPTIONS that widen the sandbox (backend.WIDENING), as written."""
-    found, index = [], 0
-    options = list(options)
-    while index < len(options):
-        word = str(options[index])
-        name = word.split("=", 1)[0]
-        takes = "=" not in word and index + 1 < len(options) and not str(options[index + 1]).startswith("-")
-        value = str(options[index + 1]) if takes else word.partition("=")[2]
-        if name in backend.WIDENING:
-            found.append(f"{name} {value}".strip())
-        index += 2 if takes else 1
-    return found
+    """The options of OPTIONS that weaken the sandbox or widen what it may do or see, however they are written (short
+    forms such as -A or -kp, bundles, -x=VALUE: read as the launcher reads them, backend.weakening_options), each as
+    its long name with its value."""
+    return [f"{name} {value}".rstrip() if value is not None else name
+            for name, value in backend.weakening_options(sai.launcher, [str(v) for v in options])]
 
 
 def short(value, limit=160):
@@ -95,23 +88,42 @@ def short(value, limit=160):
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
+def whole(value):
+    """VALUE in full on one line (nothing cut: what is trusted is all shown)."""
+    return printable(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False))
+
+
 def summary(sai, document, defaults=None):
     """Lines naming every key of DOCUMENT (the known ones in a fixed order, any other after them), the weakening
-    ones marked: what the question says will be trusted."""
+    ones marked: what the question says will be trusted. Nothing is cut: every option, every workspace and every
+    agent argument is shown in full, the workspaces and agent arguments one per line."""
     weak = weakening(sai, document, defaults)
     lines = []
     for key in [k for k in ORDER if k in document] + sorted(k for k in document if k not in ORDER and k != "version"):
         value = document[key]
         if key == "options":
-            text = " ".join(printable(str(v)) for v in value) if isinstance(value, list) else short(value)
+            text = " ".join(printable(str(v)) for v in value) if isinstance(value, list) else whole(value)
             lines.append(f"  options: {text or tr('(none)')}")
             for widening in option_warnings(sai, value if isinstance(value, list) else []):
-                lines.append(f"    {WARN} {short(widening)}: " + tr("widens what the sandbox may do or see"))
+                lines.append(f"    {WARN} {printable(widening)}: " + tr("widens what the sandbox may do or see"))
+            continue
+        if key in ("workspaces", "agent_args") and isinstance(value, list):
+            if not value:
+                lines.append(f"  {key}: {tr('(none)')}")
+                continue
+            lines.append(f"  {WARN} {key}: {weak[key]}" if key in weak else f"  {key}:")
+            if key == "workspaces":
+                shown = [mark for mark in marks(sai, document, defaults) if mark.get("why") == "workspace"]
+                notes = {mark["value"]: why_text(mark) for mark in shown}
+                lines += [f"    {WARN} {whole(item)} - {notes[item]}" if item in notes else f"    {whole(item)}"
+                          for item in value]
+            else:
+                lines += [f"    {whole(item)}" for item in value]
             continue
         if key == "mcp_servers" and isinstance(value, dict):
             text = ", ".join(printable(str(name)) for name in sorted(value))
         else:
-            text = short(value)
+            text = whole(value)
         line = f"  {printable(key)}: {text}"
         if key in weak:
             line = f"  {WARN} {printable(key)}: {text} - {weak[key]}"
@@ -134,13 +146,13 @@ def baseline_details(state, old_text, new_text):
         changes = "\n".join(difflib.unified_diff(old_text.splitlines(), new_text.splitlines(), tr("trusted before"),
                                                  tr("to be trusted"), lineterm=""))
         parts.append(tr("Changes against the version you trusted last:"))
-        parts.append(printable(changes) if changes else tr("No change."))
+        parts.append(printable_text(changes) if changes else tr("No change."))
     elif state == "unknown":
         parts.append(tr("A different version was trusted before, but this app has no copy of it (trusted elsewhere): "
                         "read the whole file below."))
     else:
         parts.append(tr("Nothing was trusted for this file before: all of it is new."))
-    parts += ["", tr("The whole file that will be trusted:"), printable(new_text)]
+    parts += ["", tr("The whole file that will be trusted:"), printable_text(new_text)]
     return "\n".join(parts)
 
 

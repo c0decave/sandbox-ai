@@ -17,8 +17,8 @@ from PySide6.QtCore import QItemSelectionModel, QObject, QProcess, QRect, QSize,
 from PySide6.QtGui import QColor, QFont, QPainter, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QHeaderView, QLabel, QLayout,
-    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QStyle, QStyledItemDelegate, QTableWidget,
-    QTableWidgetItem, QToolButton, QVBoxLayout, QWidget, QWidgetItem,
+    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QStyle, QStyledItemDelegate,
+    QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget, QWidgetItem,
 )
 
 from . import i18n, theme
@@ -163,6 +163,34 @@ def set_enabled(widget, enabled, why=None, tooltip=None):
 
 # -- dialogs (plain text only) --
 
+LONG_MESSAGE = (24, 160)  # lines, characters in a line: a message beyond either scrolls (long_message)
+
+
+def long_message(text):
+    """Whether TEXT is too long for a plain message box: it is shown in a scrolling area then, never cut."""
+    lines = str(text).split("\n")
+    return len(lines) > LONG_MESSAGE[0] or any(len(line) > LONG_MESSAGE[1] for line in lines)
+
+
+def _scrolling(box, label):
+    """The message LABEL of the QMessageBox BOX inside a scroll area in its place: a long question (every workspace
+    and option of a project file) is all there to read, the buttons stay on the screen."""
+    layout = box.layout()
+    index = layout.indexOf(label) if layout is not None else -1
+    if index < 0:
+        return
+    row, column, rows, columns = layout.getItemPosition(index)
+    layout.removeWidget(label)
+    area = QScrollArea(box)
+    area.setObjectName("message_scroll")
+    area.setWidgetResizable(True)
+    area.setFrameShape(QFrame.Shape.NoFrame)
+    area.setWidget(label)
+    area.setMinimumSize(640, 360)
+    area.setAccessibleName(tr("Message"))
+    layout.addWidget(area, row, column, rows, columns)
+
+
 def _box(parent, icon, title_text, text, details=None):
     box = QMessageBox(icon, str(title_text), str(text), QMessageBox.StandardButton.NoButton, parent)
     box.setTextFormat(Qt.TextFormat.PlainText)
@@ -171,6 +199,8 @@ def _box(parent, icon, title_text, text, details=None):
         label.setTextFormat(Qt.TextFormat.PlainText)
         label.setOpenExternalLinks(False)
         label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        if long_message(text):
+            _scrolling(box, label)
     if details:
         box.setDetailedText(str(details))  # always plain text
     return box
