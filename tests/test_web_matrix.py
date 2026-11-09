@@ -197,6 +197,8 @@ ACTIONS = [
     ("POST", "/llm", {"name": "gpu", "kind": "vllm", "url": "http://100.100.1.5:8000", "model": "qwen3"},
      [["llm", "add", "gpu", "--kind", "vllm", "--url", "http://100.100.1.5:8000", "--model", "qwen3"]]),
     ("GET", "/llm/gpu/models", None, [["llm", "models", "gpu", "--json"]]),
+    ("GET", "/llm-status", None, [["llm", "status", "--json"]]),
+    ("GET", "/llm/gpu/status", None, [["llm", "status", "gpu", "--json"]]),
     ("POST", "/llm-models", {"kind": "ollama", "url": "http://100.100.1.5:11434"},
      [["wizard", "models", "--kind=ollama", "--url=http://100.100.1.5:11434", "--json"]]),
     ("POST", "/llm-models", {"kind": "openai-compatible", "url": "https://gw.example.org/v1",
