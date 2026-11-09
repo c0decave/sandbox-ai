@@ -142,6 +142,9 @@ td.countdown.bad { color: var(--bad); font-weight: 700; }
 .terminal-bar .terminal-tabs { margin-bottom: 0; }
 .net-shown { margin-top: 8px; }
 #review-card details pre { max-height: 24em; }
+/* a reviewed project file: what weakens it, one line each and nothing cut (they scroll), then the file itself */
+.project-marks pre { max-height: 24em; margin: 0 0 6px; }
+pre.project-file { max-height: 32em; }
 .inline-ask .confirm { display: inline-block; margin: 0 6px; }
 /* The session's end, two minutes before: on top of everything, until it is renewed or ends. */
 .session-banner {

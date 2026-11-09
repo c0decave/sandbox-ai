@@ -2443,9 +2443,25 @@ class Api:
 
     def project_review(self, params, body):
         """sandbox-ai wizard trust PATH --show --json: {"path", "digest", "document", "trusted", "problem"}; nothing
-        is trusted."""
+        is trusted. With "marks": what in the document weakens the sandbox (project_marks), for the page to mark."""
         path = clean_path(body.get("path"), "path")
-        return self.json_of(params["host"], ["wizard", "trust", path, "--show", "--json"], 30)
+        shown = self.json_of(params["host"], ["wizard", "trust", path, "--show", "--json"], 30)
+        if isinstance(shown, dict) and isinstance(shown.get("document"), dict):
+            shown["marks"] = self.project_marks(params["host"], shown["document"])
+        return shown
+
+    def project_marks(self, host, document):
+        """What in the project file DOCUMENT weakens the sandbox, as the launcher judges it (modes.project_marks:
+        options read as the launcher reads them, short forms too, every extra workspace and agent argument), measured
+        against the security mode and canaries of HOST's defaults (sandbox-ai's own when that host does not say)."""
+        try:
+            data = self.json_of(host, ["defaults", "show", "--json"], 30)
+        except Exception:  # noqa: BLE001 - not answered: measured against sandbox-ai's own defaults
+            data = {}
+        values = data.get("values") if isinstance(data, dict) and isinstance(data.get("values"), dict) else {}
+        launcher = module("agent_sandbox")
+        return launcher.MODES.project_marks(launcher, document, {k: values[k] for k in ("mode", "canaries")
+                                                                 if k in values})
 
     def project_trust(self, params, body):
         """sandbox-ai wizard trust PATH --digest SHA256: trusted only if the file is exactly what was reviewed."""

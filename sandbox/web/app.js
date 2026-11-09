@@ -4390,6 +4390,37 @@ async function sendAsking(row, method, path, body, done, trigger) {
   }
 }
 
+// What in a reviewed project file weakens the sandbox (the service's "marks", modes.project_marks: options read as
+// the launcher reads them, short forms too), one line each, nothing cut: every extra workspace with what the agent may
+// do there, the agent arguments, a laxer mode, canaries off, a kept HOME, debug logs, the project's ruleset and MCP
+// servers. The texts are the app's (project_trust). null when nothing weakens.
+const MARK_TEXTS = {
+  canaries: N_("fewer canary tokens: a secret leaving is noticed less often"),
+  keep: N_("the sandbox HOME is kept after the start: what the agent wrote there stays and runs again"),
+  log_debug: N_("debug logs: the logs keep much more of what passes"),
+  rules: N_("the project's own ruleset decides requests (it may allow what is asked otherwise)"),
+  mcp_servers: N_("the project defines its own MCP servers (programs with their own folders and network)"),
+  workspaces: N_("further folders the agent sees in every start of the project"),
+  agent_args: N_("arguments for the agent itself: they can change what it does"),
+};
+function projectMarks(r) {
+  const marks = Array.isArray(r.marks) ? r.marks.filter(m => m && typeof m === "object") : [];
+  if (!marks.length) return null;
+  const doc = r.document && typeof r.document === "object" ? r.document : {};
+  const lines = [];
+  for (const m of marks) {
+    const value = (v) => typeof v === "string" ? v : JSON.stringify(v);
+    if (m.why === "mode") lines.push(`⚠ mode: ${value(doc.mode)} - ${t("a laxer security mode than your default ({mode})", { mode: String(m.default || "") })}`);
+    else if (m.why === "option") lines.push(`⚠ ${String(m.option || "")}${m.value === null || m.value === undefined ? "" : ` ${String(m.value)}`}: ${t("widens what the sandbox may do or see")}`);
+    else if (m.why === "workspace") lines.push(`    ⚠ ${String(m.value || "")} - ${m.read_only ? t("read-only for the agent, outside the project") : t("writable for the agent, outside the project")}`);
+    else if (m.why === "agent_args") lines.push(`⚠ agent_args: ${t(MARK_TEXTS.agent_args)}`, ...(Array.isArray(doc.agent_args) ? doc.agent_args.map(a => `    ${value(a)}`) : []));
+    else if (MARK_TEXTS[m.why]) lines.push(`⚠ ${String(m.key || m.why)}: ${t(MARK_TEXTS[m.why])}`);
+    else lines.push(`⚠ ${String(m.key || "?")}: ${t("widens what the sandbox may do or see")}`);
+  }
+  return el("div", { class: "notice warn project-marks" }, el("pre", {}, lines.join("\n")),
+    el("p", {}, t("Lines marked {mark} weaken the sandbox: trust them only if you chose them.", { mark: "⚠" })));
+}
+
 // Project configurations (sandbox-ai wizard trust): a .sandbox-ai.json is used only while it is exactly what was
 // trusted. Review shows it as it takes effect with its SHA-256; Trust sends that digest, so a file changed since the
 // review is not trusted.
@@ -4413,7 +4444,7 @@ pages.projects = async (main) => {
     const now = r.trusted ? t("trusted as it is") : r.trusted_digest ? t("changed since it was trusted") : t("not trusted");
     clear(reviewBox).append(el("div", { class: "card", id: "project-review" }, el("h2", {}, t("{path} on {host}", { path: r.path, host })),
       // wizard trust --show --json says what keeps it from being trusted in "problem" (and "error"): nothing to trust then
-      el("p", {}, now), r.problem || r.error ? notice(String(r.problem || r.error), "error") : el("pre", {}, JSON.stringify(r.document, null, 2)),
+      el("p", {}, now), r.problem || r.error ? notice(String(r.problem || r.error), "error") : [projectMarks(r), el("pre", { class: "project-file" }, JSON.stringify(r.document, null, 2))],
       el("p", { class: "hint mono" }, t("SHA-256 {digest}", { digest: r.digest })), row));
     if (!r.problem && !r.error && !r.trusted && r.digest) {
       const trust = el("button", { class: "primary", onclick: () => confirmIn(row, t("Trust exactly this configuration of {path} on {host}? Every later start of that project gets its options; if the file changes, it is no longer trusted.", { path: r.path, host }), t("Yes, trust it"), async () => {

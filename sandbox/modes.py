@@ -393,3 +393,111 @@ def plan(a):
             "approval_scope": getattr(a, "max_approval_scope", "always"),
             "other_workspaces_read_only": getattr(a, "mode_other_workspaces_ro", False),
             "rules": getattr(a, "mode_rules", None) is not None}
+
+
+# Options that weaken the sandbox or widen what it may do or see, by long name: a trust question (the app's, the
+# web interface's) marks each of them in a project file before it is trusted. The short forms (-A, -x, -kp ...)
+# are found through the launcher's own canonical_options (weakening_options), never by a copy of the aliases.
+WEAKENING_OPTIONS = frozenset({
+    # the network and the proxy
+    "--egress-all-allow", "--allow", "--allow-tcp", "--allow-host", "--allow-http", "--allow-host-port", "--allow-pypi",
+    "--allow-github", "--allow-gitlab", "--allow-kernel-org", "--allow-duckduckgo", "--allow-npm", "--frontier",
+    "--profile", "--dns", "--nameserver", "--network", "--ip", "--ip6", "--no-proxy", "--no-inspect", "--ask",
+    "--local-config", "--llm", "--preset", "--preset-value", "--vpn-check",  # --vpn-check: a failing VPN used anyway
+    # files, devices, displays and sound
+    "--mount", "--copy", "--device", "--gpu", "--gui", "--gui-screen", "--gui-wayland", "--gui-vnc", "--audio",
+    "--state-dir", "--kit", "--kit-dir", "--mcp",
+    # logins, secrets and identities
+    "--dangerously-skip-permissions", "--env", "--secret-env", "--api-key", "--publish", "--git-token-env",
+    "--git-token-file", "--git-token-secret", "--git-credentials", "--git-identity", "--git-logins", "--identity",
+    "--auth-file", "--import-codex-auth", "--copy-auth", "--with", "--helper",
+    # what is noticed, checked and kept
+    "--privacy-check", "--privacy-rules", "--canaries", "--no-canaries", "--keep", "--log-debug", "--log-dir",
+    "--telemetry",
+    # what runs the sandbox, and its limits
+    "--runtime", "--binary", "--image", "--image-variant", "--podman-url", "--backend", "--memory", "--cpus", "--pids",
+})
+
+
+def option_items(l, tokens):
+    """[(long name, value or None)] of the start options TOKENS (as a project file or a command line has them, up to
+    an optional --): every short form, bundle and -x=VALUE as the launcher reads it (l.canonical_options), a value
+    taken where the launcher's parser takes one. A word that is no option is (None, word)."""
+    tokens = [str(token) for token in tokens]
+    try:
+        tokens = l.canonical_options(tokens)
+    except (ValueError, SystemExit):
+        pass
+    actions = l.build_parser()._option_string_actions
+    items, index = [], 0
+    while index < len(tokens):
+        word = tokens[index]
+        index += 1
+        if word == "--":
+            break
+        if not word.startswith("-") or word == "-":
+            items.append((None, word))
+            continue
+        name, equals, value = word.partition("=")
+        action = actions.get(name)
+        if equals:
+            items.append((name, value))
+        elif action is not None and action.nargs != 0 and index < len(tokens) and \
+                (action.nargs in (None, 1) or not tokens[index].startswith("-")):
+            values = [tokens[index]]
+            index += 1
+            while action.nargs in ("*", "+") and index < len(tokens) and not tokens[index].startswith("-"):
+                values.append(tokens[index])
+                index += 1
+            items.append((name, " ".join(values)))
+        else:
+            items.append((name, None))
+    return items
+
+
+def weakening_options(l, tokens):
+    """[(long name, value or None)] of the options in TOKENS that weaken the sandbox (WEAKENING_OPTIONS), however
+    they are written (option_items)."""
+    return [(name, value) for name, value in option_items(l, tokens) if name in WEAKENING_OPTIONS]
+
+
+CANARY_DEFAULT = ("credentials",)  # the canaries a project file is measured against without the human's own choice
+
+
+def project_marks(l, document, defaults=None):
+    """What in the project file DOCUMENT (.sandbox-ai.json) weakens the sandbox, for a trust question to mark: a list
+    of {"key", "why"} (WHY: mode, canaries, keep, log_debug, rules, mcp_servers, workspaces, agent_args, option -
+    with "option" and "value" -, workspace - with "value" and "read_only" -). DEFAULTS: {"mode", "canaries"} of the
+    host the file is on (defaults.json there; {} or None: sandbox-ai's own); a laxer mode or fewer canaries than
+    those weaken. Options are read as the launcher reads them (weakening_options), every workspace is named."""
+    defaults = defaults if isinstance(defaults, dict) else {}
+    marks = []
+    default = defaults.get("mode") if defaults.get("mode") in NAMES else DEFAULT
+    mode = document.get("mode")
+    if isinstance(mode, str) and mode in NAMES and rank(mode) < rank(default):
+        marks.append({"key": "mode", "why": "mode", "default": default})
+    if "canaries" in document:
+        canaries, wanted = document.get("canaries"), defaults.get("canaries", list(CANARY_DEFAULT))
+        wanted = set(wanted) if isinstance(wanted, list) else set()
+        chosen = set(canaries) if isinstance(canaries, list) else set()
+        if canaries is False or not chosen or not wanted <= chosen:
+            marks.append({"key": "canaries", "why": "canaries"})
+    for key in ("keep", "log_debug"):
+        if document.get(key) is True:
+            marks.append({"key": key, "why": key})
+    if document.get("rules") is not None:
+        marks.append({"key": "rules", "why": "rules"})
+    if document.get("mcp_servers"):
+        marks.append({"key": "mcp_servers", "why": "mcp_servers"})
+    options = document.get("options") if isinstance(document.get("options"), list) else []
+    marks += [{"key": "options", "why": "option", "option": name, "value": value}
+              for name, value in weakening_options(l, options)]
+    workspaces = document.get("workspaces")
+    if isinstance(workspaces, list) and workspaces:
+        read_only = any(name == "--workspace-ro" for name, _ in option_items(l, options))
+        marks.append({"key": "workspaces", "why": "workspaces"})
+        marks += [{"key": "workspaces", "why": "workspace", "value": str(item), "read_only": read_only}
+                  for item in workspaces]
+    if isinstance(document.get("agent_args"), list) and document["agent_args"]:
+        marks.append({"key": "agent_args", "why": "agent_args"})
+    return marks

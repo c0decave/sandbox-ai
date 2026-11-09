@@ -1431,7 +1431,20 @@ const TEXTS = {
   "OpenCode has no marketplaces: its plugins are npm packages, which a kit lists and OpenCode installs itself (it needs {option}).": { "de": "OpenCode hat keine Marktplätze: Seine Plugins sind npm-Pakete, die ein Kit listet und OpenCode selbst installiert (dafür braucht es {option})." },
   "No npm plugins in opencode.json or a kit.": { "de": "Keine npm-Plugins in opencode.json oder einem Kit." },
   "OpenCode's plugin modules there (a kit takes one as a hook, below):": { "de": "Die Plugin-Module von OpenCode dort (ein Kit nimmt eines als Hook, unten):" },
-  "(off)": { "de": "(aus)" }
+  "(off)": { "de": "(aus)" },
+  // review round 6: what weakens the sandbox in a reviewed project file (the app's words, project_trust)
+  "a laxer security mode than your default ({mode})": { "de": "ein lockererer Sicherheitsmodus als Ihre Voreinstellung ({mode})" },
+  "widens what the sandbox may do or see": { "de": "erweitert, was die Sandbox darf oder sieht" },
+  "read-only for the agent, outside the project": { "de": "für den Agenten nur lesbar, außerhalb des Projekts" },
+  "writable for the agent, outside the project": { "de": "für den Agenten beschreibbar, außerhalb des Projekts" },
+  "fewer canary tokens: a secret leaving is noticed less often": { "de": "weniger Canary-Token: Ein abfließendes Geheimnis wird seltener bemerkt" },
+  "the sandbox HOME is kept after the start: what the agent wrote there stays and runs again": { "de": "das HOME der Sandbox bleibt nach dem Start erhalten: Was der Agent dort schrieb, bleibt und läuft wieder" },
+  "debug logs: the logs keep much more of what passes": { "de": "Debug-Protokolle: Die Protokolle halten viel mehr von dem fest, was durchgeht" },
+  "the project's own ruleset decides requests (it may allow what is asked otherwise)": { "de": "das eigene Regelwerk des Projekts entscheidet über Anfragen (es kann erlauben, was sonst nachgefragt wird)" },
+  "the project defines its own MCP servers (programs with their own folders and network)": { "de": "das Projekt legt eigene MCP-Server fest (Programme mit eigenen Ordnern und Netzwerk)" },
+  "further folders the agent sees in every start of the project": { "de": "weitere Ordner, die der Agent in jedem Start des Projekts sieht" },
+  "arguments for the agent itself: they can change what it does": { "de": "Argumente für den Agenten selbst: Damit lässt sich ändern, was er tut" },
+  "Lines marked {mark} weaken the sandbox: trust them only if you chose them.": { "de": "Mit {mark} markierte Zeilen schwächen die Sandbox: Vertrauen Sie ihnen nur, wenn Sie sie selbst gewählt haben." }
 };
 
 translateDocument();
