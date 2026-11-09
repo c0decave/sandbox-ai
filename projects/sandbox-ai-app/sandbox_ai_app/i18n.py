@@ -2784,6 +2784,31 @@ TEXTS = {
     'Runs scripts/vendor_xterm.py: the pinned xterm.js from registry.npmjs.org, checked before it is used': {
         'en': 'Runs scripts/vendor_xterm.py: the pinned xterm.js from registry.npmjs.org, checked before it is used',
         'de': 'Führt scripts/vendor_xterm.py aus: das gepinnte xterm.js von registry.npmjs.org, vor der Verwendung geprüft'},
+    # == Chromium's sandbox for the terminal tabs (chromium.py, terminal.py, settings.py) ==
+    'this system does not allow unprivileged user namespaces ({error})': {
+        'en': 'this system does not allow unprivileged user namespaces ({error})',
+        'de': 'dieses System erlaubt keine User-Namespaces ohne Root-Rechte ({error})'},
+    'the check for a user namespace did not finish in time': {
+        'en': 'the check for a user namespace did not finish in time',
+        'de': 'die Prüfung auf einen User-Namespace wurde nicht rechtzeitig fertig'},
+    'no user namespace is available ({error}: user.max_user_namespaces reached or out of memory)': {
+        'en': 'no user namespace is available ({error}: user.max_user_namespaces reached or out of memory)',
+        'de': 'kein User-Namespace ist verfügbar ({error}: user.max_user_namespaces erreicht oder kein Speicher mehr frei)'},
+    'Terminal tabs show a web view, and Chromium\'s sandbox for it cannot start right now: {why}. Making the view now would end the whole app, so the command opens in a terminal window instead.\n\nWhat you can do: end sandboxes you no longer need, or raise the limit (sysctl user.max_user_namespaces); the next terminal checks again. Or switch on Settings > Window > "Use web views without Chromium\'s sandbox" (applies at the next start).': {
+        'en': 'Terminal tabs show a web view, and Chromium\'s sandbox for it cannot start right now: {why}. Making the view now would end the whole app, so the command opens in a terminal window instead.\n\nWhat you can do: end sandboxes you no longer need, or raise the limit (sysctl user.max_user_namespaces); the next terminal checks again. Or switch on Settings > Window > "Use web views without Chromium\'s sandbox" (applies at the next start).',
+        'de': 'Terminal-Tabs zeigen eine Web-Ansicht, und Chromiums Sandbox dafür kann gerade nicht starten: {why}. Die Ansicht jetzt zu erstellen, würde die ganze App beenden; daher öffnet sich der Befehl stattdessen in einem Terminalfenster.\n\nWas Sie tun können: Beenden Sie Sandboxen, die Sie nicht mehr brauchen, oder erhöhen Sie die Grenze (sysctl user.max_user_namespaces); das nächste Terminal prüft erneut. Oder schalten Sie Einstellungen > Fenster > „Web-Ansichten ohne Chromiums Sandbox nutzen“ ein (gilt beim nächsten Start).'},
+    "Use web views without Chromium's sandbox (QTWEBENGINE_DISABLE_SANDBOX)": {
+        'en': "Use web views without Chromium's sandbox (QTWEBENGINE_DISABLE_SANDBOX)",
+        'de': 'Web-Ansichten ohne Chromiums Sandbox nutzen (QTWEBENGINE_DISABLE_SANDBOX)'},
+    "Terminal tabs show what sandboxes and agents print in a web view (Chromium). Chromium's sandbox keeps a bug in its renderer away from your files and your session; it needs free user namespaces, and every running sandbox holds some. Switched on, terminal tabs work even when none are free, without that protection. Off (the default): the app checks first and opens a terminal window when none are free. Applies when the app is started again.": {
+        'en': "Terminal tabs show what sandboxes and agents print in a web view (Chromium). Chromium's sandbox keeps a bug in its renderer away from your files and your session; it needs free user namespaces, and every running sandbox holds some. Switched on, terminal tabs work even when none are free, without that protection. Off (the default): the app checks first and opens a terminal window when none are free. Applies when the app is started again.",
+        'de': 'Terminal-Tabs zeigen in einer Web-Ansicht (Chromium), was Sandboxen und Agenten ausgeben. Chromiums Sandbox hält einen Fehler in seinem Renderer von Ihren Dateien und Ihrer Sitzung fern; sie braucht freie User-Namespaces, und jede laufende Sandbox belegt einige. Eingeschaltet funktionieren Terminal-Tabs auch, wenn keine frei sind, aber ohne diesen Schutz. Aus (die Voreinstellung): Die App prüft zuerst und öffnet ein Terminalfenster, wenn keine frei sind. Gilt beim nächsten Start der App.'},
+    "A terminal window instead of a tab: Chromium's sandbox cannot start now (see the Terminals page)": {
+        'en': "A terminal window instead of a tab: Chromium's sandbox cannot start now (see the Terminals page)",
+        'de': 'Ein Terminalfenster statt eines Tabs: Chromiums Sandbox kann gerade nicht starten (siehe Seite Terminals)'},
+    'A terminal window instead of a tab': {
+        'en': 'A terminal window instead of a tab',
+        'de': 'Ein Terminalfenster statt eines Tabs'},
     'Terminals inside the app are not available: {why}. Commands open in a terminal window instead. Install QtWebEngine with: sandbox-ai-update --force (or pip install PySide6-Addons).': {
         'en': 'Terminals inside the app are not available: {why}. Commands open in a terminal window instead. Install QtWebEngine with: sandbox-ai-update --force (or pip install PySide6-Addons).',
         'de': 'Terminals in der App sind nicht verfügbar: {why}. Befehle öffnen sich stattdessen in einem Terminalfenster. QtWebEngine installieren mit: sandbox-ai-update --force (oder pip install PySide6-Addons).'},

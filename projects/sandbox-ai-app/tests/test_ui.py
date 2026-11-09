@@ -1872,7 +1872,7 @@ def test_a_start_in_the_apps_terminal_opens_one_tab_not_two(window, env, monkeyp
     project.mkdir()
     opened = []
     monkeypatch.setattr(terminal, "available", lambda: (True, ""))
-    monkeypatch.setattr(window.terminals, "open", lambda argv, title, directory=None: opened.append(title))
+    monkeypatch.setattr(window.terminals, "open", lambda argv, title, directory=None: opened.append(title) or True)
     real_setting = backend.setting
     monkeypatch.setattr(backend, "setting", lambda name, *a, **k: True if name == "auto_tabs" else real_setting(name, *a, **k))
     assert ui.started_agent(window.sai.launch_argv("claude", ["--allow-pypi"])) == "claude"
@@ -1939,7 +1939,7 @@ def test_a_session_started_in_the_app_leaves_the_tab_of_a_run_started_elsewhere(
     project = tmp_path / "proj"
     project.mkdir()
     monkeypatch.setattr(terminal, "available", lambda: (True, ""))
-    monkeypatch.setattr(window.terminals, "open", lambda argv, title, directory=None: None)
+    monkeypatch.setattr(window.terminals, "open", lambda argv, title, directory=None: True)  # a tab
     real_setting = backend.setting
     monkeypatch.setattr(backend, "setting", lambda name, *a, **k: True if name == "auto_tabs" else real_setting(name, *a, **k))
     window.in_terminal(window.sai.launch_argv("claude", [], session="work"), "claude (work)", embedded=True,

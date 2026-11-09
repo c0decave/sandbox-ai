@@ -88,7 +88,8 @@ def make_window(qapp, monkeypatch, language="en", mode=None):
     w.opened, w.started = [], []
     w.commands = Commands()
     w.sai.run = w.commands
-    monkeypatch.setattr(w.terminals, "open", lambda argv, title, cwd=None: w.opened.append((list(argv), title, cwd)))
+    monkeypatch.setattr(w.terminals, "open",  # a tab (None: no tab, Chromium's sandbox cannot start)
+                        lambda argv, title, cwd=None: w.opened.append((list(argv), title, cwd)) or True)
     w.sai.in_terminal = lambda argv, title="": ["term", *argv]
     monkeypatch.setattr("sandbox_ai_app.ui.QProcess.startDetached",
                         lambda program, args: w.started.append([program, *args]) or True)
@@ -879,7 +880,7 @@ def changed_settings(env):
             "notify_seconds": 30, "notify_style": "system", "approvals_interval": 500, "sandboxes_interval": 5000, "connections_interval": 4000,
             "sandbox_ai_home": str(env / "checkout"), "default_agent": "codex", "default_backend": "bwrap",
             "default_template": "research", "board_grid": 40, "auto_tabs": False, "guide_nodes": False,
-            "guide_tour": False, "intro": False, "debug": True, "help_buttons": False}
+            "guide_tour": False, "intro": False, "debug": True, "help_buttons": False, "web_without_sandbox": True}
 
 
 def field_value(widget):

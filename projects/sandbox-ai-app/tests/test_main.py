@@ -24,9 +24,10 @@ def test_the_terminal_tabs_run_without_the_gpu_unless_asked():
     """A machine without usable acceleration filled app.log with Chromium's Vulkan, GLX and command-buffer errors;
     xterm.js needs no GPU."""
     from sandbox_ai_app.main import chromium_flags
-    assert chromium_flags({}) == "--disable-gpu --disable-vulkan --log-level=2"
+    no_gpu = "--disable-gpu --disable-gpu-compositing --disable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE"
+    assert chromium_flags({}) == no_gpu + " --log-level=2"
     assert chromium_flags({"SANDBOX_AI_APP_GPU": "1"}) == "--log-level=2"
-    assert chromium_flags({"SANDBOX_AI_APP_DEBUG": "1"}) == "--disable-gpu --disable-vulkan"
+    assert chromium_flags({"SANDBOX_AI_APP_DEBUG": "1"}) == no_gpu
     assert chromium_flags({"SANDBOX_AI_APP_GPU": "1", "SANDBOX_AI_APP_DEBUG": "1"}) is None
     assert chromium_flags({"QTWEBENGINE_CHROMIUM_FLAGS": "--enable-gpu-rasterization"}) is None  # yours wins
     assert chromium_flags({"QTWEBENGINE_CHROMIUM_FLAGS": ""}) is None

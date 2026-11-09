@@ -730,10 +730,10 @@ AREA_TIPS = (
           "Jedes Feld wird gespeichert, wenn es sich ändert; eine neue Sprache gilt beim nächsten Start."),
          "", "app-settings"),
     _tip("settings.window", ("Window", "Fenster"),
-         ("The system tray, start at login, where commands run, notifications, tabs for new sessions, debug "
-          "logging.",
-          "System-Tray, Start bei der Anmeldung, wo Befehle laufen, Benachrichtigungen, Tabs für neue Sitzungen, "
-          "Debug-Protokoll."),
+         ("The system tray, start at login, where commands run, Chromium's sandbox for terminal tabs, "
+          "notifications, tabs for new sessions, debug logging.",
+          "System-Tray, Start bei der Anmeldung, wo Befehle laufen, Chromiums Sandbox für Terminal-Tabs, "
+          "Benachrichtigungen, Tabs für neue Sitzungen, Debug-Protokoll."),
          None, "", "app-settings"),
     _tip("settings.polling", ("Polling", "Abfragen"),
          ("How often the app looks for new questions, running sandboxes and new connections.",

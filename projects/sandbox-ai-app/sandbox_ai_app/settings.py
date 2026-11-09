@@ -373,6 +373,15 @@ class SettingsDialog(QDialog):
         form.addRow("", self.autostart)
         self.combo(form, "terminal", tr("Commands such as builds and logins run"),
                    (("app", tr("in a tab of the app (when available)")), ("window", tr("in a terminal window"))), current)
+        # Chromium's sandbox for the terminal tabs' web view: yours to switch off (off by default), with the risk said.
+        self.check(form, "web_without_sandbox",
+                   tr("Use web views without Chromium's sandbox (QTWEBENGINE_DISABLE_SANDBOX)"), current)
+        form.addRow(plain_label(tr("Terminal tabs show what sandboxes and agents print in a web view (Chromium). "
+                                   "Chromium's sandbox keeps a bug in its renderer away from your files and your "
+                                   "session; it needs free user namespaces, and every running sandbox holds some. "
+                                   "Switched on, terminal tabs work even when none are free, without that "
+                                   "protection. Off (the default): the app checks first and opens a terminal window "
+                                   "when none are free. Applies when the app is started again."), role="secondary"))
         self.check(form, "notify", tr("Desktop notification for each new question"), current)
         self.check(form, "auto_tabs", tr("Open a tab for each session or sandbox that starts"), current)
         self.spin(form, "notify_seconds", tr("Notifications stay (seconds)"), 3, 120, current)

@@ -4,7 +4,8 @@ The page and its scripts are local files (sandbox_ai_app/web, xterm.js vendored 
 the view loads nothing else: a request interceptor blocks every URL except the files below
 sandbox_ai_app/web and Qt's qwebchannel.js, navigation away from the page is refused, local content may not
 reach remote URLs, and the profile keeps nothing on disk. Without
-QtWebEngine or the vendored files the app uses a terminal window instead (SandboxAI.in_terminal).
+QtWebEngine or the vendored files the app uses a terminal window instead (SandboxAI.in_terminal), and so it does for
+a new terminal while Chromium's sandbox cannot get its namespaces (chromium.py: Chromium would end the whole app).
 """
 from __future__ import annotations
 
@@ -20,12 +21,12 @@ from PySide6.QtWidgets import (
     QComboBox, QGroupBox, QHBoxLayout, QLabel, QPushButton, QSplitter, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from . import theme
+from . import chromium, theme
 from .backend import setting as backend_setting
 from .files import printable
 from .i18n import N_, tr
 from .pty_bridge import PtyBridge
-from .widgets import ask_first, background, fill, plain_label, row_key, safe_tooltip, table, warn
+from .widgets import ask_first, background, fill, inform, plain_label, row_key, safe_tooltip, table, warn
 
 WEB = Path(__file__).resolve().with_name("web")
 # The vendoring script next to the package (a checkout or sandbox-ai's installation; not in a wheel).
@@ -297,6 +298,7 @@ class TerminalsPage(QWidget):
         bar.addWidget(self.fetch)
         layout.addLayout(bar)
         self.command = None
+        self.sandbox_problem = ""  # why the last terminal could not be a tab (Chromium's sandbox), until one can
         self.show_state()
         self.tabs = QTabWidget()
         self.tabs.setTabsClosable(True)
@@ -513,6 +515,8 @@ class TerminalsPage(QWidget):
                       "window instead.", why=why)
         if problem:
             text += "\n" + tr("Download failed: {error}", error=problem)
+        if ok and self.sandbox_problem:
+            text = self.sandbox_problem
         self.hint.setText(text)
         self.fetch.setVisible(not ok and not MISSING and VENDOR_SCRIPT.is_file())
 
@@ -532,13 +536,41 @@ class TerminalsPage(QWidget):
         lines = [line for line in (err or out).splitlines() if line.strip()]
         self.show_state("" if status == 0 else (lines[-1] if lines else tr("exit status {status}", status=status)))
 
+    told = False  # the dialog about Chromium's sandbox: once per run of the app (the page's text stays)
+
+    def chromium_ready(self):
+        """Before a new web view: can Chromium's sandbox start now? Checked in a short-lived child process
+        (chromium.check, logged) every time, as namespaces come and go. If not, no web view is made (Chromium would
+        end the whole app): why and what to do are shown on this page, in the status bar and, the first time, in a
+        message; the caller opens a terminal window instead."""
+        result = chromium.check()
+        if result.ok:
+            if self.sandbox_problem:
+                self.sandbox_problem = ""
+                self.show_state()
+            return True
+        self.sandbox_problem = chromium.unavailable_text(result)
+        self.show_state()
+        window = self.window()
+        if hasattr(window, "statusBar"):
+            window.statusBar().showMessage(tr("A terminal window instead of a tab: Chromium's sandbox cannot start "
+                                              "now (see the Terminals page)"), 20000)
+        if not TerminalsPage.told:
+            TerminalsPage.told = True
+            inform(window, tr("A terminal window instead of a tab"), self.sandbox_problem, warning=True, modal=False)
+        return False
+
     def open(self, argv, title, cwd=None):
+        """A tab running ARGV (or the tab attached to that start already); None when Chromium's sandbox cannot start
+        now (chromium_ready): the caller then uses a terminal window."""
         # One tab per start: attaching again (here, from Sandboxes & sessions or the Hosts page) shows its tab.
         view = self.open_view(attach_key(argv))
         if view is not None:
             self.tabs.setCurrentWidget(view)
             view.view.setFocus()
             return view
+        if not self.chromium_ready():
+            return None
         view = TerminalView(argv, self.web, cwd, self)
         index = self.tabs.addTab(view, title)
         self.tabs.setTabToolTip(index, shlex.join(argv))

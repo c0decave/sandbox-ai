@@ -3665,7 +3665,8 @@ SETTINGS = {"theme": "system", "language": "system", "terminal": "app", "tray": 
             "notify_seconds": 15, "notify_style": "themed", "approvals_interval": 1000, "sandboxes_interval": 3000, "connections_interval": 2000,
             "sandbox_ai_home": "", "default_agent": "claude", "default_backend": "podman",
             "default_template": "development", "board_grid": 20, "auto_tabs": True, "guide_nodes": True,
-            "guide_tour": True, "intro": True, "debug": False, "help_buttons": True}
+            "guide_tour": True, "intro": True, "debug": False, "help_buttons": True,
+            "web_without_sandbox": False}
 
 
 def setting(name, settings=None):

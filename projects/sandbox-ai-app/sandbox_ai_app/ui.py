@@ -6671,13 +6671,13 @@ class MainWindow(QMainWindow):
     # -- terminals --
 
     def in_terminal(self, argv, title, embedded=None, cwd=None):
-        """Run ARGV in a terminal: a tab of the app (EMBEDDED True, or None and the setting says so, and
-        QtWebEngine with xterm.js is there), else a terminal window."""
+        """Run ARGV in a terminal: a tab of the app (EMBEDDED True, or None and the setting says so, QtWebEngine with
+        xterm.js is there and Chromium's sandbox can start now: TerminalsPage.chromium_ready), else a terminal
+        window."""
         if embedded is None:
             embedded = self.sai.settings().get("terminal", "app") == "app"
-        if embedded and terminal.available()[0]:
-            directory = cwd if cwd and os.path.isdir(cwd) else None
-            self.terminals.open(argv, title, directory)
+        directory = cwd if cwd and os.path.isdir(cwd) else None
+        if embedded and terminal.available()[0] and self.terminals.open(argv, title, directory) is not None:
             self.show_page("terminals")
             started = started_agent(argv)
             options = argv[:argv.index("--")] if "--" in argv else argv  # not the agent's own arguments

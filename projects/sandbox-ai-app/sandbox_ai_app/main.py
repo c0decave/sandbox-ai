@@ -25,16 +25,34 @@ def broken_pyside(version=None, python=None):
     return None
 
 
+# Without the GPU, also without Chromium's Vulkan features (its own, and ANGLE's Vulkan backend, a default on Linux):
+# the --disable-vulkan used before is no Chromium switch, and the log still showed a Vulkan instance failing ("Failed
+# to create Vulkan instance: -9"). Qt WebEngine merges this --disable-features with its own.
+NO_GPU = ("--disable-gpu", "--disable-gpu-compositing", "--disable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE")
+
+
 def chromium_flags(environ):
-    """QTWEBENGINE_CHROMIUM_FLAGS for the terminal tabs: without the GPU (xterm.js needs none, and a machine without
-    usable acceleration filled the log with Vulkan, GLX and command-buffer errors), Chromium's own messages from
-    errors up (all with --debug). None: leave the variable as it is (yours wins; SANDBOX_AI_APP_GPU=1 keeps the GPU)."""
+    """QTWEBENGINE_CHROMIUM_FLAGS for the terminal tabs: without the GPU and Vulkan (xterm.js needs neither, and a
+    machine without usable acceleration filled the log with Vulkan, GLX and command-buffer errors), Chromium's own
+    messages from errors up (all with --debug). None: leave the variable as it is (yours wins; SANDBOX_AI_APP_GPU=1
+    keeps the GPU)."""
     if "QTWEBENGINE_CHROMIUM_FLAGS" in environ:
         return None
-    flags = [] if environ.get("SANDBOX_AI_APP_GPU") == "1" else ["--disable-gpu", "--disable-vulkan"]
+    flags = [] if environ.get("SANDBOX_AI_APP_GPU") == "1" else list(NO_GPU)
     if not environ.get("SANDBOX_AI_APP_DEBUG"):
         flags.append("--log-level=2")
     return " ".join(flags) or None
+
+
+def prepare_chromium(environ=None, settings=None):
+    """Before QtWebEngine is loaded: its flags (chromium_flags) and, when Settings > Window says so, no Chromium
+    sandbox (QTWEBENGINE_DISABLE_SANDBOX=1; your own variable stays). Returns whether Chromium runs without it."""
+    from . import chromium
+    environ = os.environ if environ is None else environ
+    flags = chromium_flags(environ)
+    if flags:
+        environ["QTWEBENGINE_CHROMIUM_FLAGS"] = flags  # read when QtWebEngine starts its first page
+    return chromium.apply_setting(backend.app_settings() if settings is None else settings, environ)
 
 
 def self_test_report(sai, window, app):
@@ -59,9 +77,7 @@ def main(argv=None):
     if problem:
         print(problem, file=sys.stderr)
         return 1
-    flags = chromium_flags(os.environ)
-    if flags:
-        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = flags  # read when QtWebEngine starts its first page
+    no_sandbox = prepare_chromium()
     try:  # QtWebEngine must be loaded before the QApplication exists (terminal tabs)
         import PySide6.QtWebEngineWidgets  # noqa: F401
     except ImportError:
@@ -71,7 +87,8 @@ def main(argv=None):
     from . import applog, i18n, terminal, theme
     applog.install()  # every later entry of the log says when, where and in which versions
     applog.write(f"{applog.header('INFO', 'webengine')}\n  QTWEBENGINE_CHROMIUM_FLAGS="
-                 f"{os.environ.get('QTWEBENGINE_CHROMIUM_FLAGS', '')!r}\n")
+                 f"{os.environ.get('QTWEBENGINE_CHROMIUM_FLAGS', '')!r}, Chromium's sandbox "
+                 f"{'off (QTWEBENGINE_DISABLE_SANDBOX)' if no_sandbox else 'on (checked before each terminal tab)'}\n")
 
     app = QApplication.instance() or QApplication([arg for arg in arguments if arg != "--self-test"])
     app.setApplicationName("sandbox-ai")
