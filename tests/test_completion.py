@@ -45,6 +45,8 @@ def home(tmp_path, monkeypatch):
     (["doctor", "--"], {"--json", "--backend", "--no-color"}, set()),
     (["doctor", "--backend", ""], {"podman", "bwrap", "both"}, set()),
     (["llm", "add", "x", "--kind", ""], {"ollama", "lmstudio", "vllm"}, set()),
+    (["llm", "st"], {"status"}, {"show"}),
+    (["llm", "status", "--"], {"--json", "--watch"}, set()),
     (["kits", ""], {"show", "new", "add-skill", "trust-hooks"}, set()),
     (["list", "--"], {"--all", "--json", "--history", "--flat", "--no-color", "--color"}, set()),
     (["ps", "--"], {"--all", "--json", "--history", "--flat", "--no-color", "--color"}, set()),
