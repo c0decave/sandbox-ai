@@ -15,7 +15,13 @@ VISIBLE = 20  # rows the popup shows at a time; the rest scroll
 
 def searchable(combo, visible=VISIBLE, strict=False):
     """COMBO (a QComboBox) as a chooser for long lists: VISIBLE rows, a scroll bar, typing filters (contains, any
-    case). STRICT: typed text that names no entry is replaced by the entry chosen when editing ends. Returns COMBO."""
+    case). STRICT: typed text that names no entry is replaced by the entry chosen when editing ends. Returns COMBO.
+    Once per combo: a combo filled again keeps its completer (it follows the combo's own model)."""
+    # Set up once, not at every fill: a chooser is filled again whenever the form changes, and each Qt call without a
+    # result costs a reference to None with PySide6 6.12.0 below Python 3.12 (pyproject.toml).
+    if getattr(combo, "_model_combo", False):
+        return combo
+    combo._model_combo = True
     combo.setMaxVisibleItems(visible)
     view = combo.view()
     view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -32,8 +38,7 @@ def searchable(combo, visible=VISIBLE, strict=False):
     completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
     completer.setMaxVisibleItems(visible)
     combo.setCompleter(completer)
-    if strict and not combo.property("model_combo_strict"):
-        combo.setProperty("model_combo_strict", True)
+    if strict:
         combo.lineEdit().editingFinished.connect(lambda: settle(combo))
     return combo
 
