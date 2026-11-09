@@ -96,9 +96,11 @@ APP_NAV = [  # the app's own words (its German translation calls the Board "Tafe
                                 ("activity", T("Activity", "Aktivität")),
                                 ("statistics", T("Statistics", "Statistik")), ("files", T("Files", "Dateien"))]),
     (T("Manage", "Verwalten"), [("kits", T("Kits & plugins", "Kits & Plugins")),
-                                ("mcp", T("MCP servers", "MCP-Server")), ("images", T("Images", "Images")),
-                                ("credentials", T("Credentials", "Zugangsdaten"))]),
-    (T("System", "System"), [("system", T("System", "System")), ("hosts", T("Hosts", "Hosts"))]),
+                                ("mcp", T("MCP servers", "MCP-Server")), ("llm", T("LLM servers", "LLM-Server")),
+                                ("images", T("Images", "Images")), ("credentials", T("Credentials", "Zugangsdaten")),
+                                ("team", T("Teams", "Teams"))]),
+    (T("System", "System"), [("system", T("System", "System")), ("hosts", T("Hosts", "Hosts")),
+                             ("help", T("Help", "Hilfe"))]),
 ]
 APP_PAGES = {key: title for _, pages in APP_NAV for key, title in pages}
 
@@ -553,9 +555,10 @@ CHAPTERS = [
             {"kind": "terminal", "heading": T("sandbox-ai doctor: what is missing, and the fix", "sandbox-ai doctor: was fehlt, und die Lösung"),
              "steps": [
                  {"cmd": "sandbox-ai doctor --plain", "example": True, "out": [
+                     "ok    sandbox-ai                0.1.83, the user's own installation "
+                     "(/home/me/.local/share/sandbox-ai/versions/0.1.83); Python 3.12.3 (/usr/bin/python3)",
                      "ok    Ordinary user             me",
                      "ok    Python                    3.12.3",
-                     "ok    sandbox-ai                0.1.61 (/home/me/.local/share/sandbox-ai/versions/0.1.61)",
                      "ok    User namespaces           available",
                      "ok    systemd user session      /run/user/1000/bus",
                      "ok    Connection proxy          nftables NAT available",
@@ -568,8 +571,8 @@ CHAPTERS = [
                  ]},
              ],
              "captions": [
-                 T("doctor checks every requirement: rootless Podman, pasta, user namespaces, the proxy's kernel modules, images and logins.",
-                   "doctor prüft jede Voraussetzung: rootless Podman, pasta, User-Namespaces, die Kernelmodule des Proxys, Images und Logins."),
+                 T("doctor first names its own version and where it is installed, then checks every requirement: rootless Podman, pasta, user namespaces, the proxy's kernel modules, images and logins.",
+                   "doctor nennt zuerst seine eigene Version und wo es installiert ist, dann prüft er jede Voraussetzung: rootless Podman, pasta, User-Namespaces, die Kernelmodule des Proxys, Images und Logins."),
                  T("Each problem comes with the command that fixes it. Run it as your ordinary user, never with sudo.",
                    "Zu jedem Problem nennt er den Befehl, der es behebt. Führen Sie ihn als normaler Benutzer aus, nie mit sudo."),
              ]},
@@ -610,28 +613,29 @@ CHAPTERS = [
             {"kind": "terminal", "heading": T("Start an agent", "Einen Agenten starten"),
              "steps": [
                  {"cmd": "sandbox-ai claude -w ~/src/shop", "example": True, "out": [
+                     "agent-sandbox: /work is /home/me/src/shop; configuration: none",
                      "agent-sandbox: auth copied: /home/me/.claude/.credentials.json -> /root/.claude/.credentials.json",
                      "agent-sandbox: Claude access token valid for 7.4 h",
-                     "agent-sandbox: claude-shop-3f9a is running. Detach: Ctrl-b d (or close the terminal). "
-                     "Re-attach: sandbox-ai attach claude-shop-3f9a",
+                     "agent-sandbox: brisk-otter-lantern is running. Detach: Ctrl-b d (or close the terminal). "
+                     "Re-attach: sandbox-ai attach brisk-otter-lantern",
                  ]},
                  {"comment": T("inside: window 'agent' runs Claude, window 'shell' is bash (Ctrl-b n)",
                                "darin: Fenster 'agent' mit Claude, Fenster 'shell' mit bash (Ctrl-b n)"),
-                  "cmd": "sandbox-ai attach claude-shop-3f9a"},
+                  "cmd": "sandbox-ai attach brisk-otter-lantern"},
              ],
              "captions": [
-                 T("Inside, the project is /work. An interactive start runs in tmux: the window agent and a shell window in the same sandbox.",
-                   "Drinnen ist das Projekt /work. Ein interaktiver Start läuft in tmux: das Fenster agent und ein Shell-Fenster in derselben Sandbox."),
+                 T("Inside, the project is /work: the folder -w names, or without -w the one you start in. An interactive start runs in tmux: the window agent and a shell window in the same sandbox.",
+                   "Drinnen ist das Projekt /work: der Ordner, den -w nennt, oder ohne -w der, in dem Sie starten. Ein interaktiver Start läuft in tmux: das Fenster agent und ein Shell-Fenster in derselben Sandbox."),
                  T("Ctrl-b d or closing the terminal detaches; the agent works on, and attach brings you back.",
                    "Ctrl-b d oder das Schließen des Terminals löst; der Agent arbeitet weiter, und attach holt Sie zurück."),
              ]},
             {"kind": "terminal", "heading": T("Every start has a name", "Jeder Start hat einen Namen"),
              "steps": [
                  {"cmd": "sandbox-ai list", "example": True, "out": [
-                     "NAME              KIND     AGENT   STATE    HOME  STARTED (UTC)     WORKSPACE",
-                     "claude-shop-3f9a  session  claude  running  kept  2026-11-07 09:12  /home/me/src/shop",
+                     "NAME                 KIND     AGENT   STATE    HOME  STARTED (UTC)     WORKSPACE",
+                     "brisk-otter-lantern  session  claude  running  kept  2026-11-07 09:12  /home/me/src/shop",
                  ]},
-                 {"cmd": "sandbox-ai rename claude-shop-3f9a shop"},
+                 {"cmd": "sandbox-ai rename brisk-otter-lantern shop"},
                  {"cmd": "sandbox-ai pause shop"},
                  {"cmd": "sandbox-ai resume shop"},
                  {"cmd": "sandbox-ai stop shop"},
@@ -641,8 +645,8 @@ CHAPTERS = [
                  {"cmd": "sandbox-ai list --history shop"},
              ],
              "captions": [
-                 T("A start is named AGENT-PROJECT-xxxx, or what you choose with --name. Every command takes the name.",
-                   "Ein Start heißt AGENT-PROJEKT-xxxx, oder wie Sie ihn mit --name nennen. Jeder Befehl nimmt den Namen."),
+                 T("A start without --name gets a codename such as brisk-otter-lantern; rename gives it another. Every command takes the name.",
+                   "Ein Start ohne --name bekommt einen Codenamen wie brisk-otter-lantern; rename gibt ihm einen anderen. Jeder Befehl nimmt den Namen."),
                  T("pause freezes every process; stop ends the sandbox but keeps HOME, options and logs, so resume can bring it back later.",
                    "pause friert alle Prozesse ein; stop beendet die Sandbox, behält aber HOME, Optionen und Logs, damit resume sie später zurückholt."),
              ]},
@@ -738,9 +742,10 @@ CHAPTERS = [
             {"kind": "terminal", "heading": T("Answering questions", "Rückfragen beantworten"),
              "steps": [
                  {"cmd": "sandbox-ai approvals list", "example": True, "out": [
-                     "ID               RUN               QUESTION",
-                     "1762506000-41-1  claude-shop-3f9a  connect to 203.0.113.9:443 (tls), named api.example.com by the agent "
-                     "(not verified); asked by curl (pid 7, /usr/bin/curl)",
+                     "ID               SANDBOX                                  QUESTION",
+                     "1762506000-41-1  claude-3f9a2b1c (~/src/shop, name shop)  connect to 203.0.113.9:443 (tls), named "
+                     "api.example.com by the agent (not verified); asked by curl (pid 7, /usr/bin/curl)",
+                     "answer: sandbox-ai approvals allow|deny ID [--scope once|run|always]",
                  ]},
                  {"cmd": "sandbox-ai approvals allow 1762506000-41-1 --scope run"},
                  {"cmd": "sandbox-ai approvals history"},
@@ -863,8 +868,8 @@ CHAPTERS = [
         "scenes": [
             {"kind": "diagram", "diagram": "mounts", "heading": T("What appears where", "Was wo erscheint"),
              "captions": [
-                 T("The first workspace is always /work; further ones appear at /workspaces/NAME. Extra mounts go under /work, /mnt or /opt, read-only or writable.",
-                   "Der erste Workspace ist immer /work; weitere erscheinen unter /workspaces/NAME. Zusätzliche Mounts liegen unter /work, /mnt oder /opt, schreibgeschützt oder beschreibbar."),
+                 T("The first workspace, or the directory you start in, is /work; further ones appear at /workspaces/NAME. Extra mounts go under /work, /mnt or /opt, read-only or writable.",
+                   "Der erste Workspace, oder das Verzeichnis, in dem Sie starten, ist /work; weitere erscheinen unter /workspaces/NAME. Zusätzliche Mounts liegen unter /work, /mnt oder /opt, schreibgeschützt oder beschreibbar."),
                  T("Your HOME, ~/.ssh, ~/.config, folders on your PATH and sandbox-ai itself are refused as workspaces.",
                    "Ihr HOME, ~/.ssh, ~/.config, Ordner im PATH und sandbox-ai selbst werden als Workspace abgelehnt."),
              ]},
@@ -879,6 +884,9 @@ CHAPTERS = [
              ]},
             {"kind": "terminal", "heading": T("Add a folder to a start", "Einem Start einen Ordner hinzufügen"),
              "steps": [
+                 {"comment": T("while it runs, without a restart: at /workspaces/lib",
+                               "im Lauf, ohne Neustart: unter /workspaces/lib"),
+                  "cmd": "sandbox-ai workspace add shop ~/src/lib --name lib"},
                  {"comment": T("stopped and started again with /workspaces/lib, kept for later starts",
                                "beendet und neu gestartet mit /workspaces/lib, für spätere Starts behalten"),
                   "cmd": "sandbox-ai resume shop --restart --workspace ~/src/lib"},
@@ -887,6 +895,8 @@ CHAPTERS = [
                   "cmd": "sandbox-ai limits shop --memory 16g --cpus 4"},
              ],
              "captions": [
+                 T("workspace add mounts a folder or a file into a running start, with the checks of a start; for a stopped one it waits for the next start.",
+                   "workspace add hängt einen Ordner oder eine Datei in einen laufenden Start ein, mit den Prüfungen eines Starts; bei einem beendeten wartet es auf den nächsten Start."),
                  T("resume NAME --restart --workspace DIR stops a running start and brings it back with the folder added; the agent continues its conversation.",
                    "resume NAME --restart --workspace DIR beendet einen laufenden Start und holt ihn mit dem zusätzlichen Ordner zurück; der Agent setzt sein Gespräch fort."),
              ]},
@@ -981,10 +991,13 @@ CHAPTERS = [
                  {"cmd": "sandbox-ai kits new-skill review lint-fix --description \"Fixes lint errors; use after edits\"", "live": True},
                  {"cmd": "sandbox-ai kits show review", "live": True, "head": 4},
                  {"cmd": "sandbox-ai claude --kit review"},
+                 {"comment": T("every marketplace and its plugins: sandbox-ai's, the kits', Claude's, Codex's",
+                               "jeder Marktplatz und seine Plugins: die von sandbox-ai, der Kits, von Claude, von Codex"),
+                  "cmd": "sandbox-ai plugins marketplaces"},
              ],
              "captions": [
-                 T("sandbox-ai kits creates kits, copies or writes skills and declares plugins, without editing files by hand.",
-                   "sandbox-ai kits legt Kits an, kopiert oder schreibt Skills und deklariert Plugins, ohne Dateien von Hand zu bearbeiten."),
+                 T("sandbox-ai kits creates kits, copies or writes skills and declares plugins, without editing files by hand; plugins marketplaces shows what each marketplace offers.",
+                   "sandbox-ai kits legt Kits an, kopiert oder schreibt Skills und deklariert Plugins, ohne Dateien von Hand zu bearbeiten; plugins marketplaces zeigt, was jeder Marktplatz anbietet."),
              ]},
             {"kind": "bullets", "heading": T("Hooks run only after your review", "Hooks laufen erst nach Ihrer Prüfung"),
              "bullets": [
@@ -1032,6 +1045,8 @@ CHAPTERS = [
                   "cmd": "sandbox-ai claude --mcp demo"},
                  {"comment": T("from a catalog, pulled by digest", "aus einem Katalog, per Digest geladen"),
                   "cmd": "sandbox-ai mcp add duckduckgo --network full"},
+                 {"comment": T("into a running start, without a restart", "in einen laufenden Start, ohne Neustart"),
+                  "cmd": "sandbox-ai mcp attach demo shop --live"},
                  {"cmd": "sandbox-ai mcp stop demo"},
              ],
              "captions": [
@@ -1064,6 +1079,8 @@ CHAPTERS = [
              "steps": [
                  {"cmd": "sandbox-ai llm add gpu --kind ollama --url http://192.168.1.20:11434", "live": True},
                  {"cmd": "sandbox-ai llm check gpu --agent claude"},
+                 {"comment": T("what it has loaded, with sizes and memory", "was er geladen hat, mit Größen und Speicher"),
+                  "cmd": "sandbox-ai llm status gpu"},
                  {"cmd": "sandbox-ai claude --llm gpu:qwen2.5-coder:14b --no-provider-defaults --dry-run", "live": True,
                   "pick": ["llm.name", "llm.api", "llm.opens", "llm.placeholder", "https_hosts", "allow_tcp"]},
              ],
@@ -1168,9 +1185,12 @@ CHAPTERS = [
              ]},
             {"kind": "app", "page": "board", "heading": T("The board: one sandbox as a graph", "Die Tafel: eine Sandbox als Graph"),
              "bullets": [
-                 T("Agent, workspaces, proxy, network, MCP, VPN, limits as nodes", "Agent, Workspaces, Proxy, Netz, MCP, VPN, Limits als Knoten"),
-                 T("A security score and the launcher's own verdict", "Ein Sicherheitswert und das Urteil des Starters"),
-                 T("New from preset, Wizard, Apply writes `.sandbox-ai.json`", "Neu aus Vorlage, Assistent; Übernehmen schreibt `.sandbox-ai.json`"),
+                 T("Agent, workspaces, proxy, network, MCP, VPN, limits as parts, dragged from the list beside it",
+                   "Agent, Workspaces, Proxy, Netz, MCP, VPN, Limits als Teile, aus der Liste daneben gezogen"),
+                 T("Right-click a part: Properties, Cut, Copy, Paste", "Rechtsklick auf ein Teil: Eigenschaften, Ausschneiden, Kopieren, Einfügen"),
+                 T("Panels for the properties and for the security score with its findings: docked, undocked or folded",
+                   "Bereiche für die Eigenschaften und für den Sicherheitswert mit seinen Befunden: angedockt, abgedockt oder eingeklappt"),
+                 T("New from preset…, Wizard…; Apply… writes `.sandbox-ai.json`", "Neu aus Vorlage…, Assistent…; Übernehmen… schreibt `.sandbox-ai.json`"),
              ],
              "captions": [
                  T("The board shows one sandbox as a node graph. Problems, badges and a security score follow every change.",
@@ -1201,6 +1221,20 @@ CHAPTERS = [
                    "Die Seite Freigaben zeigt die offenen Fragen jeder laufenden Sandbox, mit Lauf, Anliegen und Countdown bis zur Ablehnung."),
                  T("It keeps answering from the system tray while the window is closed.",
                    "Sie antwortet weiter aus dem Infobereich, während das Fenster geschlossen ist."),
+             ]},
+            {"kind": "app", "page": "kits", "heading": T("Kits & plugins and the marketplaces", "Kits & Plugins und die Marktplätze"),
+             "bullets": [
+                 T("Every kit with what it brings per agent; new kits, skills, plugins and hooks",
+                   "Jedes Kit mit dem, was es je Agent mitbringt; neue Kits, Skills, Plugins und Hooks"),
+                 T("Marketplaces: sandbox-ai's, the kits', Claude's and Codex's, each plugin with its state",
+                   "Marktplätze: die von sandbox-ai, der Kits, von Claude und von Codex, jedes Plugin mit seinem Zustand"),
+                 T("Add, enable or disable a plugin in a kit, asked first", "Ein Plugin in einem Kit hinzufügen, einschalten oder ausschalten, nach Rückfrage"),
+             ],
+             "captions": [
+                 T("Kits and plugins shows every kit and, on its Marketplaces tab, every marketplace this machine knows, with its plugins.",
+                   "Kits & Plugins zeigt jedes Kit und auf dem Reiter Marktplätze jeden Marktplatz, den dieser Rechner kennt, mit seinen Plugins."),
+                 T("Each change runs sandbox-ai kits for the kit you chose; the app does nothing the command line cannot.",
+                   "Jede Änderung führt sandbox-ai kits für das gewählte Kit aus; die App kann nichts, was die Kommandozeile nicht kann."),
              ]},
             {"kind": "terminal", "heading": T("The web interface", "Die Weboberfläche"),
              "steps": [

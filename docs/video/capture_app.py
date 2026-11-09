@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Screenshots of the desktop app's pages for the learning video, rendered offscreen.
 
-    python3 docs/video/capture_app.py --app ~/src/sandbox-ai-app --out DIR/app-shots [--lang en|de|both]
+    python3 docs/video/capture_app.py --app projects/sandbox-ai-app --out DIR/app-shots [--lang en|de|both]
 
-Needs PySide6 (any Python that can `import PySide6`) and a checkout of sandbox-ai-app. The app runs with
+Needs PySide6 (any Python that can `import PySide6`) and the app (projects/sandbox-ai-app). The app runs with
 QT_QPA_PLATFORM=offscreen in a throwaway HOME and XDG folders (nothing of yours is read or changed), in its
 default dark theme, against this checkout's sandbox-ai. A staged demo project (~/src/shop) and a staged run
 with two open questions fill the Board, the Sandboxes page and the Approvals page; the video marks these
@@ -23,7 +23,7 @@ import time
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 PAGES = ["launch", "board", "sandboxes", "approvals", "terminals", "connections", "activity", "statistics", "files",
-         "kits", "mcp", "images", "credentials", "system", "hosts"]
+         "kits", "mcp", "llm", "images", "credentials", "team", "system", "hosts", "help"]
 
 
 def stage(root, home=None):
@@ -102,7 +102,7 @@ def capture(app_dir, out, lang, size):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--app", required=True, help="a checkout of sandbox-ai-app")
+    parser.add_argument("--app", required=True, help="the app: projects/sandbox-ai-app of this checkout")
     parser.add_argument("--out", required=True, help="folder for the PNG files (created)")
     parser.add_argument("--lang", choices=["en", "de", "both"], default="both")
     parser.add_argument("--size", default="1600x900", help="window size (default 1600x900)")

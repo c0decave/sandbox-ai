@@ -51,6 +51,16 @@ how to install and start (install.sh, AppImage, the macOS app, PyPI, the `.pyz`)
 and how to check the files. What is new comes from `docs/releases/vX.Y.Z.md`; write it before you tag (a list of
 the changes users notice). `python3 scripts/release_notes.py` shows the page.
 
+## Documentation, the learning video and the screenshots
+
+Before the tag, `python3 -m pytest -q tests` also checks the documentation that can drift: the commands the
+learning video's storyboard shows exist (`tests/test_video_storyboard.py`), the release notes name real commands
+(`tests/test_release_notes.py`), and lines the READMEs must keep. Update both READMEs (English and German, section by
+section) and the quickstarts with the release's changes, and refresh `docs/screenshots/` when a page they show
+changed (`docs/video/capture_app.py`; see [docs/video/README.md](docs/video/README.md)). The video itself is not
+kept in Git: after the tag, render it with the release's checkout (`docs/video/make_video.py --out DIR`) and
+attach the MP4 and VTT files to the release.
+
 ## The ready-made packages
 
 | File | Built by | Where |

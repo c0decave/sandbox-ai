@@ -2,7 +2,7 @@
 
 [Deutsch](#deutsch) below.
 
-A course of about eighteen minutes in fourteen chapters, from "what is it and why" to agent teams, rendered from
+A course of about nineteen minutes in fourteen chapters, from "what is it and why" to agent teams, rendered from
 the storyboard in this folder: an English and a German video, each with WebVTT subtitles and a chapter track.
 The rendered files are not kept in Git; render them as below, or take them from a release.
 
@@ -69,11 +69,16 @@ memory in all; `--size 1280x720` or `--lang en` is much quicker.
 - **Diagrams** are drawn from the boxes and arrows in `DIAGRAMS`.
 - **Sound.** The video has no narration audio: the narration is on screen (and in the `.vtt` files).
 
-App screenshots, before the render (any Python with PySide6, a checkout of sandbox-ai-app):
+App screenshots, before the render (any Python with PySide6; the app is `projects/sandbox-ai-app` of this
+checkout):
 
 ```bash
-python3 docs/video/capture_app.py --app ~/src/sandbox-ai-app --out ~/video-out/app-shots
+python3 docs/video/capture_app.py --app projects/sandbox-ai-app --out ~/video-out/app-shots
 ```
+
+The README's screenshots in `docs/screenshots/` are these pages in English, staged under `/home/me`
+(`--lang en --home /home/me`, then `PAGE-en.png` renamed to `PAGE.png`); `help.png`, `notifications.png` and
+`web.png` are taken by hand. Refresh them before a release when a page they show has changed.
 
 ## Update it when sandbox-ai changes
 
@@ -97,7 +102,7 @@ storyboard.
 
 ## Deutsch
 
-Ein Kurs von etwa achtzehn Minuten in vierzehn Kapiteln, von „was ist das und warum“ bis zu Agenten-Teams,
+Ein Kurs von etwa neunzehn Minuten in vierzehn Kapiteln, von „was ist das und warum“ bis zu Agenten-Teams,
 erzeugt aus dem Storyboard in diesem Ordner: ein englisches und ein deutsches Video, jeweils mit
 WebVTT-Untertiteln und einer Kapitelspur. Die fertigen Dateien liegen nicht in Git.
 
@@ -122,7 +127,10 @@ Checkouts in einem Wegwerf-HOME aus (angezeigt als `/home/me`; nichts von Ihnen 
 tragen das Abzeichen *echte Ausgabe*. Was ohne eingerichteten Host nicht läuft (eine Agenten-Session, `doctor`
 mit Podman, der Wizard, eine offene Rückfrage), steht als *Beispielausgabe* im Storyboard und ist im Bild so
 markiert. Die App-Szenen zeigen echte Screenshots aus `capture_app.py` (mit gestellten Demodaten), sonst ein
-Schema der Seite. Das Video hat keinen Sprecher-Ton: Die Erzählung steht im Bild und in den `.vtt`-Dateien.
+Schema der Seite (`python3 docs/video/capture_app.py --app projects/sandbox-ai-app --out ~/video-out/app-shots`;
+die Screenshots der README in `docs/screenshots/` sind dieselben Seiten auf Englisch, mit `--lang en --home
+/home/me`, `PAGE-en.png` umbenannt in `PAGE.png`; `help.png`, `notifications.png` und `web.png` entstehen von
+Hand). Das Video hat keinen Sprecher-Ton: Die Erzählung steht im Bild und in den `.vtt`-Dateien.
 
 **Aktualisieren.** Texte in `storyboard.py` ändern (jeder Text ist `T("English", "Deutsch")`), dann
 `python3 -m pytest tests/test_video_storyboard.py`: Der Test schlägt fehl, wenn ein gezeigter Befehl oder eine
