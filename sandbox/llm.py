@@ -23,6 +23,7 @@ Standard library only.
 """
 import argparse
 import contextlib
+import http.client
 import importlib.util
 import ipaddress
 import json
@@ -410,8 +411,32 @@ def tls_context(endpoint):
     return context
 
 
+class PinnedHTTPConnection(http.client.HTTPConnection):
+    """A plain http connection to ADDRESS, the address checked (plain_http_problem) for the URL's host name: not one
+    the name resolves to a moment later."""
+
+    def __init__(self, host, address=None, **kwargs):
+        super().__init__(host, **kwargs)
+        self.pinned = address
+
+    def connect(self):
+        self.sock = socket.create_connection((self.pinned, self.port), self.timeout, self.source_address)
+
+
+class PinnedHTTPHandler(urllib.request.HTTPHandler):
+    def __init__(self, address):
+        super().__init__()
+        self.address = address
+
+    def http_open(self, req):
+        return self.do_open(lambda host, **kwargs: PinnedHTTPConnection(host, address=self.address, **kwargs), req)
+
+
 class Client:
-    """Requests to one endpoint from the host, with its key and headers, its CA, no proxy, no redirects."""
+    """Requests to one endpoint from the host, with its key and headers, its CA, no proxy, no redirects. A key or
+    header secret goes over plain http only where `llm add` accepts it: the host's loopback and local addresses, or an
+    endpoint added with --insecure-http. The name is resolved and checked for every request, and the request goes to
+    the address checked."""
 
     def __init__(self, endpoint, get=None, timeout=TIMEOUT, opener=None):
         self.endpoint, self.timeout = endpoint, timeout
@@ -420,20 +445,42 @@ class Client:
         if key:
             self.headers["Authorization"] = f"Bearer {key}"
         self.headers.update(dict(headers))
-        context = tls_context(endpoint) if endpoint["parsed"]["scheme"] == "https" else None
+        parsed = endpoint["parsed"]
+        self.pinned = bool(key or headers) and parsed["scheme"] == "http" and not parsed["loopback"] \
+            and not endpoint.get("insecure_http")
+        context = tls_context(endpoint) if parsed["scheme"] == "https" else None
+        self.given = opener
         # A remote server must not be reached through the host's HTTP proxy variables.
         self.opener = opener or urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect(),
                                                             urllib.request.HTTPSHandler(context=context))
 
+    def checked_opener(self, resolver=None):
+        """The opener for a request: for a keyed plain http one, after the host's addresses were checked now, one that
+        connects to the address checked; ValueError where the key would cross networks unencrypted."""
+        if not self.pinned:
+            return self.opener
+        parsed = self.endpoint["parsed"]
+        try:
+            addresses = [parsed["address"]] if parsed["address"] else (resolver or resolve)(parsed["host"],
+                                                                                             parsed["port"])
+        except OSError as exc:
+            raise ValueError(f"{parsed['host']} does not resolve: {printable(exc)}") from None
+        problem = plain_http_problem(parsed, addresses)
+        if problem or not addresses:
+            raise ValueError(f"{problem or 'no address'} (the API key would go with it; nothing was sent)")
+        return self.given or urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect(),
+                                                         PinnedHTTPHandler(addresses[0]))
+
     def call(self, path, body=None):
         """(status, bytes) of GET PATH (POST with BODY, a dict) below the endpoint's root; OSError when there is no
-        answer at all."""
+        answer at all; ValueError for a key that would go over plain http to a public address."""
         data = None if body is None else json.dumps(body).encode()
         headers = dict(self.headers, **({"Content-Type": "application/json"} if data is not None else {}))
         request = urllib.request.Request(self.endpoint["url"] + path, data=data, headers=headers,
                                          method="GET" if data is None else "POST")
+        opener = self.checked_opener()
         try:
-            with self.opener.open(request, timeout=self.timeout) as response:
+            with opener.open(request, timeout=self.timeout) as response:
                 return response.status, response.read(RESPONSE_LIMIT + 1)[:RESPONSE_LIMIT]
         except urllib.error.HTTPError as exc:
             with exc:
@@ -642,7 +689,7 @@ def discover_url(kind, url, get=None, client=None, ca=None, api_key_secret=None,
         check_ca(text, ca)
     endpoint = {"name": "test", "kind": kind, "url": parsed["url"], "parsed": parsed,
                 "api_key_secret": api_key_secret, "headers": {}, "ca": None, "ca_text": text, "vpn": None,
-                "model": None, "anthropic": False, "insecure_http": False}
+                "model": None, "anthropic": False, "insecure_http": bool(insecure_http)}
     return discover(kind, (client or Client(endpoint, get)).json)
 
 
@@ -1084,7 +1131,9 @@ def check(endpoint, agent=None, model=None, get=None, out=print, connect=socket.
     if parsed["scheme"] == "http":
         problem = plain_http_problem(parsed, addresses)
         if problem and not endpoint.get("insecure_http"):
-            line(False, problem)
+            line(False, problem + ("; the key is not sent" if endpoint.get("api_key_secret") or endpoint.get("headers")
+                                   else ""))
+            return False
         elif problem:
             line(None, "WARNING: plain http to a public address (--insecure-http): prompts, code and the key "
                        "cross the network unencrypted")

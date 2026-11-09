@@ -631,6 +631,59 @@ def test_test_connection_sends_no_key_over_plain_http_to_a_public_address(monkey
         llm.discover_url("ollama", "https://gpu.example.org", api_key_secret="K", insecure_http=True)
 
 
+def test_review6_check_and_models_send_no_key_over_plain_http_to_a_public_address(monkeypatch):
+    """Review 6, L-4 (PoC llm_check_plain_http.py): `llm check` said FAIL for a registered http endpoint whose name now
+    resolves to a public address, then sent the key anyway; `llm models` (the web, the app, the wizard) never looked.
+    Every keyed plain http request is checked when it is made, and goes to the address checked."""
+    seen, connected = [], []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append((self.headers.get("Host"), self.headers.get("Authorization")))
+            body = b'{"models": [{"name": "m1"}]}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        secret("GPU_KEY", KEY)
+        parsed = llm.parse_url(f"http://gpu-box.lan:{server.server_port}")
+        endpoint = {"name": "gpu", "kind": "ollama", "url": parsed["url"], "parsed": parsed, "api_key_secret": "GPU_KEY",
+                    "headers": {}, "ca": None, "vpn": None, "model": None, "anthropic": False, "insecure_http": False,
+                    "models": [], "checked": None}
+        monkeypatch.setattr(llm, "remember_models", lambda *a: None)
+        monkeypatch.setattr(llm, "resolve", lambda host, port: ["93.184.216.34"])  # another network's DNS answers
+        with pytest.raises(ValueError, match="cross networks you do not control.*nothing was sent"):
+            llm.endpoint_models(endpoint)
+        lines = []
+        assert llm.check(endpoint, out=lines.append, connect=lambda *a, **k: pytest.fail("connected")) is False
+        assert any("FAIL" in line and "the key is not sent" in line for line in lines)
+        assert seen == []
+        # A local address: the key goes, to the address that was checked (the name is not resolved again).
+        real = llm.socket.create_connection
+
+        def to_test_server(address, *args, **kwargs):
+            connected.append(address)
+            return real(("127.0.0.1", address[1]), *args, **kwargs)
+        monkeypatch.setattr(llm, "resolve", lambda host, port: ["10.0.0.5"])
+        monkeypatch.setattr(llm.socket, "create_connection", to_test_server)
+        assert [m["name"] for m in llm.endpoint_models(endpoint)] == ["m1"]
+        assert connected and set(connected) == {("10.0.0.5", server.server_port)}
+        assert seen and set(seen) == {(f"gpu-box.lan:{server.server_port}", f"Bearer {KEY}")}
+        # Added with --insecure-http: the user accepted it.
+        monkeypatch.setattr(llm, "resolve", lambda host, port: ["93.184.216.34"])
+        client = llm.Client({**endpoint, "insecure_http": True})
+        assert client.checked_opener() is client.opener
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 @pytest.mark.skipif(not shutil.which("openssl"), reason="needs openssl")
 def test_replace_keeps_the_ca_unless_no_ca_is_given(tmp_path):
     """A front end can only send the CA's file once: --replace without --ca keeps the stored copy, --no-ca drops it."""
