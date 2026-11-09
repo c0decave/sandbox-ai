@@ -359,7 +359,13 @@ class WebPanel(QWidget):
                                     self.vendor)
         self.serve_button = button(tr("Run the service…"), tr("sandbox-ai web serve in a terminal tab: it runs as "
                                                              "long as that terminal does"), self.serve)
-        layout.addWidget(flow(self.cert_button, self.renew_button, self.vendor_button, self.serve_button))
+        # the address to open, once the service runs (through an SSH tunnel for another host's loopback)
+        self.open_button = button(tr("Open in the browser"), tr("The web interface's address in your browser"),
+                                  self.open_service)
+        self.open_button.setVisible(False)
+        self.service_url = None
+        layout.addWidget(flow(self.cert_button, self.renew_button, self.vendor_button, self.serve_button,
+                              self.open_button))
         self.status = plain_label(role="secondary")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
@@ -374,7 +380,7 @@ class WebPanel(QWidget):
             self.host, self.loaded_for = name, None
             self.users.setRowCount(0)
             self.cert.setText("")
-            self.status.setText("")
+            self.show_service(None, "")  # the address of the host chosen before is not this one's
         for widget in (self.refresh_button, self.add_button, self.cert_button, self.renew_button, self.vendor_button,
                        self.serve_button):
             widget.setEnabled(name is not None)
@@ -511,12 +517,55 @@ class WebPanel(QWidget):
             warn(self, title, str(exc))
             return
         beyond = backend.web_listen_beyond(listen or backend.WEB_LISTEN)
+        # asked only beyond the loopback (on the loopback only that host itself reaches it: nothing to ask)
         if not ask_first(self, "web-listen", title, on_host(host, tr(
                 "Run the web interface on {listen}? Other machines that reach that address can open its login page "
                 "(a password and a TOTP code are still asked).", listen=printable(listen or backend.WEB_LISTEN))), title,
                 detail={"beyond": beyond}):
             return
         self.terminal(lambda: self.sai.host_web_argv(host, "serve", listen=listen), tr("web serve"))
+        self.say_where(host, listen or backend.WEB_LISTEN, beyond)
+
+    def say_where(self, host, listen, beyond):
+        """Where the service just started can be opened, and what it takes: another host's loopback through an SSH
+        tunnel the app starts in a terminal tab of its own (review 6 N4: the URL the service prints is that host's
+        localhost, which in this machine's browser is this machine)."""
+        fingerprint = tr("Compare the certificate's fingerprint (Show fingerprint) with what the browser shows.")
+        if host == "local" or beyond:
+            entry = {} if host == "local" else next(
+                (e for e in self.sai.host_entries() if isinstance(e, dict) and e.get("name") == host), {})
+            url = backend.web_service_url(entry.get("ssh"), listen, local=host == "local")
+            where = tr("Open {url} in a browser, as long as the terminal tab \"web serve\" runs.", url=url) \
+                if host == "local" else tr("It listens on {listen} of {host}: open {url} from a machine that reaches "
+                                           "that address, as long as the terminal tab \"web serve\" runs.",
+                                           listen=printable(listen), host=printable(host), url=url)
+            self.show_service(url, where + " " + fingerprint)
+            return
+        try:
+            argv, port = self.sai.host_web_tunnel_argv(host, listen)
+        except (OSError, ValueError) as exc:
+            self.show_service(None, tr("It listens on {listen} of {host}: only {host} itself reaches it. Forward it "
+                                       "with: ssh -N -L 8443:{listen} {host} - then open https://localhost:8443/. "
+                                       "(No tunnel from here: {error})", listen=printable(listen),
+                                       host=printable(host), error=printable(str(exc))))
+            return
+        self.terminal(lambda: argv, tr("web tunnel"))
+        url = f"https://localhost:{port}/"
+        self.show_service(url, tr("It listens on {listen} of {host}, which only {host} itself reaches: the terminal "
+                                  "tab \"web tunnel\" forwards it through SSH. Open {url} on this machine, as long as "
+                                  "both tabs (\"web serve\" and \"web tunnel\") run.", listen=printable(listen),
+                                  host=printable(host), url=url) + " " + fingerprint)
+
+    def show_service(self, url, text):
+        self.service_url = url
+        self.status.setText(text)
+        self.open_button.setVisible(url is not None)
+
+    def open_service(self):
+        if self.service_url:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(QUrl(self.service_url))
 
     def answered(self, title, result, error, again=False):
         status, out, err = result if error is None else (1, "", str(error))
@@ -717,6 +766,9 @@ class HostsPage(QWidget):
         self.defaults, self.defaults_host, self.defaults_token = None, None, 0
         self.set_defaults_enabled(False)
         self.load_hosts()
+        from .host_choice import follow_hosts
+        # changed elsewhere (sandbox-ai hosts, the web interface: the hosts file is watched): the list follows too
+        follow_hosts(self, lambda: self.load_hosts(select=self.host(), announce=False))
 
     # -- the list --
 
@@ -727,7 +779,7 @@ class HostsPage(QWidget):
     def entry(self, name):
         return next((e for e in self.entries if e.get("name") == name), {})
 
-    def load_hosts(self, select=None):
+    def load_hosts(self, select=None, announce=True):
         if not self.sai.hosts_supported():
             self.status.setText(tr("This sandbox-ai has no hosts yet: update it."))
             for widget in (self.add_button, self.remove_button, self.test_button, self.edit_button, self.tabs,
@@ -750,7 +802,7 @@ class HostsPage(QWidget):
             self.status.setText(printable(str(exc)))
             self.entries = []
         after = [(e.get("name"), e.get("ssh")) for e in self.entries if isinstance(e, dict)]
-        if getattr(self, "hosts_read", False) and after != before:
+        if announce and getattr(self, "hosts_read", False) and after != before:
             # Added, edited, renamed or removed (here or meanwhile): every host chooser of the app follows at once.
             from .host_choice import hosts_changed
             hosts_changed()
@@ -1214,10 +1266,13 @@ class HostsPage(QWidget):
             # sudo there wants a password: the host's update in a terminal tab, where sudo asks for it (this machine's
             # copy: its install, as the kind of installation the host has).
             try:
+                # the kind and prefix the update itself found there (hosts.update: "mode", "prefix"), as the web
+                # takes them; the cache only when it said none (review 6: no cache, a second copy in /usr/local)
                 info = (getattr(self, "versions", None) or {}).get(name) or {}
-                mode = "system" if result.get("kind") == "system" else "user"
-                argv = self.sai.host_install_terminal(name, mode, info.get("prefix") if mode == "system" else None,
-                                                      True, "here") if from_here else \
+                mode = result.get("mode") if result.get("mode") in ("system", "user") else \
+                    "system" if result.get("kind") == "system" else "user"
+                prefix = (result.get("prefix") or info.get("prefix")) if mode == "system" else None
+                argv = self.sai.host_install_terminal(name, mode, prefix, True, "here") if from_here else \
                     self.sai.host_update_terminal(name)
                 self.in_terminal(argv, tr("{host}: update", host=name))
                 self.updates.appendPlainText(printable(tr("  {host}: the update runs in a terminal tab, where sudo "

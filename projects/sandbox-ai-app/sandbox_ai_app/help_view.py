@@ -238,10 +238,14 @@ class Corner(QObject):
         self.place()
 
     def make_room(self):
+        """While the (?)s are shown, the header draws no title under its corner: its viewport ends HEADER_ROOM before
+        the table's (a title scrolled there is cut at that edge, never covered: review 6 L2, "Answ(?)" on a table
+        that scrolls sideways), and the last title keeps that room too (scrolled to the end)."""
         header = self.header
         if header is None or bool(header.property("helpRoom")) == _SHOWN[0]:
             return
         header.setProperty("helpRoom", _SHOWN[0])
+        header.setViewportMargins(0, 0, HEADER_ROOM if _SHOWN[0] else 0, 0)
         header.style().unpolish(header)
         header.style().polish(header)
         header.viewport().update()

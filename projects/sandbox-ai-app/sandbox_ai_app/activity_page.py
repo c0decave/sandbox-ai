@@ -347,8 +347,11 @@ class ActivityPage(QWidget):
         self.status.setAccessibleName(tr("Status"))
         bottom.addWidget(self.connections_button)
         bottom.addWidget(self.files_button)
-        bottom.addWidget(self.status, 1)
+        bottom.addStretch(1)
         layout.addLayout(bottom)
+        # the status on a row of its own: beside the buttons a wrapped status got no room for its second line (a
+        # window at its smallest, in German)
+        layout.addWidget(self.status)
         # The canary log (sandbox-ai canaries log): opened decoys and tokens that left, with who and what around it.
         from .canaries_view import CanariesView  # here: it uses this module's helpers
         self.canaries = CanariesView(sai)

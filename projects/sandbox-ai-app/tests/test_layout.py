@@ -124,6 +124,37 @@ def test_every_page_lets_the_window_shrink_back(qapp, env, monkeypatch, language
         theme.apply("system", qapp)
 
 
+@pytest.mark.parametrize("language", ["en", "de"])
+def test_leaving_the_board_does_not_widen_the_window(qapp, env, monkeypatch, language):  # noqa: F811
+    """Review 6 N1: the Board's panels were hidden only after the next page was shown, so for that moment they were
+    laid out beside its minimum and Qt widened the window for good (1277 px in English, 1381 px in German, from a
+    1000 px window): past a small laptop's screen."""
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    i18n.set_language(language)
+    try:
+        window = ui.MainWindow(backend.SandboxAI())
+        window.show()
+        qapp.processEvents()
+        start = max(1000, window.minimumSizeHint().width())
+        window.resize(start, 760)
+        qapp.processEvents()
+        window.show_page("board", raise_window=False)
+        qapp.processEvents()
+        window.resize(start, 760)
+        qapp.processEvents()
+        for key in ("sandboxes", "board", "hosts", "board", "system"):
+            window.show_page(key, raise_window=False)
+            qapp.processEvents()
+            if key != "board":
+                assert window.width() <= start + 2, f"{key} after the Board: {window.width()} px (was {start})"
+        window.shutdown()
+        window.close()
+        window.deleteLater()
+        qapp.processEvents()
+    finally:
+        i18n.set_language("en")
+
+
 def beyond_view(top):
     """Texts below TOP that reach past the right edge of the scroll area they are in (the tab scrolls sideways)."""
     found = []

@@ -54,8 +54,9 @@ AGENTS = backend.AGENTS
 NEW_KIT = "my-kit"  # the name proposed for a first kit of yours (a name, not a text)
 HOOK_EVENTS = ("PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop", "SessionStart")
 # What a kit change does to every later start with that kit (webui.KIT_WIDENS, KIT_NARROWS): widens it (asked first:
-# kit-add) or narrows it (asked first: kit-remove).
-WIDENS = ("add-skill", "new-skill", "add-plugin", "add-marketplace", "add-hook", "enable-plugin", "import-marketplace")
+# kit-add) or narrows it (asked first: kit-remove). A new skill is sandbox-ai's own template text, written as the web
+# writes it, without a question (review 6).
+WIDENS = ("add-skill", "add-plugin", "add-marketplace", "add-hook", "enable-plugin", "import-marketplace")
 NARROWS = ("remove-skill", "remove-plugin", "remove-hook", "disable-plugin", "remove-marketplace")
 # Where a marketplace was found (`plugins marketplaces --json` "origins"), as the web's Kits page says it.
 MARKET_ORIGINS = {"sandbox-ai": N_("sandbox-ai's own"), "kit": N_("a kit"), "store": N_("plugin store"),
@@ -200,21 +201,12 @@ class MarketplaceDialog(FormDialog):
                                                            "and says why."))
         self.name = QLineEdit()
         self.name.setPlaceholderText(tr("my-marketplace"))
+        # No folder: sandbox-ai kits refuses one for every marketplace but its own (review 6 N2)
         self.source = QLineEdit()
         self.source.setPlaceholderText(tr("OWNER/REPO or https://git.example.org/plugins.git"))
-        folder = QPushButton(tr("Folder…"))
-        folder.clicked.connect(self.choose_folder)
-        row = QHBoxLayout()
-        row.addWidget(self.source, 1)
-        row.addWidget(folder)
         self.form.addRow(tr("Name"), self.name)
-        self.form.addRow(tr("Source"), row)
+        self.form.addRow(tr("Source"), self.source)
         self.finish()
-
-    def choose_folder(self):
-        path = choose_folder(self, tr("Marketplace folder"), "marketplace")
-        if path:
-            self.source.setText(path)
 
 
 class HookDialog(FormDialog):
@@ -889,7 +881,12 @@ class KitsPage(QWidget):
         count = sum(1 for key in self.markets if key != OPENCODE)
         errors = [e for e in data.get("errors", []) if isinstance(e, dict)] if isinstance(data.get("errors"),
                                                                                            list) else []
-        self.market_status.setText(tr("{count} marketplaces on {host}", count=count, host=label))
+        # the table's OpenCode row is no marketplace: counted apart, so the count is the rows' (review 6)
+        said = tr("1 marketplace on {host}", host=label) if count == 1 else \
+            tr("{count} marketplaces on {host}", count=count, host=label)
+        if OPENCODE in self.markets:
+            said = tr("{marketplaces}, and OpenCode's npm plugins", marketplaces=said)
+        self.market_status.setText(said)
         lines = []
         for agent, info in sorted(agents.items()):
             for note in names(info.get("notes")) if isinstance(info, dict) else []:

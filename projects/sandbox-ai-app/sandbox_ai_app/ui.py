@@ -1773,6 +1773,9 @@ class LimitsDialog(QDialog):
 
 
 KIND_TITLES = {"run": N_("Run"), "session": N_("Session"), "mcp": N_("MCP server"), "unregistered": N_("Not registered")}
+# What asks a run's supervisor through its control socket (sandbox-ai net allow/revoke/show, workspace add/remove):
+# refused while the sandbox is paused.
+ASKS_SUPERVISOR = ("allow", "revoke", "allowed", "add-workspace", "remove-workspace")
 STATE_TITLES = {"running": N_("running"), "paused": N_("paused"), "stopped": N_("stopped"), "damaged": N_("damaged"),
                 "starting": N_("starting")}
 DEMO_PORT = 4000  # the emulated device's port unless --port says otherwise (sandbox-ai demo-device)
@@ -2764,8 +2767,11 @@ class SandboxesPage(QWidget):
                    tr("It has not registered with sandbox-ai (yet): starting, or started by an older sandbox-ai. "
                       "End it in its terminal.") if kind == "unregistered" else
                    tr("It does not run.") if not instance.run else None)
-        for button in self.run_buttons:
-            set_enabled(button, run_why is None, run_why)
+        for key, button in self.run_named.items():
+            # a paused sandbox's supervisor answers nothing: what asks it waits for the resume (sandbox-ai refuses)
+            why = run_why or (tr("It is paused: resume it first.") if state == "paused" and key in ASKS_SUPERVISOR
+                              else None)
+            set_enabled(button, why is None, why)
         self.update_mcp_buttons(instance, run_why)
         rules = {"attach": state == "running", "attach-app": state == "running", "pause": state == "running",
                  "resume": state in ("paused", "stopped"), "delete": state == "stopped"}
@@ -3374,7 +3380,8 @@ class SandboxesPage(QWidget):
         self.update_buttons()
         self.after_live_change(host)
         if error is not None:
-            warn(self, title, tr("Not removed: {reason}", reason=printable(error)[:1500]), modal=False)
+            reason = "\n".join(printable(line) for line in str(error).splitlines())  # its lines, not \x0a
+            warn(self, title, tr("Not removed: {reason}", reason=reason[:1500]), modal=False)
             return
         inform(self, title, "\n\n".join([result.get("message") or "", *result.get("notes", [])]).strip(),
                modal=False)
@@ -5618,6 +5625,11 @@ class MainWindow(QMainWindow):
         self.close_seen = False
         # What the window looked like when it was left (state.json); file dialogs remember their folders there.
         self.state = State(parent=self)
+        if sai.hosts_supported():
+            # hosts added, changed or removed outside the app (sandbox-ai hosts, the web interface): every host
+            # chooser follows, as for a change on the Hosts page (review 6 M-H2); a file watch, never a poll
+            from .host_choice import watch_hosts_file
+            watch_hosts_file(sai.hosts_file())
         self.setWindowTitle(f"sandbox-ai {sai.version()}")
         self.resize(1240, 840)
         central = QWidget()
@@ -6005,6 +6017,10 @@ class MainWindow(QMainWindow):
         key = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
         if key in self.nav_rows:
             applog.debug("page", key=key)
+            if hasattr(self, "docks"):
+                # the panels of the page left go first: shown beside the next page's minimum for that moment, they
+                # would widen the window for good (Qt grows it at once; review 6 N1, the Board's two panels)
+                self.put_away_docks(key)
             self.pages.setCurrentWidget(getattr(self, key))
             if hasattr(self, "docks"):
                 self.page_changed(key)
@@ -6680,6 +6696,13 @@ class MainWindow(QMainWindow):
             return False
         self.inspector_fold.fold()
         return True
+
+    def put_away_docks(self, key):
+        """Hide the docked (not floating) panels that are not of the page KEY, before it is shown."""
+        for name, _, dock_page, _ in DOCKS:
+            dock = self.docks[name]
+            if dock_page != key and not dock.isFloating() and not dock.isHidden():
+                dock.setVisible(False)
 
     def update_docks(self):
         page = self.current_page()

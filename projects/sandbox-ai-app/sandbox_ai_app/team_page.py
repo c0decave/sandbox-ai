@@ -294,8 +294,9 @@ class TeamPage(QWidget):
             return
         self.teams, self.teams_host = [t for t in result if valid_team(t.get("name"))], host
         before = self.chosen()
-        fill(self.table, [[t["name"], ", ".join(t["members"]), t["workspace"]] for t in self.teams],
-             keys=[t["name"] for t in self.teams])
+        fill(self.table, [[t["name"], tr("damaged: its record cannot be read") if t.get("damaged") else
+                           ", ".join(t["members"]), t["workspace"]] for t in self.teams],
+             keys=[t["name"] for t in self.teams], colors=["bad" if t.get("damaged") else None for t in self.teams])
         if before:
             for row in range(self.table.rowCount()):
                 if self.table.item(row, 0) and self.table.item(row, 0).text() == before:
@@ -324,8 +325,18 @@ class TeamPage(QWidget):
         fill(self.board, [])
         self.where.setText(tr("Select a team to see its members and its board."))
 
+    def damaged(self, name):
+        return any(t.get("name") == name and t.get("damaged") for t in self.teams)
+
     def show_team(self, name):
         host = self.host()
+        if self.damaged(name):  # nothing to show: only Delete… (team delete --yes finds its members by name)
+            self.show_token += 1
+            self.clear_details()
+            self.where.setText(tr("The record of team {name} is damaged: Delete… removes it with every member of its "
+                                  "name ({members}).", name=name, members=", ".join(member_name(name, a)
+                                                                                   for a in AGENTS)))
+            return
         self.show_token += 1
         token = self.show_token
         background(lambda: self.sai.team_show(host, name), owner=self, timeout=SHOW_SECONDS + 15,
@@ -365,6 +376,10 @@ class TeamPage(QWidget):
         why = tr("Select a team first.")
         for button in (self.attach_button, self.post_button, self.stop_button, self.delete_button):
             set_enabled(button, name is not None, why)
+        if name is not None and self.damaged(name):
+            for button in (self.attach_button, self.post_button, self.stop_button):
+                set_enabled(button, False, tr("Its record is damaged: only Delete… is left."))
+            return
         if name is not None and self.shown is not None and self.shown.get("name") == name:
             states = self.shown.get("states") if isinstance(self.shown.get("states"), dict) else {}
             lead = self.shown.get("lead")
@@ -434,9 +449,13 @@ class TeamPage(QWidget):
         name, host = self.chosen(), self.acting_host()
         if name is None or host is None:
             return
-        if not ask_first(self, "team-delete", tr("Delete…").rstrip("…"), tr(
-                "Delete team {name} on {host}? Its members are stopped, then their HOMEs and the board are removed "
-                "for good; the workspace stays.", name=name, host=self.hosts.label(host)), tr("Delete")):
+        question = tr("The record of team {name} on {host} is damaged. Delete it with every member of its name "
+                      "({members})? They are stopped, then their HOMEs and the board are removed for good; the "
+                      "workspace stays.", name=name, host=self.hosts.label(host),
+                      members=", ".join(member_name(name, a) for a in AGENTS)) if self.damaged(name) else tr(
+            "Delete team {name} on {host}? Its members are stopped, then their HOMEs and the board are removed "
+            "for good; the workspace stays.", name=name, host=self.hosts.label(host))
+        if not ask_first(self, "team-delete", tr("Delete…").rstrip("…"), question, tr("Delete")):
             return
         self.status.setText(tr("Deleting {name}…", name=name))
         background(lambda: self.sai.team_delete(host, name), owner=self, work=True, source=[self.stop_button,

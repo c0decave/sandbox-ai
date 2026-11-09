@@ -472,8 +472,10 @@ class SandboxAI:
         return self.module("sessions").rows()
 
     def session_ids(self):
-        """{name: id} of the named sessions: the id is the session's directory, which stays when it is renamed."""
+        """{name: id} of the named sessions: the id is the session's directory, which stays when it is renamed. The
+        MCP servers each one's options name are kept on the way (session_servers: one read of each session.json)."""
         sessions = self.module("sessions")
+        servers = self.__dict__["_session_servers"] = {}
         if not hasattr(sessions, "display") or not hasattr(sessions, "root"):
             return {}
         found, root = {}, sessions.root()
@@ -487,7 +489,14 @@ class SandboxAI:
                 continue
             if valid_run(directory.name):
                 found[sessions.display(directory.name, data)] = directory.name
+                if isinstance(data, dict):
+                    servers[directory.name] = mcp_option_names(data.get("options"))
         return found
+
+    def session_servers(self, ident):
+        """The MCP servers the options of session IDENT name (its later starts reach them), as session_ids last read
+        them: what a stopped or paused session offers to Remove MCP server… (review 6 A-N2)."""
+        return list(self.__dict__.get("_session_servers", {}).get(ident, []))
 
     def mcp_servers(self):
         """[(name, status, what)] of the defined MCP servers."""
@@ -1117,6 +1126,8 @@ class SandboxAI:
             record = runs.get(run, {}) if run else {}
             used.add(run)
             ident = ids.get(name, name)  # its directory: a renamed session keeps its row and its tab
+            if not run:  # not running: what it keeps for its later starts (start_tree.reached: "mcp")
+                record = {"mcp": self.session_servers(ident)}
             found.append(Instance("session", f"session:{ident}", name, run=run, session=name, project=workspace,
                                   agent=agent, backend=engine, started=record.get("started") or created, state=state,
                                   proxy=record.get("proxy") if run else None, pid=record.get("pid"), record=record,
@@ -1138,7 +1149,8 @@ class SandboxAI:
                                   session=session, mcp=name[4:] if kind == "mcp" else None,
                                   project=record.get("workspace", ""), agent=record.get("agent", ""),
                                   backend=record.get("backend", ""), started=record.get("started", ""),
-                                  state="running", proxy=record.get("proxy"), pid=record.get("pid"), record=record))
+                                  state=run_state(record), proxy=record.get("proxy"), pid=record.get("pid"),
+                                  record=record))
         known = {str(i.pid) for i in found if i.pid} | {str(state.get("pid")) for state in servers.values()}
         for pid, agent, argv, cwd in launcher_processes(self.agents, proc):
             if str(pid) in known:
@@ -1642,6 +1654,10 @@ class SandboxAI:
 
     def hosts_supported(self):
         return (self.directory / "hosts.py").is_file()
+
+    def hosts_file(self):
+        """Where sandbox-ai keeps its list of hosts (hosts.config_file: the same rule, without loading hosts.py)."""
+        return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "sandbox-ai" / "hosts.json"
 
     def host_entries(self):
         """[{"name", "kind", "ssh", "port", "description", ...}]: this machine ("local") first."""
@@ -2639,6 +2655,27 @@ class SandboxAI:
             return self.host_terminal(host, "web", "serve", *([f"--listen={listen}"] if listen else []))
         raise ValueError("not an action of sandbox-ai web")
 
+    def host_web_tunnel_argv(self, host, listen=None, local_port=None):
+        """(argv, local port) of an SSH tunnel to the web interface that listens on LISTEN (default WEB_LISTEN) of
+        HOST's loopback: `ssh -N -L 127.0.0.1:LOCAL:ADDRESS:PORT` with the host's own SSH settings (its key, port and
+        known hosts), for a terminal tab; https://localhost:LOCAL/ then reaches it from this machine, for as long as
+        that tab runs (review 6 N4: the service's own URL named the host's localhost, unreachable from here)."""
+        if host == "local":
+            raise ValueError("this machine's web interface needs no tunnel")
+        listen = listen or WEB_LISTEN
+        address, port = web_listen_address(listen), web_listen_port(listen)
+        hosts = self.module("hosts")
+        entry = hosts.load().get(host)
+        if entry is None:
+            raise ValueError(f"no host {printable(host)}")
+        base = list(hosts.ssh_base(entry, tty=False))
+        target = str(address) if not address.is_unspecified else "127.0.0.1"
+        target = f"[{target}]" if ":" in target else target
+        local_port = local_port or free_local_port(port)
+        cut = base.index("--")
+        return [*base[:cut], "-N", "-o", "ExitOnForwardFailure=yes", "-L", f"127.0.0.1:{local_port}:{target}:{port}",
+                *base[cut:]], local_port
+
     def host_project_show(self, host, path):
         """`sandbox-ai wizard trust --show --json -- PATH` on HOST: what trusting the project file PATH there would
         trust, nothing trusted - {"path", "digest", "document", "trusted", "trusted_digest", "problem"} as that host's
@@ -2761,9 +2798,12 @@ class SandboxAI:
     TEAM_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,19}")
     TEAM_LINE = re.compile(r"([a-z0-9][a-z0-9_-]{0,19})\s+((?:(?:claude|codex|opencode), )*(?:claude|codex|opencode))"
                            r"\s+(.*)")
+    # a team whose record is damaged: NAME  (damaged)  remove it with: sandbox-ai team delete NAME --yes
+    TEAM_DAMAGED_LINE = re.compile(r"([a-z0-9][a-z0-9_-]{0,19})\s+\(damaged\)(?:\s.*)?")
 
     def teams(self, host="local"):
-        """[{name, members, workspace}] of `sandbox-ai team list` on HOST (its lines read)."""
+        """[{name, members, workspace}] of `sandbox-ai team list` on HOST (its lines read); a team whose record is
+        damaged as {name, members: [], workspace: "", damaged: True}: shown, so that it can be deleted."""
         status, out, err = self.host_run(host, "team", "list", timeout=60)
         if status != 0:
             raise ValueError((err or out).strip()[-500:] or f"exit status {status}")
@@ -2772,6 +2812,10 @@ class SandboxAI:
             match = self.TEAM_LINE.fullmatch(line.strip())
             if match:
                 found.append({"name": match[1], "members": match[2].split(", "), "workspace": printable(match[3])})
+                continue
+            match = self.TEAM_DAMAGED_LINE.fullmatch(line.strip())
+            if match:
+                found.append({"name": match[1], "members": [], "workspace": "", "damaged": True})
         return found
 
     def team_show(self, host, name):
@@ -2839,6 +2883,7 @@ class SandboxAI:
             raise ValueError("not an agent")
         if name == "local":
             return {option for action in self.parser_actions() for option in action.option_strings}
+        self.host_version_known(name)  # (a worker: SSH is fine here) a host just added says its version first
         try:
             version = (self.host_statuses(cached=True).get(name) or {}).get("version")
         except Exception:  # noqa: BLE001 - an older sandbox-ai, or no list of hosts: asked every NET_OPTIONS_SECONDS
@@ -2873,17 +2918,40 @@ class SandboxAI:
                  if key[0] == name and (agent is None or key[1] == agent)]
         return set(max(found, key=lambda item: item[0])[1]) if found else None
 
+    def host_version_known(self, name):
+        """Ask host NAME for its sandbox-ai version (one short command through its shared SSH connection) when no
+        status of it is kept yet (hosts.ask_version); for a worker, never the window's thread."""
+        hosts = self.module("hosts")
+        if name != "local" and hasattr(hosts, "ask_version"):
+            try:
+                hosts.ask_version(name, command=lambda host, args, timeout: self.host_run(host, *args, timeout=timeout))
+            except Exception:  # noqa: BLE001 - an older or broken list of hosts: the version stays unknown
+                pass
+
+    def host_knows_as_given(self, name, agent=None):
+        """Host NAME's launcher takes --workspaces-as-given: its kept status names 0.1.78 or later (a small local
+        file, no SSH: hosts.knows_workspaces_as_given, as the web asks it), or its options read already list it.
+        The option is hidden from --help, so the version is what tells (review 6 A-N3)."""
+        hosts = self.module("hosts")
+        try:
+            if hasattr(hosts, "knows_workspaces_as_given") and hosts.knows_workspaces_as_given(name):
+                return True
+        except Exception:  # noqa: BLE001 - no list of hosts, a damaged status file: not known
+            pass
+        known = self.cached_launch_options(name, agent)
+        return bool(known and AS_GIVEN in known)
+
     def host_as_given(self, name, agent, argv):
         """ARGV for a start on host NAME with --workspaces-as-given when it names its workspace and that host's
-        launcher is known to take the option (its options read already: cached_launch_options): the workspace chosen
-        in the app is /work there too, never a project file in the SSH login's directory (sandbox-ai 0.1.78). An
-        older host, or one not read yet, gets ARGV as it is (its launcher has no such rule or would refuse it)."""
+        launcher is known to take the option (host_knows_as_given: its version, kept, or its options read): the
+        workspace chosen in the app is /work there too, never a project file in the SSH login's directory
+        (sandbox-ai 0.1.78). An older host, or one not known yet, gets ARGV as it is (its launcher has no such rule
+        or would refuse it)."""
         if name == "local":
             return self.as_given(argv)
         argv = list(argv)
         names_workspace = any(word == "--workspace" or word.startswith("--workspace=") for word in argv)
-        known = self.cached_launch_options(name, agent)
-        if names_workspace and known and AS_GIVEN in known and AS_GIVEN not in argv:
+        if names_workspace and AS_GIVEN not in argv and self.host_knows_as_given(name, agent):
             argv.append(AS_GIVEN)
         return argv
 
@@ -2891,6 +2959,7 @@ class SandboxAI:
         """(plan or None, message) of `sandbox-ai AGENT ARGV --dry-run` on host NAME (nothing starts there)."""
         if name == "local":
             return self.dry_run(agent, argv)
+        self.host_version_known(name)  # (a worker) a host just added: its version first, for host_as_given
         argv = self.host_as_given(name, agent, argv)
         return parse_dry_run(*self.host_run(name, agent, *argv, "--dry-run", timeout=90))
 
@@ -3020,9 +3089,15 @@ class SandboxAI:
                 data = None
         if not isinstance(data, dict):
             text = (err or out).strip()
+            if host != "local" and status == 2 and re.search(
+                    r"invalid choice|unrecognized arguments|the following arguments are required", text):
+                # an older sandbox-ai there (0.1.77 has no mcp detach): "update it", not its usage (review 6 W-F2)
+                raise HostTooOld(host, tuple(args[:2]), [o for o in args if o in ("--live", "--helper")] or
+                                 [args[1]])
             lines = [line[len("sandbox-mcp: "):] if line.startswith("sandbox-mcp: ") else line
                      for line in text.splitlines() if line.strip()]
-            raise ValueError(printable("\n".join(lines[-5:]))[-800:] or f"exit status {status}")
+            # each line on its own: a line break stays one (printable would write it as \x0a)
+            raise ValueError("\n".join(printable(line) for line in lines[-5:])[-800:] or f"exit status {status}")
         message = data.get("message") if isinstance(data.get("message"), str) else ""
         data["message"] = printable(message)[:2000]
         data["notes"] = [printable(line.strip())[:500] for line in (err or "").splitlines()
@@ -3178,6 +3253,38 @@ def web_listen_problem(value):
         return printable(str(exc)) if str(exc).startswith("--listen") else \
             f"--listen {printable(value)}: ADDRESS:PORT, e.g. 127.0.0.1:8443 or [::]:8443"
     return None
+
+
+def web_listen_port(value):
+    """The port of LISTEN (ADDRESS:PORT; checked by web_listen_address)."""
+    web_listen_address(value)
+    return int(value.rpartition(":")[2])
+
+
+def free_local_port(preferred):
+    """PREFERRED when nothing listens on it on this machine's loopback, else a free port the system names."""
+    import socket
+    for port in (preferred, 0):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                probe.bind(("127.0.0.1", port))
+                return probe.getsockname()[1]
+        except OSError:
+            continue
+    raise ValueError("no free port on this machine's loopback")
+
+
+def web_service_url(host_target, listen, local=False):
+    """The https:// URL of a web interface that listens on LISTEN of a host reached as HOST_TARGET (its ssh
+    USER@HOST; LOCAL: this machine): its own address, or for a wildcard listener (0.0.0.0, ::) the host's name."""
+    address, port = web_listen_address(listen), web_listen_port(listen)
+    if address.is_unspecified:
+        name = "localhost" if local else str(host_target or "").rpartition("@")[2] or "HOST"
+    else:
+        name = "localhost" if local and address.is_loopback else str(address)
+    if ":" in name:
+        name = f"[{name}]"
+    return f"https://{name}:{port}/"
 
 
 def web_listen_beyond(value):
@@ -4429,6 +4536,31 @@ def home_short(path):
     home = str(Path.home())
     path = str(path)
     return "~" + path[len(home):] if path == home or path.startswith(home + os.sep) else path
+
+
+def mcp_option_names(options):
+    """The MCP servers OPTIONS (a start's saved options) name: --mcp NAME, --mcp=NAME, -M NAME (starts.mcp_names)."""
+    found = []
+    options = options if isinstance(options, list) else []
+    for index, token in enumerate(options):
+        if token in ("--mcp", "-M") and index + 1 < len(options) and isinstance(options[index + 1], str):
+            found.append(options[index + 1])
+        elif isinstance(token, str) and token.startswith("--mcp="):
+            found.append(token.partition("=")[2])
+    return [name for name in dict.fromkeys(found) if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", name)]
+
+
+def run_state(record):
+    """"paused" for a run that `sandbox-ai pause` froze (the marker in its run directory, as starts.py reads it),
+    else "running" (review 6 A-N1: every run read as running, so Resume was never offered for one)."""
+    directory = record.get("directory") if isinstance(record, dict) else None
+    if isinstance(directory, str) and directory:
+        try:
+            if (Path(directory) / "paused").exists():
+                return "paused"
+        except OSError:
+            pass
+    return "running"
 
 
 def runs_of_starts(runs, ids):

@@ -87,7 +87,7 @@ def findings(view, where):
         if column in compact and column != stretch and width > needed(view, column) + PAD:
             found.append(f"{where}: compact column {column} {width} px, needs {needed(view, column)}")
     total = sum(header.sectionSize(column) for column in range(header.count()))
-    room = view.viewport().width()
+    room = view.viewport().width() - header.viewportMargins().right()  # less a (?)'s corner (review 6 L2)
     if view.horizontalScrollBar().isVisible():
         least = sum(header.sectionSize(c) for c in range(header.count()) if c != stretch) + tables.STRETCH_MIN
         if least <= room and stretch is not None:

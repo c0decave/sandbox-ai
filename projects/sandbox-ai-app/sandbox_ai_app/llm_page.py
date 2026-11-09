@@ -351,11 +351,15 @@ class LlmDialog(QDialog):
         same = self.existing is not None and all((self.existing.get(k) or "") == (fields.get(k) or "")
                                                  for k in CONNECTION)
         secret = fields["secret"] if fields.get("secret") and not value else None
+        # its CA: the file typed, else (an edit that keeps it) the saved server's own, by its name (review 6 N3)
+        ca = fields.get("ca") or None
+        ca_of = (self.existing or {}).get("name") if not ca and (self.existing or {}).get("has_ca") and \
+            not fields.get("no_ca") else None
         if same and valid_name(fields["name"]):
             args, probe, secret = ["llm", "models", fields["name"], "--sort", "loaded", "--json"], False, None
         else:
             try:
-                args, probe = WL.probe_argv(fields["kind"], fields["url"], secret, insecure), True
+                args, probe = WL.probe_argv(fields["kind"], fields["url"], secret, insecure, ca=ca, ca_of=ca_of), True
             except ValueError as exc:
                 self.check_after = True
                 self.test_result.setText(tr("{reason} It is checked with sandbox-ai llm check (its key, TLS and CA) "
@@ -385,7 +389,7 @@ class LlmDialog(QDialog):
                     status = False
             if probe:
                 argv = WL.probe_argv(fields["kind"], fields["url"], secret if sent else None, insecure and sent,
-                                     status=status)
+                                     status=status, ca=ca, ca_of=ca_of)
                 return run(*argv, timeout=WL.PROBE_SECONDS), sent, None
             answer = run(*args, timeout=WL.PROBE_SECONDS)
             # A saved server: its status from `llm status NAME` (a host without it: the models alone)
@@ -415,6 +419,10 @@ class LlmDialog(QDialog):
             models, server = WL.models_and_status(out)
         except ValueError as exc:
             text = tr("Not reachable: {error}", error=printable(exc))
+            if WL.tls_untrusted(exc):
+                text += "\n" + (tr("Its certificate is not signed by the CA named in the field CA.") if fields.get("ca")
+                                 else tr("Its certificate is signed by a CA this host does not know: name that CA "
+                                         "(a PEM file) in the field CA."))
             if probe and ((fields.get("secret") and not sent) or fields.get("headers")):
                 text += "\n" + tr("(Tested without its key: a server that needs one refuses this test; llm check "
                                   "uses the key once it is saved.)")
@@ -450,8 +458,9 @@ class LlmDialog(QDialog):
         server is saved with it (the box ticked; Add asks no second time for that URL). No: not tested, said."""
         url = fields["url"]
         if not ask_first(self, "llm-insecure", self.title_text, tr(
-                "Send the prompts to {url} over plain http, unencrypted, from {host}? Whoever is on the way can read "
-                "them, the answers and the key.", url=printable(url), host=self.host_label), tr("Allow")):
+                "Test {url} over plain http, unencrypted, from {host}, and save the server with plain http allowed? "
+                "The test sends only the key; the starts send the prompts, the answers and the key that way too. "
+                "Whoever is on the way can read them.", url=printable(url), host=self.host_label), tr("Allow")):
             self.test_result.setText(tr("Not tested: the key is not sent over plain http outside the local networks "
                                         "(use https, or allow it)."))
             colored(self.test_result, "warn")

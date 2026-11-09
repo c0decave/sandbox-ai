@@ -4080,7 +4080,7 @@ TEXTS = {
         'de': '{path} kann nicht gelesen werden: {error}'},
     'Keep answering in the system tray when the window is closed': {
         'en': 'Keep answering in the system tray when the window is closed',
-        'de': 'Im Infobereich weiter antworten, wenn das Fenster geschlossen wird'},
+        'de': 'Bei geschlossenem Fenster im Infobereich weiter antworten'},
     'Window': {
         'en': 'Window',
         'de': 'Fenster'},
@@ -5395,9 +5395,6 @@ TEXTS = {
     'Manage': {
         'en': 'Manage',
         'de': 'Verwalten'},
-    'Marketplace folder': {
-        'en': 'Marketplace folder',
-        'de': 'Marktplatz-Ordner'},
     'Marketplace source': {
         'en': 'Marketplace source',
         'de': 'Marktplatz-Quelle'},
@@ -9131,9 +9128,6 @@ TEXTS = {
     'Select a login first.': {
         'en': 'Select a login first.',
         'de': 'Wählen Sie zuerst eine Anmeldung.'},
-    'Send the prompts to {url} over plain http, unencrypted, from {host}? Whoever is on the way can read them, the answers and the key.': {
-        'en': 'Send the prompts to {url} over plain http, unencrypted, from {host}? Whoever is on the way can read them, the answers and the key.',
-        'de': 'Die Prompts von {host} über einfaches http, unverschlüsselt, an {url} senden? Wer auf dem Weg ist, kann sie, die Antworten und den Schlüssel lesen.'},
     "Show a project's .sandbox-ai.json on that host (the selected one, or a folder you name) with every key and the changes against the version trusted last, and trust exactly that content": {
         'en': "Show a project's .sandbox-ai.json on that host (the selected one, or a folder you name) with every key and the changes against the version trusted last, and trust exactly that content",
         'de': 'Die .sandbox-ai.json eines Projekts auf dem gewählten Rechner zeigen (die gewählte oder die eines Ordners, den Sie nennen), mit jedem Schlüssel und den Änderungen gegenüber der zuletzt vertrauten Fassung, und genau diesem Inhalt vertrauen'},
@@ -9367,4 +9361,61 @@ TEXTS = {
     'Stopping the work that runs, then quitting…': {
         'en': 'Stopping the work that runs, then quitting…',
         'de': 'Die laufende Arbeit wird beendet, dann endet die App…'},
+    "Compare the certificate's fingerprint (Show fingerprint) with what the browser shows.": {
+        'en': "Compare the certificate's fingerprint (Show fingerprint) with what the browser shows.",
+        'de': 'Vergleichen Sie den Fingerabdruck des Zertifikats (Fingerabdruck zeigen) mit dem, was der Browser zeigt.'},
+    'Open in the browser': {
+        'en': 'Open in the browser',
+        'de': 'Im Browser öffnen'},
+    "The web interface's address in your browser": {
+        'en': "The web interface's address in your browser",
+        'de': 'Die Adresse der Web-Oberfläche in Ihrem Browser'},
+    'web tunnel': {
+        'en': 'web tunnel',
+        'de': 'Web-Tunnel'},
+    'Open {url} in a browser, as long as the terminal tab "web serve" runs.': {
+        'en': 'Open {url} in a browser, as long as the terminal tab "web serve" runs.',
+        'de': 'Öffnen Sie {url} in einem Browser, solange der Terminal-Tab „web serve“ läuft.'},
+    'It listens on {listen} of {host}: open {url} from a machine that reaches that address, as long as the terminal tab "web serve" runs.': {
+        'en': 'It listens on {listen} of {host}: open {url} from a machine that reaches that address, as long as the terminal tab "web serve" runs.',
+        'de': 'Er lauscht auf {listen} von {host}: Öffnen Sie {url} von einem Rechner aus, der diese Adresse erreicht, solange der Terminal-Tab „web serve“ läuft.'},
+    'It listens on {listen} of {host}: only {host} itself reaches it. Forward it with: ssh -N -L 8443:{listen} {host} - then open https://localhost:8443/. (No tunnel from here: {error})': {
+        'en': 'It listens on {listen} of {host}: only {host} itself reaches it. Forward it with: ssh -N -L 8443:{listen} {host} - then open https://localhost:8443/. (No tunnel from here: {error})',
+        'de': 'Er lauscht auf {listen} von {host}: Nur {host} selbst erreicht ihn. Leiten Sie ihn weiter mit: ssh -N -L 8443:{listen} {host} - dann öffnen Sie https://localhost:8443/. (Kein Tunnel von hier: {error})'},
+    'It listens on {listen} of {host}, which only {host} itself reaches: the terminal tab "web tunnel" forwards it through SSH. Open {url} on this machine, as long as both tabs ("web serve" and "web tunnel") run.': {
+        'en': 'It listens on {listen} of {host}, which only {host} itself reaches: the terminal tab "web tunnel" forwards it through SSH. Open {url} on this machine, as long as both tabs ("web serve" and "web tunnel") run.',
+        'de': 'Er lauscht auf {listen} von {host}, was nur {host} selbst erreicht: Der Terminal-Tab „Web-Tunnel“ leitet ihn über SSH weiter. Öffnen Sie {url} auf diesem Rechner, solange beide Tabs („web serve“ und „Web-Tunnel“) laufen.'},
+    '1 marketplace on {host}': {
+        'en': '1 marketplace on {host}',
+        'de': '1 Marktplatz auf {host}'},
+    "{marketplaces}, and OpenCode's npm plugins": {
+        'en': "{marketplaces}, and OpenCode's npm plugins",
+        'de': '{marketplaces}, dazu die npm-Plugins von OpenCode'},
+    'Test {url} over plain http, unencrypted, from {host}, and save the server with plain http allowed? The test sends only the key; the starts send the prompts, the answers and the key that way too. Whoever is on the way can read them.': {
+        'en': 'Test {url} over plain http, unencrypted, from {host}, and save the server with plain http allowed? The test sends only the key; the starts send the prompts, the answers and the key that way too. Whoever is on the way can read them.',
+        'de': '{url} über unverschlüsseltes http von {host} aus testen und den Server mit erlaubtem unverschlüsseltem http speichern? Der Test sendet nur den Schlüssel; die Starts senden auch die Prompts, die Antworten und den Schlüssel so. Wer auf dem Weg mithört, kann sie lesen.'},
+    'Its certificate is not signed by the CA named in the field CA.': {
+        'en': 'Its certificate is not signed by the CA named in the field CA.',
+        'de': 'Sein Zertifikat ist nicht von der im Feld CA genannten CA signiert.'},
+    'Its certificate is signed by a CA this host does not know: name that CA (a PEM file) in the field CA.': {
+        'en': 'Its certificate is signed by a CA this host does not know: name that CA (a PEM file) in the field CA.',
+        'de': 'Sein Zertifikat ist von einer CA signiert, die dieser Host nicht kennt: Nennen Sie diese CA (eine PEM-Datei) im Feld CA.'},
+    'The record of team {name} on {host} is damaged. Delete it with every member of its name ({members})? They are stopped, then their HOMEs and the board are removed for good; the workspace stays.': {
+        'en': 'The record of team {name} on {host} is damaged. Delete it with every member of its name ({members})? They are stopped, then their HOMEs and the board are removed for good; the workspace stays.',
+        'de': 'Der Eintrag des Teams {name} auf {host} ist beschädigt. Es mit jedem Mitglied seines Namens ({members}) löschen? Sie werden gestoppt, dann werden ihre HOMEs und die Tafel endgültig entfernt; der Arbeitsordner bleibt.'},
+    'The record of team {name} is damaged: Delete… removes it with every member of its name ({members}).': {
+        'en': 'The record of team {name} is damaged: Delete… removes it with every member of its name ({members}).',
+        'de': 'Der Eintrag des Teams {name} ist beschädigt: Löschen… entfernt es mit jedem Mitglied seines Namens ({members}).'},
+    'Its record is damaged: only Delete… is left.': {
+        'en': 'Its record is damaged: only Delete… is left.',
+        'de': 'Sein Eintrag ist beschädigt: Nur Löschen… bleibt.'},
+    'damaged: its record cannot be read': {
+        'en': 'damaged: its record cannot be read',
+        'de': 'beschädigt: sein Eintrag ist nicht lesbar'},
+    'The CA is the path of a PEM file.': {
+        'en': 'The CA is the path of a PEM file.',
+        'de': 'Die CA ist der Pfad einer PEM-Datei.'},
+    "Not an LLM server's name: {name}": {
+        'en': "Not an LLM server's name: {name}",
+        'de': 'Kein Name eines LLM-Servers: {name}'},
 }

@@ -625,7 +625,9 @@ def test_a_refused_plain_http_test_asks_then_tests_again_and_add_sends_the_flag(
     assert ticked and result.startswith("Reachable: 3 models"), result
     questions = plain_http_questions(widgets)
     assert len(questions) == 1, "asked once: Add does not ask again for the URL the test allowed"
-    assert PUBLIC in questions[0] and "from local (this machine)?" in questions[0], "the host and the URL named"
+    assert PUBLIC in questions[0] and "from local (this machine)," in questions[0], "the host and the URL named"
+    # review 6: what the test sends (the key), and that Yes saves the server with plain http allowed
+    assert "The test sends only the key" in questions[0] and "save the server with plain http allowed" in questions[0]
     add = adds(sai)
     assert len(add) == 1 and "--insecure-http" in add[0] and add[0][add[0].index("--url") + 1] == PUBLIC
     page.close()
@@ -689,7 +691,38 @@ def test_another_host_is_checked_for_the_options_first(qapp, sai, monkeypatch):
     sai.asked.clear()
     dialog.test()
     assert sai.asked == [("ct1", keyed), ("ct1", allowed)] and dialog.insecure.isChecked()
-    assert "from ct1?" in plain_http_questions(widgets)[-1]
+    assert "from ct1," in plain_http_questions(widgets)[-1]
     dialog.close()
     dialog.deleteLater()
     page.deleteLater()
+
+
+def test_an_edited_servers_ca_goes_with_its_test(qapp, sai, monkeypatch):
+    """Review 6 N3: Test connection never sent a CA, so a server behind a private CA failed every test that was not
+    of the server as saved: the CA typed goes as --ca, else the edited server's own as --ca-of NAME (as the web)."""
+    from sandbox_ai_app import llm_page, widgets
+    private = dict(GATEWAY, name="vg", kind="vllm", url="https://gpu.example.org", api_key_secret=None, ca="vg.pem")
+    sai.answers[("local", ("llm", "list", "--json"))] = (0, json.dumps([SERVER, GATEWAY, private]), "")
+    sai.answers[("local", ("llm", "show", "vg", "--json"))] = (0, json.dumps(private), "")
+    page = llm_page.LlmPage(sai)
+    page.show()
+    seen = []
+
+    def run(dialog):
+        dialog.show()
+        dialog.url.setText("https://gpu2.example.org")  # another address: tested before anything is saved
+        for ca in ("", "/etc/ssl/new-ca.pem"):
+            dialog.ca.setText(ca)
+            sai.asked.clear()
+            dialog.test_button.click()
+            seen.append(next(a for _, a in sai.asked if a[:2] == ("wizard", "models")))
+        return 0
+    monkeypatch.setattr(llm_page.LlmDialog, "exec", run)
+    row = [widgets.row_key(page.servers, r) for r in range(page.servers.rowCount())].index("vg")
+    page.servers.selectRow(row)
+    page.servers.cellDoubleClicked.emit(row, 0)
+    kept, typed = seen
+    assert kept[kept.index("--ca-of") + 1] == "vg" and "--ca" not in kept
+    assert typed[typed.index("--ca") + 1] == "/etc/ssl/new-ca.pem" and "--ca-of" not in typed
+    assert parsed(sai, "wizard", list(kept[1:])).ca_of == "vg", "as sandbox-ai's wizard takes it"
+    page.close()

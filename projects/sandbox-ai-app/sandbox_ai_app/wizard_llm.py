@@ -844,10 +844,12 @@ PROBE_KINDS = ("ollama", "lmstudio", "llamacpp", "vllm")
 PROBE_SECONDS = 60
 
 
-def probe_argv(kind, url, secret=None, insecure=False, status=False):
-    """`sandbox-ai wizard models --kind KIND --url URL [--api-key-secret SECRET [--insecure-http]] --sort loaded
-    --json` for a server at URL that is not registered anywhere: it lists the models and stores nothing (https and a
-    path prefix included). SECRET: the secret (of that host) whose key goes with the request, named, never the key;
+def probe_argv(kind, url, secret=None, insecure=False, status=False, ca=None, ca_of=None):
+    """`sandbox-ai wizard models --kind KIND --url URL [--ca FILE | --ca-of NAME] [--api-key-secret SECRET
+    [--insecure-http]] --sort loaded --json` for a server at URL that is not registered anywhere: it lists the models
+    and stores nothing (https and a path prefix included). CA: the PEM file (on the host asked) that signed its
+    certificate; CA_OF: the saved server whose CA an edit keeps (the field left empty), as the web sends it - both
+    only for https (review 6 N3: a server behind a private CA failed every test). SECRET: the secret (of that host) whose key goes with the request, named, never the key;
     sandbox-ai refuses to send it over plain http to a public address unless INSECURE (--insecure-http, asked first:
     llm-insecure). STATUS: --status, what it has loaded and uses now too ({"models", "status"}: models_and_status).
     ValueError says why that command cannot ask this one (an OpenAI-compatible server is tested with `llm check`
@@ -858,6 +860,15 @@ def probe_argv(kind, url, secret=None, insecure=False, status=False):
     if not URL.fullmatch(url):
         raise ValueError(tr("The URL is http(s)://HOST[:PORT][/PREFIX], without user, query or fragment."))
     argv = ["wizard", "models", "--kind", kind, "--url", url]
+    if url.lower().startswith("https://"):
+        if ca:
+            if ca.startswith("-") or "\0" in ca:
+                raise ValueError(tr("The CA is the path of a PEM file."))
+            argv += ["--ca", ca]
+        elif ca_of:
+            if not SECRET_NAME_OF_SERVER.fullmatch(ca_of):
+                raise ValueError(tr("Not an LLM server's name: {name}", name=ca_of))
+            argv += ["--ca-of", ca_of]
     if secret:
         if not SECRET.fullmatch(secret):
             raise ValueError(tr("A secret's name is letters, digits and '_', not starting with a digit."))
@@ -865,6 +876,17 @@ def probe_argv(kind, url, secret=None, insecure=False, status=False):
         if insecure and url.lower().startswith("http://"):
             argv.append("--insecure-http")
     return argv + (["--status"] if status else []) + ["--sort", "loaded", "--json"]
+
+
+SECRET_NAME_OF_SERVER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")  # an LLM server's name (llm.py: as --ca-of)
+# What a TLS check that has no CA for the server's certificate says (Python's ssl, curl, Go)
+TLS_UNTRUSTED = ("certificate verify failed", "CERTIFICATE_VERIFY_FAILED", "unable to get local issuer certificate",
+                 "self signed certificate", "self-signed certificate", "x509: certificate signed by unknown authority")
+
+
+def tls_untrusted(text):
+    """Whether TEXT (a failed test's error) says the server's certificate is signed by a CA nobody named."""
+    return any(marker in str(text or "") for marker in TLS_UNTRUSTED)
 
 
 # What `wizard models --url` says when it will not send the key over plain http to an address outside the local

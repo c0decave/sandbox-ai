@@ -229,7 +229,8 @@ def apply(view):
                     header.resizeSection(column, title)
             return
         laid_out = view.isVisible() and view.viewport().width() > 60
-        room = view.viewport().width() if laid_out else FALLBACK_WIDTH
+        # less the corner a (?) keeps free in the header (help_view.Corner.make_room)
+        room = view.viewport().width() - header.viewportMargins().right() if laid_out else FALLBACK_WIDTH
         cap = max(CAP_MIN, int(CAP * room))
         compact = getattr(view, "fit_compact", set())
         widths = {column: max(titles[column], min(content[column], cap))

@@ -87,6 +87,7 @@ BLOCKING_SAI = {"call", "answer", "dry_run", "doctor", "mcp_catalog", "statistic
                 "secrets", "login_status", "remembered", "forget_remembered", "question_context", "run_log",
                 "devices_added", "device_check", "device_candidates", "add_device", "remove_device", "set_limits",
                 "workspaces", "add_workspace", "remove_workspace",
+                "host_version_known",  # one short SSH command (review 6 A-N3)
                 "write_project",
                 # over SSH to the hosts of `sandbox-ai hosts` (seconds; a host that does not answer: up to the timeout)
                 "host_run", "host_json", "host_instances", "host_questions", "host_test", "host_update",

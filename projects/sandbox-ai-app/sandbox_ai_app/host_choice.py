@@ -4,9 +4,11 @@ SSH to fill it); a page runs its commands on the host chosen through SandboxAI.h
 host_terminal."""
 from __future__ import annotations
 
+import os
+from pathlib import Path
 import re
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QFileSystemWatcher, QObject, QTimer, Signal
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QWidget
 
 from .files import printable
@@ -54,6 +56,56 @@ def hosts_signal():
 def hosts_changed():
     """Tell every host chooser that the hosts file changed."""
     hosts_signal().changed.emit()
+
+
+def _file_signature(path):
+    try:
+        found = os.stat(path)
+    except OSError:
+        return None
+    return found.st_ino, found.st_size, found.st_mtime_ns
+
+
+def watch_hosts_file(path, settle_ms=250):
+    """Every host chooser follows the hosts file PATH also when it changes outside the app (sandbox-ai hosts, the web
+    interface, an editor): a QFileSystemWatcher on the file and on the nearest folder above it that exists (a file
+    replaced by rename, as sandbox-ai writes it, or made later, is seen there); a change is told once it settled
+    (SETTLE_MS) and only when the file differs from what was last told. No polling: nothing runs while it is quiet.
+    Called again (another window, another HOME in the tests): the watch moves to that PATH."""
+    hub = hosts_signal()
+    path = Path(path)
+    if getattr(hub, "watcher", None) is None:
+        hub.watcher = QFileSystemWatcher(hub)
+        hub.settle = QTimer(hub)
+        hub.settle.setSingleShot(True)
+        hub.watcher.fileChanged.connect(lambda _path: hub.settle.start())
+        hub.watcher.directoryChanged.connect(lambda _path: hub.settle.start())
+
+        def settled():
+            _rearm(hub)
+            signature = _file_signature(hub.watched)
+            if signature != hub.signature:
+                hub.signature = signature
+                hub.changed.emit()
+        hub.settle.timeout.connect(settled)
+    hub.settle.setInterval(settle_ms)
+    hub.watched, hub.signature = path, _file_signature(path)
+    _rearm(hub)
+    return hub.watcher
+
+
+def _rearm(hub):
+    """Watch the file (when it is there) and the nearest existing folder above it, and nothing else."""
+    path = hub.watched
+    folder = next((p for p in path.parents if p.is_dir()), None)
+    wanted = [str(p) for p in (path if path.is_file() else None, folder) if p is not None]
+    held = hub.watcher.files() + hub.watcher.directories()
+    stale = [p for p in held if p not in wanted]
+    if stale:
+        hub.watcher.removePaths(stale)
+    new = [p for p in wanted if p not in held]
+    if new:
+        hub.watcher.addPaths(new)
 
 
 def follow_hosts(widget, reload):

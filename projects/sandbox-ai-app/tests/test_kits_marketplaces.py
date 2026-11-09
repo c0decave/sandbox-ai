@@ -166,6 +166,9 @@ def test_the_browser_lists_kits_marketplaces_and_every_state(browser):
     assert page.market_kit.currentData() == "user:mine", "a kit of yours first"
     assert keys(page.market) == ["claude:sandbox-ai", "claude:acme", "claude:team", "claude:localdir", "codex:cx",
                                  kits_page.OPENCODE]
+    # review 6: the count is the marketplaces', the OpenCode row named apart
+    assert page.market_status.text().startswith("5 marketplaces on ")
+    assert page.market_status.text().endswith(", and OpenCode's npm plugins")
     team = cells(page.market, "claude:team")
     assert "declared in mine" in team[2] and team[3] == "2 (list not fetched)"
     assert cells(page.market, "claude:acme")[2] == "Claude on that host" and cells(page.market, "claude:acme")[3] == "2"
