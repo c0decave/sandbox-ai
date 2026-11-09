@@ -1299,6 +1299,7 @@ class RowModel(QAbstractTableModel):
     def __init__(self, headers, numeric=(), stretch=None, parent=None):
         super().__init__(parent)
         self.headers, self.numeric, self.stretch, self.rows = list(headers), set(numeric), stretch, []
+        self.header_tips = {}  # section: the column title's tooltip (help_view.explain_columns sets them)
         self.sorted_by = (-1, Qt.SortOrder.AscendingOrder)
 
     def rowCount(self, parent=QModelIndex()):  # noqa: N802
@@ -1308,10 +1309,22 @@ class RowModel(QAbstractTableModel):
         return 0 if parent.isValid() else len(self.headers)
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):  # noqa: N802
-        if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole and \
-                0 <= section < len(self.headers):
+        if orientation != Qt.Orientation.Horizontal or not 0 <= section < len(self.headers):
+            return None
+        if role == Qt.ItemDataRole.DisplayRole:
             return self.headers[section]
+        if role == Qt.ItemDataRole.ToolTipRole:
+            return self.header_tips.get(section)
         return None
+
+    def setHeaderData(self, section, orientation, value, role=Qt.ItemDataRole.EditRole):  # noqa: N802
+        """The column titles' tooltips (help_view.explain_columns: a term explains itself on hover)."""
+        if orientation != Qt.Orientation.Horizontal or not 0 <= section < len(self.headers) or \
+                role != Qt.ItemDataRole.ToolTipRole:
+            return False
+        self.header_tips[section] = value
+        self.headerDataChanged.emit(orientation, section, section)
+        return True
 
     def flags(self, index):
         return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
