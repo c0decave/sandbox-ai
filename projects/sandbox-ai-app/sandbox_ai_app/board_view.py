@@ -85,7 +85,7 @@ class PortItem(QGraphicsEllipseItem):
         self.setPos(0.0 if side == "in" else NODE_W, NODE_H / 2)
         self.setBrush(QBrush(QColor(theme.colors()["accent"])))
         self.setPen(QPen(Qt.PenStyle.NoPen))
-        self.setToolTip(tr("Drag from here to an input port to connect") if side == "out" else "")
+        self.setToolTip(safe_tooltip(tr("Drag from here to an input port to connect") if side == "out" else ""))
         self.setZValue(2)
 
     @property
@@ -669,8 +669,8 @@ class PathEdit(QWidget):
         layout.addWidget(browse)
         if host != LOCAL:  # a path of that host: typed in, never chosen from this computer's folders
             browse.setEnabled(False)
-            self.edit.setToolTip(tr("A path on {host}: type it in (this computer's folders are not {host}'s)",
-                                    host=printable(host)))
+            self.edit.setToolTip(safe_tooltip(tr("A path on {host}: type it in (this computer's folders are not {host}'s)",
+                                    host=printable(host))))
 
     def browse(self, directory):
         path = (choose_folder(self, tr("Choose a folder"), "folder") if directory
@@ -1230,8 +1230,8 @@ class BoardPage(QWidget):
             kind = item.data(Qt.ItemDataRole.UserRole)
             taken = B.KINDS[kind].single and self.board.first(kind) is not None
             item.setFlags(item.flags() & ~movable if taken else item.flags() | movable)
-            item.setToolTip(tr(B.KINDS[kind].help) + ("\n" + tr("On the board already: a board has one.")
-                                                       if taken else ""))
+            item.setToolTip(safe_tooltip(tr(B.KINDS[kind].help) + ("\n" + tr("On the board already: a board has one.")
+                                                       if taken else "")))
 
     @staticmethod
     def drop_what(mime):
@@ -1936,9 +1936,9 @@ class BoardPage(QWidget):
             widget = QLineEdit("" if value is None else str(value))
             widget.setPlaceholderText(option.metavar or (str(option.default) if option.default else ""))
             widget.editingFinished.connect(lambda: self.set_prop(node_id, long, widget.text().strip()))
-        widget.setToolTip(option.help)
+        widget.setToolTip(safe_tooltip(option.help))
         label = QLabel(long + (f"  ({option.short})" if option.short else ""))
-        label.setToolTip(option.help)
+        label.setToolTip(safe_tooltip(option.help))
         if None in self.forbidden.get(long, set()):
             self.disable_if_forbidden(widget, long)
         self.inspector.addRow(label, widget)
@@ -1946,7 +1946,7 @@ class BoardPage(QWidget):
     def disable_if_forbidden(self, widget, option):
         if None in self.forbidden.get(option, set()):
             widget.setEnabled(False)
-            widget.setToolTip(tr("The administrator's policy forbids {option}", option=option))
+            widget.setToolTip(safe_tooltip(tr("The administrator's policy forbids {option}", option=option)))
 
     def set_readonly(self, on):
         def update():
@@ -2188,10 +2188,10 @@ class BoardPage(QWidget):
         self.host_failed = {key: when for key, when in self.host_failed.items() if key[0] != host}  # asked again
         self.check_pending = self.check_running  # an answer for the host before is dropped; this one's after it
         self.apply_button.setEnabled(not remote)
-        self.apply_button.setToolTip(tr("Apply writes the project file on this machine; on {host} the board starts "
+        self.apply_button.setToolTip(safe_tooltip(tr("Apply writes the project file on this machine; on {host} the board starts "
                                         "as it is (--no-config)", host=printable(host)) if remote else
                                      tr("Write .sandbox-ai.json into the first workspace and trust it, after showing "
-                                        "it and what changes"))
+                                        "it and what changes")))
         self.host_note.setVisible(remote)
         self.llm_servers = None  # the agent's Model server: that host's servers, read again (load_llm_servers)
         if remote:

@@ -159,7 +159,7 @@ class ActivityModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.ToolTipRole and column == 3:
             return widgets.safe_tooltip(printable(entry.record.get("summary") or ""))
         if role == Qt.ItemDataRole.ToolTipRole and column == 0:
-            return printable(entry.record.get("time") or "")
+            return widgets.safe_tooltip(printable(entry.record.get("time") or ""))
         if role == RECORD_ROLE:
             return entry.record  # through Qt: a copy with its keys sorted; the page reads record_at()
         return None
@@ -459,8 +459,8 @@ class ActivityPage(QWidget):
     def browse(self):
         if self.host() != LOCAL:
             # A folder on that host: typed (this machine's file dialog cannot see it).
-            path, ok = QInputDialog.getText(self, tr("Log folder"), tr(
-                "A project folder or a log folder on {host} (absolute path):", host=self.hosts.label()))
+            path, ok = QInputDialog.getText(self, tr("Log folder"), shown_as_text(tr(
+                "A project folder or a log folder on {host} (absolute path):", host=self.hosts.label())))
             path = path.strip()
             if ok and backend.valid_directory(path):
                 kind = "--log-dir" if "/sandbox-ai/logs/" in path or path.rstrip("/").endswith("/logs") else "--project"

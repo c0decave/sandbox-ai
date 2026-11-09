@@ -183,7 +183,7 @@ class ListField(QWidget):
             text = (tr("Could not be read: {error}", error=problem) if problem else
                     tr("Reading…") if names is None else tr("None on {host}", host=where))
             menu.addAction(text).setEnabled(False)
-        self.pick.setToolTip(tr("Add one that {host} has", host=where) if where else tr("Add one"))
+        self.pick.setToolTip(safe_tooltip(tr("Add one that {host} has", host=where) if where else tr("Add one")))
 
     def add(self, value):
         if value not in self.value():
@@ -250,11 +250,17 @@ class OptionsForm(QTabWidget):
             form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
             for option in groups[title]:
                 widget = self.widget_for(option)
-                label = QLabel(f"{option.long}" + (f"  ({option.short})" if option.short else ""))
-                label.setToolTip(option.help)
-                widget.setToolTip(option.help)
+                # The option's name in the language chosen (labels.py), the command-line option below it in small
+                # text, sandbox-ai's own help (English) as the tooltip of both.
+                flag = option.long + (f" ({option.short})" if option.short else "")
+                label = OptionLabel(labels.label(option.long), flag)
+                tip = safe_tooltip(f"{flag}\n{option.help}" if option.help else flag)
+                label.setToolTip(tip)
+                widget.setToolTip(tip)
+                set_accessible(widget, labels.label(option.long))
                 form.addRow(label, widget)
                 self.widgets[option.long] = widget
+                self.labels[option.long] = label
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
             scroll.setWidget(page)
@@ -336,9 +342,9 @@ class OptionsForm(QTabWidget):
         widget.setEnabled(bool(found) or bool(current))
         widget.setProperty("detected", (", ".join(found) or tr("none")) if host == "local" else "")
         widget.setProperty("host", host)
-        widget.setToolTip(option.help if host == "local" else
+        widget.setToolTip(safe_tooltip(option.help if host == "local" else
                           tr("Every kind: whether {host} has that GPU is checked by its launcher at the start.",
-                             host=printable(host)) + "\n" + option.help)
+                             host=printable(host)) + "\n" + option.help))
 
     def limit_hint(self, widget, option, host):
         """--memory and --cpus: what this computer has, or for another HOST only where it starts."""
@@ -389,7 +395,7 @@ class OptionsForm(QTabWidget):
                 note = (tr("Reading what {host} has…", host=where) if names is None and long not in problems else
                         tr("Could not be read: {error}", error=problems[long]) if long in problems else
                         tr("{count} on {host}", count=len(names), host=where))
-                widget.setToolTip(f"{option.help}\n{note}" if option.help else note)
+                widget.setToolTip(safe_tooltip(f"{option.help}\n{note}" if option.help else note))
 
     def values(self):
         result = {}
@@ -414,7 +420,7 @@ class OptionsForm(QTabWidget):
             why = tr("The administrator's policy forbids {option}", option=long)
             if None in values:
                 widget.setEnabled(False)
-                widget.setToolTip(why)
+                widget.setToolTip(safe_tooltip(why))
             elif isinstance(widget, QComboBox):
                 for index in range(widget.count()):
                     if widget.itemText(index) in values:
@@ -423,7 +429,7 @@ class OptionsForm(QTabWidget):
                 for value in values:
                     if value in widget.boxes:
                         widget.boxes[value].setEnabled(False)
-                        widget.boxes[value].setToolTip(why)
+                        widget.boxes[value].setToolTip(safe_tooltip(why))
         if "--egress-all-allow" in forbidden and isinstance(self.widgets.get("--profile"), MultiChoice):
             box = self.widgets["--profile"].boxes.get("egress-all")
             if box is not None:
@@ -865,12 +871,12 @@ class LaunchPage(QWidget):
             if missing:
                 self.host_greyed.setdefault(long, (widget.isEnabled(), widget.toolTip()))
                 widget.setEnabled(False)
-                widget.setToolTip(tr("The sandbox-ai on {host} does not know {option}", host=printable(host),
-                                     option=long))
+                widget.setToolTip(safe_tooltip(tr("The sandbox-ai on {host} does not know {option}", host=printable(host),
+                                     option=long)))
             elif long in self.host_greyed:
                 enabled, tip = self.host_greyed.pop(long)
                 widget.setEnabled(enabled)
-                widget.setToolTip(tip)
+                widget.setToolTip(tip)  # as it was (escaped when it was set)
 
     def show_model(self, force=False):
         """The Model choice as the options say (--llm, --no-provider-defaults): after a change of the options, the
@@ -1054,8 +1060,8 @@ class LaunchPage(QWidget):
         self.form.set_values(values)
         self.agent_args.setText(shlex.join(agent_args))
         if unknown:
-            QMessageBox.warning(self, tr("Options not shown"), tr("These are not options of this sandbox-ai version "
-                                                                  "and were left out:") + "\n" + " ".join(unknown))
+            QMessageBox.warning(self, tr("Options not shown"), shown_as_text(tr(
+                "These are not options of this sandbox-ai version and were left out:") + "\n" + " ".join(unknown)))
 
     def load_profile(self):
         name = self.profile.currentText()
@@ -1351,7 +1357,7 @@ class DeviceDialog(QDialog):
             item.setData(Qt.ItemDataRole.UserRole, path)
             if why:
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled & ~Qt.ItemFlag.ItemIsSelectable)
-                item.setToolTip(tr("sandbox-ai refuses it: {why}", why=why))
+                item.setToolTip(safe_tooltip(tr("sandbox-ai refuses it: {why}", why=why)))
             self.list.addItem(item)
         self.list.itemSelectionChanged.connect(lambda: self.edit.setText(
             self.list.currentItem().data(Qt.ItemDataRole.UserRole) if self.list.currentItem() else self.edit.text()))
@@ -1770,7 +1776,7 @@ class SandboxesPage(QWidget):
                                               "keep_days, on this machine or the host chosen above (sandbox-ai gc; "
                                               "shown first)"), self.clean_up)):
             button = QPushButton(text)
-            button.setToolTip(tip)
+            button.setToolTip(safe_tooltip(tip))
             button.setAccessibleName(text.rstrip("…"))
             button.clicked.connect(lambda _=False, s=slot: s())
             self.manage_buttons[key] = button
@@ -1827,7 +1833,7 @@ class SandboxesPage(QWidget):
                  self.remove_mcp),
                 ("limits", tr("Limits…"), tr("Change memory, CPUs and processes of the selected sandbox"), self.limits)):
             button = QPushButton(text)
-            button.setToolTip(tip)
+            button.setToolTip(safe_tooltip(tip))
             button.setAccessibleName(text.rstrip("…"))
             button.clicked.connect(lambda _=False, s=slot: s())
             self.run_buttons.append(button)
@@ -3558,8 +3564,8 @@ class ConnectionsPage(QWidget):
 
     def browse(self):
         if self.remote():  # a folder on that host: typed (this machine's file dialog cannot see it)
-            path, ok = QInputDialog.getText(self, tr("Log folder"), tr(
-                "A project folder or a log folder on {host} (absolute path):", host=self.hosts.label()))
+            path, ok = QInputDialog.getText(self, tr("Log folder"), shown_as_text(tr(
+                "A project folder or a log folder on {host} (absolute path):", host=self.hosts.label())))
             path = (path or "").strip()
             if ok and backend.valid_directory(path):
                 kind = "--log-dir" if "/sandbox-ai/logs/" in path or path.rstrip("/").endswith("/logs") else "--project"
@@ -4405,7 +4411,7 @@ class SystemPage(QWidget):
                                   ("status", tr("Status"), tr("Whether it runs, and where")),
                                   ("stop", tr("Stop"), tr("Stop the emulated device"))):
             button = QPushButton(text)
-            button.setToolTip(tip)
+            button.setToolTip(safe_tooltip(tip))
             button.setAccessibleName(tr("{action} the emulated device", action=text))
             button.clicked.connect(lambda _=False, a=action: self.demo_device(a))
             self.demo_buttons[action] = button
@@ -5578,7 +5584,7 @@ class MainWindow(QMainWindow):
             self.actions["maximize"].setText(tr("Restore") if maximized else tr("Maximize"))
             self.actions["fullscreen"].setChecked(full)
             self.actions["tray"].setEnabled(tray_why is None)
-            self.actions["tray"].setToolTip(tray_why or tr("Hide to the system tray: sandbox-ai keeps answering there"))
+            self.actions["tray"].setToolTip(safe_tooltip(tray_why or tr("Hide to the system tray: sandbox-ai keeps answering there")))
 
     def toggle_maximized(self):
         if self.isFullScreen():
@@ -5773,7 +5779,7 @@ class MainWindow(QMainWindow):
             item = self.nav.item(row)
             item.setText("" if self.compact_nav else self.nav_title(key))
             item.setIcon(theme.glyph(key, size=24 if self.compact_nav else 20))  # never an empty icon
-            item.setToolTip(self.nav_tooltip(key))
+            item.setToolTip(self.nav_tooltip(key))  # the app's own words
             item.setData(Qt.ItemDataRole.AccessibleTextRole, self.nav_title(key))  # a strip of icons has no text
         self.show_question_count()
         for section, (header, rows) in self.section_rows.items():
@@ -5783,8 +5789,8 @@ class MainWindow(QMainWindow):
         self.fit_nav_width()
         self.brand.setVisible(not self.compact_nav)
         self.compact_button.setText("»" if self.compact_nav else "«")
-        self.compact_button.setToolTip(tr("Show the page titles") if self.compact_nav
-                                       else tr("Only icons: more room for the pages"))
+        self.compact_button.setToolTip(safe_tooltip(tr("Show the page titles") if self.compact_nav
+                                       else tr("Only icons: more room for the pages")))
         if "nav-compact" in getattr(self, "actions", {}):
             self.actions["nav-compact"].setChecked(self.compact_nav)
         self.state.set("nav_compact", self.compact_nav)
@@ -6405,13 +6411,13 @@ class MainWindow(QMainWindow):
             return True
         command = self.sai.in_terminal(argv, title)
         if command is None:
-            QMessageBox.warning(self, tr("No terminal"), tr("No terminal emulator found. Set SANDBOX_AI_TERMINAL, "
-                                                            "or run:") + "\n\n" + shlex.join(argv))
+            QMessageBox.warning(self, tr("No terminal"), shown_as_text(tr(
+                "No terminal emulator found. Set SANDBOX_AI_TERMINAL, or run:") + "\n\n" + shlex.join(argv)))
             return False
         started = QProcess.startDetached(command[0], command[1:])
         ok = started[0] if isinstance(started, tuple) else started
         if not ok:
-            QMessageBox.warning(self, tr("Not started"), shlex.join(command))
+            QMessageBox.warning(self, tr("Not started"), shown_as_text(shlex.join(command)))
         return ok
 
     def running_work(self):

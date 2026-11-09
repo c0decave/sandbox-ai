@@ -183,12 +183,13 @@ def choices(agent, sai=None, environ=None):
 def fill_combo(combo, agent, current="", sai=None):
     """An editable combo box of AGENT's models (data: the id; text: version and id); the empty first choice is the
     agent's default; CURRENT stays chosen, or typed when not listed."""
+    from . import widgets  # Qt: only where a combo is filled
     combo.blockSignals(True)
     combo.clear()
     combo.addItem(tr("the agent's default"), "")
     for model, text in choices(agent, sai):
         combo.addItem(text, model)
-        combo.setItemData(combo.count() - 1, model, 3)  # Qt.ToolTipRole: the id passed as --model
+        combo.setItemData(combo.count() - 1, widgets.safe_tooltip(model), 3)  # Qt.ToolTipRole: the --model id
     index = combo.findData(current)
     if index >= 0:
         combo.setCurrentIndex(index)

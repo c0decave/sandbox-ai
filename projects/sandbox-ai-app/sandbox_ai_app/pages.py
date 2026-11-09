@@ -1353,8 +1353,8 @@ class StatisticsPage(QWidget):
     def browse(self):
         if self.host() != LOCAL:
             from PySide6.QtWidgets import QInputDialog
-            path, ok = QInputDialog.getText(self, tr("Log folder"), tr(
-                "A project folder or a log folder on {host} (absolute path):", host=self.hosts.label()))
+            path, ok = QInputDialog.getText(self, tr("Log folder"), shown_as_text(tr(
+                "A project folder or a log folder on {host} (absolute path):", host=self.hosts.label())))
             if ok and path.strip():
                 self.refresh_directories(select=path.strip())
             return

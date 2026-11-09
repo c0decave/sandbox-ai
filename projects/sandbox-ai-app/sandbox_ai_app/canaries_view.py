@@ -22,7 +22,7 @@ from . import backend, theme
 from .activity_page import detail_text, short_time
 from .files import printable
 from .i18n import N_, tr
-from .widgets import MONO, ask_first, background, outcome, plain_label, show_text
+from .widgets import MONO, ask_first, background, outcome, plain_label, safe_tooltip, show_text
 
 COLUMNS = (N_("Time"), N_("Event"), N_("Canary"), N_("Process"), N_("What"))
 EVENT_ROLE = Qt.ItemDataRole.UserRole + 30
@@ -298,7 +298,7 @@ class CanariesView(QWidget):
                                     process_text(event.get("process")),
                                     printable(event.get("summary") or event.get("error") or "")])
             item.setData(0, EVENT_ROLE, event)
-            item.setToolTip(4, printable(event.get("summary") or event.get("error") or ""))
+            item.setToolTip(4, safe_tooltip(printable(event.get("summary") or event.get("error") or "")))
             for column in range(len(COLUMNS)):
                 item.setForeground(column, bad)
             item.setFont(1, bold)

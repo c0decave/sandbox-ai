@@ -98,7 +98,7 @@ class HelpButton(QToolButton):
     def set_tip(self, tip_id):
         self.tip_id = tip_id
         title = H.say(H.tip(tip_id).title)
-        self.setToolTip(tr("What is this? {title}", title=title))
+        self.setToolTip(tr("What is this? {title}", title=title))  # the help's own words
         self.setAccessibleName(tr("What is this? {title}", title=title))
 
     def sizeHint(self):  # noqa: N802 - the stylesheet's padding must not make it larger
@@ -627,7 +627,7 @@ class TourSearchDialog(QDialog):
         hits = tour_search.search(text)
         for hit in hits:
             item = QListWidgetItem(f"{tr(KIND_LABELS[hit.kind])}:  {H.say(hit.title)}")
-            item.setToolTip(H.say(hit.summary))
+            item.setToolTip(safe_tooltip(H.say(hit.summary)))
             item.setData(Qt.ItemDataRole.UserRole, (hit.kind, hit.ident))
             self.results.addItem(item)
         if hits:

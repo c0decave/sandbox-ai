@@ -905,8 +905,8 @@ class ImagesPage(QWidget):
         if self.host() != LOCAL:
             # A file of that host: its path there, typed (this machine's file dialog cannot see it).
             from PySide6.QtWidgets import QInputDialog
-            source, ok = QInputDialog.getText(self, tr("File to copy into the image"), tr(
-                "The file's absolute path on {host}:", host=self.hosts.label()))
+            source, ok = QInputDialog.getText(self, tr("File to copy into the image"), shown_as_text(tr(
+                "The file's absolute path on {host}:", host=self.hosts.label())))
             source = source.strip() if ok else ""
             if source and (not source.startswith("/") or ":" in source or not source.isprintable()):
                 warn(self, tr("Images"), tr("Not an absolute path without ':': {path}", path=printable(source)))

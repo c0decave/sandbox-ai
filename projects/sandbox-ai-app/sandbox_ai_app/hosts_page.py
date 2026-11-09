@@ -324,7 +324,7 @@ class HostsPage(QWidget):
 
         def button(text, tip, slot, name=None):
             widget = QPushButton(text)
-            widget.setToolTip(tip)
+            widget.setToolTip(safe_tooltip(tip))
             widget.setAccessibleName(name or text.rstrip("…"))
             widget.clicked.connect(lambda _=False: slot())
             return widget

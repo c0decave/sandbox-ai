@@ -21,7 +21,9 @@ from .files import printable
 from . import widgets
 from .i18n import N_, tr
 from .host_choice import on_host
-from .widgets import ask_first, background, fill, outcome, plain_label, selected, show_text, table
+from .widgets import (
+    ask_first, background, fill, outcome, plain_label, selected, show_text, table, shown_as_text,
+)
 
 LOCAL = "local"
 KINDS = (("wireguard", N_("WireGuard (a wg-quick file: Proton, IVPN, AirVPN, your own server)")),
@@ -319,7 +321,7 @@ def add_profile(parent, sai, done=None, host=LOCAL, host_label=""):
         if value and not fields.get("secret"):
             raise ValueError(tr("A typed key or password needs the name of the secret to keep it as."))
     except ValueError as exc:
-        QMessageBox.warning(parent, tr("New VPN profile"), printable(exc))
+        QMessageBox.warning(parent, tr("New VPN profile"), shown_as_text(printable(exc)))
         return
     if fields.get("socks") and not ask_first(parent, "vpn-socks", tr("New VPN profile"), on_host(host, tr(
             "A SOCKS port at 127.0.0.1:9050 in every sandbox with {name}: what goes through it passes the connection "
@@ -335,11 +337,12 @@ def add_profile(parent, sai, done=None, host=LOCAL, host_label=""):
         result, problem = result if error is None else (None, None)
         status, out, err = outcome(result, error)
         if status != 0:
-            QMessageBox.warning(parent, tr("New VPN profile"), printable((err or out).strip()[-1500:]))
+            QMessageBox.warning(parent, tr("New VPN profile"),
+                                shown_as_text(printable((err or out).strip()[-1500:])))
         elif problem is not None:
-            QMessageBox.warning(parent, tr("New VPN profile"), tr(
+            QMessageBox.warning(parent, tr("New VPN profile"), shown_as_text(tr(
                 "{name} added, but its key was not kept as the secret {secret}: {error}", name=name,
-                secret=fields.get("secret") or "", error=printable(problem)[:300]))
+                secret=fields.get("secret") or "", error=printable(problem)[:300])))
         if done:
             done(name if status == 0 else None)
 

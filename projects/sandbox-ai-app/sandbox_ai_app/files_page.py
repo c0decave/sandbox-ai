@@ -30,13 +30,16 @@ from . import files
 from .files import printable
 from .i18n import N_, tr
 from .state import choose_files, choose_folder
-from .widgets import Task, ask_first, background, button, confirm, fill, flow, plain_label, row_key, select_keys, \
-    selected_rows, set_enabled, table, warn
+from .widgets import (
+    Task, ask_first, background, button, confirm, fill, flow, plain_label, row_key, select_keys, selected_rows,
+    set_enabled, table, warn, shown_as_text,
+)
 
 ROOT_KINDS = {
     "run": N_("Running sandbox {name}: workspace"), "run-home": N_("Running sandbox {name}: HOME"),
     "session": N_("Session {name}: workspace"), "session-home": N_("Session {name}: HOME"),
-    "project": N_("Current project"), "other": N_("Chosen folder"),
+    "project": N_("Current project"), "started-in": N_("Folder the app was started in"),
+    "other": N_("Chosen folder"),
 }
 KINDS = {"dir": N_("folder"), "file": N_("file"), "link": N_("symbolic link"), "other": N_("special file")}
 COLUMNS = (N_("Name"), N_("Type"), N_("Size"), N_("Modified"), N_("Points to (not followed)"), N_("Owner"),
@@ -839,7 +842,8 @@ class FilesPage(QWidget):
         if entry is None:
             self.message.setText(tr("Select files or folders first."))
             return False
-        new, ok = QInputDialog.getText(self, tr("Rename"), tr("New name for {name}:", name=printable(entry.name)),
+        new, ok = QInputDialog.getText(self, tr("Rename"), shown_as_text(tr("New name for {name}:",
+                                                                            name=printable(entry.name))),
                                        QLineEdit.EchoMode.Normal, entry.name)
         return bool(ok and new) and self.rename(pane, entry, new)
 
@@ -858,8 +862,8 @@ class FilesPage(QWidget):
         pane = pane or self.active
         if pane.root is None:
             return False
-        name, ok = QInputDialog.getText(self, tr("New folder"), tr("Name of the new folder in {folder}:",
-                                                                   folder=printable(pane.path_text())))
+        name, ok = QInputDialog.getText(self, tr("New folder"), shown_as_text(tr(
+            "Name of the new folder in {folder}:", folder=printable(pane.path_text()))))
         return bool(ok and name) and self.make_folder(pane, name)
 
     def make_folder(self, pane, name):
@@ -880,7 +884,8 @@ class FilesPage(QWidget):
             self.message.setText(tr("Select files or folders first."))
             return False
         text, ok = QInputDialog.getText(self, tr("Permissions"),
-                                        tr("Mode (octal, e.g. 644 or 755) for {count} item(s):", count=len(entries)),
+                                        shown_as_text(tr("Mode (octal, e.g. 644 or 755) for {count} item(s):",
+                                                         count=len(entries))),
                                         QLineEdit.EchoMode.Normal, f"{stat.S_IMODE(entries[0].mode):o}")
         if not ok or not text.strip():
             return False

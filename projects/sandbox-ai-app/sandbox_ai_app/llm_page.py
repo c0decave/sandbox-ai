@@ -492,7 +492,7 @@ class LlmPage(QWidget):
                 (self.remove_button, tr("Remove"), tr("Forget the server (its secrets stay in sandbox-ai secrets)")),
                 (self.refresh_button, tr("Refresh"), tr("Ask the chosen host again"))):
             button.setAccessibleName(name)
-            button.setToolTip(tip)
+            button.setToolTip(safe_tooltip(tip))
         self.add_button.clicked.connect(self.add)
         self.edit_button.clicked.connect(lambda _=False: self.edit())
         self.check_button.clicked.connect(self.check)

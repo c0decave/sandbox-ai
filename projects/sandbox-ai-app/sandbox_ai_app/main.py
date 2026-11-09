@@ -86,7 +86,8 @@ def main(argv=None):
         if self_test:
             print(f"sandbox-ai-app self-test: {title}: {exc}", file=sys.stderr)
             return 1
-        QMessageBox.critical(None, title, str(exc))
+        from .widgets import shown_as_text
+        QMessageBox.critical(None, title, shown_as_text(str(exc)))
         return 1
     try:
         applog.set_sandbox_ai(sai.version(), sai.directory)

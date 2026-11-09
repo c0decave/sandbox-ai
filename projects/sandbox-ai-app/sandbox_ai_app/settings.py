@@ -25,7 +25,9 @@ from . import backend, notifications, presets as PR, theme
 from .board_view import PathEdit
 from .files import printable
 from .i18n import tr
-from .widgets import MONO, ask_first, background, inform, outcome, plain_label, warn
+from .widgets import (
+    MONO, ask_first, background, inform, outcome, plain_label, warn, shown_as_text,
+)
 
 LOCAL = "local"
 
@@ -42,7 +44,7 @@ def host_row(sai, owner):
 def typed_path(parent, title, host_label):
     """A folder of another host, typed (this machine's file dialog cannot see it); None when cancelled."""
     from PySide6.QtWidgets import QInputDialog
-    path, ok = QInputDialog.getText(parent, title, tr("The absolute path on {host}:", host=host_label))
+    path, ok = QInputDialog.getText(parent, title, shown_as_text(tr("The absolute path on {host}:", host=host_label)))
     return path.strip() if ok and path.strip() else None
 
 
