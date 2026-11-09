@@ -1189,7 +1189,7 @@ def test_the_command_line_of_attach_and_detach_live(live, capsys, monkeypatch):
         m.cli(["attach", "demo", "web", "--live", "--restart"])
     with pytest.raises(ValueError, match="give NAME START"):
         m.cli(["attach", "web", "--live"])
-    with pytest.raises(ValueError, match="--helper AGENT goes with --live"):
+    with pytest.raises(ValueError, match="--helper AGENT joins a running start.*a new start"):
         m.cli(["attach", "--helper", "codex", "web"])
 
 

@@ -1004,3 +1004,12 @@ def test_a_system_prefix_is_checked_from_the_root_down():
     assert "others" in h.prefix_problem("/opt/sai", {**good, "folder2": "drwxrwxrwt 0"})  # never PREFIX itself
     script = h.probe_script("system", "/opt/sai")
     assert "ls -ndL /opt/sai/lib/sandbox-ai" in script and "folder0=" in script
+
+
+def test_a_from_here_update_of_the_same_version_says_it_reinstalled():
+    """Review 5 (correctness L11): `hosts update NAME --from-here` that replaced the files with this machine's copy
+    of the same version said "up to date"."""
+    base = {"name": "ct1", "before": "0.1.78", "after": "0.1.78", "changed": False, "error": None, "notes": [],
+            "fixed": []}
+    assert h.update_lines({**base, "from_here": True})[0] == "ct1: reinstalled from this machine's copy (0.1.78)"
+    assert h.update_lines(base)[0] == "ct1: 0.1.78, up to date"

@@ -1176,3 +1176,21 @@ def test_trust_list_skips_damaged_entries(tmp_path, capsys):
     captured = capsys.readouterr()
     assert [e["path"] for e in json.loads(captured.out)] == [str(good)]
     assert captured.err.count("skipped a damaged entry") == 3
+
+
+def test_trust_refuses_what_every_start_would_refuse(tmp_path):
+    """Review 5 (correctness L4): `{}`, `{"version": 1}` and a file with an option the launcher does not know were
+    trusted without a word ("problem": null), and the next start failed. The launcher's checks come first now."""
+    for text, why in (("{}", "expected version 1"), ('{"version": 1}', "agent must be"),
+                      ('{"version": 1, "agent": "claude", "options": ["--bogus-option"]}', "do not parse"),
+                      ('{"version": 1, "agent": "claude", "options": ["--mode", "lax"]}', "not allowed")):
+        path = tmp_path / ".sandbox-ai.json"
+        path.write_text(text)
+        out = []
+        assert w.trust(str(path), yes=True, out=out.append) == 1 and why in out[0], (text, out)
+        assert not w.launcher().is_trusted_config(path) if hasattr(w.launcher(), "is_trusted_config") else True
+        shown = []
+        w.show(str(path), as_json=True, out=shown.append)
+        assert why in json.loads(shown[0])["problem"]
+    path.write_text('{"version": 1, "agent": "claude", "options": ["--allow-pypi"]}')
+    assert w.trust(str(path), yes=True, out=[].append) == 0

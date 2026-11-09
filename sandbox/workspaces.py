@@ -1292,7 +1292,11 @@ def main(argv, out=print):
     args = parser.parse_args(argv)
     try:
         if args.command == "list":
-            record = net.choose(net.running(), args.run)
+            runs = net.running()
+            if args.json and not args.run and not runs:
+                out("[]")  # nothing runs: nothing to list (as net list --json), for the front ends to read
+                return 0
+            record = net.choose(runs, args.run)
             entries = listing(record)
             out(json.dumps(entries, indent=2) if args.json else "\n".join(list_lines(record, entries)))
             return 0

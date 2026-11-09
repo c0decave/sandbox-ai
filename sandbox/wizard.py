@@ -10,10 +10,12 @@ uses only that server, and allows exactly its IP and port through the sandbox
 firewall.
 """
 import argparse
+import contextlib
 from collections import Counter
 import getpass
 import glob
 import hashlib
+import io
 import importlib.util
 import ipaddress
 import json
@@ -1438,7 +1440,31 @@ def review(path):
     if not all(c in "\n\t" or c.isprintable() for c in text):
         return path, data, document, (f"{launcher().printable(path)} contains control or invisible characters; "
                                       "refusing to trust it. Remove them (e.g. Windows line endings) and try again.")
+    problem = start_problem(document)
+    if problem:  # trusting what every start refuses would only move the error to the next start
+        return path, data, document, f"{launcher().printable(path)}: {problem}; not trusted, fix it first"
     return path, data, document, None
+
+
+def start_problem(document):
+    """Why a start would refuse the project configuration DOCUMENT, or None: its shape (config_problem), an option a
+    project file may not set (the launcher's CONFIG_FORBIDDEN) and options the launcher does not parse."""
+    problem = config_problem(document)
+    if problem:
+        return problem
+    l = launcher()
+    options = l.canonical_options(list(document.get("options", [])))
+    for value in options:
+        if any(value == flag or value.startswith(flag + "=") for flag in l.CONFIG_FORBIDDEN):
+            return f"option {l.printable(value)} is not allowed in a project configuration"
+    errors = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(errors):
+            l.build_parser().parse_args([document["agent"], *options])
+    except SystemExit:
+        said = errors.getvalue().strip().splitlines()
+        return "its options do not parse: " + l.printable(said[-1] if said else "invalid options")
+    return None
 
 
 def trust(path, yes=False, prompt=None, out=print, digest=None):
@@ -1550,7 +1576,7 @@ def forget(path, out=print):
 
 
 def cli(argv):
-    parser = argparse.ArgumentParser(prog="sandbox-wizard", description="Create and trust sandbox project configurations.")
+    parser = argparse.ArgumentParser(prog="sandbox-ai wizard", description="Create and trust sandbox project configurations.")
     parser.add_argument("-V", "--version", action="version", version=f"sandbox-ai {launcher().__version__}")
     commands = parser.add_subparsers(dest="command")
     commands.add_parser("new", help="Interactive setup (default); offers to edit an existing configuration")

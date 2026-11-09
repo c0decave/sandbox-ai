@@ -1218,3 +1218,19 @@ def test_the_clone_helper_enters_the_sandbox_and_sends_a_read_only_clone(tmp_pat
     assert ("syscall", w.SYS_MOUNT_SETATTR) in c.calls
     with pytest.raises(OSError, match="gone"):
         w.clone_helper(100, str(folder), [info.st_dev, info.st_ino], {"100": 1}, -1, proc, FakeLibc())
+
+
+def test_list_json_with_nothing_running_is_an_empty_list(monkeypatch, capsys):
+    """Review 5 (correctness L8): `workspace list --json` and `devices list --json` with nothing running printed an
+    error (rc 1) where `net list --json` prints []: the front ends got nothing to read."""
+    net = w.module("net")
+    monkeypatch.setattr(net, "running", lambda: {})
+    lines = []
+    assert w.main(["list", "--json"], out=lines.append) == 0 and lines == ["[]"]
+    assert w.main(["list"], out=lines.append) == 1 and "no sandbox is running" in capsys.readouterr().err
+    spec = importlib.util.spec_from_file_location("devices_for_empty_list", ROOT / "sandbox/devices.py")
+    devices = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(devices)
+    monkeypatch.setattr(devices.module("net") if hasattr(devices, "module") else net, "running", lambda: {})
+    lines = []
+    assert devices.main(["list", "--json"], out=lines.append) == 0 and lines == ["[]"]

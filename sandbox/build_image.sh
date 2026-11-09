@@ -2,10 +2,10 @@
 set -euo pipefail
 script_path=$(readlink -f -- "${BASH_SOURCE[0]}")
 script_dir=$(dirname -- "$script_path")
-usage='Usage: sandbox-build-image [-pu|--podman-url URL] [-p|--pin VERSION] [-u|--uv VERSION] [-n|--node IMAGE]
-                           [-e|--extension-only] codex|claude|opencode|all|VARIANT [podman build options]
-       sandbox-build-image [-pu|--podman-url URL] [-u|--uv VERSION] [-n|--node IMAGE] team [podman build options]
-       sandbox-build-image [-pu|--podman-url URL] vpn [podman build options]
+usage='Usage: sandbox-ai build [-pu|--podman-url URL] [-p|--pin VERSION] [-u|--uv VERSION] [-n|--node IMAGE]
+                        [-e|--extension-only] codex|claude|opencode|all|VARIANT [podman build options]
+       sandbox-ai build [-pu|--podman-url URL] [-u|--uv VERSION] [-n|--node IMAGE] team [podman build options]
+       sandbox-ai build [-pu|--podman-url URL] vpn [podman build options]
 
 Every build uses the newest releases unless you pin them: the newest npm release
 of the agent (looked up first, so the cached install layer is rebuilt), the

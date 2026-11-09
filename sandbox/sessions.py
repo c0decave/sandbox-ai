@@ -1021,7 +1021,7 @@ def list_sessions(out=print):
 
 
 def cli(argv):
-    p = argparse.ArgumentParser(prog="sandbox-session", description="Manage named sandbox sessions. "
+    p = argparse.ArgumentParser(prog="sandbox-ai session", description="Manage named sandbox sessions. "
                                 "Start one with: <agent>-sandbox --session NAME [options]")
     p.add_argument("-V", "--version", action="version", version=f"sandbox-ai {launcher().__version__}")
     commands = p.add_subparsers(dest="command", required=True)
@@ -1047,5 +1047,5 @@ if __name__ == "__main__":
     try:
         sys.exit(cli(sys.argv[1:]))
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
-        print(f"sandbox-session: {exc}", file=sys.stderr)
+        print(f"sandbox-ai session: {exc}", file=sys.stderr)
         sys.exit(1)

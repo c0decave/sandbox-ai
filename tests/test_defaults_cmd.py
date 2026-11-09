@@ -54,9 +54,10 @@ def test_show_set_unset(config):
 def test_what_the_launcher_refuses_is_never_written(config, key, value, why):
     assert run("set", "telemetry", "strict")[0] == 0
     before = config.read_text()
-    with pytest.raises(ValueError, match=why):
+    with pytest.raises(ValueError, match=why) as refused:
         d.cli(["set", key, value])
     assert config.read_text() == before
+    assert ".check" not in str(refused.value)  # review 5 (correctness L5): never the name of the checking copy
 
 
 def test_a_broken_file_is_left_alone(config):

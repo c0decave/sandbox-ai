@@ -1318,6 +1318,11 @@ def update_lines(result):
     elif result.get("changed"):
         lines.insert(0, f"{name}: {printable(result['before'] or '?')} -> {printable(result['after'])}"
                         + (" (sudo)" if result.get("sudo") else ""))
+    elif result.get("from_here") and result.get("after"):
+        # The files were replaced with this machine's copy, of the same version: not "up to date" as it was.
+        lines.insert(0, f"{name}: reinstalled from this machine's copy ({printable(result['after'])})"
+                        + (" (sudo)" if result.get("sudo") else "")
+                        + (f" ({printable(result['error'])})" if result.get("error") else ""))
     else:
         lines.insert(0, f"{name}: {printable(result.get('after') or result.get('before') or '?')}, up to date"
                         + (f" ({printable(result['error'])})" if result.get("error") else ""))

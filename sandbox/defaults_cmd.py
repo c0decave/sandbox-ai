@@ -72,6 +72,8 @@ def check(document, path):
         empty = tempfile.mkdtemp(prefix="sandbox-ai-defaults-")  # a workspace that holds nothing of yours
         try:
             L.load_user_defaults(L.parse_args(["claude", "--no-config", "--workspace", empty]))
+        except ValueError as exc:  # named as the file it is about, not the copy it was checked on
+            raise ValueError(str(exc).replace(str(candidate), str(path))) from None
         finally:
             L.defaults_file = original
             os.rmdir(empty)

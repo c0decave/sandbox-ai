@@ -1525,7 +1525,7 @@ def detach(name, start, helper=None, live=False, out=print):
 
 
 def cli(argv):
-    parser = argparse.ArgumentParser(prog="sandbox-mcp", description="Manage local MCP servers that run in their "
+    parser = argparse.ArgumentParser(prog="sandbox-ai mcp", description="Manage local MCP servers that run in their "
                                      "own sandboxes. Agents use them with --mcp NAME.")
     parser.add_argument("-V", "--version", action="version", version=f"sandbox-ai {launcher().__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1543,7 +1543,7 @@ def cli(argv):
                             "conversation)")
     start.add_argument("-j", "--json", action="store_true", help="with --for: the result as JSON")
     attaching = commands.add_parser("attach", help="Connect a server to an agent start (kept for its later starts)",
-                                    usage="sandbox-mcp attach NAME START [--live | --restart] [--json]\n"
+                                    usage="sandbox-ai mcp attach NAME START [--live | --restart] [--json]\n"
                                           "       sandbox-mcp attach --helper AGENT START --live [--json]")
     attaching.add_argument("name", metavar="NAME", help="the server (sandbox-ai mcp list); with --helper: START")
     attaching.add_argument("start", metavar="START", nargs="?", help="the agent start (sandbox-ai list)")
@@ -1560,7 +1560,7 @@ def cli(argv):
     attaching.add_argument("-j", "--json", action="store_true")
     detaching = commands.add_parser("detach", help="Take a server from an agent start (and with --live from its "
                                                    "running sandbox now)",
-                                    usage="sandbox-mcp detach NAME START [--live] [--json]\n"
+                                    usage="sandbox-ai mcp detach NAME START [--live] [--json]\n"
                                           "       sandbox-mcp detach --helper AGENT START [--live] [--json]")
     detaching.add_argument("name", metavar="NAME", help="the server; with --helper: START")
     detaching.add_argument("start", metavar="START", nargs="?", help="the agent start (sandbox-ai list)")
@@ -1655,8 +1655,10 @@ def cli(argv):
                 print(json.dumps(result, indent=2))
             return 0
         if a.helper:
-            raise ValueError("--helper AGENT goes with --live here (a running start: sandbox-ai mcp attach --helper "
-                             f"{a.helper} {target} --live), or give it at a start (--helper {a.helper})")
+            # A helper joins a start that runs (--live), or comes with a new start; a stopped start keeps its options.
+            raise ValueError(f"--helper AGENT joins a running start: sandbox-ai mcp attach --helper {a.helper} "
+                             f"{launcher().printable(target)} --live while it runs; for a start that does not run, "
+                             f"give --helper {a.helper} to a new start (its kept options stay as they are)")
         a.name, a.start = name, target
     if a.command in ("start", "attach"):
         interactive = sys.stdin.isatty() and sys.stdout.isatty() and not a.json
@@ -1680,5 +1682,5 @@ if __name__ == "__main__":
     try:
         sys.exit(cli(sys.argv[1:]))
     except (OSError, ValueError, RuntimeError) as exc:
-        print(f"sandbox-mcp: {exc}", file=sys.stderr)
+        print(f"sandbox-ai mcp: {exc}", file=sys.stderr)
         sys.exit(1)
