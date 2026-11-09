@@ -501,7 +501,7 @@ def install_choice(body):
     """{"mode", "prefix", "sudo", "source", "version"} of BODY checked as `sandbox-ai hosts install` takes them (mode
     user or system, or null: the host decides (system when the SSH user is root); prefix only for system, an
     absolute path of letters, digits, . _ - and / without . or .. parts; sudo true, false or null (with sudo when a
-    system installation as no root needs it); source here (this machine's copy) or download (the signed release),
+    system installation as no root needs it; null for mode user, which never uses it); source here (this machine's copy) or download (the signed release),
     version X.Y.Z only with download)."""
     hosts = module("hosts")
     if set(body) - {*INSTALL_KEYS, "confirm"}:
@@ -520,8 +520,8 @@ def install_choice(body):
             raise Refused(400, "the prefix is an absolute path without empty parts")
     if sudo not in (None, True, False):
         raise Refused(400, "sudo is true, false or null (when needed)")
-    if sudo is True and mode == "user":
-        raise Refused(400, "sudo is for an installation for every user (mode system)")
+    if sudo is True and mode == "user":  # a user's own installation never uses sudo (hosts.install): a retry that
+        sudo = None                      # names it anyway (from here, with the host's update setting) is not refused
     if source not in ("here", "download"):
         raise Refused(400, "source is here (this machine's sandbox-ai) or download (the signed release)")
     if version is not None:

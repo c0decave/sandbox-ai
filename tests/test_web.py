@@ -850,7 +850,6 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     ("POST", "/api/hosts/ct1/install", {"mode": "--system", "confirm": True}, 400),
     ("POST", "/api/hosts/ct1/install", {"mode": ["system"], "confirm": True}, 400),
     ("POST", "/api/hosts/ct1/install", {"mode": "system", "sudo": "yes", "confirm": True}, 400),
-    ("POST", "/api/hosts/ct1/install", {"mode": "user", "sudo": True, "confirm": True}, 400),
     ("POST", "/api/hosts/ct1/install", {"mode": "user", "source": "ftp", "confirm": True}, 400),
     ("POST", "/api/hosts/ct1/install", {"mode": "user", "as": "root", "confirm": True}, 400),
     ("POST", "/api/hosts/local/install", {"mode": "user", "confirm": True}, 400),
@@ -2703,6 +2702,8 @@ INSTALLS = [
     ({"mode": "user", "source": "download"}, ["--user", "--download"]),
     ({"mode": "user", "source": "download", "version": "0.1.80"}, ["--user", "--download", "--version=0.1.80"]),
     ({"mode": "user", "sudo": False}, ["--user", "--no-sudo", "--from-here"]),
+    # review 6 L-11: a user's installation never uses sudo; a retry that names it (from here) is not refused for that
+    ({"mode": "user", "sudo": True}, ["--user", "--from-here"]),
     ({"mode": "system"}, ["--system", "--from-here"]),
     ({"mode": "system", "sudo": True}, ["--system", "--sudo", "--from-here"]),
     ({"mode": "system", "sudo": False}, ["--system", "--no-sudo", "--from-here"]),
@@ -2791,6 +2792,9 @@ def test_a_host_install_runs_once_at_a_time_and_says_how_it_ended(home):
     assert argv[3:] == ["hosts", "install", "ct1", "--system", "--prefix=/opt/sai", "--sudo", "--from-here"]
     assert w.terminal_command({**query, "source": "download", "version": "0.1.80", "sudo": "0"})[1][3:] == [
         "hosts", "install", "ct1", "--system", "--prefix=/opt/sai", "--no-sudo", "--download", "--version=0.1.80"]
+    # review 6 L-11: the from-here retry of a user's installation in a terminal (the page sent sudo=1 with it)
+    assert w.terminal_command({"host": "ct1", "kind": "install", "mode": "user", "sudo": "1", "source": "here",
+                               "confirm": "1"})[1][3:] == ["hosts", "install", "ct1", "--user", "--from-here"]
     for change in ({"confirm": None}, {"confirm": "yes"}, {"host": "local"}, {"host": "nowhere"}, {"sudo": "yes"},
                    {"prefix": "/opt/../etc"}, {"mode": "root"}, {"version": "0.1.80"}, {"mode": "user"}):
         with pytest.raises(w.Refused):
@@ -4292,6 +4296,16 @@ const posts = () => calls.filter(c => c.method === "POST").map(c => [c.path, JSO
   await vm.runInContext('updateHost("ct1", __output, sudoChoice({ value: "" }))', context);
   result.updates = posts().map(p => p[1]);
   result.updatePassword = output.all().find(n => (n.className || "").includes("password-help")).all().find(n => n.tagName === "code").textContent;
+  // review 6 L-11: from here, a sudo password wanted: the terminal's install of a user's installation names no sudo
+  vm.runInContext('state.me = Object.assign({}, state.me, { terminals: true }); window.Terminal = window.Terminal || function () {}; var terminalsOpened = []; openTerminal = (params, title) => { terminalsOpened.push(params); };', context);
+  for (const mode of ["user", "system"]) {
+    updated = { name: "ct1", before: "0.1.70", after: null, mode, prefix: mode === "system" ? "/usr/local" : null, error: "sudo on ct1 wants a password", needs_password: true, notes: [] };
+    const retry = new Node("div");
+    context.__retry = retry;
+    await vm.runInContext('updateHost("ct1", __retry, true, "", true)', context);
+    retry.all().find(n => n.tagName === "button" && n.textContent === "Update in a terminal (sudo asks there)").fire("click");
+  }
+  result.fromHereTerminals = vm.runInContext("terminalsOpened", context);
   // the hosts page: a host without sandbox-ai offers the install in its version cell
   answer = (method, path) => (path === "/api/hosts-status" ? { ct1: { error: "bash: sandbox-ai: command not found (exit status 127)" }, ct2: { version: "0.1.80", update: false } } : path === "/api/hosts-activity" ? {} : {});
   vm.runInContext("clear(__main)", context);
@@ -4339,6 +4353,11 @@ def test_a_hosts_install_is_chosen_asked_and_sent_as_chosen(tmp_path):
                                                             "confirm": True}], "as root: no sudo sent"
     assert result["updates"] == [{"sudo": True}, {"sudo": False}, {}]
     assert result["updatePassword"] == "sandbox-ai hosts update ct1 --sudo"
+    user, system = result["fromHereTerminals"]
+    assert user["kind"] == "install" and user["mode"] == "user" and "sudo" not in user, user
+    assert system["mode"] == "system" and system["sudo"] == "1" and system["prefix"] == "/usr/local", system
+    for query in (user, system):  # what the terminal route takes (the user's was refused before)
+        w.install_choice({k: query[k] for k in ("mode", "prefix", "source") if query.get(k)})
     missing, current = result["missing"]
     assert missing == "not installed Install…" and current == "0.1.80, up to date"
     assert result["sudoSelects"] == ["as set: without sudo", "as set: with sudo"]
