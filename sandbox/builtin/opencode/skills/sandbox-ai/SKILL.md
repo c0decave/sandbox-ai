@@ -109,6 +109,10 @@ and the system bundle point at it. Each request is logged on the host with heade
   get around it: the rules read requests the way servers do, and every attempt is logged. Tell the
   human what you need and why. An MCP tool call answered with `sandbox-ai: ...` was refused the
   same way by the MCP server's gateway, which also leaves always refused tools out of its list.
+- A key, token or login the proxy adds for you (`--api-key`, `--llm`, `--publish`, Git logins) only
+  goes with requests whose single `Host` header names the server you connected to; a request with
+  another `Host` gets a `sandbox-ai: ...` 403 and nothing is sent. Use the server's own name.
+  An approval question names the server the proxy verified, not the `Host` you sent.
 - A call of your own tools (Bash, an edit, WebFetch) refused with `sandbox-ai: ...` was stopped
   by the human's rules for your tools; the text names the rule. Do not reach the same result
   another way (a script, another tool, an encoded command): ask the human instead.
@@ -190,7 +194,9 @@ and the system bundle point at it. Each request is logged on the host with heade
 - MCP servers run in sandboxes or containers of their own and are added with `--mcp NAME` (list:
   `sandbox-ai mcp list`). Ready-made ones (web search, web pages as text, binwalk, radare2 and
   more) come from the catalogs: `sandbox-ai mcp catalog`, then `sandbox-ai mcp add NAME`. A search
-  server gives you the web without opening your own sandbox's network.
+  server gives you the web without opening your own sandbox's network. The human can give you one
+  during the run without a restart: `sandbox-ai mcp attach NAME START --live` (it is kept for the
+  later starts too); a new MCP server appears in your MCP list (in Claude: `/mcp`).
 
 ## What to ask the human for
 
@@ -212,11 +218,14 @@ and the system bundle point at it. Each request is logged on the host with heade
 | Publishing to npm, PyPI, crates.io, GitLab, GitHub | `--publish KIND` (after `sandbox-ai publish-logins add KIND --secret NAME`) | restart needed |
 | An API key | `--api-key HOST=NAME` (the key stays out of the sandbox) or `--secret-env NAME` (after `sandbox-ai secrets set NAME`) | restart needed |
 | More memory, CPUs, processes | `--memory SIZE`, `--cpus N`, `--pids N` | `sandbox-ai limits $SANDBOX_AI_RUN --memory 16g` (and `--cpus`, `--pids`) |
-| Another folder of the host | `--workspace DIR` (at `/workspaces/<name>`) or `--mount SRC:DEST:ro` | `sandbox-ai workspace add $SANDBOX_AI_RUN DIR` (at `/workspaces/<name>`, no restart; `--ro` read-only), or `sandbox-ai resume NAME --restart --workspace DIR` |
+| Another folder of the host | `--workspace DIR` (at `/workspaces/<name>`) or `--mount SRC:DEST:ro` | `sandbox-ai workspace add $SANDBOX_AI_RUN DIR` (at `/workspaces/<name>`, no restart; `--ro` read-only, `--name AS` for `/workspaces/AS`, a single file too), or `sandbox-ai resume NAME --restart --workspace DIR` |
+| An MCP server | `--mcp NAME` (after `sandbox-ai mcp add NAME` from `sandbox-ai mcp catalog`) | `sandbox-ai mcp attach NAME $SANDBOX_AI_RUN --live` (no restart) |
 | Files kept in HOME | kept by default (`sandbox-ai resume NAME`); `--state-dir DIR` for one HOME across starts | restart needed |
 | A system package | extend the image: `sandbox-ai images extend AGENT --add-apt PKG`, then `sandbox-ai build AGENT` | restart needed |
 
 Name the exact host, port or path, the error message, and the command; then wait for the human.
+`$SANDBOX_AI_RUN` is this run's id; every command above also takes the name `sandbox-ai ps` shows
+for this start (often a codename such as `brisk-otter-lantern`).
 
 sandbox-ai ships this skill and updates it with sandbox-ai. A skill named `sandbox-ai` in one of
 your kits replaces it.
