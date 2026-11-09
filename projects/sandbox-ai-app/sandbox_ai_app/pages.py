@@ -29,6 +29,7 @@ REMOTE_ANSWER_WAIT = 130  # an answer on another host: SSH on top (and "always" 
 REMOTE_POLL = 5000  # ms between two looks at the other hosts' open questions (one look per host at a time)
 REMOTE_BACKOFF = 30  # s at most between two looks at a host that does not answer (REMOTE_POLL, doubled each time)
 REMOTE_GRACE = 60  # seconds the questions of a host that stopped answering stay listed after its last answer
+WAKE_SECONDS = 120  # seconds a host is asked for questions after the app started something (it may not be listed yet)
 LOCAL = "local"  # the host of this machine's own questions
 SNAPSHOT_WAIT = 30  # seconds a scan of the questions may take before the next one is tried
 POLL_WAIT = 0.2  # seconds a scan on the GUI thread waits for one running in a thread
@@ -452,6 +453,14 @@ class ApprovalsPage(QWidget):
         # ({(host, run, id): time.monotonic() of the answer}) that a read begun after the answer still listed.
         self.remote_seen, self.answered_there = {}, {}
         self.hosts_reading, self.hosts_again, self.known_hosts = None, False, None
+        # Questions only come from sandboxes that run: a host whose starts were read (the Sandboxes page, set_fleet)
+        # and showed none running is not asked for questions at all (quiet), until a read of its starts shows one or
+        # the app starts something there (woken: {host or None for every host: time.monotonic() until then}). This
+        # machine the same way: while its registry lists no running sandbox, no question folder is read (scan).
+        self.quiet_hosts, self.woken = set(), {}
+        # The last scan of this machine applied ((open, answered, widest)): the same again, while no question counts
+        # down anywhere, changes nothing on the page - nothing is done for it.
+        self.local_read = None
         self.project, self.marked, self.project_pending = None, None, 0
         self.open_box = open_box
         self.records, self.contexts, self.always_token, self.always_loaded = {}, {}, 0, False
@@ -480,10 +489,21 @@ class ApprovalsPage(QWidget):
         if remote_interval:
             self.remote_timer.start(remote_interval)
             QTimer.singleShot(0, lambda: self.poll_remote())
-        self.poll()
+        # The app's page: its first scan in a thread too, after the window's first paint (MainWindow.eventFilter) or
+        # at the timer's first tick (in a thread meanwhile it would slow the window's making and first paint down);
+        # a page without its timer (the tests): scanned now.
+        self.first_scan_due = bool(interval)
+        if not interval:
+            self.poll()
+
+    def first_scan(self):
+        """The window has painted itself: the first scan (in a thread), unless the timer did it already."""
+        if self.first_scan_due:
+            self.poll_soon()
 
     def poll_soon(self):
         """Scan in a thread (the timer's way); the result is applied on the GUI thread."""
+        self.first_scan_due = False
         if self.polling is not None:
             return
         self.generation += 1
@@ -492,8 +512,13 @@ class ApprovalsPage(QWidget):
                                   done=lambda result, error: self.polled(token, result, error))
 
     def scan(self, wait):
-        """(open, answered) of this machine's questions and the policy's widest scope, read together."""
-        snapshot = self.sai.approvals_snapshot(wait=wait)
+        """(open, answered) of this machine's questions and the policy's widest scope, read together. While no sandbox
+        runs here (the registry, files and /proc only), no question folder and no policy is read: there can be no
+        question (the widest scope stays as last read; it is read again with the first question)."""
+        runs = self.sai.live_runs()
+        if not runs:
+            return self.sai.approvals_snapshot(runs={}, wait=wait), getattr(self, "max_scope", "once")
+        snapshot = self.sai.approvals_snapshot(runs=runs, wait=wait)
         try:
             widest = self.sai.max_scope()
         except Exception:  # noqa: BLE001 - a policy that cannot be read: the narrowest, sandbox-ai decides anyway
@@ -521,11 +546,17 @@ class ApprovalsPage(QWidget):
 
     def apply(self, result, error, now=None):
         if error is not None:
+            self.local_read = None
             self.message.setText(tr("Cannot read the questions: {error}", error=printable(error)))
             return
         pending, answered = result
+        read, previous = (pending, answered, self.max_scope), self.local_read
+        self.local_read = read
+        if read == previous and not self.questions:
+            return  # nothing new, and no question anywhere whose time runs: the page stays as it is
         self.local_pending = pending
-        self.show_history(answered)
+        if previous is None or answered != previous[1]:
+            self.show_history(answered)
         self.show_all(now)
 
     def show_all(self, now=None):
@@ -639,15 +670,64 @@ class ApprovalsPage(QWidget):
         now = time.monotonic()
         for host in hosts:
             # A host that did not answer is asked again after a while (remote_next), not every REMOTE_POLL: each look
-            # is a Python process and an ssh that waits for its timeout.
+            # is a Python process and an ssh that waits for its timeout. One where nothing runs is not asked (quiet).
             if host not in self.remote_reading and (not getattr(self, "hosts_polled", False)
-                                                    or now >= self.remote_next.get(host, 0)):
+                                                    or now >= self.remote_next.get(host, 0)) \
+                    and not self.quiet(host, now):
                 self.read_host(host)
         if self.hosts_again:
             self.hosts_again = False
             self.poll_remote()
         self.show_remote_note()
         self.show_all()
+
+    def quiet(self, host, now=None):
+        """True while HOST is not asked for questions: its starts were read last with none running, it lists no
+        question, and the app has not started anything there within WAKE_SECONDS."""
+        if host not in self.quiet_hosts or self.remote.get(host):
+            return False
+        now = time.monotonic() if now is None else now
+        return not any(now < self.woken.get(key, 0) for key in (host, None))
+
+    def set_fleet(self, fleet):
+        """What the last reads of the hosts' starts showed (SandboxesPage.fleet: {host: {"active": starts running,
+        paused or starting, None when not known}}): a host with none is not asked for questions any more; one that
+        has one again (or is not known any more) is asked again at once."""
+        for host, seen in (fleet or {}).items():
+            if host == LOCAL:
+                continue
+            active = seen.get("active") if isinstance(seen, dict) else None
+            if active == 0:
+                if host not in self.quiet_hosts:
+                    self.quiet_hosts.add(host)
+                    if self.quiet(host):  # not asked any more: no note about its last read either
+                        for store in (self.remote_problems, self.remote_failures, self.remote_next):
+                            store.pop(host, None)
+                        self.show_remote_note()
+            elif host in self.quiet_hosts:
+                self.quiet_hosts.discard(host)
+                self.wake(host)
+
+    def wake_hosts(self, hosts=None, seconds=WAKE_SECONDS):
+        """The app started something on HOSTS (None: wherever, e.g. in a terminal): they are asked for questions for
+        at least SECONDS from now on, whatever the last read of their starts said, and at once."""
+        until = time.monotonic() + seconds
+        for key in ([None] if hosts is None else hosts):
+            if key != LOCAL:
+                self.woken[key] = max(until, self.woken.get(key, 0))
+        for host in (sorted(self.quiet_hosts) if hosts is None else hosts):
+            if host != LOCAL and host in self.quiet_hosts:
+                self.wake(host)
+
+    def wake(self, host):
+        """HOST is asked for questions again: now (or once more after the read that runs), whatever its back-off."""
+        self.remote_next.pop(host, None)
+        if self.known_hosts is not None and host not in self.known_hosts:
+            return
+        if host in self.remote_reading:
+            self.remote_again.add(host)
+        else:
+            self.read_host(host)
 
     def read_host(self, host):
         started = time.monotonic()

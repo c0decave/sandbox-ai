@@ -755,6 +755,99 @@ class AsyncCommand(QObject):
 _keepers = []
 
 
+class _Run:
+    """One call's run on a worker thread, as a thread is asked about it: is_alive() until the call has ended (its
+    result handed on), join(timeout) waits for that. The thread itself goes on to the next call."""
+    __slots__ = ("ended",)
+
+    def __init__(self):
+        self.ended = threading.Event()
+
+    def is_alive(self):
+        return not self.ended.is_set()
+
+    def join(self, timeout=None):
+        self.ended.wait(timeout)
+
+
+class _Workers:
+    """The daemon threads the ThreadCalls run on: a thread that has finished a call waits up to IDLE seconds for the
+    next one, so a page that polls every second (the questions) or every few seconds (the starts, the hosts) does not
+    start a new thread each time. Never a queue: a call starts at once on a waiting thread or on a new one, however
+    many run (a host that hangs for its whole timeout holds up no other read). At most KEPT threads wait."""
+    IDLE = 30.0
+    KEPT = 8
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.waiting = []  # [_Worker] with nothing to do
+        self.made = 0
+
+    def run(self, function):
+        with self.lock:
+            worker = self.waiting.pop() if self.waiting else None
+            if worker is None:
+                self.made += 1
+                number = self.made
+        if worker is None:
+            worker = _Worker(self, number)
+            worker.job = function
+            worker.thread.start()
+        else:
+            worker.give(function)
+
+    def done(self, worker):
+        """WORKER finished a call: True if it waits for the next one, False if it ends (enough wait already)."""
+        with self.lock:
+            if len(self.waiting) >= self.KEPT:
+                return False
+            self.waiting.append(worker)
+            return True
+
+    def retire(self, worker):
+        """WORKER waited IDLE seconds for nothing: True if it may end (no call was given to it meanwhile)."""
+        with self.lock:
+            if worker in self.waiting:
+                self.waiting.remove(worker)
+                return True
+            return False
+
+    def count(self):
+        with self.lock:
+            return len(self.waiting)
+
+
+class _Worker:
+    def __init__(self, pool, number):
+        self.pool, self.job, self.given, self.taken = pool, None, threading.Event(), threading.Event()
+        self.thread = threading.Thread(target=self.loop, name=f"worker-{number}", daemon=True)
+
+    def give(self, function):
+        """FUNCTION to run, returning once the thread has taken it - as Thread.start() returns once the thread runs:
+        the call's function starts before its caller goes on (a closure the caller changes right after, say)."""
+        self.taken.clear()
+        self.job = function
+        self.given.set()
+        self.taken.wait(5)
+
+    def loop(self):
+        while True:
+            job, self.job = self.job, None
+            self.taken.set()
+            job()
+            del job  # (nothing of the call stays referenced by a waiting thread)
+            if not self.pool.done(self):
+                return
+            if not self.given.wait(self.pool.IDLE):
+                if self.pool.retire(self):
+                    return
+                self.given.wait()  # taken from the waiting ones just now: its call comes
+            self.given.clear()
+
+
+_workers = _Workers()
+
+
 def _keeper():
     """The parent of every ThreadCall (made on the GUI thread with the first call)."""
     if not _keepers:
@@ -763,9 +856,10 @@ def _keeper():
 
 
 class ThreadCall(QObject):
-    """FUNCTION(*args) in a daemon thread; finished(result, error) is emitted on the GUI thread (the thread
-    that made the ThreadCall), so whatever is connected to it, a lambda too, may touch widgets. Whatever the
-    function raises - SystemExit and KeyboardInterrupt too - comes back as ERROR: a call always reports.
+    """FUNCTION(*args) in a daemon thread (one of _workers, kept for the next call); finished(result, error) is
+    emitted on the GUI thread (the thread that made the ThreadCall), so whatever is connected to it, a lambda too,
+    may touch widgets. Whatever the function raises - SystemExit and KeyboardInterrupt too - comes back as ERROR: a
+    call always reports.
 
     An abandoned call (abandon_all() when the window closes) emits nothing: the check and the emit happen under
     one lock, so no result reaches a receiver after it was given up. Once it has reported (or was abandoned and
@@ -790,11 +884,19 @@ class ThreadCall(QObject):
         self._disposed.connect(self._dispose)
 
     def start(self):
-        self.thread = threading.Thread(target=self._run, daemon=True)
-        self.thread.start()
+        """Run it on a worker thread (one waiting from an earlier call, or a new one). self.thread answers
+        is_alive() and join() for this call, as a thread of its own did."""
+        self.thread = _Run()
+        _workers.run(self._run)
         return self
 
     def _run(self):
+        try:
+            self._call()
+        finally:
+            self.thread.ended.set()
+
+    def _call(self):
         _worker.call = self
         try:
             result, error = self.function(*self.args), None
@@ -1808,13 +1910,20 @@ class FlowLayout(QLayout):
     """Lays out widgets in rows that wrap when the window is narrow (button rows, toolbars)."""
 
     def __init__(self, parent=None, spacing=6):
+        self.items, self.heights, self.minimum = [], {}, None
         super().__init__(parent)
-        self.items = []
         self.gap = spacing
         self.setContentsMargins(0, 0, 0, 0)
 
+    def invalidate(self):
+        """(Qt says so when an item changed - shown, hidden, another size hint: what was measured is measured again;
+        Qt asks a page's layouts for their heights dozens of times when the page is shown.)"""
+        self.heights, self.minimum = {}, None
+        super().invalidate()
+
     def addItem(self, item):  # noqa: N802
         self.items.append(item)
+        self.heights, self.minimum = {}, None
 
     def addWidget(self, widget):  # noqa: N802
         self.addChildWidget(widget)
@@ -1830,6 +1939,7 @@ class FlowLayout(QLayout):
         return self.items[index] if 0 <= index < len(self.items) else None
 
     def takeAt(self, index):  # noqa: N802
+        self.heights, self.minimum = {}, None
         return self.items.pop(index) if 0 <= index < len(self.items) else None
 
     def expandingDirections(self):  # noqa: N802
@@ -1839,7 +1949,12 @@ class FlowLayout(QLayout):
         return True
 
     def heightForWidth(self, width):  # noqa: N802
-        return self._layout(QRect(0, 0, width, 0), apply=False)
+        height = self.heights.get(width)
+        if height is None:
+            if len(self.heights) > 16:
+                self.heights.clear()
+            height = self.heights[width] = self._layout(QRect(0, 0, width, 0), apply=False)
+        return height
 
     def setGeometry(self, rect):  # noqa: N802
         super().setGeometry(rect)
@@ -1849,11 +1964,13 @@ class FlowLayout(QLayout):
         return self.minimumSize()
 
     def minimumSize(self):  # noqa: N802
-        size = QSize()
-        for item in self.items:
-            if item.widget() is None or not item.widget().isHidden():
-                size = size.expandedTo(item.minimumSize())
-        return size + QSize(2, 2)
+        if self.minimum is None:
+            size = QSize()
+            for item in self.items:
+                if item.widget() is None or not item.widget().isHidden():
+                    size = size.expandedTo(item.minimumSize())
+            self.minimum = size + QSize(2, 2)
+        return QSize(self.minimum)
 
     def _layout(self, rect, apply):
         x, y, line = rect.x(), rect.y(), 0
@@ -1938,3 +2055,4 @@ class Busy:
 
     def __exit__(self, *exc):
         QApplication.restoreOverrideCursor()
+

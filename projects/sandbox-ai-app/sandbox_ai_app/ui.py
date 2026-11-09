@@ -1902,7 +1902,8 @@ class SandboxesPage(QWidget):
     open_remote_log = Signal(str, object)  # (host, sandbox-ai activity's arguments) of a host's start
     counted = Signal(int, int)  # instances that run, of them in the current project
     updated = Signal(object)  # {key: Instance} after each read (the window's tabs follow it)
-    fleet_changed = Signal(object)  # {host: {"running", "seen", "problem"}} after each look at a host (Hosts page)
+    fleet_changed = Signal(object)  # {host: {"running", "active", "seen", "problem"}} after each look at a host
+    started_on = Signal(str)  # the page started something on that host (Resume): its questions are asked for at once
 
     def __init__(self, sai, terminal):
         super().__init__()
@@ -2077,7 +2078,7 @@ class SandboxesPage(QWidget):
         self.hosts_reading, self.hosts_again, self.ended_flight, self.flights = False, False, {}, 0
         self.hosts_polled = False
         self.remote_timer = QTimer(self)
-        self.remote_timer.timeout.connect(lambda: self.window_shown() and self.refresh_remote(polled=True))
+        self.remote_timer.timeout.connect(self.remote_tick)
         self.remote_timer.start(REMOTE_SECONDS * 1000)
         self.remote_failures, self.remote_next = {}, {}  # a host that does not answer is asked less often (backoff)
         # The first look too runs in the background: what runs here may ask Podman (a run whose launcher is gone, a
@@ -2092,6 +2093,19 @@ class SandboxesPage(QWidget):
         """False while the window is in the tray or minimised (its polls pause; the page alone: always True)."""
         window = self.window()
         return window is self or (window.isVisible() and not window.isMinimized())
+
+    def remote_tick(self):
+        """The hosts' starts, every REMOTE_SECONDS (shown: REMOTE_SHOWN_SECONDS). With the window in the tray or
+        minimised only those of the hosts where nothing ran at the last look: they are not asked for questions
+        (ApprovalsPage.set_fleet) until a start shows up here."""
+        if self.window_shown():
+            self.refresh_remote(polled=True)
+            return
+        now = time.monotonic()
+        for name in self.remote_names:
+            if self.fleet_entry(name)["active"] == 0 and name not in self.remote_flight and \
+                    now >= self.remote_next.get(name, 0):
+                self.read_host(name)
 
     def tick(self):
         self.ticks += 1
@@ -2251,12 +2265,22 @@ class SandboxesPage(QWidget):
         """{host: {"running": starts running or paused, "seen": time.time() of the last answer or None, "problem":
         why it did not answer or None}} of this machine and every host (what the Hosts page lists)."""
         found = {LOCAL: {"running": sum(1 for i in self.instances.values() if i.host == LOCAL
-                                        and i.state in ("running", "paused")), "seen": time.time(), "problem": None}}
+                                        and i.state in ("running", "paused")),
+                         "active": sum(1 for i in self.instances.values() if i.host == LOCAL
+                                       and i.state in ACTIVE_STATES), "seen": time.time(), "problem": None}}
         for name in self.remote_names:
-            found[name] = {"running": sum(1 for i in self.remote.get(name, []) if i.state in ("running", "paused"))
-                           if name in self.remote_seen else None, "seen": self.remote_seen.get(name),
-                           "problem": self.remote_problems.get(name)}
+            found[name] = self.fleet_entry(name)
         return found
+
+    def fleet_entry(self, name):
+        """fleet() of host NAME; "active": its starts running, paused or starting at its last look (None: not known -
+        not read yet, or its last look got no answer)."""
+        seen = name in self.remote_seen
+        return {"running": sum(1 for i in self.remote.get(name, []) if i.state in ("running", "paused"))
+                if seen else None,
+                "active": sum(1 for i in self.remote.get(name, []) if i.state in ACTIVE_STATES)
+                if seen and name not in self.remote_problems else None,
+                "seen": self.remote_seen.get(name), "problem": self.remote_problems.get(name)}
 
     def drop_host(self, name):
         """Everything of host NAME goes, its reads running too (their answers, when they come, are ignored)."""
@@ -2703,6 +2727,8 @@ class SandboxesPage(QWidget):
         def done(result, error):
             self.command_done(title, result, error)
             self.refresh_remote([instance.host])  # a fresh read of that host, also when one runs already
+        if action == "resume":
+            self.started_on.emit(instance.host)
         seconds = 180 + (wait or 0)
         background(lambda: self.sai.host_run(instance.host, *args, timeout=seconds), owner=self, work=True,
                    source=[self.stop_button, *self.session_buttons.values()], timeout=seconds + 30, done=done)
@@ -5914,10 +5940,15 @@ class MainWindow(QMainWindow):
             page.open_remote_log.connect(self.show_remote_log)
             page.counted.connect(lambda running, here: self.update_activity(sandboxes=here))
             page.updated.connect(self.sync_tabs)
-            # The fleet: the Hosts page lists what the Sandboxes and Approvals pages last saw of every host.
+            # The fleet: the Hosts page lists what the Sandboxes and Approvals pages last saw of every host; the
+            # Approvals page asks only the hosts where something runs for questions.
             page.fleet_changed.connect(self.fleet_changed)
+            page.started_on.connect(lambda host: self.approvals.wake_hosts([host]))
         elif key == "approvals":
             page.pending_changed.connect(self.questions_changed)
+            sandboxes = self.built("sandboxes")
+            if sandboxes is not None and getattr(sandboxes, "loaded", False):
+                page.set_fleet(sandboxes.fleet())
         elif key == "hosts":
             # ... and leads to them filtered by a host; a host removed there leaves both at once.
             page.host_removed.connect(lambda name: self.sandboxes.forget_host(name))
@@ -5953,6 +5984,9 @@ class MainWindow(QMainWindow):
         hosts = self.built("hosts")  # (one made later asks the Sandboxes page then)
         if hosts is not None:
             hosts.set_fleet(fleet)
+        approvals = self.built("approvals")
+        if approvals is not None:
+            approvals.set_fleet(fleet)
 
     def show_project_in(self, key, path):
         """The current project PATH on page KEY (apply_project, and a page made later)."""
@@ -6482,6 +6516,7 @@ class MainWindow(QMainWindow):
             # The window's first paint (the navigation is part of it): the other pages are made from a moment on.
             self.idle_build = False
             QTimer.singleShot(LAZY_START, self.build_later)
+            QTimer.singleShot(0, lambda: alive(self) and self.approvals.first_scan())  # (see there)
         if (event.type() == QEvent.Type.MouseButtonRelease and getattr(self, "nav", None) is not None
                 and watched is self.nav.viewport()):
             item = self.nav.itemAt(event.position().toPoint())
@@ -7276,6 +7311,9 @@ class MainWindow(QMainWindow):
         if embedded is None:
             embedded = self.sai.settings().get("terminal", "app") == "app"
         directory = cwd if cwd and os.path.isdir(cwd) else None
+        approvals = vars(self).get("approvals")  # (made already; and a stand-in window of the tests has none)
+        if approvals is not None:  # what it starts may ask (on any host): every host is asked for questions a while
+            approvals.wake_hosts()
         if embedded and terminal.available()[0]:
             def opened(view):
                 if view is None:  # Chromium's sandbox cannot start now: a terminal window instead

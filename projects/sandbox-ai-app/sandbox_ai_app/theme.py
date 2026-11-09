@@ -879,13 +879,26 @@ def _glyph_pixmap(name, color_, size):
     return pixmap
 
 
+_glyphs = {}  # (name, colour, selected colour or None, size): QIcon - the same icon is asked for again and again
+GLYPHS_KEPT = 512
+
+
 def glyph(name, color_=None, size=20):
     """The navigation icon NAME (a key of GLYPHS) in COLOR (default: the navigation's text colour; a
-    selected item gets the colour of the selected navigation text)."""
-    icon = QIcon(_glyph_pixmap(name, color_ or colors()["nav_text"], size))
-    if color_ is None:
-        icon.addPixmap(_glyph_pixmap(name, colors()["nav_selected_text"], size), QIcon.Mode.Selected)
-    return icon
+    selected item gets the colour of the selected navigation text). Drawn once per name, colours and size (a QIcon
+    is shared, never changed in place)."""
+    tint = color_ or colors()["nav_text"]
+    selected = colors()["nav_selected_text"] if color_ is None else None
+    key = (name, str(tint), str(selected) if selected is not None else None, size)
+    icon = _glyphs.get(key)
+    if icon is None:
+        icon = QIcon(_glyph_pixmap(name, tint, size))
+        if selected is not None:
+            icon.addPixmap(_glyph_pixmap(name, selected, size), QIcon.Mode.Selected)
+        if len(_glyphs) >= GLYPHS_KEPT:
+            _glyphs.clear()
+        _glyphs[key] = icon
+    return QIcon(icon)
 
 
 def counted_glyph(name, count, size=24):

@@ -457,3 +457,140 @@ def test_the_caches_keep_no_backend_alive(env):
     gc.collect()
     assert ref() is None
 
+
+def test_calls_reuse_their_threads_and_still_run_side_by_side(qapp, wait):
+    """A page that polls (the questions every second) does not start a thread per read: a thread that finished a call
+    takes the next one. Never a queue though: a call that waits (a host that hangs) holds up no other."""
+    seen, results = set(), []
+    for index in range(12):
+        call = widgets.ThreadCall(lambda i=index: (seen.add(threading.get_ident()), i)[1])
+        call.finished.connect(lambda result, error: results.append(
+            (result, error, threading.current_thread() is threading.main_thread())))
+        call.start()
+        call.thread.join(10)
+        assert not call.thread.is_alive()
+        assert wait(lambda: len(results) == index + 1, 10)
+    assert [r for r, _, _ in results] == list(range(12)) and all(on_gui for _, _, on_gui in results)
+    assert len(seen) <= 2, f"{len(seen)} threads for 12 calls one after the other"
+    release, done = threading.Event(), []
+    slow = widgets.background(lambda: release.wait(30), done=lambda *r: done.append("slow"))
+    widgets.background(lambda: "quick", done=lambda *r: done.append("quick"))
+    assert wait(lambda: done == ["quick"], 10), "a call waited for another one"
+    assert slow.thread.is_alive()
+    release.set()
+    assert wait(lambda: done == ["quick", "slow"], 10) and not slow.thread.is_alive()
+
+
+def test_the_questions_page_does_nothing_while_nothing_changes(qapp, env, monkeypatch):
+    from sandbox_ai_app import pages
+    sai = backend.SandboxAI()
+    page = pages.ApprovalsPage(sai, interval=0, remote_interval=0)
+    try:
+        shown = []
+        original = page.show_all
+        monkeypatch.setattr(page, "show_all", lambda now=None: shown.append(now) or original(now))
+        read = []
+        monkeypatch.setattr(sai, "max_scope", lambda: read.append("policy") or "always")
+        for _ in range(3):
+            page.poll()
+        assert shown == [] and read == [], "nothing runs here: no question folder, no policy read, nothing shown"
+        run = fake_run(env, "claude-abc", project(env, "p"))
+        ask(run, "1-2-3", kind="net", host="example.org", port=443)
+        page.poll()
+        page.poll()  # an open question counts down: shown each time
+        assert len(shown) == 2 and read == ["policy", "policy"] and len(page.questions) == 1
+        (run / "approvals" / "1-2-3.done").write_text(json.dumps({"decision": "deny", "scope": "once"}))
+        page.poll()
+        page.poll()
+        assert len(shown) == 3 and page.questions == {}, "answered: shown once, then nothing changes"
+    finally:
+        page.timer.stop()
+        page.remote_timer.stop()
+
+
+def test_a_host_where_nothing_runs_is_not_asked_for_questions(qapp, env, monkeypatch):
+    from sandbox_ai_app import pages
+    page = pages.ApprovalsPage(backend.SandboxAI(), interval=0, remote_interval=0)
+    try:
+        asked = []
+        monkeypatch.setattr(page, "read_host", lambda host: asked.append(host))
+        page.set_fleet({"local": {"active": 0}, "quiet": {"active": 0}, "busy": {"active": 2}, "new": {"active": None}})
+        page.hosts_listed(["busy", "new", "quiet"], None)
+        assert asked == ["busy", "new"]
+        asked.clear()
+        page.set_fleet({"quiet": {"active": 1}})  # a start there: asked at once, and from now on
+        assert asked == ["quiet"]
+        page.hosts_listed(["busy", "new", "quiet"], None)
+        assert asked == ["quiet", "busy", "new", "quiet"]
+        asked.clear()
+        page.set_fleet({"quiet": {"active": 0}})
+        page.wake_hosts(["quiet"])  # the app started something there: asked at once, whatever its starts said
+        assert asked == ["quiet"] and not page.quiet("quiet")
+        assert page.quiet("quiet", time.monotonic() + pages.WAKE_SECONDS + 1)
+        asked.clear()
+        page.remote["busy"] = [backend.RemoteQuestion("busy", {"id": "1-1-1", "run": "r"})]
+        page.set_fleet({"busy": {"active": 0}})
+        assert not page.quiet("busy"), "a host that lists a question is asked until it lists none"
+    finally:
+        page.timer.stop()
+        page.remote_timer.stop()
+
+
+def test_in_the_tray_only_the_starts_of_quiet_hosts_are_read(qapp, env, monkeypatch):
+    from sandbox_ai_app import ui
+    page = ui.SandboxesPage(backend.SandboxAI(), lambda *a, **k: None)
+    try:
+        page.timer.stop()
+        page.remote_timer.stop()
+        page.remote_names = ["quiet", "busy", "unknown"]
+        page.remote_seen = {"quiet": time.time(), "busy": time.time()}
+        page.remote = {"quiet": [], "busy": [backend.Instance("run", "run:b", "b", state="starting")]}
+        assert page.fleet()["quiet"]["active"] == 0 and page.fleet()["busy"]["active"] == 1
+        assert page.fleet()["unknown"]["active"] is None
+        read = []
+        monkeypatch.setattr(page, "read_host", read.append)
+        monkeypatch.setattr(page, "window_shown", lambda: False)
+        page.remote_tick()
+        assert read == ["quiet"]
+    finally:
+        page.close()
+
+
+def test_a_row_that_wraps_is_measured_once_until_it_changes(qapp):
+    """Qt asks a page's wrapping rows for their height dozens of times when the page is shown (the Terminals page:
+    50 times, 20 ms): measured once per width, again when a button is hidden, shown or changes its size."""
+    holder = QtWidgets.QWidget()
+    flow = widgets.FlowLayout(holder)
+    buttons = [QtWidgets.QPushButton(f"button number {index}") for index in range(4)]
+    for button in buttons:
+        flow.addWidget(button)
+    holder.show()
+    qapp.processEvents()
+    measured = []
+    original = flow._layout
+    flow._layout = lambda rect, apply: measured.append(apply) or original(rect, apply)
+    flow.invalidate()
+    tall = flow.heightForWidth(200)
+    assert [flow.heightForWidth(200) for _ in range(5)] == [tall] * 5 and measured == [False]
+    for button in buttons[1:]:
+        button.hide()
+    assert flow.heightForWidth(200) < tall
+    buttons[0].setText("a much, much, much longer text than the others had")
+    assert flow.minimumSize().width() > 200
+    holder.close()
+
+
+def test_an_icon_is_drawn_once(qapp):
+    from sandbox_ai_app import theme
+    drawn = []
+    original = theme._glyph_pixmap
+    theme._glyphs.clear()
+    try:
+        theme._glyph_pixmap = lambda *a: drawn.append(a) or original(*a)
+        first = theme.glyph("kits", "#123456", 16)
+        assert theme.glyph("kits", "#123456", 16).cacheKey() == first.cacheKey() and len(drawn) == 1
+        assert theme.glyph("kits", "#654321", 16).cacheKey() != first.cacheKey() and len(drawn) == 2
+        theme.glyph("kits")  # the navigation's: two colours (selected too)
+        assert len(drawn) == 4
+    finally:
+        theme._glyph_pixmap = original
