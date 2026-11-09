@@ -6,8 +6,8 @@ from __future__ import annotations
 from . import i18n
 
 OPTION_LABELS = {
-    "--workspace": ("Workspaces", "Workspaces"),
-    "--workspace-ro": ("Mount all workspaces read-only", "Alle Workspaces schreibgeschützt einbinden"),
+    "--workspace": ("Workspaces", "Arbeitsordner"),
+    "--workspace-ro": ("Mount all workspaces read-only", "Alle Arbeitsordner schreibgeschützt einbinden"),
     "--mount": ("Extra mounts", "Zusätzliche Mounts"),
     "--copy": ("Copy files into the sandbox HOME", "Dateien ins Sandbox-HOME kopieren"),
     "--state-dir": ("Persistent sandbox HOME", "Dauerhaftes Sandbox-HOME"),
@@ -32,7 +32,7 @@ OPTION_LABELS = {
     "--subnet": ("Sandbox subnet (IPv4)", "Subnetz der Sandbox (IPv4)"),
     "--rules": ("Ruleset file", "Regelwerk-Datei"),
     "--llm": ("LLM server", "LLM-Server"),
-    "--log-debug": ("Debug details in the logs", "Debug-Details in den Logs"),
+    "--log-debug": ("Debug details in the logs", "Debug-Details in den Protokollen"),
     "--subnet6": ("Sandbox subnet (IPv6)", "Subnetz der Sandbox (IPv6)"),
     "--ip": ("Fixed IPv4 address", "Feste IPv4-Adresse"),
     "--ip6": ("Fixed IPv6 address", "Feste IPv6-Adresse"),
@@ -40,7 +40,7 @@ OPTION_LABELS = {
     "--no-inspect": ("Pass TLS through unopened", "TLS ungeöffnet durchreichen"),
     "--privacy-check": ("Privacy check after the run", "Datenschutzprüfung nach dem Lauf"),
     "--privacy-rules": ("Own privacy rules", "Eigene Datenschutzregeln"),
-    "--log-dir": ("Log folder", "Log-Verzeichnis"),
+    "--log-dir": ("Log folder", "Protokollverzeichnis"),
     "--git-identity": ("Commit as the host's Git user", "Als Git-Benutzer des Hosts committen"),
     "--git-token-env": ("Git token from a host variable", "Git-Token aus einer Host-Variable"),
     "--git-token-file": ("Git token from a file", "Git-Token aus einer Datei"),
@@ -79,10 +79,37 @@ OPTION_LABELS = {
     "--config": ("Project configuration file", "Projektkonfiguration"),
     "--no-config": ("Ignore .sandbox-ai.json", ".sandbox-ai.json ignorieren"),
     "--probe": ("Only check the isolation (no agent)", "Nur die Isolation prüfen (ohne Agent)"),
+    # added since 0.1.66
+    "--mode": ("Security mode", "Sicherheitsmodus"),
+    "--mode-at-least": ("Security mode at least", "Sicherheitsmodus mindestens"),
+    "--preset": ("Preset", "Vorlage"),
+    "--preset-value": ("Values the preset asks for", "Werte, nach denen die Vorlage fragt"),
+    "--allow-npm": ("Allow npm", "npm erlauben"),
+    "--identity": ("Identity (sandbox-ai identities)", "Identität (sandbox-ai identities)"),
+    "--git-logins": ("Git logins in the connection proxy", "Git-Anmeldungen im Verbindungs-Proxy"),
+    "--token-proxy": ("Keep the Git tokens out of the sandbox", "Git-Tokens aus der Sandbox heraushalten"),
+    "--allow-http": ("Allowed HTTP requests (host, method, path)", "Erlaubte HTTP-Anfragen (Host, Methode, Pfad)"),
+    "--canaries": ("Canary categories", "Canary-Kategorien"),
+    "--no-canaries": ("No canary files", "Keine Canary-Dateien"),
+    "--telemetry": ("Telemetry of the agents", "Telemetrie der Agenten"),
+    "--vpn": ("VPN profile", "VPN-Profil"),
+    "--vpn-check": ("When a VPN check fails", "Wenn eine VPN-Prüfung fehlschlägt"),
+    "--model": ("Model", "Modell"),
+    "--effort": ("Effort", "Denkaufwand"),
+    "--api-key": ("API keys kept out of the sandbox", "API-Schlüssel außerhalb der Sandbox"),
+    "--publish": ("Publish with your logins", "Mit Ihren Anmeldungen veröffentlichen"),
+    "--audio": ("Sound", "Ton"),
+    "--no-tmux": ("Without tmux", "Ohne tmux"),
+    "--helper": ("Other agents as helpers", "Andere Agenten als Helfer"),
+    "--name": ("Name of the start", "Name des Starts"),
+    "--project-name": ("Project part of the name", "Projektteil des Namens"),
+    "--keep": ("Keep the HOME to resume it", "HOME zum Fortsetzen behalten"),
+    "--no-keep": ("Discard the HOME at the end", "HOME am Ende verwerfen"),
+    "--with": ("Other agents in the same sandbox", "Andere Agenten in derselben Sandbox"),
 }
 # Options that only widen or weaken the sandbox: shown with a warning colour when set.
 DANGEROUS = {"--dangerously-skip-permissions", "--egress-all-allow", "--no-proxy", "--gui-wayland", "--device",
-             "--no-inspect"}
+             "--no-inspect", "--no-canaries", "--copy-auth", "--git-credentials"}
 # Shown as one three-way choice instead of two check boxes.
 TMUX = ("--tmux", "--no-tmux")
 

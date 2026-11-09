@@ -664,6 +664,7 @@ class PathEdit(QWidget):
         self.edit.editingFinished.connect(lambda: self.changed.emit(self.edit.text()))
         browse = self.browse_button = QToolButton()
         browse.setText("…")
+        browse.setAccessibleName(tr("Choose…"))
         browse.clicked.connect(lambda: self.browse(directory))
         layout.addWidget(self.edit, 1)
         layout.addWidget(browse)
@@ -859,6 +860,8 @@ class BoardPage(QWidget):
         zoom_in, zoom_out, fit = QToolButton(), QToolButton(), QToolButton()
         zoom_in.setText("+")
         zoom_out.setText("−")
+        zoom_in.setAccessibleName(tr("Zoom in"))
+        zoom_out.setAccessibleName(tr("Zoom out"))
         fit.setText(tr("Fit"))
         # A row that wraps when the window is narrow (the folder's name is shortened, in full in its tooltip).
         layout.addWidget(flow(QLabel(tr("Project")), self.folder, open_button, new_button, wizard_button,
@@ -933,8 +936,10 @@ class BoardPage(QWidget):
         self.preview.setReadOnly(True)
         self.preview.setFont(MONO)
         self.preview.setMaximumHeight(64)
+        self.preview.setAccessibleName(tr("Command line"))
         layout.addWidget(self.preview)
-        self.verdict = plain_label(role="secondary")
+        # One line under the board (the page does not scroll): a long refusal is cut there, whole in the tooltip.
+        self.verdict = ElidedLabel(role="secondary")
         layout.addWidget(self.verdict)
         self.apply_button = QPushButton(tr("Apply…"))
         self.apply_button.setToolTip(tr("Write .sandbox-ai.json into the first workspace and trust it, after showing "
@@ -949,6 +954,7 @@ class BoardPage(QWidget):
         start_window.clicked.connect(lambda: self.start(embedded=False))
         self.session = QLineEdit()
         self.session.setPlaceholderText(tr("session name"))
+        self.session.setAccessibleName(tr("Session name"))
         self.session.setMaximumWidth(160)
         start_session = QPushButton(tr("Start as session"))
         start_session.clicked.connect(lambda: self.start(session=self.session.text().strip()))

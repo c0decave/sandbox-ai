@@ -321,6 +321,7 @@ class CredentialsPage(QWidget):
         overview_layout.addWidget(plain_label(tr("Everything configured, with its state. Click a row to open its "
                                                  "tab."), role="secondary"))
         self.overview = table([tr("Kind"), tr("Name"), tr("Where / used by"), tr("State")])
+        self.overview.setAccessibleName(tr("Overview"))
         self.overview.cellClicked.connect(lambda row, _column: self.open_row(row))
         self.overview.cellActivated.connect(lambda row, _column: self.open_row(row))
         overview_layout.addWidget(self.overview, 1)

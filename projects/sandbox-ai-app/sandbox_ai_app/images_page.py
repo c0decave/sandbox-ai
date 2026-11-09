@@ -521,6 +521,7 @@ class ImagesPage(QWidget):
         images_layout = QVBoxLayout(images)
         self.images = table([tr("Image"), tr("Agent"), tr("Built"), tr("Extension"), tr("Agent version"),
                              tr("Created"), tr("Size"), tr("Name")])
+        self.images.setAccessibleName(tr("Images"))
         self.images.itemSelectionChanged.connect(self.selection_changed)
         self.asking = False  # selection_changed's question is open
         images_layout.addWidget(self.images)
@@ -567,9 +568,11 @@ class ImagesPage(QWidget):
         packages_layout = QVBoxLayout(packages)
         self.filter = QLineEdit()
         self.filter.setPlaceholderText(tr("filter (name or version)"))
+        self.filter.setAccessibleName(tr("Filter"))
         self.filter.textChanged.connect(self.show_packages)
         packages_layout.addWidget(self.filter)
         self.packages = table([tr("Kind"), tr("Name"), tr("Version")])
+        self.packages.setAccessibleName(tr("Installed packages"))
         packages_layout.addWidget(self.packages)
         self.tabs.addTab(packages, tr("Installed packages"))
         self.tabs.addTab(self.build_editor(), tr("Extension"))
@@ -602,6 +605,7 @@ class ImagesPage(QWidget):
         files = QWidget()
         files_layout = QVBoxLayout(files)
         self.files = table([tr("File"), tr("Path in the image"), tr("Mode"), tr("State")], stretch=1)
+        self.files.setAccessibleName(tr("Files"))
         files_layout.addWidget(self.files)
         row = QHBoxLayout()
         row.addWidget(button(tr("Add file…"), tr("Copy a host file into the extension (from a folder no sandbox "

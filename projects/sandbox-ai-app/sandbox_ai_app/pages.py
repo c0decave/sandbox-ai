@@ -301,7 +301,9 @@ class ApprovalsPage(QWidget):
         self.host_filter.addItem(tr("All hosts"), None)
         self.host_filter.addItem(tr("This machine"), LOCAL)
         self.host_filter.currentIndexChanged.connect(lambda _=0: self.show_all())
-        filter_row.addWidget(QLabel(tr("Questions of")))
+        questions_of = QLabel(tr("Questions of"))
+        questions_of.setBuddy(self.host_filter)
+        filter_row.addWidget(questions_of)
         filter_row.addWidget(self.host_filter)
         filter_row.addStretch()
         open_layout.addLayout(filter_row)
@@ -353,11 +355,11 @@ class ApprovalsPage(QWidget):
         # The administrator's max_approval_scope caps the allows (sandbox-ai refuses wider ones anyway); read again
         # at every scan, so a policy changed meanwhile counts.
         self.max_scope = sai.max_scope()
-        for widget in (QLabel(tr("Scope")), self.scope, self.allow_button, self.deny_button, self.deny_once_button,
-                       self.block_button):
-            row.addWidget(widget)
-        row.addStretch()
-        open_layout.addLayout(row)
+        scope_label = QLabel(tr("Scope"))
+        scope_label.setBuddy(self.scope)
+        # A row that wraps when the window is narrow (in German it made the window 1100 px wide).
+        open_layout.addWidget(flow(scope_label, self.scope, self.allow_button, self.deny_button, self.deny_once_button,
+                                   self.block_button))
         # Tab goes from whose questions to the questions, the scope and the answers, in the order they are read.
         order = (self.host_filter, self.open, self.scope, self.allow_button, self.deny_button, self.deny_once_button,
                  self.block_button)
@@ -387,7 +389,9 @@ class ApprovalsPage(QWidget):
         history_refresh = QPushButton(tr("Refresh"))
         history_refresh.setAccessibleName(tr("Refresh the history"))
         history_refresh.clicked.connect(lambda: self.load_history())
-        for widget in (QLabel(tr("History of")), self.history_host, history_refresh):
+        history_of = QLabel(tr("History of"))
+        history_of.setBuddy(self.history_host)
+        for widget in (history_of, self.history_host, history_refresh):
             history_row.addWidget(widget)
         history_row.addStretch()
         history_layout.addLayout(history_row)
@@ -1259,7 +1263,8 @@ class StatisticsPage(QWidget):
         layout.addWidget(self.hosts)
         top = QHBoxLayout()
         self.directory = QComboBox()
-        self.directory.setMinimumWidth(320)
+        self.directory.setAccessibleName(tr("Logs"))
+        compact_combo(self.directory, 30)  # long log folders: elided here, whole in the list
         self.directory.currentIndexChanged.connect(self.load)
         browse = QPushButton(tr("Other folder…"))
         browse.clicked.connect(self.browse)
@@ -1298,6 +1303,7 @@ class StatisticsPage(QWidget):
             box = QGroupBox(title)
             box_layout = QVBoxLayout(box)
             widget = table(headers)
+            widget.setAccessibleName(title)
             widget.setMinimumHeight(160)
             box_layout.addWidget(widget)
             grid.addWidget(box, index // 2, index % 2)

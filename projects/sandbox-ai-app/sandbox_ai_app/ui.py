@@ -80,6 +80,7 @@ class PathField(QWidget):
         self.edit.textChanged.connect(self.changed)
         browse = self.browse_button = QToolButton()
         browse.setText("…")
+        browse.setAccessibleName(tr("Choose…"))
         browse.clicked.connect(self.browse)
         layout.addWidget(self.edit)
         layout.addWidget(browse)
@@ -230,13 +231,60 @@ class MultiChoice(QWidget):
             box.setChecked(name in (values or []))
 
 
+def buddy(text, widget):
+    """A label for WIDGET: its buddy (a screen reader names the field by it), and WIDGET's accessible name."""
+    label = QLabel(text)
+    label.setBuddy(widget)
+    if not widget.accessibleName():
+        widget.setAccessibleName(text.replace("&", ""))
+    return label
+
+
+def set_accessible(widget, name):
+    """NAME as WIDGET's accessible name, and of the field inside a compound one (a path or list field)."""
+    widget.setAccessibleName(name)
+    for kind in (QLineEdit, QComboBox, QPlainTextEdit):
+        for child in widget.findChildren(kind):
+            if not child.accessibleName():
+                child.setAccessibleName(name)
+
+
+class OptionLabel(QWidget):
+    """A row label of the options form: the option's name in the language chosen, and the command-line option in
+    small text below it; in the warning colour while an option that weakens the sandbox is set."""
+
+    def __init__(self, text, flag):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self.title = plain_label(text, word_wrap=False)
+        self.flag = plain_label(flag, word_wrap=False, role="secondary")
+        small = self.flag.font()
+        small.setPointSizeF(max(7.0, small.pointSizeF() - 1))
+        self.flag.setFont(small)
+        layout.addWidget(self.title)
+        layout.addWidget(self.flag)
+
+    def text(self):
+        return self.title.text()
+
+    def set_warning(self, on):
+        role = "notice-warn" if on else None
+        if self.title.property("role") != role:
+            self.title.setProperty("role", role)
+            self.title.style().unpolish(self.title)
+            self.title.style().polish(self.title)
+
+
 class OptionsForm(QTabWidget):
     """Every launcher option, grouped; built from the launcher's own parser (its help texts are sandbox-ai's)."""
     changed = Signal()
 
     def __init__(self, options):
         super().__init__()
-        self.options, self.widgets = options, {}
+        self.options, self.widgets, self.labels = options, {}, {}
+        self.changed.connect(self.mark_dangerous)
         groups = {}
         for option in options:
             groups.setdefault(option.group, []).append(option)
@@ -265,6 +313,14 @@ class OptionsForm(QTabWidget):
             scroll.setWidgetResizable(True)
             scroll.setWidget(page)
             self.addTab(scroll, tr(GROUP_TITLES.get(title, title)).replace("&", "&&"))  # & would mark a shortcut
+
+    def mark_dangerous(self):
+        """The options that weaken the sandbox (labels.DANGEROUS) in the warning colour while they are set."""
+        if len(self.widgets) < len(self.options):
+            return  # still being built
+        values = self.values()
+        for long, label in self.labels.items():
+            label.set_warning(long in labels.DANGEROUS and bool(values.get(long)))
 
     # The options whose values the chosen host lists (backend.host_start_choices): a chooser filled from its lists,
     # the value still typed in where it has none (or the list could not be read).
@@ -300,7 +356,11 @@ class OptionsForm(QTabWidget):
             widget.currentTextChanged.connect(self.changed)
             return widget
         if option.kind == "flag":
-            widget = QCheckBox(option.help.split(";")[0][:90] if option.help else "")
+            # What the box does in the language chosen (its row is labelled with the same words; the help's first
+            # words, in English, only for an option labels.py does not know yet).
+            known = option.long in labels.OPTION_LABELS
+            widget = QCheckBox(labels.label(option.long) if known else
+                               (option.help.split(";")[0][:90] if option.help else ""))
             widget.toggled.connect(self.changed)
         elif option.kind == "choice":
             widget = QComboBox()
@@ -456,6 +516,7 @@ class OptionsForm(QTabWidget):
                 widget.set_value(value)
             else:
                 widget.setText("" if value is None else str(value))
+        self.mark_dangerous()
 
 
 class LaunchPage(QWidget):
@@ -500,8 +561,9 @@ class LaunchPage(QWidget):
         # Where it starts: this machine, or a host of sandbox-ai hosts (its launcher there checks and starts it).
         self.host_choice = HostCombo(sai)
         self.host_known = {}  # {(host, agent): that host's launcher options, or None: could not be read}
-        layout.addWidget(flow(self.host_choice, QLabel(tr("Agent")), self.agent, QLabel(tr("Model")), self.model_choice,
-                              self.model_only, QLabel(tr("Profile")), self.profile, load, save, project))
+        layout.addWidget(flow(self.host_choice, buddy(tr("Agent"), self.agent), self.agent,
+                              buddy(tr("Model"), self.model_choice), self.model_choice, self.model_only,
+                              buddy(tr("Profile"), self.profile), self.profile, load, save, project))
         self.host_note = plain_label(role="secondary")
         self.host_note.hide()
         layout.addWidget(self.host_note)
@@ -519,7 +581,7 @@ class LaunchPage(QWidget):
         self.preset_gallery_button.clicked.connect(lambda _=False: self.open_preset_gallery())
         self.preset_note = plain_label(role="secondary")
         self.preset_note.hide()
-        layout.addWidget(flow(QLabel(tr("Preset")), self.preset_choice, self.preset_gallery_button))
+        layout.addWidget(flow(buddy(tr("Preset"), self.preset_choice), self.preset_choice, self.preset_gallery_button))
         layout.addWidget(self.preset_note)
         self.preset_catalogue, self.presets_host, self.presets_reading = PR.Catalogue(), None, None
         self.choices_host, self.choices_read_at, self.choices_token = None, 0.0, 0
@@ -538,13 +600,14 @@ class LaunchPage(QWidget):
         arguments = QHBoxLayout()
         self.agent_args = QLineEdit()
         self.agent_args.setPlaceholderText(tr("arguments for the agent itself, e.g. --model sonnet"))
-        arguments.addWidget(QLabel(tr("Agent arguments")))
+        arguments.addWidget(buddy(tr("Agent arguments"), self.agent_args))
         arguments.addWidget(self.agent_args)
         layout.addLayout(arguments)
         self.preview = QPlainTextEdit()
         self.preview.setReadOnly(True)
         self.preview.setFont(MONO)
         self.preview.setFixedHeight(70)
+        self.preview.setAccessibleName(tr("Command line"))
         layout.addWidget(self.preview)
         dry = QPushButton(tr("Dry run"))
         dry.setToolTip(tr("Check the options and show the plan; nothing is started"))
@@ -558,6 +621,7 @@ class LaunchPage(QWidget):
         start.clicked.connect(lambda: self.start())
         self.session = QLineEdit()
         self.session.setPlaceholderText(tr("session name"))
+        self.session.setAccessibleName(tr("Session name"))
         self.session.setMaximumWidth(160)
         session = QPushButton(tr("Start as session"))
         session.setToolTip(tr("A detachable session: attach and detach from the Sandboxes page"))
@@ -3385,17 +3449,22 @@ class ConnectionsPage(QWidget):
         self.follow.setChecked(True)
         self.run_label = QLabel(tr("Run"))
         layout.addWidget(self.hosts)
-        layout.addWidget(flow(QLabel(tr("Logs")), self.directory, browse, self.run_label, self.file, self.filter,
-                              self.refused, self.follow, self.summary_button))
+        self.run_label.setBuddy(self.file)
+        self.filter.setAccessibleName(tr("Filter"))
+        widgets.compact_combo(self.directory, 30)  # long log folders: elided here, whole in the list
+        layout.addWidget(flow(buddy(tr("Logs"), self.directory), self.directory, browse, self.run_label, self.file,
+                              self.filter, self.refused, self.follow, self.summary_button))
         self.remote_note = plain_label(role="secondary")
         self.remote_note.hide()
         layout.addWidget(self.remote_note)
         split = self.split = QSplitter(Qt.Orientation.Vertical)
         self.table = table([tr("Time"), tr("Event"), tr("Method"), tr("Status"), tr("Target"), tr("Bytes")])
+        self.table.setAccessibleName(tr("Connections"))
         self.table.itemSelectionChanged.connect(self.details)
         self.detail = QPlainTextEdit()
         self.detail.setReadOnly(True)
         self.detail.setFont(MONO)
+        self.detail.setAccessibleName(tr("Details"))
         split.addWidget(self.table)
         split.addWidget(self.detail)
         split.setSizes([400, 220])
@@ -4001,6 +4070,7 @@ class McpPage(QWidget):
         servers = QGroupBox(tr("Your MCP servers (use them with --mcp NAME)"))
         servers_layout = QVBoxLayout(servers)
         self.servers = table([tr("Name"), tr("Status"), tr("Serves"), tr("Runs")])
+        self.servers.setAccessibleName(tr("MCP servers"))
         servers_layout.addWidget(self.servers)
         row = QHBoxLayout()
         self.server_buttons = []
@@ -4023,6 +4093,7 @@ class McpPage(QWidget):
         catalog = QGroupBox(tr("Catalogs: sandbox-ai-mcp (mcp:) and axross-mcp-hub (hub:)"))
         catalog_layout = QVBoxLayout(catalog)
         self.catalog = table([tr("Entry"), tr("Network"), tr("Title"), tr("Published")])
+        self.catalog.setAccessibleName(tr("Catalog"))
         catalog_layout.addWidget(self.catalog)
         self.catalog_source = QLineEdit()
         self.catalog_source.setPlaceholderText(tr("another catalog instead: https://… or a file on the host "
@@ -4365,6 +4436,7 @@ class SystemPage(QWidget):
         row = QHBoxLayout()
         self.backend = QComboBox()
         self.backend.addItems(["podman", "bwrap", "both"])
+        self.backend.setAccessibleName(tr("Backend"))
         run = QPushButton(tr("Check"))
         run.clicked.connect(self.check)
         self.check_button = run
@@ -4973,7 +5045,16 @@ class PageStack(QStackedWidget):
 
     def __init__(self):
         super().__init__()
-        self.currentChanged.connect(lambda _index: self.updateGeometry())
+        self.currentChanged.connect(self.shown)
+
+    def shown(self, _index=None):
+        """A page is shown: its combo boxes with long items (filled meanwhile) no wider than about 28 characters
+        (tame_combos), and the window's minimum size that of this page."""
+        page = self.currentWidget()
+        if page is not None:
+            tame_combos(page)
+            widgets.name_views(page)
+        self.updateGeometry()
 
     def add_page(self, page, scroll=True):
         return self.addWidget(PageScroll(page) if scroll else page)
