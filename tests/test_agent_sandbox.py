@@ -292,11 +292,14 @@ class SandboxTests(unittest.TestCase):
             (host / ".claude").mkdir(parents=True)
             creds = host / ".claude/.credentials.json"
             creds.write_text(json.dumps({"claudeAiOauth": {"accessToken": "a", "refreshToken": "old", "expiresAt": 1000}}))
+            # The account Claude keeps for the host's login, and the one Anthropic names for the sandbox's new token.
+            (host / ".claude.json").write_text(json.dumps({"oauthAccount": {"accountUuid": "acc", "organizationUuid": "org"}}))
             def refresh(a, session, home):
                 (home / ".claude/.credentials.json").write_text(json.dumps(
                     {"claudeAiOauth": {"accessToken": "b", "refreshToken": "rotated", "expiresAt": 2000}}))
                 return 0
             with patch.dict(os.environ, {"HOME": str(host)}), patch.object(s.os, "geteuid", return_value=1000), \
+                    patch.object(s, "claude_profile_account", side_effect=lambda token, timeout=None: ("acc", "org")), \
                     patch.object(s.shutil, "which", side_effect=lambda n: "/usr/bin/" + n), patch.object(s, "run_pod", side_effect=refresh), \
                     contextlib.redirect_stderr(io.StringIO()):
                 os.environ.pop("CLAUDE_CONFIG_DIR", None)
@@ -1086,12 +1089,30 @@ class SandboxTests(unittest.TestCase):
                     {"claudeAiOauth": {"accessToken": "a", "refreshToken": "forged", "expiresAt": 1e18}}))
             self.run_claude(d, host, plant)
             self.assertEqual(json.loads((host / ".claude/.credentials.json").read_text())["claudeAiOauth"]["refreshToken"], "host")
-            # A genuine refresh is still written back.
+            # A genuine refresh is still written back: Anthropic names the account the host's ~/.claude.json names.
+            (host / ".claude.json").write_text(json.dumps({"oauthAccount": {"accountUuid": "acc", "organizationUuid": "org"}}))
             def refresh(home):
                 (home / ".claude/.credentials.json").write_text(json.dumps(
-                    {"claudeAiOauth": {"accessToken": "a", "refreshToken": "rotated", "expiresAt": (time.time() + 3600) * 1000}}))
-            self.run_claude(d, host, refresh)
+                    {"claudeAiOauth": {"accessToken": "a2", "refreshToken": "rotated", "expiresAt": (time.time() + 3600) * 1000}}))
+            with patch.object(s, "claude_profile_account", side_effect=lambda token, timeout=None: ("acc", "org")):
+                self.run_claude(d, host, refresh)
             self.assertEqual(json.loads((host / ".claude/.credentials.json").read_text())["claudeAiOauth"]["refreshToken"], "rotated")
+
+    def test_review_a_login_of_another_account_is_not_written_back(self):
+        with tempfile.TemporaryDirectory() as d:
+            host = self.claude_host(d, expires=(time.time() + 600) * 1000)
+            (host / ".claude.json").write_text(json.dumps({"oauthAccount": {"accountUuid": "acc", "organizationUuid": "org"}}))
+            before = (host / ".claude/.credentials.json").read_bytes()
+            def relogin(home):
+                (home / ".claude/.credentials.json").write_text(json.dumps(
+                    {"claudeAiOauth": {"accessToken": "other-access", "refreshToken": "other-refresh",
+                                       "expiresAt": (time.time() + 3600) * 1000}}))
+            with patch.object(s, "claude_profile_account", side_effect=lambda token, timeout=None: ("other", "org")):
+                _, err = self.run_claude(d, host, relogin)
+            self.assertEqual((host / ".claude/.credentials.json").read_bytes(), before)
+            self.assertIn("another account", err)
+            self.assertNotIn("other-access", err)
+            self.assertNotIn("other-refresh", err)
 
     def test_review_sigterm_during_startup_still_cleans_up(self):
         with tempfile.TemporaryDirectory() as d:

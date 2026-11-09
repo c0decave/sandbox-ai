@@ -97,6 +97,17 @@ def isolated_host(tmp_path, monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
+REAL_PROFILE_ACCOUNT = s.claude_profile_account
+FIXTURE_ACCOUNT = ("account-fixture", "organization-fixture")
+
+
+@pytest.fixture(autouse=True)
+def one_claude_account(monkeypatch):
+    """Anthropic names one account for every fixture token: the launcher asks it before a sandbox's Claude login
+    goes back to its source. The tests of that account check replace it; nothing here asks the real one."""
+    monkeypatch.setattr(s, "claude_profile_account", lambda token, timeout=None: FIXTURE_ACCOUNT)
+
+
 def states():
     before = {"mnt": "mnt:[10]", "pid": "pid:[11]"}
     current = dict(mnt="mnt:[12]", pid="pid:[13]", CapEff="0", CapPrm="0",
@@ -4166,6 +4177,210 @@ def test_watch_claude_login(scenario, tmp_path, monkeypatch):
         assert len(calls) == 1
     else:
         assert state["notes"] == []
+
+
+class ProfileServer:
+    """Anthropic's profile endpoint on 127.0.0.1: REPLIES[path] is (status, body bytes, extra headers); every request
+    is kept as (path, headers)."""
+
+    def __init__(self, replies):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        self.requests = []
+        server = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                server.requests.append((self.path, dict(self.headers)))
+                status, body, headers = replies.get(self.path, (404, b"", {}))
+                self.send_response(status)
+                for name, value in headers.items():
+                    self.send_header(name, value.replace("PORT", str(server.port)))
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.httpd.server_address[1]
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def test_claude_profile_account(scenario, monkeypatch):
+    for name in ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    profile = json.dumps({"account": {"uuid": "acc-1", "email": "a@example.org"},
+                          "organization": {"uuid": "org-1"}}).encode()
+    replies = {"/ok": (200, profile, {}), "/refused": (401, b'{"error": "invalid"}', {}),
+               "/forbidden": (403, b"", {}), "/busy": (429, b"", {}), "/broken": (500, b"", {}),
+               "/moved": (302, b"", {"Location": "http://127.0.0.1:PORT/stolen"}), "/stolen": (200, profile, {}),
+               "/no-org": (200, json.dumps({"account": {"uuid": "acc-1"}}).encode(), {}),
+               "/not-json": (200, b"<html>", {}), "/list": (200, b"[]", {}),
+               "/huge": (200, b" " * (s.CLAUDE_PROFILE_LIMIT + 1), {})}
+    server = ProfileServer(replies)
+    token = "fixture-oauth-access-secret"
+
+    def ask(path):
+        monkeypatch.setattr(s, "CLAUDE_PROFILE_URL", f"http://127.0.0.1:{server.port}{path}")
+        return REAL_PROFILE_ACCOUNT(token, timeout=5)
+    real_url = s.CLAUDE_PROFILE_URL
+    try:
+        if scenario == "happy":
+            # The real endpoint, as Claude Code asks it: https, Anthropic's API host.
+            assert real_url == "https://api.anthropic.com/api/oauth/profile"
+            assert ask("/ok") == ("acc-1", "org-1")
+            path, headers = server.requests[-1]
+            assert headers["Authorization"] == "Bearer " + token and headers["Content-Type"] == "application/json"
+            assert headers["User-Agent"].startswith("sandbox-ai/")
+        elif scenario == "sad":
+            assert ask("/refused") is None and ask("/forbidden") is None  # the token is refused: known
+            for path in ("/busy", "/broken", "/moved"):  # could not be asked: nothing known
+                with pytest.raises(OSError) as raised:
+                    ask(path)
+                assert token not in str(raised.value)
+            # A redirect is not followed: the token never reaches another address.
+            assert not any(path == "/stolen" for path, _ in server.requests)
+            server.close()
+            with pytest.raises(OSError) as raised:
+                ask("/ok")  # nobody listens any more
+            assert token not in str(raised.value) and raised.value.__cause__ is None
+        else:
+            assert ask("/no-org") is None and ask("/list") is None and ask("/huge") is None
+            with pytest.raises(OSError):
+                ask("/not-json")
+    finally:
+        if scenario != "sad":
+            server.close()
+
+
+def test_claude_account_file(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    home = Path.home()
+    if scenario == "happy":
+        store = s.auth_store("claude")
+        assert s.claude_account_file(store / s.AUTH_TARGETS["claude"]) == store / ".claude.json"
+    elif scenario == "sad":
+        # The default installation: ~/.claude.json next to ~/.claude, also when it does not exist.
+        assert s.claude_account_file(home / ".claude/.credentials.json") == home / ".claude.json"
+    else:
+        custom = tmp_path / "custom"
+        custom.mkdir()
+        (custom / ".claude.json").write_text("{}")
+        assert s.claude_account_file(custom / ".credentials.json") == custom / ".claude.json"
+
+
+def test_claude_file_account(scenario, tmp_path):
+    path = tmp_path / ".claude.json"
+    if scenario == "happy":
+        path.write_text(json.dumps({"oauthAccount": {"accountUuid": "acc", "organizationUuid": "org",
+                                                     "emailAddress": "a@example.org"}, "projects": {}}))
+        assert s.claude_file_account(path) == ("acc", "org")
+    elif scenario == "sad":
+        assert s.claude_file_account(path) is None  # missing
+        for content in ("not json", "[]", json.dumps({"projects": {}}), json.dumps({"oauthAccount": "acc"})):
+            path.write_text(content)
+            assert s.claude_file_account(path) is None
+    else:
+        for account in ({"accountUuid": "acc"}, {"accountUuid": "acc", "organizationUuid": ""},
+                        {"accountUuid": 1, "organizationUuid": "org"}):
+            path.write_text(json.dumps({"oauthAccount": account}))
+            assert s.claude_file_account(path) is None
+
+
+def test_claude_token_account(scenario, monkeypatch):
+    asked = []
+
+    def lookup(token, timeout=None):
+        asked.append(token)
+        if token == "unreachable":
+            raise OSError("network is unreachable")
+        return None if token == "refused" else ("acc-" + token, "org")
+    monkeypatch.setattr(s, "claude_profile_account", lookup)
+    state = {}
+    if scenario == "happy":
+        token = {"accessToken": "secret-access"}
+        assert s.claude_token_account(state, token) == ("acc-secret-access", "org")
+        assert s.claude_token_account(state, token) == ("acc-secret-access", "org")
+        assert asked == ["secret-access"]  # once per token
+        assert list(state["accounts"]) == [hashlib.sha256(b"secret-access").hexdigest()]  # kept under its digest
+    elif scenario == "sad":
+        assert s.claude_token_account(state, {"accessToken": "unreachable"}) == "failed"
+        assert state["account_retry"] > time.monotonic() + s.CLAUDE_ACCOUNT_RETRY - 5
+        # Within the minute nobody is asked, whatever the token; the end of a run asks anyway.
+        assert s.claude_token_account(state, {"accessToken": "a"}) == "later" and asked == ["unreachable"]
+        assert s.claude_token_account(state, {"accessToken": "a"}, final=True) == ("acc-a", "org")
+        assert state["account_retry"] is None
+    else:
+        assert s.claude_token_account(state, {"accessToken": "refused"}) is False
+        assert s.claude_token_account(state, {"accessToken": "refused"}) is False and asked == ["refused"]
+        for number in range(70):  # the cache stays small
+            s.claude_token_account(state, {"accessToken": f"t{number}"})
+        assert len(state["accounts"]) <= 64
+
+
+def test_claude_same_account(scenario, tmp_path, monkeypatch):
+    accounts = {"host-access": ("acc", "org"), "box-access": ("acc", "org"), "other-access": ("evil", "org"),
+                "other-org": ("acc", "evil-org")}
+    asked = []
+
+    def lookup(token, timeout=None):
+        asked.append(token)
+        if token == "unreachable":
+            raise OSError("down")
+        return accounts.get(token)
+    monkeypatch.setattr(s, "claude_profile_account", lookup)
+    host = claude_credentials(tmp_path / "host/.claude/.credentials.json", (time.time() + 3600) * 1000)
+    soon = (time.time() + 3600) * 1000
+    source = {"accessToken": "host-access", "refreshToken": "r", "expiresAt": soon}
+    box = {**source, "accessToken": "box-access"}
+    if scenario == "happy":
+        # The host's account from its ~/.claude.json: only the sandbox's token is asked about.
+        (Path.home() / ".claude.json").write_text(json.dumps({"oauthAccount": {"accountUuid": "acc",
+                                                                               "organizationUuid": "org"}}))
+        assert s.claude_same_account({}, host, source, box) == "same" and asked == ["box-access"]
+        # Without it: the source's own (valid) access token is asked about, once per state.
+        (Path.home() / ".claude.json").unlink()
+        state = {}
+        assert s.claude_same_account(state, host, source, box) == "same"
+        assert s.claude_same_account(state, host, source, box) == "same"
+        assert asked == ["box-access", "host-access", "box-access"]
+    elif scenario == "sad":
+        assert s.claude_same_account({}, host, source, {**box, "accessToken": "other-access"}) == "other"
+        assert s.claude_same_account({}, host, source, {**box, "accessToken": "other-org"}) == "other"
+        assert s.claude_same_account({}, host, source, {**box, "accessToken": "made-up"}) == "unknown"
+        # The source's access token has expired and its .claude.json names no account: cannot be checked.
+        asked.clear()
+        assert s.claude_same_account({}, host, {**source, "expiresAt": 1000}, box) == "unknown" and asked == []
+        # Unless its account is known from before (it was the sandbox's pair, written back an idle hour ago).
+        state = {}
+        assert s.claude_token_account(state, source) == ("acc", "org")
+        assert s.claude_same_account(state, host, {**source, "expiresAt": 1000}, box) == "same"
+    else:
+        state = {}
+        assert s.claude_same_account(state, host, {**source, "accessToken": "unreachable"}, box) == "failed"
+        assert s.claude_same_account(state, host, source, box) == "later"
+        assert s.claude_same_account(state, host, source, box, final=True) == "same"
+        assert s.claude_same_account({}, host, {**source, "accessToken": "made-up"}, box) == "unknown"
+
+
+def test_claude_refusal_note(scenario):
+    secret = "fixture-oauth-secret"
+    if scenario == "happy":
+        note = s.claude_refusal_note("other", "the host")
+        assert note == ("the sandbox holds a Claude login of another account (or one that could not be checked): "
+                        "not written back to the host; the host keeps its own login")
+        assert s.claude_refusal_note("unknown", "the host") == note
+    elif scenario == "sad":
+        note = s.claude_refusal_note("failed", "sandbox-ai's login store")
+        assert note.startswith("could not ask Anthropic") and "a minute later" in note and secret not in note
+    else:
+        assert s.claude_refusal_note("later", "the host", retry=False) == (
+            "could not ask Anthropic which account the sandbox's Claude login belongs to: not written back to the host")
 
 
 def test_claude_sync_notes(scenario):

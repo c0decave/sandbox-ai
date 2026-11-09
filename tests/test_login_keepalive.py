@@ -7,7 +7,8 @@ they refresh with the used-up token. An OAuth server may also revoke the whole l
 sent again (refresh token reuse detection, RFC 9700 section 4.14.2); then one stale sandbox logs out all of them.
 
 Nothing here contacts a real endpoint: FakeOAuth is a local HTTP server with rotation and (optionally) reuse
-detection, FakeClaude refreshes the way Claude Code 2.1.317 does (taken from its bundle: under its own lock it reads
+detection and the account lookup the launcher makes before a sandbox's login goes back to its source (each login of
+FakeOAuth is an account of its own), FakeClaude refreshes the way Claude Code 2.1.317 does (taken from its bundle: under its own lock it reads
 its credentials file again, takes a pair another process wrote instead of refreshing, and after a failed refresh
 reads the file once more before giving up). All tokens are random fixtures.
 """
@@ -48,9 +49,12 @@ HOUR = 3600
 
 class FakeOAuth:
     """A token endpoint with rotating refresh tokens. REUSE_DETECTION: a used-up refresh token sent again revokes
-    every token of its login (its family)."""
+    every token of its login (its family). Each family is an account of its own (account())."""
+    live = []  # every server not closed yet: the fake account lookup asks them
 
     def __init__(self, reuse_detection=True, strict=True):
+        FakeOAuth.live.append(self)
+        self.lookups = []  # the access tokens the account lookup was asked about
         self.reuse_detection, self.strict = reuse_detection, strict  # STRICT=False: a used token still works
         self.refresh, self.access = {}, {}  # token -> family; access also -> expiry (s)
         self.used, self.revoked = {}, set()  # used refresh token -> family; revoked families
@@ -112,9 +116,32 @@ class FakeOAuth:
     def tokens(self):
         return set(self.access) | set(self.refresh) | set(self.used)
 
+    def account(self, access):
+        """What Anthropic's profile endpoint names for the access token ACCESS: (account, organization), or None
+        (401) for an unknown, expired or revoked token."""
+        family, expiry = self.access.get(access, (None, 0))
+        if family is None or family in self.revoked or expiry <= time.time():
+            return None
+        return "account-" + family, "organization-fixture"
+
     def close(self):
+        FakeOAuth.live.remove(self)
         self.httpd.shutdown()
         self.httpd.server_close()
+
+
+def fake_profile_account(access_token, timeout=None):
+    """claude_profile_account answered by the FakeOAuth servers of the test."""
+    for server in FakeOAuth.live:
+        if access_token in server.access:
+            server.lookups.append(access_token)
+            return server.account(access_token)
+    return None
+
+
+@pytest.fixture(autouse=True)
+def account_lookup(monkeypatch):
+    monkeypatch.setattr(s, "claude_profile_account", fake_profile_account)
 
 
 class FakeClaude:
@@ -190,8 +217,16 @@ def server(request):
 
 
 def store_login(oauth):
-    """`sandbox-ai login claude` without the sandbox: the login goes into the store."""
-    login.write_store("claude", {s.AUTH_TARGETS["claude"]: json.dumps({"claudeAiOauth": oauth}).encode()})
+    """`sandbox-ai login claude` without the sandbox: the login goes into the store, with the account Claude wrote
+    into its ~/.claude.json at the login (oauthAccount)."""
+    files = {s.AUTH_TARGETS["claude"]: json.dumps({"claudeAiOauth": oauth}).encode()}
+    family = next((server.access[oauth["accessToken"]][0] for server in FakeOAuth.live
+                   if oauth["accessToken"] in server.access), None)
+    if family:  # kept also once the access token has expired
+        files[".claude.json"] = json.dumps({"oauthAccount": {"accountUuid": "account-" + family,
+                                                             "organizationUuid": "organization-fixture",
+                                                             "emailAddress": "user@example.org"}}).encode()
+    login.write_store("claude", files)
     return s.auth_store("claude") / s.AUTH_TARGETS["claude"]
 
 
@@ -245,7 +280,8 @@ def test_write_back_only_at_the_end_lets_a_later_sandbox_use_up_the_login(tmp_pa
     # With reuse detection the provider revokes the login: the first sandbox is logged out as well, and what its
     # end writes back to the store is dead too, so every later start needs a new login.
     assert first.claude.call() is (not server.reuse_detection)
-    assert "written back" in first.end()
+    # A revoked login cannot be checked with Anthropic (it refuses the token) and is not written back; it is dead.
+    assert first.end().startswith("refreshed Claude credentials written back") is (not server.reuse_detection)
     third = Run(tmp_path, "third", server)
     expire(third)
     assert third.claude.use() is (not server.reuse_detection)
@@ -439,3 +475,220 @@ def test_main_writes_a_refresh_back_while_the_sandbox_still_runs(tmp_path, host,
     leaked = [str(path) for path in state.rglob("*") if path.is_file() and "home" not in path.relative_to(state).parts
               and any(token in path.read_text(errors="replace") for token in server.tokens())]
     assert leaked == []
+
+
+# --- only a refresh of the same account goes back: a sandbox never replaces the source's login with another --------
+
+ANOTHER = "the sandbox holds a Claude login of another account (or one that could not be checked): not written back"
+
+
+def host_login(host, server, account=True, lifetime=HOUR):
+    """The host's own Claude login (with an MCP server's OAuth token in the same file) and, if ACCOUNT, the account
+    Claude keeps for it in ~/.claude.json."""
+    oauth = server.login(lifetime=lifetime)
+    path = host / ".claude/.credentials.json"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps({"claudeAiOauth": oauth, "mcpOAuth": {"srv": {"accessToken": "m"}}}))
+    if account:
+        family = server.access[oauth["accessToken"]][0]
+        (host / ".claude.json").write_text(json.dumps({"oauthAccount": {"accountUuid": "account-" + family,
+                                                                        "organizationUuid": "organization-fixture"}}))
+    return path
+
+
+def sandbox_relogin(run, oauth):
+    """`/login` with another account inside the sandbox (or tokens the agent planted): Claude writes them."""
+    path = run.home / ".claude/.credentials.json"
+    document = json.loads(path.read_text())
+    document["claudeAiOauth"] = {**document["claudeAiOauth"], **oauth}
+    path.write_text(json.dumps(document))
+    run.claude.memory = run.claude.read()
+
+
+def test_a_refresh_of_the_same_account_is_written_back_after_asking_anthropic_once(tmp_path, host, server):
+    credentials = host_login(host, server)
+    run = Run(tmp_path, "run", server)
+    expire(run)
+    assert run.claude.use()
+    assert run.sync() == "refreshed Claude credentials written back to the host"
+    assert s.claude_oauth(credentials)["refreshToken"] == run.claude.memory["refreshToken"]
+    # The host's account came from its ~/.claude.json; only the sandbox's new access token was asked about.
+    assert server.lookups == [run.claude.memory["accessToken"]]
+    assert server.reuses == 0
+
+
+def test_a_source_without_account_state_is_asked_once_per_run(tmp_path, host, server):
+    credentials = host_login(host, server, account=False)
+    shared = s.claude_oauth(credentials)["accessToken"]
+    run = Run(tmp_path, "run", server)
+    for _ in range(2):
+        expire(run)
+        assert run.claude.use() and run.sync() == "refreshed Claude credentials written back to the host"
+    assert server.lookups.count(shared) == 1 and len(server.lookups) == 3
+    assert s.claude_oauth(credentials)["refreshToken"] == run.claude.memory["refreshToken"]
+
+
+@pytest.mark.parametrize("where", ["host", "store"])
+def test_a_login_of_another_account_in_the_sandbox_never_reaches_its_source(tmp_path, host, server, where):
+    """What happened to the user: `/login` with another account in a sandbox replaced the host's login. And an
+    agent could plant its own account's tokens in the host's login the same way."""
+    source = host_login(host, server) if where == "host" else store_login(server.login())
+    before = source.read_bytes()
+    named = "the host" if where == "host" else "sandbox-ai's login store"
+    run = Run(tmp_path, "run", server)
+    other = server.login(lifetime=2 * HOUR)  # newer than the source's, as a fresh login is
+    sandbox_relogin(run, other)
+    note = run.sync()
+    assert note == f"{ANOTHER} to {named}; {named} keeps its own login"
+    assert source.read_bytes() == before
+    # The sandbox keeps the login it chose; it is neither asked about again nor pushed back over.
+    asked = len(server.lookups)
+    assert run.sync() is None and run.end() is None and len(server.lookups) == asked
+    assert run.claude.read()["refreshToken"] == other["refreshToken"]
+    assert source.read_bytes() == before
+    # Tokens Anthropic does not know (made up by the agent) cannot be checked: not written back either.
+    sandbox_relogin(run, {"accessToken": "planted-access", "refreshToken": "planted-refresh",
+                          "expiresAt": int((time.time() + 3 * HOUR) * 1000)})
+    assert run.sync().startswith(ANOTHER)
+    assert source.read_bytes() == before
+    assert not any(token in note for token in server.tokens())
+
+
+def test_a_planted_login_after_a_genuine_refresh_is_checked_again(tmp_path, host, server):
+    credentials = host_login(host, server)
+    run = Run(tmp_path, "run", server)
+    expire(run)
+    assert run.claude.use() and "written back" in run.sync()
+    written = credentials.read_bytes()
+    attacker = FakeOAuth()  # another provider account altogether
+    try:
+        sandbox_relogin(run, attacker.login(lifetime=2 * HOUR))
+        assert run.sync().startswith(ANOTHER)
+        assert run.end() is None
+        assert credentials.read_bytes() == written
+    finally:
+        attacker.close()
+
+
+def test_an_expired_source_without_account_state_cannot_be_checked(tmp_path, host, server):
+    credentials = host_login(host, server, account=False, lifetime=-HOUR)
+    before = credentials.read_bytes()
+    run = Run(tmp_path, "run", server)
+    assert run.claude.use()  # refreshes the expired token: the same account, but the host's cannot be asked
+    note = run.sync()
+    assert note == f"{ANOTHER} to the host; the host keeps its own login"
+    assert credentials.read_bytes() == before and server.lookups == []
+
+
+def test_when_anthropic_cannot_be_asked_nothing_is_written_back_and_it_is_asked_again_a_minute_later(
+        tmp_path, host, server, monkeypatch):
+    credentials = host_login(host, server)
+    before = credentials.read_bytes()
+    calls = []
+
+    def unreachable(token, timeout=None):
+        calls.append(1)
+        raise OSError("network is unreachable")
+    monkeypatch.setattr(s, "claude_profile_account", unreachable)
+    run = Run(tmp_path, "run", server)
+    expire(run)
+    assert run.claude.use()
+    note = run.sync()
+    assert note.startswith("could not ask Anthropic which account the sandbox's Claude login belongs to: "
+                           "not written back to the host")
+    assert credentials.read_bytes() == before and len(calls) == 1
+    # Within the minute nobody asks again, however often the files change.
+    for _ in range(5):
+        assert run.sync() is None
+    assert len(calls) == 1 and credentials.read_bytes() == before
+    # A minute later: asked again (still failing: one more request, not one per look).
+    run.state["account_retry"] = time.monotonic() - 1
+    assert run.sync().startswith("could not ask Anthropic") and len(calls) == 2
+    # Reachable again, still within the minute: the end of the run asks once more and writes back.
+    monkeypatch.setattr(s, "claude_profile_account", fake_profile_account)
+    assert run.sync() is None and credentials.read_bytes() == before
+    assert run.end() == "refreshed Claude credentials written back to the host"
+    assert s.claude_oauth(credentials)["refreshToken"] == run.claude.memory["refreshToken"]
+    assert json.loads(credentials.read_text())["mcpOAuth"] == {"srv": {"accessToken": "m"}}
+
+
+def test_the_watcher_asks_again_when_the_retry_is_due_without_a_change(tmp_path, host, server, monkeypatch):
+    credentials = host_login(host, server)
+    run = Run(tmp_path, "run", server)
+    expire(run)
+    assert run.claude.use()
+    calls = []
+
+    def flaky(token, timeout=None):
+        calls.append(token)
+        if len(calls) == 1:
+            raise OSError("timed out")
+        return fake_profile_account(token)
+    monkeypatch.setattr(s, "claude_profile_account", flaky)
+    monkeypatch.setattr(s, "CLAUDE_ACCOUNT_RETRY", 0.3)
+    stop = threading.Event()
+    watcher = threading.Thread(target=s.watch_claude_login, args=(run.home, run.pair, run.state, stop, 0.01))
+    watcher.start()
+    try:
+        deadline = time.monotonic() + 10
+        while s.claude_oauth(credentials)["refreshToken"] != run.claude.memory["refreshToken"] \
+                and time.monotonic() < deadline:
+            time.sleep(0.02)
+    finally:
+        stop.set()
+        watcher.join(10)
+    assert s.claude_oauth(credentials)["refreshToken"] == run.claude.memory["refreshToken"]
+    assert len(calls) == 2  # the failed lookup and one retry, not one per look every 10 ms
+    assert run.state["notes"][0].startswith("could not ask Anthropic")
+    assert run.state["notes"][-1] == "refreshed Claude credentials written back to the host"
+
+
+def test_a_persistent_home_left_with_another_account_is_not_written_back_at_the_next_start(tmp_path, host, server):
+    credentials = host_login(host, server)
+    before = credentials.read_bytes()
+    session = Run(tmp_path, "session", server, state_dir=True)
+    other = server.login(lifetime=2 * HOUR)
+    sandbox_relogin(session, other)  # then the launcher is killed: no end, no write-back
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        s.prepare_home(session.a, session.home)
+    assert "another account" in err.getvalue() and "earlier run of this HOME" in err.getvalue()
+    assert credentials.read_bytes() == before
+    # The source is the authority at a start: the HOME gets the host's login again.
+    assert s.claude_oauth(session.home / ".claude/.credentials.json")["refreshToken"] == \
+        s.claude_oauth(credentials)["refreshToken"]
+    assert not any(token in err.getvalue() for token in server.tokens())
+    # The same account refreshed in a killed run still goes back.
+    session.claude = FakeClaude(session.home, server)
+    expire(session)
+    assert session.claude.use()
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        s.prepare_home(session.a, session.home)
+    assert "wrote it back now" in err.getvalue()
+    assert s.claude_oauth(credentials)["refreshToken"] == session.claude.memory["refreshToken"]
+
+
+def test_main_keeps_the_stored_login_when_the_sandbox_logs_in_with_another_account(tmp_path, host, server,
+                                                                                    monkeypatch):
+    stored = store_login(server.login())
+    before = stored.read_bytes()
+    monkeypatch.setattr(s, "CLAUDE_SYNC_INTERVAL", 0.02)
+    monkeypatch.setattr(s.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(s.shutil, "which", lambda name: "/usr/bin/" + name)
+    other = server.login(lifetime=2 * HOUR)
+
+    def run_pod(a, session, home):
+        path = home / ".claude/.credentials.json"
+        path.write_text(json.dumps({"claudeAiOauth": other}))
+        time.sleep(0.3)  # the watcher looks meanwhile
+        return 0
+
+    monkeypatch.setattr(s, "run_pod", run_pod)
+    err, out = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+        assert s.main(["claude", "--workspace", str(tmp_path / "w"), "--offline", "--no-tmux"]) == 0
+    assert stored.read_bytes() == before
+    assert f"{ANOTHER} to sandbox-ai's login store; sandbox-ai's login store keeps its own login" in err.getvalue()
+    printed = err.getvalue() + out.getvalue()
+    assert not any(token in printed for token in server.tokens())

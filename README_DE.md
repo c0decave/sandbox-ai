@@ -567,7 +567,7 @@ Von der `~/.claude.json` des Hosts wird nur der Account-Teil (`oauthAccount`,
 `userID`, Onboarding-Status, Theme) kopiert; MCP-Server-Definitionen, die oft
 API-Schlüssel enthalten, und die Liste der Host-Projekte bleiben auf dem Host.
 In der Sandbox erneuerte Tokens gehen noch während des Laufs an ihre Quelle
-zurück, und ein neueres Login der Quelle erreicht die laufende Sandbox auf
+zurück (nur die Erneuerung desselben Kontos, bei Anthropic geprüft), und ein neueres Login der Quelle erreicht die laufende Sandbox auf
 demselben Weg (siehe **Claude-Anmeldung** unten); beim nächsten Start ersetzt
 immer das Login der Quelle das der Sandbox.
 
@@ -914,7 +914,8 @@ sandbox-ai-Prozesse des Hosts teilen
 
 - Die Sandbox hat erneuert und die Quelle hält noch das Login, das beide
   zuletzt geteilt haben: Das neue Paar geht sofort an die Quelle, eine danach
-  gestartete Sandbox bekommt also dieses und nicht das verbrauchte.
+  gestartete Sandbox bekommt also dieses und nicht das verbrauchte, aber nur,
+  wenn es zum selben Konto gehört wie das Login der Quelle (unten).
 - Die Quelle hält ein anderes Login (die Erneuerung einer anderen Sandbox,
   Claude auf dem Host, ein neues `sandbox-ai login claude`) und die Sandbox hat
   seitdem nicht erneuert: Es geht in die Sandbox. Claude liest seine
@@ -922,6 +923,25 @@ sandbox-ai-Prozesse des Hosts teilen
   seinen verbrauchten Refresh-Token zu senden.
 - Beide haben sich geändert: Die Quelle gewinnt. Durch diesen
   Compare-and-Swap ersetzt ein veraltetes Paar nie ein neueres.
+
+Das Login einer Sandbox geht **nur zurück, wenn es eine Erneuerung desselben
+Kontos ist**. Die Anmeldedatei nennt kein Konto, deshalb fragt der Launcher auf
+dem Host, nicht aus der Sandbox, Anthropic so, wie Claude Code selbst es tut
+(`GET https://api.anthropic.com/api/oauth/profile` mit dem Access-Token,
+TLS geprüft, keine Weiterleitung, fünf Sekunden Zeitlimit), zu welchem Konto
+und welcher Organisation der neue Access-Token der Sandbox gehört. Das Konto der
+Quelle kommt aus ihrer eigenen `~/.claude.json` (`oauthAccount`, nur gelesen;
+beim Login-Speicher aus dessen), oder, wenn sie keines nennt, aus derselben
+Frage mit dem Access-Token der Quelle, solange er gültig ist, höchstens einmal
+pro Lauf. Nur wenn beide bekannt und gleich sind, wird das Paar
+zurückgeschrieben. Ein `/login` mit einem anderen Konto in der Sandbox oder
+Tokens, die ein Agent eingeschleust hat, bleiben in der Sandbox, und die Quelle
+behält ihr eigenes Login („the sandbox holds a Claude login of another account
+(or one that could not be checked): not written back to the host; the host
+keeps its own login“). Ist Anthropic nicht erreichbar (Netz, Ratenlimit), wird
+ebenfalls nichts zurückgeschrieben; gefragt wird bei der nächsten Änderung
+wieder, höchstens einmal pro Minute, und noch einmal am Ende des Laufs. Tokens
+erscheinen in diesen Meldungen nie.
 
 Was geschehen ist, meldet der Launcher nach dem Lauf (währenddessen gehört das
 Terminal dem Agenten), und derselbe Vergleich läuft am Ende noch einmal. Vor
@@ -951,8 +971,13 @@ ersetzt, ohne einem Link zu folgen, denn der Agent kann sein HOME jederzeit
 `login-sync.json` enthalten keine. Ein fehlgeschlagenes Zurückschreiben wird
 gemeldet, ändert aber nie den Exit-Status des Agenten. Restrisiken: Zwei
 Inhaber eines Logins, die in denselben zwei Sekunden erneuern, konkurrieren
-weiterhin um seinen Refresh-Token; ein kompromittierter Agent könnte Tokens
-eines anderen Kontos einschleusen, die die Quelle dann nutzt. `--no-auth` oder `--auth-file` lassen die Hostdatei unberührt.
+weiterhin um seinen Refresh-Token; ein kompromittierter Agent, der das Login
+selbst erneuert, könnte den neuen Access-Token des richtigen Kontos mit dem
+Refresh-Token eines anderen Kontos kombinieren (einen Refresh-Token kann man bei
+Anthropic nicht prüfen, ohne ihn zu verbrauchen), und die Quelle wechselte bei
+ihrer nächsten Erneuerung zu diesem Konto; eine Erneuerung, zu der Anthropic
+nicht gefragt werden kann, wird nicht zurückgeschrieben, und die Quelle hält
+dann einen verbrauchten Refresh-Token. `--no-auth` oder `--auth-file` lassen die Hostdatei unberührt.
 Hostdateien anderer Agenten werden nie geschrieben.
 
 **Vor dem Start** prüft der Launcher das Login, das die Sandbox bekommt. Fehlt

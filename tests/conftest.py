@@ -69,6 +69,28 @@ def private_runtime_state(request, tmp_path_factory, monkeypatch):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path_factory.mktemp("xdg-cache")))  # e.g. hosts list's status
 
 
+ANTHROPIC_DOMAINS = ("anthropic.com", "claude.ai", "claude.com")
+
+
+@pytest.fixture(autouse=True)
+def no_requests_to_anthropic(monkeypatch):
+    """No test asks Anthropic anything in this process (the launcher's account check of a Claude login asks
+    api.anthropic.com with the login's access token): such a request fails as a network failure would, without a
+    connection. Tests fake the lookup (claude_profile_account) or serve it on 127.0.0.1."""
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    real = urllib.request.OpenerDirector.open
+
+    def guarded(self, fullurl, *args, **kwargs):
+        url = fullurl if isinstance(fullurl, str) else fullurl.full_url
+        host = (urllib.parse.urlsplit(url).hostname or "").lower().rstrip(".")
+        if any(host == domain or host.endswith("." + domain) for domain in ANTHROPIC_DOMAINS):
+            raise urllib.error.URLError("tests never contact Anthropic")
+        return real(self, fullurl, *args, **kwargs)
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", guarded)
+
+
 @pytest.fixture(autouse=True)
 def writable_tmp_path(request):
     """After each test, every directory under its tmp_path is writable again (a test may leave a read-only tree,

@@ -551,7 +551,7 @@ Of the host's `~/.claude.json` only the account part (`oauthAccount`,
 `userID`, onboarding state, theme) is copied; MCP server definitions, which
 often hold API keys, and the list of host projects stay on the host. Tokens
 Claude refreshes in the sandbox go back to their source while the run is still
-going, and a newer login in the source reaches the running sandbox the same way
+going (only a refresh of the same account, checked with Anthropic), and a newer login in the source reaches the running sandbox the same way
 (see **Claude login** below); at the next start the source's login always
 replaces the sandbox's.
 
@@ -877,7 +877,8 @@ sandbox-ai process on the host shares
 
 - the sandbox refreshed and the source still holds the login the two last
   shared: the new pair goes to the source at once, so a sandbox started
-  afterwards gets it and not the used-up one;
+  afterwards gets it and not the used-up one, but only if it belongs to the
+  same account as the source's login (below);
 - the source holds another login (another sandbox's refresh, Claude on the
   host, a new `sandbox-ai login claude`) and the sandbox has not refreshed
   since: it goes into the sandbox. Before refreshing, Claude reads its
@@ -885,6 +886,24 @@ sandbox-ai process on the host shares
   used-up refresh token;
 - both changed: the source wins. This compare-and-swap means a stale pair never
   replaces a newer one.
+
+A sandbox's login goes back **only if it is a refresh of the same account**.
+The credentials file names no account, so the launcher asks Anthropic, on the
+host and not from inside the sandbox, the way Claude Code itself does
+(`GET https://api.anthropic.com/api/oauth/profile` with the access token,
+TLS verified, no redirect followed, five-second timeout), which account and
+organization the sandbox's new access token belongs to. The source's account
+comes from its own `~/.claude.json` (`oauthAccount`, read only; for the login
+store the store's), or, if that names none, from the same question with the
+source's access token while it is valid, asked at most once per run. Only when
+both are known and equal is the pair written back. A `/login` with another
+account inside the sandbox, or tokens an agent planted, stay in the sandbox,
+and the source keeps its own login: "the sandbox holds a Claude login of
+another account (or one that could not be checked): not written back to the
+host; the host keeps its own login". If Anthropic cannot be asked (network,
+rate limit), nothing is written back either; it is asked again at the next
+change, at most once a minute, and once more at the end of the run. Tokens
+never appear in these notes.
 
 What happened is reported after the run (the agent's terminal is busy during
 it), and the same comparison runs once more at the end. Before the start, the
@@ -908,8 +927,12 @@ any moment. Tokens are never printed or logged; the lock and the
 `login-sync.json` record hold none. A failed write-back is reported but never
 changes the agent's exit status. Residual risks: two holders of one login that
 refresh within the same two seconds still race for its refresh token; a
-compromised agent could substitute tokens of another account that the source
-would then use. `--no-auth` or `--auth-file` keep the host file untouched.
+compromised agent that refreshes the login itself could pair the new access
+token of the right account with a refresh token of another account (Anthropic
+offers no way to check a refresh token without using it up), and the source
+would switch to that account at its next refresh; a refresh that Anthropic
+cannot be asked about is not written back, and the source then holds a used-up
+refresh token. `--no-auth` or `--auth-file` keep the host file untouched.
 Other agents' host files are never written.
 
 **Before the start** the launcher checks the login the sandbox will get. If it

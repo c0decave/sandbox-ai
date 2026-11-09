@@ -4865,13 +4865,15 @@ def timestamp_ms(value):
 OAUTH_MAX_LIFETIME = 31 * 24 * 3600
 
 
-def sync_claude_credentials(source, target, sandbox=None, newer_only=True):
+def sync_claude_credentials(source, target, sandbox=None, newer_only=True, accounts=None):
     """Anthropic rotates refresh tokens: whichever side refreshed last holds the
     only valid pair. Copy it over the older side; never downgrade.
 
     sandbox: "source" or "target", the side the agent could have tampered with.
     newer_only=False lets SOURCE win whenever its tokens differ: the host at
-    start, because the sandbox's expiresAt is the agent's to choose."""
+    start, because the sandbox's expiresAt is the agent's to choose.
+    A sandbox's login (sandbox="source") replaces only a login of the same account, checked with Anthropic
+    (claude_same_account; ACCOUNTS: its cache, a state dict), never another account's or none."""
     new = claude_oauth(source, follow=sandbox != "source")
     if new is None or Path(target).exists() and Path(source).resolve() == Path(target).resolve():
         return False
@@ -4880,6 +4882,9 @@ def sync_claude_credentials(source, target, sandbox=None, newer_only=True):
     old = claude_oauth(target, follow=sandbox != "target")
     if old is not None and (old["expiresAt"] >= new["expiresAt"] if newer_only else
                             all(old.get(key) == new.get(key) for key in OAUTH_TOKEN_FIELDS)):
+        return False
+    if sandbox == "source" and (old is None or claude_same_account(
+            {} if accounts is None else accounts, target, old, new, final=True) != "same"):
         return False
     if not Path(target).parent.is_dir():
         return False
@@ -4944,6 +4949,146 @@ def oauth_token_digest(oauth):
     return hashlib.sha256(json.dumps(oauth_fields(oauth, OAUTH_TOKEN_FIELDS), sort_keys=True).encode()).hexdigest()
 
 
+# Which Anthropic account a Claude OAuth access token belongs to, asked the way Claude Code asks it itself (taken
+# from the bundle of Claude Code 2.1.319: GET `${BASE_API_URL}/api/oauth/profile` with BASE_API_URL
+# https://api.anthropic.com and the headers Authorization: Bearer <access token>, Content-Type: application/json;
+# the answer {"account": {"uuid": ...}, "organization": {"uuid": ...}} is what Claude keeps in ~/.claude.json as
+# oauthAccount.accountUuid and .organizationUuid). Should Anthropic move it, every lookup fails and no sandbox login
+# is written back any more (fail closed): then this constant is the one place to change.
+CLAUDE_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
+CLAUDE_PROFILE_TIMEOUT = 5
+CLAUDE_PROFILE_LIMIT = 1 << 20
+# Seconds after a failed lookup (network, rate limit, server error) before Anthropic is asked again during a run.
+CLAUDE_ACCOUNT_RETRY = 60.0
+
+
+def claude_profile_account(access_token, timeout=CLAUDE_PROFILE_TIMEOUT):
+    """(account uuid, organization uuid) Anthropic names for the Claude OAuth ACCESS_TOKEN, or None when it refuses
+    the token (401, 403) or names no account. OSError when it could not be asked (network, timeout, rate limit,
+    server error, a redirect): then nothing is known.
+
+    Called by the launcher on the host, never inside a sandbox. TLS is verified; a redirect is not followed (it
+    would carry the token along); the token appears in no exception and no message."""
+    import http.client
+    import urllib.error
+    import urllib.request
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None  # urllib then raises the 3xx as an HTTPError
+
+    request = urllib.request.Request(CLAUDE_PROFILE_URL, headers={
+        "Authorization": f"Bearer {access_token}", "Content-Type": "application/json", "Cache-Control": "no-cache",
+        "User-Agent": f"sandbox-ai/{__version__}"})
+    try:
+        with urllib.request.build_opener(NoRedirect).open(request, timeout=timeout) as response:
+            body = response.read(CLAUDE_PROFILE_LIMIT + 1)
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        if exc.code in (401, 403):
+            return None
+        raise OSError(f"Anthropic answered the account lookup with HTTP {exc.code}") from None
+    except (OSError, http.client.HTTPException, ValueError) as exc:
+        raise OSError(f"the account lookup at Anthropic failed ({type(exc).__name__})") from None
+    try:
+        document = json.loads(body) if len(body) <= CLAUDE_PROFILE_LIMIT else None
+    except (ValueError, RecursionError):
+        raise OSError("Anthropic's answer to the account lookup is no JSON") from None
+    if not isinstance(document, dict):
+        return None
+    ids = tuple(document[key].get("uuid") if isinstance(document.get(key), dict) else None
+                for key in ("account", "organization"))
+    return ids if all(isinstance(value, str) and value for value in ids) else None
+
+
+def claude_account_file(source):
+    """The Claude account state (.claude.json) that belongs to the credentials file SOURCE, as auth_sources picks
+    it: the login store's own, else the one in the config directory if it has one, else ~/.claude.json."""
+    store = auth_store("claude")
+    if Path(source) == store / AUTH_TARGETS["claude"]:
+        return store / ".claude.json"
+    beside = Path(source).parent / ".claude.json"
+    return beside if beside.is_file() else Path.home() / ".claude.json"
+
+
+def claude_file_account(path):
+    """(account uuid, organization uuid) of oauthAccount in the Claude account state PATH, or None. Only for the
+    host's or the login store's own file: what a sandbox's file says is the agent's to write."""
+    try:
+        document = json.loads(read_config_bytes(Path(path).resolve(), CLAUDE_STATE_LIMIT))
+    except (OSError, ValueError, RecursionError):
+        return None
+    account = document.get("oauthAccount") if isinstance(document, dict) else None
+    if not isinstance(account, dict):
+        return None
+    ids = account.get("accountUuid"), account.get("organizationUuid")
+    return ids if all(isinstance(value, str) and value for value in ids) else None
+
+
+def claude_token_account(state, oauth, final=False):
+    """The account of the Claude login OAUTH as Anthropic names it for its access token (claude_profile_account):
+    the (account, organization) pair, False when Anthropic refuses the token or names none, "failed" when it could
+    not be asked now, "later" while a failed lookup is less than CLAUDE_ACCOUNT_RETRY seconds ago (FINAL, the end of
+    a run, asks anyway). Each token is asked about once: answers are kept in STATE["accounts"] under the token's
+    digest, the time of the next try in STATE["account_retry"]."""
+    cache = state.setdefault("accounts", {})
+    key = hashlib.sha256(oauth["accessToken"].encode()).hexdigest()
+    if key in cache:
+        return cache[key]
+    retry = state.get("account_retry")
+    if retry is not None and time.monotonic() < retry and not final:
+        return "later"
+    try:
+        answer = claude_profile_account(oauth["accessToken"])
+    except OSError:
+        state["account_retry"] = time.monotonic() + CLAUDE_ACCOUNT_RETRY
+        return "failed"
+    state["account_retry"] = None
+    if len(cache) >= 64:
+        cache.clear()
+    cache[key] = tuple(answer) if answer else False
+    return cache[key]
+
+
+def claude_same_account(state, host, source, box, final=False):
+    """Whether the sandbox's Claude login BOX belongs to the same account (and organization) as SOURCE, the login of
+    the credentials file HOST (the host's or the login store's): "same"; "other" (another account); "unknown" (one
+    of the two cannot be checked); "failed" or "later" (Anthropic could not be asked now; claude_token_account).
+    Only "same" lets a sandbox's login replace the source's.
+
+    The source's account is the oauthAccount of its own .claude.json (claude_account_file), else Anthropic's answer
+    for the source's access token while that has not expired. The sandbox's is always Anthropic's answer for the
+    sandbox's access token: the sandbox's files are the agent's to write. STATE caches the answers (a run's state,
+    or {} for one check)."""
+    mine = claude_file_account(claude_account_file(host))
+    if mine is None:
+        known = hashlib.sha256(source["accessToken"].encode()).hexdigest() in state.get("accounts", {})
+        if not known and source["expiresAt"] <= time.time() * 1000:
+            return "unknown"  # the source's access token has run out: Anthropic cannot be asked with it
+        mine = claude_token_account(state, source, final)  # known: e.g. the sandbox's pair written back before
+    if mine is False:
+        return "unknown"
+    if isinstance(mine, str):
+        return mine
+    theirs = claude_token_account(state, box, final)
+    if theirs is False:
+        return "unknown"
+    if isinstance(theirs, str):
+        return theirs
+    return "same" if tuple(theirs) == tuple(mine) else "other"
+
+
+def claude_refusal_note(verdict, where, retry=True):
+    """The status line for a sandbox login not written back to WHERE ("the host", "sandbox-ai's login store") after
+    the account check VERDICT (claude_same_account); RETRY: during a run, where it is asked again. Never a token, an
+    account id or an address."""
+    if verdict in ("failed", "later"):
+        return (f"could not ask Anthropic which account the sandbox's Claude login belongs to: not written back to "
+                f"{where}" + ("; asked again at the next change, a minute later at the earliest" if retry else ""))
+    return (f"the sandbox holds a Claude login of another account (or one that could not be checked): not written "
+            f"back to {where}; {where} keeps its own login")
+
+
 def claude_writeback_state(pair):
     """What write-back compares against later: the source's login and the tokens copied in.
 
@@ -4960,10 +5105,11 @@ def claude_writeback(home, pair, before):
     """At the end of a run: the last claude_login_sync, after the agent has stopped; a status line or None.
 
     Only a refresh of the login the source handed in counts: the source must have had credentials, must
-    still hold what it last shared with the sandbox, and the sandbox tokens must differ from that.
+    still hold what it last shared with the sandbox, the sandbox tokens must differ from that, and Anthropic must
+    name the same account for them (asked even if a lookup failed less than a minute ago: the last chance).
     A login the source got meanwhile (the host's own, another sandbox's refresh) always wins."""
     check_home_path(home, pair[1])
-    return claude_login_sync(home, pair, before)
+    return claude_login_sync(home, pair, before, final=True)
 
 
 # Seconds between two looks at a running sandbox's Claude login and its source (lstat only, unless one changed).
@@ -5072,18 +5218,23 @@ def replace_home_file(home, relative, content):
         os.close(parent)
 
 
-def claude_login_sync(home, pair, state):
+def claude_login_sync(home, pair, state, final=False):
     """Compare a sandbox's Claude login with its source (host or login store) once, under claude_login_lock;
     a status line or None. STATE (claude_writeback_state) holds what the two last shared and follows each sync.
 
     Refresh tokens rotate, so whichever side refreshed last holds the only valid pair, and it must reach the
     other side before that one refreshes with the used-up token:
     - the sandbox refreshed and the source still holds what they shared: the new tokens go to the source now
-      (only a plausible pair newer than the source's; never a login into a source that had none);
+      (only a plausible pair newer than the source's, only of the source's account as Anthropic names it
+      (claude_same_account); never a login into a source that had none);
     - the source holds another login than the sandbox (another sandbox's refresh, the host's own Claude, a new
       `sandbox-ai login`) and the sandbox did not refresh since: that login goes into the sandbox, where Claude
       reads its file again before refreshing and takes the newer pair instead of sending the used one;
     - both changed: the source wins.
+    A sandbox login of another account (a /login in the sandbox, tokens the agent planted), or one whose account
+    cannot be checked, stays in the sandbox and the source keeps its own. Anthropic is asked outside the lock, then
+    both sides are compared once more under it; when it cannot be asked, nothing is written back and it is asked
+    again a minute later at the earliest (at once when FINAL, the end of a run).
     The sandbox side is read and replaced without following links; tokens never appear in a status line."""
     host, sandbox = pair
     if state.get("host") is None or not state.get("host_login"):
@@ -5091,42 +5242,59 @@ def claude_login_sync(home, pair, state):
     relative = str(Path(sandbox).relative_to(home))
     store = auth_store() in Path(host).parents
     where = "sandbox-ai's login store" if store else "the host"
-    with claude_login_lock():
-        try:
-            data = read_home_file(home, relative)
-        except (FileNotFoundError, ValueError):
-            data = None  # none, or nothing a login can be read from without following a link: none to sync
-        box, source = (claude_oauth_from(data) if data is not None else None), claude_oauth(host)
-        if source is None:
-            return None  # logged out, or being rewritten: nothing to give or take now
-        tokens = oauth_fields(box, OAUTH_TOKEN_FIELDS) if box is not None else None
-        changed = box is not None and tokens != state["tokens"]
-        if changed and oauth_token_digest(source) == state["host"]:
+    checked = None  # ((source digest, sandbox digest), verdict) of the account check made outside the lock
+    for _ in range(2):
+        with claude_login_lock():
+            try:
+                data = read_home_file(home, relative)
+            except (FileNotFoundError, ValueError):
+                data = None  # none, or nothing a login can be read from without following a link: none to sync
+            box, source = (claude_oauth_from(data) if data is not None else None), claude_oauth(host)
+            if source is None:
+                return None  # logged out, or being rewritten: nothing to give or take now
+            tokens = oauth_fields(box, OAUTH_TOKEN_FIELDS) if box is not None else None
+            changed = box is not None and tokens != state["tokens"]
+            if not (changed and oauth_token_digest(source) == state["host"]):
+                if box is None or oauth_token_digest(box) in (oauth_token_digest(source), state.get("refused")):
+                    return None
+                replace_home_file(home, relative, merge_claude_login(data, source))
+                state["host"], state["tokens"] = oauth_token_digest(source), oauth_fields(source, OAUTH_TOKEN_FIELDS)
+                remember_sync("claude", home, state["host"])
+                if changed:
+                    return f"the Claude login {'in' if store else 'on'} {where} changed during the run; kept that one"
+                return f"took over the newer Claude login from {where} (refreshed elsewhere)"
             # The agent chooses the sandbox's expiresAt: only a plausible pair newer than the source's goes back.
             if not source["expiresAt"] < box["expiresAt"] <= (time.time() + OAUTH_MAX_LIFETIME) * 1000:
                 state["tokens"], state["refused"] = tokens, oauth_token_digest(box)
                 return None
-            if Path(host).is_symlink():
-                raise ValueError(f"Credential target is a symlink: {host}")
-            write_private_file(host, merge_claude_login(Path(host).read_bytes(), box))
-            state["host"], state["tokens"] = oauth_token_digest(claude_oauth(host)), tokens
-            remember_sync("claude", home, state["host"])
-            return f"refreshed Claude credentials written back to {where}"
-        if box is None or oauth_token_digest(box) in (oauth_token_digest(source), state.get("refused")):
-            return None
-        replace_home_file(home, relative, merge_claude_login(data, source))
-        state["host"], state["tokens"] = oauth_token_digest(source), oauth_fields(source, OAUTH_TOKEN_FIELDS)
-        remember_sync("claude", home, state["host"])
-        if changed:
-            return f"the Claude login {'in' if store else 'on'} {where} changed during the run; kept that one"
-        return f"took over the newer Claude login from {where} (refreshed elsewhere)"
+            key = oauth_token_digest(source), oauth_token_digest(box)
+            if checked is not None:
+                if checked[0] != key:
+                    return None  # changed again while Anthropic was asked: checked at the next look
+                if checked[1] in ("failed", "later"):
+                    return claude_refusal_note(checked[1], where) if checked[1] == "failed" else None
+                if checked[1] != "same":
+                    state["tokens"], state["refused"] = tokens, oauth_token_digest(box)
+                    return claude_refusal_note(checked[1], where)
+                if Path(host).is_symlink():
+                    raise ValueError(f"Credential target is a symlink: {host}")
+                write_private_file(host, merge_claude_login(Path(host).read_bytes(), box))
+                state["host"], state["tokens"] = oauth_token_digest(claude_oauth(host)), tokens
+                remember_sync("claude", home, state["host"])
+                return f"refreshed Claude credentials written back to {where}"
+        # A write-back to check: whose login the sandbox holds is asked outside the lock (up to two requests of
+        # at most CLAUDE_PROFILE_TIMEOUT seconds each), so that no other run waits for Anthropic.
+        checked = key, claude_same_account(state, host, source, box, final)
+    return None
 
 
 def watch_claude_login(home, pair, state, stop, interval=None):
     """For the whole run, until STOP is set: whenever the sandbox's Claude login or its source changed (an
     lstat every INTERVAL seconds, by default CLAUDE_SYNC_INTERVAL), sync them (claude_login_sync), so that a
     refresh on either side reaches the other at once and not only when the run ends. Status lines are collected
-    in STATE["notes"] and printed after the run, since the agent's terminal is busy meanwhile. Never raises."""
+    in STATE["notes"] and printed after the run, since the agent's terminal is busy meanwhile. A write-back whose
+    account check could not ask Anthropic (claude_login_sync) is tried again once its retry is due, also when
+    nothing changed meanwhile. Never raises."""
     interval = CLAUDE_SYNC_INTERVAL if interval is None else interval
     def signature():
         def one(path, follow):
@@ -5141,8 +5309,11 @@ def watch_claude_login(home, pair, state, stop, interval=None):
     notes = state.setdefault("notes", [])
     while not stop.wait(interval):
         current = signature()
-        if current == seen:
+        retry = state.get("account_retry")
+        if current == seen and (retry is None or time.monotonic() < retry):
             continue
+        if current == seen:
+            state["account_retry"] = None  # a lookup that failed a minute ago is due again, once
         # What was seen before the sync: a change that lands while it runs (the agent writing a refreshed token
         # just then) is seen at the next look, not hidden in a signature taken afterwards. The sync's own writes
         # cost one more look, which finds nothing to do.
@@ -5230,7 +5401,17 @@ def claude_recover_writeback(home, pair):
         return False
     if oauth_token_digest(copied) == shared:
         return False
-    return sync_claude_credentials(sandbox, source, sandbox="source")
+    if not 0 < copied["expiresAt"] / 1000 <= time.time() + OAUTH_MAX_LIFETIME or current["expiresAt"] >= copied["expiresAt"]:
+        return False  # what sync_claude_credentials refuses anyway: not worth asking Anthropic about
+    accounts = {}
+    verdict = claude_same_account(accounts, source, current, copied, final=True)
+    if verdict != "same":
+        where = "sandbox-ai's login store" if auth_store() in Path(source).parents else "the host"
+        print(f"agent-sandbox: {claude_refusal_note(verdict, where, retry=False)} (the login an earlier run of this "
+              "HOME left)",
+              file=sys.stderr)
+        return False
+    return sync_claude_credentials(sandbox, source, sandbox="source", accounts=accounts)
 
 
 def store_writeback_state(a, home, agent=None):
