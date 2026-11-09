@@ -7400,9 +7400,6 @@ TEXTS = {
     'Drag a part onto the board, or double-click it': {
         'en': 'Drag a part onto the board, or double-click it',
         'de': 'Ziehen Sie ein Teil auf die Tafel oder doppelklicken Sie es'},
-    'Drag a part onto the board, or double-click it.': {
-        'en': 'Drag a part onto the board, or double-click it.',
-        'de': 'Ziehen Sie ein Teil auf die Tafel oder doppelklicken Sie es.'},
     'Drop: {names}': {
         'en': 'Drop: {names}',
         'de': 'Ablegen: {names}'},
@@ -9228,4 +9225,23 @@ TEXTS = {
     'Hide the properties': {
         'en': 'Hide the properties',
         'de': 'Eigenschaften ausblenden'},
+    # == the Board's Cut, Copy and Paste (a part's context menu, Ctrl+X/C/V) ==
+    'Properties': {
+        'en': 'Properties',
+        'de': 'Eigenschaften'},
+    'Cut': {
+        'en': 'Cut',
+        'de': 'Ausschneiden'},
+    'Copy': {
+        'en': 'Copy',
+        'de': 'Kopieren'},
+    'Paste': {
+        'en': 'Paste',
+        'de': 'Einfügen'},
+    'The agent, the proxy and the network are always on the board': {
+        'en': 'The agent, the proxy and the network are always on the board',
+        'de': 'Agent, Proxy und Netzwerk sind immer auf der Tafel'},
+    'Not pasted: a board has only one of each of these parts, and this one has it already: {parts}.': {
+        'en': 'Not pasted: a board has only one of each of these parts, and this one has it already: {parts}.',
+        'de': 'Nicht eingefügt: Eine Tafel hat jedes dieser Teile nur einmal, und diese hat es schon: {parts}.'},
 }

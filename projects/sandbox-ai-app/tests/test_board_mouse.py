@@ -10,6 +10,7 @@ import pytest
 
 QtWidgets = pytest.importorskip("PySide6.QtWidgets", reason="PySide6 is not installed")
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt  # noqa: E402
+from PySide6 import QtGui  # noqa: E402
 from PySide6.QtGui import QContextMenuEvent, QFontMetricsF  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
@@ -134,7 +135,7 @@ def test_a_right_click_on_the_canvas_opens_its_menu_and_moves_nothing(page, qapp
     assert looks(page) == before, "a right click moves, snaps and selects nothing"
     assert len(page.menus) == 1
     menu = page.menus[0]
-    assert texts(menu) == ["Add a part here", "Select all", "Fit the board", "Zoom 100 %", "Arrange", "Undo", "Redo",
+    assert texts(menu) == ["Add a part here", "Paste", "Select all", "Fit the board", "Zoom 100 %", "Arrange", "Undo", "Redo",
                            "What is this?"]
     assert not action(menu, "Undo").isEnabled()
     parts = action(menu, "Add a part here").menu()
@@ -168,13 +169,18 @@ def test_a_right_click_on_a_node_selects_it_and_offers_its_actions(page, qapp):
     qapp.processEvents()
     assert limits.isSelected() and not agent.isSelected(), "the node right-clicked is the selection"
     menu = page.menus[-1]
-    assert "What is this?" in texts(menu) and "Delete" in texts(menu) and action(menu, "Delete").isEnabled()
+    assert [t for t in texts(menu) if t != "Set up step by step…"] == ["Properties", "What is this?", "Cut", "Copy",
+                                                                       "Paste", "Remove"]
+    assert action(menu, "Remove").isEnabled() and action(menu, "Cut").isEnabled()
     assert page.undo.count() == undo
-    action(menu, "Delete").trigger()
+    action(menu, "Remove").trigger()
     assert page.board.first("limits") is None
     agent = page.items[page.board.first("agent").id]  # the board is drawn anew after a change
     QTest.mouseClick(page.view.viewport(), RIGHT, NONE, page.view.mapFromScene(agent.sceneBoundingRect().center()))
-    assert not action(page.menus[-1], "Delete").isEnabled(), "the agent cannot be removed"
+    menu = page.menus[-1]
+    assert "Set up step by step…" in texts(menu), "the guide's parts offer it"
+    assert not action(menu, "Remove").isEnabled() and not action(menu, "Cut").isEnabled(), "the agent stays"
+    assert "always on the board" in action(menu, "Remove").toolTip() and action(menu, "Copy").isEnabled()
 
 
 def menu_event(reason, viewport):
@@ -185,7 +191,7 @@ def test_the_menu_key_opens_the_menu_too(page, qapp):
     page.items[page.board.first("agent").id].setSelected(True)
     viewport = page.view.viewport()
     QApplication.sendEvent(viewport, menu_event(QContextMenuEvent.Reason.Keyboard, viewport))
-    assert len(page.menus) == 1 and "Delete" in texts(page.menus[0])
+    assert len(page.menus) == 1 and "Remove" in texts(page.menus[0])
     # The mouse's own context menu event (at the press, on X11 and Wayland) opens nothing: the release decides.
     QApplication.sendEvent(viewport, menu_event(QContextMenuEvent.Reason.Mouse, viewport))
     assert len(page.menus) == 1
@@ -407,3 +413,116 @@ def test_a_right_click_on_a_connection_offers_delete(page, qapp, tmp_path):
     assert edge.isSelected() and texts(page.menus[-1]) == ["Delete"]
     action(page.menus[-1], "Delete").trigger()
     assert (workspace.id, agent.id) not in page.board.edges
+
+
+# -- Cut, Copy, Paste --
+
+
+def clear_clipboard():
+    QApplication.clipboard().clear()
+
+
+def test_copy_and_paste_duplicate_parts_with_their_settings_and_connections(page, qapp, tmp_path):
+    clear_clipboard()
+    page.add_node("mcp", name="files", definition={"command": "x"})
+    page.add_node("mount", source=str(tmp_path), dest="/mnt/a", mode="ro")
+    mcp, mount, agent = page.board.first("mcp"), page.board.first("mount"), page.board.first("agent")
+    assert (agent.id, mcp.id) in page.board.edges and (mount.id, agent.id) in page.board.edges
+    page.scene.clearSelection()
+    for node in (mcp, mount):
+        page.items[node.id].setSelected(True)
+    assert page.copy_selected() == 2
+    mime = QApplication.clipboard().mimeData()
+    assert mime.hasFormat("application/x-sandbox-ai-parts") and "sandbox-ai-board-parts" in mime.text()
+    undo = page.undo.count()
+    new = page.paste()
+    assert len(new) == 2 and not set(new) & {mcp.id, mount.id}, "new ids"
+    copies = [page.board.node(i) for i in new]
+    assert sorted(c.kind for c in copies) == ["mcp", "mount"]
+    mcp_copy = next(c for c in copies if c.kind == "mcp")
+    assert mcp_copy.props == mcp.props and (mcp_copy.x, mcp_copy.y) == (mcp.x + 40, mcp.y + 40)
+    assert all(page.items[i].isSelected() for i in new) and page.undo.count() == undo + 1
+    assert not [e for e in page.board.edges if set(e) & set(new)], "a connection to a part not copied is dropped"
+    page.undo.undo()
+    assert len(page.board.of_kind("mcp")) == 1, "one step of Undo"
+    page.undo.redo()
+    assert len(page.board.of_kind("mcp")) == 2
+    # Copied with the agent: the copy is connected to this board's agent (the agent itself is not pasted twice).
+    page.scene.clearSelection()
+    for node in (mount, agent):
+        page.items[node.id].setSelected(True)
+    page.copy_selected()
+    widgets.SHOWN.clear()
+    new = page.paste(QPointF(800, 600))
+    assert len(new) == 1 and (new[0], agent.id) in page.board.edges and len(page.board.of_kind("agent")) == 1
+    assert widgets.SHOWN and "Agent" in widgets.SHOWN[-1][1]
+
+
+def test_cut_removes_paste_restores_and_once_only_parts_are_refused(page, qapp):
+    clear_clipboard()
+    page.add_node("limits", **{"--memory": "4g"})
+    limits = page.board.first("limits")
+    agent = page.board.first("agent")
+    page.scene.clearSelection()
+    page.items[limits.id].setSelected(True)
+    page.cut_selected()
+    assert page.board.first("limits") is None
+    new = page.paste(QPointF(500, 300))
+    pasted = page.board.node(new[0])
+    assert pasted.kind == "limits" and pasted.props == {"--memory": "4g"} and (pasted.x, pasted.y) == (500, 300)
+    assert (pasted.id, agent.id) not in page.board.edges, "copied without the agent: not connected"
+    page.undo.undo()
+    assert page.board.first("limits") is None
+    page.undo.undo()
+    assert page.board.first("limits") is not None and page.board.first("limits").props == {"--memory": "4g"}
+    # A part a board has once: refused while the board has it, with a message; the others are pasted.
+    page.scene.clearSelection()
+    page.items[page.board.first("limits").id].setSelected(True)
+    page.copy_selected()
+    widgets.SHOWN.clear()
+    assert page.paste() == [] and len(page.board.of_kind("limits")) == 1
+    assert widgets.SHOWN[-1][0] == "Paste" and "Limits" in widgets.SHOWN[-1][1]
+
+
+def test_the_clipboard_holds_no_secret_and_strange_data_is_ignored(page, qapp):
+    from PySide6.QtCore import QMimeData
+    clear_clipboard()
+    page.set_prop(page.board.first("agent").id, "arguments", "--api-key sk-abcdefghijklmnopqrstuvwxyz0123 --verbose")
+    page.items[page.board.first("agent").id].setSelected(True)
+    page.copy_selected()
+    text = QApplication.clipboard().mimeData().text()
+    assert "sk-abcdef" not in text and "--verbose" in text
+    for junk in ("hello", '{"format": "sandbox-ai-board-parts", "parts": [{"kind": "rm -rf", "props": {}}]}',
+                 '{"format": "sandbox-ai-board-parts", "parts": "x"}'):
+        mime = QMimeData()
+        mime.setText(junk)
+        QApplication.clipboard().setMimeData(mime)
+        assert page.clipboard_parts() is None and page.paste() == []
+
+
+def test_the_shortcuts_cut_copy_paste_and_delete(page, qapp):
+    clear_clipboard()
+    page.add_node("limits", **{"--memory": "2g"})
+    page.scene.clearSelection()
+    page.items[page.board.first("limits").id].setSelected(True)
+    page.view.setFocus()
+    QTest.keySequence(page.view, QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Copy))
+    QTest.keySequence(page.view, QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Paste))
+    assert len(page.board.of_kind("limits")) == 1, "limits: once per board"
+    page.add_node("mount", source="/tmp", dest="/mnt/a", mode="ro")
+    page.scene.clearSelection()
+    page.items[page.board.first("mount").id].setSelected(True)
+    QTest.keySequence(page.view, QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Copy))
+    QTest.keySequence(page.view, QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Paste))
+    assert len(page.board.of_kind("mount")) == 2
+    QTest.keySequence(page.view, QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Cut))  # the copy, selected
+    assert len(page.board.of_kind("mount")) == 1
+    page.items[page.board.first("mount").id].setSelected(True)
+    QTest.keyClick(page.view, Qt.Key.Key_Delete)
+    assert page.board.of_kind("mount") == []
+
+
+def test_the_parts_list_explains_itself_on_hover_not_in_a_line(page, qapp):
+    hint = "Drag a part onto the board, or double-click it"
+    labels = [w for w in page.findChildren(QtWidgets.QLabel) if w.isVisible() and hint in w.text()]
+    assert labels == [] and hint in page.palette.toolTip() and hint in page.parts_panel.toolTip()

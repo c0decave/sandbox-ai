@@ -235,11 +235,12 @@ AREA_TIPS = (
           "Dateien, seine Verbindungen laufen über den Proxy ins Netzwerk."),
          ("Drag a node to move it; drag from a node's right port onto another node to connect them; Delete removes "
           "the selection. Drag with the right or the middle mouse button to move the view; a right click opens a "
-          "menu. Drop folders here to add them as workspace or mount, a .sandbox-ai.json to open its "
+          "menu (on a part: Properties, Cut, Copy, Paste, Remove; also Ctrl+X, Ctrl+C, Ctrl+V). Drop folders here to add them as workspace or mount, a .sandbox-ai.json to open its "
           "project, a preset file to import it. Every change is one step of Undo.",
           "Ziehen Sie einen Knoten, um ihn zu verschieben; ziehen Sie vom rechten Anschluss eines Knotens auf einen "
           "anderen, um sie zu verbinden; Entf entfernt die Auswahl. Ziehen Sie mit der rechten oder der mittleren "
-          "Maustaste, um die Ansicht zu verschieben; ein Rechtsklick öffnet ein Menü. Legen Sie hier Ordner ab, um "
+          "Maustaste, um die Ansicht zu verschieben; ein Rechtsklick öffnet ein Menü (auf einem Teil: Eigenschaften, "
+          "Ausschneiden, Kopieren, Einfügen, Entfernen; auch Strg+X, Strg+C, Strg+V). Legen Sie hier Ordner ab, um "
           "sie als Arbeitsordner oder Einbindung hinzuzufügen, eine .sandbox-ai.json, um ihr Projekt zu öffnen, eine "
           "Vorlagen-Datei, um sie zu importieren. Jede Änderung ist ein Schritt von Rückgängig."),
          ".sandbox-ai.json", "page-board"),

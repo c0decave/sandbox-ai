@@ -19,8 +19,9 @@ from PySide6.QtCore import (
     QEasingCurve, QEvent, QMimeData, QPoint, QPointF, QRect, QRectF, Qt, QTimer, QVariantAnimation, Signal,
 )
 from PySide6.QtGui import (
-    QBrush, QColor, QContextMenuEvent, QDrag, QFont, QFontMetricsF, QPainter, QPainterPath, QPainterPathStroker, QPen,
-    QPixmap, QPolygonF, QTextLayout, QTextOption, QTransform, QUndoCommand, QUndoGroup, QUndoStack,
+    QBrush, QColor, QContextMenuEvent, QCursor, QDrag, QFont, QFontMetricsF, QKeySequence, QPainter, QPainterPath,
+    QPainterPathStroker, QPen, QPixmap, QPolygonF, QTextLayout, QTextOption, QTransform, QUndoCommand, QUndoGroup,
+    QUndoStack,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QGraphicsEllipseItem,
@@ -57,6 +58,18 @@ def scrub_board(state):
             except ValueError:
                 props["arguments"] = ""
     return state
+
+
+def scrub_values(props):
+    """A part's settings without the values that look like a credential themselves (state.looks_secret): for the
+    clipboard, which other programs read."""
+    from .state import looks_secret
+    if isinstance(props, dict):
+        return {key: scrub_values(value) for key, value in props.items() if not (isinstance(value, str)
+                                                                                  and looks_secret(value))}
+    if isinstance(props, list):
+        return [scrub_values(value) for value in props if not (isinstance(value, str) and looks_secret(value))]
+    return props
 
 
 def same_folder(a, b):
@@ -99,6 +112,9 @@ def wrapped(text, font, width, lines):
             shown[-1] = metrics.elidedText(rest + " …", Qt.TextElideMode.ElideRight, width)
     return shown
 MIME_PART = "application/x-sandbox-ai-part"  # a part dragged from the palette: its kind
+MIME_PARTS = "application/x-sandbox-ai-parts"  # parts copied (Copy, Cut): their kinds, settings and connections
+PARTS_FORMAT = "sandbox-ai-board-parts"  # the same as JSON text, for a clipboard that keeps only text
+CLIP_LIMIT = 256 * 1024  # bytes of copied parts read back at most (the clipboard may hold anything)
 
 
 class Snapshot(QUndoCommand):
@@ -560,6 +576,18 @@ class BoardView(QGraphicsView):
             self.page.delete_selected()
             event.accept()
             return
+        if event.matches(QKeySequence.StandardKey.Copy):
+            self.page.copy_selected()
+        elif event.matches(QKeySequence.StandardKey.Cut):
+            self.page.cut_selected()
+        elif event.matches(QKeySequence.StandardKey.Paste):
+            point = self.viewport().mapFromGlobal(QCursor.pos())  # under the pointer when it is on the canvas
+            self.page.paste(self.mapToScene(point) if self.viewport().rect().contains(point) else None)
+        else:
+            super().keyPressEvent(event)
+            return
+        event.accept()
+        return
         super().keyPressEvent(event)
 
     # -- drops: parts from the palette, folders and files from a file manager --
@@ -1157,15 +1185,15 @@ class BoardPage(QWidget):
         self.palette.itemDoubleClicked.connect(lambda item: self.add_node(item.data(Qt.ItemDataRole.UserRole),
                                                                           guided=True))
         self.palette.chosen.connect(lambda kind: self.add_node(kind, guided=True))
-        self.parts_panel = QWidget()  # the palette with a line on how to use it (a dock of its own in the window)
+        # The palette (a dock of its own in the window); how to use it is in its tooltip and the (?), not in a line
+        # that takes the list's room.
+        self.parts_panel = QWidget()
         self.parts_panel.setMaximumWidth(230)
+        self.parts_panel.setToolTip(self.palette.toolTip())
         parts_layout = QVBoxLayout(self.parts_panel)
         parts_layout.setContentsMargins(0, 0, 0, 0)
-        parts_hint = QHBoxLayout()
-        self.parts_hint = plain_label(tr("Drag a part onto the board, or double-click it."), role="secondary")
-        parts_hint.addWidget(self.parts_hint, 1)
-        parts_hint.addWidget(help_view.HelpButton("board.palette"), 0, Qt.AlignmentFlag.AlignTop)
-        parts_layout.addLayout(parts_hint)
+        parts_layout.setSpacing(2)
+        parts_layout.addWidget(help_view.HelpButton("board.palette"), 0, Qt.AlignmentFlag.AlignRight)
         parts_layout.addWidget(self.palette, 1)
         self.scene = BoardScene(self)
         self.scene.selectionChanged.connect(self.selection_changed)
@@ -1706,9 +1734,10 @@ class BoardPage(QWidget):
             QTimer.singleShot(0, self.fit)
 
     def canvas_menu(self, point):
-        """The context menu at the scene point POINT: a node's (Set up step by step…, What is this?, Delete), an
-        edge's (Delete), else the canvas's (add a part there, select all, fit, zoom 100 %, arrange, undo, redo, what
-        the board is). A node or edge right-clicked is selected first (alone, unless it already was)."""
+        """The context menu at the scene point POINT: a node's (Properties, Set up step by step…, What is this?, Cut,
+        Copy, Paste, Remove), an edge's (Delete), else the canvas's (add a part there, paste there, select all, fit,
+        zoom 100 %, arrange, undo, redo, what the board is). A node or edge right-clicked is selected first (alone,
+        unless it already was)."""
         menu = QMenu(self.view)
         hit = None
         for item in self.scene.items(point):
@@ -1721,16 +1750,29 @@ class BoardPage(QWidget):
             if not hit.isSelected():
                 self.scene.clearSelection()
                 hit.setSelected(True)
-            if isinstance(hit, NodeItem):
-                from . import guide
-                node_id, kind = hit.node_id, hit.kind
-                if guide.questions(kind):
-                    menu.addAction(tr("Set up step by step…"), lambda: self.guide_node(node_id))
-                menu.addAction(tr("What is this?"), lambda: hit.help_mark.explain())
-            removable = [i for i in self.scene.selectedItems() if isinstance(i, EdgeItem)
-                         or (isinstance(i, NodeItem) and not B.KINDS[i.kind].required)]
-            delete = menu.addAction(tr("Delete"), self.delete_selected)
-            delete.setEnabled(bool(removable))
+            if isinstance(hit, EdgeItem):
+                menu.addAction(tr("Delete"), self.delete_selected)
+                return menu
+            from . import guide
+            node_id, kind = hit.node_id, hit.kind
+            menu.setToolTipsVisible(True)
+            menu.addAction(tr("Properties"), lambda: self.show_properties(node_id))
+            if guide.questions(kind):
+                menu.addAction(tr("Set up step by step…"), lambda: self.guide_node(node_id))
+            menu.addAction(tr("What is this?"), lambda: hit.help_mark.explain())
+            menu.addSeparator()
+            removable = self.removable_selected()
+            cut = menu.addAction(tr("Cut"), self.cut_selected)
+            cut.setEnabled(bool(removable))
+            menu.addAction(tr("Copy"), self.copy_selected)
+            paste = menu.addAction(tr("Paste"), lambda: self.paste(point))
+            paste.setEnabled(self.clipboard_parts() is not None)
+            menu.addSeparator()
+            remove = menu.addAction(tr("Remove"), self.delete_selected)
+            remove.setEnabled(bool(removable))
+            if not removable:
+                for action in (cut, remove):
+                    action.setToolTip(tr("The agent, the proxy and the network are always on the board"))
             return menu
         parts = menu.addMenu(tr("Add a part here"))
         for row in range(self.palette.count()):
@@ -1739,6 +1781,8 @@ class BoardPage(QWidget):
             action = parts.addAction(entry.text(), lambda k=kind: self.add_node(k, guided=True, at=point))
             action.setEnabled(bool(entry.flags() & Qt.ItemFlag.ItemIsEnabled))
             action.setToolTip(safe_tooltip(tr(B.KINDS[kind].help)) if kind in B.KINDS else "")
+        paste = menu.addAction(tr("Paste"), lambda: self.paste(point))
+        paste.setEnabled(self.clipboard_parts() is not None)
         menu.addSeparator()
         menu.addAction(tr("Select all"), self.select_all)
         menu.addAction(tr("Fit the board"), self.fit)
@@ -1753,6 +1797,119 @@ class BoardPage(QWidget):
         global_point = self.view.viewport().mapToGlobal(self.view.mapFromScene(point))
         menu.addAction(tr("What is this?"), lambda: help_view.show_tip("board.canvas", self.view, global_point))
         return menu
+
+    def show_properties(self, node_id):
+        """Properties (a part's menu): that part alone selected, its inspector out (the strip or its window)."""
+        item = self.items.get(node_id)
+        if item is None:
+            return
+        self.scene.clearSelection()
+        item.setSelected(True)
+        self.show_inspector()
+
+    def removable_selected(self):
+        return [i for i in self.scene.selectedItems() if isinstance(i, NodeItem) and not B.KINDS[i.kind].required]
+
+    # -- Copy, Cut, Paste: parts with their settings and the connections among them, on the system clipboard --
+
+    def copy_selected(self, items=None):
+        """The selected parts (or ITEMS) on the clipboard: their kinds, settings and places, and the connections
+        between them (one to a part not copied is left out). Agent arguments that may be secrets and values that
+        look like a credential are left out (a part names a secret, never holds it). The number of parts copied."""
+        items = items if items is not None else [i for i in self.scene.selectedItems() if isinstance(i, NodeItem)]
+        ids = {i.node_id for i in items}
+        if not ids:
+            return 0
+        state = scrub_board({"nodes": [n for n in self.board.state()["nodes"] if n["id"] in ids]})
+        parts = [{"id": n["id"], "kind": n["kind"], "props": scrub_values(n["props"]), "x": n["x"], "y": n["y"]}
+                 for n in state["nodes"]]
+        edges = sorted([a, b] for a, b in self.board.edges if a in ids and b in ids)
+        data = json.dumps({"format": PARTS_FORMAT, "version": 1, "parts": parts, "edges": edges}).encode()
+        mime = QMimeData()
+        mime.setData(MIME_PARTS, data)
+        mime.setText(data.decode())
+        QApplication.clipboard().setMimeData(mime)
+        return len(parts)
+
+    def cut_selected(self):
+        """Copy the selected parts, then remove those that may go (one step of Undo)."""
+        items = self.removable_selected()
+        if not items or not self.copy_selected(items):
+            return
+        ids = [i.node_id for i in items]
+
+        def cut():
+            for node_id in ids:
+                self.board.remove(node_id)
+        self.change(tr("Cut"), cut)
+
+    @staticmethod
+    def clipboard_parts():
+        """The parts on the clipboard ({"parts", "edges"}, checked: known kinds, settings as a JSON object), or
+        None. It may hold anything (another program, another board): read as untrusted data."""
+        mime = QApplication.clipboard().mimeData()
+        if mime is None:
+            return None
+        raw = bytes(mime.data(MIME_PARTS)) if mime.hasFormat(MIME_PARTS) else \
+            (mime.text().encode() if mime.hasText() and PARTS_FORMAT in mime.text()[:200] else b"")
+        if not raw or len(raw) > CLIP_LIMIT:
+            return None
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return None
+        if not isinstance(data, dict) or data.get("format") != PARTS_FORMAT or not isinstance(data.get("parts"), list):
+            return None
+        parts = []
+        for part in data["parts"][:64]:
+            if not isinstance(part, dict) or part.get("kind") not in B.KINDS or not isinstance(part.get("props"), dict):
+                continue
+            x, y = part.get("x", 0), part.get("y", 0)
+            if not isinstance(x, (int, float)) or not isinstance(y, (int, float)) or abs(x) > 1e6 or abs(y) > 1e6:
+                x, y = 0.0, 0.0
+            parts.append({"id": part.get("id"), "kind": part["kind"], "props": part["props"], "x": float(x),
+                          "y": float(y)})
+        edges = [tuple(e) for e in data.get("edges") or [] if isinstance(e, list) and len(e) == 2]
+        return {"parts": parts, "edges": edges} if parts else None
+
+    def paste(self, point=None):
+        """The parts on the clipboard added (one step of Undo) with new ids and their connections among them: at
+        the scene point POINT (the group's top left corner there), else beside where they were copied. A part a
+        board has only once is refused when the board has it already (a message says so); a connection to it goes
+        to the board's own (a workspace copied with the agent is connected to this board's agent). The new parts
+        are selected."""
+        clip = self.clipboard_parts()
+        if clip is None:
+            return []
+        grid, parts = self.grid(), clip["parts"]
+        left, top = min(p["x"] for p in parts), min(p["y"] for p in parts)
+        dx, dy = (point.x() - left, point.y() - top) if point is not None else (40.0, 40.0)
+        added, ends, refused = {}, {}, []  # ends: the node each copied part's connections go to now
+
+        def add():
+            for part in parts:
+                kind = B.KINDS[part["kind"]]
+                existing = self.board.first(kind.key) if kind.single else None
+                if existing is not None:
+                    refused.append(tr(kind.title))
+                    ends[part["id"]] = existing.id
+                    continue
+                node = self.board.add(kind.key, connect=False, **json.loads(json.dumps(part["props"])))
+                node.x, node.y = B.snap(part["x"] + dx, grid), B.snap(part["y"] + dy, grid)
+                added[part["id"]] = ends[part["id"]] = node.id
+            for a, b in clip["edges"]:
+                if a in ends and b in ends and (a in added or b in added) and self.board.can_connect(ends[a], ends[b]):
+                    self.board.connect(ends[a], ends[b])
+        self.change(tr("Paste"), add)
+        if refused:
+            inform(self, tr("Paste"), tr("Not pasted: a board has only one of each of these parts, and this one has "
+                                         "it already: {parts}.", parts=", ".join(refused)))
+        new = [self.items[i] for i in added.values() if i in self.items]
+        if new:
+            self.scene.clearSelection()
+            for item in new:
+                item.setSelected(True)
+        return [i.node_id for i in new]
 
     def select_all(self):
         for item in self.scene.items():

@@ -6214,6 +6214,7 @@ class MainWindow(QMainWindow):
             dock.setObjectName(f"dock-{name}")
             if name in widgets:
                 dock.setWidget(widgets[name])
+                dock.setToolTip(widgets[name].toolTip())  # its title explains it on hover (the parts: how to add)
             dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable
                              | QDockWidget.DockWidgetFeature.DockWidgetMovable
                              | QDockWidget.DockWidgetFeature.DockWidgetFloatable)
