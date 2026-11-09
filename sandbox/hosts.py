@@ -723,13 +723,42 @@ def older_than(name, since, path=None):
     return version if key and key < since else None
 
 
-def knows_workspaces_as_given(name, path=None):
+def ask_version(name, path=None, command=None, timeout=30):
+    """(the version text, its key) of the sandbox-ai on host NAME: its last status's, else asked now (a short
+    `sandbox-ai version --verbose` over SSH, never the slow update check). What is asked is kept as a status that
+    hosts list still refreshes (checked 0: as old as can be), so a host just added is known at its first start.
+    COMMAND(name, args, timeout) -> (status, out, err): how it is asked (default: run). (None, None) when the host
+    does not answer or this is this machine."""
+    version, key = known_version(name, path)
+    if key or name == LOCAL:
+        return version, key
+    try:
+        status, out, _ = (command or (lambda host, args, timeout: run(host, args, timeout=timeout, path=path)))(
+            name, ["version", "--verbose"], timeout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None, None
+    info = installation(out) if status == 0 else {}
+    key = version_key(info["version"]) if isinstance(info.get("version"), str) else None
+    if not key:
+        return None, None
+    entry = load(path).get(name)
+    if entry is not None:
+        kept = load_statuses()
+        kept[name] = {"name": name, **{field: info.get(field) for field in ("version", "kind", "path", "prefix")},
+                      "available": None, "update": None, "error": None, "fixed": [], "checked": 0,
+                      "ssh": entry["ssh"], "port": entry["port"]}
+        save_statuses(kept)
+    return info["version"], key
+
+
+def knows_workspaces_as_given(name, path=None, ask=False):
     """The sandbox-ai on host NAME takes --workspaces-as-given: this machine's always; another host's when the version
-    its last status found (hosts list, never asked here) is 0.1.78 or later. Older ones do not know the option, and
-    neither do they let the directory a start runs in decide /work, so a start there without it is the same."""
+    its last status found (hosts list) is 0.1.78 or later; ASK (True, or ask_version's COMMAND): a host whose version
+    is not known yet is asked now (one short SSH command), else it counts as older. Older ones do not know the option, and neither do
+    they let the directory a start runs in decide /work, so a start there without it is the same."""
     if name == LOCAL:
         return True
-    _, key = known_version(name, path)
+    _, key = ask_version(name, path, None if ask is True else ask) if ask else known_version(name, path)
     return bool(key and key >= AS_GIVEN_SINCE)
 
 
@@ -1477,6 +1506,11 @@ def cli(argv_, out=print):
             raise ValueError("--jobs is 1-8")
         if a.release is not None and not VERSION.fullmatch(a.release):
             raise ValueError("--version expects X.Y.Z")
+        if a.from_here and a.release is not None:
+            # before any output or SSH: the two contradict each other (hosts install refuses them the same way)
+            raise ValueError("--from-here installs this machine's version; --version is for the signed release")
+        if a.from_here and LOCAL in names:
+            raise ValueError("--from-here is for another host (this machine updates with: sandbox-ai update)")
         hosts = load()
         for name in names:
             if name != LOCAL and name not in hosts:

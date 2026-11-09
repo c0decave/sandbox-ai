@@ -966,6 +966,40 @@ def test_update_from_here_installs_this_machines_copy_as_the_same_kind(remote):
         h.update("ct1", version="0.1.77", from_here=True)
 
 
+def test_a_host_whose_version_is_not_known_yet_is_asked_before_a_start(remote, tmp_path, monkeypatch):
+    """Review 6 (L10, A-N3): a remote host just added (no status kept yet) got its starts without
+    --workspaces-as-given; asked, one short `version --verbose` says its version, kept for the next start while
+    hosts list still asks for the whole status."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    h.save({"ct1": h.check("ct1", {"ssh": "user@ct1"})})
+    (remote["home"] / "version").write_text("0.1.78")
+    assert h.known_version("ct1") == (None, None)
+    assert not h.knows_workspaces_as_given("ct1")  # not asked: counts as older
+    assert h.knows_workspaces_as_given("ct1", ask=True)
+    sent = [json.loads(line)[-1] for line in remote["log"].read_text().splitlines()]
+    assert sum("version --verbose" in command for command in sent) == 1 and not any("--check" in c for c in sent)
+    assert h.known_version("ct1")[0] == "0.1.78" and h.knows_workspaces_as_given("ct1")
+    assert h.statuses(["ct1"], cached=True)["ct1"]["checked"] == 0  # hosts list asks again for the whole status
+    (remote["home"] / "version").write_text("0.1.77")
+    h.forget_status("ct1")
+    assert not h.knows_workspaces_as_given("ct1", ask=True)  # older: not given the option it does not know
+    assert not h.knows_workspaces_as_given("nohost", ask=True)
+
+
+def test_from_here_with_a_version_is_refused_before_any_output_or_ssh(remote, monkeypatch):
+    """Review 6 N2: `hosts update NAME --from-here --version X` said "updating NAME to X ..." and refused only after
+    the SSH round trip; now it is refused at once, as hosts install does."""
+    h.save({"ct1": h.check("ct1", {"ssh": "user@ct1"})})
+    monkeypatch.setattr(h, "update_many", lambda *a, **k: pytest.fail("no update may start"))
+    monkeypatch.setattr(h, "run_fixing", lambda *a, **k: pytest.fail("no SSH"))
+    lines = []
+    with pytest.raises(ValueError, match="--version is for the signed release"):
+        h.cli(["update", "ct1", "--from-here", "--version", "0.1.70"], lines.append)
+    with pytest.raises(ValueError, match="--from-here is for another host"):
+        h.cli(["update", "local", "--from-here"], lines.append)
+    assert lines == []
+
+
 def test_an_update_with_no_release_points_to_from_here(remote, monkeypatch):
     h.save({"ct1": h.check("ct1", {"ssh": "user@ct1"})})
     real = h.run

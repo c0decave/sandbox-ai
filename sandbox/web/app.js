@@ -1121,6 +1121,23 @@ function moreCard(main, s) {
       catch (e) { status.append(errorNotice(e)); }
     }, { trigger: event.target });
   };
+  // the MCP servers of its later starts, taken out one by one (mcp detach NAME START): for a start that does not run
+  // now; a running one has them in its own card (mcp detach --live)
+  const kept = again && s.state !== "running" ? (Array.isArray(s.mcp) ? s.mcp : []).filter(x => typeof x === "string" && MCP_SERVER_NAME.test(x)) : [];
+  const keptBody = el("tbody");
+  for (const server of kept) {
+    const actions = el("td", { class: "actions" });
+    const remove = el("button", { class: "danger", onclick: () => confirmIn(actions, t("Take {server} out of {name} on {host}? Its later starts go without it; the server's own sandbox keeps running.", { server, name, host }), t("Yes, take it out"), async () => {
+      try {
+        const r = await api("POST", hostPath(`/starts/${encodeURIComponent(name)}/mcp/remove`, host), { server, confirm: true });
+        toast("success", t("Detached {server} from {where}", { server, where: t("{name} on {host}", { name, host }) }), (r && r.message) || "");
+        actions.closest("tr").remove();
+      } catch (e) { failed(t("Could not detach {server} from {where}", { server, where: t("{name} on {host}", { name, host }) }))(e); }
+    }, { trigger: remove }) }, t("Remove…"));
+    actions.append(remove);
+    keptBody.append(el("tr", {}, el("td", { class: "mono" }, server), actions));
+  }
+  const keptTable = kept.length ? el("table", { class: "wide" }, el("caption", {}, t("MCP servers of its later starts")), el("thead", {}, el("tr", {}, el("th", {}, t("Server")), el("th", {}, ""))), keptBody) : null;
   row.append(...[again ? el("button", { class: "primary", onclick: resume }, live ? t("Restart with these…") : t("Resume with these…")) : null,
     live ? el("button", { onclick: stop }, t("Stop and wait…")) : null, el("button", { onclick: () => dropCard(card) }, t("Close"))].filter(Boolean));
   const title = () => t("More for {name} on {host}", { name, host });
@@ -1133,7 +1150,7 @@ function moreCard(main, s) {
       again ? el("label", { for: "more-mcp" }, t("MCP servers")) : null, again ? servers : null,
       again && live ? el("label", { for: "more-restart" }, t("Restart it now")) : null, again && live ? restart : null,
       live ? el("label", { for: "more-wait" }, t("Stop: wait up to (seconds)")) : null, live ? wait : null,
-      status, el("span"), row));
+      status, el("span"), row), keptTable);
   openCard(main, card, s);
   const opened = s.state;
   registerCard(card, notes, cardRef(s, () => name, (fresh) => { name = fresh; }, heading, title, (now) => now === opened));
@@ -3330,7 +3347,7 @@ pages.llm = async (main) => {
       if (key.ask) { askRefused(addRow, key.ask, () => add(confirm, true), { trigger: ev.target }); return; }
       try { await api("POST", hostPath("/llm", host), Object.assign({}, body, confirm ? { confirm: true } : {})); show("llm"); }
       catch (e) {
-        status.append(errorNotice(e));
+        status.append(errorNotice(e), ...plainHttpHint(e));
         if (key.made) {
           try { await api("DELETE", hostPath(`/secrets/${encodeURIComponent(body.api_key_secret)}`, host), { confirm: true }); status.append(el("p", { class: "hint" }, t("The secret {name} stored for it was removed again.", { name: body.api_key_secret }))); }
           catch (err) { status.append(el("p", { class: "hint" }, t("The secret {name} stored for it stays: remove it on the page Secrets if it is not needed.", { name: body.api_key_secret }))); }
@@ -3348,11 +3365,15 @@ pages.llm = async (main) => {
   // a VPN profile do not, so a server that needs one of those can refuse the test and still work for the starts.
   // With "Plain http outside the local networks" ticked and a key named, the test sends that key unencrypted too:
   // asked first, as Add asks (the command refuses plain http to a public address otherwise, as llm add does).
+  // the command's refusal of plain http names its option; here it is the form's checkbox
+  const plainHttpHint = (e) => (String((e && e.message) || "").includes("--insecure-http") && !insecure.checked
+    ? [el("p", { class: "hint" }, t("To allow it, tick “Plain http outside the local networks” above."))] : []);
   const test = el("button", { onclick: (ev) => {
     const risky = insecure.checked && keySecret.value.trim() && url.value.trim().toLowerCase().startsWith("http://");
     if (!risky) { runTest(ev, false); return; }
-    confirmIn(addRow, t("Send the prompts to {url} over plain http, unencrypted, from {host}? Whoever is on the way can read them, the answers and the key.", { url: url.value.trim(), host }),
-      t("Yes, do it"), () => runTest(ev, true), { kind: "primary", trigger: ev.target });
+    // the test sends the key only (no prompt); Add asks again for the server's prompts
+    confirmIn(addRow, t("Test {url} over plain http, unencrypted, from {host}? The test sends the key {secret} unencrypted: whoever is on the way can read it. Nothing is saved; Add asks again for the prompts.", { url: url.value.trim(), host, secret: keySecret.value.trim() }),
+      t("Yes, test it"), () => runTest(ev, true), { kind: "primary", trigger: ev.target });
   } }, t("Test connection"));
   const runTest = (ev, insecureConfirmed) => busy(ev.target, async () => {
     clear(status);
@@ -3372,7 +3393,7 @@ pages.llm = async (main) => {
       let e = first;
       if (e && e.code === "host-too-old") { try { models = await api("POST", hostPath("/llm-models", host), sent); e = null; } catch (again) { e = again; } }
       if (e) {
-        clear(testBox).append(errorNotice(e, t("{url} did not answer with a list of models", { url: address })),
+        clear(testBox).append(errorNotice(e, t("{url} did not answer with a list of models", { url: address })), ...plainHttpHint(e),
           ...(keyValue.value ? [el("p", { class: "hint" }, t("A key typed here is stored only with Add or Save: the test used the secret named, as that host has it now."))] : []));
         fillModels([]); return;
       }
@@ -3431,6 +3452,11 @@ function marketPluginState(p) {
   return words.join(" · ");
 }
 
+// After a kit change: the Kits page again, only while it still shows that host (never pulled back from elsewhere).
+function kitsAgain(host) {
+  if (state.page === "kits" && state.host === host) show("kits");
+}
+
 async function kitMarketplaces(section, host, live) {
   clear(section).append(el("h2", {}, t("Marketplaces")), el("p", { class: "hint" }, t("Loading…")));
   let data;
@@ -3438,11 +3464,21 @@ async function kitMarketplaces(section, host, live) {
   catch (e) { if (live()) clear(section).append(el("h2", {}, t("Marketplaces")), errorNotice(e)); return; }
   if (!live()) return;
   if (marketView.host !== host) Object.assign(marketView, { host, key: null, kit: null });
-  renderMarketplaces(section, host, data);
+  renderMarketplaces(section, host, data, live);
 }
 
-function renderMarketplaces(section, host, data) {
-  const again = () => renderMarketplaces(section, host, data);
+// FOCUS after a redraw of the section: "kit" (the kit chooser), "plugins" (the heading of the plugins shown),
+// "refresh" (its Refresh button); the redraw keeps the reader where they were instead of the page's top.
+function renderMarketplaces(section, host, data, live, focus) {
+  const here = () => section.isConnected && state.page === "kits" && state.host === host && (!live || live());
+  const again = (where) => renderMarketplaces(section, host, data, live, where);
+  const reload = (where) => { if (!here()) return; kitMarketplaces(section, host, live || (() => true)).then(() => focusIn(where)); };
+  const focusIn = (where) => {
+    if (!where || !section.isConnected) return;
+    const target = where === "kit" ? section.querySelector("#market-kit") : where === "refresh" ? section.querySelector("#market-refresh")
+      : section.querySelector("#market-plugins");
+    if (target) target.focus();
+  };
   const markets = (Array.isArray(data.marketplaces) ? data.marketplaces : []).filter(m => m && typeof m.name === "string" && typeof m.agent === "string");
   const agents = data.agents && typeof data.agents === "object" ? data.agents : {};
   const editable = (Array.isArray(data.kits) ? data.kits : []).filter(k => k && k.editable && typeof k.name === "string" && (k.kind === "default" || k.kind === "user"));
@@ -3462,33 +3498,49 @@ function renderMarketplaces(section, host, data) {
       try {
         const r = await api("POST", hostPath(`/kits/${encodeURIComponent(k.name)}/${action}`, host), Object.assign({}, body, { confirm: true }));
         toast("success", title, (r && r.output) || "");
-        show("kits");
-      } catch (e) { status.append(errorNotice(e)); }
+        reload(marketView.key ? "plugins" : "kit");  // only while this host's Kits page is still shown
+      } catch (e) {
+        if (here()) status.append(errorNotice(e));
+        else failed(t("Could not change the kit {kit} on {host}", { kit: k.name, host }))(e);  // said where the user is now
+      }
     });
     if (!needsConfirm(confirmKey)) { go(); return; }
     confirmIn(ask, question, confirmKey === "kit-add" ? t("Yes, change the kit") : t("Yes, take it out"), go, { kind: confirmKey === "kit-add" ? "primary" : undefined, trigger: ev.target });
   };
   const kitLabel = () => { const k = kit(); return k ? (k.kind === "default" ? t("the default kit") : k.name) : "?"; };
-  kitChoice.addEventListener("change", () => { marketView.kit = kitChoice.value; again(); });
+  kitChoice.addEventListener("change", () => { marketView.kit = kitChoice.value; again("kit"); });
 
   clear(section).append(el("h2", {}, t("Marketplaces")),
     el("p", { class: "hint" }, t("Every plugin marketplace on {host}: sandbox-ai's own, those the kits declare, and those Claude, Codex and OpenCode already know there. Pick one to see its plugins; what you add, enable, disable or remove changes the kit chosen here. The agents' own configuration is only read.", { host })),
     el("div", { class: "card" }, el("div", { class: "form" }, el("label", { for: "market-kit" }, t("Kit")), kitChoice,
       el("span"), el("div", { class: "row" },
-        el("button", { onclick: () => openTerminal({ kind: "plugins", host, agent: "claude", marketplaces_only: "1" }, t("plugins on {host}", { host })) }, t("Fetch the plugin lists")),
-        el("button", { onclick: () => openTerminal({ kind: "plugins", host, agent: "claude" }, t("plugins on {host}", { host })) }, t("Install the kits' plugins"))),
+        el("button", { onclick: () => openTerminal({ kind: "plugins", host, agent: "claude", marketplaces_only: "1" }, t("plugins on {host}", { host }), () => reload()) }, t("Fetch the plugin lists")),
+        el("button", { onclick: () => openTerminal({ kind: "plugins", host, agent: "claude" }, t("plugins on {host}", { host }), () => reload()) }, t("Install the kits' plugins")),
+        el("button", { onclick: () => pluginStatus() }, t("Plugin status")),
+        el("button", { id: "market-refresh", onclick: () => reload("refresh") }, t("Refresh"))),
       el("p", { class: "hint wide" }, t("A marketplace's plugin list comes from a copy fetched before: {command} fetches the kits' marketplaces in a sandbox that reaches only their hosts.", { command: "sandbox-ai plugins claude --marketplaces-only" })))),
     ask, status);
+  // sandbox-ai plugins --status there: what the kits declare and what is installed, as it says it
+  const pluginStatus = async () => {
+    clear(status).append(el("p", { class: "hint" }, t("Loading…")));
+    try {
+      const r = await api("GET", hostPath("/plugins-status", host));
+      if (here()) clear(status).append(el("h3", {}, t("Plugin status on {host}", { host })), el("pre", {}, String((r && r.output) || "")));
+    } catch (e) { if (here()) clear(status).append(errorNotice(e)); }
+  };
 
   const keyOf = (m) => `${m.agent}:${m.name}`;
   const rows = markets.map(m => {
     const declared = inKit(m.kits);
     const actions = el("td", { class: "actions" });
     actions.append(rowButton(marketView.key === keyOf(m) ? t("Shown") : t("Plugins"), m.name, host, { class: marketView.key === keyOf(m) ? "primary" : undefined,
-      onclick: () => { marketView.key = keyOf(m); again(); } }));
+      onclick: () => { marketView.key = keyOf(m); again("plugins"); } }));
     if (m.agent === "claude" && declared) {
-      actions.append(rowButton(t("Remove from the kit"), m.name, host, { class: "danger", onclick: (ev) => change(ev, "remove-marketplace", { marketplace: m.name, with_plugins: true },
-        t("Take the marketplace {marketplace} with its plugins out of {kit} on {host}? Every later start with that kit goes without them.", { marketplace: m.name, kit: kitLabel(), host }), "kit-remove", t("{kit}: removed {value}", { kit: kitLabel(), value: m.name })) }));
+      // the kit's plugins of that marketplace go with it (the command refuses otherwise): named in the question
+      const its = (Array.isArray(m.plugins) ? m.plugins : []).filter(p => p && typeof p.id === "string" && inKit(p.kits)).map(p => p.id);
+      actions.append(rowButton(t("Remove from the kit"), m.name, host, { class: "danger", onclick: (ev) => change(ev, "remove-marketplace", { marketplace: m.name, with_plugins: its.length > 0 },
+        its.length ? t("Take the marketplace {marketplace} with its plugins ({plugins}) out of {kit} on {host}? Every later start with that kit goes without them.", { marketplace: m.name, plugins: its.join(", "), kit: kitLabel(), host })
+          : t("Take the marketplace {marketplace} out of {kit} on {host}? The kit has none of its plugins.", { marketplace: m.name, kit: kitLabel(), host }), "kit-remove", t("{kit}: removed {value}", { kit: kitLabel(), value: m.name })) }));
     } else if (m.agent === "claude" && m.importable && m.source_value) {
       actions.append(rowButton(t("Add to the kit"), m.name, host, { onclick: (ev) => change(ev, "add-marketplace", { marketplace: m.name, source: m.source_value },
         t("Declare the marketplace {marketplace} ({source}) in {kit} on {host}? Its plugins can then be added there.", { marketplace: m.name, source: m.source_value, kit: kitLabel(), host }), "kit-add", t("Marketplace added to {kit}", { kit: kitLabel() })) }));
@@ -3539,7 +3591,7 @@ function renderMarketplaces(section, host, data) {
         el("td", {}, p.description || (p.listed === false ? t("not in its plugin list (named by a kit or the agent)") : "")),
         el("td", {}, marketPluginState(p) || el("span", { class: "hint" }, t("in no kit"))), actions);
     });
-    section.append(...[el("h3", {}, t("Plugins of {marketplace} ({agent})", { marketplace: picked.name, agent: picked.agent })),
+    section.append(...[el("h3", { id: "market-plugins", tabindex: "-1" }, t("Plugins of {marketplace} ({agent})", { marketplace: picked.name, agent: picked.agent })),
       picked.agent === "codex" ? el("p", { class: "hint" }, t("sandbox-ai's kits give Codex no plugins yet: shown as Codex has them on that host.")) : null,
       picked.agent === "claude" && !marketDeclared && !picked.importable ? el("p", { class: "hint" }, t("Its plugins cannot go into a kit: {why}", { why: picked.problem || "?" })) : null,
       picked.listed_from ? null : el("p", { class: "hint" }, t("Its plugin list is not fetched yet: only the plugins a kit or the agent names are shown.")),
@@ -3554,6 +3606,10 @@ function renderMarketplaces(section, host, data) {
       const actions = el("td", { class: "actions" });
       if (!mine && p.importable) actions.append(rowButton(t("Add to the kit"), p.name, host, { class: "primary", onclick: (ev) => change(ev, "add-plugin", { plugin: p.name, agent: "opencode" },
         t("Add {what} to the kit {kit} on {host}? Every later start with that kit gets it.", { what: p.name, kit: kitLabel(), host }), "kit-add", t("Plugin added to {kit}", { kit: kitLabel() })) }));
+      // one the default kit enables: off for the starts with the kit chosen here, as for Claude's
+      if (!mine && (p.kits || []).some(k => k.enabled && k.kind === "default") && kit() && kit().kind !== "default")
+        actions.append(rowButton(t("Disable"), p.name, host, { onclick: (ev) => change(ev, "disable-plugin", { plugin: p.name, agent: "opencode" },
+          t("Turn {plugin} off in every start with {kit} on {host}, though the default kit enables it?", { plugin: p.name, kit: kitLabel(), host }), "kit-remove", t("{kit}: {plugin} disabled", { kit: kitLabel(), plugin: p.name })) }));
       if (mine) actions.append(mine.enabled
         ? rowButton(t("Disable"), p.name, host, { onclick: (ev) => change(ev, "disable-plugin", { plugin: p.name, agent: "opencode" },
           t("Turn {plugin} off in every start with {kit} on {host}? It stays in the kit (and installed).", { plugin: p.name, kit: kitLabel(), host }), "kit-remove", t("{kit}: {plugin} disabled", { kit: kitLabel(), plugin: p.name })) })
@@ -3576,6 +3632,7 @@ function renderMarketplaces(section, host, data) {
   }
   for (const e of Array.isArray(data.errors) ? data.errors : []) if (e && typeof e.error === "string") notes.push(el("li", { class: "status-bad" }, `${e.kit || "?"} (${e.agent || "?"}): ${e.error}`));
   if (notes.length) section.append(el("ul", { class: "hint" }, notes));
+  focusIn(focus);
 }
 
 pages.kits = async (main) => {
@@ -3609,7 +3666,7 @@ pages.kits = async (main) => {
         holder.append(el("button", { class: "danger small", title: label, "aria-label": label,
           onclick: () => confirmIn(holder, t("Remove the {kind} {value} for {agent} from the kit {kit} on {host}?", { kind, value, agent, kit: k.name, host }), t("Yes, remove it"), async () => {
             const body = Object.assign(kind === "skill" ? { skill: value, agents: [agent] } : { plugin: value, agent }, { confirm: true });
-            try { result(t("{kit}: removed {value}", { kit: k.name, value }), await api("POST", hostPath(`/kits/${encodeURIComponent(k.name)}/remove-${kind}`, host), body)); show("kits"); }
+            try { result(t("{kit}: removed {value}", { kit: k.name, value }), await api("POST", hostPath(`/kits/${encodeURIComponent(k.name)}/remove-${kind}`, host), body)); kitsAgain(host); }
             catch (e) { failed(t("Could not remove {value}", { value }))(e); }
           }) }, "×"));
         line.append("  ");
@@ -3625,7 +3682,7 @@ pages.kits = async (main) => {
       () => openTerminal({ kind: "trust-hooks", host, kit: k.name, confirm: "1" }, t("hooks of {kit}", { kit: k.name })), { kind: "primary", trigger: trust }) });
     kitActions.append(trust, rowButton(t("Revoke hooks"), k.name, host, { onclick: () => openTerminal({ kind: "trust-hooks", host, kit: k.name, revoke: "1" }, t("hooks of {kit}", { kit: k.name })) }));
     if (own) kitActions.append(rowButton(t("Delete kit"), k.name, host, { class: "danger", onclick: () => confirmIn(kitActions, t("Delete the kit {kit} on {host} with everything in it? Projects that use it cannot start until {option} is removed.", { kit: k.name, host, option: `--kit ${k.name}` }), t("Yes, delete it"), async () => {
-      try { result(t("{kit} deleted", { kit: k.name }), await api("DELETE", hostPath(`/kits/${encodeURIComponent(k.name)}`, host), { confirm: true })); show("kits"); }
+      try { result(t("{kit} deleted", { kit: k.name }), await api("DELETE", hostPath(`/kits/${encodeURIComponent(k.name)}`, host), { confirm: true })); kitsAgain(host); }
       catch (e) { failed(t("Could not delete {kit}", { kit: k.name }))(e); }
     }) }));
     return el("tr", {}, el("td", { class: "mono" }, k.name), el("td", {}, KIT_KINDS[k.kind] ? t(KIT_KINDS[k.kind]) : String(k.kind || "")), brings, kitActions);
@@ -3645,7 +3702,7 @@ pages.kits = async (main) => {
     el("label", { for: "kit-new-name" }, t("Name")), newName, el("span", {}, t("For")), newAgents,
     el("span"), el("button", { class: "primary", onclick: (ev) => busy(ev.target, async () => {
       clear(newStatus);
-      try { result(t("Kit {kit} created", { kit: newName.value.trim() }), await api("POST", hostPath("/kits"), { name: newName.value.trim(), agents: chosenAgents(newAgents) })); show("kits"); }
+      try { result(t("Kit {kit} created", { kit: newName.value.trim() }), await api("POST", hostPath("/kits"), { name: newName.value.trim(), agents: chosenAgents(newAgents) })); kitsAgain(host); }
       catch (e) { newStatus.append(errorNotice(e)); }
     }) }, t("Create")), newStatus)));
 
@@ -3667,7 +3724,7 @@ pages.kits = async (main) => {
     const name = fresh ? targetName.value.trim() : target.value;
     const request = Object.assign(body(), { create: fresh });
     const go = () => busy(ev.target, async () => {
-      try { result(title(name), await api("POST", hostPath(`/kits/${encodeURIComponent(name)}/${action}`, host), Object.assign({}, request, WIDENS[action] ? { confirm: true } : {}))); show("kits"); }
+      try { result(title(name), await api("POST", hostPath(`/kits/${encodeURIComponent(name)}/${action}`, host), Object.assign({}, request, WIDENS[action] ? { confirm: true } : {}))); kitsAgain(host); }
       catch (e) { addStatus.append(errorNotice(e)); }
     });
     if (!WIDENS[action] || !needsConfirm("kit-add")) { go(); return; }
@@ -3682,8 +3739,9 @@ pages.kits = async (main) => {
   const pluginAgent = el("select", { id: "kit-plugin-agent" }, ["claude", "opencode"].map(a => el("option", { value: a }, a)));
   const pluginSource = el("input", { id: "kit-plugin-source", class: "mono", placeholder: t("OWNER/REPO or https://… (only for a marketplace the kit does not declare yet)") });
   const marketName = el("input", { id: "kit-market-name", class: "mono", placeholder: "my-plugins", pattern: "[A-Za-z0-9][A-Za-z0-9_.-]{0,63}" });
-  const marketSource = el("input", { id: "kit-market-source", class: "mono", placeholder: t("OWNER/REPO, a Git URL or a folder on that host") });
-  const marketAgent = el("select", { id: "kit-market-agent" }, ["claude", "opencode"].map(a => el("option", { value: a }, a)));
+  // a kit's marketplaces are Claude's (OpenCode has none) and come from GitHub or a Git URL: a folder is refused by
+  // sandbox-ai kits (sandboxes get only sandbox-ai's own marketplace as a directory)
+  const marketSource = el("input", { id: "kit-market-source", class: "mono", placeholder: t("OWNER/REPO or https://… (a Git repository)") });
   const hookFile = el("input", { id: "kit-hook-file", class: "mono", placeholder: t("{path} (on that host: a script, hooks.json or a plugin module)", { path: "/home/you/hooks/guard.sh" }) });
   const hookAs = el("input", { id: "kit-hook-as", class: "mono", placeholder: t("the file's name") }), hookEvent = el("input", { id: "kit-hook-event", class: "mono", placeholder: "PreToolUse" });
   const hookMatcher = el("input", { id: "kit-hook-matcher", class: "mono", placeholder: "Bash|Write" }), hookTimeout = el("input", { id: "kit-hook-timeout", type: "number", min: 1, max: 3600 });
@@ -3703,9 +3761,8 @@ pages.kits = async (main) => {
     el("span"), el("button", { class: "primary", onclick: send("add-plugin", () => ({ plugin: plugin.value.trim(), agent: pluginAgent.value, source: pluginSource.value.trim() }), n => t("Plugin added to {kit}", { kit: n })) }, t("Add plugin")),
     el("h3", { class: "wide" }, t("A marketplace")),
     el("label", { for: "kit-market-name" }, t("Marketplace")), marketName, el("label", { for: "kit-market-source" }, t("Source")), marketSource,
-    el("label", { for: "kit-market-agent" }, t("Agent")), marketAgent,
-    el("span"), el("button", { class: "primary", onclick: send("add-marketplace", () => ({ marketplace: marketName.value.trim(), source: marketSource.value.trim(), agent: marketAgent.value }), n => t("Marketplace added to {kit}", { kit: n })) }, t("Add marketplace")),
-    el("p", { class: "hint wide" }, t("A marketplace the kit declares: its plugins can then be added by NAME@MARKETPLACE.")),
+    el("span"), el("button", { class: "primary", onclick: send("add-marketplace", () => ({ marketplace: marketName.value.trim(), source: marketSource.value.trim() }), n => t("Marketplace added to {kit}", { kit: n })) }, t("Add marketplace")),
+    el("p", { class: "hint wide" }, t("A marketplace the kit declares for Claude (OpenCode has no marketplaces): its plugins can then be added by NAME@MARKETPLACE.")),
     el("h3", { class: "wide" }, t("A hook")),
     el("label", { for: "kit-hook-file" }, t("Hook file")), hookFile, el("label", { for: "kit-hook-as" }, t("Name in the kit")), hookAs,
     el("label", { for: "kit-hook-event" }, t("Event")), hookEvent, el("label", { for: "kit-hook-matcher" }, t("Tools")), hookMatcher,
@@ -3715,7 +3772,7 @@ pages.kits = async (main) => {
         const name = target.value, file = hookAs.value.trim() || hookFile.value.trim().split("/").pop();
         if (!name || !file) { toast("warning", t("Which hook?"), t("Choose a kit of yours and name the hook's file.")); return; }
         confirmIn(addAsk, t("Remove the hook {file} from the kit {kit} on {host}?", { file, kit: name, host }), t("Yes, remove it"), async () => {
-          try { result(t("{kit}: removed {value}", { kit: name, value: file }), await api("POST", hostPath(`/kits/${encodeURIComponent(name)}/remove-hook`, host), { file, agents: chosenAgents(skillAgents), confirm: true })); show("kits"); }
+          try { result(t("{kit}: removed {value}", { kit: name, value: file }), await api("POST", hostPath(`/kits/${encodeURIComponent(name)}/remove-hook`, host), { file, agents: chosenAgents(skillAgents), confirm: true })); kitsAgain(host); }
           catch (e) { addStatus.append(errorNotice(e)); }
         }, { trigger: ev.target });
       } }, t("Remove hook…"))),
@@ -4533,7 +4590,7 @@ function offerReview(host, path) {
     { action: [t("Review it"), () => { state.review = { host, path }; state.host = host; show("projects"); }] });
 }
 
-function openTerminal(params, title) {
+function openTerminal(params, title, onClose) {
   if (!window.Terminal) { toast("warning", t("No terminals here"), t("Terminals need xterm.js on the server: {command}", { command: "sandbox-ai web vendor" })); return; }
   // One tab per start: attaching again shows the tab already open. PARAMS.host: the start's own (else the chosen).
   const host = params.host || state.host;
@@ -4581,6 +4638,7 @@ function openTerminal(params, title) {
     // A refused WebSocket says nothing of why: if the session ended, the login is shown.
     if (!entry.opened) api("GET", "/api/me", undefined, { background: true }).catch(() => {});
     if (state.page === "terminals") show("terminals");
+    if (onClose && entry.opened) { try { onClose(); } catch (e) { /* the page it would refresh is gone */ } }
   };
   term.onData((data) => { if (ws.readyState === 1) ws.send(encoder.encode(data)); });
   term.onResize(({ cols, rows }) => { if (ws.readyState === 1) ws.send(JSON.stringify({ resize: [cols, rows] })); });
@@ -5179,6 +5237,17 @@ pages.teams = async (main) => {
   for (const team of teams) {
     const actions = el("td", { class: "actions" });
     const slot = el("tr", { class: "card-row", hidden: true }, el("td", { colspan: 4 }));
+    if (team.damaged) {
+      // its record cannot be read: only Delete (team delete --yes looks its members up by every agent's name)
+      const members = AGENTS.map(a => `${team.name}-${a}`).join(", ");
+      const remove = rowButton(t("Delete…"), team.name, host, { class: "danger", onclick: () => confirmIn(actions, t("The record of the team {team} on {host} is damaged. Delete it with every member of its name ({members}), their HOMEs and its board? What is in those HOMEs is gone for good.", { team: team.name, host, members }), t("Yes, delete it"), async () => {
+        try { const r = await api("DELETE", hostPath(`/teams/${encodeURIComponent(team.name)}`, host), { confirm: true }); toast("success", t("Team {team} on {host} deleted", { team: team.name, host }), (r && r.output) || ""); show("teams"); }
+        catch (e) { failed(t("Could not delete the team {team} on {host}", { team: team.name, host }))(e); }
+      }, { trigger: remove }) });
+      actions.append(remove);
+      rows.push(el("tr", { "data-team": team.name }, el("td", { class: "mono" }, team.name), el("td", { class: "hint" }, t("damaged: its record cannot be read")), el("td", {}, ""), actions), slot);
+      continue;
+    }
     const members = team.members.map(a => `${team.name}-${a}`).join(", ");
     const stop = rowButton(t("Stop…"), team.name, host, { onclick: () => confirmIn(actions, t("Stop the team {team} on {host}? What runs in its members ({members}) ends, and its board stops.", { team: team.name, host, members }), t("Yes, stop it"), async () => {
       try { const r = await api("POST", hostPath(`/teams/${encodeURIComponent(team.name)}/stop`, host), { confirm: true }); toast("success", t("Team {team} on {host} stopped", { team: team.name, host }), (r && r.output) || ""); show("teams"); }

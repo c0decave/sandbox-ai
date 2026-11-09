@@ -453,9 +453,11 @@ def newer_needed(host, args):
 
 def too_old_said(host, args, status, err):
     """A refusal when HOST's sandbox-ai refused ARGS, which hold what only newer versions know (NEWER), as argparse
-    refuses what it does not know (status 2: "unrecognized arguments", "invalid choice"): the page then says to
-    update it, not just the usage line."""
-    if host == module("hosts").LOCAL or status != 2 or not re.search(r"unrecognized arguments|invalid choice", err or ""):
+    refuses what it does not know (status 2: "unrecognized arguments", "invalid choice", or "the following arguments
+    are required" where an older parser reads a newer form's words otherwise, as 0.1.77's `wizard trust --list` and
+    `mcp attach --helper`): the page then says to update it, not just the usage line."""
+    if host == module("hosts").LOCAL or status != 2 or not re.search(
+            r"unrecognized arguments|invalid choice|the following arguments are required", err or ""):
         return None
     what = next((what for _, what, test in NEWER if test(list(args))), None)  # other callers read such a refusal
     return too_old(host, module("hosts").known_version(host)[0], what) if what else None  # themselves (doctor)
@@ -727,6 +729,8 @@ TEAM_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,19}")  # team.TEAM_NAME
 # a line of team list: NAME  MEMBERS  WORKSPACE
 TEAM_LINE = re.compile(r"(?P<name>[a-z0-9][a-z0-9_-]{0,19})\s+"
                        r"(?P<members>(?:claude|codex|opencode)(?:, (?:claude|codex|opencode))*)\s+(?P<workspace>/.*)")
+# a team whose record is damaged: NAME  (damaged)  remove it with: sandbox-ai team delete NAME --yes
+TEAM_DAMAGED_LINE = re.compile(r"(?P<name>[a-z0-9][a-z0-9_-]{0,19})\s+\(damaged\)(?:\s.*)?")
 IMAGE_KINDS = ("apt", "npm", "pip")  # images extend --add-KIND / --remove-KIND
 IMAGE_PACKAGE = re.compile(r"[A-Za-z0-9@][A-Za-z0-9@/._+~=<>!*^:\[\],-]{0,200}")  # images.py checks each kind's own
 IMAGE_MODE = re.compile(r"0?[0-7]{3}")
@@ -1094,6 +1098,9 @@ class Api:
             # an MCP server (or a helper agent) into a running start now, and out of it (mcp attach|detach --live)
             ("POST", H + r"/starts/(?P<name>[^/]+)/mcp-live", self.mcp_live_attach, ("mcp-attach",)),
             ("POST", H + r"/starts/(?P<name>[^/]+)/mcp-live/remove", self.mcp_live_detach, ("mcp-detach",)),
+            # out of a start that does not run (stopped, paused): its later starts go without it (mcp detach)
+            ("POST", H + r"/starts/(?P<name>[^/]+)/mcp/remove", self.mcp_detach, ("mcp-detach",)),
+            ("GET", H + r"/plugins-status", self.plugins_status, ()),
             ("GET", H + r"/approvals", self.approvals, ()),
             ("GET", H + r"/approvals-history", self.approvals_history, ()),
             ("GET", H + r"/approvals-history/(?P<run>[^/]+)", self.approvals_history, ()),
@@ -1101,7 +1108,6 @@ class Api:
             ("POST", H + r"/remembered/forget", self.forget, ("approval-forget",)),
             ("POST", H + r"/approvals/(?P<id>[^/]+)", self.answer, ("approval-allow-always", "approval-deny-always")),
             ("GET", H + r"/doctor", self.doctor, ()),
-            ("GET", H + r"/logs", self.logs, ()),
             ("GET", H + r"/llm", self.llm, ()),
             ("GET", H + r"/llm/(?P<name>[^/]+)/models", self.llm_models, ()),
             ("GET", H + r"/llm-status", self.llm_status, ()),
@@ -1747,6 +1753,19 @@ class Api:
         confirmed(body, "mcp-detach", f"{shown} from {start}")
         return self.json_of(params["host"], ["mcp", "detach", *server, start, "--live", "--json"], timeout=120)
 
+    def plugins_status(self, params, body):
+        """sandbox-ai plugins --status: what the kits declare and what is installed, as it says it."""
+        return self.done(params["host"], ["plugins", "--status"], 120)
+
+    def mcp_detach(self, params, body):
+        """sandbox-ai mcp detach NAME START --json (or --helper AGENT START): the server out of a kept start's options,
+        so that its later starts go without it; for a start that does not run now (stopped or paused: a paused one's
+        relay stays until it ends). Asked first: mcp-detach."""
+        start = start_name(params["name"])
+        server, shown = self.live_server(body)
+        confirmed(body, "mcp-detach", f"{shown} from {start}")
+        return self.json_of(params["host"], ["mcp", "detach", *server, start, "--json"], timeout=120)
+
     # the network of a running sandbox (sandbox-ai net), and the presets to start from
     def net_show(self, params, body):
         return self.json_of(params["host"], ["net", "show", start_name(params["name"]), "--json"], 30)
@@ -2288,9 +2307,6 @@ class Api:
         if not text:
             raise self.failed(host, ["doctor"], status, out, err)
         return text
-
-    def logs(self, params, body):
-        return self.json_of(params["host"], ["logs", "--json"], 60)
 
     # LLM servers (sandbox-ai llm)
     def llm(self, params, body):
@@ -2900,7 +2916,11 @@ class Api:
 
     # logs of a directory or project, the privacy check of repositories, the activity of runs
     def logs_of(self, params, body):
-        """sandbox-ai logs --json [--project PROJECT] [DIRECTORY]: one log directory, or a project's."""
+        """sandbox-ai logs --json [--project PROJECT] [DIRECTORY]: one log directory, or a project's (one of them:
+        without, sandbox-ai would read the log directory of the directory it runs in, this service's own or the SSH
+        login's, which nobody chose)."""
+        if all(body.get(key) in (None, "") for key in ("project", "directory")):
+            raise Refused(400, "which logs? Name the log directory or the project")
         args = ["logs", "--json"]
         if body.get("project") not in (None, ""):
             args.append(f"--project={clean_path(body['project'], 'project')}")
@@ -2963,8 +2983,8 @@ class Api:
         # this service's own or the SSH login's: the page always names one): a session's, a project's default log
         # directory, a log directory, the transcripts of a sandbox HOME
         where = [key for key in ("session", "project", "log_dir", "home") if body.get(key) not in (None, "")]
-        if len(where) > 1:
-            raise Refused(400, "one of session, project, log_dir and home")
+        if len(where) != 1:  # never the directory this service (or the SSH login) happens to run in
+            raise Refused(400, "where to read: one of session, project, log_dir and home")
         if where == ["session"]:
             args.append(f"--session={start_name(body['session'])}")
         elif where:
@@ -3011,7 +3031,8 @@ class Api:
         return value
 
     def teams(self, params, body):
-        """team list (it has no --json): [{"name", "members", "workspace"}] from its lines, in its order."""
+        """team list (it has no --json): [{"name", "members", "workspace"}] from its lines, in its order; a team whose
+        record is damaged as {"name", "members": [], "workspace": "", "damaged": True} (deleted as any other)."""
         status, out, err = self.run(params["host"], ["team", "list"], 30)
         if status != 0:
             raise self.failed(params["host"], ["team", "list"], status, out, err)
@@ -3021,6 +3042,10 @@ class Api:
             if match:
                 found.append({"name": match["name"], "members": match["members"].split(", "),
                               "workspace": printable(match["workspace"].strip())[:4096]})
+                continue
+            match = TEAM_DAMAGED_LINE.fullmatch(line.rstrip())
+            if match:
+                found.append({"name": match["name"], "members": [], "workspace": "", "damaged": True})
         return found
 
     def team_show(self, params, body):
@@ -3196,7 +3221,14 @@ def names_workspace(options):
     return False
 
 
-def terminal_command(query):
+def as_given_on(host, runner=None):
+    """HOST's sandbox-ai takes --workspaces-as-given (hosts.knows_workspaces_as_given), a host whose version is not
+    known yet asked first: through RUNNER (Api.runner's form) when given."""
+    ask = (lambda name, args, timeout: runner(name, args, timeout=timeout)) if runner else True
+    return module("hosts").knows_workspaces_as_given(host, ask=ask)
+
+
+def terminal_command(query, runner=None):
     """argv of a terminal the browser opens (QUERY: the WebSocket URL's parameters): attach to a start, or a new
     start of an agent (in its own terminal, detachable as every start)."""
     hosts = module("hosts")
@@ -3221,10 +3253,11 @@ def terminal_command(query):
             # Without one the launcher takes the directory it runs in: this service's own, or the SSH login's HOME.
             raise Refused(400, "which workspace? Name the folder the agent works on (its /work), in the field or "
                                "with --workspace in the options")
-        if hosts.knows_workspaces_as_given(host):
+        if as_given_on(host, runner):
             # The workspace is the one chosen here (or in the options): a project file in the directory the start
             # runs in (the web service's own, the SSH login's HOME) must not take the start over. Passed wherever
-            # the host's sandbox-ai knows it (0.1.78, which brought that rule; an older one has neither).
+            # the host's sandbox-ai knows it (0.1.78, which brought that rule; an older one has neither); a host
+            # whose version is not known yet (just added) is asked for it first.
             args.append("--workspaces-as-given")
         args += options
         older = newer_needed(host, args)  # an option value that host's sandbox-ai does not know (--ask allow)
@@ -3257,7 +3290,7 @@ def terminal_command(query):
         choice = install_choice({key: query[key] for key in ("mode", "prefix", "source", "version") if query.get(key)}
                                 | ({"sudo": sudo} if sudo is not None else {}))
         return host, hosts.argv(hosts.LOCAL, install_argv(host, choice, as_json=False), tty=True)
-    args = tool_command(kind, query)
+    args = tool_command(kind, query, runner)
     if args is None:
         raise Refused(400, "kind is attach, start, update, install, login, plugins, build, trust-hooks, team-start or "
                            "demo-device")
@@ -3273,7 +3306,7 @@ def terminal_confirmed(query, action, detail):
         raise Refused(400, f"{detail}: {NEEDS_CONFIRM[action]}: confirm=1", confirm=action)
 
 
-def tool_command(kind, query):
+def tool_command(kind, query, runner=None):
     """The sandbox-ai arguments of the interactive tools a terminal runs (None: no such kind): an agent's login (or
     its logout, asked first), the plugin store, an image build, a kit's hooks trusted (asked first; the command
     shows them and asks again) or revoked, the demo device. Every value is checked; nothing starts with "-"."""
@@ -3358,10 +3391,12 @@ def tool_command(kind, query):
         # a remote host of that version whose team.py is older gets it here).
         hosts = module("hosts")
         host = host_name(query.get("host") or hosts.LOCAL)
-        given = ["--workspaces-as-given"] if host != hosts.LOCAL and hosts.knows_workspaces_as_given(host) and \
-            "--workspaces-as-given" not in options else []
-        return ["team", "start", name, f"--agents={','.join(agents)}",
-                f"--workspace={workspace}", "--", *given, *options]
+        given = ["--workspaces-as-given"] if host != hosts.LOCAL and as_given_on(host, runner) \
+            and "--workspaces-as-given" not in options else []
+        # NAME after the options: 0.1.76 and 0.1.77 took everything after NAME as NAME's own (their team start
+        # refused "--agents" then); this order works on every version, as the app's does.
+        return ["team", "start", f"--agents={','.join(agents)}", f"--workspace={workspace}", name,
+                "--", *given, *options]
     if kind == "demo-device":
         port = query.get("port")
         if port not in (None, ""):
@@ -3560,7 +3595,7 @@ class Service:
         self.api, self.limiter = api or Api(), limiter or Limiter()
         self.login_lock = threading.Lock()
         self.sessions = sessions or Sessions()
-        self.terminal = terminal or (lambda query: terminal_command(query))
+        self.terminal = terminal or (lambda query: terminal_command(query, runner=self.api.runner))
 
     @staticmethod
     def cookie(headers):

@@ -192,7 +192,6 @@ ACTIONS = [
     ("POST", "/approvals/1700000000-1-2", {"decision": "allow", "scope": "run", "no_open": True},
      [["approvals", "allow", "1700000000-1-2", "--scope", "run", "--no-open"]]),
     ("GET", "/doctor", None, [["doctor", "--json"]]),
-    ("GET", "/logs", None, [["logs", "--json"]]),
     ("GET", "/llm", None, [["llm", "list", "--json"]]),
     ("POST", "/llm", {"name": "gpu", "kind": "vllm", "url": "http://100.100.1.5:8000", "model": "qwen3"},
      [["llm", "add", "gpu", "--kind", "vllm", "--url", "http://100.100.1.5:8000", "--model", "qwen3"]]),
@@ -239,6 +238,8 @@ ACTIONS = [
      [["mcp", "detach", "files", "web", "--live", "--json"]]),
     ("POST", "/starts/web/mcp-live/remove", {"helper": "codex", "confirm": True},
      [["mcp", "detach", "--helper=codex", "web", "--live", "--json"]]),
+    # review 6 W-F3: out of a stopped or paused start (its later starts)
+    ("POST", "/starts/web/mcp/remove", {"server": "files", "confirm": True}, [["mcp", "detach", "files", "web", "--json"]]),
     ("GET", "/devices/web", None, [["devices", "list", "web", "--json"]]),
     ("POST", "/devices/web", {"device": "usb:2e8a:000a", "confirm": True}, [["devices", "add", "web", "usb:2e8a:000a"]]),
     ("POST", "/devices/web/remove", {"device": "2"}, [["devices", "remove", "web", "2"]]),
@@ -273,6 +274,7 @@ ACTIONS = [
     ("DELETE", "/kits/mv", {"confirm": True}, [["kits", "delete", "--yes", "--", "mv"]]),
     # the marketplace browser of the Kits page
     ("GET", "/marketplaces", None, [["plugins", "marketplaces", "--json"]]),
+    ("GET", "/plugins-status", None, [["plugins", "--status"]]),  # review 6: the app's "Plugin status" in the web
     ("POST", "/kits/mv/enable-plugin", {"plugin": "egm@sandbox-ai", "agent": "claude", "confirm": True},
      [["kits", "enable-plugin", "--agent=claude", "--", "mv", "egm@sandbox-ai"]]),
     ("POST", "/kits/mv/disable-plugin", {"plugin": "egm@sandbox-ai", "agent": "claude", "confirm": True},
@@ -359,7 +361,8 @@ ACTIONS = [
     ("GET", "/vpn/mv", None, [["vpn", "show", "mv", "--json"]]),
     ("POST", "/logs", {"directory": "/srv/logs"}, [["logs", "--json", "/srv/logs"]]),
     ("POST", "/privacy-check", {"paths": ["/srv/project"]}, [["privacy-check", "--json", "/srv/project"]]),
-    ("POST", "/activity", {"tail": 20, "kinds": ["tool"]}, [["activity", "--json", "--tail=20", "--kind=tool"]]),
+    ("POST", "/activity", {"tail": 20, "kinds": ["tool"], "session": "web"},
+     [["activity", "--json", "--tail=20", "--kind=tool", "--session=web"]]),
     ("GET", "/doctor/podman", None, [["doctor", "--json", "--backend=podman"]]),
     ("GET", "/version", None, [["version", "--verbose"]]),
     ("GET", "/images", None, [["images", "--json"]]),
@@ -686,9 +689,9 @@ TOOL_TERMINALS = [
     ({"kind": "demo-device", "port": "5555"}, ["demo-device", "start", "--port=5555"]),
     ({"kind": "team-start", "team": "review", "agents": "claude,codex", "workspace": "/srv/project",
       "options": json.dumps(["--mode", "high"])},
-     ["team", "start", "review", "--agents=claude,codex", "--workspace=/srv/project", "--", "--mode", "high"]),
+     ["team", "start", "--agents=claude,codex", "--workspace=/srv/project", "review", "--", "--mode", "high"]),
     ({"kind": "team-start", "team": "duo", "agents": "opencode,claude,codex", "workspace": "~/src/p"},
-     ["team", "start", "duo", "--agents=opencode,claude,codex", "--workspace=~/src/p", "--"]),
+     ["team", "start", "--agents=opencode,claude,codex", "--workspace=~/src/p", "duo", "--"]),
 ]
 
 
@@ -854,6 +857,10 @@ def test_a_start_its_question_answered_and_its_stop(web, host, agent):
         status, _, data = web.request("POST", f"/api/hosts/{host}/starts/{name}/{action}",
                                       {"confirm": True}, headers)
         assert status == 200, data
+    # review 6 (L10): a host whose version is not known yet is asked for it once, before the start
+    asked = [entry for entry in web.processes.log if entry["args"] == ["version", "--verbose"]]
+    assert len(asked) == (0 if host == "local" else 1)
+    web.processes.log[:] = [entry for entry in web.processes.log if entry not in asked]
     assert web.processes.args() == [(host, args) for args in (
         ["list", "--json"], ["approvals", "list", "--json"],
         ["approvals", "allow", "1700000000-7-1", "--scope", "once"],

@@ -292,7 +292,6 @@ def logged_in():
     ("POST", "/api/hosts/ct1/approvals/12-3-4", {"decision": "allow", "scope": "once", "no_open": True},
      ["approvals", "allow", "12-3-4", "--scope", "once", "--no-open"]),
     ("GET", "/api/hosts/ct1/doctor", None, ["doctor", "--json"]),
-    ("GET", "/api/hosts/ct1/logs", None, ["logs", "--json"]),
     ("GET", "/api/hosts/ct1/llm", None, ["llm", "list", "--json"]),
     ("POST", "/api/hosts/ct1/llm", {"name": "lmstudio", "kind": "lmstudio", "url": "http://192.0.2.20:1234",
                                     "model": "qwen3"},
@@ -395,6 +394,8 @@ def logged_in():
      ["mcp", "detach", "helper-claude-0123abcd", "web", "--live", "--json"]),
     ("POST", "/api/hosts/ct1/starts/web/mcp-live/remove", {"helper": "opencode", "confirm": True},
      ["mcp", "detach", "--helper=opencode", "web", "--live", "--json"]),
+    ("POST", "/api/hosts/ct1/starts/web/mcp/remove", {"server": "files", "confirm": True},
+     ["mcp", "detach", "files", "web", "--json"]),
     ("POST", "/api/hosts/ct1/workspaces/web/remove", {"workspace": "other-2", "force": True, "confirm": True},
      ["workspace", "remove", "web", "other-2", "--force"]),
     ("GET", "/api/hosts/ct1/devices/web", None, ["devices", "list", "web", "--json"]),
@@ -604,9 +605,9 @@ def logged_in():
                                               "project": "web", "all": True},
      ["privacy-check", "--json", "--rules-dir=/home/u/rules", "--project=web", "--all", "/home/u/src/web"]),
     ("POST", "/api/hosts/ct1/activity", {"tail": 50, "kinds": ["tool", "network"], "grep": "-rf", "since": "2h",
-                                         "run": "claude-1"},
-     ["activity", "--json", "--tail=50", "--kind=tool", "--kind=network", "--grep=-rf", "--since=2h", "claude-1"]),
-    ("POST", "/api/hosts/ct1/activity", {}, ["activity", "--json", "--tail=200"]),
+                                         "run": "claude-1", "session": "web"},
+     ["activity", "--json", "--tail=50", "--kind=tool", "--kind=network", "--grep=-rf", "--since=2h", "--session=web",
+      "claude-1"]),
     # where it is read (review 5 W3/W6): a session, a project, a log directory, a sandbox HOME
     ("POST", "/api/hosts/ct1/activity", {"tail": 10, "session": "web"}, ["activity", "--json", "--tail=10", "--session=web"]),
     ("POST", "/api/hosts/ct1/activity", {"project": "/srv/p"}, ["activity", "--json", "--tail=200", "--project=/srv/p"]),
@@ -964,6 +965,8 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     ("POST", "/api/hosts/ct1/starts/web/mcp-live/remove", {"server": "--live", "confirm": True}, 400),
     ("POST", "/api/hosts/ct1/starts/web/mcp-live/remove", {"helper": "gpt", "confirm": True}, 400),
     ("POST", "/api/hosts/ct1/starts/web/mcp-live/remove", {"confirm": True}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/mcp/remove", {"server": "files"}, 400),  # asked first
+    ("POST", "/api/hosts/ct1/starts/-x/mcp/remove", {"server": "files", "confirm": True}, 400),
     ("GET", "/api/hosts/ct1/starts/web/mcp-live", None, 405),
     # a workspace: a file or folder, a name as --name takes it
     ("POST", "/api/hosts/ct1/workspaces/web", {"path": "relative/notes.md", "read_only": True}, 400),
@@ -1021,6 +1024,11 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     ("POST", "/api/hosts/ct1/activity", {"tail": 0}, 400),
     ("POST", "/api/hosts/ct1/starts/web/rename", {"new": "a" * 41}, 400),  # the launcher's names: 40 (review 5 W6)
     ("POST", "/api/hosts/ct1/activity", {"session": "web", "project": "/srv/p"}, 400),
+    # review 6: never the directory the service or the SSH login runs in
+    ("POST", "/api/hosts/ct1/activity", {}, 400),
+    ("POST", "/api/hosts/ct1/activity", {"run": "claude-1"}, 400),
+    ("POST", "/api/hosts/ct1/logs", {}, 400),
+    ("GET", "/api/hosts/ct1/logs", None, 405),  # only POST, naming where
     ("POST", "/api/hosts/ct1/activity", {"session": "--all"}, 400),
     ("POST", "/api/hosts/ct1/activity", {"log_dir": "relative"}, 400),
     ("POST", "/api/hosts/ct1/activity", {"home": "/srv/../etc"}, 400),
@@ -1092,6 +1100,11 @@ def test_options_an_older_host_does_not_know_are_said_not_sent(logged_in):
                                                        "unrecognized arguments: --keep-all")
     status, said = logged_in("POST", "/api/hosts/ct3/net/web/keep", {"all": True, "confirm": True})
     assert status == 409 and said["code"] == "host-too-old" and said["params"]["what"] == "net show --keep-all"
+    # Review 6 W-F2: 0.1.77's parser reads the newer forms' words otherwise and asks for what it misses
+    logged_in.runner.answers[("wizard", "trust")] = (2, "", "usage: sandbox-ai wizard trust ...\nsandbox-ai wizard "
+                                                            "trust: error: the following arguments are required: path")
+    status, said = logged_in("GET", "/api/hosts/ct3/projects")
+    assert status == 409 and said["code"] == "host-too-old", said
     status, said = logged_in("POST", "/api/hosts/local/net/web/keep", {"all": True, "confirm": True})
     assert status == 502, "on this machine a usage error is a usage error"
     # a browser question of the older host: marked, so the page opens nothing for an allow that cannot work
@@ -1374,12 +1387,22 @@ def test_terminal_commands():
                 "new": hosts.check("new", {"ssh": "root@192.0.2.12"})})
     hosts.save_statuses({"old": {"version": "0.1.77", "ssh": "root@192.0.2.11", "port": 22, "checked": 1},
                          "new": {"version": "0.1.78", "ssh": "root@192.0.2.12", "port": 22, "checked": 1}})
-    for name, given in (("ct1", False), ("old", False), ("new", True)):
-        _, argv = w.terminal_command({"host": name, "kind": "start", "agent": "codex", "workspace": "/srv/app"})
+    # Review 6 (L10): a host whose version is not known yet (ct1, just added) is asked for it first, once.
+    asked = []
+
+    def runner(host, args, timeout=120, input=None):
+        asked.append((host, args))
+        return (0, "sandbox-ai 0.1.83\ninstalled in: /x\n", "") if host == "ct1" else (255, "", "unreachable")
+    for name, given in (("ct1", True), ("old", False), ("new", True)):
+        _, argv = w.terminal_command({"host": name, "kind": "start", "agent": "codex", "workspace": "/srv/app"},
+                                     runner=runner)
         assert ("--workspaces-as-given" in argv[-1]) == given, name
         team = w.tool_command("team-start", {"host": name, "team": "t", "agents": "claude,codex",
-                                             "workspace": "/srv/app"})
+                                             "workspace": "/srv/app"}, runner)
         assert team[-1:] == (["--workspaces-as-given"] if given else ["--"]), (name, team)
+        # NAME after the options: a team start that 0.1.77 takes as well (it took all after NAME as NAME's)
+        assert team[:5] == ["team", "start", "--agents=claude,codex", "--workspace=/srv/app", "t"], team
+    assert asked == [("ct1", ["version", "--verbose"])]
     for query in ({"host": "local", "kind": "shell"}, {"host": "local", "kind": "start", "agent": "bash"},
                   {"host": "local", "kind": "attach", "name": "--all"},
                   {"host": "local", "kind": "start", "agent": "claude", "workspace": "relative"},
@@ -1485,7 +1508,7 @@ def server(home, monkeypatch):
                       "print('size', os.get_terminal_size(0), flush=True)\n"
                       "line = sys.stdin.readline()\nprint('got', line.strip(), flush=True)\n")
     script.chmod(0o755)
-    monkeypatch.setattr(w, "terminal_command", lambda query: ("local", [str(script), query.get("name", "")]))
+    monkeypatch.setattr(w, "terminal_command", lambda query, **_: ("local", [str(script), query.get("name", "")]))
     started, holder = threading.Event(), {}
 
     def ready(srv):
@@ -1932,7 +1955,7 @@ def test_a_browser_that_reads_nothing_does_not_hold_its_terminal(server, home, m
     chatty = home / "chatty-terminal"
     chatty.write_text(f"#!{sys.executable}\nimport sys\nwhile True:\n    sys.stdout.write('x' * 65536)\n")
     chatty.chmod(0o755)
-    monkeypatch.setattr(w, "terminal_command", lambda query: ("local", [str(chatty)]))
+    monkeypatch.setattr(w, "terminal_command", lambda query, **_: ("local", [str(chatty)]))
     sock, _, session = terminal_session(server)
     stop = threading.Event()
 
@@ -4688,7 +4711,7 @@ def test_the_mcp_catalog_and_the_activity_are_read_as_the_commands_print_them(lo
                                                                        "example.org/mine/catalog.json"]
     assert out["problems"] == ["sandbox-mcp: catalog not read: c1: 404"]
     logged_in.runner.answers[("activity",)] = (0, '{"kind": "tool", "run": "r1"}\nnot json\n{"kind": "file"}\n', "")
-    status, out = logged_in("POST", "/api/hosts/ct1/activity", {"tail": 10})
+    status, out = logged_in("POST", "/api/hosts/ct1/activity", {"tail": 10, "session": "web"})
     assert status == 200 and out == {"events": [{"kind": "tool", "run": "r1"}, {"kind": "file"}]}
 
 
@@ -4947,7 +4970,7 @@ def test_the_common_refusals_say_their_code_for_the_pages_own_words(logged_in, m
     status, out = logged_in("GET", "/api/hosts/ct1/doctor")
     assert status == 502 and out["code"] == "host-unreachable" and out["params"]["host"] == "ct1"
     logged_in.runner.answers[("logs",)] = (3, "", "no logs here")
-    status, out = logged_in("GET", "/api/hosts/ct1/logs")
+    status, out = logged_in("POST", "/api/hosts/ct1/logs", {"directory": "/srv/logs"})
     assert status == 502 and out["code"] == "command-failed"
     assert out["params"] == {"host": "ct1", "command": "sandbox-ai logs", "status": "3"}
     assert "no logs here" in out["error"]
@@ -4986,11 +5009,17 @@ def test_teams_are_listed_shown_posted_to_stopped_and_deleted(logged_in):
     team.py takes it; stop and delete are confirmed (CONFIRM_CASES)."""
     logged_in.runner.answers[("team", "list")] = (0, "review               claude, codex            /srv/project\n"
                                                      "trio                 opencode, claude, codex  /home/u/my src\n"
+                                                     "bad                  (damaged)                remove it with: "
+                                                     "sandbox-ai team delete bad --yes\n"
                                                      "garbage\n", "")
     status, out = logged_in("GET", "/api/hosts/ct1/teams")
+    # Review 6 W-F1: a team whose record is damaged is listed too, so that it can be deleted
     assert status == 200 and out == [{"name": "review", "members": ["claude", "codex"], "workspace": "/srv/project"},
                                      {"name": "trio", "members": ["opencode", "claude", "codex"],
-                                      "workspace": "/home/u/my src"}]
+                                      "workspace": "/home/u/my src"},
+                                     {"name": "bad", "members": [], "workspace": "", "damaged": True}]
+    status, out = logged_in("DELETE", "/api/hosts/ct1/teams/bad", {"confirm": True})
+    assert status == 200 and logged_in.runner.calls[-1] == ("ct1", ["team", "delete", "bad", "--yes"])
     status, out = logged_in("GET", "/api/hosts/ct1/teams/review")
     assert status == 200 and logged_in.runner.calls[-1] == ("ct1", ["team", "show", "review", "--json"])
     status, out = logged_in("POST", "/api/hosts/ct1/teams/review/post", {"agent": "codex",
@@ -5317,7 +5346,8 @@ const reset = () => { vm.runInContext("clear(__main); terminalsOpened.length = 0
   vm.runInContext('state.page = "kits";', context);
   await vm.runInContext("pages.kits(__main)", context); await settle();
   byId("kit-target").value = "mine";  // a browser's select: its first option
-  byId("kit-market-name").value = "mp"; byId("kit-market-source").value = "owner/repo"; byId("kit-market-agent").value = "claude";
+  byId("kit-market-name").value = "mp"; byId("kit-market-source").value = "owner/repo";
+  result.marketAgentChoice = Boolean(byId("kit-market-agent"));  // review 6 N2: Claude only
   buttonIn(main, "Add marketplace").fire("click");
   result.marketAsk = confirmText(main);
   buttonIn(main, "Yes, add it").fire("click"); await settle();
@@ -5415,8 +5445,8 @@ def test_round_four_of_the_page(tmp_path):
                                ["POST", "/api/hosts/ct1/preset-dirs", {"directory": "/srv/a", "confirm": True}]]
     assert result["marketAsk"].startswith("Add mp to the kit mine on ct1?")
     assert result["market"] == [["POST", "/api/hosts/ct1/kits/mine/add-marketplace",
-                                 {"marketplace": "mp", "source": "owner/repo", "agent": "claude", "create": False,
-                                  "confirm": True}]]
+                                 {"marketplace": "mp", "source": "owner/repo", "create": False, "confirm": True}]]
+    assert result["marketAgentChoice"] is False, "review 6 N2: a kit's marketplaces are Claude's: no agent to choose"
     ask, before = result["llmReplace"]
     assert "Replace the LLM server gw on ct1?" in ask and before == 0 and result["llmReplacePost"] == [[True, True]]
     assert result["waited"] == [None, True] and result["waitedOurs"] == {"name": "ct1", "after": "0.1.80"}
