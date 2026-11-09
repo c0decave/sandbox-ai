@@ -343,10 +343,11 @@ def main(argv, out=print):
     deleted.add_argument("name")
     deleted.add_argument("--yes", action="store_true")
     argv, options = start_options(list(argv))
-    a = parser.parse_args(argv)
+    # The options after -- are the namespace's "options" as they always were (front ends read it so).
+    a = parser.parse_args(argv, namespace=argparse.Namespace(options=options))
     try:
         if a.command == "start":
-            return start(a.name, a.agents.split(","), a.workspace, options, out)
+            return start(a.name, a.agents.split(","), a.workspace, a.options, out)
         if a.command == "list":
             for name in names():
                 try:

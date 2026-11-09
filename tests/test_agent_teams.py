@@ -354,3 +354,24 @@ def test_team_list_shows_a_damaged_team_and_delete_removes_it(tmp_path, capsys):
     states = {"claude": "stopped", "codex": "gone", "opencode": "gone"}
     assert team.delete("t3", True, lines.append, run, states) == 0
     assert ["delete", "t3-claude", "--yes"] in calls and not (team.teams_dir() / "t3").exists()
+
+
+def test_the_namespace_of_team_start_carries_its_options():
+    """The app reads team start's parsed namespace (its parity test): "options" holds what follows the --."""
+    import argparse
+    seen = []
+    original = argparse.ArgumentParser.parse_args
+
+    def capture(self, args=None, namespace=None):
+        seen.append(original(self, args, namespace))
+        raise SystemExit(0)
+    try:
+        argparse.ArgumentParser.parse_args = capture
+        for argv in (["start", "--agents", "claude,codex", "--workspace", "/w", "review", "--", "--allow-pypi"],
+                     ["start", "review", "--agents", "claude,codex", "-w", "/w", "--", "--allow-pypi"]):
+            with pytest.raises(SystemExit):
+                team.main(argv)
+    finally:
+        argparse.ArgumentParser.parse_args = original
+    assert [(n.name, n.agents, n.workspace, n.options) for n in seen] == [("review", "claude,codex", "/w",
+                                                                          ["--allow-pypi"])] * 2

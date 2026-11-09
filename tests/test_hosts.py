@@ -74,6 +74,12 @@ os.environ["FAKE_ROOT"] = "1"
 os.execv(args[0], args)
 """)
     (home / "rbin/sudo").chmod(0o755)
+    # The folders a system installation depends on (hosts.prefix_problem) as on a usual host: root's, 0755. The
+    # machine running the tests has its own owners and modes (a CI runner owns /tmp/pytest-of-runner, its
+    # /usr/local/bin is 0777); a test that is about them fakes its own.
+    (home / "rbin/ls").write_text('#!/bin/sh\nif [ "$1" = -ndL ]; then echo "drwxr-xr-x 2 0 0 0 Jan 1 00:00 $2"; '
+                                  'else exec /bin/ls "$@"; fi\n')
+    (home / "rbin/ls").chmod(0o755)
     (home / ".local/bin/sandbox-ai").write_text(f"""#!{sys.executable}
 import json, os, sys
 args = sys.argv[1:]
@@ -902,12 +908,20 @@ def test_install_refuses_a_prefix_of_another_user(remote, tmp_path):
     fake = remote["home"] / "rbin/ls"
     fake.write_text('#!/bin/sh\ncase "$2" in */bin) echo "drwxr-xr-x 2 4321 4321 0 Jan 1 00:00 $2" ;; '
                     f'{prefix}) echo "drwxr-xr-x 2 1000 1000 0 Jan 1 00:00 $2" ;; '  # not the runner's own uid
-                    '*) /bin/ls "$@" ;; esac\n')
+                    '*) echo "drwxr-xr-x 2 0 0 0 Jan 1 00:00 $2" ;; esac\n')  # the folders above: root's
     fake.chmod(0o755)
     result = h.install("ct1", mode="system", prefix=str(prefix), dry_run=True)
     assert "belongs to the user 4321" in (result["error"] or "") and not result["planned"]
     fake.write_text('#!/bin/sh\necho "drwxr-xr-x 2 1000 1000 0 Jan 1 00:00 $2"\n')  # the SSH user's own: fine
     assert h.install("ct1", mode="system", prefix=str(prefix), dry_run=True)["planned"]
+    # Review 5 L5: a folder above that another user owns, or one others may change, is refused as well.
+    fake.write_text(f'#!/bin/sh\ncase "$2" in {prefix.parent}) echo "drwxr-xr-x 2 4321 4321 0 Jan 1 00:00 $2" ;; '
+                    '*) echo "drwxr-xr-x 2 0 0 0 Jan 1 00:00 $2" ;; esac\n')
+    assert f"{prefix.parent} belongs to the user 4321" in h.install("ct1", mode="system", prefix=str(prefix),
+                                                                      dry_run=True)["error"]
+    fake.write_text(f'#!/bin/sh\ncase "$2" in {prefix}/bin) echo "drwxrwxrwx 2 0 0 0 Jan 1 00:00 $2" ;; '
+                    '*) echo "drwxr-xr-x 2 0 0 0 Jan 1 00:00 $2" ;; esac\n')
+    assert "may be changed by others" in h.install("ct1", mode="system", prefix=str(prefix), dry_run=True)["error"]
 
 
 def test_install_probes_the_prefixs_copy(remote, tmp_path):
