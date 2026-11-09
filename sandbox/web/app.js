@@ -2703,26 +2703,6 @@ function selectText(node) {
 
 const DOCTOR_STATE_CLASS = { ok: "doctor-state status-ok", warn: "doctor-state status-warn", fail: "doctor-state status-fail", skip: "doctor-state status-skip" };
 
-// One check: its status (icon and word), its name, what was found, and for a problem or warning how to fix it.
-function doctorItem(c) {
-  const item = el("li", { class: "doctor-check", "data-status": c.status },
-    el("div", { class: "doctor-head" }, el("span", { class: DOCTOR_STATE_CLASS[c.status] }, el("span", { "aria-hidden": "true" }, DOCTOR_SYMBOLS[c.status]), " ", t(DOCTOR_WORDS[c.status])),
-      el("strong", { class: "doctor-name" }, c.check)),
-    c.detail ? el("p", { class: "doctor-detail" }, c.detail) : null);
-  if (c.hint && (c.status === "fail" || c.status === "warn")) {
-    // advice in words; a hint that is only the command is the command alone
-    const bare = c.hint.trim().replace(/^(?:run|try|then run)\s*:\s+/i, "").replace(/\.+$/, "");
-    if (!c.command || bare !== c.command) item.append(el("p", { class: "doctor-hint" }, el("span", { class: "doctor-label" }, t("What to do:")), " ", c.hint));
-    if (c.command) item.append(commandBlock(c.command));
-  }
-  return item;
-}
-
-// The doctor's RESULTS (--json: a list of checks; an older sandbox-ai: its text) as one readable view. OPTIONS.level:
-// the heading level of its areas (2 on the doctor page, 3 below a host's test); OPTIONS.host: whose doctor it is.
-function doctorView(results, options) {
-  const opts = options || {};
-  const heading = `h${opts.level || 2}`, sub = `h${(opts.level || 2) + 1}`;
 // The doctor's first check, sandbox-ai itself (id "sandbox-ai-version", with version, kind, path, prefix, python);
 // where a sandbox-ai is installed, by the kind the doctor and the hosts list give (the app's doctor_view.WHERE).
 const DOCTOR_VERSION_ID = "sandbox-ai-version";
@@ -2758,6 +2738,28 @@ function doctorVersionLine(results, host, known) {
   return t("sandbox-ai {version} on {host}", { version, host: host || state.host }) + (where ? ` — ${where}` : "") + (source ? ` ${source}` : "");
 }
 
+// One check: its status (icon and word), its name, what was found, and for a problem or warning how to fix it.
+function doctorItem(c) {
+  const item = el("li", { class: "doctor-check", "data-status": c.status },
+    el("div", { class: "doctor-head" }, el("span", { class: DOCTOR_STATE_CLASS[c.status] }, el("span", { "aria-hidden": "true" }, DOCTOR_SYMBOLS[c.status]), " ", t(DOCTOR_WORDS[c.status])),
+      el("strong", { class: "doctor-name" }, c.check)),
+    c.detail ? el("p", { class: "doctor-detail" }, c.detail) : null);
+  if (c.hint && (c.status === "fail" || c.status === "warn")) {
+    // advice in words; a hint that is only the command is the command alone
+    const bare = c.hint.trim().replace(/^(?:run|try|then run)\s*:\s+/i, "").replace(/\.+$/, "");
+    if (!c.command || bare !== c.command) item.append(el("p", { class: "doctor-hint" }, el("span", { class: "doctor-label" }, t("What to do:")), " ", c.hint));
+    if (c.command) item.append(commandBlock(c.command));
+  }
+  return item;
+}
+
+// The doctor's RESULTS (--json: a list of checks; an older sandbox-ai: its text) as one readable view. OPTIONS.level:
+// the heading level of its areas (2 on the doctor page, 3 below a host's test); OPTIONS.host: whose doctor it is.
+function doctorView(results, options) {
+  const opts = options || {};
+  const heading = `h${opts.level || 2}`, sub = `h${(opts.level || 2) + 1}`;
+  const line = doctorVersionLine(results, opts.host, opts.known);
+  const versionLine = line ? el("p", { class: "doctor-version" }, el("strong", {}, line)) : null;
   if (typeof results === "string") {
     return el("div", { class: "doctor" }, versionLine, notice(t("The sandbox-ai of {host} answered with text (an older version without the doctor's list): shown as it is. An update gives the readable list.", { host: opts.host || state.host }), "warn"),
       el("pre", { class: "doctor-text" }, results));
@@ -2778,8 +2780,6 @@ function doctorVersionLine(results, host, known) {
     const failedHere = open.filter(c => c.status === "fail").length, warnedHere = open.length - failedHere;
     view.append(el("section", { class: "doctor-group", "data-group": key }, el(heading, {}, t(title), " ",
       el("span", { class: "hint" }, t("{problems} problem(s), {warnings} warning(s)", { problems: failedHere, warnings: warnedHere }))),
-  const line = doctorVersionLine(results, opts.host, opts.known);
-  const versionLine = line ? el("p", { class: "doctor-version" }, el("strong", {}, line)) : null;
     el("ul", { class: "doctor-checks" }, open.map(doctorItem))));
   }
   // the fine ones, and those not checked here, folded away, by area
@@ -4255,6 +4255,7 @@ pages.hosts = async (main) => {
   // a host whose sandbox-ai is missing or does not answer: its version cell says so and offers the install
   const showVersions = (found) => {
     Object.assign(versions, found);
+    state.hostVersions = Object.assign(state.hostVersions || {}, found);  // the doctor page's version of an older host
     for (const [name, cell] of Object.entries(versionCells)) {
       const v = versions[name];
       clear(cell).append(versionText(v));
@@ -4275,7 +4276,6 @@ pages.hosts = async (main) => {
   // the starts and the open questions of each host, as the fleet's last listings found them (nothing is asked for it)
   const activityCells = {};
   const loadActivity = async () => {
-    state.hostVersions = Object.assign(state.hostVersions || {}, found);  // the doctor page's version of an older host
     let found;
     try { found = await api("GET", "/api/hosts-activity", undefined, { background: true }); } catch (e) { found = {}; }
     for (const [name, [starts, questions]] of Object.entries(activityCells)) {

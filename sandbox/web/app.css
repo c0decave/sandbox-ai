@@ -163,8 +163,8 @@ tr[data-id]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2
    wraps (no sideways scrolling, also at phone width), the fix command in a block of its own with its Copy. */
 .doctor { max-width: 980px; }
 .doctor-summary { font-weight: 600; }
-.doctor-group h2, .doctor-group h3, .doctor-group h4 { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
 .doctor-version { margin: 0 0 0.5rem; overflow-wrap: anywhere; }
+.doctor-group h2, .doctor-group h3, .doctor-group h4 { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
 .doctor-group h3, .doctor-group h4 { font-size: 1em; margin: 14px 0 6px; color: var(--title); }
 .doctor-group .hint { font-weight: 400; font-size: .9em; }
 .doctor-checks { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 8px; }

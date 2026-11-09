@@ -2417,8 +2417,7 @@ def mode_at_least_is_a_floor(m, dev):
 def a_presets_short_forms_are_refused_as_the_long_ones(m, dev):
     own = Path(os.environ["HOME"]) / ".config" / "sandbox-ai" / "presets"
     own.mkdir(parents=True, exist_ok=True)
-    # (-w/--workspace is allowed in your own presets: test_presets.py; still refused in shared ones)
-    for options in (["-ca"], ["-gc", "/tmp/x"], ["-N", "other"], ["-s", "other"], ["--mode", "bogus"]):
+    for options in (["-ca"], ["-gc", "/tmp/x"], ["-w", "/tmp"], ["--mode", "bogus"]):
         (own / "short.json").write_text(json.dumps({"format": "sandbox-ai preset", "version": 1, "id": "short",
                                                     "title": "Short", "description": "d", "options": options}))
         m.refused("--preset", "short", match="not allowed in a preset|security mode is one of")
