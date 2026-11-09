@@ -1614,6 +1614,9 @@ def cli(argv):
                         help="with --url http://... and --api-key-secret: send the key over plain http to a server "
                              "outside your local networks (as llm add --insecure-http)")
     models.add_argument("--sort", choices=["name", "size", "loaded"], default="loaded")
+    models.add_argument("--status", action="store_true",
+                        help="also what the server has loaded and uses now (VRAM/RAM, KV cache, requests: what its API "
+                             "reports, as sandbox-ai llm status); with --json {\"models\": [...], \"status\": {...}}")
     models.add_argument("-j", "--json", action="store_true", help="as JSON")
     a = parser.parse_args(argv)
     if a.command in (None, "new", "edit") or a.command == "trust" and not (a.show or a.list or a.digest):
@@ -1635,9 +1638,15 @@ def cli(argv):
     if a.command == "forget":
         return forget(a.path)
     if a.command == "models":
+        status = None
         if a.llm:
-            found = llm().endpoint_models(llm().endpoint(a.llm))
-        elif a.url:
+            endpoint = llm().endpoint(a.llm)
+            if a.status:
+                client = llm().Client(endpoint, timeout=llm().STATUS_TIMEOUT)
+                found, status = llm().discover_status(endpoint["kind"], client.json, client.text)
+            else:
+                found = llm().endpoint_models(endpoint)
+        elif a.url or (a.status and a.kind and a.host):
             # A server that is not registered yet, by its whole URL (https and a path prefix included): what the
             # app's and the web's "Test connection" asks before anything is stored.
             if not a.kind:
@@ -1649,8 +1658,16 @@ def cli(argv):
                 stored = llm().ca_text(llm().endpoint(a.ca_of))
                 if stored is None:
                     raise ValueError(f"the LLM server {launcher().printable(a.ca_of)} has no CA of its own")
-            found = llm().discover_url(a.kind, a.url, ca=a.ca, api_key_secret=a.api_key_secret,
-                                       insecure_http=a.insecure_http, ca_text=stored)
+            url = a.url
+            if not url:  # --host with --status: the same server by its URL (the status reads /metrics as text too)
+                port = a.port or (SERVERS[a.kind][1] if a.kind in SERVERS else None)
+                if port is None:
+                    parser.error(f"--kind {a.kind} has no default port: give --port, or --url with the whole address")
+                url = f"http://{url_host(a.host)}:{port}"
+            found = llm().discover_url(a.kind, url, ca=a.ca, api_key_secret=a.api_key_secret,
+                                       insecure_http=a.insecure_http, ca_text=stored, with_status=a.status)
+            if a.status:
+                found, status = found
         elif a.kind and a.host:
             port = a.port or (SERVERS[a.kind][1] if a.kind in SERVERS else None)
             if port is None:
@@ -1660,10 +1677,13 @@ def cli(argv):
             parser.error("models needs --kind with --host or --url, or --llm NAME")
         found = sort_models(found, a.sort)
         if a.json:
-            print(json.dumps(found, indent=2))
+            print(json.dumps({"models": found, "status": status} if a.status else found, indent=2))
             return 0
         for line in model_table(found):
             print(line)
+        if a.status:
+            for line in llm().status_lines(dict(status, kind=llm().endpoint(a.llm)["kind"] if a.llm else a.kind)):
+                print(line)
         return 0
     if a.command == "edit":
         path = a.path.expanduser().absolute()
