@@ -4247,6 +4247,9 @@ sandbox-ai web serve --listen 0.0.0.0:8443 --hostname box.lan   # reachable from
   header must be one of the service's names (no DNS rebinding). The page runs
   with a strict Content Security Policy and shows server text only as text.
   At most 64 connections at once; one without a session is kept 10 seconds.
+  At most 16 of them from one address (an IPv6 client: its /64); a request's
+  TLS handshake, request line and headers must arrive within 10 seconds of
+  its first byte, its body within 30.
 - **Every action is one sandbox-ai command**, with each argument quoted on its
   own, on this machine or over SSH: the browser cannot send a shell command.
   Terminals are a WebSocket into a pty running `sandbox-ai attach` or a start

@@ -4520,7 +4520,10 @@ sandbox-ai web serve --listen 0.0.0.0:8443 --hostname box.lan   # aus Ihrem Netz
   Herkunft und JSON; der `Host`-Header muss einer der Namen des Dienstes sein
   (kein DNS-Rebinding). Die Seite läuft mit einer strengen Content Security
   Policy und zeigt Text vom Server nur als Text. Höchstens 64 Verbindungen
-  zugleich; eine ohne Sitzung wird 10 Sekunden gehalten.
+  zugleich; eine ohne Sitzung wird 10 Sekunden gehalten. Höchstens 16 davon
+  von einer Adresse (ein IPv6-Client: sein /64); TLS-Handshake, Anfragezeile
+  und Header einer Anfrage müssen binnen 10 Sekunden ab ihrem ersten Byte
+  ankommen, ihr Inhalt binnen 30.
 - **Jede Aktion ist ein sandbox-ai-Befehl**, jedes Argument einzeln
   gequotet, auf dieser Maschine oder über SSH: Der Browser kann keinen
   Shell-Befehl schicken. Terminals sind ein WebSocket in ein pty, in dem dort
