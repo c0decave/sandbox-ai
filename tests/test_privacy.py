@@ -604,3 +604,20 @@ def test_push_options_are_checked_as_the_commits_are(tmp_path):
     verdict = p.push_verdict(config, {**request, "url": "https://git.home.example/x.git",
                                       "push_options": [f"merge_request.title={canary}"]})
     assert not verdict["ok"] and verdict["canary"] == ["aws"]
+
+
+@needs_git
+def test_review6_more_push_options_than_are_checked_are_refused(tmp_path):
+    """Review 6, L-3 (PoC l3_push_options_cap.py): only the first 100 options were checked, the rest forwarded, so
+    `-o ci.skip` 100 times and then the secret went out. A push with more options than the check reads is refused,
+    on a public remote and on one only the canaries are looked for on."""
+    repo, (first,) = repo_with_commits(tmp_path, ("a.txt", "fine\n"))
+    request = {"url": "https://gitlab.com/ada/x.git", "commands": [["0" * 40, first, "refs/heads/main"]]}
+    padded = ["ci.skip"] * p.PUSH_OPTIONS_LIMIT
+    assert p.push_verdict(config_for(repo), {**request, "push_options": padded})["ok"]  # as many as are read: fine
+    leaking = {**request, "push_options": padded + [f"merge_request.description=token {GH_TOKEN}"]}
+    verdict = p.push_verdict(config_for(repo), leaking)
+    assert not verdict["ok"] and "101 push options" in verdict["message"] and GH_TOKEN not in verdict["message"]
+    config = {**config_for(repo), "canaries": [{"id": "aws", "tokens": ["sandbox-ai-canary-0123456789abcdef"]}]}
+    verdict = p.push_verdict(config, {**leaking, "url": "https://git.home.example/x.git"})
+    assert not verdict["ok"] and "at most 100" in verdict["message"]

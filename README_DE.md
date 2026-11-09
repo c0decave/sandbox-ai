@@ -3517,7 +3517,11 @@ der Sandbox startet. Er ist standardmäßig an; `--no-proxy` schaltet ihn ab
   erscheinen als `remote:`-Zeilen. Hooks, `--no-verify` oder ein anderer
   `core.hooksPath` ändern daran nichts. Ein Push, den der Prüfprozess nicht
   prüfen kann (Commits aus einem Klon außerhalb der Workspaces, unbekanntes
-  Format), wird ebenfalls abgelehnt.
+  Format, mehr als 100 Push-Optionen), wird ebenfalls abgelehnt. Push-Optionen
+  (`git push -o`, aus denen GitLab Titel und Beschreibungen von Merge Requests
+  macht) werden wie die Commits geprüft. Geprüft wird nur, was ein Ref-Update
+  erreicht: Objekte im Pack, die kein gepushter Ref erreicht (ein loser Commit
+  oder Blob), speichert der Server ungeprüft.
 - **SSH** wird abgelehnt, außer zu Bereichen, die mit `--allow` erlaubt sind,
   und zu dem Port, der mit `--allow-tcp IP:PORT` angegeben ist (beim Start
   oder mit `sandbox-ai net allow`); nie zu einem öffentlichen Git-Host oder in

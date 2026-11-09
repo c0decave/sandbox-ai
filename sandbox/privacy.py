@@ -1016,13 +1016,20 @@ def push_verdict(config, request):
     return {**verdict, "canary": canaries}
 
 
+PUSH_OPTIONS_LIMIT = 100  # push options (git push -o) one push may carry; a push with more is refused
+
+
 def with_push_options(config, request, url, public, verdict):
     """VERDICT of the commits with the push options (git push -o) checked as well: a forge publishes them (GitLab's
     merge_request.title and .description). For a public remote they meet the built-in privacy rules, for every
-    remote the run's canaries."""
-    options = [str(option) for option in request.get("push_options") or [] if isinstance(option, str)][:100]
+    remote the run's canaries. More than PUSH_OPTIONS_LIMIT options are refused, not checked in part."""
+    options = [str(option) for option in request.get("push_options") or [] if isinstance(option, str)]
     if not options:
         return verdict
+    if len(options) > PUSH_OPTIONS_LIMIT:
+        return {"ok": False, "canaries": verdict.get("canaries", []), "message":
+                f"this push to {remote_host(url)} has {len(options)} push options (git push -o); the privacy check "
+                f"reads at most {PUSH_OPTIONS_LIMIT}, so it is refused. Push with fewer options."}
     rules = (builtin_rules() if public else Rules()).add(canary_rules(config))
     report = Report("push options")
     report.add(scan_text("\n".join(options), rules, "", lambda number: f"push option {number}"))

@@ -3311,7 +3311,11 @@ the sandbox. It is on by default; `--no-proxy` switches it off (and
   the push the way a Git server would, with the findings shown as `remote:`
   lines. Hooks, `--no-verify` or another `core.hooksPath` make no difference.
   A push the checker cannot check (commits from a clone outside the workspaces,
-  an unknown format) is refused too.
+  an unknown format, more than 100 push options) is refused too. Push options
+  (`git push -o`, which GitLab turns into merge request titles and
+  descriptions) are checked like the commits. Only what a ref update reaches is
+  scanned: objects in the pack that no pushed ref reaches (a dangling commit or
+  blob) are stored by the server unchecked.
 - **SSH** is refused except to ranges allowed with `--allow` and to the port
   given with `--allow-tcp IP:PORT` (at the start or with `sandbox-ai net
   allow`), never to a public Git host or into a range that contains one, and
