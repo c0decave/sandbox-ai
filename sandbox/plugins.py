@@ -110,7 +110,10 @@ def sync(options=(), update=False, out=None, runner=None, builtin=(), marketplac
     k = kits()
     if k.ensure_default_home("claude"):
         out(f"sandbox-ai plugins: created the default kit {k.default_home('claude')} with examples")
-    marketplaces, plugins, notes = k.declarations("claude", k.all_plugin_files("claude", builtin), with_disabled=True)
+    # Each marketplaces.json checked link by link: one reached through a symlink an agent planted would choose the
+    # plugins (programs) this installs.
+    marketplaces, plugins, notes = k.declarations("claude", k.all_plugin_files("claude", builtin), with_disabled=True,
+                                                  check=module("agent_sandbox").kit_check())
     for note in notes:
         out(f"sandbox-ai plugins: {note}")
     known, _ = k.installed()

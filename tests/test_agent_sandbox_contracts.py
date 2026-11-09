@@ -7121,6 +7121,97 @@ def test_remember_exposed(scenario, tmp_path, monkeypatch, capsys):
         assert s.exposed_before() == [work, Path("/old/tree")]
 
 
+def test_session_workspaces(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    sessions = tmp_path / "state" / "sandbox-ai" / "sessions"
+    if scenario == "happy":  # the main workspace and those of -w
+        (sessions / "web").mkdir(parents=True)
+        (sessions / "web" / "session.json").write_text(json.dumps({"workspace": "/p/one",
+                                                                    "options": ["-w", "/p/two,/p/three"]}))
+        assert s.session_workspaces() == ["/p/one", "/p/two", "/p/three"]
+    elif scenario == "sad":  # a damaged record is skipped
+        (sessions / "bad").mkdir(parents=True)
+        (sessions / "bad" / "session.json").write_text("not json")
+        assert s.session_workspaces() == []
+    else:  # no sessions at all
+        assert s.session_workspaces() == []
+
+
+def test_sandbox_writable(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    earlier, running, added, kept, work = (tmp_path / name for name in ("earlier", "running", "added", "kept", "work"))
+    for folder in (earlier, running, added, kept, work):
+        folder.mkdir()
+    if scenario == "happy":  # this run's, earlier runs', the running sandboxes' (also added) and the kept sessions'
+        s.remember_exposed(None, [earlier])
+        run = s.runs_dir() / "r1"
+        run.mkdir(parents=True)
+        (run / "run.json").write_text(json.dumps({"run": "r1", "name": "web", "workspace": str(running)}))
+        (run / "workspaces.json").write_text(json.dumps({"workspaces": [{"host": str(added), "mode": "rw"},
+                                                                       {"host": "/ro/one", "mode": "ro"}]}))
+        session = tmp_path / "state" / "sandbox-ai" / "sessions" / "s"
+        session.mkdir(parents=True)
+        (session / "session.json").write_text(json.dumps({"workspace": str(kept)}))
+        found = dict(s.sandbox_writable(s.parse_args(["codex", "--workspace", str(work)])))
+        assert list(found) == [work, earlier, running, added, kept]
+        assert found[running] == "the workspace of the sandbox web" and "earlier run" in found[earlier]
+    elif scenario == "sad":  # damaged run records are skipped
+        run = s.runs_dir() / "r1"
+        run.mkdir(parents=True)
+        (run / "run.json").write_text("not json")
+        assert s.sandbox_writable() == []
+    else:  # relative paths in a record are no folders
+        s.remember_exposed(None, [earlier])
+        run = s.runs_dir() / "r1"
+        run.mkdir(parents=True)
+        (run / "run.json").write_text(json.dumps({"workspace": "relative"}))
+        assert s.sandbox_writable() == [(earlier, "a folder a sandbox could write in an earlier run")]
+
+
+def test_kit_check(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    project, ssh, work = tmp_path / "proj", tmp_path / ".ssh", tmp_path / "work"
+    for folder in (project, ssh, work):
+        folder.mkdir()
+    (project / "skill").symlink_to(ssh)  # what an agent working on PROJECT planted
+    a = s.parse_args(["claude", "--workspace", str(work)])
+    if scenario == "happy":  # a link inside a folder an earlier sandbox could write: refused, naming it
+        s.remember_exposed(None, [project])
+        with pytest.raises(ValueError, match=r"Kit file \(kit x\): .*proj/skill -> .*\.ssh is a symlink inside "
+                                             r".*proj \(a folder a sandbox could write in an earlier run\).*planted"):
+            s.kit_check(a)(project / "skill", "kit x")
+    elif scenario == "sad":  # inside this run's workspace: check_host_source refuses any path
+        with pytest.raises(ValueError, match="lies inside .*work, which the agent can change"):
+            s.kit_check(a)(work / "skill", "kit x")
+    else:  # a link no sandbox could have written, and real folders: fine; without a run only links are checked
+        s.kit_check(a)(project / "skill", "kit x")
+        s.kit_check(a)(ssh, "kit x")
+        s.kit_check()(work / "skill", "kit x")
+
+
+def test_kit_source_notes(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    checkout = tmp_path / "src" / "proj"
+    (checkout / "skills" / "foo").mkdir(parents=True)
+    plan = {"entries": {"skills": {"foo": ("kit x", tmp_path / "kit" / "foo")}, "commands": {}}}
+    (tmp_path / "kit").mkdir()
+    (tmp_path / "kit" / "foo").symlink_to(checkout / "skills" / "foo")
+    if scenario == "happy":  # the user's link to a skill in a checkout an agent worked on: said
+        s.remember_exposed(None, [checkout])
+        notes = s.kit_source_notes(plan)
+        assert len(notes) == 1 and "comes from" in notes[0] and str(checkout) in notes[0]
+    elif scenario == "sad":  # a dangling entry says nothing here (staging notes it)
+        (tmp_path / "kit" / "foo").unlink()
+        (tmp_path / "kit" / "foo").symlink_to(tmp_path / "gone")
+        assert s.kit_source_notes(plan) == []
+    else:  # nobody else writes there
+        assert s.kit_source_notes(plan) == []
+
+
 def test_private_locations(scenario, tmp_path, monkeypatch):
     home = tmp_path / "home"
     monkeypatch.setattr(s.Path, "home", classmethod(lambda cls: home))

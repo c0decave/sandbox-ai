@@ -1056,12 +1056,22 @@ Die Einträge aller Kits werden zusammengeführt. Derselbe Skill-, Agent-,
 Command- oder Prompt-Name aus zwei Kits oder zwei Memory-Vorlagen beenden den
 Start mit einer Meldung, die beide Kits nennt; nichts wird still ersetzt.
 sandbox-ai kopiert die Einträge in einen privaten Schnappschuss und hängt ihn
-**nur lesbar** ein: Der Agent kann sie nutzen, nicht ändern. Symlinks in Kits
+**nur lesbar** ein: Der Agent kann sie nutzen, nicht ändern.
 Ein Kit-Eintrag darf ein Symlink sein (praktisch für einen Skill aus einem
-Git-Checkout); unterhalb eines Eintrags werden Links nur verfolgt, solange sie
-in ihm bleiben. Weder ein Kit noch ein Link-Ziel darf in einem Workspace, einem
+Git-Checkout); unterhalb eines Eintrags wird kein Link verfolgt (die Kopie
+enthält die eigenen Dateien des Eintrags). Weder ein Kit noch ein Link-Ziel darf in einem Workspace, einem
 rw-Mount oder dem `--state-dir` liegen, und keines davon in einem Kit oder
-Store; Schleifen, mehr als 5000 Dateien oder 64 MiB beenden den
+Store. Ein Kit-Eintrag, eine Memory-Vorlage, eine `marketplaces.json` oder ein
+`--kit-dir` wird Link für Link verfolgt, und der Start hält an einem Link an,
+der in einem Ordner liegt, den eine Sandbox schreiben kann oder konnte (ein
+Workspace dieses oder eines früheren Laufs, einer gerade laufenden Sandbox oder
+einer behaltenen Sitzung): Ein Agent, der in Ihrem Checkout arbeitet, könnte den
+Ordner des Skills durch einen Link auf `~/.ssh` ersetzt haben. Die Meldung nennt
+diesen Link; prüfen Sie ihn und lassen Sie das Kit dann auf den echten Ordner
+zeigen oder kopieren Sie den Skill ins Kit (`sandbox-ai kits add-skill`). Ein
+Link auf einen echten Ordner in so einem Checkout funktioniert weiter, mit dem
+Hinweis, dass alles, was ein Agent dort schreibt, jede Sandbox mit diesem Kit
+erreicht. Schleifen, mehr als 5000 Dateien oder 64 MiB beenden den
 Start. Einträge, die nur ein anderer Agent kennt (z. B. `prompts/` in einem
 Claude-Kit), werden gemeldet und ignoriert. Namen für `--kit`: Buchstaben,
 Ziffern, `_`, `.`, `-`.

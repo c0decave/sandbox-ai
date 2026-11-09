@@ -214,9 +214,10 @@ def stage(agent, plan, staging, check):
     """Copy the kits' entries to STAGING (a fresh launcher-owned directory), one directory per kind;
     returns [(staged directory, sandbox path)] to mount read-only, and notes.
 
-    CHECK(path, label) raises for a host path the agent could change. A kit entry that is a symlink is followed
-    (its target checked too); below an entry nothing is followed (copy_tree); more than KIT_FILES files, KIT_BYTES
-    bytes or KIT_DEPTH levels are errors."""
+    CHECK(path, label) raises for a host path the agent could change, and for a symlink a sandbox may have planted.
+    A kit entry that is a symlink is followed one link at a time, every link on the way and the target checked
+    (checked_target); below an entry nothing is followed (copy_tree); more than KIT_FILES files, KIT_BYTES bytes or
+    KIT_DEPTH levels are errors."""
     mounts, notes, budget = [], [], {"files": 0, "bytes": 0}
     for kind, items in plan["entries"].items():
         if not items:
@@ -244,23 +245,71 @@ def fd_path(fd, fallback):
     return Path(fallback)
 
 
-def copy_tree(source, target, check, label, budget, notes):
-    """Copy the kit entry SOURCE to TARGET. The entry itself may be a symlink the user made (to a skill in a Git
-    checkout, say): it is resolved once, opened, and the place it was opened at is checked (CHECK). Below it the walk
-    goes from directory handle to directory handle with nothing followed as a symlink (O_NOFOLLOW, each handle
-    compared with what was listed by st_dev/st_ino), so that somebody who can change that checkout (an agent working
-    in it) cannot make the copy reach any other host file, not even by swapping a folder for a symlink while the
-    copy runs: symlinks, FIFOs, sockets and devices below the entry are skipped with a note."""
+def link_hops(path, limit=40):
+    """(where PATH leads, [(link, target)]): PATH resolved one readlink at a time, like the kernel does, with every
+    symlink met on the way in order: the path's own folders that are links, the links their targets go through, and
+    so on. Each LINK is where that link really lies (the folders before it already resolved), so a link an agent
+    planted in a folder it can write is seen wherever the chain passes it. A missing part ends the walk (the rest is
+    taken as written); more than LIMIT links is a ValueError (a loop)."""
+    current, hops = Path("/"), []
+    pending = list(reversed(Path(path).expanduser().absolute().parts[1:]))  # ".." kept: taken where it is met
+    while pending:
+        part = pending.pop()
+        if part in ("", "."):
+            continue
+        if part == "..":
+            current = current.parent
+            continue
+        candidate = current / part
+        try:
+            target = os.readlink(candidate)
+        except OSError:  # not a link, or missing: taken as it is
+            current = candidate
+            continue
+        hops.append((candidate, target))
+        if len(hops) > limit:
+            raise ValueError(f"{path}: more than {limit} symlinks on the way (a loop?)")
+        if os.path.isabs(target):
+            current = Path("/")
+        pending.extend(reversed(Path(target).parts[1 if os.path.isabs(target) else 0:]))
+    return current, hops
+
+
+def checked_target(source, label, check):
+    """Where SOURCE leads (link_hops), after CHECK(path, label) passed for SOURCE as given, for every symlink on the
+    way (where it lies: a link in a folder a sandbox can or could write may have been planted there by an agent, to
+    make the user's own link reach another host folder) and for the target. ValueError for a loop."""
+    resolved, hops = link_hops(source)
     check(source, label)
-    try:
-        resolved = source.resolve(strict=True)
-    except (OSError, RuntimeError):
-        notes.append(f"{label}: {source} skipped: dangling or looping symlink")
-        return
+    for link, _ in hops:
+        if link != source:
+            check(link, f"{label}, on the way to {source}")
     if resolved != source:
         check(resolved, label)
+    return resolved
+
+
+def copy_tree(source, target, check, label, budget, notes):
+    """Copy the kit entry SOURCE to TARGET. The entry itself may be a symlink the user made (to a skill in a Git
+    checkout, say): it is resolved one link at a time, every link on the way and the target checked
+    (checked_target), and the target is opened and must be where the check found it. Below it the walk goes from
+    directory handle to directory handle with nothing followed as a symlink (O_NOFOLLOW, each handle compared with
+    what was listed by st_dev/st_ino), so that somebody who can change that checkout (an agent working in it) cannot
+    make the copy reach any other host file: not by re-pointing a link on the way (refused by CHECK), and not by
+    swapping a folder for a symlink while the copy runs. Symlinks, FIFOs, sockets and devices below the entry are
+    skipped with a note."""
+    try:
+        resolved = checked_target(source, label, check)
+    except ValueError as exc:
+        if "symlinks on the way" not in str(exc):
+            raise
+        notes.append(f"{label}: {source} skipped: looping symlink")
+        return
     try:
         listed = os.lstat(resolved)
+    except FileNotFoundError:
+        notes.append(f"{label}: {source} skipped: dangling symlink")
+        return
     except OSError as exc:
         notes.append(f"{label}: {source} skipped: {exc.strerror}")
         return
@@ -273,11 +322,9 @@ def copy_tree(source, target, check, label, budget, notes):
         notes.append(f"{label}: {source} skipped: {'swapped for a symlink' if exc.errno == errno.ELOOP else exc.strerror}")
         return
     try:
-        opened = fd_path(fd, resolved)
-        if opened != resolved:
-            check(opened, label)  # a folder above it was swapped meanwhile: the place it was really opened at
         info = os.fstat(fd)
-        if (info.st_dev, info.st_ino) != (listed.st_dev, listed.st_ino):
+        # A folder above it swapped for a link meanwhile: opened elsewhere than where the check found it.
+        if fd_path(fd, resolved) != resolved or (info.st_dev, info.st_ino) != (listed.st_dev, listed.st_ino):
             notes.append(f"{label}: {source} skipped: changed while it was copied")
         elif stat.S_ISDIR(info.st_mode):
             copy_dir_at(fd, target, label, budget, notes, source, 0)
@@ -460,14 +507,18 @@ def read_at(directory_fd, name, limit):
         os.close(fd)
 
 
-def read_regular(path, limit):
-    """Bytes of the regular file PATH (its last component not followed), or None; for launcher-owned paths."""
+def read_regular(path, limit, exact=False):
+    """Bytes of the regular file PATH (its last component not followed), or None; for launcher-owned paths. EXACT:
+    PATH is a resolved path (checked_target), and its folder must still be there when it is opened (not swapped for a
+    symlink meanwhile), else ValueError."""
     path = Path(path)
     try:
         directory = os.open(path.parent, DIR_FLAGS & ~os.O_NOFOLLOW)
     except OSError:
         return None
     try:
+        if exact and fd_path(directory, path.parent) != path.parent:
+            raise ValueError(f"{path} changed while it was read (a folder on its way was replaced)")
         data, why = read_at(directory, path.name, limit)
     finally:
         os.close(directory)
@@ -634,16 +685,14 @@ def memory_prepare(agent, project, home, template=None, check=None, persistent=F
 
     The manifest {HOME path: sha256} is what memory_save() compares against after the run. The first run
     of a project creates its store from the kit's memory template (checked with CHECK(path, label) like
-    every kit file). A PERSISTENT HOME whose last run never saved its memory (crash, failed save) is
+    every kit file: checked_target). A PERSISTENT HOME whose last run never saved its memory (crash, failed save) is
     saved first, so that its changes are not overwritten."""
     store = memory_store(project, agent)
     seeded, notes, data = None, [], None
     if template:
         label, path = template
-        if check:
-            check(path, label)
-            check(path.resolve(), label)
-        data = read_regular(path.resolve(), TEMPLATE_LIMIT)
+        resolved = checked_target(path, label, check or (lambda *_: None))
+        data = read_regular(resolved, TEMPLATE_LIMIT, exact=True)
         if data is None:
             raise ValueError(f"{label}: {path} is not a regular file")
     with locked(store.parent):
@@ -771,9 +820,12 @@ def source_argument(source):
     return source[{"github": "repo", "git": "url", "url": "url", "directory": "path"}[source["source"]]]
 
 
-def read_declaration(label, path):
+def read_declaration(label, path, check=None):
+    """The JSON object of a kit's marketplaces.json PATH; with CHECK (the launcher's, as for kit entries) the way to
+    it is checked link by link (checked_target)."""
+    resolved = checked_target(Path(path), label, check or (lambda *_: None))  # a refusal says why
     try:
-        data = read_regular(Path(path).resolve(), DECLARATION_LIMIT)
+        data = read_regular(resolved, DECLARATION_LIMIT, exact=True)
         document = json.loads(data) if data is not None else None
     except (OSError, ValueError, RecursionError):
         document = None
@@ -782,16 +834,16 @@ def read_declaration(label, path):
     return document
 
 
-def declarations(agent, plugin_files, with_disabled=False):
+def declarations(agent, plugin_files, with_disabled=False, check=None):
     """({marketplace name: source}, [plugin ids], notes) of the marketplaces.json files of the kits.
     Claude: marketplaces + "NAME@MARKETPLACE" plugins; OpenCode: npm plugin names; Codex: not yet.
     "plugins" lists what a kit enables, "disabled" what it keeps declared but off; of the kits in PLUGIN_FILES'
     order, the last that names a plugin decides (a kit given with --kit after the default kit can turn one of the
     default kit's plugins off, or on again). WITH_DISABLED: every declared plugin, off or on (what the plugin
-    store installs)."""
+    store installs). CHECK: as for read_declaration."""
     marketplaces, origins, plugins, notes = {}, {}, {}, []
     for label, path in plugin_files:
-        document = read_declaration(label, path)
+        document = read_declaration(label, path, check)
         unknown = set(document) - {"marketplaces", "plugins", "disabled", "$comment"}
         if unknown:
             raise ValueError(f"{label}: {path}: unknown keys {sorted(unknown)} (known: marketplaces, plugins, "

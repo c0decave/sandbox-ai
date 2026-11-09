@@ -1010,9 +1010,17 @@ from two kits, or two memory templates, stop the start with a message naming
 both kits; nothing is replaced silently. sandbox-ai copies the entries into a
 private snapshot and mounts it **read-only**: the agent can use, not change
 them. A kit entry may be a symlink (handy for a skill kept in a Git checkout);
-below an entry, links are followed only while they stay inside it. Neither a
+below an entry, no link is followed (the copy holds the entry's own files). Neither a
 kit nor a link target may lie in a workspace, a rw mount or the `--state-dir`,
-nor may one of those lie inside a kit or store; loops, more than 5000 files or 64 MiB stop the start. Names
+nor may one of those lie inside a kit or store. A kit entry, memory template,
+`marketplaces.json` or `--kit-dir` is followed one link at a time, and the start
+stops at a link that lies in a folder a sandbox can or could write (a workspace
+of this or an earlier run, of a sandbox running now or of a kept session): an
+agent working in your checkout could have replaced the skill's folder with a
+link to `~/.ssh`. The message names that link; check it, then let the kit point
+at the real folder or copy the skill into the kit (`sandbox-ai kits add-skill`).
+A link to a real folder in such a checkout still works, with a note that what an
+agent writes there reaches every sandbox given the kit. Loops, more than 5000 files or 64 MiB stop the start. Names
 that only work for another agent (e.g. `prompts/` in a Claude kit) are reported
 and ignored. Directory names `--kit` accepts: letters, digits, `_`, `.`, `-`.
 

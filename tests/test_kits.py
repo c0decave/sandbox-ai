@@ -316,6 +316,120 @@ def test_kit_inside_workspace_is_refused(tmp_path):
         args(tmp_path, "claude", "--kit-dir", str(tmp_path / "work/kit"))
 
 
+def agent_wrote_a_link(home, how, workspace=None):
+    """Review 6, M-A: the user's kit links to a skill in a checkout (~/src/proj); an agent that works on that checkout
+    (HOW: in an earlier run, in a sandbox running now, in a kept session, or as this run's own workspace) replaced
+    the skill's folder with a link to ~/.ssh."""
+    ssh = make(home / ".ssh", {"id_ed25519": "HOST-PRIVATE-KEY\n"})
+    checkout = make(home / "src/proj", {"skills/foo/SKILL.md": "---\nname: foo\n---\n", "CLAUDE.md": "memory"})
+    shutil.rmtree(checkout / "skills/foo")
+    (checkout / "skills/foo").symlink_to(ssh, target_is_directory=True)
+    if how == "earlier run":
+        s.remember_exposed(None, [checkout])
+    elif how == "running sandbox":
+        run = s.runs_dir() / "claude-1234"
+        run.mkdir(parents=True)
+        (run / "run.json").write_text(json.dumps({"run": "claude-1234", "workspace": str(checkout)}))
+    elif how == "kept session":
+        session = Path(os.environ["HOME"]) / ".local/state/sandbox-ai/sessions/s1"
+        session.mkdir(parents=True)
+        (session / "session.json").write_text(json.dumps({"workspace": str(checkout)}))
+    return ssh, checkout
+
+
+@pytest.mark.parametrize("how", ["earlier run", "running sandbox", "kept session", "same workspace"])
+def test_review6_kit_link_re_pointed_by_an_agent_is_refused(tmp_path, isolated, how):
+    """The reviewer's PoC: ~/kit/claude/skills/foo -> ~/src/proj/skills/foo, which an agent replaced with a link to
+    ~/.ssh. The next start refuses, naming the link and what to do; nothing of ~/.ssh is staged."""
+    _, checkout = agent_wrote_a_link(isolated, how)
+    kit = isolated / "kit/claude/skills"
+    kit.mkdir(parents=True)
+    (kit / "foo").symlink_to(checkout / "skills/foo", target_is_directory=True)
+    workspace = checkout if how == "same workspace" else tmp_path / "work"
+    a = s.parse_args(["claude", "--workspace", str(workspace), "--no-auth", "--no-default-kit", "--kit-dir",
+                      str(isolated / "kit")])
+    plan = k.scan("claude", k.sources(a))
+    (tmp_path / "staging").mkdir()
+    expected = "agent can change" if how == "same workspace" else "is a symlink inside .*proj .*planted.*kits add-skill"
+    with pytest.raises(ValueError, match=f"on the way to .*kit/claude/skills/foo.*{expected}"):
+        k.stage("claude", plan, tmp_path / "staging", s.kit_check(a))
+    assert not any(b"HOST-PRIVATE-KEY" in path.read_bytes() for path in (tmp_path / "staging").rglob("*")
+                   if path.is_file())
+
+
+def test_review6_kit_link_to_a_real_folder_in_a_checkout_is_copied_with_a_note(tmp_path, isolated):
+    """The README's own example still works: a kit entry linked to a real skill folder in a checkout. When a sandbox
+    worked on that checkout, the start says that what it wrote there reaches every sandbox given the kit."""
+    checkout = make(isolated / "src/proj", {"skills/foo/SKILL.md": "---\nname: foo\n---\n"})
+    s.remember_exposed(None, [checkout])
+    kit = isolated / "kit/claude/skills"
+    kit.mkdir(parents=True)
+    (kit / "foo").symlink_to(checkout / "skills/foo", target_is_directory=True)
+    a = s.parse_args(["claude", "--workspace", str(tmp_path / "work"), "--no-auth", "--no-default-kit",
+                      "--kit-dir", str(isolated / "kit")])
+    plan = k.scan("claude", k.sources(a))
+    (tmp_path / "staging").mkdir()
+    k.stage("claude", plan, tmp_path / "staging", s.kit_check(a))
+    assert (tmp_path / "staging/skills/foo/SKILL.md").is_file()
+    notes = s.kit_source_notes(plan, a)
+    assert len(notes) == 1 and "reaches every sandbox this kit is given to" in notes[0]
+
+
+def test_review6_memory_template_through_a_planted_link_is_refused(tmp_path, isolated):
+    """The kit's memory template linked to a checkout's CLAUDE.md, which an agent re-pointed at a host file."""
+    ssh, checkout = agent_wrote_a_link(isolated, "earlier run")
+    (checkout / "CLAUDE.md").unlink()
+    (checkout / "CLAUDE.md").symlink_to(ssh / "id_ed25519")
+    kit = isolated / "kit/claude"
+    kit.mkdir(parents=True)
+    (kit / "CLAUDE.md").symlink_to(checkout / "CLAUDE.md")
+    a = s.parse_args(["claude", "--workspace", str(tmp_path / "work"), "--no-auth"])
+    home = tmp_path / "home"
+    home.mkdir()
+    with pytest.raises(ValueError, match="on the way to .*kit/claude/CLAUDE.md.*symlink inside .*proj"):
+        k.memory_prepare("claude", tmp_path / "proj2", home, ("kit-dir x", kit / "CLAUDE.md"), s.kit_check(a))
+    assert not k.memory_store(tmp_path / "proj2", "claude").exists()
+    assert "HOST-PRIVATE-KEY" not in "".join(p.read_text() for p in home.rglob("*") if p.is_file())
+
+
+def test_review6_plugin_declaration_through_a_planted_link_is_refused(tmp_path, isolated):
+    """A kit's marketplaces.json linked into a checkout: an agent re-pointing it would choose the plugins (programs)
+    sandboxes and the plugin installer get. The start (declarations) and `sandbox-ai plugins` refuse."""
+    _, checkout = agent_wrote_a_link(isolated, "earlier run")
+    (isolated / "agent.json").write_text(json.dumps({"plugins": ["evil@sandbox-ai"]}))
+    (checkout / "marketplaces.json").symlink_to(isolated / "agent.json")
+    kit = s.load_kits_module().default_home("claude")
+    kit.mkdir(parents=True)
+    (kit / "marketplaces.json").symlink_to(checkout / "marketplaces.json")
+    a = s.parse_args(["claude", "--workspace", str(tmp_path / "work"), "--no-auth"])
+    with pytest.raises(ValueError, match="on the way to .*marketplaces.json.*symlink inside .*proj"):
+        k.declarations("claude", [("home", kit / "marketplaces.json")], check=s.kit_check(a))
+    with pytest.raises(ValueError, match="on the way to .*marketplaces.json.*symlink inside .*proj"):
+        k.read_declaration("home", kit / "marketplaces.json", s.kit_check())
+    ran = []
+    with pytest.raises(ValueError, match="symlink inside .*proj"):
+        plugins.sync(out=lambda line: None, runner=lambda command: ran.append(command))
+    assert ran == []
+
+
+def test_review6_kit_dir_through_a_planted_link_is_refused(tmp_path, isolated):
+    """--kit-dir ~/kitlink, the user's link to a kit kept in a checkout, whose folder an agent replaced with a link."""
+    elsewhere = make(isolated / "elsewhere/claude", {"skills/x/SKILL.md": "x"}).parent
+    checkout = isolated / "src/proj"
+    checkout.mkdir(parents=True)
+    (checkout / "kit").symlink_to(elsewhere, target_is_directory=True)
+    (isolated / "kitlink").symlink_to(checkout / "kit", target_is_directory=True)
+    s.remember_exposed(None, [checkout])
+    with pytest.raises(ValueError, match="--kit-dir .*kitlink goes through the symlink .*proj/kit"):
+        args(tmp_path, "claude", "--kit-dir", str(isolated / "kitlink"))
+    run = s.runs_dir() / "r"  # the same for the workspace of a sandbox running now
+    run.mkdir(parents=True)
+    (run / "run.json").write_text(json.dumps({"workspace": str(checkout)}))
+    s.exposed_registry().write_text("[]")
+    with pytest.raises(ValueError, match="--kit-dir .*kitlink goes through the symlink .*proj/kit"):
+        args(tmp_path, "claude", "--kit-dir", str(isolated / "kitlink"))
+
+
 # --- project memory --------------------------------------------------------------------------------
 
 def test_memory_seeded_once_kept_per_project_and_never_written_to_the_kit(tmp_path):

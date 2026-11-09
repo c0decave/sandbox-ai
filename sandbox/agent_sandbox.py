@@ -1080,18 +1080,7 @@ def seed_exposed():
         except (OSError, ValueError, RecursionError):
             continue
         found += [project(key) for key in data if isinstance(key, str)] if isinstance(data, dict) else []
-    state = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "sandbox-ai"
-    for record in state.glob("sessions/*/session.json"):
-        try:
-            data = json.loads(record.read_text())
-        except (OSError, ValueError, RecursionError):
-            continue
-        if isinstance(data, dict) and isinstance(data.get("workspace"), str):
-            found.append(data["workspace"])
-        options = data.get("options", []) if isinstance(data, dict) else []
-        for flag, value in zip(options, options[1:]) if isinstance(options, list) else []:
-            if flag in ("-w", "--workspace") and isinstance(value, str):
-                found += value.split(",")  # a session's other workspaces
+    found += session_workspaces()
     try:
         servers = json.loads((config / "mcp.json").read_text())
     except (OSError, ValueError, RecursionError):
@@ -1104,6 +1093,102 @@ def seed_exposed():
                   and m.get("mode") == "rw"]
     found = [os.path.expanduser(p) for p in found]
     return [Path(p) for p in dict.fromkeys(found) if os.path.isabs(p)]
+
+
+def session_workspaces():
+    """The workspaces of the kept sessions (session.json: the main one and those of its -w options), as recorded."""
+    found = []
+    state = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "sandbox-ai"
+    for record in state.glob("sessions/*/session.json"):
+        try:
+            data = json.loads(record.read_text())
+        except (OSError, ValueError, RecursionError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("workspace"), str):
+            found.append(data["workspace"])
+        options = data.get("options", []) if isinstance(data, dict) else []
+        for flag, value in zip(options, options[1:]) if isinstance(options, list) else []:
+            if flag in ("-w", "--workspace") and isinstance(value, str):
+                found += value.split(",")  # a session's other workspaces
+    return found
+
+
+def sandbox_writable(a=None):
+    """[(tree, why)] of the host folders a sandbox can or could write, resolved: this run's (A: exposed_trees), those
+    of earlier runs (exposed_before), the workspaces of the sandboxes running now (also those added during their run)
+    and of the kept sessions. A symlink in one of them may have been planted by an agent."""
+    found = {}
+
+    def add(path, why):
+        with contextlib.suppress(OSError, RuntimeError, ValueError, TypeError):
+            path = Path(os.path.expanduser(str(path)))
+            if path.is_absolute():
+                found.setdefault(path.resolve(), why)
+    for tree in exposed_trees(a) if a is not None else []:
+        add(tree, "a folder this sandbox can write")
+    for tree in exposed_before():
+        add(tree, "a folder a sandbox could write in an earlier run")
+    for record in sorted(runs_dir().glob("*/run.json")):
+        try:
+            data = json.loads(record.read_text())
+            added = json.loads((record.parent / "workspaces.json").read_text()) \
+                if (record.parent / "workspaces.json").is_file() else {}
+        except (OSError, ValueError, RecursionError):
+            continue
+        name = printable(str(data.get("name") or data.get("run") or record.parent.name)) if isinstance(data, dict) \
+            else record.parent.name
+        if isinstance(data, dict) and isinstance(data.get("workspace"), str):
+            add(data["workspace"], f"the workspace of the sandbox {name}")
+        entries = added.get("workspaces") if isinstance(added, dict) else None
+        for entry in entries if isinstance(entries, list) else []:
+            if isinstance(entry, dict) and entry.get("mode") == "rw" and isinstance(entry.get("host"), str):
+                add(entry["host"], f"a workspace added to the sandbox {name}")
+    for workspace in session_workspaces():
+        add(workspace, "the workspace of a kept session")
+    return list(found.items())
+
+
+def kit_check(a=None):
+    """CHECK(path, label) for the kits' host files (kits.stage, memory_prepare, declarations: called for the path as
+    given, every symlink on its way and its target): refuses a path inside this run's agent-writable trees
+    (check_host_source, with A) and a symlink that lies in a folder a sandbox can or could write (sandbox_writable).
+    The user may link a kit entry to a skill in a Git checkout; an agent working in that checkout could replace the
+    skill's folder with a link to ~/.ssh, and the next start would copy the keys."""
+    trees = exposed_trees(a) if a is not None else []
+    writable = sandbox_writable(a)
+
+    def check(path, label):
+        if a is not None:
+            check_host_source(a, path, f"Kit file ({label})", trees)
+        path = Path(path)
+        if not path.is_symlink():
+            return
+        with contextlib.suppress(OSError, RuntimeError):
+            holder = path.parent.resolve()
+            for tree, why in writable:
+                if holder == tree or tree in holder.parents:
+                    raise ValueError(
+                        f"Kit file ({label}): {path} -> {os.readlink(path)} is a symlink inside {tree} ({why}); an "
+                        "agent may have planted it to get another host folder (~/.ssh, say) copied into a sandbox. "
+                        "Check it, then let the kit point at the real folder, or copy the files into the kit "
+                        "(sandbox-ai kits add-skill KIT FOLDER)")
+    return check
+
+
+def kit_source_notes(plan, a=None):
+    """Notes on the kit entries of PLAN (kits.scan) that come from a folder a sandbox can or could write: what an agent
+    writes there reaches every sandbox the kit is given to."""
+    writable, notes = sandbox_writable(a), []
+    for items in plan["entries"].values():
+        for label, source in items.values():
+            with contextlib.suppress(OSError, RuntimeError):
+                real = source.resolve()
+                tree, why = next(((tree, why) for tree, why in writable if real == tree or tree in real.parents),
+                                 (None, None))
+                if tree is not None:
+                    notes.append(f"{label}: {source} comes from {tree} ({why}): what an agent writes there reaches "
+                                 "every sandbox this kit is given to")
+    return notes
 
 
 def remember_exposed(a, trees=None):
@@ -1144,14 +1229,18 @@ def image_mount_hosts(project_document=None):
 
 
 def planted_symlink(source, trees):
-    """The first symlink on the way to SOURCE (itself or a parent) that lies in one of TREES, where a sandbox
-    could have created it; None. Links elsewhere (~/src -> /data/src, /home -> /var/home) are yours."""
-    for path in reversed((source, *source.parents)):
+    """The first symlink on the way to SOURCE that lies in one of TREES, where a sandbox could have created it; None.
+    The way is followed one link at a time (kits.link_hops): SOURCE itself, its folders, and every link their targets
+    go through, so a link of yours (~/kit/skill -> ~/src/proj/skill) whose target an agent re-pointed is seen too.
+    Links elsewhere (~/src -> /data/src, /home -> /var/home) are yours."""
+    try:
+        _, hops = load_kits_module().link_hops(source)
+    except ValueError:
+        return Path(source)  # a loop: nobody's own link
+    for path, _ in hops:
         try:
-            if not path.is_symlink():
-                continue
             holder = path.parent.resolve()
-        except OSError:
+        except (OSError, RuntimeError):
             continue
         if any(holder == tree or tree in holder.parents for tree in trees):
             return path
@@ -3778,8 +3867,10 @@ def check_host_sources(a):
         if path:
             check_planted(path, option, before)
             check_output_dir(path, option)
-    for value in a.kit_dir:
-        check_planted(value, "--kit-dir", before)
+    if a.kit_dir:
+        writable = [tree for tree, _ in sandbox_writable(a)]  # also the running sandboxes' and kept sessions'
+        for value in a.kit_dir:
+            check_planted(value, "--kit-dir", writable)
     # An MCP image server mounts its folders again for every connection: the agent must not be able to swap
     # one of them for a link, through a workspace or rw mount that holds it.
     for host in image_mount_hosts(getattr(a, "project_document", None)):
@@ -6500,7 +6591,8 @@ def kit_plan(a):
         return None
     kits = load_kits_module()
     plan = kits.scan(a.agent, kits.sources(a))
-    marketplaces, plugins, notes = kits.declarations(a.agent, plan["plugins"]) if not a.no_plugins else ({}, [], [])
+    marketplaces, plugins, notes = kits.declarations(a.agent, plan["plugins"], check=kit_check(a)) \
+        if not a.no_plugins else ({}, [], [])
     hooks = []
     for label, folder in kits.kit_hook_sources(a.agent, kits.sources(a)):
         info = kits.read_hooks(a.agent, folder)
@@ -6620,20 +6712,15 @@ def prepare_kits(a, home, staging):
         notes.append(f"created the default kit {kits.default_home(a.agent)} with examples")
     plan = kits.scan(a.agent, kits.sources(a))
     notes += plan["notes"]
-    trees = exposed_trees(a)
+    check = kit_check(a)
     staging.mkdir(mode=0o755)
-    staged, more = kits.stage(a.agent, plan, staging,
-                              lambda path, label: check_host_source(a, path, f"Kit file ({label})", trees))
-    notes += more
+    staged, more = kits.stage(a.agent, plan, staging, check)
+    notes += more + kit_source_notes(plan, a)
     a.kit_hooks = kits.stage_hooks(a.agent, kits.sources(a), staging / "hooks", KIT_HOOKS_TARGET)
     notes += kit_hook_notes(a.agent, a.kit_hooks)
     for source, dest in staged:
         ensure_mount_point(home, str(PurePosixPath(dest).relative_to("/root")))
         mounts.append((source, dest, "ro"))
-    check = lambda path, label: check_host_source(a, path, f"Kit file ({label})", trees)  # noqa: E731
-    for label, path in plan["plugins"]:
-        check(path, label)
-        check(path.resolve(), label)
     if not a.no_memory:
         manifest, seeded, store, more = kits.memory_prepare(a.agent, a.workspaces[0], home, plan["memory"],
                                                             check, persistent=bool(a.state_dir))
@@ -6642,7 +6729,7 @@ def prepare_kits(a, home, staging):
         if seeded:
             notes.append(f"new project memory {store}, started from the {kits.MEMORY_FILE[a.agent][0]} of {seeded}")
     if not a.no_plugins:
-        marketplaces, plugins, more = kits.declarations(a.agent, plan["plugins"])
+        marketplaces, plugins, more = kits.declarations(a.agent, plan["plugins"], check=check)
         notes += more
         if a.agent == "claude":
             mounts += claude_plugins(home, marketplaces, plugins, notes)
