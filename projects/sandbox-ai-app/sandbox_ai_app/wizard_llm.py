@@ -662,14 +662,35 @@ PROBE_KINDS = ("ollama", "lmstudio", "llamacpp", "vllm")
 PROBE_SECONDS = 60
 
 
-def probe_argv(kind, url):
-    """`sandbox-ai wizard models --kind KIND --url URL --sort loaded --json` for a server at URL that is not
-    registered anywhere: it lists the models, stores nothing and sends no key (https and a path prefix included).
-    ValueError says why that command cannot ask this one (an OpenAI-compatible server is tested with `llm check`
-    once it is saved)."""
+def probe_argv(kind, url, secret=None, insecure=False):
+    """`sandbox-ai wizard models --kind KIND --url URL [--api-key-secret SECRET [--insecure-http]] --sort loaded
+    --json` for a server at URL that is not registered anywhere: it lists the models and stores nothing (https and a
+    path prefix included). SECRET: the secret (of that host) whose key goes with the request, named, never the key;
+    sandbox-ai refuses to send it over plain http to a public address unless INSECURE (--insecure-http, asked first:
+    llm-insecure). ValueError says why that command cannot ask this one (an OpenAI-compatible server is tested with
+    `llm check` once it is saved)."""
     if kind not in PROBE_KINDS:
         raise ValueError(tr("An OpenAI-compatible server cannot be tested before it is saved."))
     url = (url or "").strip()
     if not URL.fullmatch(url):
         raise ValueError(tr("The URL is http(s)://HOST[:PORT][/PREFIX], without user, query or fragment."))
-    return ["wizard", "models", "--kind", kind, "--url", url, "--sort", "loaded", "--json"]
+    argv = ["wizard", "models", "--kind", kind, "--url", url]
+    if secret:
+        if not SECRET.fullmatch(secret):
+            raise ValueError(tr("A secret's name is letters, digits and '_', not starting with a digit."))
+        argv += ["--api-key-secret", secret]
+        if insecure and url.lower().startswith("http://"):
+            argv.append("--insecure-http")
+    return argv + ["--sort", "loaded", "--json"]
+
+
+# What `wizard models --url` says when it will not send the key over plain http to an address outside the local
+# networks (llm.discover_url: plain_http_problem, then "(the API key would go with it)"): only that refusal is
+# answered with the llm-insecure question and a test again with --insecure-http.
+PLAIN_HTTP_REFUSED = ("would cross networks you do not control unencrypted", "(the API key would go with it)")
+
+
+def plain_http_refused(text):
+    """Whether TEXT (the error output of `sandbox-ai wizard models --url ... --api-key-secret ...`) is its refusal to
+    send the key over plain http to a public address."""
+    return all(part in (text or "") for part in PLAIN_HTTP_REFUSED)

@@ -8514,4 +8514,130 @@ TEXTS = {
     'Not added: the login for {name} stays as it is.': {
         'en': 'Not added: the login for {name} stays as it is.',
         'de': 'Nicht hinzugefügt: Die Anmeldung für {name} bleibt, wie sie ist.'},
+    "A login's name is 1-32 lowercase letters, digits, '_', '.' or '-', starting with a letter.": {
+        'en': "A login's name is 1-32 lowercase letters, digits, '_', '.' or '-', starting with a letter.",
+        'de': "Der Name einer Anmeldung hat 1-32 Kleinbuchstaben, Ziffern, '_', '.' oder '-' und beginnt mit einem Buchstaben."},
+    'ADDRESS:PORT the service listens on (--listen); empty: {listen}, this host only': {
+        'en': 'ADDRESS:PORT the service listens on (--listen); empty: {listen}, this host only',
+        'de': 'ADRESSE:PORT, auf der der Dienst lauscht (--listen); leer: {listen}, nur dieser Rechner'},
+    'Add login…': {
+        'en': 'Add login…',
+        'de': 'Anmeldung hinzufügen…'},
+    'Certificate': {
+        'en': 'Certificate',
+        'de': 'Zertifikat'},
+    'Fetch xterm.js': {
+        'en': 'Fetch xterm.js',
+        'de': 'xterm.js holen'},
+    'Give the absolute path of a folder on {host}.': {
+        'en': 'Give the absolute path of a folder on {host}.',
+        'de': 'Geben Sie den absoluten Pfad eines Ordners auf {host} an.'},
+    'Give the login {name} a new password and TOTP secret? The old ones stop working.': {
+        'en': 'Give the login {name} a new password and TOTP secret? The old ones stop working.',
+        'de': 'Der Anmeldung {name} ein neues Passwort und ein neues TOTP-Geheimnis geben? Die alten gelten dann nicht mehr.'},
+    'Listen on': {
+        'en': 'Listen on',
+        'de': 'Lauschen auf'},
+    'Logins of the web interface': {
+        'en': 'Logins of the web interface',
+        'de': 'Anmeldungen der Weboberfläche'},
+    'Make a new certificate for the web interface? Its fingerprint changes: every browser that trusted the old one asks again, and the running service uses it after its restart.': {
+        'en': 'Make a new certificate for the web interface? Its fingerprint changes: every browser that trusted the old one asks again, and the running service uses it after its restart.',
+        'de': 'Ein neues Zertifikat für die Weboberfläche erstellen? Sein Fingerabdruck ändert sich: Jeder Browser, der dem alten vertraut hat, fragt erneut, und der laufende Dienst nutzt es nach seinem Neustart.'},
+    "Name of the login (lowercase letters, digits, '_', '.' or '-', starting with a letter):": {
+        'en': "Name of the login (lowercase letters, digits, '_', '.' or '-', starting with a letter):",
+        'de': "Name der Anmeldung (Kleinbuchstaben, Ziffern, '_', '.' oder '-', beginnend mit einem Buchstaben):"},
+    'New password': {
+        'en': 'New password',
+        'de': 'Neues Passwort'},
+    'New password…': {
+        'en': 'New password…',
+        'de': 'Neues Passwort…'},
+    'No login on {host} yet: Add login… makes the first.': {
+        'en': 'No login on {host} yet: Add login… makes the first.',
+        'de': 'Noch keine Anmeldung auf {host}: „Anmeldung hinzufügen…“ legt die erste an.'},
+    'Not tested: the key is not sent over plain http outside the local networks (use https, or allow it).': {
+        'en': 'Not tested: the key is not sent over plain http outside the local networks (use https, or allow it).',
+        'de': 'Nicht getestet: Der Schlüssel wird nicht über einfaches http außerhalb der lokalen Netze gesendet (nutzen Sie https, oder erlauben Sie es).'},
+    'Remove the login {name} of the web interface? Its sessions end at their next request.': {
+        'en': 'Remove the login {name} of the web interface? Its sessions end at their next request.',
+        'de': 'Die Anmeldung {name} der Weboberfläche entfernen? Ihre Sitzungen enden bei ihrer nächsten Anfrage.'},
+    'Renew': {
+        'en': 'Renew',
+        'de': 'Erneuern'},
+    'Renew certificate…': {
+        'en': 'Renew certificate…',
+        'de': 'Zertifikat erneuern…'},
+    'Run the service…': {
+        'en': 'Run the service…',
+        'de': 'Dienst starten…'},
+    'Run the web interface on {listen}? Other machines that reach that address can open its login page (a password and a TOTP code are still asked).': {
+        'en': 'Run the web interface on {listen}? Other machines that reach that address can open its login page (a password and a TOTP code are still asked).',
+        'de': 'Die Weboberfläche auf {listen} starten? Andere Rechner, die diese Adresse erreichen, können ihre Anmeldeseite öffnen (Passwort und TOTP-Code werden weiterhin verlangt).'},
+    'Select a login first.': {
+        'en': 'Select a login first.',
+        'de': 'Wählen Sie zuerst eine Anmeldung.'},
+    'Send the prompts to {url} over plain http, unencrypted, from {host}? Whoever is on the way can read them, the answers and the key.': {
+        'en': 'Send the prompts to {url} over plain http, unencrypted, from {host}? Whoever is on the way can read them, the answers and the key.',
+        'de': 'Die Prompts von {host} über einfaches http, unverschlüsselt, an {url} senden? Wer auf dem Weg ist, kann sie, die Antworten und den Schlüssel lesen.'},
+    "Show a project's .sandbox-ai.json on that host (the selected one, or a folder you name) with every key and the changes against the version trusted last, and trust exactly that content": {
+        'en': "Show a project's .sandbox-ai.json on that host (the selected one, or a folder you name) with every key and the changes against the version trusted last, and trust exactly that content",
+        'de': 'Die .sandbox-ai.json eines Projekts auf dem gewählten Rechner zeigen (die gewählte oder die eines Ordners, den Sie nennen), mit jedem Schlüssel und den Änderungen gegenüber der zuletzt vertrauten Fassung, und genau diesem Inhalt vertrauen'},
+    'Show fingerprint': {
+        'en': 'Show fingerprint',
+        'de': 'Fingerabdruck zeigen'},
+    "The host's web interface (sandbox-ai web there): who may log in, its certificate and the service itself. Passwords and TOTP codes are typed in a terminal, never through the app.": {
+        'en': "The host's web interface (sandbox-ai web there): who may log in, its certificate and the service itself. Passwords and TOTP codes are typed in a terminal, never through the app.",
+        'de': 'Die Weboberfläche des Rechners (sandbox-ai web dort): wer sich anmelden darf, ihr Zertifikat und der Dienst selbst. Passwörter und TOTP-Codes werden in einem Terminal eingetippt, nie über die App.'},
+    'The project folder on {host} (or its .sandbox-ai.json), an absolute path:': {
+        'en': 'The project folder on {host} (or its .sandbox-ai.json), an absolute path:',
+        'de': 'Der Projektordner auf {host} (oder seine .sandbox-ai.json), ein absoluter Pfad:'},
+    'The project folder on {host}, an absolute path:': {
+        'en': 'The project folder on {host}, an absolute path:',
+        'de': 'Der Projektordner auf {host}, ein absoluter Pfad:'},
+    'Trusted on {host}: {path}': {
+        'en': 'Trusted on {host}: {path}',
+        'de': 'Vertraut auf {host}: {path}'},
+    'Web interface': {
+        'en': 'Web interface',
+        'de': 'Weboberfläche'},
+    'sandbox-ai web cert --renew: a new certificate with another fingerprint; asked first': {
+        'en': 'sandbox-ai web cert --renew: a new certificate with another fingerprint; asked first',
+        'de': 'sandbox-ai web cert --renew: ein neues Zertifikat mit anderem Fingerabdruck; mit Rückfrage'},
+    "sandbox-ai web cert: the certificate's SHA-256 fingerprint, to compare with what the browser shows": {
+        'en': "sandbox-ai web cert: the certificate's SHA-256 fingerprint, to compare with what the browser shows",
+        'de': 'sandbox-ai web cert: der SHA-256-Fingerabdruck des Zertifikats, zum Vergleich mit dem, was der Browser zeigt'},
+    'sandbox-ai web serve in a terminal tab: it runs as long as that terminal does': {
+        'en': 'sandbox-ai web serve in a terminal tab: it runs as long as that terminal does',
+        'de': 'sandbox-ai web serve in einem Terminal-Tab: Er läuft, solange dieses Terminal läuft'},
+    'sandbox-ai web user add NAME in a terminal: a password (12 or more characters) and a TOTP code from your app': {
+        'en': 'sandbox-ai web user add NAME in a terminal: a password (12 or more characters) and a TOTP code from your app',
+        'de': 'sandbox-ai web user add NAME in einem Terminal: ein Passwort (12 oder mehr Zeichen) und ein TOTP-Code aus Ihrer App'},
+    'sandbox-ai web user list on the host': {
+        'en': 'sandbox-ai web user list on the host',
+        'de': 'sandbox-ai web user list auf dem Rechner'},
+    'sandbox-ai web user remove NAME: its sessions end; asked first': {
+        'en': 'sandbox-ai web user remove NAME: its sessions end; asked first',
+        'de': 'sandbox-ai web user remove NAME: Ihre Sitzungen enden; mit Rückfrage'},
+    'sandbox-ai web user reset NAME in a terminal: a new password and TOTP secret; asked first': {
+        'en': 'sandbox-ai web user reset NAME in a terminal: a new password and TOTP secret; asked first',
+        'de': 'sandbox-ai web user reset NAME in einem Terminal: ein neues Passwort und TOTP-Geheimnis; mit Rückfrage'},
+    "sandbox-ai web vendor in a terminal: the terminals' xterm.js from registry.npmjs.org, pinned and checked": {
+        'en': "sandbox-ai web vendor in a terminal: the terminals' xterm.js from registry.npmjs.org, pinned and checked",
+        'de': 'sandbox-ai web vendor in einem Terminal: xterm.js der Terminals von registry.npmjs.org, fest versioniert und geprüft'},
+    'web login {name}': {
+        'en': 'web login {name}',
+        'de': 'Web-Anmeldung {name}'},
+    'web serve': {
+        'en': 'web serve',
+        'de': 'web serve'},
+    'web vendor': {
+        'en': 'web vendor',
+        'de': 'web vendor'},
+    '{count} login(s) on {host}.': {
+        'en': '{count} login(s) on {host}.',
+        'de': '{count} Anmeldung(en) auf {host}.'},
+    '{path} cannot be read: {error}': {
+        'en': '{path} cannot be read: {error}',
+        'de': '{path} kann nicht gelesen werden: {error}'},
 }

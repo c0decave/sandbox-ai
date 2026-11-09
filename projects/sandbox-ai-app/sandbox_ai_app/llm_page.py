@@ -11,9 +11,12 @@ secret (--api-key-secret NAME): the key is never on a command line, in a file of
 The dialog (new or Edit…, a double-click) checks the name as it is typed (the character that cannot be in it, a
 name to use instead; OK only for a valid one) and stays open with everything typed whatever goes wrong: a field the
 CLI would refuse, a question answered No, `llm add` refusing (its message shown in the dialog). Test connection
-lists the models of a server not saved yet (`sandbox-ai wizard models --kind --url --json`: nothing is stored and no
-key is sent; an OpenAI-compatible server cannot be asked that way, so `llm check` runs once it is saved; an edited
-server whose address and key are as saved: `llm models NAME`) and fills the Default model choice. Edit prefills from
+lists the models of a server not saved yet (`sandbox-ai wizard models --kind --url --json`: nothing is stored; a
+secret named goes as --api-key-secret where that host knows it, and when sandbox-ai refuses to send it over plain http
+to an address outside the local networks the dialog asks (llm-insecure, naming the host and the URL) and tests again
+with --insecure-http, which the server is then saved with; an OpenAI-compatible server cannot be asked that way, so
+`llm check` runs once it is saved; an edited server whose address and key are as saved: `llm models NAME`) and fills
+the Default model choice. Edit prefills from
 `llm show NAME --json` and saves with --replace, every setting kept - the CA it has stays by itself, and only a file
 named in the dialog replaces it - after a yes naming what changes (llm-replace).
 
@@ -39,7 +42,7 @@ from PySide6.QtWidgets import (
 
 from .files import printable
 from .host_choice import follow_hosts, on_host
-from . import theme, widgets
+from . import backend, theme, widgets
 from . import wizard_llm as WL
 from .i18n import N_, tr
 from .widgets import (
@@ -138,14 +141,17 @@ class LlmDialog(QDialog):
     """A new LLM server, or EXISTING (its fields as wizard_llm.fields_of gives them) edited: its name, kind, URL,
     default model, VPN profile and key. REMOTE: the key is a secret of that host, named only (the value cannot reach
     it without a command line). RUN(*args, timeout=...) runs a sandbox-ai command on that host (blocking: in the
-    background) for Test connection; TAKEN: the names registered there.
+    background) for Test connection; TAKEN: the names registered there. REQUIRE(options) raises backend.HostTooOld
+    when that host's `wizard models` does not know OPTIONS (backend.require_options; None: this machine's own).
 
     OK hands the fields to ON_SAVE(fields, value) - the page saves while the dialog stays open - and the dialog
     closes only once it saved (finish); failed(message) keeps it open with everything typed."""
 
-    def __init__(self, parent=None, host_label="", remote=False, existing=None, run=None, taken=()):
+    def __init__(self, parent=None, host_label="", remote=False, existing=None, run=None, taken=(), require=None):
         super().__init__(parent)
         self.remote, self.existing, self.run, self.taken = remote, existing, run, set(taken or ())
+        self.host_label, self.require = host_label, require
+        self.insecure_confirmed = None  # the URL plain http outside the local networks was allowed for (Test)
         self.on_save, self.saved, self.saving, self.check_after, self.tests = None, False, False, False, 0
         self.suggestion = None
         editing = existing is not None
@@ -328,20 +334,23 @@ class LlmDialog(QDialog):
         self.test_result.setText("")
         colored(self.test_result, None)
 
-    def test(self):
+    def test(self, insecure=False):
         """The models of the server as typed, without saving it: `sandbox-ai wizard models` for a server not saved
         yet (plain http, no prefix), `llm models NAME` for an edited one reached as it was saved. Neither: said so,
-        and `llm check` runs once it is saved."""
-        fields, _ = self.request()
+        and `llm check` runs once it is saved. A secret named (and no new key typed, which is not kept yet) goes with
+        the request as on the web page, where that host's sandbox-ai knows it; plain http to a public address with it
+        is refused there unless INSECURE (--insecure-http, sent only after the llm-insecure question: ask_insecure)."""
+        fields, value = self.request()
         self.tests += 1
         ticket = self.tests
         same = self.existing is not None and all((self.existing.get(k) or "") == (fields.get(k) or "")
                                                  for k in CONNECTION)
+        secret = fields["secret"] if fields.get("secret") and not value else None
         if same and valid_name(fields["name"]):
-            args, probe = ["llm", "models", fields["name"], "--sort", "loaded", "--json"], False
+            args, probe, secret = ["llm", "models", fields["name"], "--sort", "loaded", "--json"], False, None
         else:
             try:
-                args, probe = WL.probe_argv(fields["kind"], fields["url"]), True
+                args, probe = WL.probe_argv(fields["kind"], fields["url"], secret, insecure), True
             except ValueError as exc:
                 self.check_after = True
                 self.test_result.setText(tr("{reason} It is checked with sandbox-ai llm check (its key, TLS and CA) "
@@ -353,22 +362,43 @@ class LlmDialog(QDialog):
         self.check_after = False
         self.test_result.setText(tr("Asking the server…"))
         colored(self.test_result, None)
-        run = self.run
-        background(lambda: run(*args, timeout=WL.PROBE_SECONDS), owner=self, source=self.test_button,
-                   timeout=WL.PROBE_SECONDS + 15,
-                   done=lambda result, error: self.tested(ticket, probe, fields, result, error))
+        run, require = self.run, self.require
 
-    def tested(self, ticket, probe, fields, result, error):
+        def work():
+            sent = bool(probe and secret)
+            if probe and require is not None:
+                require(["--url"])  # 0.1.77 and older: "update the host" instead of argparse's error there
+                if sent:
+                    try:  # a host that does not know them is asked without the key, as before
+                        require(["--api-key-secret", "--insecure-http"])
+                    except backend.HostTooOld:
+                        sent = False
+            argv = args if sent or not probe else WL.probe_argv(fields["kind"], fields["url"])
+            return run(*argv, timeout=WL.PROBE_SECONDS), sent
+
+        background(work, owner=self, source=self.test_button, timeout=WL.PROBE_SECONDS + 75,
+                   done=lambda result, error: self.tested(ticket, probe, fields, result, error, insecure))
+
+    def tested(self, ticket, probe, fields, result, error, insecure=False):
+        """RESULT: (the command's (status, out, err), whether the key went with it)."""
         if ticket != self.tests:
             return  # the kind or URL changed meanwhile: that answer is about another server
+        result, sent = result if error is None else (None, False)
+        if isinstance(error, backend.HostTooOld):
+            self.test_result.setText(printable(error))
+            colored(self.test_result, "warn")
+            return
         status, out, err = outcome(result, error)
+        if status != 0 and sent and not insecure and WL.plain_http_refused(err):
+            self.ask_insecure(fields)  # only that refusal: asked, then tested again with --insecure-http
+            return
         try:
             if status != 0:
                 raise ValueError(failure(result, error))
             models = WL.parse_models(out)
         except ValueError as exc:
             text = tr("Not reachable: {error}", error=printable(exc))
-            if probe and (fields.get("secret") or fields.get("headers")):
+            if probe and ((fields.get("secret") and not sent) or fields.get("headers")):
                 text += "\n" + tr("(Tested without its key: a server that needs one refuses this test; llm check "
                                   "uses the key once it is saved.)")
             self.test_result.setText(text)
@@ -387,6 +417,22 @@ class LlmDialog(QDialog):
                       "empty).", count=len(models), loaded=loaded)
         self.test_result.setText(text)
         colored(self.test_result, "ok")
+
+    def ask_insecure(self, fields):
+        """sandbox-ai refused to send the key over plain http to an address outside the local networks: asked as the
+        web page asks (llm-insecure, naming the host and the URL). Yes: tested again with --insecure-http, and the
+        server is saved with it (the box ticked; Add asks no second time for that URL). No: not tested, said."""
+        url = fields["url"]
+        if not ask_first(self, "llm-insecure", self.title_text, tr(
+                "Send the prompts to {url} over plain http, unencrypted, from {host}? Whoever is on the way can read "
+                "them, the answers and the key.", url=printable(url), host=self.host_label), tr("Allow")):
+            self.test_result.setText(tr("Not tested: the key is not sent over plain http outside the local networks "
+                                        "(use https, or allow it)."))
+            colored(self.test_result, "warn")
+            return
+        self.insecure_confirmed = url
+        self.insecure.setChecked(True)
+        self.test(insecure=True)
 
     # -- OK: saved while the dialog stays open --
 
@@ -660,13 +706,18 @@ class LlmPage(QWidget):
         """A command on HOST for the dialog's Test connection (blocking: the dialog runs it in the background)."""
         return functools.partial(self.sai.host_run, host)
 
+    def requirement(self, host):
+        """For the dialog's Test connection: HostTooOld when HOST's `wizard models` lacks the options named (the app's
+        known-options check, backend.require_options; nothing to check on this machine)."""
+        return None if host == "local" else functools.partial(self.sai.require_options, host, ("wizard", "models"))
+
     def add(self):
         host = valid_host(self.host())
         if host is None:
             return
         taken = [e["name"] for e in self.entries] if host == self.loaded_host else []
         self.open_dialog(LlmDialog(self, self.host_label(host), remote=host != "local", run=self.runner(host),
-                                   taken=taken), host, None)
+                                   taken=taken, require=self.requirement(host)), host, None)
 
     def edit(self):
         """The dialog prefilled from `llm show NAME --json` (and the CA's path from `llm show NAME`)."""
@@ -675,7 +726,8 @@ class LlmPage(QWidget):
             return
         self.status.setText(tr("Reading {name}…", name=name))
         self.server_fields(host, name, self.edit_button, lambda old: self.open_dialog(
-            LlmDialog(self, self.host_label(host), remote=host != "local", existing=old, run=self.runner(host)),
+            LlmDialog(self, self.host_label(host), remote=host != "local", existing=old, run=self.runner(host),
+                      require=self.requirement(host)),
             host, old))
 
     def server_fields(self, host, name, source, then):
@@ -724,8 +776,10 @@ class LlmPage(QWidget):
             dialog.finish()
             return
         # Plain http to a public address: prompts, answers and the key unencrypted on the way - asked first (an
-        # edited server that had it already keeps it without a question).
-        if fields.get("insecure") and not (old or {}).get("insecure") and not ask_first(
+        # edited server that had it already keeps it without a question; so does one whose Test connection asked
+        # that question for this URL and was answered yes).
+        if fields.get("insecure") and not (old or {}).get("insecure") and \
+                getattr(dialog, "insecure_confirmed", None) != fields["url"] and not ask_first(
                 dialog, "llm-insecure", title, on_host(host, tr(
                     "Allow plain http to {url} even outside your local networks? Prompts, answers, code and the key "
                     "cross the network unencrypted.", url=printable(fields["url"]))), tr("Allow")):

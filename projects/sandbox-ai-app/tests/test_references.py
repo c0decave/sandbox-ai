@@ -239,7 +239,7 @@ MUTATIONS = {
     "start-stop": ["stop_run", ("session", "stop")],
     "team-stop": ["team_stop"],
     "mcp-stop": ["stop_mcp"],
-    "project-trust": ["trust_project"],
+    "project-trust": ["trust_project", "host_project_trust"],
     "login-remove": [("identities", "remove"), "save_identity"],
     "login-logout": [("--logout",)],
     "kit-hooks-trust": ["trust_hooks_argv"],
@@ -266,6 +266,10 @@ MUTATIONS = {
     "mcp-attach": ["mcp_attach", "host_mcp_attach_live"],
     "mcp-detach": ["host_mcp_detach_live", "host_mcp_detach"],
     "net-keep": ["net_keep"],
+    "web-user-remove": ["host_web_user_remove"],
+    "web-user-reset": [("reset",)],
+    "web-cert-renew": ["host_web_cert"],
+    "web-listen": [("serve",)],
 }
 
 # The actions of the web interface's table (backend.NEEDS_CONFIRM is the same set) that no page of the app does yet:

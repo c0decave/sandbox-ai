@@ -1176,7 +1176,11 @@ class LaunchPage(QWidget):
         """Review a folder's .sandbox-ai.json (written there by whoever could write the folder, the agent
         too) and trust exactly the bytes shown if the human agrees. The file's options are never copied into
         the form: the launcher applies a trusted file itself when the folder is the first workspace, and
-        refuses it if it changes afterwards."""
+        refuses it if it changes afterwards. With another host chosen: a folder there, reviewed and trusted by that
+        host's sandbox-ai (load_project_on_host)."""
+        if self.host() != LOCAL:
+            self.load_project_on_host(directory)
+            return None
         directory = directory or choose_folder(self, tr("Project folder with .sandbox-ai.json"), "project")
         if not directory:
             return False
@@ -1224,6 +1228,39 @@ class LaunchPage(QWidget):
         self.opened.emit(str(directory))
         self.show_project_note()
         return True
+
+    def load_project_on_host(self, directory=None):
+        """A project folder on the chosen host (typed in: the first workspace of the form offered): its
+        .sandbox-ai.json reviewed through that host's sandbox-ai as a file of this machine is (every key, what weakens,
+        the changes against the version trusted last; host_trust) and trusted exactly as shown after a yes; then the
+        form starts in that folder there."""
+        host = self.host()
+        if not directory:
+            workspaces = self.form.values().get("--workspace") or []
+            directory, ok = QInputDialog.getText(self, tr("Project folder with .sandbox-ai.json"), shown_as_text(tr(
+                "The project folder on {host}, an absolute path:", host=printable(host))),
+                text=str(workspaces[0]) if workspaces else "")
+            if not ok:
+                return
+        directory = (directory or "").strip()
+        path = PT.config_path(directory)
+        if path is None:
+            warn(self, tr("No project configuration"), tr("Give the absolute path of a folder on {host}.",
+                                                          host=printable(host)))
+            return
+        folder = path[:-len("/.sandbox-ai.json")] or "/"
+        from .host_trust import review_and_trust
+
+        def done(trusted, document):
+            if not trusted or host != self.host():
+                return
+            agent = (document or {}).get("agent")
+            self.set_from_argv(agent if agent in self.sai.agents else self.agent.currentText(),
+                               ["--workspace", folder])
+            inform(self, tr("Project configuration"), on_host(host, tr(
+                "Trusted: {path}. The form starts in that folder; the launcher applies the file's options itself.",
+                path=printable(path))), modal=False)
+        review_and_trust(self, self.sai, host, path, done=done, source=self.open_button)
 
     def dry_run(self):
         """The launcher's plan, nothing started: on the chosen host by its own launcher."""

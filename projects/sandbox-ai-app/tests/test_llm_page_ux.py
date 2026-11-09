@@ -352,11 +352,22 @@ def test_test_connection_lists_the_models_and_fills_the_default_model(qapp, sai)
     dialog.model.setText("typed-model")
     dialog.test()
     assert dialog.model.text() == "typed-model", "a test again keeps what was typed"
-    sai.answers[("local", probe)] = (1, "", "sandbox-wizard: Cannot reach lmstudio at 192.168.1.30:1234: refused\n")
+    refused = (1, "", "sandbox-wizard: Cannot reach lmstudio at 192.168.1.30:1234: refused\n")
+    keyed = probe[:6] + ("--api-key-secret", "BOX_KEY") + probe[6:]
+    sai.answers[("local", keyed)] = sai.answers[("local", probe)] = refused
     dialog.secret.setText("BOX_KEY")
+    sai.asked.clear()
     dialog.test()
+    assert sai.asked == [("local", keyed)], "the secret named goes with the test (its name: the key stays there)"
     assert dialog.test_result.text().startswith("Not reachable: sandbox-wizard: Cannot reach lmstudio")
+    assert "Tested without its key" not in dialog.test_result.text()
+    dialog.value.setText("sk-new")
+    sai.asked.clear()
+    dialog.test()
+    assert sai.asked == [("local", probe)], "a key typed is not kept yet: the test goes without one"
     assert "Tested without its key" in dialog.test_result.text()
+    dialog.value.clear()
+    dialog.secret.clear()
     dialog.url.setText("https://gpu.example.org/llm")
     assert dialog.test_result.text() == "", "another URL: the earlier result says nothing about it"
     https = ("wizard", "models", "--kind", "lmstudio", "--url", "https://gpu.example.org/llm", "--sort", "loaded",
@@ -524,4 +535,151 @@ def test_an_edit_that_cannot_be_read_says_so(qapp, sai, monkeypatch):
     page.edit()
     assert opened == [] and "Could not read lm: sandbox-ai llm: no LLM endpoint lm" in page.status.text()
     page.close()
+    page.deleteLater()
+
+
+# -- Test connection over plain http with a key: refused by sandbox-ai, asked (llm-insecure), tested again --
+
+PUBLIC = "http://203.0.113.5:8000"
+
+
+@needs_cli
+def test_the_key_and_insecure_http_go_to_wizard_models_as_the_cli_takes_them(env):
+    """--api-key-secret NAME (a secret's name, never a key) and --insecure-http, parsed by sandbox-ai's own wizard;
+    the refusal the app answers with its question is the one llm.discover_url gives, word for word."""
+    sai = backend.SandboxAI()
+    argv = WL.probe_argv("vllm", PUBLIC, "BOX_KEY", insecure=True)
+    assert argv == ["wizard", "models", "--kind", "vllm", "--url", PUBLIC, "--api-key-secret", "BOX_KEY",
+                    "--insecure-http", "--sort", "loaded", "--json"]
+    args = parsed(sai, "wizard", argv[1:])
+    assert (args.kind, args.url, args.api_key_secret, args.insecure_http, args.json) == \
+        ("vllm", PUBLIC, "BOX_KEY", True, True)
+    plain = parsed(sai, "wizard", WL.probe_argv("vllm", PUBLIC, "BOX_KEY")[1:])
+    assert plain.api_key_secret == "BOX_KEY" and plain.insecure_http is False, "never without the question"
+    assert "--insecure-http" not in WL.probe_argv("vllm", "https://gpu.example.org", "BOX_KEY", insecure=True), \
+        "only for plain http (the CLI refuses it for https)"
+    assert "--insecure-http" not in WL.probe_argv("vllm", PUBLIC, None, insecure=True), "no key: nothing to allow"
+    with pytest.raises(ValueError, match="secret"):
+        WL.probe_argv("vllm", PUBLIC, "-x")
+    llm = sai.module("llm")
+    with pytest.raises(ValueError) as refusal:
+        llm.discover_url("vllm", PUBLIC, api_key_secret="BOX_KEY")
+    assert WL.plain_http_refused(f"sandbox-wizard: {refusal.value}\n")
+    assert not WL.plain_http_refused("sandbox-wizard: Cannot reach vllm at 203.0.113.5:8000: timed out")
+    assert not WL.plain_http_refused("sandbox-wizard: no secret BOX_KEY; keep the key with: sandbox-ai secrets set")
+    add = WL.server_argv({"name": "pub", "kind": "vllm", "url": PUBLIC, "secret": "BOX_KEY", "insecure": True})
+    added = parsed(sai, "llm", add[1:])
+    assert added.insecure_http is True and added.api_key_secret == "BOX_KEY", "Add sends the flag the test asked for"
+
+
+def refused_then_listed(sai, host="local"):
+    keyed = ("wizard", "models", "--kind", "vllm", "--url", PUBLIC, "--api-key-secret", "BOX_KEY", "--sort",
+             "loaded", "--json")
+    allowed = keyed[:8] + ("--insecure-http",) + keyed[8:]
+    sai.answers[(host, keyed)] = (1, "", "sandbox-wizard: plain http to 203.0.113.5 would cross networks you do not "
+                                        "control unencrypted; use https, or --insecure-http if you accept that (the API "
+                                        "key would go with it)\n")
+    sai.answers[(host, allowed)] = (0, json.dumps(WL.model_order(MODELS)), "")
+    return keyed, allowed
+
+
+def plain_http_questions(widgets):
+    return [text for _, text, _ in widgets.SHOWN if "over plain http" in text or "plain http to" in text]
+
+
+def test_a_refused_plain_http_test_asks_then_tests_again_and_add_sends_the_flag(qapp, sai, monkeypatch):
+    """The CLI refuses to send the key over plain http to a public address: the dialog asks once (llm-insecure,
+    naming the host and the URL), tests again with --insecure-http, ticks the box, and Add sends --insecure-http
+    without asking a second time."""
+    from sandbox_ai_app import llm_page, widgets
+    keyed, allowed = refused_then_listed(sai)
+    page = llm_page.LlmPage(sai)
+    page.show()
+    seen = []
+
+    def run(dialog):
+        dialog.show()
+        dialog.name.setText("pub")
+        dialog.kind.setCurrentIndex(dialog.kind.findData("vllm"))
+        dialog.url.setText(PUBLIC)
+        dialog.secret.setText("BOX_KEY")
+        sai.asked.clear()
+        dialog.test_button.click()
+        seen.append(([a for _, a in sai.asked], dialog.insecure.isChecked(), dialog.test_result.text()))
+        dialog.ok_button.click()
+        return dialog.result()
+    monkeypatch.setattr(llm_page.LlmDialog, "exec", run)
+    page.add()
+    asked, ticked, result = seen[0]
+    assert asked == [keyed, allowed], "refused, asked, tested again with --insecure-http"
+    assert ticked and result.startswith("Reachable: 3 models"), result
+    questions = plain_http_questions(widgets)
+    assert len(questions) == 1, "asked once: Add does not ask again for the URL the test allowed"
+    assert PUBLIC in questions[0] and "from local (this machine)?" in questions[0], "the host and the URL named"
+    add = adds(sai)
+    assert len(add) == 1 and "--insecure-http" in add[0] and add[0][add[0].index("--url") + 1] == PUBLIC
+    page.close()
+    page.deleteLater()
+
+
+def test_a_no_tests_nothing_and_other_errors_ask_nothing(qapp, sai, monkeypatch):
+    from sandbox_ai_app import llm_page, widgets
+    keyed, allowed = refused_then_listed(sai)
+    page = llm_page.LlmPage(sai)
+    dialog = llm_page.LlmDialog(page, "local", run=page.runner("local"))
+    dialog.show()
+    dialog.kind.setCurrentIndex(dialog.kind.findData("vllm"))
+    dialog.url.setText(PUBLIC)
+    dialog.secret.setText("BOX_KEY")
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", False)
+    sai.asked.clear()
+    dialog.test()
+    assert [a for _, a in sai.asked] == [keyed], "answered No: not tested again"
+    assert dialog.test_result.text().startswith("Not tested: the key is not sent over plain http")
+    assert not dialog.insecure.isChecked() and dialog.insecure_confirmed is None
+    widgets.SHOWN.clear()
+    sai.answers[("local", keyed)] = (1, "", "sandbox-wizard: Cannot reach vllm at 203.0.113.5:8000: timed out\n")
+    dialog.test()
+    assert plain_http_questions(widgets) == [] and dialog.test_result.text().startswith("Not reachable"), \
+        "only that refusal is asked about"
+    dialog.close()
+    dialog.deleteLater()
+    page.deleteLater()
+
+
+def test_another_host_is_checked_for_the_options_first(qapp, sai, monkeypatch):
+    """A host whose `wizard models` lacks --url (0.1.77) is told to update, nothing runs; one that lacks only
+    --api-key-secret/--insecure-http is tested without the key, as before; one that knows them asks on its own
+    terms (the question names that host)."""
+    from sandbox_ai_app import llm_page, widgets
+    keyed, allowed = refused_then_listed(sai, "ct1")
+    plain = ("wizard", "models", "--kind", "vllm", "--url", PUBLIC, "--sort", "loaded", "--json")
+    sai.answers[("ct1", plain)] = (0, json.dumps(WL.model_order(MODELS)), "")
+    known = {"ct1": set()}
+
+    def command_options(host, *command):
+        assert command == ("wizard", "models")
+        return set(known[host])
+    monkeypatch.setattr(sai, "host_command_options", command_options)
+    page = llm_page.LlmPage(sai)
+    dialog = llm_page.LlmDialog(page, "ct1", remote=True, run=page.runner("ct1"), require=page.requirement("ct1"))
+    assert page.requirement("local") is None, "this machine's sandbox-ai is the app's own"
+    dialog.show()
+    dialog.kind.setCurrentIndex(dialog.kind.findData("vllm"))
+    dialog.url.setText(PUBLIC)
+    dialog.secret.setText("BOX_KEY")
+    sai.asked.clear()
+    dialog.test()
+    assert sai.asked == [] and "too old" in dialog.test_result.text() and "--url" in dialog.test_result.text()
+    known["ct1"] = {"--url", "--kind", "--sort", "--json"}
+    dialog.test()
+    assert sai.asked == [("ct1", plain)] and dialog.test_result.text().startswith("Reachable"), \
+        "without the key where the host does not know it yet"
+    known["ct1"] |= {"--api-key-secret", "--insecure-http"}
+    sai.asked.clear()
+    dialog.test()
+    assert sai.asked == [("ct1", keyed), ("ct1", allowed)] and dialog.insecure.isChecked()
+    assert "from ct1?" in plain_http_questions(widgets)[-1]
+    dialog.close()
+    dialog.deleteLater()
     page.deleteLater()

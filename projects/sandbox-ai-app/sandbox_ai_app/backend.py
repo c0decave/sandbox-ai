@@ -2338,6 +2338,112 @@ class SandboxAI:
             return 2, "", "invalid path"
         return self.host_run(host, "wizard", "forget", "--", path, timeout=60)
 
+    # the web interface of a host (sandbox-ai web there): its logins, certificate, xterm.js and the service
+    def host_web_users(self, host):
+        """[(name, since)] of `sandbox-ai web user list` on HOST (names as webui.USER_NAME takes them; any other line
+        is left out). ValueError: no answer."""
+        status, out, err = self.host_run(host, "web", "user", "list", timeout=60)
+        if status != 0:
+            raise ValueError((err or out).strip()[-500:] or f"exit status {status}")
+        found = []
+        for line in out.splitlines():
+            name, _, since = line.strip().partition("  since ")
+            if WEB_USER.fullmatch(name):
+                found.append((name, printable(since.strip())[:40]))
+        return found
+
+    def host_web_user_remove(self, host, name):
+        """`sandbox-ai web user remove NAME` on HOST (asked first: web-user-remove): its sessions end at their next
+        request."""
+        if not isinstance(name, str) or not WEB_USER.fullmatch(name):
+            return 2, "", "invalid user name"
+        return self.host_run(host, "web", "user", "remove", name, timeout=60)
+
+    def host_web_cert(self, host, listen=None, renew=False):
+        """`sandbox-ai web cert [--listen ADDRESS:PORT] [--renew]` on HOST: its certificate's path and SHA-256
+        fingerprint (made when there is none; RENEW, asked first: web-cert-renew, makes a new one)."""
+        if listen is not None and web_listen_problem(listen):
+            return 2, "", web_listen_problem(listen)
+        return self.host_run(host, "web", "cert", *([f"--listen={listen}"] if listen else []),
+                             *(["--renew"] if renew else []), timeout=120)
+
+    def host_web_argv(self, host, action, name=None, listen=None):
+        """argv of `sandbox-ai web ...` on HOST for a terminal (ssh -tt for another host): "add" and "reset" a login
+        NAME (the password and the TOTP code are typed there, never through the app), "vendor" (xterm.js, pinned and
+        checked) and "serve" (the service, on LISTEN; it runs as long as the terminal does)."""
+        if action in ("add", "reset"):
+            if not isinstance(name, str) or not WEB_USER.fullmatch(name):
+                raise ValueError("a user name is 1-32 lowercase letters, digits, '_', '.' or '-', starting with a "
+                                 "letter")
+            return self.host_terminal(host, "web", "user", action, name)
+        if action == "vendor":
+            return self.host_terminal(host, "web", "vendor")
+        if action == "serve":
+            if listen is not None and web_listen_problem(listen):
+                raise ValueError(web_listen_problem(listen))
+            return self.host_terminal(host, "web", "serve", *([f"--listen={listen}"] if listen else []))
+        raise ValueError("not an action of sandbox-ai web")
+
+    def host_project_show(self, host, path):
+        """`sandbox-ai wizard trust --show --json -- PATH` on HOST: what trusting the project file PATH there would
+        trust, nothing trusted - {"path", "digest", "document", "trusted", "trusted_digest", "problem"} as that host's
+        sandbox-ai read it once ("error" set and digest None when it could not). HostTooOld where --show is not known
+        yet; ValueError for an answer that is not such an object."""
+        if not valid_directory(path):
+            raise ValueError("invalid path")
+        self.require_options(host, ("wizard", "trust"), ["--show", "--json"])
+        data = self.host_json(host, "wizard", "trust", "--show", "--json", "--", path, timeout=60)
+        sha = re.compile(r"[0-9a-f]{64}")
+        if not (isinstance(data, dict) and valid_directory(data.get("path"))
+                and (data.get("digest") is None or isinstance(data["digest"], str) and sha.fullmatch(data["digest"]))
+                and (data.get("trusted_digest") is None or isinstance(data["trusted_digest"], str)
+                     and sha.fullmatch(data["trusted_digest"]))
+                and (data.get("document") is None or isinstance(data["document"], dict))):
+            raise ValueError("not the answer of sandbox-ai wizard trust --show --json")
+        if data.get("digest") is None and not data.get("error"):
+            data["error"] = data.get("problem") or "not read"
+        return data
+
+    def host_trust_defaults(self, host):
+        """The defaults a project file on HOST is measured against ({"mode", "canaries"} as defaults.json has them
+        there; {} when that host's `defaults show --json` does not answer): a laxer mode or fewer canaries than its own
+        defaults weaken its starts."""
+        try:
+            data = self.host_json(host, "defaults", "show", "--json", timeout=60)
+        except Exception:  # noqa: BLE001 - not answered: measured against sandbox-ai's own defaults
+            return {}
+        values = data.get("values") if isinstance(data, dict) and isinstance(data.get("values"), dict) else {}
+        return {key: values[key] for key in ("mode", "canaries") if key in values}
+
+    def shown_baseline(self, shown):
+        """(state, text) of the version trusted last of the project file SHOWN describes (host_project_show): ("kept",
+        its text) from the app's copies (or the file itself while it is exactly the trusted one: kept now), ("unknown",
+        None) when another version is trusted there that the app never saw, ("none", None) when nothing is trusted
+        for that path. Never the file in the folder, which whoever can write that folder wrote."""
+        known = shown.get("trusted_digest")
+        if not known:
+            return "none", None
+        text = shown_copy(known)
+        if text is None and known == shown.get("digest") and isinstance(shown.get("document"), dict):
+            keep_shown_copy(known, shown["document"])
+            text = shown_text(shown["document"])
+        return ("kept", text) if text is not None else ("unknown", None)
+
+    def host_project_trust(self, host, path, digest, document=None):
+        """`sandbox-ai wizard trust --digest SHA256 -- PATH` on HOST: trusted there only if the file is still exactly
+        the version reviewed (its sha256 DIGEST; sandbox-ai refuses it otherwise). DOCUMENT, as shown, is kept as the
+        version a later change is shown against. (status, out, err)."""
+        if not valid_directory(path) or not (isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest)):
+            return 2, "", "invalid path or digest"
+        try:
+            self.require_options(host, ("wizard", "trust"), ["--digest"])
+        except HostTooOld as exc:
+            return 2, "", str(exc)
+        result = self.host_run(host, "wizard", "trust", f"--digest={digest}", "--", path, timeout=60)
+        if result[0] == 0 and document is not None:
+            keep_shown_copy(digest, document)
+        return result
+
     # images
     def image_build_argv(self, host, target, extension_only=False, pin=None, uv=None, node=None):
         """`sandbox-ai build [--extension-only] [--pin V] [--uv V] [--node IMAGE] TARGET` on HOST, for a terminal."""
@@ -2767,6 +2873,34 @@ WIDENING = {
 }
 
 
+WEB_USER = re.compile(r"[a-z][a-z0-9_.-]{0,31}")  # webui.USER_NAME: a login of the web interface
+WEB_LISTEN = "127.0.0.1:8443"  # webui.DEFAULT_LISTEN
+
+
+def web_listen_address(value):
+    """The address of LISTEN (ADDRESS:PORT, as `sandbox-ai web serve --listen` takes it), an ipaddress object;
+    ValueError otherwise."""
+    import ipaddress
+    host, sep, port = (value or "").rpartition(":")
+    if not sep or not port.isdigit() or not 0 <= int(port) <= 65535:
+        raise ValueError(f"--listen {printable(value)}: ADDRESS:PORT, e.g. 127.0.0.1:8443 or [::]:8443")
+    return ipaddress.ip_address(host.strip("[]") or "127.0.0.1")
+
+
+def web_listen_problem(value):
+    try:
+        web_listen_address(value)
+    except ValueError as exc:
+        return printable(str(exc)) if str(exc).startswith("--listen") else \
+            f"--listen {printable(value)}: ADDRESS:PORT, e.g. 127.0.0.1:8443 or [::]:8443"
+    return None
+
+
+def web_listen_beyond(value):
+    """Whether the web interface on LISTEN can be reached from other machines (any address but the loopback)."""
+    return not web_listen_address(value).is_loopback
+
+
 class HostTooOld(ValueError):
     """The sandbox-ai on HOST does not know OPTIONS of COMMAND yet (require_options): told as an update to do."""
 
@@ -2927,6 +3061,12 @@ APP_NEEDS_CONFIRM = {
     "terminal-end": "ending the command of a terminal tab loses what it did not save",
     "app-quit": "quitting ends what runs only in the window (its commands and work) and leaves the sandboxes' questions "
                 "unanswered",
+    # the web interface of a host (sandbox-ai web there): what no web route does
+    "web-user-remove": "removing a login of the web interface ends its sessions at their next request",
+    "web-user-reset": "a new password and TOTP secret replace the login's: the old ones stop working",
+    "web-cert-renew": "a new certificate has another fingerprint: every browser that trusted the old one asks again",
+    "web-listen": "the web interface listening beyond the loopback can be reached from other machines (a password and "
+                  "a TOTP code are still asked)",
 }
 MODE_ORDER = ("lax", "low", "medium", "high", "paranoid")  # the order of protection, weakest first (webui.MODE_ORDER)
 TELEMETRY_ORDER = ("on", "off", "strict")  # the agents' telemetry, the least private first (webui.TELEMETRY_ORDER)
@@ -2940,7 +3080,8 @@ def needs_confirm(action, detail=None):
     """Why ACTION must be confirmed first (the reason of NEEDS_CONFIRM or APP_NEEDS_CONFIRM), or None when it need not
     be: DETAIL says what it does where that decides it - "limits-raise": {"current": limits_shown() or None, "values":
     {"memory", "cpus", "pids": "8g", "none" or ""}}; "defaults-lower": {"old", "new", "canary_default"} (defaults
-    values); "workspace-writable": {"read_only": bool}; "secret-replace": {"exists": bool}. Every other action is
+    values); "workspace-writable": {"read_only": bool}; "secret-replace": {"exists": bool}; "web-listen": {"beyond":
+    bool} (False: the loopback only, nothing to ask). Every other action is
     always confirmed. KeyError: an action the table does not have (a bug, never a pass)."""
     reason = NEEDS_CONFIRM.get(action) or APP_NEEDS_CONFIRM[action]
     detail = detail if isinstance(detail, dict) else {}
@@ -2952,6 +3093,8 @@ def needs_confirm(action, detail=None):
     if action == "workspace-writable" and detail.get("read_only") is True:
         return None
     if action == "secret-replace" and detail.get("exists") is False:
+        return None
+    if action == "web-listen" and detail.get("beyond") is False:
         return None
     return reason
 
@@ -3487,8 +3630,46 @@ def read_bounded(path, limit):
 def keep_trusted_copy(data):
     """Keep DATA (the bytes of a trusted project file) under its sha256; a failure only loses the diff later."""
     digest = hashlib.sha256(data).hexdigest()
-    folder = trusted_copies_dir()
-    target = folder / f"{digest}.json"
+    keep_copy(trusted_copies_dir(), f"{digest}.json", data)
+
+
+def shown_text(document):
+    """How the app shows a project file another host's sandbox-ai read (`wizard trust --show --json`: what takes
+    effect, parsed there) and diffs it: indented JSON, the keys in the file's order."""
+    return json.dumps(document, indent=2, ensure_ascii=False) + "\n"
+
+
+def keep_shown_copy(digest, document):
+    """Keep the DOCUMENT another host's sandbox-ai showed for the project file of sha256 DIGEST (trusted there, as
+    shown): the version a later change of it on that host is shown against. Its bytes never reach the app, so the copy
+    is the document as shown (shown_text); a failure only loses the diff later."""
+    if isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) and isinstance(document, dict):
+        keep_copy(trusted_copies_dir() / "shown", f"{digest}.json", shown_text(document).encode())
+
+
+def shown_copy(digest):
+    """The text of the project file of sha256 DIGEST as the app last saw it trusted: its own bytes (trusted_copy,
+    checked by their sha256) shown as a host shows them, else the document a host showed (keep_shown_copy); None
+    without one (or with one that is no JSON object)."""
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        return None
+    data = trusted_copy(digest)
+    if data is None:
+        try:
+            data = read_bounded(trusted_copies_dir() / "shown" / f"{digest}.json", 1 << 20)
+        except (OSError, ValueError):
+            return None
+    try:
+        document = json.loads(data.decode())
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        return None
+    return shown_text(document) if isinstance(document, dict) else None
+
+
+def keep_copy(folder, name, data):
+    """DATA as FOLDER/NAME, private, written once (an existing regular file of that name stays)."""
+    target = folder / name
+    digest = name.split(".", 1)[0]
     try:
         if target.is_file() and not target.is_symlink():
             return

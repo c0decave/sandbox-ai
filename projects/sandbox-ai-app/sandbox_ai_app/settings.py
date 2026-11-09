@@ -9,7 +9,9 @@ page's form, the board, the wizard).
 
 The sandbox-ai tab also lists the extra preset directories (sandbox-ai presets dirs) and the trusted project
 configurations (sandbox-ai wizard trust --list; Forget… runs `sandbox-ai wizard forget PATH`, asked first:
-project-forget), each of this machine or of a host of `sandbox-ai hosts` (over SSH).
+project-forget; Review and trust… shows a project file of that machine with every key, what weakens marked and the
+changes against the version trusted last, and trusts exactly that after a yes: host_trust), each of this machine or of
+a host of `sandbox-ai hosts` (over SSH).
 """
 from __future__ import annotations
 
@@ -21,7 +23,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from . import backend, notifications, presets as PR, theme
+from . import backend, notifications, presets as PR, project_trust as PT, theme
 from .board_view import PathEdit
 from .files import printable
 from .i18n import tr
@@ -184,7 +186,8 @@ class PresetDirs(QWidget):
 class TrustedProjects(QWidget):
     """The trusted project configurations of this machine or a host (`sandbox-ai wizard trust --list --json`):
     each with its state (trusted, changed since, missing, unreadable); Forget… takes one off the list (`sandbox-ai
-    wizard forget PATH`, asked first: its project's starts stop until it is trusted again)."""
+    wizard forget PATH`, asked first: its project's starts stop until it is trusted again); Review and trust…
+    reviews the selected one, or a project folder typed in, on that host (host_trust.review_and_trust)."""
     changed = Signal()
     STATES = {"trusted": "ok", "changed": "warn", "missing": "muted", "unreadable": "bad"}
 
@@ -207,7 +210,13 @@ class TrustedProjects(QWidget):
         self.forget_button.setToolTip(tr("sandbox-ai wizard forget: the configuration is no longer trusted; its "
                                          "project's starts stop until it is trusted again"))
         self.forget_button.clicked.connect(lambda _=False: self.forget())
+        self.review_button = QPushButton(tr("Review and trust…"))
+        self.review_button.setToolTip(tr("Show a project's .sandbox-ai.json on that host (the selected one, or a "
+                                         "folder you name) with every key and the changes against the version "
+                                         "trusted last, and trust exactly that content"))
+        self.review_button.clicked.connect(lambda _=False: self.review())
         row.addWidget(self.refresh_button)
+        row.addWidget(self.review_button)
         row.addWidget(self.forget_button)
         row.addStretch()
         layout.addLayout(row)
@@ -228,7 +237,8 @@ class TrustedProjects(QWidget):
         self.entries = []
         self.status.setText(tr("Asking {host}…", host=self.hosts.label(host)))
         background(lambda: self.sai.trusted_projects(host), owner=self, source=[self.refresh_button,
-                                                                                self.forget_button],
+                                                                                self.forget_button,
+                                                                                self.review_button],
                    timeout=90, done=lambda result, error: self.loaded(token, host, result, error))
 
     def loaded(self, token, host, result, error):
@@ -257,6 +267,35 @@ class TrustedProjects(QWidget):
 
     def update_buttons(self):
         self.forget_button.setEnabled(bool(self.list.selectedItems()))
+
+    def review(self, path=None):
+        """Review and trust PATH (a project folder or its .sandbox-ai.json on the chosen host): the selected entry,
+        else one asked for."""
+        host = self.host()
+        items = self.list.selectedItems()
+        if path is None and items:
+            path = items[0].data(256)
+        if path is None:
+            from PySide6.QtWidgets import QInputDialog
+            text, ok = QInputDialog.getText(self, tr("Review and trust…").rstrip("…"), shown_as_text(tr(
+                "The project folder on {host} (or its .sandbox-ai.json), an absolute path:",
+                host=self.hosts.label(host))))
+            if not ok:
+                return
+            path = text
+        target = PT.config_path(path)
+        if target is None:
+            warn(self, tr("Trusted project configurations"), tr("Give the absolute path of a folder on {host}.",
+                                                               host=self.hosts.label(host)))
+            return
+        from .host_trust import review_and_trust
+        review_and_trust(self, self.sai, host, target, source=[self.review_button, self.forget_button],
+                         done=lambda trusted, _document: self.reviewed(trusted))
+
+    def reviewed(self, trusted):
+        if trusted:
+            self.changed.emit()
+        self.refresh()
 
     def forget(self):
         items, host = self.list.selectedItems(), self.host()

@@ -12,12 +12,17 @@ opens the host's update in a terminal tab, where sudo asks. Update from here (ho
 machine's copy there instead, as the same kind of installation, asked first like an install; an update that finds no
 published release offers it at once. Adding and testing a host make a key file that others
 can read private (ssh refuses it) and say so.
+
+The Web interface tab manages the host's `sandbox-ai web` (WebPanel): its logins (web user list; Add login… and New
+password… run in a terminal, where the password and the TOTP code are typed; Remove… asked first), its certificate's
+fingerprint (web cert; Renew… asked first), xterm.js for its terminals (web vendor) and the service itself (web serve
+in a terminal tab, as long as that runs; an address beyond the loopback asked first).
 """
 from __future__ import annotations
 
 import json
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLineEdit,
     QPlainTextEdit, QPushButton, QRadioButton, QSpinBox, QSplitter, QTabWidget, QVBoxLayout, QWidget,
@@ -25,6 +30,7 @@ from PySide6.QtWidgets import (
 
 from . import backend
 from .files import printable
+from .host_choice import on_host
 from .i18n import tr
 from .widgets import (
     MONO, ask_first, background, compact_combo, confirm, fill, flow, inform, plain_label, row_key, safe_tooltip,
@@ -298,6 +304,230 @@ class AddHostDialog(QDialog):
         return {"command": self.command.text().strip(), "update_sudo": self.update_sudo.isChecked()}
 
 
+class WebPanel(QWidget):
+    """The web interface of the chosen host (`sandbox-ai web` there): logins, certificate, xterm.js, the service.
+    IN_TERMINAL(argv, title) opens a terminal tab: what asks for a password or runs on stays there."""
+
+    def __init__(self, sai, in_terminal, parent=None):
+        super().__init__(parent)
+        self.sai, self.in_terminal, self.host, self.token, self.loaded_for = sai, in_terminal, None, 0, None
+        layout = QVBoxLayout(self)
+        layout.addWidget(plain_label(tr("The host's web interface (sandbox-ai web there): who may log in, its "
+                                        "certificate and the service itself. Passwords and TOTP codes are typed in a "
+                                        "terminal, never through the app."), role="secondary"))
+        self.users = table([tr("Login"), tr("Since")], stretch=0)
+        self.users.setAccessibleName(tr("Logins of the web interface"))
+        self.users.itemSelectionChanged.connect(self.update_buttons)
+        layout.addWidget(self.users, 1)
+
+        def button(text, tip, slot):
+            widget = QPushButton(text)
+            widget.setToolTip(safe_tooltip(tip))
+            widget.setAccessibleName(text.rstrip("…"))
+            widget.clicked.connect(lambda _=False: slot())
+            return widget
+        self.refresh_button = button(tr("Refresh"), tr("sandbox-ai web user list on the host"), self.refresh)
+        self.add_button = button(tr("Add login…"), tr("sandbox-ai web user add NAME in a terminal: a password (12 or "
+                                                       "more characters) and a TOTP code from your app"), self.add)
+        self.reset_button = button(tr("New password…"), tr("sandbox-ai web user reset NAME in a terminal: a new "
+                                                          "password and TOTP secret; asked first"), self.reset)
+        self.remove_button = button(tr("Remove…"), tr("sandbox-ai web user remove NAME: its sessions end; asked "
+                                                     "first"), self.remove)
+        layout.addWidget(flow(self.refresh_button, self.add_button, self.reset_button, self.remove_button))
+        form = QFormLayout()
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        self.listen = QLineEdit()
+        self.listen.setAccessibleName(tr("Listen on"))
+        self.listen.setPlaceholderText(backend.WEB_LISTEN)
+        self.listen.setToolTip(safe_tooltip(tr("ADDRESS:PORT the service listens on (--listen); empty: {listen}, "
+                                               "this host only", listen=backend.WEB_LISTEN)))
+        form.addRow(tr("Listen on"), self.listen)
+        self.cert = plain_label(role="secondary")
+        self.cert.setAccessibleName(tr("Certificate"))
+        self.cert.setWordWrap(True)
+        self.cert.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        form.addRow(tr("Certificate"), self.cert)
+        layout.addLayout(form)
+        self.cert_button = button(tr("Show fingerprint"), tr("sandbox-ai web cert: the certificate's SHA-256 "
+                                                             "fingerprint, to compare with what the browser shows"),
+                                  lambda: self.certificate(False))
+        self.renew_button = button(tr("Renew certificate…"), tr("sandbox-ai web cert --renew: a new certificate with "
+                                                               "another fingerprint; asked first"),
+                                   lambda: self.certificate(True))
+        self.vendor_button = button(tr("Fetch xterm.js"), tr("sandbox-ai web vendor in a terminal: the terminals' "
+                                                            "xterm.js from registry.npmjs.org, pinned and checked"),
+                                    self.vendor)
+        self.serve_button = button(tr("Run the service…"), tr("sandbox-ai web serve in a terminal tab: it runs as "
+                                                             "long as that terminal does"), self.serve)
+        layout.addWidget(flow(self.cert_button, self.renew_button, self.vendor_button, self.serve_button))
+        self.status = plain_label(role="secondary")
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        self.set_host(None)
+
+    def label(self):
+        return tr("{name} (this machine)", name="local") if self.host == "local" else printable(self.host or "")
+
+    def set_host(self, name, load=False):
+        """NAME chosen on the page (None: none); LOAD: ask it for its logins now (the tab is shown)."""
+        if name != self.host:
+            self.host, self.loaded_for = name, None
+            self.users.setRowCount(0)
+            self.cert.setText("")
+            self.status.setText("")
+        for widget in (self.refresh_button, self.add_button, self.cert_button, self.renew_button, self.vendor_button,
+                       self.serve_button):
+            widget.setEnabled(name is not None)
+        self.update_buttons()
+        if load and name is not None and self.loaded_for != name:
+            self.refresh()
+
+    def chosen(self):
+        rows = selected_rows(self.users)
+        return row_key(self.users, rows[0]) if rows else None
+
+    def update_buttons(self):
+        chosen = self.host is not None and self.chosen() is not None
+        for widget in (self.reset_button, self.remove_button):
+            set_enabled(widget, chosen, tr("Select a login first."))
+
+    def refresh(self):
+        host = self.host
+        if host is None:
+            return
+        self.token += 1
+        token, self.loaded_for = self.token, host
+        self.status.setText(tr("Asking {host}…", host=self.label()))
+        background(self.sai.host_web_users, host, owner=self, source=[self.refresh_button, self.remove_button],
+                   timeout=90, done=lambda result, error: self.listed(token, host, result, error))
+
+    def listed(self, token, host, result, error):
+        if token != self.token or host != self.host:
+            return
+        if error is not None:
+            self.loaded_for = None
+            self.status.setText(tr("{host}: no answer", host=self.label()) + f" ({printable(str(error))[:300]})")
+            return
+        fill(self.users, [[name, since] for name, since in result])
+        self.status.setText(tr("{count} login(s) on {host}.", count=len(result), host=self.label()) if result else
+                            tr("No login on {host} yet: Add login… makes the first.", host=self.label()))
+        self.update_buttons()
+
+    def ask_name(self):
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, tr("Add login…").rstrip("…"), tr(
+            "Name of the login (lowercase letters, digits, '_', '.' or '-', starting with a letter):"))
+        name = (name or "").strip()
+        if not ok or not name:
+            return None
+        if not backend.WEB_USER.fullmatch(name):
+            warn(self, tr("Add login…").rstrip("…"), tr("A login's name is 1-32 lowercase letters, digits, '_', '.' or "
+                                                         "'-', starting with a letter."))
+            return None
+        return name
+
+    def terminal(self, argv_of, title):
+        try:
+            argv = argv_of()
+        except (OSError, ValueError) as exc:
+            warn(self, title, printable(str(exc)))
+            return
+        self.in_terminal(argv, f"{printable(self.host)}: {title}")
+        self.loaded_for = None  # what the terminal changes is read again with Refresh
+
+    def add(self):
+        host, name = self.host, self.ask_name()
+        if host is None or name is None:
+            return
+        self.terminal(lambda: self.sai.host_web_argv(host, "add", name), tr("web login {name}", name=name))
+
+    def reset(self):
+        host, name = self.host, self.chosen()
+        if host is None or name is None:
+            return
+        if not ask_first(self, "web-user-reset", tr("New password…").rstrip("…"), on_host(host, tr(
+                "Give the login {name} a new password and TOTP secret? The old ones stop working.",
+                name=printable(name))), tr("New password")):
+            return
+        self.terminal(lambda: self.sai.host_web_argv(host, "reset", name), tr("web login {name}", name=name))
+
+    def remove(self):
+        host, name = self.host, self.chosen()
+        if host is None or name is None:
+            return
+        if not ask_first(self, "web-user-remove", tr("Remove…").rstrip("…"), on_host(host, tr(
+                "Remove the login {name} of the web interface? Its sessions end at their next request.",
+                name=printable(name))), tr("Remove")):
+            return
+        background(self.sai.host_web_user_remove, host, name, owner=self, source=[self.remove_button], timeout=90,
+                   done=lambda result, error: self.answered(tr("Remove…").rstrip("…"), result, error, again=True))
+
+    def listen_value(self):
+        """The address typed (None: the default); ValueError when it is no ADDRESS:PORT."""
+        value = self.listen.text().strip()
+        if value and backend.web_listen_problem(value):
+            raise ValueError(backend.web_listen_problem(value))
+        return value or None
+
+    def certificate(self, renew):
+        host = self.host
+        title = tr("Renew certificate…").rstrip("…") if renew else tr("Certificate")
+        try:
+            listen = self.listen_value()
+        except ValueError as exc:
+            warn(self, title, str(exc))
+            return
+        if renew and not ask_first(self, "web-cert-renew", title, on_host(host, tr(
+                "Make a new certificate for the web interface? Its fingerprint changes: every browser that trusted "
+                "the old one asks again, and the running service uses it after its restart.")), tr("Renew")):
+            return
+        background(lambda: self.sai.host_web_cert(host, listen, renew), owner=self,
+                   source=[self.cert_button, self.renew_button], timeout=150,
+                   done=lambda result, error: self.certified(host, title, result, error))
+
+    def certified(self, host, title, result, error):
+        if host != self.host:
+            return
+        status, out, err = result if error is None else (1, "", str(error))
+        if status != 0:
+            warn(self, title, printable((err or out).strip()[-1500:]) or tr("Failed (exit status {status}).",
+                                                                          status=status))
+            return
+        self.cert.setText(printable(out.strip()[-600:]))
+
+    def vendor(self):
+        if self.host is not None:
+            self.terminal(lambda: self.sai.host_web_argv(self.host, "vendor"), tr("web vendor"))
+
+    def serve(self):
+        host = self.host
+        if host is None:
+            return
+        title = tr("Run the service…").rstrip("…")
+        try:
+            listen = self.listen_value()
+        except ValueError as exc:
+            warn(self, title, str(exc))
+            return
+        beyond = backend.web_listen_beyond(listen or backend.WEB_LISTEN)
+        if not ask_first(self, "web-listen", title, on_host(host, tr(
+                "Run the web interface on {listen}? Other machines that reach that address can open its login page "
+                "(a password and a TOTP code are still asked).", listen=printable(listen or backend.WEB_LISTEN))), title,
+                detail={"beyond": beyond}):
+            return
+        self.terminal(lambda: self.sai.host_web_argv(host, "serve", listen=listen), tr("web serve"))
+
+    def answered(self, title, result, error, again=False):
+        status, out, err = result if error is None else (1, "", str(error))
+        text = printable((out + err).strip())[-1500:]
+        if status != 0:
+            warn(self, title, text or tr("Failed (exit status {status}).", status=status))
+        else:
+            self.status.setText(text)
+        if again:
+            self.refresh()
+
+
 class HostsPage(QWidget):
     """The hosts of `sandbox-ai hosts` with what the other pages last saw of them (set_fleet, set_questions): the
     Sandboxes page reads every host's starts, the Approvals page their questions; this page adds no SSH of its own for
@@ -466,6 +696,11 @@ class HostsPage(QWidget):
         self.defaults_note = plain_label(role="secondary")
         form.addRow(self.defaults_note)
         self.tabs.addTab(defaults, tr("Defaults"))
+        # sandbox-ai web there: its logins, certificate, xterm.js and the service (asked when the tab is shown)
+        self.web = WebPanel(sai, in_terminal)
+        self.tabs.addTab(self.web, tr("Web interface"))
+        self.tabs.currentChanged.connect(lambda _index: self.web.set_host(
+            self.host(), load=self.tabs.currentWidget() is self.web))
         split.addWidget(right)
         split.setStretchFactor(1, 3)
         layout.addWidget(split, 1)
@@ -595,6 +830,7 @@ class HostsPage(QWidget):
         self.update_sudo.setItemText(0, tr("sudo as set for the host ({how})", how=tr("with sudo") if entry.get(
             "update_sudo") else tr("without sudo")) if remote else tr("sudo as set for the host"))
         self.pane_title.setText(printable(self.label(name)) if name else "")
+        self.web.set_host(name, load=self.isVisible() and self.tabs.currentWidget() is self.web)
         if name != self.defaults_host:
             self.defaults, self.defaults_host = None, None
             self.set_defaults_enabled(False)
