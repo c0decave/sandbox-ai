@@ -90,8 +90,9 @@ WS_PING, WS_DEADLINE = 30, 90
 # One address holds at most MAX_PER_ADDRESS of them, so that a few slow clients cannot take every place.
 MAX_CONNECTIONS = 64
 MAX_PER_ADDRESS = 16
-# Seconds a request may take from its first line to the end of its headers, and its body to arrive: a client that
-# sends one byte every few seconds (under the per-read timeout) is cut off, not served for minutes.
+# Seconds a request may take from its first byte to the end of its headers (the TLS handshake too), and its body to
+# arrive: a client that sends one byte every few seconds (under the per-read timeout) is cut off, not served for
+# minutes. Each is a deadline for the whole of it (Reaper), not for one read.
 HEAD_DEADLINE, BODY_DEADLINE = 10, 30
 # Seconds an idle HTTP connection is kept: KEEPALIVE once it carried a session, GUEST_KEEPALIVE before (one that
 # never logs in holds its thread a few seconds, not two minutes).
@@ -3770,9 +3771,74 @@ def loopback_address(address):
     return ip.is_loopback or (ip.version == 6 and ip.ipv4_mapped is not None and ip.ipv4_mapped.is_loopback)
 
 
+class Reaper:
+    """Deadlines for whole reads, not single ones: a socket's timeout bounds each recv, so a client that sends a byte
+    just before every timeout keeps one readline (or a TLS handshake) going without end. A socket armed here is shut
+    down once its deadline passes (one thread for all of them), which ends whatever read waits on it."""
+
+    def __init__(self):
+        self.due, self.condition, self.thread = {}, threading.Condition(), None
+
+    @contextlib.contextmanager
+    def bounded(self, sock, deadline):
+        """Within the block, SOCK is shut down at DEADLINE (time.monotonic()); TimeoutError when it was (or the block
+        ended after it)."""
+        with self.condition:
+            self.due[sock] = deadline
+            if self.thread is None:
+                self.thread = threading.Thread(target=self.run, name="web-deadlines", daemon=True)
+                self.thread.start()
+            self.condition.notify()
+        try:
+            yield
+        except (OSError, ValueError):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("the request took too long to arrive") from None
+            raise
+        finally:
+            with self.condition:
+                self.due.pop(sock, None)
+        if time.monotonic() >= deadline:  # cut off while reading: what was read is no whole request
+            raise TimeoutError("the request took too long to arrive")
+
+    def run(self):
+        while True:
+            with self.condition:
+                now = time.monotonic()
+                expired = [sock for sock, deadline in self.due.items() if deadline <= now]
+                for sock in expired:
+                    del self.due[sock]
+                if not expired:
+                    soonest = min(self.due.values(), default=None)
+                    self.condition.wait(None if soonest is None else max(0.01, soonest - now))
+                    continue
+            for sock in expired:
+                with contextlib.suppress(OSError):
+                    # the plain socket's shutdown (an SSLSocket's own would drop its TLS state under its reader)
+                    socket.socket.shutdown(sock, socket.SHUT_RDWR)
+
+
+REAPER = Reaper()
+
+
+def address_key(address):
+    """What one client's connections are counted under (Server.per_address): its IPv4 address (also when written
+    IPv4-mapped), or the /64 of its IPv6 address, which one client usually has whole."""
+    try:
+        ip = ipaddress.ip_address(str(address).split("%", 1)[0])
+    except ValueError:
+        return str(address)
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        return str(ip.ipv4_mapped)
+    if ip.version == 6 and not ip.is_loopback:
+        return str(ipaddress.ip_network(f"{ip}/64", strict=False))
+    return str(ip)
+
+
 class Deadline:
     """A reader of the connection's file (RFILE) that ends at DEADLINE (time.monotonic()) whatever the per-read
-    timeout: every read waits at most what is left, and none starts once it is over (TimeoutError)."""
+    timeout: every read waits at most what is left, none starts once it is over, and the connection is shut down when
+    it passes during one (Reaper): TimeoutError."""
 
     def __init__(self, rfile, connection, deadline):
         self.rfile, self.connection, self.deadline = rfile, connection, deadline
@@ -3784,7 +3850,8 @@ class Deadline:
         before = self.connection.gettimeout()
         self.connection.settimeout(min(left, before) if before else left)
         try:
-            return read(*args)
+            with REAPER.bounded(self.connection, self.deadline):
+                return read(*args)
         finally:
             with contextlib.suppress(OSError):
                 self.connection.settimeout(before)
@@ -3804,8 +3871,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def setup(self):
         handshake = getattr(self.request, "do_handshake", None)
         if handshake is not None:  # TLS, in this connection's thread, bounded: never the accept loop's
-            self.request.settimeout(30)
-            handshake()
+            self.request.settimeout(HEAD_DEADLINE)
+            with REAPER.bounded(self.request, time.monotonic() + HEAD_DEADLINE):  # the whole handshake
+                handshake()
         # Seconds the idle connection is kept: GUEST_KEEPALIVE until a request shows a session (keep_alive); a
         # terminal sets its own (WS_DEADLINE: it may be quiet for long, its browser answers the pings).
         self.timeout = GUEST_KEEPALIVE
@@ -3824,14 +3892,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):  # noqa: A002 - the audit log has what matters
         pass
 
-    def parse_request(self):
-        """The headers within HEAD_DEADLINE of the request line (which ended the idle wait)."""
+    def handle_one_request(self):
+        """One request: the idle wait for its first byte is the connection's keep-alive time; from that byte on, its
+        request line and headers have HEAD_DEADLINE seconds in all (however slowly they arrive)."""
         original = self.rfile
+        peek = getattr(original, "peek", None)
+        if peek is not None:
+            try:
+                peek(1)
+            except (OSError, ValueError):  # idle too long, or gone
+                self.close_connection = True
+                return
         self.rfile = Deadline(original, self.connection, time.monotonic() + HEAD_DEADLINE)
+        try:
+            super().handle_one_request()
+        finally:
+            self.rfile = original
+
+    def parse_request(self):
+        """The headers, still within HEAD_DEADLINE of the request's first byte (handle_one_request); the request is
+        then read and answered from the connection itself (its body has a deadline of its own)."""
+        head = self.rfile
         try:
             return super().parse_request()
         finally:
-            self.rfile = original
+            self.rfile = head.rfile if isinstance(head, Deadline) else head
 
     def send(self, status, headers, body):
         self.send_response(status)
@@ -3971,7 +4056,7 @@ class Server(http.server.ThreadingHTTPServer):
         """A thread for the connection, while fewer than LIMIT are served and its address holds fewer than
         PER_ADDRESS of them: else it is closed at once. The accept loop never waits for a free place, a flood of
         connections cannot start threads without bound, and one address cannot take every place."""
-        address = client_address[0] if isinstance(client_address, tuple) else str(client_address)
+        address = address_key(client_address[0] if isinstance(client_address, tuple) else str(client_address))
         with self.active_lock:
             # This machine's own address shares one count: the browser here (and a reverse proxy) is not capped.
             full = self.active >= self.limit or (not loopback_address(address)
@@ -3992,7 +4077,7 @@ class Server(http.server.ThreadingHTTPServer):
         try:
             super().process_request_thread(request, client_address)
         finally:
-            self.finished(client_address[0] if isinstance(client_address, tuple) else str(client_address))
+            self.finished(address_key(client_address[0] if isinstance(client_address, tuple) else str(client_address)))
 
     def finished(self, address=None):
         with self.active_lock:

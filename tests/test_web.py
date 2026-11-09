@@ -3049,6 +3049,71 @@ def test_a_request_that_trickles_in_is_cut_off_and_one_address_cannot_take_every
     assert refused == ["r2"]
 
 
+def trickled_until_closed(sock, data, pause=0.3, limit=20):
+    """Send DATA one byte at a time, PAUSE seconds apart, until the server closes SOCK: whether it did (and when)."""
+    started = time.monotonic()
+    for byte in data[:limit]:
+        try:
+            sock.sendall(bytes([byte]))
+            sock.settimeout(pause)
+            if sock.recv(1024) == b"":
+                return True, time.monotonic() - started
+        except (ssl.SSLWantReadError, socket.timeout):
+            continue
+        except OSError:
+            return True, time.monotonic() - started
+    return False, time.monotonic() - started
+
+
+def test_the_request_line_and_the_handshake_have_a_deadline_in_all(server, monkeypatch):
+    """Review 6 L-5 (PoC l10_request_line.py): HEAD_DEADLINE started after the request line, and each read had its own
+    timeout, so a request line, a header line or a TLS handshake sent one byte every few seconds held its place for
+    hours. From the first byte (the handshake's too), the whole head must arrive within HEAD_DEADLINE."""
+    monkeypatch.setattr(w, "HEAD_DEADLINE", 1.0)
+    context = ssl.create_default_context()
+    context.check_hostname, context.verify_mode = False, ssl.CERT_NONE
+    request_line = context.wrap_socket(socket.create_connection(("127.0.0.1", server["port"]), timeout=30),
+                                       server_hostname="localhost")
+    closed, took = trickled_until_closed(request_line, b"GET /" + b"a" * 100)
+    request_line.close()
+    assert closed and took < 5, took
+    header_line = context.wrap_socket(socket.create_connection(("127.0.0.1", server["port"]), timeout=30),
+                                      server_hostname="localhost")
+    header_line.sendall(b"GET / HTTP/1.1\r\n")
+    closed, took = trickled_until_closed(header_line, b"X-Long: " + b"y" * 100)
+    header_line.close()
+    assert closed and took < 5, took
+    incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+    hello = context.wrap_bio(incoming, outgoing, server_hostname="localhost")
+    with pytest.raises(ssl.SSLWantReadError):
+        hello.do_handshake()
+    handshake = socket.create_connection(("127.0.0.1", server["port"]), timeout=30)
+    closed, took = trickled_until_closed(handshake, outgoing.read())
+    handshake.close()
+    assert closed and took < 5, took
+    assert https(server, "GET", "/")[0] == 200
+
+
+def test_one_ipv6_client_counts_as_its_64():
+    """Review 6 L-5: an IPv6 client has a /64 (and any address in it): its connections count together."""
+    assert w.address_key("2001:db8:1:2::1") == w.address_key("2001:db8:1:2:ffff::9") == "2001:db8:1:2::/64"
+    assert w.address_key("2001:db8:1:3::1") != w.address_key("2001:db8:1:2::1")
+    assert w.address_key("::ffff:192.0.2.9") == w.address_key("192.0.2.9") == "192.0.2.9"
+    assert w.address_key("::1") == "::1" and w.loopback_address(w.address_key("::1"))
+    srv = w.Server.__new__(w.Server)
+    srv.limit, srv.per_address, srv.active, srv.active_lock, srv.by_address = 64, 2, 0, threading.Lock(), {}
+    refused = []
+    srv.shutdown_request = refused.append
+    original = w.http.server.ThreadingHTTPServer.process_request
+    w.http.server.ThreadingHTTPServer.process_request = lambda self, request, address: None
+    try:
+        for index in range(3):
+            srv.process_request(f"r{index}", (f"2001:db8:1:2::{index + 1}", 1000 + index, 0, 0))
+    finally:
+        w.http.server.ThreadingHTTPServer.process_request = original
+    assert refused == ["r2"] and srv.by_address == {"2001:db8:1:2::/64": 2}
+
+
 def test_a_connection_without_a_session_is_kept_only_briefly(server, monkeypatch):
     """An idle connection that never showed a session is closed after GUEST_KEEPALIVE seconds; one whose request
     carried a session (or made one: a login) is kept KEEPALIVE seconds."""
