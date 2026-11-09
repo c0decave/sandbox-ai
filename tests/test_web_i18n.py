@@ -407,7 +407,7 @@ def test_the_page_in_german_and_back_to_english(tmp_path):
     assert result["toast"] == "!Warnung: Fertig<b>x</b>×", "the level in German, the text as it is"
     assert result["filled"] == "<img src=x> auf {host}", "values are put in as text, once"
     approvals = result["approvals"]
-    for text in ("Freigaben", "Host", "Frage", "Verbleibende Zeit", "Erlauben", "Für diesen Lauf ablehnen", "Immer blockieren…",
+    for text in ("Freigaben", "Host", "Frage", "Verbleibende Zeit", "Erlauben", "Für diesen Lauf ablehnen", "Immer sperren…",
                  "nur dieses Mal", "für den Rest dieses Laufs", "immer (für das Projekt gemerkt)"):
         assert text in approvals, (text, approvals)
     assert result["closed"] == "die Verbindung wurde abgelehnt oder ging verloren (Code 1006): gone", \
@@ -468,3 +468,59 @@ def test_the_german_texts_keep_their_words():
         assert not re.search(r"\b(Session|Sessions|Sandboxes|Sandboxs)\b", entry["de"]), (key, entry["de"])
     assert texts["Refresh"]["de"] == "Neu laden" and texts["Reload"]["de"] == "Neu laden"
     assert texts["Update"]["de"] == "Aktualisieren" and texts["Update all"]["de"] == "Alle aktualisieren"
+
+
+# The words the desktop app chose for its German (commit 84854c4, review 5 M10): one word for each thing, in the app
+# and the web alike. A German text of the page says the right column, never the left one ("Git-Login" and
+# "Veröffentlichungs-Login" are the app's compounds: they stay).
+GLOSSARY = [
+    (r"\bWorkspaces?\b|Arbeitsbereich", "Arbeitsordner"),
+    (r"\bBoards?\b", "Tafel"),
+    (r"\bPresets?\b|\bVorgabe", "Vorlage"),
+    (r"\bMaschine|\bComputer", "Rechner"),
+    (r"\bProvider", "Anbieter"),
+    (r"\bLogs\b|\bLog-|-Log\b", "Protokoll"),
+    (r"Privatsphäre", "Datenschutz"),
+    (r"\bThema\b", "Farbschema (the setting) or Design"),
+    (r"Verzeichnis", "Ordner"),
+    (r"(?<!Git-)(?<!Veröffentlichungs-)\bLogins?\b(?!-Server)", "Anmeldung"),
+    (r"Markierung (?:von|zurück)|markierte Läufe", "Taint aufheben, Läufe mit Taint"),
+    (r"mit Gewalt", "erzwungen"),
+    (r"\b(?:immer )?blockier", "sperren (an approval); the browser's own blocking aside"),
+    (r"\bAnhalten\b|\bAnhängen\b|angehängt|\bAnwenden\b", "Pausieren, Verbinden, Übernehmen (the buttons)"),
+    (r"\S …", "… without a space, as the English has it"),
+]
+# what a browser does is its own word
+GLOSSARY_EXCEPT = {"Desktop notifications: blocked by the browser", "media: ffmpeg, PulseAudio, espeak-ng, Piper …"}
+# a progress message says what happens ("{name} wird gestoppt…"), not a first-person command ("Stoppe {name}…")
+FIRST_PERSON = re.compile(r"^(Lese|Prüfe|Stoppe|Lösche|Frage|Starte|Hole|Lade|Teste|Suche|Speichere|Schreibe|Entferne|"
+                          r"Warte|Sende|Baue|Erstelle|Installiere|Aktualisiere|Verbinde|Pausiere|Setze)\b.*…$")
+
+
+def app_texts():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("app_i18n_for_web_test",
+                                                  ROOT / "projects/sandbox-ai-app/sandbox_ai_app/i18n.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.TEXTS
+
+
+def test_the_german_words_are_the_apps():
+    """Review 5 M10: one German word for each thing, as the app has it (its glossary above); progress messages
+    describe what happens; a text the app and the page share reads the same in both (but where a key means another
+    thing on the page: "Change" a column there, "Start" a button)."""
+    texts = catalog()
+    wrong = {key: [word for word, pattern in ((w, re.compile(w)) for w, _ in GLOSSARY) if pattern.search(entry["de"])]
+             for key, entry in texts.items() if key not in GLOSSARY_EXCEPT}
+    assert not {key: words for key, words in wrong.items() if words}, "German words the app does not use"
+    assert not [key for key, entry in texts.items() if FIRST_PERSON.match(entry["de"])], "first-person progress"
+    assert texts["Logs"]["de"] == "Protokolle" and texts["Privacy"]["de"] == "Datenschutz"
+    assert texts["Workspace"]["de"] == texts["Workspaces"]["de"] == "Arbeitsordner"
+    assert texts["Untaint…"]["de"] == "Taint aufheben…" and texts["Theme"]["de"] == "Farbschema"
+    app = app_texts()
+    shared = {key: (entry["de"], app[key].get("de")) for key, entry in texts.items() if key in app and app[key].get("de")}
+    assert len(shared) > 250
+    differ = {key: pair for key, pair in shared.items() if pair[0] != pair[1]}
+    # another meaning on the page; the Kits page is being rebuilt
+    assert set(differ) <= {"Change", "Start", "Add marketplace"}, differ
