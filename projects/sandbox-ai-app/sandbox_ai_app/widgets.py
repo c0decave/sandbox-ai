@@ -386,9 +386,23 @@ class MessageDialog(QDialog):
         self.details_button.setVisible(True)
 
     def _toggle_details(self):
+        """Show or hide the details: the dialog grows by their room (within the screen) and shrinks back, so the
+        message, the details and the buttons never lie over each other and the button stays where it can be hit."""
         shown = not self.details.isVisible()
+        if shown:
+            self._closed_size = self.size()
         self.details.setVisible(shown)
         self.details_button.setText(tr("Hide details…") if shown else tr("Show details…"))
+        self.layout().activate()
+        if shown:
+            screen = self.screen() or QApplication.primaryScreen()
+            room = screen.availableGeometry().size() if screen is not None else QSize(*MESSAGE_SIZE) * 2
+            wanted = self.sizeHint().expandedTo(self.minimumSizeHint())
+            extra = max(self.details.minimumHeight(), min(MESSAGE_SIZE[1], room.height() // 3))
+            self.resize(min(max(self.width(), wanted.width()), room.width() - 40),
+                        min(max(self.height() + extra, wanted.height()), room.height() - 40))
+        else:
+            self.resize(getattr(self, "_closed_size", self.sizeHint()))
 
 
 def _box(parent, icon, title_text, text, details=None):
