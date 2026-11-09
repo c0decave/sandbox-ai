@@ -203,13 +203,15 @@ def test_rename_without_new_gives_a_fresh_codename(monkeypatch):
     assert sessions.load("codex-app-1a2b")["name"] == "keen-wren-moss"
 
 
-def test_rename_codename_with_a_new_name_is_refused(capsys):
+def test_a_name_given_wins_over_codename(capsys):
+    """The human's NEW is taken, --codename beside it only earns a warning (no refusal of a choice)."""
     make_kept("web")
-    assert st.main(["rename", "web", "frontend", "--codename"]) == 1
-    assert "give NEW or --codename, not both" in capsys.readouterr().err
+    lines = []
+    assert st.main(["rename", "web", "frontend", "--codename"], out=lines.append) == 0
+    assert "NEW given, so --codename is not used: the name is frontend" in capsys.readouterr().err
+    assert lines == ["web is now frontend"] and sessions.load("web")["name"] == "frontend"
     assert st.main(["rename", "nothing", "--codename"]) == 1
     assert "nothing named nothing" in capsys.readouterr().err
-    assert sessions.load("web").get("name") is None
 
 
 # --- defaults, completion --------------------------------------------------------------------------------------

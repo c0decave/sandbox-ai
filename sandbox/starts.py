@@ -991,7 +991,8 @@ def parser():
     renamed.add_argument("old", metavar="OLD")
     renamed.add_argument("new", metavar="NEW", nargs="?", help="its new name (default: a fresh codename)")
     renamed.add_argument("-c", "--codename", action="store_true",
-                         help="a fresh codename such as brisk-otter-lantern (the same as giving no NEW)")
+                         help="a fresh codename such as brisk-otter-lantern (the same as giving no NEW; a NEW "
+                              "given wins)")
     collect = commands.add_parser("gc", help="remove leftovers, and kept starts unused for --older-than DAYS")
     collect.add_argument("-o", "--older-than", type=int, metavar="DAYS",
                          help="also the stopped kept starts (with their HOME) unused for more than DAYS days, and old "
@@ -1031,8 +1032,9 @@ def main(argv, out=print):
     args = parser().parse_args(argv)
     try:
         if args.command == "rename":
-            if args.codename and args.new is not None:
-                raise ValueError("--codename chooses the new name: give NEW or --codename, not both")
+            if args.codename and args.new is not None:  # the name given wins; said, not refused
+                print(f"sandbox-ai rename: NEW given, so --codename is not used: the name is "
+                      f"{launcher().printable(args.new)}", file=sys.stderr)
             return rename(args.old, args.new, out)
         if args.command == "gc":
             if args.older_than is not None and args.older_than < 0:
