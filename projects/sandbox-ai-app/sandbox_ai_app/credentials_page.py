@@ -21,6 +21,7 @@ from .backend import SandboxAI
 from .files import printable
 from .i18n import N_, tr
 from .host_choice import on_host
+from .name_fields import NameField, publish as publish_names
 from .widgets import ask_first, background, fill, outcome, plain_label, selected, show_text, table
 
 LOCAL = "local"  # the host of this machine's own secrets (sandbox-ai hosts' name for it)
@@ -262,8 +263,11 @@ class LoginDialog(QDialog):
         self.secret.textEdited.connect(lambda _text: setattr(self, "name_typed", True))
         self.name_typed = False
         form.addRow(tr("Kept as the secret"), self.secret)
-        self.secret_choice = QComboBox()  # a secret that host keeps already
-        self.secret_choice.addItems(list(secret_names))
+        # a secret that host keeps already: its names to choose from (read again when one is added or removed there)
+        self.secret_choice = NameField("secret", names=list(secret_names), host=host)
+        self.secret_choice.setAccessibleName(tr("Stored secret"))
+        if getattr(parent, "sai", None) is not None:  # the page read them just now: again when one is added or removed
+            self.secret_choice.set_source(parent.sai, host, read=False)
         form.addRow(tr("Stored secret"), self.secret_choice)
         form.addRow(plain_label(tr("A secret name (e.g. PYPI_TOKEN) is how sandbox-ai keeps a token: the login only "
                                    "names it, the token itself stays in sandbox-ai secrets."), role="secondary"))
@@ -278,7 +282,6 @@ class LoginDialog(QDialog):
             self.kind.currentTextChanged.connect(lambda _text: self.offer_name())
         if "url" in self.edits:
             self.edits["url"].textChanged.connect(lambda _text: self.offer_name())
-        self.stored.setEnabled(bool(secret_names))
         self.offer_name()
         self.show_choice()
 
@@ -292,6 +295,8 @@ class LoginDialog(QDialog):
 
     def show_choice(self):
         typed = self.typed.isChecked()
+        if not typed and not self.secret_choice.text() and self.secret_choice.offered():
+            self.secret_choice.setCurrentIndex(1)  # the first stored secret, as before (another chosen or typed)
         for widget, shown in ((self.value_row, typed), (self.secret, typed), (self.secret_choice, not typed)):
             self.form.setRowVisible(widget, shown)
 
@@ -300,7 +305,7 @@ class LoginDialog(QDialog):
         if self.typed.isChecked():
             found["secret"], found["value"] = self.secret.text().strip(), self.value.text().strip() or None
         else:
-            found["secret"], found["value"] = self.secret_choice.currentText(), None
+            found["secret"], found["value"] = self.secret_choice.text().strip(), None
         if self.kind is not None:
             found["kind"] = self.kind.currentText()
         return found
@@ -567,6 +572,7 @@ class CredentialsPage(QWidget):
             self.remote_secrets.pop(host, None)
         else:
             self.remote_secrets[host] = list(names)
+            publish_names(self.sai, "secret", host, [name for name, _ in names])  # for every name field
         if hosts is not None:
             self.fill_secret_hosts(hosts)
         states = {None: tr("logged in"), "missing": tr("no login"), "expired": tr("expired, log in again"),
@@ -639,6 +645,7 @@ class CredentialsPage(QWidget):
             return
         store, names = result
         self.remote_secrets[host] = list(names)
+        publish_names(self.sai, "secret", host, [name for name, _ in names])
         self.show_secrets(host, store, names)
 
     @staticmethod

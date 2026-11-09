@@ -21,6 +21,7 @@ from .files import printable
 from . import widgets
 from .i18n import N_, tr
 from .host_choice import on_host
+from .name_fields import NameField, publish
 from .widgets import (
     ask_first, background, disclosure, fill, outcome, plain_label, selected, show_text, table, shown_as_text,
 )
@@ -154,7 +155,7 @@ class VpnDialog(QDialog):
     """A new VPN profile: its name, its kind, what that kind needs and the advanced options. REMOTE: the files are
     paths on that host (typed; no file dialog of this machine)."""
 
-    def __init__(self, parent=None, host_label="", remote=False):
+    def __init__(self, parent=None, host_label="", remote=False, sai=None, host=LOCAL):
         super().__init__(parent)
         self.remote = remote
         self.setWindowTitle(tr("New VPN profile on {host}", host=host_label) if host_label else tr("New VPN profile"))
@@ -171,8 +172,8 @@ class VpnDialog(QDialog):
         self.browse = QPushButton(tr("File…"))
         self.browse.clicked.connect(lambda _=False: self.choose(self.file))
         file_row = self.with_browse(self.file, self.browse)
-        self.secret = QLineEdit()
-        self.secret.setPlaceholderText(SECRET_EXAMPLE)
+        # The secrets that host keeps, to choose from (names only; a name it lacks is typed, its value below)
+        self.secret = NameField("secret", sai, host, placeholder=SECRET_EXAMPLE)
         self.value = QLineEdit()
         self.value.setPlaceholderText(tr("typed here: kept as that secret (or leave it empty if it is kept already)"))
         self.split = QCheckBox(tr("Only the server's routes through the tunnel (the rest stays blocked)"))
@@ -197,8 +198,7 @@ class VpnDialog(QDialog):
         bridges_browse.clicked.connect(lambda _=False: self.choose(self.bridges))
         self.bridges_browse = bridges_browse
         bridges_row = self.with_browse(self.bridges, bridges_browse)
-        self.bridge_secret = QLineEdit()
-        self.bridge_secret.setPlaceholderText(BRIDGE_SECRET_EXAMPLE)
+        self.bridge_secret = NameField("secret", sai, host, placeholder=BRIDGE_SECRET_EXAMPLE)
         self.exit_country = QLineEdit()
         self.exit_country.setPlaceholderText(COUNTRY_EXAMPLE)
         self.exit_country.setToolTip(tr("Tor exits only in these countries (two-letter codes)"))
@@ -306,7 +306,7 @@ def add_profile(parent, sai, done=None, host=LOCAL, host_label=""):
     """Ask for a new profile on HOST and add it in the background; DONE(name or None) afterwards. A typed key is kept
     as its secret there after the profile was added (Mullvad's before: it is read while added), on standard input; a
     secret of that name is replaced only after a yes, a SOCKS port only after one (vpn-socks)."""
-    dialog = VpnDialog(parent, host_label, remote=host != LOCAL)
+    dialog = VpnDialog(parent, host_label, remote=host != LOCAL, sai=sai, host=host)
     if dialog.exec() != QDialog.DialogCode.Accepted:
         dialog.value.clear()
         dialog.deleteLater()
@@ -436,6 +436,8 @@ class VpnBox(QGroupBox):
         else:
             self.entries = [e for e in result or [] if isinstance(e, dict)]
             fill(self.profiles, [[e.get("profile", ""), e.get("type", ""), e.get("provider", "")] for e in self.entries])
+            # what every field that takes a profile's name offers for that host from now on (one added or removed)
+            publish(self.sai, "vpn", host, [e["profile"] for e in self.entries if isinstance(e.get("profile"), str)])
             if host != LOCAL:
                 self.message.setText(tr("VPN profiles on {host}: {count}", host=self.host_label(host),
                                         count=len(self.entries)))

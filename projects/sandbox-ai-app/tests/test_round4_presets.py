@@ -137,10 +137,12 @@ def test_the_start_choices_of_a_host_come_from_its_lists(sai):
         ("identities", "list"): (0, json.dumps({"work": {"email": "w@example.org"}}), ""),
         ("mcp", "list"): (0, json.dumps([{"name": "fetch", "status": "stopped"}]), ""),
         ("images", "--json"): (0, json.dumps([{"target": "tor", "variant": True}, {"target": "claude"}]), ""),
+        ("secrets", "list"): (0, "NAME     STORE\nGH_PUSH  file\n", ""),
     })
     found, problems = sai.host_start_choices("ct1")
     assert found == {"--vpn": ["mv", "ts"], "--kit": ["egm"], "--identity": ["work"], "--mcp": ["fetch"],
-                     "--image-variant": ["tor"]} and problems == {}
+                     "--image-variant": ["tor"], "--secret-env": ["GH_PUSH"], "--api-key": ["GH_PUSH"],
+                     "--git-token-secret": ["GH_PUSH"]} and problems == {}
     assert all(asked[0] == "ct1" for asked in sai.asked), "that host's lists, never this machine's"
     sai.answers[("vpn", "list")] = (1, "", "no vpn here")
     found, problems = sai.host_start_choices("ct1")
@@ -520,7 +522,7 @@ def test_the_login_dialog_offers_a_typed_token_or_a_stored_secret(qt, monkeypatc
     assert dialog.values()["value"] == long_token and dialog.values()["secret"] == "CARGO_TOKEN"
     dialog.stored.setChecked(True)
     assert not dialog.form.isRowVisible(dialog.value_row) and dialog.form.isRowVisible(dialog.secret_choice)
-    assert [dialog.secret_choice.itemText(i) for i in range(dialog.secret_choice.count())] == ["NPM_TOKEN", "OTHER"]
+    assert dialog.secret_choice.offered() == ["NPM_TOKEN", "OTHER"]
     assert dialog.values()["value"] is None and dialog.values()["secret"] == "NPM_TOKEN"
     # The box: a typed token whose name is kept already is asked about first; declined, nothing runs.
     asked, ran = [], []

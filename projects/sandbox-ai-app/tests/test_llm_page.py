@@ -240,7 +240,8 @@ def test_adding_on_a_host_keeps_the_typed_key_as_a_secret_there(qapp, sai, monke
     while not sai.secrets_set and time.monotonic() < deadline:
         qapp.processEvents()
         time.sleep(0.02)
-    assert sai.asked[0] == ("ct1", add) and sai.secrets_set == [("REMOTE_KEY", KEY, "ct1")]
+    asked = [a for a in sai.asked if a[1][:2] not in (("vpn", "list"), ("secrets", "list"))]  # the fields' names
+    assert asked[0] == ("ct1", add) and sai.secrets_set == [("REMOTE_KEY", KEY, "ct1")]
     assert KEY not in json.dumps(sai.asked)
     assert parsed(sai, list(add)).vpn == "ts"
     page.close()

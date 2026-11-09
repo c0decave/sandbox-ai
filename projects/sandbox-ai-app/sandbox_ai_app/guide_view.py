@@ -320,6 +320,13 @@ class NodeGuide(QDialog):
             widget = QComboBox()
             widget.setEditable(question.form == "model")
             self.fill_agent_choices(question, widget, self.node.props.get("agent", "claude"), current)
+        elif question.key == "--vpn":  # the board's host's VPN profiles to choose from, any other name typed
+            from .name_fields import NameField
+            board = self.parent()
+            widget = NameField("vpn", getattr(board, "sai", None), board.host() if hasattr(board, "host") else "local",
+                               placeholder=question.placeholder)
+            widget.setText(current or "")
+            widget.setAccessibleName(tr(question.label))
         elif question.form == "path":
             widget = PathEdit(current, directory=question.key != "source")
             if question.placeholder:

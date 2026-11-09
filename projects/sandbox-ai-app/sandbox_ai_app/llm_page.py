@@ -45,6 +45,7 @@ from .host_choice import follow_hosts, on_host
 from . import backend, theme, widgets
 from . import wizard_llm as WL
 from .i18n import N_, tr
+from .name_fields import NameField
 from .widgets import (
     ask_first, background, fill, flow, outcome, plain_label, row_key, safe_tooltip, selected_keys, set_enabled,
     show_text, table, warn,
@@ -147,7 +148,8 @@ class LlmDialog(QDialog):
     OK hands the fields to ON_SAVE(fields, value) - the page saves while the dialog stays open - and the dialog
     closes only once it saved (finish); failed(message) keeps it open with everything typed."""
 
-    def __init__(self, parent=None, host_label="", remote=False, existing=None, run=None, taken=(), require=None):
+    def __init__(self, parent=None, host_label="", remote=False, existing=None, run=None, taken=(), require=None,
+                 sai=None, host=LOCAL):
         super().__init__(parent)
         self.remote, self.existing, self.run, self.taken = remote, existing, run, set(taken or ())
         self.host_label, self.require = host_label, require
@@ -202,12 +204,13 @@ class LlmDialog(QDialog):
         self.model.setPlaceholderText(MODEL_EXAMPLE)
         self.model_box.setToolTip(tr("The model a start uses when --llm names none (optional): type it, or choose one "
                                      "Test connection listed"))
-        self.vpn = QLineEdit()
-        self.vpn.setPlaceholderText(VPN_EXAMPLE)
+        # That host's VPN profiles and secrets to choose from (names only), any other name typed
+        self.vpn = NameField("vpn", sai, host, placeholder=VPN_EXAMPLE)
+        self.vpn.setAccessibleName(tr("VPN profile"))
         self.vpn.setToolTip(tr("The VPN profile the server is reached through (optional)"))
         self.anthropic = QCheckBox(tr("It also offers the Anthropic Messages API (Claude Code)"))
-        self.secret = QLineEdit()
-        self.secret.setPlaceholderText(SECRET_EXAMPLE)
+        self.secret = NameField("secret", sai, host, placeholder=SECRET_EXAMPLE)
+        self.secret.setAccessibleName(tr("Secret for the API key (optional)"))
         self.value = QLineEdit()
         self.value.setPlaceholderText(tr("typed here: kept as that secret (or leave it empty if it is kept already)"))
         self.headers = QLineEdit()
@@ -717,7 +720,7 @@ class LlmPage(QWidget):
             return
         taken = [e["name"] for e in self.entries] if host == self.loaded_host else []
         self.open_dialog(LlmDialog(self, self.host_label(host), remote=host != "local", run=self.runner(host),
-                                   taken=taken, require=self.requirement(host)), host, None)
+                                   taken=taken, require=self.requirement(host), sai=self.sai, host=host), host, None)
 
     def edit(self):
         """The dialog prefilled from `llm show NAME --json` (and the CA's path from `llm show NAME`)."""
@@ -727,7 +730,7 @@ class LlmPage(QWidget):
         self.status.setText(tr("Reading {name}…", name=name))
         self.server_fields(host, name, self.edit_button, lambda old: self.open_dialog(
             LlmDialog(self, self.host_label(host), remote=host != "local", existing=old, run=self.runner(host),
-                      require=self.requirement(host)),
+                      require=self.requirement(host), sai=self.sai, host=host),
             host, old))
 
     def server_fields(self, host, name, source, then):

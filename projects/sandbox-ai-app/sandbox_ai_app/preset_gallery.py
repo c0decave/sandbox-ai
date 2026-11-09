@@ -602,6 +602,11 @@ class PlaceholderForm(QDialog):
         default = getattr(placeholder, "default", "")  # sandbox-ai's presets: the value's default (a port, a name)
         if placeholder.kind == "folder":
             return PathEdit(default)
+        if getattr(placeholder, "names", "") == "secret":  # the host's secrets to choose from (names only)
+            from .name_fields import NameField
+            field = NameField("secret", self.sai, self.host, placeholder=tr("empty: fill in later"))
+            field.setText(default)
+            return field
         combo = QComboBox()
         combo.setEditable(placeholder.kind != "gpu")
         combo.addItem("")

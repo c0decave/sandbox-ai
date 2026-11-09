@@ -6,9 +6,8 @@ from __future__ import annotations
 
 import re
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox, QCompleter, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLineEdit,
+    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLineEdit,
     QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
@@ -16,6 +15,7 @@ from .backend import SandboxAI
 from .files import printable
 from .i18n import tr
 from .host_choice import on_host
+from .name_fields import NameField
 from .widgets import ask_first, background, fill, outcome, plain_label, selected, show_text, table
 
 LOCAL = "local"
@@ -226,12 +226,14 @@ class IdentityDialog(QDialog):
         return row
 
     def secret_edit(self, value):
-        edit = QLineEdit(value)
-        edit.setPlaceholderText(tr("a secret's name, e.g. GH_PUSH"))
-        completer = QCompleter(self.secret_names, edit)
-        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        completer.setFilterMode(Qt.MatchFlag.MatchContains)
-        edit.setCompleter(completer)
+        """A secret's name: that host's to choose from (a list, and as you type), any other typed."""
+        host = getattr(self.parent(), "host", LOCAL) or LOCAL
+        edit = NameField("secret", names=self.secret_names, host=host,
+                         placeholder=tr("a secret's name, e.g. GH_PUSH"))
+        edit.setAccessibleName(tr("Secret"))
+        edit.setText(value)
+        if getattr(self.parent(), "sai", None) is not None:
+            edit.set_source(self.parent().sai, host, read=False)  # the page read them: again when they change
         return edit
 
     def add_git(self, url, user, secret):

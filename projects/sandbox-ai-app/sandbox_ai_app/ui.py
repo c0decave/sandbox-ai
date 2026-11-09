@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 from . import applog, backend, i18n, notifications, terminal, theme, widgets
 from .files import printable
 from .host_choice import on_host
+from .name_fields import NameField
 from .state import choose_file, choose_folder
 from .i18n import N_, tr
 from .activity_page import ActivityPage
@@ -149,8 +150,9 @@ class ListField(QWidget):
     the names the chosen host has (set_choices: its MCP servers for --mcp, its kits for --kit)."""
     changed = Signal()
 
-    def __init__(self, path=False, choices=False):
+    def __init__(self, path=False, choices=False, option=None):
         super().__init__()
+        self.option = option
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.edit = QPlainTextEdit()
@@ -187,7 +189,10 @@ class ListField(QWidget):
         self.pick.setToolTip(safe_tooltip(tr("Add one that {host} has", host=where) if where else tr("Add one")))
 
     def add(self, value):
-        if value not in self.value():
+        if self.option in OptionsForm.SECRET_CHOICES:  # a secret's name: HOST=NAME, URL=NAME or NAME (name_fields)
+            from .name_fields import add_line
+            self.edit.setPlainText(add_line(self.edit.toPlainText(), value, self.option))
+        elif value not in self.value():
             self.edit.appendPlainText(value)
 
     def set_local(self, local):
@@ -324,7 +329,9 @@ class OptionsForm(QTabWidget):
 
     # The options whose values the chosen host lists (backend.host_start_choices): a chooser filled from its lists,
     # the value still typed in where it has none (or the list could not be read).
-    HOST_CHOICES = ("--vpn", "--kit", "--identity", "--mcp", "--image-variant")
+    HOST_CHOICES = ("--vpn", "--kit", "--identity", "--mcp", "--image-variant", "--secret-env", "--api-key",
+                    "--git-token-secret")
+    SECRET_CHOICES = ("--secret-env", "--api-key", "--git-token-secret")  # their values name a secret of that host
 
     def widget_for(self, option):
         from . import hardware
@@ -345,7 +352,7 @@ class OptionsForm(QTabWidget):
             self.limit_hint(widget, option, "local")
             return widget
         if option.long in self.HOST_CHOICES and option.kind == "list":
-            widget = ListField(choices=True)
+            widget = ListField(choices=True, option=option.long)
             widget.changed.connect(self.changed)
             return widget
         if option.long in self.HOST_CHOICES and option.kind == "value":
@@ -587,6 +594,9 @@ class LaunchPage(QWidget):
         layout.addWidget(self.preset_note)
         self.preset_catalogue, self.presets_host, self.presets_reading = PR.Catalogue(), None, None
         self.choices_host, self.choices_read_at, self.choices_token = None, 0.0, 0
+        # A secret or VPN profile added or removed (Credentials page): the choosers are read again when shown next.
+        from .name_fields import hub
+        hub().changed.connect(self.names_changed)
         self.form = OptionsForm(self.options)
         try:
             self.form.apply_policy(sai.forbidden())
@@ -848,6 +858,10 @@ class LaunchPage(QWidget):
         self.form.set_choices(host, None, {})
         background(self.sai.host_start_choices, host, timeout=180,
                    done=lambda result, error: alive(self) and self.host_choices_read(token, host, result, error))
+
+    def names_changed(self, _kind, host):
+        if host == self.choices_host:
+            self.choices_read_at = 0.0
 
     def host_choices_read(self, token, host, result, error):
         if token != self.choices_token or host != self.host():
@@ -4045,8 +4059,10 @@ class AddServerDialog(QDialog):
             self.engine.addItem(text, key)
         self.engine.setToolTip(tr("Podman (the image), Bubblewrap (the image's rootfs, checked and unpacked) or both"))
         form.addRow(tr("Backend"), self.engine)
-        self.vpn = QLineEdit()
-        self.vpn.setPlaceholderText(tr("a VPN profile (sandbox-ai vpn list); needs the full network"))
+        # that host's VPN profiles to choose from, any other name typed
+        self.vpn = NameField("vpn", getattr(parent, "sai", None), host,
+                             placeholder=tr("a VPN profile (sandbox-ai vpn list); needs the full network"))
+        self.vpn.setAccessibleName(tr("VPN"))
         form.addRow(tr("VPN"), self.vpn)
         self.no_pull = QCheckBox(tr("Do not pull the image (it is there already)"))
         form.addRow(self.no_pull)
@@ -4113,8 +4129,9 @@ class McpStartDialog(QDialog):
         for text, key in ((tr("as defined"), ""), ("podman", "podman"), ("bwrap", "bwrap")):
             self.engine.addItem(text, key)
         form.addRow(tr("Backend"), self.engine)
-        self.vpn = QLineEdit()
-        self.vpn.setPlaceholderText(tr("a VPN profile in front (sandbox-ai vpn list)"))
+        self.vpn = NameField("vpn", getattr(parent, "sai", None), host,
+                             placeholder=tr("a VPN profile in front (sandbox-ai vpn list)"))
+        self.vpn.setAccessibleName(tr("VPN"))
         form.addRow(tr("VPN"), self.vpn)
         self.start = QComboBox()
         self.start.addItem(tr("no start: only the server"), "")

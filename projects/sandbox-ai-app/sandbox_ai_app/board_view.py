@@ -31,9 +31,12 @@ from PySide6.QtWidgets import (
 from . import backend, board as B
 from . import help_view, project_trust as PT, theme
 from .files import printable
+from .name_fields import NameButton, NameField, add_line
 from .state import choose_file, choose_folder
 from .i18n import tr
 from .widgets import MONO, ElidedLabel, ask_first, background, flow, inform, plain_label, safe_tooltip, warn
+
+NF_OPTIONS = ("--secret-env", "--api-key", "--git-token-secret")  # their lines name a secret (name_fields)
 
 LOCAL = "local"  # this machine, as `sandbox-ai hosts` names it
 REMOTE_CHECK_DELAY = 2000  # ms after an edit before another host's launcher checks the board (a dry run over SSH)
@@ -2160,9 +2163,27 @@ class BoardPage(QWidget):
             for box in boxes.values():
                 box.toggled.connect(lambda _=False: self.set_prop(node_id, long, [c for c, b in boxes.items()
                                                                                   if b.isChecked()]))
+        elif option.kind == "list" and long in NF_OPTIONS:
+            # a secret's name per line: that host's secrets to add from a "+" menu (names only), any other typed
+            lines = LinesEdit(value or [])
+            lines.changed.connect(lambda values: self.set_prop(node_id, long, values))
+            pick = NameButton("secret", self.sai, self.host())
+            pick.picked.connect(lambda name, e=lines: e.setPlainText(add_line(e.toPlainText(), name, long)))
+            widget = QWidget()
+            row = QHBoxLayout(widget)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.addWidget(lines, 1)
+            row.addWidget(pick, alignment=Qt.AlignmentFlag.AlignTop)
+            lines.setToolTip(safe_tooltip(option.help))
         elif option.kind == "list":
             widget = LinesEdit(value or [])
             widget.changed.connect(lambda values: self.set_prop(node_id, long, values))
+        elif long == "--vpn":  # that host's VPN profiles to choose from, any other name typed
+            widget = NameField("vpn", self.sai, self.host(), placeholder=option.metavar or "")
+            widget.setText("" if value is None else str(value))
+            widget.setAccessibleName(long)
+            widget.editingFinished.connect(lambda: self.set_prop(node_id, long, widget.text().strip()))
+            widget.activated.connect(lambda _i: self.set_prop(node_id, long, widget.text().strip()))
         else:
             widget = QLineEdit("" if value is None else str(value))
             widget.setPlaceholderText(option.metavar or (str(option.default) if option.default else ""))

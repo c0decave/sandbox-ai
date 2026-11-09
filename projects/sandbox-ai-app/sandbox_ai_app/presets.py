@@ -48,6 +48,7 @@ class Placeholder:
     optional: bool = False  # left empty: what holds it is left out instead
     follows: str = ""  # the marker of an LLM server whose VPN this one is (filled in from its registration)
     default: str = ""  # what the form offers first (sandbox-ai's presets: the value's default, e.g. a port)
+    names: str = ""  # "secret": a secret's name (sandbox-ai's presets: a value of kind secret), offered from the host's
 
     @property
     def kind(self):
@@ -593,11 +594,13 @@ def from_document(sai, document):
         _check(isinstance(entry, dict) and isinstance(entry.get("marker"), str)
                and B.PLACEHOLDER.fullmatch(entry["marker"]) and isinstance(entry.get("label", ""), str)
                and isinstance(entry.get("hint", ""), str) and isinstance(entry.get("optional", False), bool)
-               and isinstance(entry.get("follows", ""), str) and isinstance(entry.get("default", ""), str),
+               and isinstance(entry.get("follows", ""), str) and isinstance(entry.get("default", ""), str)
+               and entry.get("names", "") in ("", "secret"),
                N_("A placeholder has a marker, a label, a hint and whether it is optional."))
         marks.append(Placeholder(entry["marker"], entry.get("label", "")[:120] or entry["marker"],
                                  entry.get("hint", "")[:200], entry.get("optional", False),
-                                 entry.get("follows", "")[:40], entry.get("default", "")[:200]))
+                                 entry.get("follows", "")[:40], entry.get("default", "")[:200],
+                                 entry.get("names", "")))
     positions = document.get("positions") or {}
     _check(isinstance(positions, dict) and len(positions) <= 200 and all(
         isinstance(k, str) and re.fullmatch(r"[a-z]+#[0-9]{1,3}", k) and isinstance(v, list) and len(v) == 2
@@ -692,7 +695,8 @@ def from_sandbox_ai(sai, document, host="local"):
         "placeholders": [{"marker": markers[name], "label": str((spec or {}).get("label", name))[:200],
                           "hint": str((spec or {}).get("hint", ""))[:300], "optional": bool((spec or {}).get("optional")),
                           "follows": "", **({"default": str(spec["default"])[:200]}
-                                            if (spec or {}).get("default") not in (None, "") else {})}
+                                            if (spec or {}).get("default") not in (None, "") else {}),
+                          **({"names": "secret"} if (spec or {}).get("kind") == "secret" else {})}
                          for name, spec in values.items()],
         "notes": [str(note)[:1000] for note in (document.get("notes") or []) + (document.get("needs") or [])]
                  + ([tr("From the preset directory {path}", path=str(folder)[:900])]

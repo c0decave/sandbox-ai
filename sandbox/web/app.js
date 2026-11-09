@@ -160,6 +160,30 @@ function ended() {
 // The API path of SUFFIX on HOST (the chosen host unless given: a question names its own).
 function hostPath(suffix, host) { return `/api/hosts/${encodeURIComponent(host || state.host)}${suffix}`; }
 
+// A field for the NAME of a stored secret (KIND "secret") or of a VPN profile ("vpn") offers what HOST has: a
+// <datalist> (one per kind and host) read when a page draws such a field (GET /secrets: names only, never a value;
+// GET /vpn: the profiles), so a profile or secret added or removed shows the next time. Any other name typed stays
+// possible; a host that cannot list them (an older one) leaves the field typed in. The answer fills that host's list
+// only, so a late one never reaches another host's field.
+const NAME_LISTS = { secret: ["/secrets", (x) => x && x.name], vpn: ["/vpn", (x) => x && x.profile] };
+const NAME_PATTERNS = { secret: /^[A-Za-z_][A-Za-z0-9_]{0,63}$/, vpn: /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/ };
+function offerNames(input, kind, host) {
+  host = host || state.host;
+  const id = `names-${kind}-${String(host).replace(/[^A-Za-z0-9_.-]/g, "_")}`;
+  let list = document.getElementById(id);
+  if (!list) { list = el("datalist", { id }); document.body.append(list); }
+  input.setAttribute("list", id);
+  input.setAttribute("autocomplete", "off");
+  if (!list.reading) {
+    const [path, nameOf] = NAME_LISTS[kind];
+    list.reading = api("GET", hostPath(path, host)).then((found) => {
+      const names = [...new Set((Array.isArray(found) ? found : []).map(nameOf).filter(n => typeof n === "string" && NAME_PATTERNS[kind].test(n)))].sort();
+      clear(list).append(...names.map(n => el("option", { value: n })));
+    }).catch(() => {}).then(() => { list.reading = null; });
+  }
+  return input;
+}
+
 // One rule for what ends, removes or weakens something: it is asked in place, in the page (never the browser's
 // own dialog), naming the host and what happens; Cancel puts back what was there. ask() gives the nodes,
 // confirmIn() puts them into CONTAINER (a table cell, a row of buttons) instead of what it holds.
@@ -1614,6 +1638,7 @@ async function drawStartForm(card, heading, host) {
     } else {
       input = el("input", { id, class: ["folder", "file", "device", "host", "secret"].includes(kind) ? "mono" : null,
         placeholder: spec.default !== undefined ? String(spec.default) : kind === "folder" ? t("{path} (on that host)", { path: "/home/you/samples" }) : kind === "device" ? "/dev/ttyUSB0" : "" });
+      if (kind === "secret") offerNames(input, "secret", host);  // that host's secrets to choose from (names only)
     }
     f.input = input;
     f.value = () => String(input.value || "").trim();
@@ -2813,12 +2838,12 @@ pages.vpn = async (main) => {
   const kind = el("select", { id: "vpn-kind" }, [["wireguard", N_("WireGuard (a wg-quick file)")], ["openvpn", N_("OpenVPN (an .ovpn file)")],
     ["mullvad", N_("Mullvad (account number in a secret)")], ["tailscale", N_("Tailscale or Headscale (auth key in a secret)")], ["tor", N_("Tor (every connection through Tor)")]].map(([v, label]) => el("option", { value: v }, t(label))));
   const file = el("input", { id: "vpn-file", class: "mono", placeholder: t("{path} (on that host)", { path: "/home/you/vpn/home.conf" }) });
-  const secret = el("input", { id: "vpn-secret", class: "mono", placeholder: "VPN_HOME" });
+  const secret = offerNames(el("input", { id: "vpn-secret", class: "mono", placeholder: "VPN_HOME" }), "secret", host);
   const location = el("input", { id: "vpn-location", placeholder: "se-sto" });
   const exitNode = el("input", { id: "vpn-exit", placeholder: "exit-node-1" });
   const loginServer = el("input", { id: "vpn-login", placeholder: "https://headscale.example.org" });
   const hostname = el("input", { id: "vpn-hostname", class: "mono", placeholder: "sandbox-ai-home" }), tailnet = el("input", { id: "vpn-tailnet", class: "mono", placeholder: "100.64.0.0/10" });
-  const bridges = el("input", { id: "vpn-bridges", class: "mono", placeholder: "/home/you/tor/bridges.txt" }), bridgeSecret = el("input", { id: "vpn-bridge-secret", class: "mono", placeholder: "TOR_BRIDGES" });
+  const bridges = el("input", { id: "vpn-bridges", class: "mono", placeholder: "/home/you/tor/bridges.txt" }), bridgeSecret = offerNames(el("input", { id: "vpn-bridge-secret", class: "mono", placeholder: "TOR_BRIDGES" }), "secret", host);
   const exitCountry = el("input", { id: "vpn-exit-country", placeholder: "de,nl" });
   const rows2 = { file: [file, N_("Configuration file")], secret: [secret, N_("Secret (its name)")], location: [location, N_("Location")],
     exit_node: [exitNode, N_("Exit node")], login_server: [loginServer, N_("Login server")], hostname: [hostname, N_("Node name")], tailnet_allow: [tailnet, N_("Tailnet range the agent may reach")],
@@ -3019,7 +3044,7 @@ pages.llm = async (main) => {
   modelPick.hidden = true; modelPickLabel.hidden = true;
   modelPick.addEventListener("change", () => { if (modelPick.value) model.value = modelPick.value; });
   // the NAME of the secret that holds the API key (sandbox-ai secrets there), never the key
-  const keySecret = el("input", { id: "llm-key-secret", class: "mono", placeholder: t("optional, e.g. {name}", { name: "LMSTUDIO_KEY" }), pattern: "[A-Za-z_][A-Za-z0-9_]{0,63}", autocomplete: "off", "aria-describedby": "llm-hint" });
+  const keySecret = offerNames(el("input", { id: "llm-key-secret", class: "mono", placeholder: t("optional, e.g. {name}", { name: "LMSTUDIO_KEY" }), pattern: "[A-Za-z_][A-Za-z0-9_]{0,63}", autocomplete: "off", "aria-describedby": "llm-hint" }), "secret", host);
   // the key itself, typed here (review 5 L4): stored as that secret of the host first (secrets set, on its standard
   // input), only on Add/Save, as the Logins page stores a token; never sent anywhere else
   const [keyValue, keyField] = secretInput({ id: "llm-key-value", class: "mono", placeholder: t("optional: stored as that secret on Save"), value: "" });
@@ -3027,7 +3052,7 @@ pages.llm = async (main) => {
   const testBox = el("div", { class: "wide", id: "llm-test-result" });
   const headerSecrets = el("input", { id: "llm-headers", class: "mono", placeholder: "X-Gateway-Key=GW_KEY" }), ca = el("input", { id: "llm-ca", class: "mono", placeholder: "/home/you/ca.pem" });
   const caNote = el("div", { class: "wide hint", id: "llm-ca-note" });
-  const vpn = el("input", { id: "llm-vpn", class: "mono", placeholder: "home" });
+  const vpn = offerNames(el("input", { id: "llm-vpn", class: "mono", placeholder: "home" }), "vpn", host);
   const anthropic = el("input", { id: "llm-anthropic", type: "checkbox" }), replace = el("input", { id: "llm-replace", type: "checkbox" }), insecure = el("input", { id: "llm-insecure", type: "checkbox" });
   const heading = el("h2", { id: "llm-form-title" }, t("Add a server"));
   const addRow = el("div", { class: "row" });
@@ -4497,7 +4522,7 @@ pages.mcp = async (main) => {
   const startBox = el("div");
   const startForm = (server) => {
     const backend = el("select", { id: "mcp-backend" }, el("option", { value: "" }, t("as defined")), ["podman", "bwrap"].map(b => el("option", { value: b }, b)));
-    const vpn = el("input", { id: "mcp-vpn", class: "mono", placeholder: "home" });
+    const vpn = offerNames(el("input", { id: "mcp-vpn", class: "mono", placeholder: "home" }), "vpn", host);
     const forStart = el("input", { id: "mcp-for", class: "mono", placeholder: t("a start's name (optional)") });
     const restart = el("input", { id: "mcp-restart", type: "checkbox" });
     const row = el("div", { class: "row" });
@@ -4535,7 +4560,7 @@ pages.mcp = async (main) => {
   const network = el("select", { id: "mcp-network" }, el("option", { value: "" }, t("as the entry says")), ["none", "full"].map(n => el("option", { value: n }, n)));
   const memory = el("input", { id: "mcp-memory", placeholder: "512m" }), pids = el("input", { id: "mcp-pids", type: "number", min: 1, placeholder: "128" });
   const backend = el("select", { id: "mcp-add-backend" }, el("option", { value: "" }, t("Podman when it is there")), ["podman", "bwrap", "both"].map(b => el("option", { value: b }, b)));
-  const vpn = el("input", { id: "mcp-add-vpn", class: "mono", placeholder: "home" });
+  const vpn = offerNames(el("input", { id: "mcp-add-vpn", class: "mono", placeholder: "home" }), "vpn", host);
   const noPull = el("input", { id: "mcp-no-pull", type: "checkbox" }), unsigned = el("input", { id: "mcp-unsigned", type: "checkbox" });
   const addRow = el("div", { class: "row" }), addStatus = el("div", { class: "wide" });
   const showCatalog = (event) => busy(event.target, async () => {
@@ -4794,7 +4819,7 @@ pages.logins = async (main) => {
     const ident = el("input", { id: "identity-name", class: "mono", placeholder: "work" }), person = el("input", { id: "identity-person", placeholder: "Ann Example" });
     const email = el("input", { id: "identity-email", class: "mono", placeholder: "ann@example.org" }), description = el("input", { id: "identity-description" });
     const loginUrl = el("input", { id: "identity-url", class: "mono", placeholder: "https://github.com" }), loginUser = el("input", { id: "identity-user", class: "mono" });
-    const loginSecret = el("input", { id: "identity-secret", class: "mono", placeholder: "GH_WORK" });
+    const loginSecret = offerNames(el("input", { id: "identity-secret", class: "mono", placeholder: "GH_WORK" }), "secret", host);
     const publishKind = el("select", { id: "identity-kind" }, el("option", { value: "" }, t("a Git server (above)")), PUBLISH_KINDS.map(k => el("option", { value: k }, k)));
     const row = el("div", { class: "row" }), loginRow = el("div", { class: "row" }), result = el("div", { class: "wide check-result" });
     const fields = () => ({ name: person.value.trim(), email: email.value.trim(), description: description.value.trim() });

@@ -6042,3 +6042,73 @@ def test_name_style_is_a_default_that_lowers_nothing(logged_in):
     assert any(test(["defaults", "set", "name_style", '"project"']) for _, _, test in w.NEWER), "an older host says so"
     script = (WEB / "app.js").read_text()
     assert '["name_style", N_(' in script and 't("empty: a codename like brisk-otter-lantern")' in script
+
+# -- the names of a host's secrets and VPN profiles offered where a field takes one (offerNames: a <datalist>) --
+
+NAMES_DRIVER = FAKE_DOM + r"""
+const byId = (id) => document.getElementById(id);
+const offered = (id) => { const input = byId(id); const list = input && byId(input.getAttribute("list"));
+  return list ? [list.id, list.children.map(o => o.value)] : null; };
+(async () => {
+  const result = {};
+  vm.runInContext('state.me = { user: "admin", csrf: "c" }; state.hosts = [{ name: "local", kind: "local" }, { name: "ct1", kind: "ssh", ssh: "root@ct1", port: 22 }];', context);
+  const lists = {
+    local: { secrets: [{ name: "VPN_HOME", store: "keyring" }, { name: "TS_KEY", store: "file" }, { name: "bad name", store: "file" }],
+             vpn: [{ profile: "home", type: "wireguard" }, { profile: "tor", type: "tor" }] },
+    // an older host: no vpn list --json (the request fails), its secrets all the same
+    ct1: { secrets: [{ name: "REMOTE_KEY", store: "file" }], vpn: new Error("sandbox-ai vpn list: unknown option --json") },
+  };
+  answer = (method, path, sent) => {
+    const m = /^\/api\/hosts\/([^/]+)\/(secrets|vpn)$/.exec(path);
+    if (method === "GET" && m) return lists[m[1]][m[2]];
+    if (method === "GET") return [];
+    return { output: "ok" };
+  };
+  vm.runInContext('state.host = "local"; state.page = "vpn";', context);
+  await vm.runInContext("pages.vpn(__main)", context); await settle();
+  result.vpnLocal = [offered("vpn-secret"), offered("vpn-bridge-secret"), byId("vpn-secret").getAttribute("autocomplete")];
+  // a name the host lacks is typed and sent as it is (the human decides)
+  calls.length = 0;
+  byId("vpn-name").value = "work"; byId("vpn-kind").value = "openvpn"; byId("vpn-kind").fire("change");
+  byId("vpn-file").value = "/etc/work.ovpn"; byId("vpn-secret").value = "NEW_ONE";
+  main.all().find(n => n.tagName === "button" && n.textContent === "Add profile").fire("click"); await settle();
+  result.typed = calls.filter(c => c.method === "POST").map(c => [c.path, JSON.parse(c.body)]);
+  // the LLM page of another host: its secrets for the key, no VPN profiles (it cannot list them): typed in
+  calls.length = 0;
+  vm.runInContext('state.host = "ct1"; state.page = "llm";', context);
+  await vm.runInContext("pages.llm(__main)", context); await settle();
+  result.llmRemote = [offered("llm-key-secret"), offered("llm-vpn")];
+  // MCP servers of this machine: its VPN profiles for mcp add --vpn
+  vm.runInContext('state.host = "local"; state.page = "mcp";', context);
+  await vm.runInContext("pages.mcp(__main)", context); await settle();
+  result.mcpLocal = offered("mcp-add-vpn");
+  // the list is read again when a page draws such a field (a profile added meanwhile shows)
+  lists.local.vpn.push({ profile: "added", type: "tailscale" });
+  vm.runInContext('state.page = "vpn";', context);
+  await vm.runInContext("pages.vpn(__main)", context); await settle();
+  await vm.runInContext("pages.mcp(__main)", context); await settle();
+  result.mcpAgain = offered("mcp-add-vpn");
+  result.asked = calls.filter(c => /\/(secrets|vpn)/.test(c.path)).map(c => [c.method, c.path]);
+  result.datalists = body.all().filter(n => n.tagName === "datalist").map(n => n.id).sort();
+  console.log(JSON.stringify(result));
+})().catch((e) => { console.error(e && e.stack || e); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_fields_for_a_secrets_or_vpn_profiles_name_offer_the_hosts_names(tmp_path):
+    """Where a page takes the NAME of a secret or of a VPN profile, the host's names are offered (a datalist filled
+    from GET /secrets, names only, and GET /vpn), one list per kind and host; a name it lacks is typed and sent as it
+    is; a host that cannot list them leaves the field typed in; the list is read again when a page draws a field."""
+    result = run_driver(tmp_path, NAMES_DRIVER, "names")
+    assert result["vpnLocal"] == [["names-secret-local", ["TS_KEY", "VPN_HOME"]],
+                                  ["names-secret-local", ["TS_KEY", "VPN_HOME"]], "off"], "valid names only, sorted"
+    assert result["typed"] == [["/api/hosts/local/vpn", {"name": "work", "kind": "openvpn", "file": "/etc/work.ovpn",
+                                                          "secret": "NEW_ONE"}]]
+    assert result["llmRemote"] == [["names-secret-ct1", ["REMOTE_KEY"]], ["names-vpn-ct1", []]], \
+        "that host's names, never this machine's; none it cannot list"
+    assert result["mcpLocal"] == ["names-vpn-local", ["home", "tor"]]
+    assert result["mcpAgain"] == ["names-vpn-local", ["added", "home", "tor"]]
+    assert all(method == "GET" and re.fullmatch(r"/api/hosts/(local|ct1)/(secrets|vpn)", path)
+               for method, path in result["asked"]), "names only: no secret is ever asked for by its name"
+    assert result["datalists"] == ["names-secret-ct1", "names-secret-local", "names-vpn-ct1", "names-vpn-local"]

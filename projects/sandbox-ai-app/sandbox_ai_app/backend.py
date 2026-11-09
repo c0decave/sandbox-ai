@@ -2387,13 +2387,27 @@ class SandboxAI:
         return sorted({str(e["target"]) for e in data if isinstance(e, dict) and e.get("variant")
                        and isinstance(e.get("target"), str) and re.fullmatch(KIT_NAME, e["target"])})
 
-    START_CHOICES = ("--vpn", "--kit", "--identity", "--mcp", "--image-variant")
+    START_CHOICES = ("--vpn", "--kit", "--identity", "--mcp", "--image-variant", "--secret-env", "--api-key",
+                     "--git-token-secret")
 
     def host_start_choices(self, host):
         """({option: [name]}, {option: problem}) of what HOST has for the Start page's choosers: --vpn its VPN profiles
         (vpn list --json), --kit its kits that are named (kits list --json), --identity its identities (identities
-        list --json), --mcp its MCP servers (mcp list --json), --image-variant its image variants (images --json). A
-        list that could not be read is a problem (its field stays typed in)."""
+        list --json), --mcp its MCP servers (mcp list --json), --image-variant its image variants (images --json),
+        --secret-env, --api-key and --git-token-secret the names of its secrets (secrets list, read once; never a
+        value). A list that could not be read is a problem (its field stays typed in)."""
+        secrets_read = []
+
+        def secret_names():
+            if not secrets_read:
+                try:
+                    secrets_read.append(([name for name, _ in self.host_secrets(host)[1]], None))
+                except Exception as exc:  # noqa: BLE001 - said for each of the three options
+                    secrets_read.append((None, exc))
+            names, problem = secrets_read[0]
+            if problem is not None:
+                raise problem
+            return names
         readers = {
             "--vpn": lambda: [e["profile"] for e in self.host_vpn_profiles(host)],
             "--kit": lambda: [k["name"] for k in self.host_kits_inventory(host).get("kits", [])
@@ -2402,6 +2416,7 @@ class SandboxAI:
             "--identity": lambda: list(self.host_identities(host)),
             "--mcp": lambda: [row[0] for row in self.host_mcp_servers(host)],
             "--image-variant": lambda: self.host_image_variants(host),
+            "--secret-env": secret_names, "--api-key": secret_names, "--git-token-secret": secret_names,
         }
         found, problems = {}, {}
         for option, read in readers.items():

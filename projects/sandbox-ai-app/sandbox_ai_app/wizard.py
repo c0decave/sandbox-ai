@@ -32,6 +32,7 @@ from . import wizard_llm as WL
 from .board_view import LinesEdit, PathEdit, RulesEdit
 from .preset_gallery import PlaceholderForm
 from .files import printable
+from .name_fields import NameField
 from .i18n import N_, tr
 from .widgets import MONO, ask_first, background, confirm, plain_label, safe_tooltip, show_text, warn
 
@@ -591,8 +592,9 @@ class ServerDialog(QDialog):
         self.name.setMaxLength(32)
         self.name.setToolTip(tr("How starts name it: --llm NAME[:MODEL]"))
         self.name.textEdited.connect(lambda _text: setattr(self, "name_typed", True))
-        self.secret = QLineEdit()
-        self.secret.setPlaceholderText(SECRET_EXAMPLE)
+        # this machine's secrets to choose from (names only), any other name typed
+        self.secret = NameField("secret", sai, LOCAL, placeholder=SECRET_EXAMPLE)
+        self.secret.setAccessibleName(tr("Secret for the API key (optional)"))
         self.value = QLineEdit()
         self.value.setPlaceholderText(tr("typed here: kept as that secret (or leave it empty if it is kept already)"))
         self.vpn = QComboBox()
