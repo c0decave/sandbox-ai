@@ -6040,6 +6040,28 @@ TEXTS = {
     'Approvals and rules': {
         'en': 'Approvals and rules',
         'de': 'Freigaben und Regeln'},
+    # == --ask in words (ask_choice.py; the web page has the same): allow asks nothing, every question allowed ==
+    'Ask me (default)': {
+        'en': 'Ask me (default)',
+        'de': 'Mich fragen (Standard)'},
+    'Refuse without asking': {
+        'en': 'Refuse without asking',
+        'de': 'Ohne Frage ablehnen'},
+    'Always allow everything': {
+        'en': 'Always allow everything',
+        'de': 'Immer alles erlauben'},
+    "Nothing is asked: every question is allowed at once, for the run, and recorded in the approvals history and the connection log. What rules deny, the privacy check's blocking findings and a canary's alarm stay as they are.": {
+        'en': "Nothing is asked: every question is allowed at once, for the run, and recorded in the approvals history and the connection log. What rules deny, the privacy check's blocking findings and a canary's alarm stay as they are.",
+        'de': 'Es wird nichts gefragt: Jede Rückfrage wird sofort erlaubt, für den Lauf, und im Verlauf der Freigaben und im Verbindungsprotokoll verzeichnet. Was Regeln ablehnen, Funde der Datenschutzprüfung, die einen Push stoppen, und der Alarm eines Canaries bleiben, wie sie sind.'},
+    'asks nothing, allows every question': {
+        'en': 'asks nothing, allows every question',
+        'de': 'fragt nichts, erlaubt jede Rückfrage'},
+    'asks nothing: every question is allowed at once': {
+        'en': 'asks nothing: every question is allowed at once',
+        'de': 'fragt nichts: Jede Rückfrage wird sofort erlaubt'},
+    'Nothing is asked: every question is allowed at once, so any destination can be reached (each one logged)': {
+        'en': 'Nothing is asked: every question is allowed at once, so any destination can be reached (each one logged)',
+        'de': 'Es wird nichts gefragt: Jede Rückfrage wird sofort erlaubt, also ist jedes Ziel erreichbar (jedes wird protokolliert)'},
     'LLM server': {
         'en': 'LLM server',
         'de': 'LLM-Server'},
@@ -6778,9 +6800,12 @@ TEXTS = {
     'Questions': {
         'en': 'Questions',
         'de': 'Rückfragen'},
-    'Ask you before a connection the options do not allow, or refuse it at once.': {
-        'en': 'Ask you before a connection the options do not allow, or refuse it at once.',
-        'de': 'Sie vor einer Verbindung fragen, die die Optionen nicht erlauben, oder sie sofort ablehnen.'},
+    'Ask you before a connection the options do not allow, refuse it at once, or allow every question at once without asking (each one logged).': {
+        'en': 'Ask you before a connection the options do not allow, refuse it at once, or allow every question at once without asking (each one logged).',
+        'de': 'Sie vor einer Verbindung fragen, die die Optionen nicht erlauben, sie sofort ablehnen oder jede Rückfrage ohne Frage sofort erlauben (jede wird protokolliert).'},
+    '⚠ always allow everything': {
+        'en': '⚠ always allow everything',
+        'de': '⚠ immer alles erlauben'},
     'Rulesets': {
         'en': 'Rulesets',
         'de': 'Regelwerke'},

@@ -656,7 +656,11 @@ What narrowing means, option by option (in `high` and `paranoid`):
   `--egress-all-allow`, `--no-provider-defaults`, `--local-config`) replaces
   the mode's network; other network options add to it.
 - **Proxy and approvals**: `--no-proxy`, `--no-inspect` and `--ask=off` widen;
-  `--ask=on` narrows `lax`. The widest approval scope is `run` (`high`) or
+  `--ask=on` narrows `lax`. `--ask=allow` answers every question itself: with a
+  strict mode you chose it is allowed (the start warns that the mode's
+  questions are answered too), with one a floor chose (`min_mode`, a preset's
+  mode, `--mode-at-least`) refused ([approvals](#approvals-and-browser-requests)).
+  The widest approval scope is `run` (`high`) or
   `once` (`paranoid`), or the policy's `max_approval_scope` if that is
   narrower; below `always`, remembered approvals are not applied.
 - **Privacy check**: `always` is the strictest, then `public`, then `off`;
@@ -3556,6 +3560,34 @@ the background (`statsig.com`, `sentry.io` and similar) are refused without
 asking. `--ask off` refuses everything the options do not allow, as before;
 `--no-proxy` and `--offline` ask nothing.
 
+**`--ask allow`: allow every question.** A sandbox started with `--ask allow`
+asks nobody: the launcher answers each question *allow* at once, for the run,
+as your answer would be applied (a name is resolved on the host and pinned,
+a URL opened in your browser), and records it as `allowed automatically
+(--ask allow)` in `sandbox-ai approvals history`, the connection log and
+`sandbox-ai logs`. Answered so: connections and lookups the options do not
+allow, pushes with privacy warnings, requests, MCP and tool calls an `ask`
+rule holds (the writes mode `high` asks about and the calls of a tainted run
+too), devices a device rule asks about, and URLs to open in your browser.
+Nothing is remembered beyond the run (never *always*), and answers keep to the
+scope the administrator's policy and the security mode allow (`paranoid`:
+once, so a lookup there is refused at once). No questions, so unchanged: what
+rules deny, the privacy check's blocking findings, what you blocked always,
+the telemetry hosts refused without asking, and the limits of 20 open and 500
+questions per run. A canary's alarm (a decoy file read: the sandbox is paused)
+still waits for you, and so does a URL that carries a canary token of the run;
+a lookup of a name with a canary token, outside the administrator's
+`allow_hosts` or without a public address is refused at once. The start says
+all this in a warning; `sandbox-ai list`, the app and the web interface mark
+such a start (`asks nothing, allows every question`). A security mode you
+chose (`--mode high`, the project file, `defaults.json`) together with
+`--ask allow` has its questions answered too (the start warns); where a floor
+chose the strict mode (the administrator's `min_mode`, a preset's mode,
+`--mode-at-least`), `--ask allow` is refused. In a project file or a preset it
+is marked as weakening in the trust review; the administrator can forbid it
+(`"forbid": ["--ask=allow"]`). Only the start's own options set it: nothing in
+the sandbox can (`sandbox-ai net allow` has no such option).
+
 The questions live in the run's control directory (under `$XDG_RUNTIME_DIR`),
 which the agent cannot see; only processes of your own user can answer.
 
@@ -4468,7 +4500,7 @@ See [Kits, project memory and plugins](#kits-project-memory-and-plugins).
 | `-x`, `--no-inspect HOST` | Pass TLS to HOST (or `*.DOMAIN`) through unopened; repeatable |
 | `-ah`, `--allow-http 'HOST METHODS PATH'` | Only matching requests reach HOST (or `*.DOMAIN`); repeatable |
 | `-ru`, `--rules FILE` | A [ruleset](#rulesets): allow, ask or deny per HTTP request and per MCP tool call; outside every workspace; repeatable |
-| `-Q`, `--ask on\|off` | Ask before what the options do not allow; unanswered after 60 s: refused (default: `on`; [approvals](#approvals-and-browser-requests)) |
+| `-Q`, `--ask on\|off\|allow` | Ask before what the options do not allow; unanswered after 60 s: refused (default: `on`); `off`: refuse without asking; `allow`: ask nothing, allow every question at once, each recorded ([approvals](#approvals-and-browser-requests)) |
 | `-cn`, `--canaries CATEGORIES` | [Canary files](#canary-files): `credentials` and `home` (default), `workspace`, comma-separated, or `all` |
 | `-nn`, `--no-canaries` | No canary files |
 | `-tm`, `--telemetry LEVEL` | [Telemetry of the agents](#telemetry-of-the-agents): `off` (default), `strict`, `on` |

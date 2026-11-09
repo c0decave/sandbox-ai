@@ -6268,6 +6268,23 @@ RUN_QUESTIONS = 500      # per run; after that, nothing more is asked
 WILDCARD_QUESTIONS = 512
 
 
+# --ask allow: the launcher answers every question by itself (approvals.auto_answer) and marks its answer so ("by");
+# it is recorded with this reason (as approvals.AUTO_REASON). Only the host writes answers: the agent cannot.
+AUTO_BY = "ask-allow"
+AUTO_REASON = "allowed automatically (--ask allow)"
+AUTO_REFUSED = "refused automatically: --ask allow could not allow it"
+
+
+def answered_reason(answer):
+    """The reason an answer (an .answer file's content, written on the host) is recorded with: "answered" for a
+    human's, AUTO_REASON or AUTO_REFUSED (with why) for one --ask allow gave."""
+    if answer.get("by") != AUTO_BY:
+        return "answered"
+    if answer.get("decision") == "allow":
+        return AUTO_REASON
+    return AUTO_REFUSED + (f" ({printable_text(answer['why'], 300)})" if isinstance(answer.get("why"), str) else "")
+
+
 class ApprovalBroker:
     """The supervisor's side: one request per question (repeats wait for the same answer), decisions
     remembered for the run, firewall changes for what is allowed."""
@@ -6375,7 +6392,7 @@ class ApprovalBroker:
         if SCOPES.index(scope) > SCOPES.index(self.max_scope):
             scope = self.max_scope
         return {"decision": answer["decision"], "scope": scope,
-                "reason": "answered", "addresses": answer.get("addresses", [])}
+                "reason": answered_reason(answer), "addresses": answer.get("addresses", [])}
 
     def _wait(self, key, kind, details, waiting):
         deadline = self.clock() + self.timeout

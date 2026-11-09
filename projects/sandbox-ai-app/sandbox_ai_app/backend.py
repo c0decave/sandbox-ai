@@ -4551,7 +4551,20 @@ def help_options(text):
             continue
         head = line.strip().split("  ")[0]  # "-ps, --preset NAME": up to the gap before the help text
         found |= set(re.findall(r"(?<![\w-])--[a-z0-9][a-z0-9-]*", head))
+        # A choice's values ("--ask {on,off,allow}") as OPTION=VALUE: a value newer versions brought is found out
+        # (--ask allow came with sandbox-ai 0.1.80; choice_unknown).
+        for name, values in re.findall(r"(?<![\w-])(--[a-z0-9][a-z0-9-]*) \{([^{}\s]*)\}", head):
+            found |= {f"{name}={value}" for value in values.split(",") if value}
     return found
+
+
+def choice_unknown(option, value, known):
+    """True when VALUE of the choice OPTION is one a host's launcher (its options KNOWN, help_options) lists no
+    "OPTION=VALUE" for while it lists other values of it: a value it is too old for (--ask allow before 0.1.80)."""
+    if option is None or option.kind != "choice" or value in (None, "") or str(value) == str(option.default):
+        return False
+    listed = {name for name in known if name.startswith(f"{option.long}=")}
+    return bool(listed) and f"{option.long}={value}" not in listed
 
 
 def argv_for_host(options, values, known=None):
@@ -4566,7 +4579,9 @@ def dropped_options(options, values, known=None):
     restrictive one (--workspace-ro, --no-provider-defaults) left out would start a weaker sandbox without a word."""
     if known is None:
         return []
-    return [o.long for o in options if o.long not in known and o.long in values and o.tokens(values[o.long])]
+    return [o.long for o in options if o.long not in known and o.long in values and o.tokens(values[o.long])] + \
+        [f"{o.long} {values[o.long]}" for o in options if o.long in known and o.long in values
+         and choice_unknown(o, values[o.long], known)]
 
 
 def unknown_options(options, argv, known):
@@ -4578,7 +4593,7 @@ def unknown_options(options, argv, known):
         token = str(tokens[index])
         if token == "--":
             break
-        name, equals, _ = token.partition("=")
+        name, equals, value = token.partition("=")
         index += 1
         if not name.startswith("--"):
             continue
@@ -4586,7 +4601,10 @@ def unknown_options(options, argv, known):
             found.append(name)
         option = by_name.get(name)
         if option is not None and option.kind != "flag" and not equals:
+            value = str(tokens[index]) if index < len(tokens) else ""
             index += 1  # its value
+        if name in known and choice_unknown(option, value, known) and f"{name} {value}" not in found:
+            found.append(f"{name} {value}")  # a value it is too old for (--ask allow)
     return found
 
 

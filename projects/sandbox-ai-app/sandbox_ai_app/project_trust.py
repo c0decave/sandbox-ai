@@ -82,6 +82,13 @@ def option_warnings(sai, options):
             for name, value in backend.weakening_options(sai.launcher, [str(v) for v in options])]
 
 
+def option_why(widening):
+    """Why the option WIDENING (as option_warnings gives it) is marked."""
+    if widening == "--ask allow":
+        return tr("asks nothing: every question is allowed at once")
+    return tr("widens what the sandbox may do or see")
+
+
 def short(value, limit=160):
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
     text = printable(text)
@@ -105,7 +112,7 @@ def summary(sai, document, defaults=None):
             text = " ".join(printable(str(v)) for v in value) if isinstance(value, list) else whole(value)
             lines.append(f"  options: {text or tr('(none)')}")
             for widening in option_warnings(sai, value if isinstance(value, list) else []):
-                lines.append(f"    {WARN} {printable(widening)}: " + tr("widens what the sandbox may do or see"))
+                lines.append(f"    {WARN} {printable(widening)}: " + option_why(widening))
             continue
         if key in ("workspaces", "agent_args") and isinstance(value, list):
             if not value:

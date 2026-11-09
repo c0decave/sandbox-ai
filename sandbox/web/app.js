@@ -878,8 +878,14 @@ function startAsks(s) { return Boolean(s.run) && state.questions.some(q => q.hos
 
 function startSignature(s, starts) {
   const targets = s.kind === "mcp" ? starts.filter(other => other.kind !== "mcp" && other.host === s.host).map(other => [other.name, other.state, Boolean(other.directory)]) : null;
-  return JSON.stringify([s.host, s.name, s.agent, s.kind, s.state, s.workspace, s.home, s.keep, s.started, s.attachable, s.directory ? 1 : 0, s.mcp, s.llm, s.serves, targets, startAsks(s), LANGUAGE]);
+  return JSON.stringify([s.host, s.name, s.agent, s.kind, s.state, s.workspace, s.home, s.keep, s.started, s.attachable, s.directory ? 1 : 0, s.mcp, s.llm, s.serves, targets, startAsks(s), s.ask, LANGUAGE]);
 }
+
+// --ask in words (the desktop app's ask_choice.py has the same): on asks, off refuses without asking, allow asks
+// nothing and allows every question at once (sandbox-ai 0.1.80), marked with a warning wherever it shows.
+const ASK_LABELS = { on: N_("Ask me (default)"), off: N_("Refuse without asking"), allow: N_("Always allow everything") };
+const ASK_ALLOW_HELP = N_("Nothing is asked: every question is allowed at once, for the run, and recorded in the approvals history and the connection log. What rules deny, the privacy check's blocking findings and a canary's alarm stay as they are.");
+function askLabel(value) { return value === "allow" ? `⚠ ${t(ASK_LABELS.allow)}` : t(ASK_LABELS[value] || value); }
 
 // What failed when a start's button was pressed (its action: pause, resume, stop, delete).
 const RUN_FAILED = { pause: N_("Could not pause {name} on {host}"), resume: N_("Could not resume {name} on {host}"),
@@ -929,8 +935,13 @@ function startRow(s, starts, main, all) {
   const mcpNote = [mcp ? ((s.serves || []).length ? t("serves {starts}", { starts: s.serves.join(", ") }) : t("serves no start yet"))
     : (s.mcp || []).length ? `MCP: ${s.mcp.join(", ")}` : "", llm ? `LLM: ${llm}` : ""].filter(Boolean).join(" · ");
   const asks = startAsks(s) ? el("button", { class: "badge asking small", title: t("a question of this start waits in Approvals"), onclick: () => show("approvals") }, t("asking")) : null;
+  // --ask allow (list --json "ask"): nobody is asked, every question allowed
+  const allowsAll = s.ask === "allow" && ["running", "paused"].includes(s.state)
+    ? el("span", { class: "badge allows-all", title: t(ASK_ALLOW_HELP) }, `⚠ ${t("asks nothing, allows every question")}`) : null;
+  const status = statusCell(s.state);
+  if (allowsAll) status.append(" ", allowsAll);
   return el("tr", { "data-name": s.name, "data-host": host }, hostMarkerCell(host),
-    el("td", { class: "mono start-name" }, el("span", { class: "tree-slot" }), s.name, asks ? " " : null, asks, el("span", { class: "stale-note hint" })), el("td", {}, s.agent || s.kind || ""), statusCell(s.state),
+    el("td", { class: "mono start-name" }, el("span", { class: "tree-slot" }), s.name, asks ? " " : null, asks, el("span", { class: "stale-note hint" })), el("td", {}, s.agent || s.kind || ""), status,
     el("td", { class: "mono" }, s.workspace || "", mcpNote ? el("div", { class: "hint" }, mcpNote) : null), el("td", {}, s.home || ""), el("td", {}, (s.started || "").replace("T", " ").replace("Z", "")), actions);
 }
 
@@ -1744,6 +1755,13 @@ async function drawStartForm(card, heading, host) {
   const name = el("input", { id: "name", placeholder: t("empty: a codename like brisk-otter-lantern"), pattern: NEW_START_NAME.source.slice(1, -1) });
   const workspace = el("input", { id: "workspace", placeholder: "/home/you/src/project", class: "mono", required: true, "aria-describedby": "workspace-hint" });
   const options = el("textarea", { id: "options", rows: 3, class: "mono", placeholder: "--mode high\n--allow-pypi\n-mm sonnet", "aria-describedby": "options-hint" });
+  // --ask: ask (the default), refuse without asking, or allow every question at once (marked, explained below it)
+  const ask = el("select", { id: "start-ask", "aria-describedby": "start-ask-hint" }, ["on", "off", "allow"].map(value => el("option", { value }, askLabel(value))));
+  const askHint = el("div", { class: "hint", id: "start-ask-hint" });
+  ask.addEventListener("change", () => {
+    askHint.textContent = ask.value === "allow" ? `⚠ ${t(ASK_ALLOW_HELP)}` : "";
+    askHint.className = ask.value === "allow" ? "hint status-warn" : "hint";
+  });
   const startStatus = el("div", { class: "wide", id: "start-status" });
   const start = el("button", { class: "primary", onclick: () => busy(start, async () => {
     clear(startStatus);
@@ -1774,7 +1792,8 @@ async function drawStartForm(card, heading, host) {
       return;
     }
     const server = model.disabled ? "" : model.value;  // "only this server" means nothing for the cloud
-    list = withModel([...presetArgs, ...list], server, onlyServer.checked && Boolean(server));
+    // the chooser's --ask first: an --ask of the options comes later and wins, as on a command line
+    list = withModel([...presetArgs, ...(["off", "allow"].includes(ask.value) ? ["--ask", ask.value] : []), ...list], server, onlyServer.checked && Boolean(server));
     openTerminal({ kind: "start", host, agent: agentOf(), name: textOf(name), workspace: textOf(workspace), options: JSON.stringify(list) }, textOf(name) || t("new {agent}", { agent: agentOf() }));
   }) }, t("Start in a terminal"));
   card.append(el("div", { class: "form" },
@@ -1787,6 +1806,7 @@ async function drawStartForm(card, heading, host) {
       el("div", { class: "hint", id: "workspace-hint" }, t("Required: the folder on that host the agent works on, as /work (an absolute path, or ~/…). The folder this service runs in is never taken instead."))),
     el("label", { for: "preset" }, t("Preset")), el("div", {}, preset, " ", presetHint),
     presetValues, presetMcp,
+    el("label", { for: "start-ask" }, t("Questions")), el("div", {}, ask, askHint),
     el("label", { for: "options" }, t("Options")), el("div", {}, options,
       el("div", { class: "hint", id: "options-hint" }, t("Further options, as on a command line (one or more per line): {examples}; quotes keep spaces together.", { examples: "-mm sonnet, --mode high" }))),
     startStatus,
@@ -4622,7 +4642,7 @@ function projectMarks(r) {
   for (const m of marks) {
     const value = (v) => typeof v === "string" ? v : JSON.stringify(v);
     if (m.why === "mode") lines.push(`⚠ mode: ${value(doc.mode)} - ${t("a laxer security mode than your default ({mode})", { mode: String(m.default || "") })}`);
-    else if (m.why === "option") lines.push(`⚠ ${String(m.option || "")}${m.value === null || m.value === undefined ? "" : ` ${String(m.value)}`}: ${t("widens what the sandbox may do or see")}`);
+    else if (m.why === "option") lines.push(`⚠ ${String(m.option || "")}${m.value === null || m.value === undefined ? "" : ` ${String(m.value)}`}: ${m.option === "--ask" && m.value === "allow" ? t("asks nothing: every question is allowed at once") : t("widens what the sandbox may do or see")}`);
     else if (m.why === "workspace") lines.push(`    ⚠ ${String(m.value || "")} - ${m.read_only ? t("read-only for the agent, outside the project") : t("writable for the agent, outside the project")}`);
     else if (m.why === "agent_args") lines.push(`⚠ agent_args: ${t(MARK_TEXTS.agent_args)}`, ...(Array.isArray(doc.agent_args) ? doc.agent_args.map(a => `    ${value(a)}`) : []));
     else if (MARK_TEXTS[m.why]) lines.push(`⚠ ${String(m.key || m.why)}: ${t(MARK_TEXTS[m.why])}`);

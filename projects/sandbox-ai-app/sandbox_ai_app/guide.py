@@ -166,8 +166,10 @@ NODE_QUESTIONS = {
                     "own."), "flag"),
     ),
     "approvals": (
-        Question("--ask", N_("Questions"), N_("Ask you before a connection the options do not allow, or refuse it "
-                                              "at once."), "choice", (("on", N_("ask me")), ("off", N_("refuse")))),
+        Question("--ask", N_("Questions"), N_("Ask you before a connection the options do not allow, refuse it at "
+                                              "once, or allow every question at once without asking (each one "
+                                              "logged)."), "choice",
+                 (("on", N_("ask me")), ("off", N_("refuse")), ("allow", N_("⚠ always allow everything")))),
         Question("--rules", N_("Rulesets"), N_("Files of rules, one per line: they allow, ask or deny requests, "
                                                "MCP tool calls and the agent's own tools."), "list"),
     ),

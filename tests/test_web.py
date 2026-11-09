@@ -1101,6 +1101,23 @@ def test_options_an_older_host_does_not_know_are_said_not_sent(logged_in):
     assert [q.get("host_too_old") for q in logged_in.svc.api.host_questions("ct2")] == [None, None]
 
 
+def test_a_start_that_allows_every_question_asks_an_older_host_to_be_updated(logged_in):
+    """--ask allow (every question answered yes at once) came with 0.1.80: a start with it on a host whose last status
+    names an older version is refused before anything runs there (host-too-old, naming "--ask allow"), however the
+    option is written; the same start with --ask on goes, and so does a host of that version."""
+    hosts = w.module("hosts")
+    hosts.save({"ct1": hosts.check("ct1", {"ssh": "root@192.0.2.10"}), "ct2": hosts.check("ct2", {"ssh": "root@192.0.2.11"})})
+    hosts.save_statuses({"ct1": {"version": "0.1.79", "ssh": "root@192.0.2.10", "port": 22, "checked": 1},
+                         "ct2": {"version": "0.1.80", "ssh": "root@192.0.2.11", "port": 22, "checked": 1}})
+    start = {"host": "ct1", "kind": "start", "agent": "claude", "workspace": "/srv/p"}
+    for options in (["--ask", "allow"], ["--ask=allow"], ["-Q", "allow"], ["--mode", "high", "--ask", "allow"]):
+        with pytest.raises(w.Refused) as refused:
+            w.terminal_command({**start, "options": json.dumps(options)})
+        assert refused.value.code == "host-too-old" and refused.value.params["what"] == "--ask allow", options
+    assert w.terminal_command({**start, "options": json.dumps(["--ask", "on"])})[0] == "ct1"
+    assert w.terminal_command({**start, "host": "ct2", "options": json.dumps(["--ask", "allow"])})[0] == "ct2"
+
+
 def test_the_marketplace_browser_asks_an_older_host_to_be_updated(logged_in):
     """sandbox-ai plugins marketplaces, the new kits commands, the default kit's plugins and the plugin lists fetched
     in a terminal came with 0.1.78: a host whose last status names an older version is told to update, nothing runs
@@ -5170,6 +5187,13 @@ const reset = () => { vm.runInContext("clear(__main); terminalsOpened.length = 0
   buttonIn(main, "Start in a terminal").fire("click"); await settle();
   result.checked = posts().filter(p => p[1].endsWith("/check")).map(p => [p[1], p[2]]);
   result.started = vm.runInContext("terminalsOpened.map(p => [p.host, p.agent, JSON.parse(p.options)])", context);
+  // --ask in words; "Always allow everything" explained below it, passed before the options (theirs would win)
+  result.askLabels = byId("start-ask").children.map(o => o.textContent);
+  byId("start-ask").value = "allow"; byId("start-ask").fire("change");
+  result.askHint = byId("start-ask-hint").textContent;
+  buttonIn(main, "Start in a terminal").fire("click"); await settle();
+  result.startedAllow = vm.runInContext("JSON.parse(terminalsOpened[terminalsOpened.length - 1].options)", context);
+  byId("start-ask").value = "on"; byId("start-ask").fire("change");
   byId("preset").value = "software-analysis"; byId("preset").fire("change"); await settle();
   result.mcp = main.all().filter(n => n.tagName === "li").map(n => [n.className, n.textContent]);
   result.samples = Boolean(byId("preset-value-samples"));
@@ -5342,6 +5366,9 @@ def test_round_four_of_the_page(tmp_path):
     assert opened == 0 and "not ready on ct1: nothing was started" in text and "no VPN profile anon" in text
     assert result["checked"] == [["/api/hosts/ct1/presets/tor/check", {"values": {"tor": "anon"}, "agent": "codex"}]] * 2
     assert result["started"] == [["ct1", "codex", ["--preset", "tor", "--preset-value", "tor=anon", "--mode", "high"]]]
+    assert result["askLabels"] == ["Ask me (default)", "Refuse without asking", "⚠ Always allow everything"]
+    assert result["askHint"].startswith("⚠ Nothing is asked: every question is allowed at once")
+    assert result["startedAllow"] == ["--preset", "tor", "--preset-value", "tor=anon", "--ask", "allow", "--mode", "high"]
     assert result["mcp"] == [["status-ok", "hub:capa added on ct1"],
                              ["status-warn", "hub:yara not added on ct1 yet: sandbox-ai mcp add hub:yaraOpen MCP servers"]]
     assert result["samples"] and result["ollama"] == ["ollama", True], "the preset names the LLM server: no model"

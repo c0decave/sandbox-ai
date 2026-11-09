@@ -353,6 +353,13 @@ def mode_of(record_):
     return text(mode.get("name")) if isinstance(mode, dict) else None
 
 
+def ask_of(record_):
+    """How a running sandbox's questions are answered, from its run.json: "on" (asked), "off" (refused), "allow"
+    (--ask allow: every one allowed at once, nobody asked), or None (no proxy, or an older version: not recorded)."""
+    ask = record_.get("ask") if isinstance(record_, dict) else None
+    return ask if ask in ("on", "off", "allow") else None
+
+
 def start_entries(prune=True):
     """{id: entry} of the start directories: detachable sessions and kept starts, in every state. PRUNE: remove
     the ended ones that kept no HOME on the way (only their history is left)."""
@@ -571,7 +578,7 @@ def entries(include_all=False, prune=True):
         plain.append({"name": name, "id": run, "kind": "run", "agent": text(record_.get("agent")),
                       "backend": text(record_.get("backend")), "state": "orphaned",
                       "home": "own" if record_.get("own_home") else "discarded", "keep": False,
-                      "mode": mode_of(record_), "attachable": False, "run": run, "pid": None,
+                      "mode": mode_of(record_), "ask": ask_of(record_), "attachable": False, "run": run, "pid": None,
                       "started": text(record_.get("started")), "workspace": text(record_.get("workspace")),
                       "mcp": record_mcp(record_) or [], "llm": record_llm(record_), "directory": None,
                       "run_dir": record_.get("directory")})
@@ -581,6 +588,7 @@ def entries(include_all=False, prune=True):
         session = starts.get(text(record_.get("start")) or "") or legacy.get(run)
         if session is not None:
             session["run"], session["run_dir"], session["mode"] = run, record_.get("directory"), mode_of(record_)
+            session["ask"] = ask_of(record_)
             running_mcp = record_mcp(record_)
             if running_mcp is not None:  # what it reaches now; its options say what it starts with next time
                 session["mcp_running"] = running_mcp
@@ -597,7 +605,7 @@ def entries(include_all=False, prune=True):
         plain.append({"name": name, "id": run, "kind": "run", "agent": text(record_.get("agent")),
                       "backend": text(record_.get("backend")), "state": "paused" if paused else "running",
                       "home": "own" if record_.get("own_home") else "discarded", "keep": False,
-                      "mode": mode_of(record_),
+                      "mode": mode_of(record_), "ask": ask_of(record_),
                       "attachable": False, "run": run, "pid": record_.get("pid"),
                       "started": text(record_.get("started")), "workspace": text(record_.get("workspace")),
                       "mcp": record_mcp(record_) or [], "llm": record_llm(record_), "directory": None,
@@ -965,6 +973,8 @@ def shown_time(value):
 
 
 HEADERS = ["NAME", "KIND", "AGENT", "STATE", "HOME", "STARTED (UTC)", "WORKSPACE"]
+# A start with --ask allow: after its state (never a question, every one allowed; the app and the web warn alike).
+ASK_ALLOW_STATE = "asks nothing, allows every question (--ask allow)"
 STATE_STYLES = {"running": "ok", "paused": "warn", "orphaned": "bad", "damaged": "bad"}  # any other state (stopped, ended): muted
 KIND_STYLES = {"session": "accent", "run": "blue", "mcp": "magenta"}
 HELPER_PREFIX = "mcp-helper-"  # an MCP server that is another agent, a lead's helper (agent_sandbox.HELPER_PREFIX)
@@ -1010,7 +1020,8 @@ def row(entry, colour, mark="", under=None):
             t.style(entry["kind"], kind_style(entry), colour),
             printable(entry.get("agent") or "-"),
             t.style(entry["state"] + (", expired" if entry.get("expired") else ""),
-                    STATE_STYLES.get(entry["state"], "muted"), colour),
+                    STATE_STYLES.get(entry["state"], "muted"), colour)
+            + (t.style(f", {ASK_ALLOW_STATE}", "bad", colour) if entry.get("ask") == "allow" else ""),
             entry.get("home") or "-",
             shown_time(entry.get("started")),
             printable(where)]
@@ -1099,7 +1110,8 @@ start uses follow the starts. --flat lists every row on its own, in start order 
 
 Colour on a terminal (not with NO_COLOR set or TERM=dumb; --color=always forces it, --no-color turns it off):
 KIND and NAME by kind (session cyan, run blue, MCP server magenta, helper violet), STATE by state (running green,
-paused yellow, damaged red, stopped grey)."""
+paused yellow, damaged red, stopped grey). A start with --ask allow says after its state, in red, that it asks
+nothing and allows every question ("ask" in --json: on, off or allow)."""
 
 
 def parser():

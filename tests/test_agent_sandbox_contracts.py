@@ -6677,6 +6677,43 @@ def test_asking(scenario):
         assert not s.asking(s.parse_args(["codex", "--probe"])) and not s.asking(s.parse_args(["codex", "--offline"]))
 
 
+def test_asks_nobody(scenario):
+    if scenario == "happy":  # --ask allow: the launcher answers every question itself
+        assert s.asks_nobody(s.parse_args(["codex", "--ask", "allow"])) and s.asking(s.parse_args(["codex", "-Q", "allow"]))
+    elif scenario == "sad":
+        assert not s.asks_nobody(s.parse_args(["codex"])) and not s.asks_nobody(s.parse_args(["codex", "--ask", "off"]))
+    else:  # nothing is asked without the proxy: nothing to answer either
+        assert not s.asks_nobody(s.parse_args(["codex", "--ask", "allow", "--no-proxy"]))
+        assert not s.asks_nobody(s.parse_args(["codex", "--ask", "allow", "--probe"]))
+
+
+def test_ask_allow_notes(scenario):
+    a = s.parse_args(["codex", "--ask", "allow"])
+    a.mode, a.mode_origin = "medium", "default"
+    if scenario == "happy":
+        assert s.ask_allow_notes(a) == [s.ASK_ALLOW_WARNING]
+    elif scenario == "sad":
+        plain = s.parse_args(["codex"])
+        plain.mode = "medium"
+        assert s.ask_allow_notes(plain) == []
+        a.no_proxy = True
+        assert "does nothing here" in s.ask_allow_notes(a)[0]
+    else:  # a strict mode the human chose: its questions are answered too, said so
+        a.mode, a.mode_origin = "paranoid", "--mode"
+        notes = s.ask_allow_notes(a)
+        assert len(notes) == 2 and "security mode paranoid (--mode) too" in notes[1] and "once only" in notes[1]
+
+
+def test_answered_reason(scenario):
+    if scenario == "happy":
+        assert rt.answered_reason({"decision": "allow", "by": "ask-allow"}) == "allowed automatically (--ask allow)"
+    elif scenario == "sad":
+        assert rt.answered_reason({"decision": "allow", "by": "someone"}) == "answered"
+    else:  # a refusal says why, escaped: the why names what the agent chose
+        assert rt.answered_reason({"decision": "deny", "by": "ask-allow", "why": "a\nb"}) == \
+            "refused automatically: --ask allow could not allow it (a%0Ab)"
+
+
 def test_remembered_pins(scenario):
     a = s.parse_args(["codex"])
     a.policy = {}

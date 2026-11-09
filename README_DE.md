@@ -678,7 +678,12 @@ Was „enger" heißt, Option für Option (in `high` und `paranoid`):
   `--egress-all-allow`, `--no-provider-defaults`, `--local-config`) das
   Netzwerk des Modus; andere Netzwerkoptionen kommen hinzu.
 - **Proxy und Rückfragen**: `--no-proxy`, `--no-inspect` und `--ask=off`
-  machen weiter; `--ask=on` macht `lax` enger. Der weiteste Geltungsbereich
+  machen weiter; `--ask=on` macht `lax` enger. `--ask=allow` beantwortet jede
+  Frage selbst: mit einem strengen Modus, den Sie gewählt haben, ist es erlaubt
+  (der Start warnt, dass auch die Fragen des Modus beantwortet werden), mit
+  einem, den eine Untergrenze gewählt hat (`min_mode`, der Modus eines Presets,
+  `--mode-at-least`), abgelehnt ([Rückfragen](#rückfragen-und-browser-anfragen)).
+  Der weiteste Geltungsbereich
   einer Antwort ist `run` (`high`) oder `once` (`paranoid`), oder
   `max_approval_scope` der Richtlinie, wenn das enger ist; unterhalb von
   `always` werden gemerkte Freigaben nicht angewandt.
@@ -3782,6 +3787,39 @@ die die Agenten im Hintergrund ansprechen (`statsig.com`, `sentry.io` und
 ähnliche), werden ohne Frage abgewiesen. `--ask off` weist alles ab, was die
 Optionen nicht erlauben, wie bisher; `--no-proxy` und `--offline` fragen nichts.
 
+**`--ask allow`: jede Rückfrage erlauben.** Eine mit `--ask allow` gestartete
+Sandbox fragt niemanden: Der Launcher beantwortet jede Frage sofort mit
+*erlauben*, für den Lauf, so angewandt wie Ihre Antwort (ein Name wird auf dem
+Host aufgelöst und gepinnt, eine URL in Ihrem Browser geöffnet), und
+verzeichnet sie als `allowed automatically (--ask allow)` in `sandbox-ai
+approvals history`, im Verbindungsprotokoll und in `sandbox-ai logs`. So
+beantwortet werden: Verbindungen und Namensauflösungen, die die Optionen nicht
+erlauben, Pushs mit Datenschutz-Warnungen, Anfragen, MCP- und Werkzeugaufrufe,
+die eine `ask`-Regel anhält (auch die Schreibzugriffe, nach denen der Modus
+`high` fragt, und die Aufrufe eines Laufs mit Taint), Geräte, nach denen eine
+Geräteregel fragt, und URLs, die in Ihrem Browser öffnen sollen. Nichts wird
+über den Lauf hinaus behalten (nie *immer*), und Antworten halten sich an den
+Umfang, den die Policy des Administrators und der Sicherheitsmodus erlauben
+(`paranoid`: einmal, eine Namensauflösung wird dort daher sofort abgewiesen).
+Keine Fragen und daher unverändert: was Regeln ablehnen, Funde der
+Datenschutzprüfung, die einen Push stoppen, was Sie immer gesperrt haben, die ohne Frage
+abgewiesenen Telemetrie-Hosts und die Grenzen von 20 offenen und 500 Fragen je
+Lauf. Der Alarm eines Canaries (eine Köderdatei wurde gelesen: die Sandbox ist
+angehalten) wartet weiter auf Sie, ebenso eine URL mit einem Canary-Token des
+Laufs; die Namensauflösung eines Namens mit Canary-Token, außerhalb von
+`allow_hosts` des Administrators oder ohne öffentliche Adresse wird sofort
+abgewiesen. Der Start sagt all das in einer Warnung; `sandbox-ai list`, die App
+und die Weboberfläche kennzeichnen einen solchen Start (`asks nothing, allows
+every question`). Ein Sicherheitsmodus, den Sie gewählt haben (`--mode high`,
+die Projektdatei, `defaults.json`), wird zusammen mit `--ask allow` ebenfalls
+ohne Frage beantwortet (der Start warnt); hat eine Untergrenze den strengen
+Modus gewählt (`min_mode` des Administrators, der Modus eines Presets,
+`--mode-at-least`), wird `--ask allow` abgelehnt. In einer Projektdatei oder
+einem Preset ist es in der Vertrauensprüfung als schwächend markiert; der
+Administrator kann es verbieten (`"forbid": ["--ask=allow"]`). Nur die Optionen
+des Starts setzen es: nichts in der Sandbox kann das (`sandbox-ai net allow`
+hat keine solche Option).
+
 Die Fragen liegen im Steuerverzeichnis des Laufs (unter `$XDG_RUNTIME_DIR`),
 das der Agent nicht sieht; nur Prozesse Ihres eigenen Benutzers können
 antworten.
@@ -4751,7 +4789,7 @@ Siehe [Kits, Projekt-Memory und Plugins](#kits-projekt-memory-und-plugins).
 | `-x`, `--no-inspect HOST` | TLS zu HOST (oder `*.DOMAIN`) ungeöffnet durchreichen; mehrfach |
 | `-ah`, `--allow-http 'HOST METHODEN PFAD'` | Nur passende Anfragen erreichen HOST (oder `*.DOMAIN`); mehrfach |
 | `-ru`, `--rules DATEI` | Ein [Regelwerk](#regelwerke): erlauben, erfragen oder verbieten je HTTP-Anfrage und je Aufruf eines MCP-Werkzeugs; außerhalb aller Workspaces; mehrfach |
-| `-Q`, `--ask on\|off` | Nachfragen bei allem, was die Optionen nicht erlauben; ohne Antwort nach 60 s abgewiesen (Standard: `on`; [Rückfragen](#rückfragen-und-browser-anfragen)) |
+| `-Q`, `--ask on\|off\|allow` | Nachfragen bei allem, was die Optionen nicht erlauben; ohne Antwort nach 60 s abgewiesen (Standard: `on`); `off`: ohne Frage abweisen; `allow`: nichts fragen, jede Frage sofort erlauben, jede verzeichnet ([Rückfragen](#rückfragen-und-browser-anfragen)) |
 | `-cn`, `--canaries KATEGORIEN` | [Köderdateien](#köderdateien-canaries): `credentials` und `home` (Standard), `workspace`, durch Kommas getrennt, oder `all` |
 | `-nn`, `--no-canaries` | Keine Köderdateien |
 | `-tm`, `--telemetry STUFE` | [Telemetrie der Agenten](#telemetrie-der-agenten): `off` (Standard), `strict`, `on` |

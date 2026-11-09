@@ -902,7 +902,9 @@ def summary(node):
         rules = len(props.get("--allow-http", []))
         return tr("on, {count} request rules", count=rules) if rules else tr("on, TLS inspected")
     if node.kind == "approvals":
-        parts = [f"--ask {props['--ask']}"] if props.get("--ask") else []
+        from . import ask_choice as AC
+        parts = [AC.label("allow") if props.get("--ask") == "allow" else f"--ask {props['--ask']}"] \
+            if props.get("--ask") else []
         if isinstance(props.get("rules"), dict):
             rules = props["rules"]
             count = len(rules.get("http", []) or []) + len(rules.get("mcp", []) or [])
@@ -2169,6 +2171,8 @@ class BoardPage(QWidget):
             if option == "--kit" and kind == "kits" and self.kit_inventory:
                 continue  # the kits are offered by name above
             self.option_row(node, options[option])
+            if option == "--ask":
+                self.ask_note()
         if kind in ("devices", "limits"):
             self.live_rows(node)
 
@@ -2450,16 +2454,24 @@ class BoardPage(QWidget):
             widget.setChecked(bool(value))
             widget.toggled.connect(lambda on: self.set_prop(node_id, long, bool(on)))
         elif option.kind == "choice":
-            widget = QComboBox()
             items = ([""] if option.default is None else []) + [str(c) for c in option.choices]
-            widget.addItems(items)
+            if long == "--ask":  # its values in words, "allow" marked and explained below it (ask_note)
+                from . import ask_choice as AC
+                widget = self.ask_box = AC.AskChoice(items)
+            else:
+                widget = QComboBox()
+                widget.addItems(items)
             widget.setCurrentText(str(value) if value not in (None, "") else ("" if option.default is None
                                                                                else str(option.default)))
             for index, item in enumerate(items):
                 if item and item in self.forbidden.get(long, set()):
                     widget.model().item(index).setEnabled(False)
-            widget.currentTextChanged.connect(lambda text: self.set_prop(
-                node_id, long, "" if text == str(option.default) else text))
+            if long == "--ask":  # the value, not the words shown
+                widget.currentIndexChanged.connect(lambda _i, box=widget: self.set_prop(
+                    node_id, long, "" if box.currentText() == str(option.default) else box.currentText()))
+            else:
+                widget.currentTextChanged.connect(lambda text: self.set_prop(
+                    node_id, long, "" if text == str(option.default) else text))
         elif option.kind == "multi":
             widget = QWidget()
             row = QHBoxLayout(widget)
@@ -2526,6 +2538,17 @@ class BoardPage(QWidget):
         if None in self.forbidden.get(long, set()):
             self.disable_if_forbidden(widget, long)
         self.inspector.addRow(label, widget)
+
+    def ask_note(self):
+        """Below --ask: what "Always allow everything" (--ask allow) means, shown while it is chosen."""
+        from . import ask_choice as AC
+        box = getattr(self, "ask_box", None)
+        if box is None:
+            return
+        note = plain_label(f"{AC.WARN} {tr(AC.ALLOW_HELP)}", role="notice-warn")
+        note.setVisible(AC.warned("--ask", box.currentText()))
+        box.currentIndexChanged.connect(lambda _i, b=box, n=note: n.setVisible(AC.warned("--ask", b.currentText())))
+        self.inspector.addRow("", note)
 
     def disable_if_forbidden(self, widget, option):
         if None in self.forbidden.get(option, set()):

@@ -1323,7 +1323,12 @@ SECTIONS = (
          "Questions appear as desktop notifications, in the app and in `sandbox-ai approvals`. The name in a "
          "connection question is the agent's claim: what you allow is the address, unless sandbox-ai can prove "
          "the name. `--ask off` refuses everything the options do not allow. The security mode `high` caps "
-         "answers at run, `paranoid` at once, and the administrator's `max_approval_scope` can cap them further.",
+         "answers at run, `paranoid` at once, and the administrator's `max_approval_scope` can cap them further.\n\n"
+         "`--ask allow` (Always allow everything) asks nothing: every question is allowed at once, for the run, and "
+         "recorded as \"allowed automatically\" in the approvals history and the connection log. What rules deny "
+         "and the privacy check's blocking findings stay refused, and a canary alarm still waits for you. With a "
+         "strict mode you chose, its questions are answered too; where a preset or the administrator set the mode, "
+         "it is refused.",
          "Mit Proxy fragt eine Sandbox nach, statt still zu scheitern (`--ask on`, der Standard). Sie fragt nach "
          "einer Verbindung oder Namensauflösung, die die Optionen nicht erlauben, einem Push, zu dem die "
          "Datenschutzprüfung Warnungen hat, einer Anfrage oder einem MCP-Aufruf, den eine `ask`-Regel anhält, "
@@ -1336,8 +1341,13 @@ SECTIONS = (
          "einer Verbindungsfrage ist eine Angabe des Agenten: Erlaubt wird die Adresse, außer sandbox-ai kann den "
          "Namen belegen. `--ask off` weist alles ab, was die Optionen nicht erlauben. Der Sicherheitsmodus `high` "
          "begrenzt Antworten auf den Lauf, `paranoid` auf einmal, und `max_approval_scope` des Administrators kann "
-         "sie weiter begrenzen."),
-        cli=("--ask on|off", "sandbox-ai approvals list", "sandbox-ai approvals allow ID --scope once|run|always",
+         "sie weiter begrenzen.\n\n"
+         "`--ask allow` (Immer alles erlauben) fragt nichts: Jede Frage wird sofort erlaubt, für den Lauf, und als "
+         "\"allowed automatically\" im Verlauf der Freigaben und im Verbindungsprotokoll verzeichnet. Was Regeln "
+         "ablehnen und Funde der Datenschutzprüfung, die einen Push stoppen, bleiben abgewiesen, und ein Canary-Alarm "
+         "wartet weiter auf Sie. Mit einem strengen Modus, den Sie gewählt haben, werden auch dessen Fragen "
+         "beantwortet; hat ein Preset oder der Administrator den Modus gesetzt, wird es abgelehnt."),
+        cli=("--ask on|off|allow", "sandbox-ai approvals list", "sandbox-ai approvals allow ID --scope once|run|always",
              "sandbox-ai approvals remembered", "sandbox-ai approvals forget PROJECT ENTRY"),
         see=("page-approvals", "network", "rulesets", "security-modes"),
         tours=("approvals-network",)),

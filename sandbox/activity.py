@@ -1936,10 +1936,13 @@ class Approvals:
             answer = result.get("decision") if isinstance(result.get("decision"), str) else \
                 "unanswered" if not answered else "?"
             scope = result.get("scope") if isinstance(result.get("scope"), str) else None
-            events.append(raw("approval", f"{answer}{' (' + scope + ')' if scope else ''}: {text}",
+            # --ask allow answered it, not a human (approvals.AUTO_REASON, AUTO_REFUSED).
+            auto = str(result.get("reason") or "").startswith(("allowed automatically", "refused automatically"))
+            events.append(raw("approval", f"{answer}{' (' + scope + ')' if scope else ''}"
+                              f"{' automatically (--ask allow)' if auto else ''}: {text}",
                               when(result.get("time") or question.get("time")),
                               {"question": text, "kind": question.get("kind"), "answer": answer, "scope": scope,
-                               "reason": result.get("reason"), "asked": question.get("time"),
+                               "reason": result.get("reason"), "asked": question.get("time"), "automatic": auto,
                                **{k: question[k] for k in ("destination", "host", "name", "url", "refs") if k in question}},
                               key=f"approval:{ident}", source=self.source))
         return events

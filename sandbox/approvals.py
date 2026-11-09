@@ -22,6 +22,15 @@ one the agent sends: what is allowed is the address, and "always" keeps the name
 proved it (its own pin, or the real server's certificate on the approved connection); the question says
 which it will be.
 
+A sandbox started with --ask allow asks nobody: every question is answered "allow" at once, for the run (or the
+narrower scope the administrator's policy and the run's security mode allow; never "always"), by the launcher on
+the host (auto_answer), and recorded like your answer ("allowed automatically (--ask allow)" in approvals history,
+the connection log and sandbox-ai logs). Not questions, so not answered: what rules deny, the privacy check's
+blocking findings, what you blocked always. A canary's alarm (a decoy file read: the sandbox is paused) and a
+browser request whose URL carries a canary token of the run still go to you; a lookup no answer may allow (a name
+with a canary token, one outside the policy, one with no public address, a run that approves only once) is
+refused at once.
+
 Standard library only.
 """
 import argparse
@@ -442,6 +451,14 @@ def answer_cap(record, widest="always"):
     return min(caps, key=SCOPES.index)
 
 
+# --ask allow: the "by" of an answer the launcher gave by itself (in the .answer file); the sandbox's readers of the
+# answer (runtime.ApprovalBroker, devices.read_answer) record AUTO_REASON (AUTO_REFUSED for a refusal) as its reason.
+AUTO_BY = "ask-allow"
+AUTO_REASON = "allowed automatically (--ask allow)"
+AUTO_REFUSED = "refused automatically: --ask allow could not allow it"
+AUTO_SKIPPED = ("canary",)  # an alarm (the sandbox is paused until you answer), not a question: always yours
+
+
 DNS_ONCE = ("an allowed name stays pinned for the run (the agent's next try reaches it), and this run approves at "
             "most once (its security mode or the administrator's policy): deny it, or allow the name at the next "
             "start (--allow-host) if you mean it")
@@ -516,12 +533,13 @@ def wait_done(path, seconds):
             time.sleep(0.1)
 
 
-def answer(ident, decision, scope="once", runs=None, resolver=resolve, opener=None, out=print, wait=10.0,
-           no_open=False):
+def answer(ident, decision, scope="once", runs=None, resolver=None, opener=None, out=print, wait=10.0,
+           no_open=False, auto=None):
     """Write the answer to question IDENT; side effects the supervisor cannot do itself happen here:
     a name is resolved and pinned, a browser is opened, an "always" is remembered for the project. NO_OPEN (a browser
     question only): allowed without opening the page on this host (the human opened it where they are: the web
-    interface or the app on another machine)."""
+    interface or the app on another machine). AUTO: given by --ask allow, not by a human (auto_answer): True, or
+    the reason it could not allow (with a deny); the answer says so (AUTO_BY) and is recorded with AUTO_REASON."""
     if decision not in ("allow", "deny") or scope not in ("once", "run", "always"):
         raise ValueError("decision allow|deny, scope once|run|always")
     if no_open and decision != "allow":
@@ -568,13 +586,17 @@ def answer(ident, decision, scope="once", runs=None, resolver=resolve, opener=No
             else:
                 notes.append("only names and addresses are blocked always; this one is denied for the run")
         reply = {"decision": decision, "scope": scope}
+        if auto:
+            reply["by"] = AUTO_BY
+            if isinstance(auto, str):
+                reply["why"] = shown(auto, 300)
         if decision == "allow" and kind == "dns":
             host = question.get("name")
             if not isinstance(host, str) or not HOST.fullmatch(host):
                 raise ValueError(f"not a host name: {shown(host)}")
             if canary_in_name(record, host):  # looked up here, the token would leave through this host's DNS
                 raise ValueError(f"{shown(host)} carries a canary token of the run: it is never looked up")
-            resolved = resolver(host)
+            resolved = (resolver or resolve)(host)
             addresses = public_addresses(host, resolved)
             if len(addresses) < len(resolved):
                 notes.append("not opened (not public): " + ", ".join(a for a in resolved if a not in addresses))
@@ -601,7 +623,7 @@ def answer(ident, decision, scope="once", runs=None, resolver=resolve, opener=No
         temporary.write_text(json.dumps(reply))
         os.replace(temporary, path)
         if kind == "browser":  # nobody waits for these in the sandbox
-            path.with_name(f"{ident}.done").write_text(json.dumps({**reply, "reason": "answered"}))
+            path.with_name(f"{ident}.done").write_text(json.dumps({**reply, "reason": answered_reason(reply)}))
         if later:
             # Only what the sandbox accepted is remembered: a question that timed out meanwhile, or an answer the
             # supervisor could not apply, must not open the next start.
@@ -617,10 +639,54 @@ def answer(ident, decision, scope="once", runs=None, resolver=resolve, opener=No
             else:
                 notes.append("not remembered for the project: the sandbox did not apply it ("
                              f"{shown(result.get('reason', 'no reply'), 200)})")
-        out(f"{shown(name)}: {decision} ({scope}): {describe(question)}"
+        out(f"{shown(name)}: {decision} ({scope}{', automatically: --ask allow' if auto else ''}): {describe(question)}"
             + "".join(f"\n  {shown(note, 1000)}" for note in notes))
         return reply
     raise ValueError(f"no open question {ident}; see sandbox-ai approvals list")
+
+
+def answered_reason(reply):
+    """The reason an answer REPLY (an .answer file's content) is recorded with: "answered" for a human's, AUTO_REASON
+    (AUTO_REFUSED and why) for one --ask allow gave."""
+    if not isinstance(reply, dict) or reply.get("by") != AUTO_BY:
+        return "answered"
+    if reply.get("decision") == "allow":
+        return AUTO_REASON
+    return AUTO_REFUSED + (f" ({shown(reply['why'], 300)})" if reply.get("why") else "")
+
+
+def auto_scope(question, record):
+    """The scope an automatic "allow" of QUESTION has: the run, or narrower where the administrator's policy or the
+    run's security mode caps answers (widest_answer); None where no answer may allow it (a lookup in a run that
+    approves only once)."""
+    widest = widest_answer(question, record, policy_scope())
+    return None if widest is None else min(("run", widest), key=SCOPES.index)
+
+
+def auto_answer(question, record, answer_with=None, out=None):
+    """--ask allow: answer QUESTION of the run RECORD (its run.json with "directory") "allow" at once, for the run
+    (auto_scope; never "always": nothing is remembered for later starts), applied and recorded as a human's answer
+    is (answer(): a name is resolved and pinned, a URL opened), with AUTO_REASON. Not answered (None): a canary's
+    alarm (AUTO_SKIPPED) and a browser request whose URL carries a canary token of the run: they stay with the
+    human. Refused for the run at once, with why (AUTO_REFUSED): what no answer may allow (a lookup in a run that
+    approves only once, a name with a canary token, outside the administrator's policy or without a public
+    address)."""
+    answer_with = answer_with or answer
+    kind, ident = question.get("kind"), question.get("id")
+    runs = {record.get("run", "run"): record}
+    if kind in AUTO_SKIPPED or (kind == "browser" and canary_in_name(record, question.get("url", ""))):
+        return None
+    try:
+        scope = auto_scope(question, record)
+        if scope is None:
+            raise ValueError(DNS_ONCE)
+        if kind == "dns" and isinstance(question.get("name"), str) and not policy_allows_host(question["name"]):
+            raise ValueError(f"{shown(question['name'])} lies outside the administrator's policy (allow_hosts)")
+        return answer_with(ident, "allow", scope, runs=runs, out=out or (lambda line: None), auto=True)
+    except (OSError, ValueError) as exc:
+        with contextlib.suppress(OSError, ValueError):
+            answer_with(ident, "deny", "run", runs=runs, out=lambda line: None, auto=str(exc) or "refused")
+        return {"decision": "deny", "reason": f"{AUTO_REFUSED} ({shown(str(exc), 300)})"}
 
 
 VERIFY_WAIT = 30  # seconds: an "always" for a name waits for the sandbox's certificate check (15 s at most)
@@ -797,10 +863,14 @@ def answer_wildcard(question, record, wildcard, answer_with=None, out=None, ask_
         return {"decision": "deny", "reason": f"{wildcard}: {exc}"}
 
 
-def watch(directory, stop, notify=None, interval=1.0, burst=3, buttons=None, wildcards=answer_wildcard):
+def watch(directory, stop, notify=None, interval=1.0, burst=3, buttons=None, wildcards=answer_wildcard, auto=False,
+          autos=None):
     """Notify (notify-send) about every new question in DIRECTORY until STOP is set (the launcher runs this
     while its sandbox runs: the agent's terminal is busy with the agent). More than BURST new questions at
-    once give one notification; browser requests are announced by serve_browser."""
+    once give one notification; browser requests are announced by serve_browser. AUTO (--ask allow, from the
+    launcher's own options: nothing in the sandbox can set it): every question is answered by AUTOS (auto_answer)
+    instead, and nobody is notified; a canary's alarm is left to the human (it notifies itself)."""
+    autos = autos or auto_answer
     if buttons is None and notify is None and notify_actions():
         buttons = desktop_question  # buttons in the notification answer it
     notify = notify or desktop_notification
@@ -826,7 +896,13 @@ def watch(directory, stop, notify=None, interval=1.0, burst=3, buttons=None, wil
             record = {**run_record(directory), "directory": str(Path(directory).parent)}
             wildcard = under_wildcard(question, record)
             if wildcard is not None:  # --allow-host *.DOMAIN: answered here, asked of nobody
-                threading.Thread(target=wildcards, args=(question, record, wildcard), daemon=True).start()
+                # Past its cap the lookup goes to the human, which --ask allow answers as well.
+                extra = {"ask_human": lambda title, text, q=question, r=record: autos(q, r)} if auto else {}
+                threading.Thread(target=wildcards, args=(question, record, wildcard), kwargs=extra,
+                                 daemon=True).start()
+                continue
+            if auto and question.get("kind") not in ("browser", *AUTO_SKIPPED):  # browser ones: serve_browser
+                threading.Thread(target=autos, args=(question, record), daemon=True).start()
                 continue
             if question.get("kind") not in ("browser", "canary"):  # they notify themselves
                 fresh.append(question)
@@ -852,9 +928,11 @@ def desktop_notification(title, text):
                        check=False)
 
 
-def serve_browser(socket_path, approvals_dir, stop, notify=None, limit=20, listen=None):
+def serve_browser(socket_path, approvals_dir, stop, notify=None, limit=20, listen=None, auto=False, autos=None):
     """Take the sandbox's requests to open a URL in your browser (its xdg-open) on SOCKET_PATH and turn each
-    into a question in APPROVALS_DIR; at most LIMIT open at a time. Runs on the host while the sandbox runs."""
+    into a question in APPROVALS_DIR; at most LIMIT open at a time. Runs on the host while the sandbox runs. AUTO
+    (--ask allow): each is answered by AUTOS (auto_answer) at once, the URL opened without a question (one that
+    carries a canary token of the run is still asked about)."""
     import importlib.util
     import itertools
     if listen is None:
@@ -891,15 +969,25 @@ def serve_browser(socket_path, approvals_dir, stop, notify=None, limit=20, liste
                     path.with_name(f".{ident}.json").write_text(json.dumps(question))
                     os.replace(path.with_name(f".{ident}.json"), path)
                     asker = origin(run_record(approvals_dir))
-                    if notify is desktop_notification and notify_actions():
+                    done = None
+                    if auto:
+                        record = {**run_record(approvals_dir), "directory": str(Path(approvals_dir).parent)}
+                        done = (autos or auto_answer)(question, record)
+                    if done is not None:
+                        reply = {"ok": done.get("decision") == "allow",
+                                 "message": f"sandbox-ai: opened in the human's browser without a question (--ask "
+                                            f"allow; question {ident})" if done.get("decision") == "allow" else
+                                            f"sandbox-ai: not opened ({shown(done.get('reason', 'refused'), 300)})"}
+                    elif notify is desktop_notification and notify_actions():
                         threading.Thread(target=desktop_question, daemon=True, args=(
                             f"sandbox-ai: open a URL? ({asker})" if asker else "sandbox-ai: open a URL?",
                             url[:300], ident, BROWSER_ACTIONS)).start()
                     else:
                         notify(f"sandbox-ai: open a URL? ({asker})" if asker else "sandbox-ai: open a URL?",
                                f"{url[:300]}\nsandbox-ai approvals allow {ident}")
-                    reply = {"ok": True, "message": "sandbox-ai: asked the human to open it in their browser "
-                                                    f"(question {ident}); nothing opens without their answer"}
+                    if done is None:
+                        reply = {"ok": True, "message": "sandbox-ai: asked the human to open it in their browser "
+                                                        f"(question {ident}); nothing opens without their answer"}
             except (OSError, ValueError, RecursionError) as exc:
                 reply = {"ok": False, "message": f"sandbox-ai: {str(exc)[:200]}"}
             with contextlib.suppress(OSError):

@@ -5,6 +5,12 @@ modes (high, paranoid) an option that would widen the sandbox beyond the mode is
 the laxer mode that would allow it. lax, low and medium only change defaults: each of them still allows
 everything the launcher allowed before modes existed (medium is exactly that start).
 
+--ask allow (every question answered "allow" by the launcher) is no widening of a strict mode the human chose
+(--mode, the project file, defaults.json): it is their answer to the mode's questions, given beforehand, and the
+start says so in a warning; what the mode refuses stays refused. It is refused where a floor chose the strict mode
+(the administrator's min_mode, a preset's mode, --mode-at-least): those questions are not the starter's to answer
+unseen (ask_allow_refusal).
+
 Where the mode comes from, the first that is set: --mode, the project file's "mode", "mode" in
 ~/.config/sandbox-ai/defaults.json, else medium. The administrator's policy key min_mode is a floor: a mode
 below it is refused, and without a choice the floor is the mode.
@@ -313,10 +319,31 @@ def laxer(l, a, given, name, floor):
     return None
 
 
+def ask_allow_refusal(l, a, policy):
+    """Why --ask allow is refused for the start A, or None: only where a floor chose a strict mode - the
+    administrator's min_mode (high or paranoid), or a.mode_floor (the launcher's: a preset's mode, --mode-at-least).
+    A strict mode the human chose is theirs, and so is answering its questions (the start warns)."""
+    if getattr(a, "ask", None) != "allow" or a.mode not in STRICT:
+        return None
+    floor = policy.get("min_mode")
+    if floor in STRICT:
+        return (f"--ask allow would answer every question of the security mode {a.mode} unseen, and the "
+                f"administrator's policy ({l.POLICY_FILE}) requires at least the mode {floor} (min_mode): its "
+                "questions are put to you; start with --ask on")
+    if getattr(a, "mode_floor", None):
+        return (f"--ask allow would answer every question of the security mode {a.mode} unseen, and that mode is a "
+                f"floor ({a.mode_floor}), not your choice: leave --ask allow out (its questions are put to you), or "
+                f"choose the mode yourself with --mode (with --ask allow its questions are answered too)")
+    return None
+
+
 def check(l, a, policy):
     """Refuse the first option that widens the mode, naming the mode and the laxer one that would allow it; then
     record what the mode enforces beyond options: the approval scope, read-only workspaces and its ruleset."""
     name = a.mode
+    refused = ask_allow_refusal(l, a, policy)
+    if refused:
+        raise ValueError(refused)
     for given, why in widening(l, a, name):
         floor = policy.get("min_mode")
         other = laxer(l, a, given, name, floor)

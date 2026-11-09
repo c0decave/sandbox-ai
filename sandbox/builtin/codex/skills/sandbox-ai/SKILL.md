@@ -90,6 +90,10 @@ means no):
   URL in their browser on the host, for example a login page. Nothing opens without their answer
   and you are not told the answer; tell the human why you want the page opened.
 - When the human started with `--ask off` (or the mode `lax`), nothing is asked: blocked is blocked.
+- When the human started with `--ask allow`, nothing is asked either: every question is answered
+  yes at once (for the run), but the human sees each one in their logs (approvals history, the
+  connection log). What rules deny and the privacy check's blocking findings stay refused, and a
+  canary alarm still pauses the sandbox for the human.
 
 ## Connection proxy
 

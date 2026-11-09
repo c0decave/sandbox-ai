@@ -1075,6 +1075,10 @@ def capabilities(board, launcher=None, definitions=None):
             approvals)
     if values_.get("--ask") == "off" and not offline:
         add("reach", "info", tr("Nothing is asked: what the options do not allow is refused"), board.first("approvals"))
+    if values_.get("--ask") == "allow" and proxy_on:
+        # Every question answered yes at once (sandbox-ai 0.1.80): any destination is reached, logged all the same.
+        add("reach", "bad", tr("Nothing is asked: every question is allowed at once, so any destination can be "
+                               "reached (each one logged)"), board.first("approvals"), 30)
     # secrets
     agent_node, git = board.first("agent"), board.first("git")
     for value in values_.get("--secret-env", []):

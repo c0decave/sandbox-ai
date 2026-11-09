@@ -982,6 +982,7 @@ class NetworkPage(Page):
         self.ports.setPlainText("\n".join(props.get("--allow-host-port", [])))
         approvals = self.board.first("approvals")
         self.ask.setChecked(not approvals or approvals.props.get("--ask", "on") != "off")
+        self.shown_ask = self.ask.isChecked()  # unchanged, --ask stays as written (allow too)
 
     def checked_profiles(self):
         return [name for name, box in self.profiles.items() if box.isChecked()]
@@ -998,7 +999,9 @@ class NetworkPage(Page):
             set_or_drop(props, option, box.isChecked())
         set_or_drop(props, "--allow-host", self.hosts.values())
         set_or_drop(props, "--allow-host-port", self.ports.values())
-        if self.ask.isChecked():
+        if self.ask.isChecked() == getattr(self, "shown_ask", None):
+            pass  # as it was: --ask allow (every question allowed, chosen on the board) is not turned into on
+        elif self.ask.isChecked():
             if self.board.first("approvals"):
                 self.board.first("approvals").props.pop("--ask", None)
         else:

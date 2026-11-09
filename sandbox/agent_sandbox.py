@@ -222,7 +222,7 @@ NAME_STYLES = ("codename", "project")  # starts.NAME_STYLES: how a start without
 SESSION_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}"
 # The directory of a start: its first name, with a suffix when that directory is taken (sessions.new_key).
 START_ID = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}"
-__version__ = "0.1.79"
+__version__ = "0.1.80"
 CONFIG_NAME = ".sandbox-ai.json"
 RULES_NAME = "rules.json"  # ~/.config/sandbox-ai/rules.json: your own rules, for every start
 # Label on session pods: the session's tmux directory, so a stale pod can be told apart from someone else's.
@@ -570,10 +570,15 @@ def build_parser():
                         "bodies (redacted, 64 KiB each) to connections-*.jsonl in the log directory, refuses "
                         "pushes the privacy check stops and SSH except to destinations allowed with --allow or "
                         "--allow-tcp")
-    p.add_argument("--ask", choices=["on", "off"], default="on",
+    p.add_argument("--ask", choices=["on", "off", "allow"], default="on",
                    help="With the proxy, ask (sandbox-ai approvals, the app, a desktop notification) before a "
                         "connection to a destination the options do not allow, a lookup of a name they do not pin, "
-                        "or a push with privacy warnings; unanswered questions are refused after 60 s (default: on)")
+                        "a push with privacy warnings, a request or tool call an ask rule holds, or opening a URL in "
+                        "your browser; unanswered questions are refused after 60 s (default: on). off: refuse all "
+                        "of them without asking. allow: ask nothing and allow every question at once, for the run, "
+                        "each recorded (sandbox-ai approvals history, the connection log); what rules deny, the "
+                        "privacy check's blocking findings and a canary's alarm are no questions and stay as they "
+                        "are")
     p.add_argument("--allow-http", action="append", default=[], metavar="'HOST METHODS PATH'",
                    help="Allow only matching requests to HOST (or *.DOMAIN): METHODS such as GET,HEAD or *, PATH a "
                         "pattern where * matches within one path segment and ** across them, e.g. "
@@ -3216,7 +3221,7 @@ def check_device_rules(a):
         what = entry["value"] if entry["value"] == entry["path"] else f"{entry['value']} ({entry['path']})"
         if verdict["decision"] == "deny":
             raise ValueError(f"--device {printable(what)}: {printable(verdict['reason'])}")
-        if verdict["decision"] == "ask" and a.ask != "on" and not a.dry_run:
+        if verdict["decision"] == "ask" and a.ask == "off" and not a.dry_run:
             raise ValueError(f"--device {printable(what)}: rule {verdict['rule']} ({verdict['ruleset']}) asks about "
                              "it, and --ask is off")
         a.device_verdicts[entry["path"]] = verdict
@@ -6047,8 +6052,44 @@ def load_approvals_module():
 
 
 def asking(a):
-    """Approvals are asked for: the proxy runs and --ask is on (not in probes)."""
-    return proxy_enabled(a) and a.ask == "on" and not a.probe
+    """Approvals are asked for: the proxy runs and --ask is on or allow (not in probes). With allow the launcher
+    answers each question itself (asks_nobody)."""
+    return proxy_enabled(a) and a.ask in ("on", "allow") and not a.probe
+
+
+def asks_nobody(a):
+    """--ask allow in a run that asks: every question is answered "allow" by the launcher, at once (approvals.watch
+    and serve_browser with auto). Only the launcher's own options set it: nothing in the sandbox can (no
+    `sandbox-ai net` option, no control request, no file the agent reaches)."""
+    return asking(a) and a.ask == "allow"
+
+
+ASK_ALLOW_WARNING = (
+    "warning: --ask allow: nothing is asked, every question is allowed at once (for the run): connections and "
+    "lookups the options do not allow, pushes with privacy warnings, requests, MCP and tool calls an ask rule holds "
+    "(writes in mode high and calls in a tainted run too), devices a rule asks about, URLs to open in your browser. "
+    "Each is recorded as \"allowed automatically (--ask allow)\": sandbox-ai approvals history, the connection "
+    "log, sandbox-ai logs. Still refused: what rules deny, the privacy check's blocking findings, what you blocked "
+    "always; a canary's alarm still pauses the sandbox and waits for you")
+
+
+def ask_allow_notes(a):
+    """The warnings a start with --ask allow prints (MODES.check refused it already where a floor sets a strict
+    mode): what is answered, and that a strict mode's questions are answered too."""
+    if a.ask != "allow" or a.probe:
+        return []
+    if not asking(a):
+        return ["--ask allow does nothing here: without the proxy (--no-proxy, --offline) nothing is asked, so "
+                "nothing the options do not allow is reached"]
+    notes = [ASK_ALLOW_WARNING]
+    if a.mode in MODES.STRICT:
+        notes.append(f"warning: --ask allow answers the questions of the security mode {a.mode} "
+                     f"({a.mode_origin}) too: you chose both, so both hold - what the mode refuses stays refused, "
+                     "what it would ask about is allowed (writes to hosts other than the agent's provider, MCP and "
+                     "tool calls once untrusted content entered the run)"
+                     + ("; answers approve once only (the mode)" if MODES.MODES[a.mode].get("approval_scope") == "once"
+                        else ""))
+    return notes
 
 
 def apply_remembered_approvals(a):
@@ -6676,6 +6717,8 @@ def register_run(a, run, session):
         "agent_home": str(a.sandbox_home) if getattr(a, "sandbox_home", None) else None,
         # The security mode: `sandbox-ai net allow` and `sandbox-ai approvals` keep to it (modes.py).
         "mode": a.runtime_mode,
+        # --ask: on, off, or allow (every question answered by the launcher; sandbox-ai list, the app and the web warn).
+        "ask": (a.ask if asking(a) else "off") if proxy_enabled(a) else None,
         # --allow-host *.DOMAIN: the launcher answers the lookups below them itself (approvals.watch).
         "allow_wildcards": host_wildcards(a),
         # The sandbox's cgroup is its own (the pod's; Bubblewrap's systemd scope), not the launcher's shared one:
@@ -8268,7 +8311,8 @@ def load_presets_module():
     return _presets_module
 
 
-def launch(argv):
+def launch(argv, floor_by=None):
+    # FLOOR_BY: the floor that chose the mode of this start (the launch below), for MODES.check (--ask allow).
     # --preset NAME: its options right after the agent (the command line wins), its first task as the agent's
     # arguments; then everything is checked as if typed.
     argv, preset_mode = load_presets_module().apply(canonical_options(list(argv)), canonical=canonical_options,
@@ -8297,7 +8341,9 @@ def launch(argv):
                 skip = True
             elif not token.startswith("--mode-at-least="):
                 rest.append(token)
-        return launch([argv[0], "--mode", floor, *rest])
+        return launch([argv[0], "--mode", floor, *rest],
+                      floor_by=f"the preset's mode {floor}" if preset_mode == floor else f"--mode-at-least {floor}")
+    a.mode_floor = floor_by  # a mode a floor chose is not the human's own choice (MODES.check: --ask allow)
     # The checked document is passed on; nothing re-reads the file later.
     a.project_config, a.project_document = (str(config_path) if config_path else None), document
     if not a.dry_run and not a.probe and not a.mcp_socket_dir:
@@ -8329,7 +8375,7 @@ def launch(argv):
     check_image_variant(a)
     if not a.dry_run:
         remember_exposed(a)
-    for note in remembered + notes:
+    for note in remembered + notes + ask_allow_notes(a):
         print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
     a.run_id = (a.pod_name[len("agent-"):] if a.pod_name else f"{a.agent}-{uuid.uuid4().hex[:8]}")
     check_login(a)
@@ -8376,6 +8422,7 @@ def launch(argv):
                           "network_profiles": a.profile,
                           "git_identity": a.git_identity,
                           "privacy_check": a.privacy_check,
+                          "ask": (a.ask if asking(a) else "off") if proxy_enabled(a) else None,
                           "proxy": {"enabled": proxy_enabled(a), "no_inspect": a.no_inspect,
                                     "log_dir": str(Path(a.log_dir).expanduser()) if proxy_enabled(a) else None},
                           "privacy_rules": str(privacy_rules_dir(a)) if privacy_rules_dir(a) else None,
@@ -8586,12 +8633,13 @@ def launch(argv):
             # The agent's terminal is busy with the agent: questions are announced on the desktop.
             approvals = load_approvals_module()
             (a.control_dir / "approvals").mkdir(mode=0o700, exist_ok=True)
+            # --ask allow: answered here at once, nobody is notified (a canary's alarm still is).
             threading.Thread(target=approvals.watch, args=(a.control_dir / "approvals", watching),
-                             daemon=True).start()
+                             kwargs={"auto": True, "interval": 0.2} if asks_nobody(a) else {}, daemon=True).start()
         if asking(a):
             threading.Thread(target=approvals.serve_browser, args=(a.browser_dir / "open.sock",
                                                                    a.control_dir / "approvals", watching),
-                             daemon=True).start()
+                             kwargs={"auto": asks_nobody(a)}, daemon=True).start()
         if writeback and writeback["host_login"]:
             # Refreshes reach the source (and other sandboxes' refreshes this one) during the run, not at its end.
             login_watch = threading.Thread(target=watch_claude_login, args=(home, pair, writeback, watching),

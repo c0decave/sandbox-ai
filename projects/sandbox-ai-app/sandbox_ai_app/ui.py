@@ -366,9 +366,10 @@ class OptionsForm(QTabWidget):
         """The options that weaken the sandbox (labels.DANGEROUS) in the warning colour while they are set."""
         if len(self.widgets) < len(self.options):
             return  # still being built
+        from . import ask_choice as AC
         values = self.values()
         for long, label in self.labels.items():
-            label.set_warning(long in labels.DANGEROUS and bool(values.get(long)))
+            label.set_warning((long in labels.DANGEROUS and bool(values.get(long))) or AC.warned(long, values.get(long)))
 
     # The options whose values the chosen host lists (backend.host_start_choices): a chooser filled from its lists,
     # the value still typed in where it has none (or the list could not be read).
@@ -412,6 +413,10 @@ class OptionsForm(QTabWidget):
             widget = QCheckBox(labels.label(option.long) if known else
                                (option.help.split(";")[0][:90] if option.help else labels.label(option.long)))
             widget.toggled.connect(self.changed)
+        elif option.kind == "choice" and option.long == "--ask":
+            from . import ask_choice as AC  # its values in words, "allow" marked (sandbox-ai 0.1.80)
+            widget = AC.AskChoice(option.choices, option.default)
+            widget.currentTextChanged.connect(self.changed)
         elif option.kind == "choice":
             widget = QComboBox()
             widget.addItems(([""] if option.default is None else []) + [str(c) for c in option.choices])
@@ -2340,6 +2345,10 @@ class SandboxesPage(QWidget):
                 if i.host in self.remote_seen else tr("{state}, not seen", state=state or "?")
         elif asking:
             state = tr("{state}, asking", state=state or "?")
+        from . import ask_choice as AC
+        allows_all = AC.allows_all(i.record) and i.state in ("running", "paused")  # --ask allow: nobody is asked
+        if allows_all:
+            state = f"{state}, {AC.WARN} {tr(AC.BADGE)}"
         cells = [tr(KIND_TITLES.get(i.kind, i.kind)), printable(i.name), printable(i.project), printable(i.agent),
                  printable(i.backend), local_time(i.started), state,
                  "" if i.proxy is None else tr("on") if i.proxy else tr("off"),
@@ -2350,11 +2359,13 @@ class SandboxesPage(QWidget):
             color = "bad"  # the watch is about to end a process in it
         elif memory is not None and memory[0] >= 85 and color != "bad":
             color = "warn"
-        if asking and color != "bad":
+        if (asking or allows_all) and color != "bad":
             color = "warn"
         if stale is not None or i.state in ENDED_STATES and i.key.startswith("ended:"):
             color = "muted"
         tip = [tr("Current project")] if self.mine(i) else []
+        if allows_all:
+            tip.append(tr(AC.ALLOW_HELP))
         if asking:
             tip.append(tr("It waits for an answer on the Approvals page."))
         if stale is not None:

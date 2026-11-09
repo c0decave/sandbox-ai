@@ -729,7 +729,11 @@ def read_answer(record, ident):
         return {"decision": "deny", "scope": "once", "reason": "unreadable answer"}
     scope = answer.get("scope") if answer.get("scope") in ("once", "run") else "run" if \
         answer.get("scope") == "always" else "once"  # a device is approved for the run at most
-    return {"decision": answer["decision"], "scope": scope, "reason": "answered"}
+    # --ask allow: the launcher answered it by itself (approvals.AUTO_BY), recorded so.
+    by_launcher = answer.get("by") == "ask-allow"
+    return {"decision": answer["decision"], "scope": scope,
+            "reason": ("allowed automatically (--ask allow)" if answer["decision"] == "allow" else
+                       "refused automatically: --ask allow could not allow it") if by_launcher else "answered"}
 
 
 def close_question(record, ident, answer):

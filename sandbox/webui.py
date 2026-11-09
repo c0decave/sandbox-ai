@@ -386,7 +386,22 @@ ERROR_CODES = ("no-host", "confirm-needed", "bad-path", "bad-name", "host-unreac
 # status (hosts list, kept; never asked for this) names an older version is told so before anything runs there
 # (newer_needed); an older one whose version is not known yet says so itself (argparse's "unrecognized arguments",
 # "invalid choice"), which is told the same way (too_old_said).
+def asks_allow(args):
+    """ARGS start a sandbox with --ask allow, however written: an agent's start (its options up to "--") or a team's
+    (`team start ... -- OPTIONS`)."""
+    words = [str(word) for word in args]
+    if words[:2] == ["team", "start"]:
+        words = words[words.index("--") + 1:] if "--" in words else []
+    elif words[:1] and words[0] in AGENTS:
+        words = words[1:words.index("--")] if "--" in words else words[1:]
+    else:
+        return False
+    return any(word in ("--ask=allow", "-Q=allow") or (word in ("--ask", "-Q") and following == "allow")
+               for word, following in zip(words, words[1:] + [""]))
+
+
 NEWER = (
+    ((0, 1, 80), "--ask allow", asks_allow),
     ((0, 1, 78), "approvals allow --no-open", lambda a: a[:2] == ["approvals", "allow"] and "--no-open" in a),
     ((0, 1, 78), "wizard trust --list, --show and --digest", lambda a: a[:2] == ["wizard", "trust"] and any(
         x in ("--list", "--show") or x.startswith("--digest") for x in a)),
@@ -3212,6 +3227,9 @@ def terminal_command(query):
             # the host's sandbox-ai knows it (0.1.78, which brought that rule; an older one has neither).
             args.append("--workspaces-as-given")
         args += options
+        older = newer_needed(host, args)  # an option value that host's sandbox-ai does not know (--ask allow)
+        if older:
+            raise older
         return host, hosts.argv(host, args, tty=True)
     if kind == "update":
         # The host's update where sudo may ask for its password (hosts update said it wants one).
