@@ -4533,7 +4533,6 @@ class SystemPage(QWidget):
         tools_layout = QHBoxLayout(tools)
         build = QPushButton(tr("Build images"))
         build.clicked.connect(lambda _=False: self.tool(("build", "all")))
-        tools_layout.addWidget(build)
         update = self.update_sai_button = QPushButton(tr("Update sandbox-ai"))
         update.setToolTip(tr("sandbox-ai update in a terminal: the newest signed release, or the version given"))
         update.clicked.connect(lambda _=False: self.update_sandbox_ai())
@@ -4542,13 +4541,11 @@ class SystemPage(QWidget):
         self.update_version.setToolTip(tr("Update to this version (sandbox-ai update --version), e.g. to go back"))
         self.update_version.setAccessibleName(tr("Version to update to"))
         self.update_version.setMaximumWidth(150)
-        tools_layout.addWidget(update)
-        tools_layout.addWidget(self.update_version)
         privacy = QPushButton(tr("Privacy check of a repository…"))
         privacy.clicked.connect(self.privacy)
         self.privacy_button = privacy
-        tools_layout.addWidget(privacy)
-        tools_layout.addStretch()
+        # A row that wraps when the window is narrow (a page never needs more room than the window has).
+        tools_layout.addWidget(flow(build, update, self.update_version, privacy), 1)
         layout.addWidget(tools)
         # The emulated serial device the hardware-analysis preset practises on (sandbox-ai demo-device), on a host too.
         demo = QGroupBox(tr("Emulated device (sandbox-ai demo-device)"))
@@ -4577,6 +4574,7 @@ class SystemPage(QWidget):
         layout.addWidget(demo)
         settings = QGroupBox(tr("Settings of the app"))
         form = QFormLayout(settings)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)  # a long label above its field
         current = sai.settings()
         self.theme = QComboBox()
         for key, text in theme.choices():

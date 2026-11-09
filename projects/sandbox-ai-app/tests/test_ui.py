@@ -115,7 +115,7 @@ def test_fill_keeps_row_keys_and_the_selection_across_sorting(qapp):
 # -- the existing pages --
 
 
-def test_pages_and_preview(window):
+def test_pages_and_preview(window, env):
     assert [window.nav.item(i).text() for i in range(window.nav.count())] == [
         "PROJECT", "Start", "Board", "RUNNING", "Sandboxes & sessions", "Approvals", "Terminals", "INSIGHT",
         "Connections", "Activity", "Statistics", "Files", "MANAGE", "Kits & plugins", "MCP servers", "LLM servers", "Images",
@@ -129,11 +129,13 @@ def test_pages_and_preview(window):
     launch.agent_args.setText("--model gpt")
     assert launch.preview.toPlainText() == ("sandbox-ai codex --profile development --allow-host example.org "
                                             "--dangerously-skip-permissions -- --model gpt")
+    assert launch.start() is False, "no workspace: the app's own folder never becomes /work (review 5, M3)"
+    launch.project = str(env)  # the project chosen fills the empty field
     launch.start()
     started = window.started[-1]
     assert started[0] == "term" and started[2:4] == ["-I", str(window.sai.directory / "main.py")]
-    assert started[4:] == ["codex", "--profile", "development", "--allow-host", "example.org",
-                           "--dangerously-skip-permissions", "--", "--model", "gpt"]
+    assert started[4:] == ["codex", "--workspace", str(env), "--profile", "development", "--allow-host", "example.org",
+                           "--dangerously-skip-permissions", "--workspaces-as-given", "--", "--model", "gpt"]
 
 
 def test_the_intro_can_be_watched_again(window, qapp):
@@ -588,7 +590,7 @@ def test_files_page_browses_copies_and_never_follows_links(window, env, tmp_path
     page.refresh_roots()
     titles = [left.roots.itemText(i) for i in range(left.roots.count())]
     assert titles[0].startswith("Running sandbox claude-abc: workspace")
-    assert any(t.startswith("Current project") for t in titles)
+    assert any(t.startswith(("Current project", "Folder the app was started in")) for t in titles)
     left.roots.setCurrentIndex(0)
     names = {left.table.item(r, 0).text(): left.table.item(r, 1).text() for r in range(left.table.rowCount())}
     assert names == {"src": "folder", "notes.txt": "file", "outside": "symbolic link"}
@@ -984,6 +986,7 @@ def test_credentials_page_logins_and_secrets(window, env, wait):
 
 def test_terminal_tabs_or_the_terminal_window(window, env, monkeypatch, tmp_path, wait):
     from sandbox_ai_app import terminal
+    window.launch.form.widgets["--workspace"].set_value([str(env)])
     # Without QtWebEngine or xterm.js: a terminal window.
     window.launch.start_in_app()
     assert window.started[-1][0] == "term" and window.terminals.tabs.count() == 0
@@ -1002,7 +1005,8 @@ def test_terminal_tabs_or_the_terminal_window(window, env, monkeypatch, tmp_path
     window.launch.start_in_app()
     assert len(window.started) == count and window.terminals.tabs.count() == 1
     view = window.terminals.views()[0]
-    assert view.argv[-1] == "codex" and window.pages.currentWidget() is window.terminals
+    assert view.argv[-4:] == ["codex", "--workspace", str(env), "--workspaces-as-given"]
+    assert window.pages.currentWidget() is window.terminals
     assert window.terminals.tabs.tabText(0) == "codex"
     # A session attached in the app.
     session = env / "state" / "sandbox-ai" / "sessions" / "work"
@@ -1040,6 +1044,7 @@ def test_slow_commands_do_not_block_the_window(window, env, monkeypatch, wait):
     monkeypatch.setattr(ui.PrivacyDialog, "exec", lambda dialog: (dialog.paths.set_value([str(env)]),
                                                                   QtWidgets.QDialog.DialogCode.Accepted)[-1])
     run = fake_run(env)
+    window.launch.form.widgets["--workspace"].set_value([str(env)])
     began = time.monotonic()
     window.system.privacy()
     window.system.check()
@@ -1846,13 +1851,15 @@ def test_the_navigation_folds_and_shrinks_to_save_room(window):
     assert window.collapsed == set() and not nav.isRowHidden(rows["connections"])
     window.toggle_section("Insight", True)
     window.set_compact_nav(True)
-    assert nav.width() == ui.COMPACT_NAV_WIDTH and not window.brand.isVisibleTo(window)
+    margins = nav.contentsMargins()
+    assert nav.width() == ui.COMPACT_NAV_WIDTH + margins.left() + margins.right()
+    assert not window.brand.isVisibleTo(window)
     assert nav.item(rows["files"]).text() == "" and nav.item(rows["files"]).toolTip() == "Files"
     assert not nav.isRowHidden(rows["files"])  # the strip shows every page, folded or not
     assert all(nav.isRowHidden(header) for header, _ in window.section_rows.values())
     assert window.actions["nav-compact"].isChecked() and window.state.get("nav_compact") is True
     window.set_compact_nav(False)
-    assert nav.width() == ui.NAV_WIDTH and nav.item(rows["files"]).text() == "Files"
+    assert ui.NAV_WIDTH <= nav.width() <= ui.NAV_MAX_WIDTH and nav.item(rows["files"]).text() == "Files"
     assert nav.isRowHidden(rows["files"])  # its section is still folded
     assert nav.item(rows["launch"]).toolTip() == "Start (Ctrl+1)"
 

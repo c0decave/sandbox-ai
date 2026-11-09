@@ -317,7 +317,9 @@ def test_buttons_follow_the_kind_and_say_why_not(window, env, sleepers):
     page.table.selectRow(widgets.find_row(page.table, "session:work"))
     assert page.session_buttons["resume"].isEnabled() and page.session_buttons["delete"].isEnabled()
     assert not page.session_buttons["attach"].isEnabled() and "stopped" in page.session_buttons["attach"].toolTip()
-    assert not page.stop_button.isEnabled() and not any(b.isEnabled() for b in page.run_buttons)
+    # Review 5 (A3): an MCP server can be taken out of a stopped session's options; nothing else runs on it.
+    assert not page.stop_button.isEnabled() and page.run_named["remove-mcp"].isEnabled()
+    assert not any(b.isEnabled() for b in page.run_buttons if b is not page.run_named["remove-mcp"])
     page.table.selectRow(widgets.find_row(page.table, f"pid:{loose.pid}"))
     assert not page.stop_button.isEnabled() and "not registered" in page.stop_button.toolTip()
     assert not page.run_buttons[0].isEnabled() and "terminal" in page.run_buttons[0].toolTip()
@@ -348,9 +350,10 @@ def test_stop_runs_the_command_of_its_kind(window, env, monkeypatch, sleepers, w
     data = json.loads((session_dir / "session.json").read_text())
     data.update(pid=supervisor.pid, pid_start=window.sai.launcher.process_start(supervisor.pid))
     (session_dir / "session.json").write_text(json.dumps(data))
+    assert wait(lambda: not widgets.busy(page), 10)  # the stop before has finished (its button waits until then)
     page.refresh()
     page.table.selectRow(widgets.find_row(page.table, "session:work"))
-    assert page.current().state == "running" and page.stop_button.isEnabled()
+    assert page.current().state == "running" and page.stop_button.isEnabled(), page.stop_button.toolTip()
     page.stop()
     assert wait(lambda: ("session", "stop", "work") in calls, 10)
 

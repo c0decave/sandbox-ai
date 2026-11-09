@@ -94,7 +94,8 @@ def test_a_workspace_with_a_name_and_one_that_is_a_file(sai, host):
     assert sai.calls[-1] == on(host, "workspace", "add", "api", "/srv/data"), "no name: its own"
     for name in ("-x", ".hidden", "a/b", "x" * 65, "..", "a b"):
         assert sai.add_workspace("api", "/srv/data", False, name, host=host)[0] == 2
-    assert len(sai.calls) == 2
+    # (on a host, --name is first checked against that host's `workspace add --help`: review 5, A4)
+    assert len([c for c in sai.calls if "--help" not in c]) == 2
     assert backend.valid_workspace_name("A1_.-z") and not backend.valid_workspace_name("")
 
 

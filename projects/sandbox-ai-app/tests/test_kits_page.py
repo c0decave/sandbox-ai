@@ -300,7 +300,9 @@ def test_using_a_kit_writes_the_project_file_after_review_and_trusts_it(fake, en
     options = document["options"]
     assert options[options.index("--kit") + 1] == "egm" and "--offline" in options
     title, text, details = next(s for s in widgets.SHOWN if s[0] == "Write and trust")
-    assert "+" in details and "egm" in details, "the change was shown before it was written"
+    # Review 5 (H2): the file in the folder was never trusted, so the whole file is shown (not a diff against what
+    # whoever could write the folder put there), "--kit egm" in it.
+    assert "Nothing was trusted for this file before" in details and "egm" in details, "shown before it was written"
     assert wait(lambda: fake.sai.project_state(folder)[0] == "trusted", 10)
     assert wait(lambda: not fake.board.dirty() and page.project_kits == ["egm"], 10), "applied: the board is clean"
     select_kit(page, "builtin", "egm")
