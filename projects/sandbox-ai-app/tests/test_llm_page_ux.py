@@ -216,7 +216,7 @@ def qtenv(env, monkeypatch):
 def sai(qtenv, monkeypatch):
     """host_run records (host, args) and answers from sai.answers ({(host, args): (status, out, err)})."""
     sai = backend.SandboxAI()
-    sai.asked, sai.secrets_set = [], []
+    sai.asked, sai.secrets_set, sai.status_asked = [], [], []
     sai.answers = {("local", ("llm", "list", "--json")): (0, json.dumps([SERVER, GATEWAY]), ""),
                    ("local", ("llm", "show", "lm", "--json")): (0, json.dumps(SERVER), ""),
                    ("local", ("llm", "show", "gw", "--json")): (0, json.dumps(GATEWAY), ""),
@@ -225,7 +225,8 @@ def sai(qtenv, monkeypatch):
     monkeypatch.setattr(sai, "hosts_supported", lambda: False)
 
     def host_run(name, *args, timeout=120):
-        sai.asked.append((name, args))
+        # What the servers have loaded now (llm status) is read beside every list: kept apart from the commands
+        (sai.status_asked if args[:2] == ("llm", "status") else sai.asked).append((name, args))
         return sai.answers.get((name, args), (0, "", ""))
     monkeypatch.setattr(sai, "host_run", host_run)
     monkeypatch.setattr(sai, "set_secret", lambda name, value, host="local": sai.secrets_set.append(
@@ -331,8 +332,8 @@ def test_test_connection_lists_the_models_and_fills_the_default_model(qapp, sai)
     from sandbox_ai_app import llm_page
     llm = sai.module("llm")
     listed = llm.sort_models(llm.clean_models(MODELS), "loaded")
-    probe = ("wizard", "models", "--kind", "lmstudio", "--url", "http://192.168.1.30:1234", "--sort", "loaded",
-             "--json")
+    probe = ("wizard", "models", "--kind", "lmstudio", "--url", "http://192.168.1.30:1234", "--status", "--sort",
+             "loaded", "--json")
     sai.answers[("local", probe)] = (0, json.dumps(listed), "")
     page = llm_page.LlmPage(sai)
     dialog = llm_page.LlmDialog(page, "local", run=page.runner("local"))
@@ -370,13 +371,21 @@ def test_test_connection_lists_the_models_and_fills_the_default_model(qapp, sai)
     dialog.secret.clear()
     dialog.url.setText("https://gpu.example.org/llm")
     assert dialog.test_result.text() == "", "another URL: the earlier result says nothing about it"
-    https = ("wizard", "models", "--kind", "lmstudio", "--url", "https://gpu.example.org/llm", "--sort", "loaded",
-             "--json")
-    sai.answers[("local", https)] = (0, json.dumps(listed[:1]), "")
+    https = ("wizard", "models", "--kind", "lmstudio", "--url", "https://gpu.example.org/llm", "--status", "--sort",
+             "loaded", "--json")
+    now = {"loaded": [{"name": "qwen2.5-coder:7b", "size": 4_500_000_000, "memory_bytes": 5_000_000_000,
+                       "vram_bytes": 4_000_000_000, "ram_bytes": 1_000_000_000, "context": 8192}],
+           "usage": {"vram_bytes": 4_000_000_000, "ram_bytes": 1_000_000_000}, "reported_by": ["Ollama /api/ps"],
+           "not_reported": ["kv_cache", "requests", "totals"], "read_at": "2026-11-09T12:00:00Z"}
+    sai.answers[("local", https)] = (0, json.dumps({"models": listed[:1], "status": now}), "")
     sai.asked.clear()
     dialog.test()
     assert sai.asked == [("local", https)], "https and a path prefix are asked too"
     assert dialog.test_result.text().startswith("Reachable: 1 models, 1 loaded.")
+    assert dialog.test_result.text().splitlines()[-1] == (
+        "Now: loaded: qwen2.5-coder:7b (5.0 GB in memory: VRAM 4.0 GB, RAM 1.0 GB; context 8192) · VRAM 4.0 GB · "
+        "RAM 1.0 GB · not reported: KV cache, requests"), "what it has loaded now, with sizes and VRAM/RAM"
+    assert "the host's total RAM/VRAM" in dialog.test_result.toolTip()
     dialog.kind.setCurrentIndex(dialog.kind.findData("openai-compatible"))
     sai.asked.clear()
     dialog.test()
@@ -573,8 +582,9 @@ def test_the_key_and_insecure_http_go_to_wizard_models_as_the_cli_takes_them(env
 
 
 def refused_then_listed(sai, host="local"):
-    keyed = ("wizard", "models", "--kind", "vllm", "--url", PUBLIC, "--api-key-secret", "BOX_KEY", "--sort",
-             "loaded", "--json")
+    # This machine's sandbox-ai is the app's own: the test asks what the server has loaded now too (--status).
+    keyed = ("wizard", "models", "--kind", "vllm", "--url", PUBLIC, "--api-key-secret", "BOX_KEY",
+             *(("--status",) if host == "local" else ()), "--sort", "loaded", "--json")
     allowed = keyed[:8] + ("--insecure-http",) + keyed[8:]
     sai.answers[(host, keyed)] = (1, "", "sandbox-wizard: plain http to 203.0.113.5 would cross networks you do not "
                                         "control unencrypted; use https, or --insecure-http if you accept that (the API "

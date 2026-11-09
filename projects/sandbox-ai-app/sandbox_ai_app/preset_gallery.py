@@ -22,6 +22,7 @@ from . import theme, widgets
 from . import wizard_llm as WL
 from .board_view import NODE_H, NODE_W, PathEdit, elide
 from .files import printable
+from .model_combo import searchable
 from .i18n import tr
 from .state import choose_file
 from .widgets import MONO, FlowLayout, ask_first, background, inform, plain_label, safe_tooltip, warn
@@ -615,6 +616,7 @@ class PlaceholderForm(QDialog):
         if combo.isEditable():
             combo.lineEdit().setPlaceholderText(tr("empty: fill in later"))
         if placeholder.kind == "llm":
+            searchable(combo)  # every NAME:MODEL of every server: a popup that scrolls, typing filters
             combo.currentTextChanged.connect(lambda text, marker=placeholder.marker: self.llm_chosen(marker, text))
         if default and (combo.isEditable() or combo.findText(default) >= 0):
             combo.setCurrentText(default)

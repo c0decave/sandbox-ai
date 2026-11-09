@@ -32,6 +32,7 @@ from . import wizard_llm as WL
 from .board_view import LinesEdit, PathEdit, RulesEdit
 from .preset_gallery import PlaceholderForm
 from .files import printable
+from .model_combo import searchable
 from .name_fields import NameField
 from .i18n import N_, tr
 from .widgets import MONO, ask_first, background, confirm, plain_label, safe_tooltip, show_text, warn
@@ -290,6 +291,7 @@ class ModelPage(Page):
         self.server_model = QComboBox()
         self.server_model.setEditable(True)
         self.server_model.lineEdit().setPlaceholderText(tr("choose one the server lists, or type its name"))
+        searchable(self.server_model)  # every model the server lists: a popup that scrolls, typing filters
         self.form.addRow(tr("Its model"), self.server_model)
         self.only = QCheckBox(tr("only this server (no cloud: --no-provider-defaults)"))
         self.only.setToolTip(tr("The agent reaches this server and what you allow on the next pages, not its cloud "
@@ -741,6 +743,7 @@ def fill_model_combo(combo, only, endpoints, agent, sai, value="", only_checked=
     then each registered server as NAME and NAME:MODEL (wizard_llm.model_choices); one AGENT cannot use is shown
     greyed, with why. VALUE (--llm's, or a placeholder still to fill in) is chosen, added when it is not listed. ONLY,
     the "only this server" box, is checked as ONLY_CHECKED says and only usable with a server. No signal fires."""
+    searchable(combo, strict=True)  # every model listed (70 and more): a popup that scrolls, typing filters
     combo.blockSignals(True)
     only.blockSignals(True)
     try:

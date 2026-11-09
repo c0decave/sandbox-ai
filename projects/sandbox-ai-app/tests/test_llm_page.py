@@ -23,6 +23,11 @@ LOCAL_SERVER = {"name": "lm", "kind": "lmstudio", "url": "http://192.168.1.20:12
 REMOTE_SERVER = {"name": "gpu", "kind": "vllm", "url": "http://100.64.0.7:8000", "api_key_secret": None,
                  "headers": {}, "ca": None, "vpn": "ts", "model": None, "anthropic": False, "insecure_http": False,
                  "models": [], "checked": None, "agents": ["claude", "codex", "opencode"]}
+# `llm status --json` of LOCAL_SERVER: LM Studio reports what is loaded, not what it uses.
+STATUS = {"name": "lm", "kind": "lmstudio", "url": "http://192.168.1.20:1234", "reachable": True, "error": None,
+          "read_at": "2026-11-09T12:00:00Z", "models": 2,
+          "loaded": [{"name": "qwen2.5-coder:7b", "size": 4_500_000_000, "context": 8192}], "usage": {},
+          "reported_by": ["LM Studio /api/v1/models"], "not_reported": ["memory", "kv_cache", "requests", "totals"]}
 MODELS = [{"name": "qwen2.5-coder:7b", "size": 4_500_000_000, "loaded": True, "details": "7B Q4_K_M"},
           {"name": "llama3.1:8b", "size": None, "loaded": None, "details": ""}]
 
@@ -76,7 +81,7 @@ def sai(env, monkeypatch):
     """A SandboxAI with this machine and one host (ct1), whose host_run records (host, args) and answers from
     sai.answers ({(host, args): (status, out, err)}); set_secret records (name, value)."""
     sai = backend.SandboxAI()
-    sai.asked, sai.secrets_set = [], []
+    sai.asked, sai.secrets_set, sai.status_asked = [], [], []
     sai.answers = {("local", ("llm", "list", "--json")): (0, json.dumps([LOCAL_SERVER]), ""),
                    ("ct1", ("llm", "list", "--json")): (0, "old: unusable (url: bad)\n" + json.dumps([REMOTE_SERVER]),
                                                         "")}
@@ -85,7 +90,8 @@ def sai(env, monkeypatch):
                                                       {"name": "ct1", "kind": "ssh", "ssh": "admin@192.0.2.10"}])
 
     def host_run(name, *args, timeout=120):
-        sai.asked.append((name, args))
+        # What the servers have loaded now (llm status) is read beside every list: kept apart from the commands
+        (sai.status_asked if args[:2] == ("llm", "status") else sai.asked).append((name, args))
         return sai.answers.get((name, args), (0, "", ""))
     monkeypatch.setattr(sai, "host_run", host_run)
     monkeypatch.setattr(sai, "set_secret", lambda name, value, host="local": sai.secrets_set.append(
@@ -101,10 +107,14 @@ def test_the_servers_of_this_machine_and_of_a_host(qapp, sai):
     page = llm_page.LlmPage(sai)
     assert [page.host_box.itemData(i) for i in range(page.host_box.count())] == ["local", "ct1"]
     assert sai.asked == [], "a page nobody opened asks nothing (no command, no SSH at every start of the app)"
+    sai.answers[("local", ("llm", "status", "--json"))] = (0, json.dumps([STATUS]), "")
     page.show()
     assert sai.asked == [("local", ("llm", "list", "--json"))]
+    assert sai.status_asked == [("local", ("llm", "status", "--json"))], "then what its servers have loaded now"
     assert cells(page) == ["lm", "lmstudio", "http://192.168.1.20:1234", "qwen2.5-coder:7b", "LLM_KEY", "",
                            "claude, codex, opencode"]
+    assert page.server_status.text() == ("lm: loaded: qwen2.5-coder:7b (4.5 GB; context 8192) · not reported: "
+                                         "VRAM/RAM use, KV cache, requests")
     assert "LLM servers on local (this machine): 1" in page.status.text()
     page.host_box.setCurrentIndex(page.host_box.findData("ct1"))
     assert sai.asked[-1] == ("ct1", ("llm", "list", "--json"))

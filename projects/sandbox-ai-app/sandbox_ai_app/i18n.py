@@ -504,6 +504,110 @@ TEXTS = {
     'Reachable, but the server lists no models: load or pull one first.': {
         'en': 'Reachable, but the server lists no models: load or pull one first.',
         'de': 'Erreichbar, aber der Server nennt keine Modelle: zuerst eines laden oder holen.'},
+    # == what an LLM server has loaded and uses now (sandbox-ai llm status; llm_page.py, wizard_llm.py); the texts the
+    # web's LLM page has too read the same (tests/test_web_i18n.py) ==
+    'VRAM {size} of {total}': {
+        'en': 'VRAM {size} of {total}',
+        'de': 'VRAM {size} von {total}'},
+    'VRAM {size}': {
+        'en': 'VRAM {size}',
+        'de': 'VRAM {size}'},
+    'RAM {size}': {
+        'en': 'RAM {size}',
+        'de': 'RAM {size}'},
+    '{size} VRAM free': {
+        'en': '{size} VRAM free',
+        'de': '{size} VRAM frei'},
+    'KV cache {percent} %': {
+        'en': 'KV cache {percent} %',
+        'de': 'KV-Cache {percent} %'},
+    'CPU KV cache {percent} %': {
+        'en': 'CPU KV cache {percent} %',
+        'de': 'CPU-KV-Cache {percent} %'},
+    'requests: {running} running, {waiting} waiting': {
+        'en': 'requests: {running} running, {waiting} waiting',
+        'de': 'Anfragen: {running} laufen, {waiting} warten'},
+    '{count} slots': {
+        'en': '{count} slots',
+        'de': '{count} Slots'},
+    '{size} in memory': {
+        'en': '{size} in memory',
+        'de': '{size} im Speicher'},
+    'context {tokens}': {
+        'en': 'context {tokens}',
+        'de': 'Kontext {tokens}'},
+    'not reachable: {error}': {
+        'en': 'not reachable: {error}',
+        'de': 'nicht erreichbar: {error}'},
+    'what is loaded is not reported': {
+        'en': 'what is loaded is not reported',
+        'de': 'was geladen ist, wird nicht gemeldet'},
+    'no model loaded': {
+        'en': 'no model loaded',
+        'de': 'kein Modell geladen'},
+    'loaded: {models}': {
+        'en': 'loaded: {models}',
+        'de': 'geladen: {models}'},
+    'not reported: {what}': {
+        'en': 'not reported: {what}',
+        'de': 'nicht gemeldet: {what}'},
+    'Loaded: {model}': {
+        'en': 'Loaded: {model}',
+        'de': 'Geladen: {model}'},
+    'unloaded at {time}': {
+        'en': 'unloaded at {time}',
+        'de': 'entladen um {time}'},
+    'read at {time} (UTC)': {
+        'en': 'read at {time} (UTC)',
+        'de': 'gelesen um {time} (UTC)'},
+    'Not reported by its API: {what}': {
+        'en': 'Not reported by its API: {what}',
+        'de': 'Von seiner API nicht gemeldet: {what}'},
+    'llama-server --metrics also reports the requests waiting.': {
+        'en': 'llama-server --metrics also reports the requests waiting.',
+        'de': 'llama-server --metrics meldet auch die wartenden Anfragen.'},
+    'the loaded models': {
+        'en': 'the loaded models',
+        'de': 'die geladenen Modelle'},
+    'VRAM/RAM use': {
+        'en': 'VRAM/RAM use',
+        'de': 'VRAM-/RAM-Belegung'},
+    'KV cache': {
+        'en': 'KV cache',
+        'de': 'KV-Cache'},
+    'requests': {
+        'en': 'requests',
+        'de': 'Anfragen'},
+    "the host's total RAM/VRAM": {
+        'en': "the host's total RAM/VRAM",
+        'de': 'gesamter RAM/VRAM des Hosts'},
+    'Now: {status}': {
+        'en': 'Now: {status}',
+        'de': 'Jetzt: {status}'},
+    'The sandbox-ai there does not know llm status yet: update the host (Hosts › Update).': {
+        'en': 'The sandbox-ai there does not know llm status yet: update the host (Hosts › Update).',
+        'de': 'Das sandbox-ai dort kennt llm status noch nicht: Aktualisieren Sie den Host (Hosts › Aktualisieren).'},
+    'What the servers have loaded and use now': {
+        'en': 'What the servers have loaded and use now',
+        'de': 'Was die Server jetzt geladen haben und belegen'},
+    'What the servers have loaded now could not be read: {error}': {
+        'en': 'What the servers have loaded now could not be read: {error}',
+        'de': 'Was die Server jetzt geladen haben, konnte nicht gelesen werden: {error}'},
+    "The LLM server's status": {
+        'en': "The LLM server's status",
+        'de': 'Der Zustand des LLM-Servers'},
+    'LLM server {value}: reading its status…': {
+        'en': 'LLM server {value}: reading its status…',
+        'de': 'LLM-Server {value}: Sein Zustand wird gelesen…'},
+    'no status of {name}': {
+        'en': 'no status of {name}',
+        'de': 'kein Zustand von {name}'},
+    'LLM server {value}: its status could not be read: {error}': {
+        'en': 'LLM server {value}: its status could not be read: {error}',
+        'de': 'LLM-Server {value}: Sein Zustand konnte nicht gelesen werden: {error}'},
+    'LLM server {value}: {status}': {
+        'en': 'LLM server {value}: {status}',
+        'de': 'LLM-Server {value}: {status}'},
     'Reachable: {count} models, {loaded} loaded. Choose the default model below (or leave it empty).': {
         'en': 'Reachable: {count} models, {loaded} loaded. Choose the default model below (or leave it empty).',
         'de': 'Erreichbar: {count} Modelle, {loaded} geladen. Unten das Standardmodell wählen (oder leer lassen).'},

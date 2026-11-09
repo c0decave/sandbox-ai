@@ -34,10 +34,10 @@ import functools
 import json
 import re
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLineEdit, QPushButton,
-    QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
+    QPushButton, QVBoxLayout, QWidget,
 )
 
 from .files import printable
@@ -45,6 +45,7 @@ from .host_choice import follow_hosts, on_host
 from . import backend, theme, widgets
 from . import wizard_llm as WL
 from .i18n import N_, tr
+from .model_combo import searchable
 from .name_fields import NameField
 from .widgets import (
     ask_first, background, fill, flow, outcome, plain_label, row_key, safe_tooltip, selected_keys, set_enabled,
@@ -201,6 +202,7 @@ class LlmDialog(QDialog):
         self.model_box.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.model_box.setAccessibleName(tr("Default model"))
         self.model = self.model_box.lineEdit()  # what is typed or chosen
+        searchable(self.model_box)  # every model Test connection listed: a popup that scrolls, typing filters
         self.model.setPlaceholderText(MODEL_EXAMPLE)
         self.model_box.setToolTip(tr("The model a start uses when --llm names none (optional): type it, or choose one "
                                      "Test connection listed"))
@@ -369,6 +371,7 @@ class LlmDialog(QDialog):
 
         def work():
             sent = bool(probe and secret)
+            status = True  # what it has loaded and uses now, too (wizard models --status), where the host knows it
             if probe and require is not None:
                 require(["--url"])  # 0.1.77 and older: "update the host" instead of argparse's error there
                 if sent:
@@ -376,17 +379,28 @@ class LlmDialog(QDialog):
                         require(["--api-key-secret", "--insecure-http"])
                     except backend.HostTooOld:
                         sent = False
-            argv = args if sent or not probe else WL.probe_argv(fields["kind"], fields["url"])
-            return run(*argv, timeout=WL.PROBE_SECONDS), sent
+                try:
+                    require(["--status"])
+                except backend.HostTooOld:
+                    status = False
+            if probe:
+                argv = WL.probe_argv(fields["kind"], fields["url"], secret if sent else None, insecure and sent,
+                                     status=status)
+                return run(*argv, timeout=WL.PROBE_SECONDS), sent, None
+            answer = run(*args, timeout=WL.PROBE_SECONDS)
+            # A saved server: its status from `llm status NAME` (a host without it: the models alone)
+            now = run(*WL.status_argv(fields["name"]), timeout=WL.STATUS_SECONDS) if answer[0] == 0 else None
+            return answer, sent, now
 
         background(work, owner=self, source=self.test_button, timeout=WL.PROBE_SECONDS + 75,
                    done=lambda result, error: self.tested(ticket, probe, fields, result, error, insecure))
 
     def tested(self, ticket, probe, fields, result, error, insecure=False):
-        """RESULT: (the command's (status, out, err), whether the key went with it)."""
+        """RESULT: (the command's (status, out, err), whether the key went with it, `llm status NAME`'s answer for a
+        saved server or None)."""
         if ticket != self.tests:
             return  # the kind or URL changed meanwhile: that answer is about another server
-        result, sent = result if error is None else (None, False)
+        result, sent, now = result if error is None else (None, False, None)
         if isinstance(error, backend.HostTooOld):
             self.test_result.setText(printable(error))
             colored(self.test_result, "warn")
@@ -398,7 +412,7 @@ class LlmDialog(QDialog):
         try:
             if status != 0:
                 raise ValueError(failure(result, error))
-            models = WL.parse_models(out)
+            models, server = WL.models_and_status(out)
         except ValueError as exc:
             text = tr("Not reachable: {error}", error=printable(exc))
             if probe and ((fields.get("secret") and not sent) or fields.get("headers")):
@@ -418,6 +432,15 @@ class LlmDialog(QDialog):
         else:
             text = tr("Reachable: {count} models, {loaded} loaded. Choose the default model below (or leave it "
                       "empty).", count=len(models), loaded=loaded)
+        if server is None and now is not None:
+            try:
+                server = WL.parse_statuses(now[1]).get(fields["name"])
+            except ValueError:
+                server = None
+        if server is not None:
+            # What it has loaded now (with sizes) and what it uses: VRAM/RAM, KV cache, requests - as its API says.
+            text += "\n" + tr("Now: {status}", status=WL.status_text(server))
+            self.test_result.setToolTip(safe_tooltip(WL.status_detail(server)))
         self.test_result.setText(text)
         colored(self.test_result, "ok")
 
@@ -512,6 +535,16 @@ class LlmPage(QWidget):
         self.servers.itemSelectionChanged.connect(self.update_buttons)
         self.servers.cellDoubleClicked.connect(lambda *_: self.edit())
         layout.addWidget(self.servers, 2)
+        # What each server has loaded and uses now (`llm status --json` on that host): read in the background after
+        # the list, on Refresh and every STATUS_REFRESH seconds while the page is shown - never on the GUI thread.
+        self.server_status = plain_label(role="secondary")
+        self.server_status.setAccessibleName(tr("What the servers have loaded and use now"))
+        self.server_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.server_status)
+        self.statuses, self.status_host, self.status_reading, self.status_old = {}, None, None, set()
+        self.status_timer = QTimer(self)
+        self.status_timer.setInterval(WL.STATUS_REFRESH * 1000)
+        self.status_timer.timeout.connect(lambda: self.read_status())
         self.add_button = QPushButton(tr("Add…"))
         self.edit_button = QPushButton(tr("Edit…"))
         self.check_button = QPushButton(tr("Check"))
@@ -638,6 +671,12 @@ class LlmPage(QWidget):
         if not event.spontaneous():
             self.load_hosts()
             self.refresh()
+        self.status_timer.start()
+
+    def hideEvent(self, event):  # noqa: N802 - Qt's name
+        """A page nobody looks at reads no status (no command, no SSH every few seconds)."""
+        super().hideEvent(event)
+        self.status_timer.stop()
 
     # -- the list --
 
@@ -654,6 +693,10 @@ class LlmPage(QWidget):
         if self.models_of and self.models_of[0] != host:
             self.models_box.hide()
             self.models_of = None
+        if host != self.status_host:
+            self.statuses, self.status_host = {}, host
+            self.server_status.setText("")
+        self.status_old.discard(host)  # Refresh asks a host that did not know llm status again (updated meanwhile?)
         self.status.setText(tr("Asking {host}…", host=self.host_label(host)))
         background(lambda: self.sai.host_run(host, "llm", "list", "--json", timeout=LIST_SECONDS), owner=self,
                    source=self.refresh_button, timeout=LIST_SECONDS + 15,
@@ -681,6 +724,50 @@ class LlmPage(QWidget):
         lines += [lines_of(note) for note in notes]
         self.status.setText("\n".join(lines))
         self.update_buttons()
+        self.show_statuses()
+        if entries:
+            self.read_status(host)
+
+    # -- what the servers have loaded and use now --
+
+    def read_status(self, host=None):
+        """`sandbox-ai llm status --json` on HOST (the chosen one), in the background: one read at a time, none for a
+        page that is not shown or a host whose sandbox-ai does not know the command (until Refresh)."""
+        host = valid_host(host or self.host())
+        if host is None or host != self.host() or self.status_reading == host or host in self.status_old:
+            return
+        if host != self.loaded_host or not self.entries:
+            return  # no servers there (yet): nothing to read
+        self.status_reading = host
+        background(lambda: self.sai.host_run(host, *WL.status_argv(), timeout=WL.STATUS_SECONDS), owner=self,
+                   work=False, timeout=WL.STATUS_SECONDS + 15,
+                   done=lambda result, error: self.status_read(host, result, error))
+
+    def status_read(self, host, result, error):
+        self.status_reading = None
+        if host != self.host():
+            return  # another host was chosen meanwhile
+        status, out, err = outcome(result, error)
+        try:
+            found = WL.parse_statuses(out)
+        except ValueError:
+            if status == 2 and "invalid choice" in (err or ""):
+                self.status_old.add(host)  # an older sandbox-ai there: not asked again every few seconds
+            self.server_status.setText(tr("What the servers have loaded now could not be read: {error}",
+                                          error=WL.status_unknown(status, out, err)))
+            self.server_status.setToolTip("")
+            return
+        self.statuses, self.status_host = found, host
+        self.show_statuses()
+
+    def show_statuses(self):
+        """One line per server of the list: what it has loaded (with sizes) and uses now; details in the tooltip."""
+        if self.status_host != self.host() or not self.statuses:
+            return
+        names = [e["name"] for e in self.entries if e.get("name") in self.statuses]
+        self.server_status.setText("\n".join(WL.status_text(self.statuses[n], n) for n in names))
+        self.server_status.setToolTip(safe_tooltip("\n\n".join(
+            f"{n}\n{WL.status_detail(self.statuses[n])}" for n in names)))
 
     def chosen(self):
         """The selected server's name, checked; None (and the status says why) otherwise."""
@@ -1070,3 +1157,71 @@ class LlmPage(QWidget):
                 self.models_of = None
         if host == self.host():
             self.refresh()
+
+
+class ServerStatusLine(QLabel):
+    """The status of the LLM server a start works with (--llm NAME[:MODEL]), for the Sandboxes page: what it has
+    loaded (with sizes) and uses now, as `sandbox-ai llm status NAME --json` on the start's host says it. watch()
+    names the server (None: none, the line hides); it is read then and every STATUS_REFRESH seconds while the line is
+    shown, in the background (never on the GUI thread), one read at a time."""
+
+    def __init__(self, sai, parent=None):
+        super().__init__(parent)
+        self.sai, self.target, self.reading, self.old = sai, None, False, set()
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setWordWrap(True)
+        self.setProperty("role", "secondary")
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.setAccessibleName(tr("The LLM server's status"))
+        self.timer = QTimer(self)
+        self.timer.setInterval(WL.STATUS_REFRESH * 1000)
+        self.timer.timeout.connect(lambda: self.read() if self.isVisible() else None)
+        self.hide()
+
+    def watch(self, host, value):
+        """The server of --llm VALUE (NAME[:MODEL]) on HOST; None or another value: what was shown goes."""
+        name = WL.llm_name_of(value)
+        target = (host, name, printable(value)[:240]) if name and valid_host(host) else None
+        if target == self.target:
+            return
+        self.target = target
+        if target is None:
+            self.timer.stop()
+            self.setText("")
+            self.setToolTip("")
+            self.hide()
+            return
+        self.setText(tr("LLM server {value}: reading its status…", value=target[2]))
+        self.setToolTip("")
+        self.show()
+        self.timer.start()
+        self.read()
+
+    def read(self):
+        if self.target is None or self.reading or self.target[0] in self.old:
+            return
+        host, name, _ = target = self.target
+        self.reading = True
+        background(lambda: self.sai.host_run(host, *WL.status_argv(name), timeout=WL.STATUS_SECONDS), owner=self,
+                   work=False, timeout=WL.STATUS_SECONDS + 15, done=lambda result, error: self.done(target, result,
+                                                                                                      error))
+
+    def done(self, target, result, error):
+        self.reading = False
+        if target != self.target:
+            self.read()  # another start was chosen meanwhile: its server's status
+            return
+        host, name, value = target
+        status, out, err = outcome(result, error)
+        try:
+            found = WL.parse_statuses(out).get(name)
+            if found is None:
+                raise ValueError(tr("no status of {name}", name=name))
+        except ValueError as exc:
+            if status == 2 and "invalid choice" in (err or ""):
+                self.old.add(host)
+            text = WL.status_unknown(status, out, err) if status != 0 or not out.strip() else printable(exc)
+            self.setText(tr("LLM server {value}: its status could not be read: {error}", value=value, error=text))
+            return
+        self.setText(tr("LLM server {value}: {status}", value=value, status=WL.status_text(found)))
+        self.setToolTip(safe_tooltip(WL.status_detail(found)))

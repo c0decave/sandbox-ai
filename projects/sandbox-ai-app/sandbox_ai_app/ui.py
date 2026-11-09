@@ -1926,6 +1926,11 @@ class SandboxesPage(QWidget):
         below.addWidget(self.stop_wait)
         below.addWidget(self.stop_button)
         layout.addLayout(below)
+        # The LLM server the selected start works with (--llm NAME): what it has loaded and uses now (llm status on
+        # the start's host), read in the background while it is shown.
+        from .llm_page import ServerStatusLine
+        self.llm_status = ServerStatusLine(sai)
+        layout.addWidget(self.llm_status)
         # The sessions' own actions (sandbox-ai session ...).
         session_box = QGroupBox(tr("Session"))
         session_row = QVBoxLayout(session_box)
@@ -2516,6 +2521,8 @@ class SandboxesPage(QWidget):
             if instance.project:
                 parts.append(printable(instance.project))
             self.detail.setText(" · ".join(parts))
+        running = instance is not None and instance.state in ACTIVE_STATES
+        self.llm_status.watch(getattr(instance, "host", "local"), (instance.record or {}).get("llm") if running else None)
         self.update_buttons()
         self.load_devices()
 

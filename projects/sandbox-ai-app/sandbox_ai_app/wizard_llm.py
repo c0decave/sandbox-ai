@@ -11,6 +11,8 @@ Qt (tested without a display).
   (server_argv), an existing server's settings from `llm show NAME --json` kept by a --replace (fields_of, changes;
   the CA it has stays without --ca), and the models of a server not registered yet (`sandbox-ai wizard models --kind
   --url --json`: probe_argv),
+- what a server has loaded and uses now (`sandbox-ai llm status [NAME] --json`, `wizard models --status`: the loaded
+  models with their sizes, VRAM/RAM, KV cache, requests - what its API reports; parse_status, status_text),
 - the Model choice beside the agent on the launch page and the board's agent node (model_choices, form_values,
   apply): the agent's provider, or a registered server as NAME or NAME:MODEL,
 - what goes on the board: --llm NAME[:MODEL] for whichever agent (Claude Code needs a server with the Anthropic
@@ -187,11 +189,22 @@ def add_and_check(sai, fields, agent=None, keep_key=None):
 
 def parse_models(out):
     """[{name, size, loaded, details}] of `sandbox-ai llm models --json`, each checked (a server's answer is
-    untrusted); ValueError: not a list."""
+    untrusted); ValueError: not a list. `wizard models --status --json` ({"models": [...], "status": {...}}): its
+    models (models_and_status gives both)."""
+    return models_and_status(out)[0]
+
+
+def models_and_status(out):
+    """([model], status or None) of `sandbox-ai llm models --json` or `wizard models [--status] --json` (see
+    parse_models, parse_status)."""
     try:
         data = json.loads(out or "")
     except ValueError:
         raise ValueError(printable((out or "").strip()[-500:]) or tr("no answer")) from None
+    status = None
+    if isinstance(data, dict) and isinstance(data.get("models"), list):
+        status = parse_status(data.get("status")) if isinstance(data.get("status"), dict) else None
+        data = data["models"]
     if not isinstance(data, list):
         raise ValueError(tr("not a list of models"))
     found = []
@@ -213,7 +226,7 @@ def parse_models(out):
         if isinstance(context, int) and not isinstance(context, bool) and 0 < context < 1 << 31:
             model["context"] = context
         found.append(model)
-    return found
+    return found, status
 
 
 def list_models(sai, name):
@@ -222,6 +235,175 @@ def list_models(sai, name):
     if status != 0:
         raise ValueError(message(status, out, err))
     return parse_models(out)
+
+
+# -- what a server has loaded and uses now: sandbox-ai llm status --
+
+STATUS_SECONDS = 45  # `llm status` reads every server at the same time, each request at most 5 s
+STATUS_REFRESH = 20  # seconds between two readings while a page shows them
+USAGE_COUNTS = ("vram_bytes", "ram_bytes", "vram_total_bytes", "vram_free_bytes", "requests_running",
+                "requests_waiting", "slots_total")
+USAGE_PERCENTS = ("kv_cache_percent", "cpu_kv_cache_percent")
+NOT_REPORTED = {"loaded": N_("the loaded models"), "memory": N_("VRAM/RAM use"), "kv_cache": N_("KV cache"),
+                "requests": N_("requests"), "totals": N_("the host's total RAM/VRAM")}
+TIME = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
+
+
+def status_argv(name=None):
+    """`sandbox-ai llm status [NAME] --json`: what each server (or NAME) has loaded and uses now."""
+    if name is not None and valid_name(name) is None:
+        raise ValueError(tr("Not a server's name: {name}", name=printable(name)))
+    return ["llm", "status", *([name] if name else []), "--json"]
+
+
+def whole(value):
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 1 << 62 else None
+
+
+def parse_status(entry):
+    """One server's status as `llm status --json` gives it (or `wizard models --status`'s "status"), checked (it
+    holds what a server said): {name, kind, reachable, error, read_at, models, loaded (None: not reported), usage,
+    not_reported}; None for what is not a status."""
+    if not isinstance(entry, dict):
+        return None
+    loaded = None
+    if isinstance(entry.get("loaded"), list):
+        loaded = []
+        for item in entry["loaded"][:200]:
+            name = item.get("name") if isinstance(item, dict) else None
+            if valid_model(name) is None:
+                continue
+            model = {"name": name}
+            for key in ("size", "memory_bytes", "vram_bytes", "ram_bytes"):
+                if whole(item.get(key)) is not None:
+                    model[key] = item[key]
+            if whole(item.get("context")):
+                model["context"] = item["context"]
+            if isinstance(item.get("expires_at"), str) and item["expires_at"].strip():
+                model["expires_at"] = printable(item["expires_at"].strip())[:40]
+            loaded.append(model)
+    raw = entry.get("usage") if isinstance(entry.get("usage"), dict) else {}
+    usage = {key: raw[key] for key in USAGE_COUNTS if whole(raw.get(key)) is not None}
+    usage.update({key: float(raw[key]) for key in USAGE_PERCENTS if isinstance(raw.get(key), (int, float))
+                  and not isinstance(raw.get(key), bool) and 0 <= raw[key] <= 100})
+    name = entry.get("name") if valid_name(entry.get("name")) else None
+    return {"name": name, "kind": entry.get("kind") if entry.get("kind") in {k for k, *_ in KINDS} else None,
+            "reachable": entry.get("reachable") if isinstance(entry.get("reachable"), bool) else True,
+            "error": printable(entry["error"])[:600] if isinstance(entry.get("error"), str) else "",
+            "read_at": entry["read_at"] if isinstance(entry.get("read_at"), str) and TIME.fullmatch(entry["read_at"])
+            else "", "models": whole(entry.get("models")), "loaded": loaded, "usage": usage,
+            "not_reported": [k for k in entry.get("not_reported") or [] if k in NOT_REPORTED]}
+
+
+def parse_statuses(out):
+    """{name: status} of `sandbox-ai llm status --json` (it says 1 when a server did not answer, and prints the JSON
+    all the same). ValueError: no list in the answer."""
+    try:
+        data = json.loads(out or "")
+    except ValueError:
+        raise ValueError(printable((out or "").strip()[-500:]) or tr("no answer")) from None
+    if not isinstance(data, list):
+        raise ValueError(tr("not a list of servers"))
+    found = {}
+    for entry in data:
+        status = parse_status(entry)
+        if status is not None and status["name"]:
+            found[status["name"]] = status
+    return found
+
+
+def status_unknown(status, out, err):
+    """Why `llm status` gave no list: that host's sandbox-ai does not know it yet (an update), or what it said."""
+    if status == 2 and "invalid choice" in (err or ""):
+        return tr("The sandbox-ai there does not know llm status yet: update the host (Hosts › Update).")
+    return message(status, out, err)
+
+
+def usage_parts(usage):
+    """The usage numbers as short texts: VRAM (of its total), RAM, free VRAM, KV cache, requests, slots."""
+    parts = []
+    if "vram_bytes" in usage:
+        parts.append(tr("VRAM {size} of {total}", size=size_text(usage["vram_bytes"]),
+                        total=size_text(usage["vram_total_bytes"])) if "vram_total_bytes" in usage
+                     else tr("VRAM {size}", size=size_text(usage["vram_bytes"])))
+    if "ram_bytes" in usage:
+        parts.append(tr("RAM {size}", size=size_text(usage["ram_bytes"])))
+    if "vram_free_bytes" in usage:
+        parts.append(tr("{size} VRAM free", size=size_text(usage["vram_free_bytes"])))
+    if "kv_cache_percent" in usage:
+        parts.append(tr("KV cache {percent} %", percent=f"{usage['kv_cache_percent']:g}"))
+    if "cpu_kv_cache_percent" in usage:
+        parts.append(tr("CPU KV cache {percent} %", percent=f"{usage['cpu_kv_cache_percent']:g}"))
+    if "requests_running" in usage or "requests_waiting" in usage:
+        parts.append(tr("requests: {running} running, {waiting} waiting",
+                        running=usage.get("requests_running", "?"), waiting=usage.get("requests_waiting", "?")))
+    if "slots_total" in usage:
+        parts.append(tr("{count} slots", count=usage["slots_total"]))
+    return parts
+
+
+def loaded_text(model):
+    """A loaded model in a few words: its name, the memory it takes (VRAM, RAM) or its size, its context."""
+    extra = []
+    if "memory_bytes" in model:
+        split = [tr("VRAM {size}", size=size_text(model["vram_bytes"]))] if "vram_bytes" in model else []
+        split += [tr("RAM {size}", size=size_text(model["ram_bytes"]))] if "ram_bytes" in model else []
+        extra.append(tr("{size} in memory", size=size_text(model["memory_bytes"])) +
+                     (f": {', '.join(split)}" if split else ""))
+    elif "size" in model:
+        extra.append(size_text(model["size"]))
+    if model.get("context"):
+        extra.append(tr("context {tokens}", tokens=model["context"]))
+    return model["name"] + (f" ({'; '.join(extra)})" if extra else "")
+
+
+def status_text(status, name=None):
+    """STATUS (parse_status) in one line: what is loaded (with sizes), the usage, what the server does not report.
+    NAME: said first."""
+    if status is None:
+        return ""
+    head = f"{name}: " if name else ""
+    if not status["reachable"]:
+        return head + tr("not reachable: {error}", error=status["error"] or "?")
+    parts = []
+    if status["loaded"] is None:
+        parts.append(tr("what is loaded is not reported"))
+    elif not status["loaded"]:
+        parts.append(tr("no model loaded"))
+    else:
+        parts.append(tr("loaded: {models}", models=", ".join(loaded_text(m) for m in status["loaded"][:4])
+                        + (" …" if len(status["loaded"]) > 4 else "")))
+    parts += usage_parts(status["usage"])
+    missing = [tr(NOT_REPORTED[key]) for key in status["not_reported"] if key not in ("loaded", "totals")]
+    if missing:
+        parts.append(tr("not reported: {what}", what=", ".join(missing)))
+    return head + " · ".join(parts)
+
+
+def status_detail(status):
+    """STATUS in lines (a tooltip): each loaded model, the usage, when it was read, what its API does not report."""
+    if status is None:
+        return ""
+    if not status["reachable"]:
+        return tr("not reachable: {error}", error=status["error"] or "?")
+    lines = [tr("Loaded: {model}", model=loaded_text(m)) + (f" · {tr('unloaded at {time}', time=m['expires_at'])}"
+                                                             if m.get("expires_at") else "")
+             for m in status["loaded"] or []]
+    lines += usage_parts(status["usage"])
+    if status["read_at"]:
+        lines.append(tr("read at {time} (UTC)", time=status["read_at"][11:19]))
+    missing = [tr(NOT_REPORTED[key]) for key in status["not_reported"]]
+    if missing:
+        lines.append(tr("Not reported by its API: {what}", what=", ".join(missing)))
+    if status["kind"] == "llamacpp" and "requests_waiting" not in status["usage"]:
+        lines.append(tr("llama-server --metrics also reports the requests waiting."))
+    return "\n".join(lines)
+
+
+def llm_name_of(value):
+    """The server's name of --llm NAME[:MODEL] as a start records it (sandbox-ai list --json: "llm"), or None."""
+    name, _, _ = (value or "").partition(":") if isinstance(value, str) else ("", "", "")
+    return valid_name(name) or None
 
 
 # -- which agent can use which server --
@@ -276,7 +458,7 @@ def placeholder_choices(endpoint):
         return []
     models = [m for m in endpoint.get("models") or [] if valid_model(m)] if isinstance(endpoint.get("models"), list) \
         else []
-    return ([name] if bare_name_works(endpoint) else []) + [f"{name}:{model}" for model in models[:30]]
+    return ([name] if bare_name_works(endpoint) else []) + [f"{name}:{model}" for model in models]
 
 
 def endpoint_row(endpoint):
@@ -662,13 +844,14 @@ PROBE_KINDS = ("ollama", "lmstudio", "llamacpp", "vllm")
 PROBE_SECONDS = 60
 
 
-def probe_argv(kind, url, secret=None, insecure=False):
+def probe_argv(kind, url, secret=None, insecure=False, status=False):
     """`sandbox-ai wizard models --kind KIND --url URL [--api-key-secret SECRET [--insecure-http]] --sort loaded
     --json` for a server at URL that is not registered anywhere: it lists the models and stores nothing (https and a
     path prefix included). SECRET: the secret (of that host) whose key goes with the request, named, never the key;
     sandbox-ai refuses to send it over plain http to a public address unless INSECURE (--insecure-http, asked first:
-    llm-insecure). ValueError says why that command cannot ask this one (an OpenAI-compatible server is tested with
-    `llm check` once it is saved)."""
+    llm-insecure). STATUS: --status, what it has loaded and uses now too ({"models", "status"}: models_and_status).
+    ValueError says why that command cannot ask this one (an OpenAI-compatible server is tested with `llm check`
+    once it is saved)."""
     if kind not in PROBE_KINDS:
         raise ValueError(tr("An OpenAI-compatible server cannot be tested before it is saved."))
     url = (url or "").strip()
@@ -681,7 +864,7 @@ def probe_argv(kind, url, secret=None, insecure=False):
         argv += ["--api-key-secret", secret]
         if insecure and url.lower().startswith("http://"):
             argv.append("--insecure-http")
-    return argv + ["--sort", "loaded", "--json"]
+    return argv + (["--status"] if status else []) + ["--sort", "loaded", "--json"]
 
 
 # What `wizard models --url` says when it will not send the key over plain http to an address outside the local

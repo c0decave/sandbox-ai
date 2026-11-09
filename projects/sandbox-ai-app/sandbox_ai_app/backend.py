@@ -2922,7 +2922,7 @@ class SandboxAI:
             return endpoints
         for endpoint in [e for e in endpoints if not e.get("models")][:ask_models]:
             try:
-                endpoint["models"] = self.host_llm_models(host, endpoint["name"])[:30]
+                endpoint["models"] = self.host_llm_models(host, endpoint["name"])
             except (ValueError, OSError):
                 continue
         return endpoints
