@@ -3257,6 +3257,57 @@ def test_forget_config(scenario, tmp_path, monkeypatch):
     assert s.forget_config(path) is True and s.trusted_configs() == {}
 
 
+def test_settings_lock(scenario, tmp_path):
+    store = tmp_path / "cfg" / "trusted.json"
+    if scenario == "happy":  # the lock file beside the store, this user's, 0600; reentrant in a thread
+        with s.settings_lock(store) as held:
+            with s.settings_lock(store):
+                assert held == store
+        assert (tmp_path / "cfg" / "trusted.json.lock").stat().st_mode & 0o777 == 0o600
+    elif scenario == "sad":  # a lock that is a symlink is never followed
+        (tmp_path / "cfg").mkdir()
+        (tmp_path / "cfg" / "trusted.json.lock").symlink_to(tmp_path / "elsewhere")
+        with pytest.raises(OSError):
+            with s.settings_lock(store):
+                pass
+        assert not (tmp_path / "elsewhere").exists()
+    else:  # another thread waits for it
+        order = []
+
+        def other():
+            with s.settings_lock(store):
+                order.append("other")
+        with s.settings_lock(store):
+            worker = threading.Thread(target=other)
+            worker.start()
+            worker.join(0.3)
+            order.append("first")
+        worker.join(5)
+        assert order == ["first", "other"]
+
+
+def test_review6_trust_and_forget_hold_the_trust_store_lock(tmp_path, monkeypatch):
+    """Review 6, L-8: trusted.json was read, changed and written without a lock, so a `wizard forget` beside a
+    `wizard trust` (the app and the web) could re-trust a forgotten file. Both now wait for the store's lock."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    first, second = tmp_path / "a.json", tmp_path / "b.json"
+    first.write_text("{}")
+    second.write_text("{}")
+    s.trust_config(first)
+    done = []
+    with s.settings_lock(s.config_store()):
+        threads = [threading.Thread(target=lambda: done.append(s.forget_config(first))),
+                   threading.Thread(target=lambda: done.append(s.trust_config(second)))]
+        for thread in threads:
+            thread.start()
+        threads[0].join(0.3)
+        assert done == []  # both wait for the lock
+    for thread in threads:
+        thread.join(10)
+    assert sorted(map(str, done)) == ["None", "True"]
+    assert list(s.trusted_configs()) == [str(second)]
+
+
 def test_listen_unix(scenario, tmp_path):
     path = tmp_path / "l.sock"
     if scenario == "sad":

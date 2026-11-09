@@ -2565,21 +2565,39 @@ def read_config_bytes(path, limit=CONFIG_LIMIT):
         os.close(fd)
 
 
+_filelock = None
+
+
+def settings_lock(file):
+    """The lock of a read-modify-write of the settings file FILE (filelock.py): the CLI, the app and the web interface
+    may change it at the same time, and none may lose the other's change."""
+    global _filelock
+    if _filelock is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_filelock", HERE / "filelock.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        _filelock = loaded
+    return _filelock.locked(file)
+
+
 def trust_config(path, digest=None):
-    """Record a project configuration as trusted: the hash of the bytes reviewed, or of the file now."""
+    """Record a project configuration as trusted: the hash of the bytes reviewed, or of the file now. Under the
+    trust store's lock: a `wizard forget` at the same time (the app and the web side by side) is never undone."""
     key = config_key(path)
-    trusted = trusted_configs()
-    trusted[str(key)] = digest or hashlib.sha256(read_config_bytes(key)).hexdigest()
-    save_trusted(trusted)
+    with settings_lock(config_store()):
+        trusted = trusted_configs()
+        trusted[str(key)] = digest or hashlib.sha256(read_config_bytes(key)).hexdigest()
+        save_trusted(trusted)
 
 
 def forget_config(path):
-    """Remove a configuration from the trusted list; True if it was there."""
-    trusted = trusted_configs()
-    if trusted.pop(str(config_key(path)), None) is None:
-        return False
-    save_trusted(trusted)
-    return True
+    """Remove a configuration from the trusted list (under the trust store's lock); True if it was there."""
+    with settings_lock(config_store()):
+        trusted = trusted_configs()
+        if trusted.pop(str(config_key(path)), None) is None:
+            return False
+        save_trusted(trusted)
+        return True
 
 
 def save_trusted(trusted):
