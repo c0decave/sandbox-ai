@@ -649,7 +649,7 @@ class SlidePanel(QWidget):
     def show_arrow(self):
         self.arrow.setText("›" if self.expanded else "‹")
         text = tr("Hide the properties") if self.expanded else tr("Show the properties")
-        self.arrow.setToolTip(text)
+        self.arrow.setToolTip(safe_tooltip(text))
         self.arrow.setAccessibleName(text)
 
     def expand(self):
@@ -1738,7 +1738,7 @@ class BoardPage(QWidget):
             kind = entry.data(Qt.ItemDataRole.UserRole)
             action = parts.addAction(entry.text(), lambda k=kind: self.add_node(k, guided=True, at=point))
             action.setEnabled(bool(entry.flags() & Qt.ItemFlag.ItemIsEnabled))
-            action.setToolTip(entry.toolTip())
+            action.setToolTip(safe_tooltip(tr(B.KINDS[kind].help)) if kind in B.KINDS else "")
         menu.addSeparator()
         menu.addAction(tr("Select all"), self.select_all)
         menu.addAction(tr("Fit the board"), self.fit)
