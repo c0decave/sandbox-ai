@@ -1013,6 +1013,49 @@ def test_a_login_is_checked_before_its_token_is_stored(logged_in):
     assert {tuple(args[:2]) for _, args in logged_in.runner.calls} == {("publish-logins", "list")}, "nothing added"
 
 
+def test_options_an_older_host_does_not_know_are_said_not_sent(logged_in):
+    """Review 5 W2: what only sandbox-ai 0.1.78 knows (approvals allow --no-open, wizard trust --list/--show/--digest,
+    wizard models --url, workspace add --name, limits --show, net show --keep-all, mcp --live/--helper, mcp detach)
+    is refused for a host whose last status names an older version, before anything runs there (409,
+    host-too-old: update it); what that version knows runs as before. A host whose version is not known yet says
+    so itself (argparse's "unrecognized arguments"): told the same way. This machine is this copy."""
+    hosts = w.module("hosts")
+    hosts.save({"ct1": hosts.check("ct1", {"ssh": "root@192.0.2.10"}), "ct2": hosts.check("ct2", {"ssh": "root@192.0.2.11"}),
+                "ct3": hosts.check("ct3", {"ssh": "root@192.0.2.12"})})
+    hosts.save_statuses({"ct1": {"version": "0.1.77", "ssh": "root@192.0.2.10", "port": 22, "checked": 1},
+                         "ct2": {"version": "0.1.78", "ssh": "root@192.0.2.11", "port": 22, "checked": 1}})
+    newer = [("POST", "/approvals/1-1", {"decision": "allow", "scope": "run", "no_open": True}),
+             ("GET", "/projects", None), ("POST", "/projects/review", {"path": "/srv/p/.sandbox-ai.json"}),
+             ("POST", "/llm-models", {"kind": "ollama", "url": "http://192.168.1.9:11434"}),
+             ("POST", "/workspaces/web", {"directory": "/srv/lib", "name": "lib", "read_only": True}),
+             ("GET", "/limits/web", None), ("POST", "/net/web/keep", {"all": True, "confirm": True}),
+             ("POST", "/starts/web/mcp-live", {"server": "files", "confirm": True}),
+             ("POST", "/starts/web/mcp-live/remove", {"server": "files", "confirm": True})]
+    for method, path, body in newer:
+        status, said = logged_in(method, "/api/hosts/ct1" + path, body)
+        assert status == 409 and said.get("code") == "host-too-old", (path, status, said)
+        assert said["params"]["version"] == "0.1.77" and "update it on the page Hosts" in said["error"], said
+    assert logged_in.runner.calls == [], "nothing ran on the older host"
+    for method, path, body in newer:
+        logged_in(method, "/api/hosts/ct2" + path, body)
+    assert len({tuple(args[:2]) for host, args in logged_in.runner.calls if host == "ct2"}) >= 7, "0.1.78 runs them"
+    logged_in.runner.calls.clear()
+    assert logged_in("POST", "/api/hosts/ct1/approvals/1-1", {"decision": "allow", "scope": "run"})[0] == 200
+    assert logged_in("GET", "/api/hosts/local/projects")[0] == 200, "this machine is this copy"
+    # a host whose version is not known: its own refusal, said as "update it"
+    logged_in.runner.answers[("net", "show")] = (2, "", "usage: sandbox-ai net ...\nsandbox-ai net: error: "
+                                                       "unrecognized arguments: --keep-all")
+    status, said = logged_in("POST", "/api/hosts/ct3/net/web/keep", {"all": True, "confirm": True})
+    assert status == 409 and said["code"] == "host-too-old" and said["params"]["what"] == "net show --keep-all"
+    status, said = logged_in("POST", "/api/hosts/local/net/web/keep", {"all": True, "confirm": True})
+    assert status == 502, "on this machine a usage error is a usage error"
+    # a browser question of the older host: marked, so the page opens nothing for an allow that cannot work
+    logged_in.runner.answers[("approvals", "list")] = (0, json.dumps([{"id": "1-1", "kind": "browser", "url": "https://x.example"},
+                                                                     {"id": "1-2", "kind": "connect"}]), "")
+    assert [q.get("host_too_old") for q in logged_in.svc.api.host_questions("ct1")] == ["0.1.77", None]
+    assert [q.get("host_too_old") for q in logged_in.svc.api.host_questions("ct2")] == [None, None]
+
+
 def test_a_running_sandboxs_workspaces_and_devices_come_as_the_command_lists_them(logged_in):
     """The lists are the commands' own JSON, passed on; a failure is the command's message (its stderr), as a 502."""
     listed = [{"host": "/home/u/src/web", "sandbox": "/work", "mode": "rw", "source": "start"},
@@ -2959,7 +3002,7 @@ const fetch = async (path, opts) => {
   const data = await answer(opts.method, path, opts.body);
   const headers = { get: (name) => (name === "X-Session-Idle-Left" && sessionLeft !== null ? String(sessionLeft) : name === "X-Session-Lifetime-Left" && sessionLeft !== null ? "40000" : null) };
   if (data instanceof Error) return { status: 502, ok: false, statusText: "Bad Gateway", headers, json: async () => ({ error: data.message }) };
-  if (data && data.__status) return { status: data.__status, ok: false, statusText: "", headers, json: async () => Object.assign({ error: data.__error || "log in" }, data.__confirm ? { confirm: data.__confirm } : {}) };
+  if (data && data.__status) return { status: data.__status, ok: false, statusText: "", headers, json: async () => Object.assign({ error: data.__error || "log in" }, data.__confirm ? { confirm: data.__confirm } : {}, data.__code ? { code: data.__code, params: data.__params || {} } : {}) };
   return { status: 200, ok: true, headers, json: async () => data };
 };
 const context = vm.createContext({ document, Node, setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0,
@@ -5029,6 +5072,13 @@ const posts = () => calls.filter(c => c.method !== "GET").map(c => [c.path, JSON
   calls.length = 0; main.children = []; starts = [];
   await vm.runInContext("pages.activity(__main)", context); await settle();
   result.activityNone = [posts(), main.textContent.includes("Choose a start, or a project, log directory or sandbox HOME on ct1.")];
+  // Projects on an older host (review 5 W2): the page stays, the list's place says to update it
+  calls.length = 0; main.children = [];
+  answer = (method, path) => (path.endsWith("/projects") ? { __status: 409, __error: "sandbox-ai 0.1.77 on ct1 does not know wizard trust --list",
+    __code: "host-too-old", __params: { host: "ct1", version: "0.1.77", what: "wizard trust --list, --show and --digest" } } : path.endsWith("/mcp") ? [] : {});
+  vm.runInContext('state.page = "projects"', context);
+  await vm.runInContext("pages.projects(__main)", context); await settle();
+  result.projects = [Boolean(byId("project-path")), main.textContent.includes("sandbox-ai 0.1.77 on ct1 does not know wizard trust --list, --show and --digest yet: update it on the page Hosts")];
   console.log(JSON.stringify(result));
 })().catch(e => { console.error(e.stack); process.exit(1); });
 """
@@ -5049,6 +5099,7 @@ def test_logs_and_activity_never_read_the_services_own_directory(tmp_path):
     assert result["activitySession"] == [["/api/hosts/ct1/activity", {**base, "session": "web"}]]
     assert result["activityProject"] == [["/api/hosts/ct1/activity", {**base, "project": "/srv/p"}]]
     assert result["activityNone"] == [[], True]
+    assert result["projects"] == [True, True], "an older host's Projects page: the form, and what to do"
 
 
 MORE_DRIVER = FAKE_DOM + r"""

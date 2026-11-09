@@ -848,6 +848,8 @@ const TEXTS = {
   "session ended": { "de": "Sitzung beendet" },
   "state|attached": { "de": "angeschlossen" },
   "noun|Start": { "de": "Start" },
+  "sandbox-ai {version} on {host} does not know {what} yet: update it on the page Hosts (Update, or Update from this machine's copy).": { "de": "sandbox-ai {version} auf {host} kennt {what} noch nicht: Aktualisieren Sie es auf der Seite Hosts (Aktualisieren oder Mit der Kopie dieses Rechners aktualisieren)." },
+  "sandbox-ai {version} on {host} cannot allow this without opening a browser there: update it on the page Hosts (Update, or Update from this machine's copy).": { "de": "sandbox-ai {version} auf {host} kann dies nicht freigeben, ohne dort einen Browser zu öffnen: Aktualisieren Sie es auf der Seite Hosts (Aktualisieren oder Mit der Kopie dieses Rechners aktualisieren)." },
   "no start on {host}": { "de": "kein Start auf {host}" },
   "A start's project": { "de": "Projekt eines Starts" },
   "Choose a start's project, a log directory or a project folder on {host}.": { "de": "Wählen Sie das Projekt eines Starts, einen Protokollordner oder einen Projektordner auf {host}." },

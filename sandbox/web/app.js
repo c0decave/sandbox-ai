@@ -76,6 +76,7 @@ const ERROR_TEXTS = {
   "busy": N_("Something runs on {host} already: wait for its end."),
   "changed-meanwhile": N_("{host} was changed meanwhile: nothing was done. Look again, then ask again."),
   "nothing-checked": N_("Nothing was checked on {host}: there is no all-clear."),
+  "host-too-old": N_("sandbox-ai {version} on {host} does not know {what} yet: update it on the page Hosts (Update, or Update from this machine's copy)."),
 };
 
 // E's text in the page's language: the page's own words for a known code, else its message.
@@ -84,7 +85,7 @@ function errorText(e) {
     const values = {};
     for (const [key, value] of Object.entries(e.params || {})) values[key] = String(value ?? "");
     for (const name of (ERROR_TEXTS[e.code].match(/\{(\w+)\}/g) || [])) if (!(name.slice(1, -1) in values)) values[name.slice(1, -1)] = "?";
-    return t(ERROR_TEXTS[e.code], values);
+    return t(ERROR_TEXTS[e.code], values).replace(/ {2,}/g, " ");  // a value not known ("") leaves no gap
   }
   return e && e.message ? e.message : String(e);
 }
@@ -2343,7 +2344,10 @@ function approvalRow(q, view) {
   const link = url ? webLink(url) : null;
   const destination = browser && q.url_host ? el("div", { class: "hint" }, t("opens {host}", { host: String(q.url_host) })) : null;
   const refused = browser && !url ? el("div", { class: "hint status-bad" }, t("not opened anywhere: {why}", { why: String(q.url_refused || t("not an http(s) link without a user part")) })) : null;
-  const question = el("td", {}, q.question, link ? el("div", {}, link) : null, destination, refused,
+  // a host whose sandbox-ai cannot allow it without opening a browser there (before 0.1.78): nothing is opened here
+  const tooOld = browser && url && typeof q.host_too_old === "string" ? el("div", { class: "hint status-bad" },
+    t("sandbox-ai {version} on {host} cannot allow this without opening a browser there: update it on the page Hosts (Update, or Update from this machine's copy).", { version: q.host_too_old, host })) : null;
+  const question = el("td", {}, q.question, link ? el("div", {}, link) : null, destination, refused, tooOld,
     q.url_truncated ? el("div", { class: "hint" }, t("the URL was cut")) : null,
     q.always ? el("div", { class: "hint" }, q.always) : null,
     !allowable && q.allow_refused ? el("div", { class: "hint" }, t("cannot be allowed: {why}", { why: String(q.allow_refused) })) : null);
@@ -2391,7 +2395,7 @@ function approvalRow(q, view) {
   scope.addEventListener("change", () => { picked = true; if (deny) deny.textContent = denyLabel(); });
   const denyNow = (event) => answer("deny", { scope: denyScope() }, t("Denied {scope}", { scope: t(SCOPES[denyScope()]) }))(event);
   // Allow: a browser question is opened here (never on that host); one that cannot be allowed has no Allow.
-  const allowButton = !allowable || (browser && !url) ? null : browser
+  const allowButton = !allowable || (browser && (!url || tooOld)) ? null : browser
     ? el("button", { class: "primary", title: t("opens the link in this browser, then allows it on {host} without opening a browser there", { host }), onclick: () => askAllow() }, t("Open here and allow"))
     : el("button", { class: "primary", onclick: () => askAllow() }, t("Allow"));
   const buttons = () => {

@@ -378,7 +378,59 @@ class Sessions:
 # its message. A code is never a reason to pass anything: it only says which of these it is.
 ERROR_CODES = ("no-host", "confirm-needed", "bad-path", "bad-name", "host-unreachable", "timeout", "command-failed",
                "unknown-preset-value", "no-preset", "login-needed", "page-outdated", "too-many-logins", "busy",
-               "changed-meanwhile", "nothing-checked")
+               "changed-meanwhile", "nothing-checked", "host-too-old")
+
+# What the page sends that only newer sandbox-ai versions know: (since, what, test of the argv). A host whose last
+# status (hosts list, kept; never asked for this) names an older version is told so before anything runs there
+# (newer_needed); an older one whose version is not known yet says so itself (argparse's "unrecognized arguments",
+# "invalid choice"), which is told the same way (too_old_said).
+NEWER = (
+    ((0, 1, 78), "approvals allow --no-open", lambda a: a[:2] == ["approvals", "allow"] and "--no-open" in a),
+    ((0, 1, 78), "wizard trust --list, --show and --digest", lambda a: a[:2] == ["wizard", "trust"] and any(
+        x in ("--list", "--show") or x.startswith("--digest") for x in a)),
+    ((0, 1, 78), "wizard models --url", lambda a: a[:2] == ["wizard", "models"] and any(x.startswith("--url") for x in a)),
+    ((0, 1, 78), "workspace add --name", lambda a: a[:2] == ["workspace", "add"] and any(x.startswith("--name") for x in a)),
+    ((0, 1, 78), "limits --show", lambda a: a[:1] == ["limits"] and "--show" in a),
+    ((0, 1, 78), "net show --keep-all", lambda a: a[:2] == ["net", "show"] and "--keep-all" in a),
+    ((0, 1, 78), "mcp attach --live and --helper", lambda a: a[:2] == ["mcp", "attach"] and (
+        "--live" in a or any(x.startswith("--helper") for x in a))),
+    ((0, 1, 78), "mcp detach", lambda a: a[:2] == ["mcp", "detach"]),
+)
+
+
+def version_text(key):
+    return ".".join(str(part) for part in key)
+
+
+def too_old(host, version, what, since=None):
+    """The refusal of a command HOST's sandbox-ai (VERSION, or None: not known) does not know."""
+    needed = f" (it came with {version_text(since)})" if since else ""
+    return Refused(409, f"sandbox-ai {version or ''}{' ' if version else ''}on {host} does not know {what}{needed}: "
+                        "update it on the page Hosts (Update, or Update from this machine's copy)", code="host-too-old",
+                   params={"host": host, "version": version or "", "what": what})
+
+
+def newer_needed(host, args):
+    """A refusal when HOST's sandbox-ai is known to be older than what ARGS need (NEWER), else None."""
+    hosts = module("hosts")
+    if host == hosts.LOCAL:
+        return None
+    for since, what, test in NEWER:
+        if test(list(args)):
+            version = hosts.older_than(host, since)
+            if version:
+                return too_old(host, version, what, since)
+    return None
+
+
+def too_old_said(host, args, status, err):
+    """A refusal when HOST's sandbox-ai refused ARGS, which hold what only newer versions know (NEWER), as argparse
+    refuses what it does not know (status 2: "unrecognized arguments", "invalid choice"): the page then says to
+    update it, not just the usage line."""
+    if host == module("hosts").LOCAL or status != 2 or not re.search(r"unrecognized arguments|invalid choice", err or ""):
+        return None
+    what = next((what for _, what, test in NEWER if test(list(args))), None)  # other callers read such a refusal
+    return too_old(host, module("hosts").known_version(host)[0], what) if what else None  # themselves (doctor)
 
 
 class Refused(Exception):
@@ -1116,6 +1168,9 @@ class Api:
                 "defaults": {"mode": DEFAULT_MODE, "telemetry": DEFAULT_TELEMETRY}}
 
     def run(self, host, args, timeout=120, input=None):
+        older = newer_needed(host_name(host), args)  # an option that host's sandbox-ai does not know: said, not run
+        if older:
+            raise older
         try:
             status, out, err = self.runner(host_name(host), list(args), timeout=timeout, input=input)
         except ValueError as exc:  # hosts.run: no such host, or hosts.json cannot be read
@@ -1123,6 +1178,9 @@ class Api:
             missing = "no host" in str(exc)
             raise Refused(404 if missing else 400, printable(exc)[:600], code="no-host" if missing else None,
                           params={"host": host} if missing else None) from None
+        older = too_old_said(host, args, status, err)
+        if older:
+            raise older
         return status, out, err
 
     @staticmethod
@@ -2034,10 +2092,18 @@ class Api:
         return self.json_of(params["host"], ["approvals", "list", "--json"], 30)
 
     def host_questions(self, name):
+        """NAME's open questions; a browser question of a host whose sandbox-ai is known to be older than 0.1.78
+        carries "host_too_old" (its version): it cannot be allowed without opening a browser there (--no-open), so
+        the page says to update it instead of opening the link here first."""
         listed = self.json_of(name, ["approvals", "list", "--json"], APPROVALS_HOST_SECONDS)
         if not isinstance(listed, list):
             raise Refused(502, f"sandbox-ai approvals on {name}: not a list of questions")
-        return [question for question in listed if isinstance(question, dict)]
+        older = newer_needed(name, ["approvals", "allow", "-", "--no-open"])
+        questions = [question for question in listed if isinstance(question, dict)]
+        for question in questions:
+            if older and question.get("kind") == "browser":
+                question["host_too_old"] = older.params["version"]
+        return questions
 
     def all_approvals(self, params, body):
         """The open questions of every host (this machine and each of `sandbox-ai hosts`), asked at once:

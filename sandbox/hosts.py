@@ -702,17 +702,34 @@ def version_key(version):
 AS_GIVEN_SINCE = (0, 1, 78)  # the launcher's --workspaces-as-given (and the rule it switches off) came with it
 
 
+def known_version(name, path=None):
+    """(the version text, its key) of the sandbox-ai on host NAME as its last status found it (hosts list; never
+    asked here), or (None, None) when that is not known. This machine: None too (it is this copy)."""
+    if name == LOCAL:
+        return None, None
+    try:
+        found = statuses([name], cached=True, path=path).get(name)
+    except (OSError, ValueError):
+        return None, None
+    version = found.get("version") if isinstance(found, dict) else None
+    key = version_key(version) if isinstance(version, str) else None
+    return (version, key) if key else (None, None)
+
+
+def older_than(name, since, path=None):
+    """The version of the sandbox-ai on host NAME when its last status found one older than SINCE (a version key),
+    else None (newer, the same, not known, or this machine)."""
+    version, key = known_version(name, path)
+    return version if key and key < since else None
+
+
 def knows_workspaces_as_given(name, path=None):
     """The sandbox-ai on host NAME takes --workspaces-as-given: this machine's always; another host's when the version
     its last status found (hosts list, never asked here) is 0.1.78 or later. Older ones do not know the option, and
     neither do they let the directory a start runs in decide /work, so a start there without it is the same."""
     if name == LOCAL:
         return True
-    try:
-        found = statuses([name], cached=True, path=path).get(name)
-    except (OSError, ValueError):
-        return False
-    key = version_key(found.get("version")) if isinstance(found, dict) else None
+    _, key = known_version(name, path)
     return bool(key and key >= AS_GIVEN_SINCE)
 
 
