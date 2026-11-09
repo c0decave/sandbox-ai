@@ -1556,6 +1556,7 @@ class BoardPage(QWidget):
 
     def inspect(self, node):
         self.clear_inspector()
+        self.live_token = getattr(self, "live_token", 0) + 1  # a live row still being looked up is for another look
         if node is None:
             self.inspector_title.setText(tr("Select a part to change it"))
             self.inspector_help.set_tip("board.inspector")
@@ -1767,7 +1768,6 @@ class BoardPage(QWidget):
             button = QPushButton(tr("Add these devices to {run} now", run=printable(run)))
             button.clicked.connect(lambda: self.live_devices(run, list(node.props.get("--device", [])), button))
         else:
-        self.live_token = getattr(self, "live_token", 0) + 1  # a live row still being looked up is for another look
             button = QPushButton(tr("Apply these limits to {run} now", run=printable(run)))
             button.clicked.connect(lambda: self.live_limits(run, node.props, button))
         self.inspector.addRow(button)

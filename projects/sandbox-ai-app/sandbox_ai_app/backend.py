@@ -3554,6 +3554,9 @@ class Pipes:
     def __init__(self, process, data=None, watch=None, errors_only=False):
         self.process = process
         self.output = ([], [])  # chunks of stdout and stderr
+        self.watch, self.cancelled = watch, False  # WATCH(text): what comes, as it comes (SandboxAI.watching)
+        self.watched = {process.stderr.fileno()} if errors_only else {process.stdout.fileno(), process.stderr.fileno()}
+        self.decoders = {}
         self.chunks = dict(zip((process.stdout.fileno(), process.stderr.fileno()), self.output))
         self.reading = set(self.chunks)  # pipes not at their end yet
         self.data = memoryview(data) if data else None
@@ -3569,9 +3572,6 @@ class Pipes:
         self.data = None
         if self.process.stdin is not None:
             try:
-        self.watch, self.cancelled = watch, False  # WATCH(text): what comes, as it comes (SandboxAI.watching)
-        self.watched = {process.stderr.fileno()} if errors_only else {process.stdout.fileno(), process.stderr.fileno()}
-        self.decoders = {}
                 self.process.stdin.close()
             except OSError:
                 pass
@@ -3613,6 +3613,11 @@ class Pipes:
                         chunk = b""
                     if chunk:
                         self.chunks[key.fd].append(chunk)
+                        if self.watch is not None and key.fd in self.watched:
+                            decoder = self.decoders.setdefault(key.fd, codecs.getincrementaldecoder("utf-8")("replace"))
+                            text = decoder.decode(chunk)
+                            if text:
+                                self.watch(text)
                     else:
                         selector.unregister(key.fd)
                         self.reading.discard(key.fd)
@@ -3628,11 +3633,6 @@ class Pipes:
                 pass
 
     def text(self):
-                        if self.watch is not None and key.fd in self.watched:
-                            decoder = self.decoders.setdefault(key.fd, codecs.getincrementaldecoder("utf-8")("replace"))
-                            text = decoder.decode(chunk)
-                            if text:
-                                self.watch(text)
         """[stdout, stderr] as read so far."""
         return [b"".join(chunks).decode("utf-8", "replace") for chunks in self.output]
 

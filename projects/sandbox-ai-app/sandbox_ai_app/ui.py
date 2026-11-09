@@ -149,10 +149,9 @@ class ListField(QWidget):
     the names the chosen host has (set_choices: its MCP servers for --mcp, its kits for --kit)."""
     changed = Signal()
 
-    def __init__(self, path=False, choices=False, option=None):
+    def __init__(self, path=False, choices=False):
         super().__init__()
         layout = QHBoxLayout(self)
-        self.option = option
         layout.setContentsMargins(0, 0, 0, 0)
         self.edit = QPlainTextEdit()
         self.edit.setFixedHeight(52)
@@ -188,10 +187,7 @@ class ListField(QWidget):
         self.pick.setToolTip(safe_tooltip(tr("Add one that {host} has", host=where) if where else tr("Add one")))
 
     def add(self, value):
-        if self.option in OptionsForm.SECRET_CHOICES:  # a secret's name: HOST=NAME, URL=NAME or NAME (name_fields)
-            from .name_fields import add_line
-            self.edit.setPlainText(add_line(self.edit.toPlainText(), value, self.option))
-        elif value not in self.value():
+        if value not in self.value():
             self.edit.appendPlainText(value)
 
     def set_local(self, local):
@@ -328,9 +324,7 @@ class OptionsForm(QTabWidget):
 
     # The options whose values the chosen host lists (backend.host_start_choices): a chooser filled from its lists,
     # the value still typed in where it has none (or the list could not be read).
-    HOST_CHOICES = ("--vpn", "--kit", "--identity", "--mcp", "--image-variant", "--secret-env", "--api-key",
-                    "--git-token-secret")
-    SECRET_CHOICES = ("--secret-env", "--api-key", "--git-token-secret")  # their values name a secret of that host
+    HOST_CHOICES = ("--vpn", "--kit", "--identity", "--mcp", "--image-variant")
 
     def widget_for(self, option):
         from . import hardware
@@ -351,7 +345,7 @@ class OptionsForm(QTabWidget):
             self.limit_hint(widget, option, "local")
             return widget
         if option.long in self.HOST_CHOICES and option.kind == "list":
-            widget = ListField(choices=True, option=option.long)
+            widget = ListField(choices=True)
             widget.changed.connect(self.changed)
             return widget
         if option.long in self.HOST_CHOICES and option.kind == "value":
@@ -594,9 +588,6 @@ class LaunchPage(QWidget):
         self.preset_catalogue, self.presets_host, self.presets_reading = PR.Catalogue(), None, None
         self.choices_host, self.choices_read_at, self.choices_token = None, 0.0, 0
         self.form = OptionsForm(self.options)
-        # A secret or VPN profile added or removed (Credentials page): the choosers are read again when shown next.
-        from .name_fields import hub
-        hub().changed.connect(self.names_changed)
         try:
             self.form.apply_policy(sai.forbidden())
         except Exception:  # noqa: BLE001 - a broken policy is shown on the System page
@@ -859,10 +850,6 @@ class LaunchPage(QWidget):
                    done=lambda result, error: alive(self) and self.host_choices_read(token, host, result, error))
 
     def host_choices_read(self, token, host, result, error):
-    def names_changed(self, _kind, host):
-        if host == self.choices_host:
-            self.choices_read_at = 0.0
-
         if token != self.choices_token or host != self.host():
             return
         self.choices_read_at = time.monotonic()
@@ -4972,10 +4959,6 @@ class ProjectCombo(QComboBox):
         super().showPopup()
 
 
-class ProjectBar(QWidget):
-    """The current project, large, at the top of the window; the switcher lists the projects sandbox-ai and the
-    app know (SandboxAI.known_projects), then Open folder… and New project (wizard)…."""
-    chosen = Signal(str)
 class KnownProjects(QObject):
     """SandboxAI.known_projects() as last read, read again in the background (it reads sandbox-ai's registry, which
     may ask Podman, and the folders of sessions): the project switcher and the menus show at once what is known and
@@ -5002,6 +4985,10 @@ class KnownProjects(QObject):
             self.refresh()
 
 
+class ProjectBar(QWidget):
+    """The current project, large, at the top of the window; the switcher lists the projects sandbox-ai and the
+    app know (SandboxAI.known_projects), then Open folder… and New project (wizard)…."""
+    chosen = Signal(str)
     open_folder = Signal()
     new_project = Signal()
     OPEN, NEW = ":open", ":new"  # never a project: those are absolute paths
@@ -5009,12 +4996,12 @@ class KnownProjects(QObject):
     def __init__(self, sai):
         super().__init__()
         self.sai, self.path = sai, None
+        self.known = KnownProjects(sai)
+        self.known.changed.connect(lambda: self.fill(read=False))
         self.setObjectName("projectBar")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(18, 8, 18, 8)
-        self.known = KnownProjects(sai)
-        self.known.changed.connect(lambda: self.fill(read=False))
         self.icon = QLabel()
         self.icon.setPixmap(theme.glyph("project", theme.colors()["title"], 26).pixmap(26, 26))
         texts = QVBoxLayout()
@@ -5497,12 +5484,12 @@ class MainWindow(QMainWindow):
         self.add_tab_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.add_tab_menu = QMenu(self)
         self.add_tab_menu.aboutToShow.connect(self.fill_add_tab_menu)
+        self.project_bar.known.changed.connect(self.known_projects_changed)
         self.add_tab_button.setMenu(self.add_tab_menu)
         strip_layout.addWidget(self.tabs, 1)
         strip_layout.addWidget(self.add_tab_button)
         # Hidden on the pages the project does not change (PROJECT_TAB_PAGES), keeping their place: nothing below moves.
         for widget in (self.tabs, self.add_tab_button):
-        self.project_bar.known.changed.connect(self.known_projects_changed)
             policy = widget.sizePolicy()
             policy.setRetainSizeWhenHidden(True)
             widget.setSizePolicy(policy)
@@ -5529,12 +5516,12 @@ class MainWindow(QMainWindow):
         help_view.set_shown(backend.setting("help_buttons"))  # the setting; the Help page and F1 stay either way
         self.help_buttons = help_view.install(self)  # the (?)s of the pages' areas and controls
         self.statusBar().showMessage(tr("sandbox-ai {version} from {path}", version=sai.version(), path=sai.directory))
+        self.make_busy_indicator()
         self.tray, self.tray_timer = None, None
         self.session_timer = QTimer(self)
         self.session_timer.setSingleShot(True)
         self.session_timer.timeout.connect(self.session_goes_on)
         self.make_window_controls()
-        self.make_busy_indicator()
         self.make_menus()
         if QSystemTrayIcon.isSystemTrayAvailable():
             self.make_tray()
@@ -5961,12 +5948,12 @@ class MainWindow(QMainWindow):
             item = self.switch_menu.addAction(menu_text(f"{Path(path).name or path}  —  {middle(path, 60)}"))
             item.setCheckable(True)
             item.setChecked(same_folder(path, self.project))
+            group.addAction(item)
             item.triggered.connect(lambda _=False, p=path: self.set_project(p))
         if not known:
             self.switch_menu.addAction(tr("No project known yet")).setEnabled(False)
 
     def about(self):
-            group.addAction(item)
         import platform
         import PySide6
         from . import __version__
@@ -6004,14 +5991,14 @@ class MainWindow(QMainWindow):
         tables += [(f"statistics-{key}", widget) for key, widget in self.statistics.tables.items()]
         for key, widget in tables:
             s.table(key, widget)
+        saved = s.section("splitters").get("files")
+        self.files.keep_split = isinstance(saved, list) and len(saved) == self.files.split.count()  # kept: it wins
         for key, splitter in (("approvals", self.approvals.split), ("connections", self.connections.split),
                               ("kits", self.kits.split), ("kits-marketplaces", self.kits.market_split),
                               ("files", self.files.split)):
             s.splitter(key, splitter)
         s.text("connections-filter", self.connections.filter)
         s.check("connections-refused", self.connections.refused)
-        saved = s.section("splitters").get("files")
-        self.files.keep_split = isinstance(saved, list) and len(saved) == self.files.split.count()  # kept: it wins
         s.check("connections-follow", self.connections.follow)
         s.text("images-filter", self.images.filter)
         s.check("sandboxes-only-project", self.sandboxes.only_project)
@@ -6763,22 +6750,6 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, tr("Not started"), shown_as_text(shlex.join(command)))
         return ok
 
-    def running_work(self):
-        """The titles of the pages with work in the background (commands, copies, an answer being sent)."""
-        found = [key for key, _ in PAGES if busy(getattr(self, key))]  # busy(): its background calls and its Task
-        if self.approvals.answering is not None:
-            found.append("approvals")
-        return [tr(title) for key, title in PAGES if key in found]
-
-    def stop_work(self, timeout=None):
-        """Cancel the copies (they stop at their next chunk and remove what they created), stop the
-        sandbox-ai commands that run (their whole process groups), and wait up to TIMEOUT (QUIT_WAIT)
-        seconds for the background threads to end; the calls still running."""
-        self.stopped = True
-        self.files.task.cancel()
-        self.sai.stop_commands()  # on the GUI thread on purpose: quitting, bounded by one grace period
-        return ThreadCall.wait_all(QUIT_WAIT if timeout is None else timeout)
-
     def make_busy_indicator(self):
         """At the right of the status bar, while a page has work in the background (a command, a copy, an install): a
         busy bar and which pages ("Running: Kits & plugins…"), so a click that takes a while is seen to be working
@@ -6803,6 +6774,22 @@ class MainWindow(QMainWindow):
         self.busy_label.setText(tr("Running: {pages}…", pages=", ".join(pages)) if pages else "")
         self.busy_label.setVisible(bool(pages))
         self.busy_bar.setVisible(bool(pages))
+
+    def running_work(self):
+        """The titles of the pages with work in the background (commands, copies, an answer being sent)."""
+        found = [key for key, _ in PAGES if busy(getattr(self, key))]  # busy(): its background calls and its Task
+        if self.approvals.answering is not None:
+            found.append("approvals")
+        return [tr(title) for key, title in PAGES if key in found]
+
+    def stop_work(self, timeout=None):
+        """Cancel the copies (they stop at their next chunk and remove what they created), stop the
+        sandbox-ai commands that run (their whole process groups), and wait up to TIMEOUT (QUIT_WAIT)
+        seconds for the background threads to end; the calls still running."""
+        self.stopped = True
+        self.files.task.cancel()
+        self.sai.stop_commands()  # on the GUI thread on purpose: quitting, bounded by one grace period
+        return ThreadCall.wait_all(QUIT_WAIT if timeout is None else timeout)
 
     def terminate(self):
         """SIGTERM (logout, systemctl stop): no question, the work is stopped (bounded), the app quits."""
