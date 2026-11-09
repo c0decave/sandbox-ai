@@ -425,6 +425,7 @@ def test_the_start_records_what_a_later_workspace_is_checked_against(tmp_path, m
 def test_every_start_has_a_small_tmpfs_for_workspaces_added_later():
     assert L.WORKSPACES_DIR == w.WORKSPACES_DIR == "/workspaces"
     assert "size=1m" in L.WORKSPACES_TMPFS and "noexec" in L.WORKSPACES_TMPFS
+    assert "nr_inodes" not in L.WORKSPACES_TMPFS, "podman refuses nr_inodes in --tmpfs"
     source = (ROOT / "sandbox/agent_sandbox.py").read_text()
     assert 'f"--tmpfs={WORKSPACES_DIR}:{WORKSPACES_TMPFS}"' in source and '"--tmpfs", WORKSPACES_DIR]' in source
 

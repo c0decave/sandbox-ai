@@ -2788,7 +2788,8 @@ def merge_config(argv, a, document):
 # Every workspace after the first lies below WORKSPACES_DIR, a small tmpfs of the sandbox's own (the root file
 # system is read-only): `sandbox-ai workspace add` makes the mount point of a workspace added during the run there.
 WORKSPACES_DIR = "/workspaces"
-WORKSPACES_TMPFS = "rw,nosuid,nodev,noexec,size=1m,nr_inodes=4096,mode=0755"
+# no nr_inodes: podman refuses it in --tmpfs ("unknown mount option"); size=1m keeps the entries few anyway
+WORKSPACES_TMPFS = "rw,nosuid,nodev,noexec,size=1m,mode=0755"
 
 
 # --workspace-name NAME=DIR: what /workspaces/NAME may be called (as sandbox-ai workspace add --name checks it).
