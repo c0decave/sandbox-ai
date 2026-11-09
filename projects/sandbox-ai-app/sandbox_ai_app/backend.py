@@ -3752,7 +3752,7 @@ SETTINGS = {"theme": "system", "language": "system", "terminal": "app", "tray": 
             "sandbox_ai_home": "", "default_agent": "claude", "default_backend": "podman",
             "default_template": "development", "board_grid": 20, "auto_tabs": True, "guide_nodes": True,
             "guide_tour": True, "intro": True, "debug": False, "help_buttons": True,
-            "web_without_sandbox": False}
+            "web_without_sandbox": False, "show_flags": False}
 
 
 def setting(name, settings=None):

@@ -81,7 +81,7 @@ def test_the_inspector_builds_fields_from_the_launcher_and_honours_the_policy(pa
     page.inspect(proxy)
     from sandbox_ai_app.board_view import RulesEdit
     boxes = page.inspector_holder.findChildren(QtWidgets.QCheckBox)
-    enabled = next(b for b in boxes if "--no-proxy" in b.text())
+    enabled = next(b for b in boxes if "every connection passes it" in b.text())  # (--no-proxy: when shown)
     assert not enabled.isEnabled() and enabled.isChecked()
     combo = next(c for c in page.inspector_holder.findChildren(QtWidgets.QComboBox) if c.findText("off") >= 0)
     assert not combo.model().item(combo.findText("off")).isEnabled()

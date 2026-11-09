@@ -1,9 +1,15 @@
 """Human labels of the launcher's options, in English and German (German as in sandbox-ai's README_DE).
-The option itself (--workspace, -w) is shown next to its label; sandbox-ai's own help text (English) is
-the tooltip. An option sandbox-ai adds later gets its option name as label until it is listed here."""
+The option itself (--workspace, -w) is shown next to its label, and in its tooltip, only while the setting
+show_flags is on (off by default: the field's name alone); sandbox-ai's own help text (English) is the tooltip. An
+option sandbox-ai adds later gets a name made of its option name ("--allow-host": "Allow host") until it is listed
+here."""
 from __future__ import annotations
 
+import re
+
 from . import i18n
+
+_FLAGS = [False]  # the setting show_flags: the command-line options (--…) shown beside the fields' names
 
 OPTION_LABELS = {
     "--workspace": ("Workspaces", "Arbeitsordner"),
@@ -115,9 +121,41 @@ DANGEROUS = {"--dangerously-skip-permissions", "--egress-all-allow", "--no-proxy
 TMUX = ("--tmux", "--no-tmux")
 
 
+def flags_shown():
+    """True while the setting show_flags is on: the options (--…) are shown beside the fields' names."""
+    return _FLAGS[0]
+
+
+def set_flags_shown(on):
+    _FLAGS[0] = bool(on)
+
+
+def readable(option):
+    """A name made of OPTION itself, for an option not listed here yet: "--allow-host" gives "Allow host"."""
+    words = str(option).lstrip("-").replace("-", " ").replace("_", " ").strip()
+    return words[:1].upper() + words[1:] if words else str(option)
+
+
 def label(option):
     """The human label of OPTION (a long option name) in the current language."""
     pair = OPTION_LABELS.get(option)
     if not pair:
-        return option
+        return readable(option)
     return pair[1] if i18n.language() == "de" else pair[0]
+
+
+def tip(flag, help_text):
+    """The tooltip of an option's field: sandbox-ai's help, with the option FLAG first while they are shown."""
+    if flags_shown() and flag:
+        return f"{flag}\n{help_text}" if help_text else flag
+    return help_text or ""
+
+
+_FLAG_NOTE = re.compile(r"\s*\((?:--[A-Za-z0-9][A-Za-z0-9-]*)(?:,\s*-[A-Za-z0-9])?\)"  # "Kits (--kit)"
+                        r"|(?:;\s*[^;():]*:|:)\s*--[A-Za-z0-9][A-Za-z0-9-]*(?=\))")  # "(no cloud: --no-provider-…)"
+
+
+def shown(text):
+    """TEXT (a field's name) as shown: an option in parentheses at its end ("Kits (--kit)") only while they are
+    shown."""
+    return text if flags_shown() else _FLAG_NOTE.sub("", text)

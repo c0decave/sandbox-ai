@@ -7027,6 +7027,9 @@ TEXTS = {
     'Play the intro animation at start (Esc skips it)': {
         'en': 'Play the intro animation at start (Esc skips it)',
         'de': 'Beim Start die Intro-Animation zeigen (Esc überspringt sie)'},
+    "Show the command-line options (--…) beside the fields' names": {
+        'en': "Show the command-line options (--…) beside the fields' names",
+        'de': 'Die Kommandozeilen-Optionen (--…) neben den Namen der Felder zeigen'},
     'plugin {name}': {
         'en': 'plugin {name}',
         'de': 'Plugin {name}'},

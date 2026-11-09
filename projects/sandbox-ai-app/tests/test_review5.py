@@ -426,7 +426,11 @@ def test_the_start_form_speaks_german_and_marks_what_weakens(qapp, isolated, mon
         assert form.labels["--workspace-ro"].text() == "Alle Arbeitsordner schreibgeschützt einbinden"
         assert form.labels["--workspace-ro"].flag.text().startswith("--workspace-ro")
         assert form.widgets["--workspace-ro"].text() == "Alle Arbeitsordner schreibgeschützt einbinden"
+        assert "--workspace-ro" not in form.widgets["--workspace-ro"].toolTip(), "the option only when shown"
+        labels.set_flags_shown(True)
+        form.show_flags()
         assert "--workspace-ro" in form.widgets["--workspace-ro"].toolTip(), "the option itself in the tooltip"
+        labels.set_flags_shown(False)
         assert all(o.long in labels.OPTION_LABELS for o in form.options), "every option has its words"
         danger = form.labels["--dangerously-skip-permissions"]
         assert danger.title.property("role") is None

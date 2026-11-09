@@ -443,6 +443,7 @@ class SettingsDialog(QDialog):
         self.check(form, "help_buttons", tr("Show the (?) help buttons (the Help page, the tours and F1 stay)"),
                    current)
         self.check(form, "intro", tr("Play the intro animation at start (Esc skips it)"), current)
+        self.check(form, "show_flags", tr("Show the command-line options (--…) beside the fields' names"), current)
         self.replay = QPushButton(tr("Watch the intro again"))
         self.replay.clicked.connect(self.watch_intro)
         form.addRow("", self.replay)

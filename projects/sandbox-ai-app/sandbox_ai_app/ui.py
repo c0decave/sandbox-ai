@@ -286,7 +286,8 @@ def set_accessible(widget, name):
 
 class OptionLabel(QWidget):
     """A row label of the options form: the option's name in the language chosen, and the command-line option in
-    small text below it; in the warning colour while an option that weakens the sandbox is set."""
+    small text below it while the setting show_flags is on; in the warning colour while an option that weakens the
+    sandbox is set."""
 
     def __init__(self, text, flag):
         super().__init__()
@@ -300,6 +301,7 @@ class OptionLabel(QWidget):
         self.flag.setFont(small)
         layout.addWidget(self.title)
         layout.addWidget(self.flag)
+        self.flag.setVisible(labels.flags_shown())
 
     def text(self):
         return self.title.text()
@@ -337,7 +339,7 @@ class OptionsForm(QTabWidget):
                 # text, sandbox-ai's own help (English) as the tooltip of both.
                 flag = option.long + (f" ({option.short})" if option.short else "")
                 label = OptionLabel(labels.label(option.long), flag)
-                tip = safe_tooltip(f"{flag}\n{option.help}" if option.help else flag)
+                tip = safe_tooltip(labels.tip(flag, option.help))
                 label.setToolTip(tip)
                 widget.setToolTip(tip)
                 set_accessible(widget, labels.label(option.long))
@@ -348,6 +350,17 @@ class OptionsForm(QTabWidget):
             scroll.setWidgetResizable(True)
             scroll.setWidget(page)
             self.addTab(scroll, tr(GROUP_TITLES.get(title, title)).replace("&", "&&"))  # & would mark a shortcut
+
+    def show_flags(self):
+        """The setting show_flags changed: each row's option (--…) below its name and in its tooltip, or not."""
+        for option in self.options:
+            label, widget = self.labels.get(option.long), self.widgets.get(option.long)
+            if label is None or widget is None:
+                continue
+            label.flag.setVisible(labels.flags_shown())
+            tip = safe_tooltip(labels.tip(label.flag.text(), option.help))
+            label.setToolTip(tip)
+            widget.setToolTip(tip)
 
     def mark_dangerous(self):
         """The options that weaken the sandbox (labels.DANGEROUS) in the warning colour while they are set."""
@@ -397,7 +410,7 @@ class OptionsForm(QTabWidget):
             # words, in English, only for an option labels.py does not know yet).
             known = option.long in labels.OPTION_LABELS
             widget = QCheckBox(labels.label(option.long) if known else
-                               (option.help.split(";")[0][:90] if option.help else ""))
+                               (option.help.split(";")[0][:90] if option.help else labels.label(option.long)))
             widget.toggled.connect(self.changed)
         elif option.kind == "choice":
             widget = QComboBox()
@@ -4108,7 +4121,8 @@ class AddServerDialog(QDialog):
         self.no_pull = QCheckBox(tr("Do not pull the image (it is there already)"))
         form.addRow(self.no_pull)
         signature = (entry.get("_signature") or {}).get("state", "unsigned")
-        self.unsigned = QCheckBox(tr("Take it although its catalog is not signed by a trusted key (--unsigned)"))
+        self.unsigned = QCheckBox(labels.shown(tr("Take it although its catalog is not signed by a trusted key "
+                                                  "(--unsigned)")))
         self.unsigned.setVisible(signature != "good")
         if signature == "bad":
             set_enabled(self.unsigned, False, tr("Its catalog's signature does not verify: sandbox-ai refuses it "
@@ -4579,7 +4593,7 @@ class PrivacyDialog(QDialog):
         self.project.setPlaceholderText(tr("the repository folder's name"))
         self.project.setToolTip(tr("The name of the project rule file (--project)"))
         form.addRow(tr("Project rules"), self.project)
-        self.every = QCheckBox(tr("Every tracked and untracked file, also unchanged ones (--all)"))
+        self.every = QCheckBox(labels.shown(tr("Every tracked and untracked file, also unchanged ones (--all)")))
         form.addRow(self.every)
         self.note = plain_label(role="secondary")
         form.addRow(self.note)
@@ -5396,6 +5410,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, sai, check_updates=True, approvals_interval=1000, risk=None):
         super().__init__()
+        labels.set_flags_shown(backend.setting("show_flags"))  # before the forms that show them are made
         # quitting: SIGTERM or logout (no questions); leaving: a confirmed quit from the tray menu (no hiding);
         # finished: the window has closed for good (shutdown ran, exactly once).
         self.sai, self.quitting, self.leaving, self.finished, self.stopped = sai, False, False, False, False
@@ -6416,6 +6431,12 @@ class MainWindow(QMainWindow):
         """What can change at once does (theme: by the dialog; polling intervals and the (?)s here)."""
         if key == "help_buttons":
             help_view.set_shown(backend.setting("help_buttons"))
+            return
+        if key == "show_flags":  # the options (--…) beside the fields' names: the Start page's form, the board's
+            labels.set_flags_shown(backend.setting("show_flags"))
+            for form in self.findChildren(OptionsForm):
+                form.show_flags()
+            self.board.inspect_timer.start()  # its inspector is made again
             return
         timers = {"approvals_interval": self.approvals.timer, "sandboxes_interval": self.sandboxes.timer,
                   "connections_interval": self.connections.timer}

@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import backend, board as B
-from . import help_view, project_trust as PT, rules_tools, theme
+from . import help_view, labels as OL, project_trust as PT, rules_tools, theme
 from .files import printable
 from .name_fields import NameButton, NameField, add_line
 from .state import choose_file, choose_folder
@@ -2108,7 +2108,7 @@ class BoardPage(QWidget):
             path = PathEdit(node.props.get("path", ""), host=self.host())
             path.changed.connect(lambda text: self.set_prop(node_id, "path", text.strip()))
             self.inspector.addRow(tr("Folder"), path)
-            readonly = QCheckBox(tr("every workspace read-only (--workspace-ro)"))
+            readonly = QCheckBox(OL.shown(tr("every workspace read-only (--workspace-ro)")))
             readonly.setChecked(bool(node.props.get("readonly")))
             readonly.toggled.connect(lambda on: self.set_readonly(on))
             self.disable_if_forbidden(readonly, "--workspace-ro")
@@ -2141,7 +2141,7 @@ class BoardPage(QWidget):
             for label, value in B.mcp_summary(definition):
                 self.inspector.addRow(label, plain_label(value))
         elif kind == "proxy":
-            enabled = QCheckBox(tr("on (every connection passes it; off: --no-proxy)"))
+            enabled = QCheckBox(OL.shown(tr("on (every connection passes it; off: --no-proxy)")))
             enabled.setChecked(node.props.get("enabled", True) is not False)
             enabled.toggled.connect(lambda on: self.set_prop(node_id, "enabled", bool(on)))
             if None in self.forbidden.get("--no-proxy", set()):
@@ -2151,7 +2151,7 @@ class BoardPage(QWidget):
             self.inspector.addRow(tr("Connection proxy"), enabled)
             rules = RulesEdit(node.props.get("--allow-http", []))
             rules.changed.connect(lambda values: self.set_prop(node_id, "--allow-http", values))
-            self.inspector.addRow(tr("Requests per host (--allow-http)"), rules)
+            self.inspector.addRow(OL.shown(tr("Requests per host (--allow-http)")), rules)
         elif kind == "kits":
             self.kit_rows(node)
         elif kind == "approvals" and isinstance(node.props.get("rules"), dict):
@@ -2247,7 +2247,7 @@ class BoardPage(QWidget):
         for box in boxes.values():
             box.toggled.connect(toggled)
         self.disable_if_forbidden(holder, "--kit")
-        self.inspector.addRow(tr("Kits (--kit)"), holder)
+        self.inspector.addRow(OL.shown(tr("Kits (--kit)")), holder)
 
     def enable_kit(self, directory, name):
         """Use kit NAME in the project DIRECTORY: the board of that project gets it in its kits node, and Apply
@@ -2445,7 +2445,7 @@ class BoardPage(QWidget):
         node_id, long = node.id, option.long
         value = node.props.get(long)
         if option.kind == "flag":
-            widget = QCheckBox(elide(option.help.split(";")[0], 70) if option.help else long)
+            widget = QCheckBox(elide(option.help.split(";")[0], 70) if option.help else OL.label(long))
             widget.setChecked(bool(value))
             widget.toggled.connect(lambda on: self.set_prop(node_id, long, bool(on)))
         elif option.kind == "choice":
@@ -2515,9 +2515,11 @@ class BoardPage(QWidget):
             widget = QLineEdit("" if value is None else str(value))
             widget.setPlaceholderText(option.metavar or (str(option.default) if option.default else ""))
             widget.editingFinished.connect(lambda: self.set_prop(node_id, long, widget.text().strip()))
-        widget.setToolTip(safe_tooltip(option.help))
-        label = QLabel(long + (f"  ({option.short})" if option.short else ""))
-        label.setToolTip(safe_tooltip(option.help))
+        # The option's name in the language chosen; the option itself (--…) only while the setting show_flags is on.
+        flag = long + (f"  ({option.short})" if option.short else "")
+        widget.setToolTip(safe_tooltip(OL.tip(flag, option.help)))
+        label = QLabel(flag if OL.flags_shown() else OL.label(long))
+        label.setToolTip(safe_tooltip(OL.tip(flag, option.help)))
         if long == "--rules":  # an example in the tooltip of its lines
             lines.setToolTip(rules_tools.tooltip())
         if None in self.forbidden.get(long, set()):

@@ -1015,6 +1015,10 @@ SETTING_TIPS = _terms(
      "Aus blendet jedes (?) aus; diese kurzen Erklärungen beim Zeigen, die Hilfe, die Touren und F1 bleiben."),
     ("intro", "A short animation when the app starts; Esc skips it.",
      "Eine kurze Animation beim Start der App; Esc überspringt sie."),
+    ("show_flags", "On: each option's field also shows its command-line option (--workspace, --allow-host…) and has "
+     "it in its tooltip. Off: the field's name alone.",
+     "An: das Feld jeder Option zeigt auch ihre Kommandozeilen-Option (--workspace, --allow-host…) und hat sie im "
+     "Tooltip. Aus: nur der Name des Felds."),
     ("tray", "Closing the window keeps the app in the system tray, so questions are still answered.",
      "Das Schließen des Fensters lässt die App im System-Tray, damit Fragen weiter beantwortet werden."),
     ("autostart", "The app starts in the tray when you log in.", "Die App startet bei Ihrer Anmeldung im Tray."),

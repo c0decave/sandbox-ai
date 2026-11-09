@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWizard, QWizardPage,
 )
 
-from . import board as B
+from . import board as B, labels
 from . import presets as PR
 from . import project_trust as PT
 from . import widgets
@@ -293,7 +293,7 @@ class ModelPage(Page):
         self.server_model.lineEdit().setPlaceholderText(tr("choose one the server lists, or type its name"))
         searchable(self.server_model)  # every model the server lists: a popup that scrolls, typing filters
         self.form.addRow(tr("Its model"), self.server_model)
-        self.only = QCheckBox(tr("only this server (no cloud: --no-provider-defaults)"))
+        self.only = QCheckBox(labels.shown(tr("only this server (no cloud: --no-provider-defaults)")))
         self.only.setToolTip(tr("The agent reaches this server and what you allow on the next pages, not its cloud "
                                 "provider"))
         self.only.setChecked(True)
@@ -1018,7 +1018,7 @@ class ProxyPage(Page):
         self.passthrough.setToolTip(tr("Hosts (or *.domain) whose TLS passes unopened: only their names are logged"))
         self.form.addRow(tr("TLS not opened for"), self.passthrough)
         self.rules = RulesEdit([])
-        self.form.addRow(tr("Requests per host (--allow-http)"), self.rules)
+        self.form.addRow(labels.shown(tr("Requests per host (--allow-http)")), self.rules)
         self.privacy = QComboBox()
         for value in ("public", "always", "off"):
             self.privacy.addItem(value, value)
@@ -1055,7 +1055,8 @@ class GitPage(Page):
         super().__init__(wizard, tr("Git and tokens"), tr("Push from the sandbox: a typed token goes to a private "
                                                           "file, never into the project file. The project's own "
                                                           "remote is not offered: the agent can rewrite .git/config."))
-        self.identity = QCheckBox(tr("commit as my global user.name and user.email (--git-identity)"))
+        self.identity = QCheckBox(labels.shown(tr(
+            "commit as my global user.name and user.email (--git-identity)")))
         self.form.addRow("", self.identity)
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels([tr("Git server"), tr("Token from"), tr("Name, file or token")])
@@ -1079,8 +1080,8 @@ class GitPage(Page):
         row.addWidget(remove)
         row.addStretch()
         self.form.addRow(row)
-        self.token_proxy = QCheckBox(tr("keep the tokens out of the sandbox: the connection proxy adds them to Git's "
-                                        "requests (--token-proxy)"))
+        self.token_proxy = QCheckBox(labels.shown(tr("keep the tokens out of the sandbox: the connection proxy adds "
+                                                     "them to Git's requests (--token-proxy)")))
         self.forbid(self.token_proxy, "--token-proxy")
         self.form.addRow("", self.token_proxy)
         self.note = plain_label(role="secondary")
