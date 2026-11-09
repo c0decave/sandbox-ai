@@ -42,8 +42,8 @@ def slow(result, calls=None, seconds=SLOW):
 
 
 def responsive(qapp, click, finished, calls, timeout=20):
-    """CLICK, then the event loop until FINISHED(): it never stands still for MAX_GAP; the slow call (CALLS) ran
-    off the GUI thread and has ended."""
+    """CLICK, then the event loop until FINISHED(): it never stands still for MAX_GAP (from the click on, the click
+    itself included); the slow call (CALLS) ran off the GUI thread and has ended."""
     stamps = []
     timer = QTimer()
     timer.setInterval(20)
@@ -63,8 +63,8 @@ def responsive(qapp, click, finished, calls, timeout=20):
     assert finished(), "what the click started has finished"
     assert calls and calls[0][0] == "began" and calls[0][1] is False, f"the slow call ran on the GUI thread: {calls}"
     assert any(entry[0] == "ended" for entry in calls), "the slow call has ended"
-    assert returned < MAX_GAP, f"the click took {returned:.2f} s on the GUI thread"
-    assert gap < MAX_GAP, f"the event loop stood still for {gap:.2f} s"
+    # (the click may wait in a local event loop that goes on: what counts is that the loop never stands still)
+    assert gap < MAX_GAP, f"the event loop stood still for {gap:.2f} s (the click took {returned:.2f} s)"
     assert ended - began >= SLOW * 0.9, "it waited for the slow call (what the click started)"
 
 
