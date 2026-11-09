@@ -2776,7 +2776,15 @@ def merge_config(argv, a, document):
             skip = True
         elif not value.startswith("--workspace="):
             kept.append(value)
-    workspaces = a.workspaces + [w for w in document.get("workspaces", []) if w not in a.workspaces]
+    # A folder the command line (or a preset) names already is not added again, in whatever spelling the file has
+    # it (~/src/lib, /home/me/src/lib/): twice, it would be refused as overlapping itself.
+    def same(value):
+        try:
+            return Path(os.path.expanduser(value)).resolve()
+        except (OSError, RuntimeError):
+            return value
+    named = {same(w) for w in a.workspaces}
+    workspaces = a.workspaces + [w for w in document.get("workspaces", []) if same(w) not in named]
     file_options = document.get("options", []) + (["--log-debug"] if document.get("log_debug") is True else []) + \
         (["--project-name", document["name"]] if isinstance(document.get("name"), str) else []) + \
         ({True: ["--keep"], False: ["--no-keep"]}.get(document.get("keep")) if "keep" in document else [])
@@ -8315,8 +8323,11 @@ def launch(argv, floor_by=None):
     # FLOOR_BY: the floor that chose the mode of this start (the launch below), for MODES.check (--ask allow).
     # --preset NAME: its options right after the agent (the command line wins), its first task as the agent's
     # arguments; then everything is checked as if typed.
+    preset_notes = []
     argv, preset_mode = load_presets_module().apply(canonical_options(list(argv)), canonical=canonical_options,
-                                                    with_mode=True)
+                                                    with_mode=True, notes=preset_notes)
+    for note in preset_notes:
+        print(f"agent-sandbox: note: {printable(note)}", file=sys.stderr)
     argv = canonical_options(argv)
     if preset_mode:
         MODES.check_name(preset_mode, "the preset's --mode")

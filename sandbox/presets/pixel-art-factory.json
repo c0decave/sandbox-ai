@@ -23,7 +23,8 @@
     }
   },
   "notes": [
-    "The GPU, if given: dri (Intel/AMD, /dev/dri), rocm (AMD, /dev/kfd and /dev/dri) or nvidia (Podman with a CDI specification: sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml). A GPU weakens the isolation; the security modes high and paranoid refuse it."
+    "The GPU, if given: dri (Intel/AMD, /dev/dri), rocm (AMD, /dev/kfd and /dev/dri) or nvidia (Podman with a CDI specification: sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml). A GPU weakens the isolation; the security modes high and paranoid refuse it.",
+    "The base image has no Pillow, ImageMagick or scrot and only the provider is reachable: SVG works as it is; for Pillow and the screenshot use the media variant (sandbox-ai images recipe media --from AGENT, sandbox-ai images extend media --add-pip pillow, sandbox-ai build media; start with --image-variant media)."
   ],
   "prompt": "Design a logo for this project, drawn only with code (Pillow, SVG or a shader): three variants in /work/logo/, each with the code that makes it, and a screenshot of them side by side."
 }

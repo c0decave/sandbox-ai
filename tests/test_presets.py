@@ -259,17 +259,19 @@ def test_the_cli(capsys, own_config):
 def test_your_own_preset_may_name_workspaces_an_extra_or_built_in_one_may_not(own_config, tmp_path, no_sandboxes):
     """A preset in ~/.config/sandbox-ai/presets is yours alone (outside every workspace, never passed on): it may give
     a start its folders. One from an extra directory (shared, maybe someone else's) may not."""
+    main = tmp_path / "main"
+    main.mkdir()
     own = minimal(id="all-mine", options=["--workspace", "{main}", "--workspace", "{other}", "--gui"],
-                  values={"main": {"label": "Main", "kind": "folder", "default": "/srv/main"},
+                  values={"main": {"label": "Main", "kind": "folder", "default": str(main)},
                           "other": {"label": "Other", "kind": "folder", "optional": True}})
     assert p.problems(own, origin="yours") == []
     assert any("--workspace is not allowed in a preset" in problem for problem in p.problems(own, origin="extra"))
     assert any("only in your own" in problem for problem in p.problems(own))
     own_config.mkdir(parents=True)
     (own_config / "all-mine.json").write_text(json.dumps(own))
-    assert p.apply(["claude", "--preset", "all-mine"]) == ["claude", "--workspace", "/srv/main", "--gui"]
+    assert p.apply(["claude", "--preset", "all-mine"]) == ["claude", "--workspace", str(main), "--gui"]
     assert p.apply(["claude", "--preset", "all-mine", "--preset-value", "other=/srv/other"])[:5] == \
-        ["claude", "--workspace", "/srv/main", "--workspace", "/srv/other"]
+        ["claude", "--workspace", str(main), "--workspace", "/srv/other"]
     shared = tmp_path / "shared"
     shared.mkdir()
     (shared / "theirs.json").write_text(json.dumps({**own, "id": "theirs"}))
@@ -279,3 +281,73 @@ def test_your_own_preset_may_name_workspaces_an_extra_or_built_in_one_may_not(ow
     for flag in ("--copy-auth", "--git-credentials", "--name", "--session"):  # still refused in yours too
         assert any(f"{flag} is not allowed" in problem for problem in
                    p.problems(minimal(options=[flag, "x"]), origin="yours"))
+
+
+def test_a_default_folder_that_is_not_there(own_config, tmp_path, capsys):
+    """A folder, file or device a preset names by default (your own preset's ~/c0de/...) that is not on this computer:
+    an optional one is left out with a note (a start would create an empty workspace in its place), a required one is
+    named as missing with the --preset-value to give, in presets check and at the start. Given in the app's form (the
+    default filled in) it is the same; a folder you name yourself is yours: check only notes it."""
+    there, gone = tmp_path / "there", tmp_path / "gone"
+    there.mkdir()
+    own = minimal(id="dev", options=["--workspace", "{main}", "--workspace", "{extra}", "--workspace", "{more}"],
+                  values={"main": {"label": "Main", "kind": "folder", "default": str(there)},
+                          "extra": {"label": "Extra", "kind": "folder", "default": str(gone), "optional": True},
+                          "more": {"label": "More", "kind": "folder", "default": "~/not-here-at-all",
+                                   "optional": True}})
+    own_config.mkdir(parents=True)
+    (own_config / "dev.json").write_text(json.dumps(own))
+    notes = []
+    assert p.apply(["codex", "--preset", "dev"], notes=notes) == ["codex", "--workspace", str(there)]
+    assert len(notes) == 2 and f"extra: {gone} does not exist here, left out (another one: --preset-value extra=PATH)" \
+        in notes[0] and "~/not-here-at-all does not exist here" in notes[1]
+    # the app passes the default it showed: the same
+    assert p.apply(["codex", "--preset", "dev", "--preset-value", f"extra={gone}"]) == ["codex", "--workspace",
+                                                                                        str(there)]
+    # once it is there, it is used
+    gone.mkdir()
+    assert p.apply(["codex", "--preset", "dev"]) == ["codex", "--workspace", str(there), "--workspace", str(gone)]
+    gone.rmdir()
+    # a required one: missing, with what to give
+    there.rmdir()
+    with pytest.raises(ValueError, match=f"main \\(Main\\): its default {there} does not exist here; create it, or "
+                                         "give another: --preset-value main=PATH"):
+        p.apply(["codex", "--preset", "dev"])
+    assert p.main(["check", "dev"]) == 1
+    out = capsys.readouterr().out
+    assert "note: preset dev: extra:" in out and "missing: preset dev: main (Main): its default" in out
+    other = tmp_path / "other"
+    other.mkdir()
+    assert p.apply(["codex", "--preset", "dev", "--preset-value", f"main={other}"]) == ["codex", "--workspace",
+                                                                                        str(other)]
+    # a folder you name that is not there: check says it, the start decides (a workspace is created)
+    assert p.main(["check", "dev", "--value", f"main={tmp_path / 'new'}"]) == 0
+    assert f"note: main: {tmp_path / 'new'} does not exist (as a workspace a start creates it empty" in \
+        capsys.readouterr().out
+    assert p.apply(["codex", "--preset", "dev", "--preset-value", f"main={tmp_path / 'new'}"])[:3] == \
+        ["codex", "--workspace", str(tmp_path / "new")]
+
+
+def test_check_names_what_the_options_need(own_config, monkeypatch):
+    """presets check: an MCP server or a publishing login the options name through a value (--mcp {search},
+    --publish {publish}) that is not there yet is missing, with the command to add it and, for an optional value, how
+    to leave it out; a required value without one says the hint of the preset (the command that makes one)."""
+    preset = {**minimal(id="opts", options=["--mcp", "{search}", "--mcp=fixed", "--publish", "{publish}"],
+                        values={"search": {"label": "S", "default": "search", "optional": True},
+                                "publish": {"label": "P", "default": "pypi", "optional": True}}),
+              "_path": "/x/opts.json", "_origin": "yours"}
+    monkeypatch.setattr(p, "_module", lambda name: type("M", (), {"load": staticmethod(lambda: [])}))
+    found = p.missing(preset, {}, "codex", mcp_names=set())
+    assert any(line.startswith("MCP server search is not added yet") and "sandbox-ai mcp add ENTRY --as search" in line
+               and line.endswith("; or leave it out: --preset-value search=") for line in found), found
+    assert any(line.startswith("MCP server fixed is not added yet") and "leave it out" not in line for line in found)
+    assert any(line.startswith("--publish pypi: no login yet") and "publish-logins add pypi --secret NAME" in line
+               for line in found), found
+    assert p.missing(preset, {"search": "", "publish": ""}, "codex", mcp_names={"fixed"}) == []
+    monkeypatch.setattr(p, "_module", lambda name: type("M", (), {"load": staticmethod(
+        lambda: [{"kind": "pypi", "host": "upload.pypi.org", "secret": "T"}])}))
+    assert p.missing(preset, {}, "codex", mcp_names={"search", "fixed"}) == []
+    # the hint of a value without one: the exact command
+    tor = p.load("tor")
+    found = p.missing(tor, {}, "codex", mcp_names=set())
+    assert any("--preset-value tor=..." in line and "sandbox-ai vpn add anon --tor --socks" in line for line in found)

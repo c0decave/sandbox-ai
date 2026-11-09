@@ -15,7 +15,9 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import stat
+import subprocess
 import sys
 
 import pytest
@@ -322,3 +324,244 @@ def test_the_tor_preset_takes_only_a_tor_profile(host, capsys):
     # The value's constraint is a preset's own field: kind vpn only.
     assert any("vpn_type" in problem for problem in P.problems(
         {**PRESETS["tor"], "values": {"tor": {"label": "x", "kind": "text", "vpn_type": "tor"}}}))
+
+
+# --- Bubblewrap, what a plan keeps beyond the network, the commands the notes name ------------------------------
+
+def loopback_llm(values):
+    """True when VALUES name an LLM server on this host's loopback (only Podman's pasta reaches it)."""
+    server = (values.get("llm") or "").split(":", 1)[0]
+    return any(name == server and "//127.0.0.1:" in url for name, _, url, _ in SERVERS)
+
+
+@pytest.mark.parametrize("agent", AGENTS)
+@pytest.mark.parametrize("name", sorted(PRESETS))
+def test_every_preset_with_bubblewrap(host, capsys, name, agent):
+    """Every preset with --backend bwrap: a plan with the same network as with Podman; or, for a preset that needs the
+    host's loopback (--allow-host-port, an LLM server on 127.0.0.1) or a VPN, which only Podman gives, a refusal that
+    names the Podman backend; its notes say so ("Podman only")."""
+    root, dev, work = host
+    preset = PRESETS[name]
+    if agent not in preset.get("agents", AGENTS):
+        return
+    values = sample_values(preset, root, dev, agent, True)
+    options = P.expand(preset, values, extras=False)
+    if "--allow-host-port" in options or "--vpn" in options or loopback_llm(values):
+        assert any("Podman only" in note or "only with Podman" in note for note in preset.get("notes", [])), name
+        with pytest.raises(ValueError, match="Podman backend"):
+            dry_run(capsys, work, agent, name, values, "--backend", "bwrap")
+        return
+    plan = dry_run(capsys, work, agent, name, values, "--backend", "bwrap")
+    assert plan["backend"] == "bwrap" and plan["agent"] == agent
+    assert_network(plan, network_of(preset, values, agent))
+
+
+def option_pairs(options):
+    pairs, index = [], 0
+    while index < len(options):
+        flag, value = options[index], None
+        if index + 1 < len(options) and not options[index + 1].startswith("--"):
+            value, index = options[index + 1], index + 1
+        pairs.append((flag, value))
+        index += 1
+    return pairs
+
+
+@pytest.mark.parametrize("agent", AGENTS)
+@pytest.mark.parametrize("name", sorted(PRESETS))
+def test_every_plan_keeps_what_the_preset_promises(host, capsys, name, agent):
+    """Beyond the network (above): each folder mounted where and as the preset says, the virtual screen and its size,
+    the audio, the resource limits, the security mode as a floor, a read-only workspace, the privacy check, the
+    canaries, the companion agent, the subnet, the devices, and the first task with its values filled in (OpenCode's
+    after --prompt)."""
+    root, dev, work = host
+    preset = PRESETS[name]
+    if agent not in preset.get("agents", AGENTS):
+        return
+    values = sample_values(preset, root, dev, agent, True)
+    plan = dry_run(capsys, work, agent, name, values)
+    rank = {"lax": 0, "low": 0, "medium": 1, "high": 2, "paranoid": 3}
+    for flag, value in option_pairs(P.expand(preset, values, extras=False)):
+        if flag == "--mount":
+            assert value in plan["mounts"], (value, plan["mounts"])
+            assert value.endswith(":ro"), f"{name}: samples and evidence stay read-only"
+        elif flag == "--gui":
+            assert plan["gui"], name
+        elif flag == "--gui-screen":
+            assert value in json.dumps(plan["gui"]), plan["gui"]
+        elif flag == "--audio":
+            assert plan["audio"] == value
+        elif flag in ("--memory", "--cpus", "--pids"):
+            assert str(plan["limits"].get(flag[2:])) == value, (flag, plan["limits"])
+        elif flag == "--mode":
+            assert rank[plan["mode"]["name"]] >= rank[value], plan["mode"]
+            assert plan["mode"]["name"] == value  # a laxer default (medium) is raised to it
+        elif flag == "--workspace-ro":
+            assert plan["workspace_mode"] == "ro"
+        elif flag == "--privacy-check":
+            assert plan["privacy_check"] == value
+        elif flag == "--canaries":
+            assert plan["canaries"], name
+        elif flag == "--with":
+            assert value in json.dumps(plan["companions"]), plan["companions"]
+        elif flag == "--subnet":
+            assert plan["sandbox_network"] and value.rsplit(".", 1)[0] in json.dumps(plan["sandbox_network"])
+        elif flag == "--device":
+            assert value in [entry["path"] for entry in plan["devices"]], plan["devices"]
+        elif flag == "--gpu":
+            assert plan["gpu"] == value
+    text = preset.get("prompt")
+    if text:
+        args = plan["agent_args"]
+        assert args[:1] == ["--prompt"] if agent == "opencode" else len(args) == 1, args
+        assert not P.PLACEHOLDER.search(args[-1]), args[-1]
+        for value_name in P.PLACEHOLDER.findall(text):
+            assert values[value_name] in args[-1]
+    else:
+        assert plan["agent_args"] == []
+
+
+# `sandbox-ai WORD [SUBCOMMAND]` in a preset's notes, hints and labels; the --options of the same note.
+COMMAND = re.compile(r"sandbox-ai ([a-z][a-z-]*)(?: ([a-z][a-z-]*))?")
+# Options of other programs the notes show (llama-server, vllm serve, nvidia-ctk, python3 -m http.server, curl).
+FOREIGN = {"--jinja", "--host", "--port", "--enable-auto-tool-choice", "--tool-call-parser", "--served-model-name",
+           "--output", "--bind", "--directory", "--socks5-hostname"}
+PROSE = {"opens"}  # "sandbox-ai opens that one port": sandbox-ai as the subject of a sentence
+HELP_CACHE = {}
+
+
+def help_text(words):
+    """The --help of `sandbox-ai WORDS...` (python3 -I sandbox/main.py), or None when it is not a command."""
+    key = tuple(words)
+    if key not in HELP_CACHE:
+        result = subprocess.run([sys.executable, "-I", str(ROOT / "sandbox/main.py"), *words, "--help"],
+                                capture_output=True, text=True, timeout=60)
+        HELP_CACHE[key] = (result.stdout + result.stderr) if result.returncode == 0 else None
+    return HELP_CACHE[key]
+
+
+def test_the_commands_and_options_the_presets_name_exist(host):
+    """Every command a preset's notes, hints and labels tell you to run is one of sandbox-ai's (with that subcommand),
+    and every --option such a text names is an option of a command it names or of the start (`sandbox-ai AGENT`):
+    no note sends you to a command or option that is not there."""
+    main = importlib.util.spec_from_file_location("sandbox_ai_main_for_presets", ROOT / "sandbox/main.py")
+    module = importlib.util.module_from_spec(main)
+    main.loader.exec_module(module)
+    commands = set(module.PYTHON_COMMANDS) | {"build", "update", "version"}
+    launcher = help_text(["codex"])
+    checked, wrong = 0, []
+    for preset in PRESETS.values():
+        texts = list(preset.get("notes", [])) + [spec.get(key, "") for spec in preset.get("values", {}).values()
+                                                  for key in ("hint", "label")]
+        for text in texts:
+            helps = [launcher]
+            for word, sub in COMMAND.findall(text):
+                if word in PROSE:
+                    continue
+                if word not in commands:
+                    wrong.append((preset["id"], f"no command {word}", text))
+                    continue
+                if word in ("build", "update", "claude", "codex", "opencode"):
+                    continue
+                top = help_text([word])
+                choices = re.search(r"\{([a-z,-]+)\}", top or "")
+                if sub and choices and sub in choices.group(1).split(","):
+                    helps.append(help_text([word, sub]))
+                else:
+                    helps.append(top)
+                if not helps[-1]:
+                    wrong.append((preset["id"], f"no help for {word} {sub}", text))
+                checked += 1
+            for option in sorted(set(re.findall(r"(?<![\w-])(--[a-z][a-z0-9-]*)", text)) - FOREIGN):
+                if not any(option in found for found in helps if found):
+                    wrong.append((preset["id"], f"no command named here has {option}", text))
+    assert wrong == []
+    assert checked > 20
+
+
+def test_your_own_development_preset_with_its_folders(host, capsys, monkeypatch):
+    """A preset of your own as a developer writes one (~/.config/sandbox-ai/presets): its folders as workspaces with
+    defaults in HOME, GitHub and PyPI, a Git server on this host's loopback, two ports of a machine in the LAN, an MCP
+    server and a publishing login by values, the virtual screen and limits. With every folder there; with optional
+    ones missing (left out, said); with the main one missing (refused, naming the --preset-value); started from the
+    main folder, whose trusted project file names one of the folders again in another spelling (once, not refused as
+    overlapping itself); with Bubblewrap (refused for the loopback port; with that value left empty it starts)."""
+    root, _, work = host
+    home = Path(os.environ["HOME"])
+    for name in ("main", "lib", "notes"):
+        (home / "code" / name).mkdir(parents=True, exist_ok=True)
+    own = {"format": "sandbox-ai preset", "version": 1, "id": "own-dev", "title": "Own dev", "description": "d",
+           "category": "development",
+           "options": ["--workspace", "{main}", "--workspace", "{lib}", "--workspace", "{notes}", "--workspace", "{gone}",
+                       "--allow-github", "--allow-pypi", "--allow-host-port", "{git_port}", "--allow-tcp", "{lan}:1234",
+                       "--allow-tcp", "{lan}:22", "--mcp", "{tool}", "--publish", "{publish}", "--gui", "--memory",
+                       "{memory}", "--cpus", "{cpus}", "--pids", "8192"],
+           "values": {"main": {"label": "Main", "kind": "folder", "default": "~/code/main"},
+                      "lib": {"label": "Lib", "kind": "folder", "default": "~/code/lib", "optional": True},
+                      "notes": {"label": "Notes", "kind": "folder", "default": "~/code/notes", "optional": True},
+                      "gone": {"label": "Gone", "kind": "folder", "default": "~/code/gone", "optional": True},
+                      "git_port": {"label": "Git", "kind": "port", "default": "3000", "optional": True},
+                      "lan": {"label": "LAN", "kind": "host", "default": "192.0.2.44"},
+                      "tool": {"label": "MCP", "default": "capa", "optional": True},
+                      "publish": {"label": "Publish", "default": "pypi", "optional": True},
+                      "memory": {"label": "Memory", "default": "16g"},
+                      "cpus": {"label": "CPUs", "kind": "number", "default": "8"}}}
+    presets = Path(os.environ["XDG_CONFIG_HOME"]) / "sandbox-ai" / "presets"
+    presets.mkdir(parents=True, exist_ok=True)
+    (presets / "own-dev.json").write_text(json.dumps(own))
+    monkeypatch.setenv("PYPI_FAKE", "pypi-not-a-token")
+    assert s.load_secret_store_module().main(["set", "PYPI_TOKEN", "--from-env", "PYPI_FAKE"], out=lambda line: None) == 0
+    assert s.load_publish_logins_module().main(["add", "pypi", "--secret", "PYPI_TOKEN"], out=lambda line: None) == 0
+    try:
+        assert P.missing(P.load("own-dev"), {}, "codex") == []
+
+        def start(*extra, cwd=None, backend="podman"):
+            capsys.readouterr()
+            argv = ["codex", "--backend", backend, "--no-tmux", "--preset", "own-dev", *extra, "--dry-run"]
+            if cwd:
+                monkeypatch.chdir(cwd)
+            assert s.launch(argv) == 0
+            captured = capsys.readouterr()
+            return json.loads(captured.out), captured.err
+
+        plan, err = start()
+        assert [w["host"] for w in plan["workspaces"]] == [str(home / "code" / n) for n in ("main", "lib", "notes")]
+        assert plan["workspaces"][0]["sandbox"] == "/work"
+        assert "code/gone does not exist here, left out (another one: --preset-value gone=PATH)" in err
+        assert plan["host_ports"] == [3000] and sorted(plan["allow_tcp"]) == ["192.0.2.44:1234", "192.0.2.44:22"]
+        assert [m["name"] for m in plan["mcp"]] == ["capa"] and plan["publish"][0]["kind"] == "pypi"
+        assert plan["gui"] and plan["limits"] == {"memory": "16g", "cpus": "8", "pids": 8192}
+        # values of yours: another memory limit, folders and servers left out
+        plan, _ = start("--preset-value", "memory=32g", "--preset-value", "lib=", "--preset-value", "tool=",
+                        "--preset-value", "publish=")
+        assert plan["limits"]["memory"] == "32g" and len(plan["workspaces"]) == 2
+        assert plan["mcp"] == [] and plan["publish"] == []
+        # an optional folder that is gone: left out; the main one gone: refused, with what to give
+        (home / "code" / "notes").rmdir()
+        plan, err = start()
+        assert len(plan["workspaces"]) == 2 and "code/notes does not exist here, left out" in err
+        (home / "code" / "main").rename(home / "code" / "main-moved")
+        with pytest.raises(ValueError, match=r"main \(Main\): its default ~/code/main does not exist here; create it, "
+                                             r"or give another: --preset-value main=PATH"):
+            start()
+        assert any("its default ~/code/main does not exist" in line for line in P.missing(P.load("own-dev"), {}))
+        (home / "code" / "main-moved").rename(home / "code" / "main")
+        (home / "code" / "notes").mkdir()
+        # started in the main folder, whose trusted project file names a folder of the preset as ~/code/lib
+        project = home / "code" / "main" / ".sandbox-ai.json"
+        project.write_text(json.dumps({"version": 1, "agent": "codex", "workspaces": ["~/code/lib", str(work)]}))
+        s.trust_config(project)
+        plan, _ = start(cwd=home / "code" / "main")
+        assert plan["project_config"] == str(project)
+        assert [w["host"] for w in plan["workspaces"]] == [str(home / "code" / n) for n in ("main", "lib", "notes")] + \
+            [str(work)]
+        project.unlink()
+        s.forget_config(project)
+        # Bubblewrap: the host's loopback only with Podman; without the Git server's port it starts
+        with pytest.raises(ValueError, match="--allow-host-port needs the Podman backend"):
+            start(backend="bwrap")
+        plan, _ = start("--preset-value", "git_port=", backend="bwrap")
+        assert plan["backend"] == "bwrap" and plan["host_ports"] == []
+    finally:
+        (presets / "own-dev.json").unlink()
+        s.load_publish_logins_module().main(["remove", "pypi"], out=lambda line: None)

@@ -15,5 +15,8 @@
     "--allow-pypi",
     "--allow-npm"
   ],
+  "notes": [
+    "Screenshots (import, scrot) need the media variant: sandbox-ai images recipe media --from AGENT, then sandbox-ai build media; start with --image-variant media."
+  ],
   "prompt": "Make an onboarding guide for someone new to this project: set it up from scratch, run it, take screenshots of what they will see (the virtual display :99, e.g. with import or scrot), and write /work/onboarding/README.md with the steps, the screenshots and the five things that surprised you."
 }

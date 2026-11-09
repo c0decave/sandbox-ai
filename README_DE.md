@@ -609,9 +609,11 @@ Tor-Profil von `sandbox-ai vpn add NAME --tor`, mit `--dns` für `.onion`-Namen)
 den Agenten nur zu seinem Provider und die Proben schreibgeschützt; ihre
 Werkzeuge (capa, FLOSS, radare2, YARA, binwalk, TShark, The Sleuth Kit ...) sind
 MCP-Server aus den Katalogen, jeder in einem eigenen Container: `presets check`
-nennt die `sandbox-ai mcp add`-Befehle für die noch nicht hinzugefügten und
-die VPN-Profile und LLM-Server in den Werten eines Presets, die nicht
-eingerichtet sind (oder die der Agent nicht nutzen kann).
+nennt die `sandbox-ai mcp add`-Befehle für die noch nicht hinzugefügten, die
+VPN-Profile und LLM-Server in den Werten eines Presets, die nicht eingerichtet
+sind (oder die der Agent nicht nutzen kann), und die MCP-Server
+(`--mcp {wert}`) und Veröffentlichungs-Logins (`--publish {wert}`), die seine
+Optionen nennen und die noch fehlen, jeweils mit dem Befehl, der sie anlegt.
 
 Eigene Presets sind JSON-Dateien in `~/.config/sandbox-ai/presets/` (außerhalb
 jedes Workspaces: Ein Agent darf nicht schreiben, womit er startet); eines mit
@@ -621,7 +623,11 @@ der ID eines eingebauten ersetzt dieses. Ein Preset enthält nie ein Geheimnis
 dafür übergeben). Nur Ihre eigenen Presets dürfen Workspaces nennen
 (`--workspace {ordner}`: sie gehören Ihnen allein und werden nicht
 weitergegeben); ein eingebautes Preset oder eines aus einem weiteren Ordner
-darf sie nicht wählen. Das Format steht in
+darf sie nicht wählen. Ein Ordner, eine Datei oder ein Gerät, das der Standard
+eines Werts ist und auf diesem Rechner nicht existiert, wird bei einem
+optionalen Wert mit einem Hinweis weggelassen; bei einem nötigen hält der Start
+an und nennt das `--preset-value NAME=PFAD`, das Sie angeben (ein Start legt an
+seiner Stelle nie einen leeren Workspace an). Das Format steht in
 `sandbox-ai presets --help` und `sandbox/presets.py`.
 
 Weitere Preset-Ordner, eine private Sammlung oder der Checkout eines Teams,

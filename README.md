@@ -591,9 +591,11 @@ Messages API), **privacy** (`tor`: everything through a Tor profile of
 the agent to its provider and the samples read-only; their tools (capa, FLOSS,
 radare2, YARA, binwalk, TShark, The Sleuth Kit ...) are MCP servers from the
 catalogs, each in a container of its own: `presets check` names the
-`sandbox-ai mcp add` commands for the ones you have not added, and the VPN
+`sandbox-ai mcp add` commands for the ones you have not added, the VPN
 profiles and LLM servers a preset's values name that are not registered (or
-that the agent cannot use).
+that the agent cannot use), and the MCP servers (`--mcp {value}`) and
+publishing logins (`--publish {value}`) its options name that are not set up
+yet, each with the command that adds it.
 
 Your own presets are JSON files in `~/.config/sandbox-ai/presets/` (outside
 every workspace: an agent must not write what it starts with); one with the id
@@ -602,7 +604,11 @@ name them) and may not copy a login in (`--copy-auth`, `--auth-file`, ...)
 or carry `--rules` (a `"rules"` file beside it is passed for it). Only your
 own presets may name workspaces (`--workspace {folder}`: they are yours alone
 and never passed on); a built-in preset or one from a further directory may not
-choose them. The format is in `sandbox-ai presets --help` and `sandbox/presets.py`.
+choose them. A folder, file or device that is a value's default and does not
+exist on this computer is left out with a note when the value is optional; a
+required one stops the start and names the `--preset-value NAME=PATH` to give
+(a start never creates an empty workspace in its place). The format is in
+`sandbox-ai presets --help` and `sandbox/presets.py`.
 
 Further preset directories, a private collection or a team's checkout, are
 added with `sandbox-ai presets dirs add DIR` (listed with `presets dirs`,

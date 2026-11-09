@@ -19,6 +19,6 @@
   ],
   "prompt": "Build /work/1995/index.html: this project's documentation as a 1995 homepage (tables, <marquee>, an under-construction GIF you draw yourself, a visitor counter, a guestbook form that goes nowhere). Open it in a browser on the virtual 640x480 screen and take a screenshot. Bonus: a MIDI-like jingle (sox or a few lines of Python) in /work/1995/jingle.wav.",
   "notes": [
-    "Screenshots and the jingle need the media variant (sandbox-ai images recipe media --from AGENT), started with --image-variant media."
+    "Screenshots and the jingle need the media variant (ImageMagick, scrot, SoX, PulseAudio): sandbox-ai images recipe media --from AGENT, then sandbox-ai build media; start with --image-variant media."
   ]
 }

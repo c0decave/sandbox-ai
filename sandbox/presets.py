@@ -341,19 +341,31 @@ def parse_values(pairs):
     return values
 
 
-def resolved_values(preset, given):
-    """{name: value} for every placeholder: given, else its default; ValueError naming what is missing or wrong."""
+def absent_default(spec, value):
+    """True when VALUE (expanded) is the default path of a folder, file or device value SPEC and nothing is there:
+    a preset's guess about your computer that does not hold here (given in the app's form or not)."""
+    default = spec.get("default")
+    if spec.get("kind") not in ("folder", "file", "device") or default in (None, ""):
+        return False
+    return value == os.path.expanduser(str(default)) and not os.path.lexists(value)
+
+
+def checked_values(preset, given, notes=None):
+    """({name: value} for every placeholder: given, else its default; [what is missing]); ValueError for a value
+    that is wrong (an unknown name, a malformed port or path). A folder, file or device that is the value's default
+    and does not exist on this computer is left out when the value is optional (said in NOTES), and is missing when
+    it is not: a start would otherwise create an empty workspace in its place, or fail on a mount."""
     declared = preset.get("values", {})
     unknown = set(given) - set(declared)
     if unknown:
         raise ValueError(f"preset {preset['id']} has no value {', '.join(sorted(unknown))}; it takes: "
                          f"{', '.join(sorted(declared)) or 'none'}")
-    values, missing = {}, []
+    values, unset, absent = {}, [], []
     for name, spec in declared.items():
         value = given.get(name, spec.get("default"))
         if value is None or value == "":
             if not spec.get("optional"):
-                missing.append(name)
+                unset.append(name)
             continue
         value = str(value)
         kind = spec.get("kind", "text")
@@ -365,12 +377,32 @@ def resolved_values(preset, given):
             value = os.path.expanduser(value)
             if not os.path.isabs(value):
                 raise ValueError(f"preset {preset['id']}: {name} needs an absolute path (or ~/...): {value!r}")
+            if absent_default(spec, value):
+                if not spec.get("optional"):
+                    absent.append(name)
+                elif notes is not None:
+                    notes.append(f"preset {preset['id']}: {name}: {spec['default']} does not exist here, left out "
+                                 f"(another one: --preset-value {name}=PATH)")
+                continue
         if any(ord(c) < 32 for c in value):
             raise ValueError(f"preset {preset['id']}: {name} contains control characters")
         values[name] = value
-    if missing:
-        hints = ", ".join(f"--preset-value {name}=... ({declared[name].get('label', name)})" for name in missing)
-        raise ValueError(f"preset {preset['id']} needs: {hints}")
+    found = []
+    if unset:
+        found.append(f"preset {preset['id']} needs: " + ", ".join(
+            f"--preset-value {name}=... ({declared[name].get('label', name)}"
+            + (f"; {declared[name]['hint']}" if declared[name].get("hint") else "") + ")" for name in unset))
+    found += [f"preset {preset['id']}: {name} ({declared[name].get('label', name)}): its default "
+              f"{declared[name]['default']} does not exist here; create it, or give another: --preset-value {name}=PATH"
+              for name in absent]
+    return values, found
+
+
+def resolved_values(preset, given, notes=None):
+    """{name: value} for every placeholder (checked_values); ValueError naming what is missing or wrong."""
+    values, found = checked_values(preset, given, notes)
+    if found:
+        raise ValueError("; ".join(found))
     return values
 
 
@@ -416,16 +448,37 @@ def prompt_args(preset, agent, values=None):
     return ["--prompt", text] if agent == "opencode" else [text]
 
 
-def missing(preset, given=None, agent=None, mcp_names=None):
-    """What keeps PRESET from starting: [text]; empty when nothing does."""
-    found = []
+def option_values(preset, values, flag):
+    """[(value, [names of the preset's values in it])] of each FLAG VALUE (or FLAG=VALUE) among PRESET's options,
+    its placeholders filled in from VALUES; one whose optional values are left empty is not there."""
+    options, found = list(preset.get("options", [])), []
+    for index, token in enumerate(options):
+        if token == flag and index + 1 < len(options):
+            raw = options[index + 1]
+        elif token.startswith(flag + "="):
+            raw = token.split("=", 1)[1]
+        else:
+            continue
+        names = PLACEHOLDER.findall(raw)
+        if any(name not in values for name in names):
+            continue
+        found.append((PLACEHOLDER.sub(lambda m: values[m.group(1)], raw), names))
+    return found
+
+
+def missing(preset, given=None, agent=None, mcp_names=None, notes=None):
+    """What keeps PRESET from starting: [text]; empty when nothing does. What a start leaves out or should know
+    goes to NOTES."""
+    found, given = [], given or {}
     if agent and agent not in preset.get("agents", AGENTS):
         found.append(f"preset {preset['id']} is for {', '.join(preset.get('agents', AGENTS))}, not {agent}")
     try:
-        resolved_values(preset, given or {})
+        values, problems_found = checked_values(preset, given, notes)
+        found += problems_found
     except ValueError as exc:
         found.append(str(exc))
-    found += registered_values(preset, given or {}, agent)
+        values = None
+    found += registered_values(preset, given, agent)
     known = mcp_names if mcp_names is not None else registered_mcp()
     for server in preset.get("mcp", []):
         if PLACEHOLDER.search(server):
@@ -433,6 +486,35 @@ def missing(preset, given=None, agent=None, mcp_names=None):
         name = server.split(":", 1)[-1]
         if name not in known and server not in known:
             found.append(f"MCP server {server} is not added yet: sandbox-ai mcp add {server}")
+    if values is None:
+        return found
+    # What the options name by a value of yours: an MCP server (--mcp), a publishing login (--publish).
+    def leave_out(names):
+        optional = names and all(preset["values"][n].get("optional") for n in names)
+        return "; or leave it out: " + " ".join(f"--preset-value {n}=" for n in names) if optional else ""
+    for name, names in option_values(preset, values, "--mcp"):
+        if name not in known:
+            found.append(f"MCP server {name} is not added yet (sandbox-ai mcp list shows yours): sandbox-ai mcp add "
+                         f"ENTRY --as {name} (sandbox-ai mcp catalog lists the entries){leave_out(names)}")
+    logins = None
+    for kinds, names in option_values(preset, values, "--publish"):
+        try:
+            logins = _module("publish_logins").load() if logins is None else logins
+        except ValueError as exc:
+            found.append(f"--publish {kinds}: {exc}")
+            break
+        for kind in [k.strip().lower() for k in kinds.split(",") if k.strip()]:
+            if kind not in {entry["kind"] for entry in logins}:
+                found.append(f"--publish {kind}: no login yet: sandbox-ai secrets set NAME, then sandbox-ai "
+                             f"publish-logins add {kind} --secret NAME{leave_out(names)}")
+    # A folder, file or device you named that is not there: a start creates a workspace, and fails on anything else.
+    if notes is not None:
+        for name, spec in preset.get("values", {}).items():
+            value = values.get(name)
+            if spec.get("kind") in ("folder", "file", "device") and value and name in given \
+                    and not os.path.lexists(value):
+                notes.append(f"{name}: {value} does not exist (as a workspace a start creates it empty; a mount or "
+                             "device is refused)")
     return found
 
 
@@ -522,10 +604,11 @@ def split_mode(options):
     return kept, mode
 
 
-def apply(argv, canonical=None, with_mode=False):
+def apply(argv, canonical=None, with_mode=False, notes=None):
     """ARGV (the launcher's: AGENT options... [-- agent args]) with --preset NAME and --preset-value KEY=VALUE
     replaced by the preset's options, placed right after the agent so that the command line wins; and its first
-    task added as the agent's arguments unless the command line gives some. ARGV unchanged without --preset."""
+    task added as the agent's arguments unless the command line gives some. ARGV unchanged without --preset. What
+    the preset leaves out (a default folder that is not there) goes to NOTES."""
     if not argv or not any(token == "--preset" or token.startswith("--preset=") for token in argv):
         return (argv, None) if with_mode else argv
     head, tail = list(argv), []
@@ -556,6 +639,7 @@ def apply(argv, canonical=None, with_mode=False):
     if agent not in preset.get("agents", AGENTS):
         raise ValueError(f"preset {name} is for {', '.join(preset.get('agents', AGENTS))}, not {agent}")
     given = parse_values(pairs)
+    resolved_values(preset, given, notes)  # what it leaves out is said once, here
     options = expand(preset, given, extras=False)
     # Checked as the launcher reads them: short forms (-ca for --copy-auth) and values that turned into flags too.
     if canonical:
@@ -745,7 +829,10 @@ def main(argv, out=print):
             else:
                 describe(preset, out)
             return 0
-        found = missing(preset, parse_values(args.value), args.agent)
+        notes = []
+        found = missing(preset, parse_values(args.value), args.agent, notes=notes)
+        for line in notes:
+            out(f"note: {line}")
         if found:
             for line in found:
                 out(f"missing: {line}")
