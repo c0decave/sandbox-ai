@@ -6,12 +6,12 @@ from __future__ import annotations
 
 import re
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QWidget
 
 from .files import printable
 from .i18n import tr
-from .widgets import plain_label
+from .widgets import plain_label, safe_tooltip
 
 LOCAL = "local"  # this machine, as sandbox-ai hosts names it
 HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
@@ -35,6 +35,51 @@ def host_label(host):
     return tr("{name} (this machine)", name=LOCAL) if host in (None, LOCAL) else printable(host)
 
 
+class _Hosts(QObject):
+    """The one signal that the list of hosts changed (a host added, edited, renamed or removed: the Hosts page says
+    so): every host chooser of the app reads the hosts file again (no SSH) and keeps its choice while that host is
+    there; one that left falls back to this machine."""
+    changed = Signal()
+
+
+_HOSTS = []
+
+
+def hosts_signal():
+    if not _HOSTS:
+        _HOSTS.append(_Hosts())
+    return _HOSTS[0]
+
+
+def hosts_changed():
+    """Tell every host chooser that the hosts file changed."""
+    hosts_signal().changed.emit()
+
+
+def follow_hosts(widget, reload):
+    """RELOAD() whenever the list of hosts changes, as long as WIDGET lives."""
+    try:
+        from shiboken6 import isValid
+    except ImportError:  # pragma: no cover
+        isValid = lambda _w: True  # noqa: E731
+    signal = hosts_signal().changed
+
+    def again():
+        if isValid(widget):
+            reload()
+        else:
+            signal.disconnect(again)
+    signal.connect(again)
+    widget.destroyed.connect(lambda *_: _disconnect(signal, again))
+
+
+def _disconnect(signal, slot):
+    try:
+        signal.disconnect(slot)
+    except (RuntimeError, TypeError):
+        pass
+
+
 class HostChooser(QWidget):
     """"Host: [this machine | a host …]". CHANGED(host) when the human chooses another one (not while it is filled)."""
     changed = Signal(str)
@@ -47,11 +92,12 @@ class HostChooser(QWidget):
         row.addWidget(plain_label(tr("Host"), word_wrap=False))
         self.box = QComboBox()
         self.box.setAccessibleName(tr("Host"))
-        self.box.setToolTip(tooltip or tr("This machine, or a host of sandbox-ai hosts (over SSH)"))
+        self.box.setToolTip(safe_tooltip(tooltip or tr("This machine, or a host of sandbox-ai hosts (over SSH)")))
         self.box.currentIndexChanged.connect(lambda _=0: self.changed.emit(self.host()))
         row.addWidget(self.box, 1)
         self.problem = None
         self.load()
+        follow_hosts(self, self.load)  # a host added, renamed or removed on the Hosts page: here at once
 
     def load(self):
         """This machine, and each host of sandbox-ai hosts (a small local file: no SSH here); the choice stays while

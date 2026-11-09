@@ -374,9 +374,13 @@ def from_project(sai, document, directory):
     """The board of a project file (.sandbox-ai.json in DIRECTORY): its main workspace is DIRECTORY."""
     board = from_argv(sai, document.get("agent", ""), document.get("options", []), document.get("agent_args", []),
                       [str(directory)] + [str(w) for w in document.get("workspaces", [])])
+    # The file's other keys (mode, canaries, keep, log_debug, name, description) are no part of the board: kept for
+    # the file Apply writes, named above the board and in Apply's question (project_trust), never carried silently.
+    # A key the launcher does not know is dropped (it would refuse the file).
+    known = set(getattr(sai.launcher, "CONFIG_KEYS", ())) if sai is not None else set()
     board.document_extra = {k: v for k, v in document.items()
                             if k not in ("version", "agent", "options", "workspaces", "agent_args", "mcp_servers",
-                                         "rules")}
+                                         "rules") and k in known}
     if isinstance(document.get("rules"), dict):  # the project's ruleset belongs to the approvals node
         (board.first("approvals") or board.add("approvals")).props["rules"] = json.loads(json.dumps(document["rules"]))
     # The project's own MCP servers are nodes: inspectable and scored (their folders and network), connected
@@ -458,10 +462,53 @@ def to_argv(sai, board, workspaces=True):
     return backend.argv_from_values(list(options.values()), found) + list(board.extra)
 
 
-def launcher_argv(sai, board):
-    """What the launcher checks in a dry run: the board alone (--no-config: a trusted project file in the
-    workspace would be merged in otherwise)."""
-    return to_argv(sai, board) + ["--no-config"]
+def document_argv(board):
+    """The options of the project file's own keys that no node holds (Board.document_extra): its security mode,
+    canaries, kept HOME, debug logs and name. A board start passes --no-config, so without these a paranoid
+    project would start as medium; given first, so an option the board sets itself wins (as on the command line
+    over a project file)."""
+    extra, argv = board.document_extra, []
+    if isinstance(extra.get("mode"), str) and extra["mode"]:
+        argv += ["--mode", extra["mode"]]
+    if "canaries" in extra:
+        chosen = extra["canaries"]
+        argv += ["--canaries", ",".join(map(str, chosen))] if isinstance(chosen, list) and chosen else ["--no-canaries"]
+    if extra.get("keep") in (True, False):
+        argv.append("--keep" if extra["keep"] else "--no-keep")
+    if extra.get("log_debug") is True:
+        argv.append("--log-debug")
+    if isinstance(extra.get("name"), str) and extra["name"]:
+        argv += ["--project-name", extra["name"]]
+    return argv
+
+
+def project_rules(board):
+    """The project's own ruleset (.sandbox-ai.json "rules", on the approvals node), or None."""
+    approvals = board.first("approvals")
+    rules = approvals.props.get("rules") if approvals is not None else None
+    return rules if isinstance(rules, dict) else None
+
+
+def rules_copy(rules):
+    """A private copy of the project's ruleset RULES outside every workspace (the app's settings, named by its
+    sha256), for --rules: a board start passes --no-config, and the ruleset must hold all the same."""
+    import hashlib
+    data = (json.dumps(rules, indent=2, sort_keys=True) + "\n").encode()
+    folder = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "sandbox-ai" / "app" / "rules"
+    target = folder / f"{hashlib.sha256(data).hexdigest()}.json"
+    if not (target.is_file() and not target.is_symlink() and target.read_bytes() == data):
+        backend.write_private_json(target, json.loads(data))
+    return target
+
+
+def launcher_argv(sai, board, local=True):
+    """What the launcher checks in a dry run and what a board start runs: the board alone (--no-config: a trusted
+    project file in the workspace would be merged in otherwise), with the project file's own keys as options
+    (document_argv) and, on this machine (LOCAL), its ruleset as --rules (a copy outside every workspace). Nothing
+    of the project file is left out silently: a ruleset on another host is refused at the start (board_view)."""
+    rules = project_rules(board)
+    copy = ["--rules", str(rules_copy(rules))] if rules is not None and local else []
+    return document_argv(board) + to_argv(sai, board) + copy + ["--no-config"]
 
 
 def project_servers(board):
@@ -488,7 +535,8 @@ def file_start_argv(sai, board):
 
 def command_line(sai, board):
     agent, _, agent_args = values(board, sai)
-    return shlex.join(["sandbox-ai", agent, *to_argv(sai, board), *(["--", *agent_args] if agent_args else [])])
+    return shlex.join(["sandbox-ai", agent, *document_argv(board), *to_argv(sai, board),
+                       *(["--", *agent_args] if agent_args else [])])
 
 
 def project_document(sai, board):
@@ -502,7 +550,9 @@ def project_document(sai, board):
     options = _options(sai)
     argv = backend.argv_from_values(list(options.values()), kept)
     argv += [t for t in board.extra if t.split("=", 1)[0] not in forbidden]
-    document = {"version": 1, "agent": agent, "options": argv, **board.document_extra}
+    known = set(getattr(sai.launcher, "CONFIG_KEYS", ()))
+    document = {"version": 1, "agent": agent, "options": argv,
+                **{k: v for k, v in board.document_extra.items() if k in known}}
     servers = {n.props["name"]: n.props["definition"] for n in board.of_kind("mcp")
                if n.props.get("project") and n.props.get("name") and isinstance(n.props.get("definition"), dict)}
     if servers:

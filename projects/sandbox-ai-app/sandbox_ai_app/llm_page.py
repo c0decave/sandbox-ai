@@ -39,12 +39,13 @@ from PySide6.QtWidgets import (
 )
 
 from .files import printable
-from .host_choice import on_host
+from .host_choice import follow_hosts, on_host
 from . import theme, widgets
 from . import wizard_llm as WL
 from .i18n import N_, tr
 from .widgets import (
-    ask_first, background, fill, outcome, plain_label, row_key, selected_keys, set_enabled, show_text, table, warn,
+    ask_first, background, fill, flow, outcome, plain_label, row_key, safe_tooltip, selected_keys, set_enabled,
+    show_text, table, warn,
 )
 
 # As sandbox-ai llm checks them (llm.py: NAME, SECRET, MODEL_NAME, VPN_PROFILE, URL).

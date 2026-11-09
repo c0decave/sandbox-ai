@@ -1902,7 +1902,29 @@ class SandboxAI:
             os.close(fd)
         path = Path(directory) / name
         launcher.trust_config(path, digest=hashlib.sha256(data).hexdigest())
+        keep_trusted_copy(data)  # what the next change is shown against
         return path
+
+    def trusted_baseline(self, directory):
+        """(state, bytes) of the version of DIRECTORY/.sandbox-ai.json trusted last: ("kept", its bytes) from the
+        app's copies (or the file itself while it is still exactly the trusted one), ("unknown", None) when another
+        version is trusted but the app never saw it, ("none", None) when nothing is trusted for that path. A change
+        is shown against this, never against the file in the folder, which whoever can write the folder wrote."""
+        launcher = self.launcher
+        path = launcher.config_key(Path(directory) / launcher.CONFIG_NAME)
+        known = launcher.trusted_configs(note=lambda _line: None).get(str(path))
+        if not known:
+            return "none", None
+        data = trusted_copy(known)
+        if data is None:
+            try:
+                current = launcher.read_config_bytes(path)
+            except (OSError, ValueError):
+                current = None
+            if current is not None and hashlib.sha256(current).hexdigest() == known:
+                keep_trusted_copy(current)
+                data = current
+        return ("kept", data) if data is not None else ("unknown", None)
 
     def review_project(self, directory):
         """ProjectReview of DIRECTORY/.sandbox-ai.json: read once with the launcher's own bounded reader
@@ -1914,6 +1936,8 @@ class SandboxAI:
         digest = hashlib.sha256(data).hexdigest()
         known = launcher.trusted_configs().get(str(path))
         review = ProjectReview(path, data, digest, trusted=known == digest, changed=bool(known) and known != digest)
+        if review.trusted:
+            keep_trusted_copy(data)  # the baseline a later change of the file is shown against
         try:
             document = json.loads(data.decode())
         except (ValueError, UnicodeDecodeError, RecursionError):
@@ -1963,6 +1987,7 @@ class SandboxAI:
         if review.problems:
             raise ValueError("this configuration cannot be used: " + "; ".join(review.problems))
         self.launcher.trust_config(review.path, digest=review.digest)
+        keep_trusted_copy(review.data)
 
     # -- actions --
 
@@ -3311,6 +3336,62 @@ def sandbox_ai_home_override(environ=None):
     if environ.get("SANDBOX_AI_HOME"):
         return None
     return setting("sandbox_ai_home") or None
+
+
+def trusted_copies_dir():
+    """Where the app keeps a copy of every project file version it saw trusted, named by its sha256 (beside the app's
+    other settings, outside every workspace)."""
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "sandbox-ai" / "app" / "trusted"
+
+
+def read_bounded(path, limit):
+    """The bytes of the regular file PATH (not through a link), at most LIMIT; ValueError when larger."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError(f"{path} is not a regular file")
+        chunks, size = [], 0
+        while chunk := os.read(fd, 65536):
+            size += len(chunk)
+            if size > limit:
+                raise ValueError(f"{path} is larger than {limit} bytes")
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def keep_trusted_copy(data):
+    """Keep DATA (the bytes of a trusted project file) under its sha256; a failure only loses the diff later."""
+    digest = hashlib.sha256(data).hexdigest()
+    folder = trusted_copies_dir()
+    target = folder / f"{digest}.json"
+    try:
+        if target.is_file() and not target.is_symlink():
+            return
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        temporary = folder / f".{digest}.{os.getpid()}-{secrets.token_hex(4)}.tmp"
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(data)
+            os.replace(temporary, target)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+    except OSError:
+        pass
+
+
+def trusted_copy(digest):
+    """The kept bytes whose sha256 is DIGEST, checked again (a copy that does not match is no copy), or None."""
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        return None
+    try:
+        data = read_bounded(trusted_copies_dir() / f"{digest}.json", 1 << 20)
+    except (OSError, ValueError):
+        return None
+    return data if hashlib.sha256(data).hexdigest() == digest else None
 
 
 def write_private_json(path, data):

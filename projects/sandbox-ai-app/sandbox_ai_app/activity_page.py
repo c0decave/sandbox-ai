@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 from . import backend, theme, widgets
 from .files import printable
 from .i18n import N_, tr
-from .widgets import MONO, plain_label
+from .widgets import MONO, flow, plain_label, shown_as_text
 
 KINDS = {"prompt": N_("prompt"), "reply": N_("reply"), "tool": N_("tool"), "command": N_("command"),
          "file": N_("file"), "network": N_("network"), "approval": N_("approval"), "mcp": N_("MCP"),

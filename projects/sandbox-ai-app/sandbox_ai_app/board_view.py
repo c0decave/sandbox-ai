@@ -10,10 +10,8 @@ to it. Pure Python and Qt: nothing here needs Node.js or a browser engine.
 """
 from __future__ import annotations
 
-import difflib
 import json
 import os
-from pathlib import Path
 import re
 import time
 
@@ -31,11 +29,11 @@ from PySide6.QtWidgets import (
 )
 
 from . import backend, board as B
-from . import help_view, theme
+from . import help_view, project_trust as PT, theme
 from .files import printable
 from .state import choose_file, choose_folder
 from .i18n import tr
-from .widgets import MONO, ask_first, background, flow, inform, plain_label, safe_tooltip, warn
+from .widgets import MONO, ElidedLabel, ask_first, background, flow, inform, plain_label, safe_tooltip, warn
 
 LOCAL = "local"  # this machine, as `sandbox-ai hosts` names it
 REMOTE_CHECK_DELAY = 2000  # ms after an edit before another host's launcher checks the board (a dry run over SSH)
@@ -1476,7 +1474,8 @@ class BoardPage(QWidget):
         self.check_token += 1
         token = self.check_token
         self.check_running, self.check_pending = host != LOCAL, False
-        background(self.sai.host_dry_run, host, agent, B.launcher_argv(self.sai, self.board), timeout=120,
+        background(self.sai.host_dry_run, host, agent, B.launcher_argv(self.sai, self.board, local=host == LOCAL),
+                   timeout=120,
                    done=lambda result, error: self.checked(token, result, error, host))
 
     def check_delay(self):
@@ -2006,10 +2005,20 @@ class BoardPage(QWidget):
             self.untrusted.pop(self.key_of(directory), None)
         else:
             self.untrusted[self.key_of(directory)] = str(review.path)
+        # Keys no part of the board shows (the security mode, canaries, a kept HOME, ...): named here, and again in
+        # Apply's question, which trusts them too.
+        weak = PT.weakening(self.sai, review.document)
+        extra = ", ".join(f"{'⚠ ' if key in weak else ''}{printable(key)}: {PT.short(value, 60)}"
+                          for key, value in PT.unshown(review.document).items())
+        also = ("\n" + tr("The file also sets (no part of the board shows it; Apply trusts it too): {list}",
+                          list=extra)) if extra else ""
         if not review.trusted:
             text = tr("{path} is not trusted yet: the board shows it; Apply trusts what you see after you review it.",
-                      path=printable(review.path))
+                      path=printable(review.path)) + also
             self.show_notice(text, "notice-warn") if quiet else inform(self, tr("Board"), text)
+        elif also:
+            risky = weak.keys() & PT.unshown(review.document).keys()
+            self.show_notice(also.strip(), "notice-warn" if risky else "secondary")
         return True
 
     def load(self, board, directory, positioned=False):
@@ -2220,15 +2229,13 @@ class BoardPage(QWidget):
         if not main:
             inform(self, tr("Project configuration"), tr("Add a workspace first: the file is written there."))
             return False
-        new = json.dumps(document, indent=2) + "\n"
-        old = read_small(Path(main) / ".sandbox-ai.json")
-        diff = "\n".join(difflib.unified_diff(old.splitlines(), new.splitlines(), tr("before"), tr("after"),
-                                              lineterm="")) if old else new
-        question = tr("Write {path} with this content and trust exactly it? The details show what changes.",
-                      path=f"{main}/.sandbox-ai.json")
+        # Every key that will be trusted is named, what weakens the sandbox marked, and the details show the changes
+        # against the version trusted LAST (never against the file in the folder: the agent may have written it).
+        intro = tr("Write {path} with this content and trust exactly it? The details show the changes against the "
+                   "version you trusted last, and the whole file.", path=f"{main}/.sandbox-ai.json")
+        question, details = PT.question(self.sai, main, document, (lead + "\n\n" + intro) if lead else intro)
         # Trusted, the file's options apply at every later start of the project: asked first (Cancel the default).
-        if not ask_first(self, "project-trust", tr("Write and trust"), (lead + "\n\n" + question) if lead else question,
-                         tr("Write and trust"), details=diff):
+        if not ask_first(self, "project-trust", tr("Write and trust"), question, tr("Write and trust"), details=details):
             return False
         background(self.sai.write_project, main, document, owner=self, source=self.apply_button, timeout=60,
                    done=lambda result, error: self.applied(main, result, error, then))
@@ -2259,7 +2266,8 @@ class BoardPage(QWidget):
     def dry_run(self):
         agent, _, _ = B.values(self.board)
         self.read_host_options(self.host(), agent, now=True)  # on demand, also after a failed read
-        background(self.sai.host_dry_run, self.host(), agent, B.launcher_argv(self.sai, self.board), owner=self,
+        background(self.sai.host_dry_run, self.host(), agent,
+                   B.launcher_argv(self.sai, self.board, local=self.host() == LOCAL), owner=self,
                    source=self.dry_button, timeout=120, done=self.dry_run_done)
 
     def dry_run_done(self, result, error):
@@ -2298,9 +2306,15 @@ class BoardPage(QWidget):
                                              "there (sandbox-ai mcp list).", names=", ".join(servers),
                                              host=printable(host)))
             return False
+        if B.project_rules(self.board) is not None and host != LOCAL:
+            warn(self, tr("Not started"), tr("The board has the project's own ruleset (.sandbox-ai.json \"rules\"): "
+                                             "it holds only for starts on this machine. On {host}, give it as a "
+                                             "ruleset file there (--rules FILE), or start on this machine.",
+                                             host=printable(host)))
+            return False
         if servers:
             return self.start_from_project_file(servers, embedded, session)
-        return self.run_start(B.launcher_argv(self.sai, self.board), embedded, session)
+        return self.run_start(B.launcher_argv(self.sai, self.board, local=host == LOCAL), embedded, session)
 
     def start_untrusted_on_host(self, path):
         """The board came from the untrusted project file PATH of this machine and starts on another host: asked first

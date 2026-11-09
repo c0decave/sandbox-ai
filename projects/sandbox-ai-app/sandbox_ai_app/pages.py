@@ -18,9 +18,9 @@ from .files import printable
 from .state import choose_folder
 from .i18n import tr
 from .widgets import (
-    MONO, SORT_ROLE, AsyncCommand, ask_first, background, bars, confirm, fill, find_row, fit_columns, outcome,
-    plain_label,
-    row_key, safe_tooltip, selected, selected_rows, set_enabled, table, warn,
+    MONO, SORT_ROLE, AsyncCommand, ask_first, background, bars, compact_combo, confirm, fill, find_row, fit_columns,
+    flow, outcome,
+    plain_label, row_key, safe_tooltip, selected, selected_rows, set_enabled, table, warn, shown_as_text,
 )
 
 

@@ -29,7 +29,7 @@ from .host_choice import on_host
 from .i18n import tr
 from .widgets import (
     MONO, AsyncCommand, Task, ask_first, button, confirm, fill, inform, plain_label, safe_tooltip, select_keys,
-    selected_keys, show_text, table, warn,
+    selected_keys, show_text, table, warn, shown_as_text,
 )
 
 KINDS = ("apt", "npm", "pip")

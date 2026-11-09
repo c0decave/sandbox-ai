@@ -49,6 +49,13 @@ def safe_tooltip(text, limit=TOOLTIP_LIMIT):
     return "<p style='white-space:pre-wrap'>" + html.escape(text, quote=False) + "</p>"
 
 
+def shown_as_text(text):
+    """TEXT for a place Qt reads as rich text when it looks like markup (Qt.AutoText: the labels of QInputDialog and of
+    the static QMessageBox calls): escaped and marked as rich text, so a name an agent or a host chose (a file
+    "<b>Allow</b>", a URL) is shown as it is, never interpreted."""
+    return "<p style='white-space:pre-wrap'>" + html.escape(str(text), quote=False) + "</p>"
+
+
 def elide(text, limit=CELL_LIMIT):
     text = str(text)
     return text if len(text) <= limit else text[:limit - 1] + "…"
@@ -81,6 +88,38 @@ def plain_label(text="", word_wrap=True, role=None):
     if role:
         label.setProperty("role", role)
     return label
+
+
+class ElidedLabel(QLabel):
+    """A one-line label that never asks for more room than ABOUT characters: a longer text is cut with "…" where the
+    room ends, whole in its tooltip (a status line under a canvas that does not scroll)."""
+
+    def __init__(self, about=40, role=None):
+        super().__init__()
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.about = about
+        self.elides = True  # cut on purpose (tests/test_layout.py: not a clipped text)
+        if role:
+            self.setProperty("role", role)
+
+    def sizeHint(self):  # noqa: N802
+        hint = super().sizeHint()
+        return QSize(min(hint.width(), self.fontMetrics().averageCharWidth() * self.about), hint.height())
+
+    def minimumSizeHint(self):  # noqa: N802
+        return QSize(0, super().minimumSizeHint().height())
+
+    def setText(self, text):  # noqa: N802
+        super().setText(str(text))
+        self.setToolTip(safe_tooltip(text) if text else "")
+
+    def paintEvent(self, event):  # noqa: N802
+        from PySide6.QtGui import QPainter
+        painter = QPainter(self)
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        rect = self.contentsRect()
+        text = self.fontMetrics().elidedText(self.text(), Qt.TextElideMode.ElideRight, rect.width())
+        painter.drawText(rect, int(self.alignment()) | int(Qt.AlignmentFlag.AlignVCenter), text)
 
 
 def title(text, subtitle=None):
@@ -1031,6 +1070,46 @@ class FlowLayout(QLayout):
             x += hint.width() + self.gap
             line = max(line, hint.height())
         return y + line - rect.y()
+
+
+def compact_combo(combo, chars=24):
+    """COMBO no wider than about CHARS characters, whatever its longest item (Qt sizes a combo to its longest item
+    otherwise, and a long one makes the whole window wider than the screen): the popup still shows every item in
+    full, and each item's full text is its tooltip."""
+    from PySide6.QtWidgets import QComboBox
+    combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+    combo.setMinimumContentsLength(chars)
+    for index in range(combo.count()):
+        if not combo.itemData(index, Qt.ItemDataRole.ToolTipRole):
+            combo.setItemData(index, safe_tooltip(combo.itemText(index)), Qt.ItemDataRole.ToolTipRole)
+    return combo
+
+
+def tame_combos(root, chars=28):
+    """Every combo box below ROOT whose longest item is longer than CHARS characters: compact_combo."""
+    from PySide6.QtWidgets import QComboBox
+    for combo in root.findChildren(QComboBox):
+        if combo.sizeAdjustPolicy() == QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon:
+            continue
+        longest = max((len(combo.itemText(i)) for i in range(combo.count())), default=0)
+        if longest > chars:
+            compact_combo(combo, chars)
+
+
+def name_views(root):
+    """Every table, tree or list below ROOT without an accessible name gets the title of the group box it sits in
+    (a screen reader says "Plugins, table" instead of only "table"); the pages name their own views, this is the
+    fallback for a view added without one."""
+    from PySide6.QtWidgets import QAbstractItemView, QComboBox, QGroupBox, QHeaderView
+    for view in root.findChildren(QAbstractItemView):
+        if view.accessibleName() or isinstance(view, QHeaderView):
+            continue
+        parent = view.parentWidget()
+        while parent is not None and parent is not root and not isinstance(parent, (QGroupBox, QComboBox)):
+            parent = parent.parentWidget()
+        heading = QGroupBox.title(parent) if isinstance(parent, QGroupBox) else ""  # (a box may shadow title())
+        if heading:
+            view.setAccessibleName(heading.replace("&", ""))
 
 
 def flow(*widgets):

@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 from . import help_texts as H
 from . import i18n, theme, tours
 from .i18n import N_, tr
-from .widgets import MONO, FlowLayout, plain_label
+from .widgets import MONO, FlowLayout, plain_label, safe_tooltip
 
 OPENER = None   # the window's show_help(section id): set by the main window
 OPENED = []     # the ids of the explanations opened in this run (a tour step waits for one)

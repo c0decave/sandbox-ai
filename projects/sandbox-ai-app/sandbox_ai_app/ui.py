@@ -19,14 +19,16 @@ from PySide6.QtWidgets import (
     QTabWidget, QToolButton, QTreeView, QVBoxLayout, QWidget,
 )
 
-from . import applog, backend, i18n, notifications, terminal, theme
+from . import applog, backend, i18n, notifications, terminal, theme, widgets
 from .files import printable
+from .host_choice import on_host
 from .state import choose_file, choose_folder
 from .i18n import N_, tr
 from .activity_page import ActivityPage
 from .board_view import BoardPage, HostCombo
-from . import help_view
+from . import help_view, labels
 from . import presets as PR
+from . import project_trust as PT
 from .hosts_page import HostsPage
 from .kits_page import KitsPage
 from .state import State, scrub_arguments
@@ -37,9 +39,8 @@ from .start_tree import ID_ROLE, KEY_ROLE, KIND_ROLE, StartTree, id_host, relate
 from . import wizard_llm as WL
 from .widgets import (
     MONO, AsyncCommand, ThreadCall, append_rows, ask_first, background, busy, fill, find_row, fit_columns, flow,
-    inform,
-    local_time,
-    outcome, plain_label, row_key, safe_tooltip, selected, selected_rows, set_enabled, show_text, table, warn,
+    inform, local_time, outcome, plain_label, row_key, safe_tooltip, selected, selected_rows, set_enabled,
+    show_text, table, warn, shown_as_text, tame_combos,
 )
 
 CONNECTIONS_LIMIT = 5000  # records the Connections page keeps (backend.read_connections reads as many)
@@ -1112,11 +1113,15 @@ class LaunchPage(QWidget):
         if not review.trusted:
             state = (tr("{path} changed since you trusted it.", path=printable(review.path)) if review.changed else
                      tr("{path} is not trusted yet.", path=printable(review.path)))
-            question = "\n".join([state, "", *lines, "", tr("Trust exactly this content (see the details)? The "
-                                                            "launcher refuses the file if it changes afterwards.")])
+            intro = state + "\n\n" + tr("Trust exactly this content (see the details: the changes against the version "
+                                         "you trusted last, and the whole file)? The launcher refuses the file if it "
+                                         "changes afterwards.")
+            # Every key is named and what weakens marked; the details diff against the version trusted LAST.
+            question, details = PT.question(self.sai, directory, review.document, intro,
+                                            new_text=review.data.decode("utf-8", "replace"))
             # Trusting outlives this start (every later start of the project gets the file's options): asked first.
             if not ask_first(self, "project-trust", tr("Review the project configuration"), question, tr("Trust"),
-                             details=review.text()):
+                             details=details):
                 return False
             try:
                 self.sai.trust_project(review)
@@ -1182,12 +1187,13 @@ class LaunchPage(QWidget):
             QMessageBox.information(self, tr("Project configuration"),
                                     tr("Choose a workspace first: the file is written there."))
             return
-        text = json.dumps(document, indent=2)
+        intro = tr("Write {path} with this content and trust exactly it? The details show the changes against the "
+                   "version you trusted last, and the whole file.", path=f"{main}/.sandbox-ai.json")
+        question, details = PT.question(self.sai, main, document, intro)
         # Trusted, the file's options apply at every start there without a question: asked first (the policy of
         # project-trust), Cancel the default.
-        if ask_first(self, "project-trust", tr("Write and trust"), tr("Write {path} with this content and trust it?",
-                                                                      path=f"{main}/.sandbox-ai.json"),
-                     tr("Write and trust"), details=text):  # the folder may be slow (a network file system): in a thread
+        if ask_first(self, "project-trust", tr("Write and trust"), question, tr("Write and trust"),
+                     details=details):  # the folder may be slow (a network file system): in a thread
             background(self.sai.write_project, main, document, owner=self, timeout=60, done=self.project_written)
 
     def project_written(self, path, error):

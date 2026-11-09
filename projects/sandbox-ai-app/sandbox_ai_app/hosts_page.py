@@ -27,7 +27,8 @@ from . import backend
 from .files import printable
 from .i18n import tr
 from .widgets import (
-    MONO, ask_first, background, confirm, fill, inform, plain_label, row_key, selected_rows, set_enabled, table, warn,
+    MONO, ask_first, background, compact_combo, confirm, fill, flow, inform, plain_label, row_key, safe_tooltip,
+    selected_rows, set_enabled, table, warn,
 )
 
 # Security modes in rising strictness (sandbox-ai's modes.NAMES) and its default when defaults.json names none; the

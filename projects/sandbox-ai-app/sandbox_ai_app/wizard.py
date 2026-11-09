@@ -12,7 +12,6 @@ file is shown, never applied, until it is written and trusted again.
 """
 from __future__ import annotations
 
-import difflib
 import json
 import os
 from pathlib import Path
@@ -27,13 +26,14 @@ from PySide6.QtWidgets import (
 
 from . import board as B
 from . import presets as PR
+from . import project_trust as PT
 from . import widgets
 from . import wizard_llm as WL
-from .board_view import LinesEdit, PathEdit, RulesEdit, read_small
+from .board_view import LinesEdit, PathEdit, RulesEdit
 from .preset_gallery import PlaceholderForm
 from .files import printable
 from .i18n import N_, tr
-from .widgets import MONO, ask_first, background, confirm, plain_label, show_text, warn
+from .widgets import MONO, ask_first, background, confirm, plain_label, safe_tooltip, show_text, warn
 
 DEFAULT_MEMORY = "8g"  # the launcher's default, as a placeholder
 SECRET_EXAMPLE = "LLM_KEY"  # the same in every language
@@ -65,8 +65,8 @@ class Page(QWizardPage):
         forbidden = self.wizard_.forbidden.get(option, set())
         if None in forbidden or (value is not None and value in forbidden):
             widget.setEnabled(False)
-            widget.setToolTip(tr("The administrator's policy forbids {option}", option=option +
-                                 (f"={value}" if value is not None else "")))
+            widget.setToolTip(safe_tooltip(tr("The administrator's policy forbids {option}", option=option +
+                                 (f"={value}" if value is not None else ""))))
 
 
 class FolderPage(Page):
@@ -127,7 +127,7 @@ class FolderPage(Page):
                 shown = tr("{folder}   (used {time})", folder=shown, time=stamp)
             item = QListWidgetItem(shown)
             item.setData(Qt.ItemDataRole.UserRole, path)
-            item.setToolTip(printable(path))
+            item.setToolTip(safe_tooltip(printable(path)))
             self.recent.addItem(item)
         self.recent.setCurrentRow(-1)
         self.recent.blockSignals(False)
@@ -378,10 +378,10 @@ class ModelPage(Page):
         why = tr("The model is the server's: --llm NAME:MODEL (the launcher refuses --model with --llm)")
         for widget in (self.model, self.effort):
             widget.setEnabled(not own and (widget is not self.effort or widget.count() > 1))
-        self.model.setToolTip(why if own else "")
-        self.effort.setToolTip(why if own else "" if self.effort.count() > 1 else
+        self.model.setToolTip(safe_tooltip(why if own else ""))
+        self.effort.setToolTip(safe_tooltip(why if own else "" if self.effort.count() > 1 else
                                tr("{agent} sets its effort per model in its own configuration",
-                                  agent=self.shown_agent or ""))
+                                  agent=self.shown_agent or "")))
         for widget in (self.servers, self.add_button, self.refresh_button, self.models_button, self.server_model,
                        self.only):
             widget.setEnabled(own)
@@ -1062,7 +1062,7 @@ class GitPage(Page):
         for title, url, name in (("GitHub", "https://github.com", "GH_PUSH"), ("GitLab", "https://gitlab.com", "GITLAB_TOKEN"),
                                  (tr("Local Gitea"), "http://localhost:3000", "GITEA_TOKEN")):
             quick = QPushButton(title)
-            quick.setToolTip(tr("A row for {url}, its token from the stored secret {name}", url=url, name=name))
+            quick.setToolTip(safe_tooltip(tr("A row for {url}, its token from the stored secret {name}", url=url, name=name)))
             quick.clicked.connect(lambda _=False, u=url, n=name: self.add_row(u, "secret", n))
             row.addWidget(quick)
         add = QPushButton(tr("Add token"))
@@ -1115,8 +1115,8 @@ class GitPage(Page):
             widgets.mark_secret(e, c.currentData() == "typed")
             e.setPlaceholderText(tr(self.PLACEHOLDERS[c.currentData()]))
             e.setCompleter(self.completer() if c.currentData() == "secret" else None)
-            e.setToolTip(tr("Kept secrets: {names}", names=", ".join(self.stored) or tr("none yet"))
-                         if c.currentData() == "secret" else "")
+            e.setToolTip(safe_tooltip(tr("Kept secrets: {names}", names=", ".join(self.stored) or tr("none yet"))
+                         if c.currentData() == "secret" else ""))
         combo.currentIndexChanged.connect(kind_changed)
         kind_changed()
         self.table.setCellWidget(row, 2, cell)
@@ -1148,7 +1148,7 @@ class GitPage(Page):
             combo, edit = self.table.cellWidget(row, 1), self.token_edit(row)
             if combo is not None and combo.currentData() == "secret":
                 edit.setCompleter(self.completer())
-                edit.setToolTip(tr("Kept secrets: {names}", names=", ".join(self.stored) or tr("none yet")))
+                edit.setToolTip(safe_tooltip(tr("Kept secrets: {names}", names=", ".join(self.stored) or tr("none yet"))))
 
     def initializePage(self):  # noqa: N802
         background(self.wizard_.sai.secrets, owner=self, timeout=60, done=self.secrets_read)  # names only, never values
@@ -1422,14 +1422,19 @@ class SandboxWizard(QWizard):
     def document(self):
         return B.project_document(self.sai, self.board)
 
-    def file_diff(self):
+    def trust_question(self):
+        """(question, details) of Write and trust: every key that will be trusted, what weakens the sandbox marked, the
+        changes against the version trusted last (never against the file in the folder, which the agent may have
+        written) and the whole file."""
         document, main = self.document()
-        new = json.dumps(document, indent=2) + "\n"
-        old = read_small(Path(main or self.directory or ".") / ".sandbox-ai.json")
-        if not old:
-            return new
-        return "\n".join(difflib.unified_diff(old.splitlines(), new.splitlines(), tr("before"), tr("after"),
-                                              lineterm="")) or tr("No change.")
+        intro = tr("Write {path} with this content and trust exactly it? The details show the changes against the "
+                   "version you trusted last, and the whole file.", path=f"{main}/.sandbox-ai.json")
+        return PT.question(self.sai, main or self.directory or ".", document, intro)
+
+    def file_diff(self):
+        """What the last page shows: what will be trusted, and the changes against the version trusted last."""
+        question, details = self.trust_question()
+        return question + "\n\n" + details
 
     def write(self):
         """Write and trust the project file (after one more explicit yes), keep the layout next to it."""
@@ -1437,10 +1442,9 @@ class SandboxWizard(QWizard):
         if not main:
             warn(self, tr("Not written"), tr("Add a workspace first: the file is written there."))
             return False
+        question, details = self.trust_question()
         # Trusted, the file's options apply at every later start of the project: asked first (Cancel the default).
-        if not ask_first(self, "project-trust", tr("Write and trust"),
-                         tr("Write {path} with this content and trust exactly it? The details show what changes.",
-                            path=f"{main}/.sandbox-ai.json"), tr("Write and trust"), details=self.file_diff()):
+        if not ask_first(self, "project-trust", tr("Write and trust"), question, tr("Write and trust"), details=details):
             return False
         # The folder may be slow (a network file system): written in a thread; the wizard closes when it is.
         self.set_write_state("writing")
