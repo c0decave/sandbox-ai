@@ -497,6 +497,7 @@ def logged_in():
      ["git-logins", "check", "https://git.example.org"]),
     ("GET", "/api/hosts/ct1/publish-logins", None, ["publish-logins", "list", "--json"]),
     ("GET", "/api/hosts/ct1/publish-logins/kinds", None, ["publish-logins", "kinds"]),
+    ("GET", "/api/hosts/ct1/login-status", None, ["login", "--status"]),  # review 5 W6
     ("POST", "/api/hosts/ct1/publish-logins", {"kind": "npm", "secret": "NPM_TOKEN", "url": "https://npm.example.org"},
      ["publish-logins", "add", "--secret=NPM_TOKEN", "--url=https://npm.example.org", "npm"]),
     ("POST", "/api/hosts/ct1/publish-logins/pypi/remove", {"confirm": True}, ["publish-logins", "remove", "pypi"]),
@@ -525,6 +526,8 @@ def logged_in():
      ["net", "allow", "web", "--allow=192.0.2.0/24", "--allow=2001:db8::1", "--allow-pypi", "--allow-kernel-org",
       "--nameserver=192.0.2.53", "--git-token-file=https://git.example.org=/home/u/.config/git-token", "--keep"]),
     ("POST", "/api/hosts/ct1/net/web", {"op": "revoke", "presets": ["npm"]}, ["net", "revoke", "web", "--allow-npm"]),
+    # an "All ports" row's Revoke (review 5 W6)
+    ("POST", "/api/hosts/ct1/net/web", {"op": "revoke", "allow": ["10.0.0.0/24"]}, ["net", "revoke", "web", "--allow=10.0.0.0/24"]),
     ("POST", "/api/hosts/ct1/net/web/keep", {"all": True, "confirm": True}, ["net", "show", "web", "--keep-all"]),
     ("GET", "/api/hosts/ct1/starts/all", None, ["list", "--all", "--json"]),
     ("POST", "/api/hosts/ct1/starts/web/stop", {"wait": 90, "confirm": True}, ["stop", "web", "--wait=90"]),
@@ -975,6 +978,7 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     ("POST", "/api/hosts/ct1/privacy-check", {"paths": ["--all"]}, 400),
     ("POST", "/api/hosts/ct1/privacy-check", {"paths": ["/r"], "project": "-x"}, 400),
     ("POST", "/api/hosts/ct1/activity", {"tail": 0}, 400),
+    ("POST", "/api/hosts/ct1/starts/web/rename", {"new": "a" * 41}, 400),  # the launcher's names: 40 (review 5 W6)
     ("POST", "/api/hosts/ct1/activity", {"session": "web", "project": "/srv/p"}, 400),
     ("POST", "/api/hosts/ct1/activity", {"session": "--all"}, 400),
     ("POST", "/api/hosts/ct1/activity", {"log_dir": "relative"}, 400),
@@ -1234,6 +1238,7 @@ def test_terminal_commands():
                   {"host": "local", "kind": "start", "agent": "claude", "options": json.dumps([1])},
                   # review 5 UX M3 / W5: no workspace at all (the service's own directory would be /work)
                   {"host": "local", "kind": "start", "agent": "claude"},
+                  {"host": "local", "kind": "start", "agent": "claude", "workspace": "/srv/app", "name": "a" * 41},
                   {"host": "local", "kind": "start", "agent": "claude", "options": json.dumps(["--mode", "high", "--", "-w", "/x"])},
                   {"host": "local", "kind": "start", "agent": "claude", "options": json.dumps(["--workspace-ro", "--with", "codex"])}):
         with pytest.raises(w.Refused):
@@ -4141,7 +4146,8 @@ const byId = (id) => body.all().find(n => n.id === id);
   // arguments after -- stay; a server the agent cannot use is shown disabled
   const model = (list, choice, only) => vm.runInContext(`withModel(${JSON.stringify(list)}, ${JSON.stringify(choice)}, ${only})`, context);
   result.withModel = [model(["--mode", "high", "--model", "opus", "-mm", "x", "--model=y", "--llm", "old", "-nd"], "gpu:qwen3", true),
-    model(["--mode", "high", "--model", "opus"], "", false), model(["--allow-pypi", "--", "--model", "kept"], "gpu", false)];
+    model(["--mode", "high", "--model", "opus"], "", false), model(["--allow-pypi", "--", "--model", "kept"], "gpu", false),
+    model(["-mm=opus", "-lm=old", "--llm=x", "-y"], "gpu", false)];  // review 5 L6: the short = forms go too
   vm.runInContext('state.page = "starts"; state.startsHost = "ct1";', context);
   answer = (method, path) => (path.endsWith("/starts") ? [] : path.endsWith("/presets") ? [] : path.endsWith("/llm") ?
     [{ name: "gpu", kind: "vllm", model: "qwen3", agents: ["codex", "opencode"] }, { name: "gw", kind: "openai-compatible", agents: ["claude", "codex", "opencode"] }]
@@ -4213,7 +4219,7 @@ def test_the_pages_of_the_clis_other_commands(tmp_path):
     result = run_driver(tmp_path, PARITY_DRIVER, "parity")
     assert result["withModel"] == [["--mode", "high", "--llm", "gpu:qwen3", "--no-provider-defaults"],
                                    ["--mode", "high", "--model", "opus"],
-                                   ["--allow-pypi", "--llm", "gpu", "--", "--model", "kept"]]
+                                   ["--allow-pypi", "--llm", "gpu", "--", "--model", "kept"], ["-y", "--llm", "gpu"]]
     values = {value: (disabled, text) for value, disabled, text in result["models"]}
     assert values[""][0] is False and "provider" in values[""][1]
     assert values["gpu"][0] is True and "Anthropic" in values["gpu"][1], "Claude Code cannot use a plain vLLM server"

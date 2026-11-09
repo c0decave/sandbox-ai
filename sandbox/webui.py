@@ -71,7 +71,8 @@ VENDOR_FILES = {"xterm.js": "text/javascript; charset=utf-8", "xterm.css": "text
                 "addon-fit.js": "text/javascript; charset=utf-8"}
 DEFAULT_LISTEN = "127.0.0.1:8443"
 USER_NAME = re.compile(r"[a-z][a-z0-9_.-]{0,31}")
-START_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}")
+START_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}")  # a start's name or id (START_ID)
+NEW_START_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}")  # a name given to a start (SESSION_NAME)
 MCP_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
 APPROVAL_ID = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}")  # never a leading "-": read as an option there
 AGENTS = ("claude", "codex", "opencode")
@@ -601,6 +602,15 @@ def start_name(value):
     return value
 
 
+def new_start_name(value):
+    """The name a start is given (--name, rename NEW): 1-40 characters as the launcher's SESSION_NAME takes them (a
+    start is named by its id too, up to 48: start_name)."""
+    if not (isinstance(value, str) and NEW_START_NAME.fullmatch(value)):
+        raise Refused(400, "a start's new name is 1-40 letters, digits, '_', '.' or '-', starting with a letter or "
+                           "digit", code="bad-name", params={"what": "start"})
+    return value
+
+
 # Kits (sandbox-ai kits): the names as kits.py has them; every value is checked here and again by the command.
 KIT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 KIT_SKILL = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")  # a new skill's name (Claude's rule)
@@ -1090,6 +1100,7 @@ class Api:
             ("POST", H + r"/git-logins/check", self.git_login_check, ()),
             ("GET", H + r"/publish-logins", self.publish_logins, ()),
             ("GET", H + r"/publish-logins/kinds", self.publish_kinds, ()),
+            ("GET", H + r"/login-status", self.login_status, ()),
             ("POST", H + r"/publish-logins", self.publish_login_add, ("login-replace",)),
             ("POST", H + r"/publish-logins/check", self.publish_login_check, ()),
             ("POST", H + r"/publish-logins/(?P<kind>[^/]+)/remove", self.publish_login_remove, ("login-remove",)),
@@ -1569,7 +1580,7 @@ class Api:
 
     def rename(self, params, body):
         """sandbox-ai rename OLD NEW: another name for a start (its run id stays)."""
-        old, new = start_name(params["name"]), start_name(body.get("new"))
+        old, new = start_name(params["name"]), new_start_name(body.get("new"))
         return self.done(params["host"], ["rename", old, new], 60)
 
     def history(self, params, body):
@@ -2567,6 +2578,10 @@ class Api:
     def publish_logins(self, params, body):
         return self.json_of(params["host"], ["publish-logins", "list", "--json"], 30)
 
+    def login_status(self, params, body):
+        """sandbox-ai login --status: which login each agent's sandboxes get on that host."""
+        return self.done(params["host"], ["login", "--status"], 30)
+
     def publish_kinds(self, params, body):
         return self.done(params["host"], ["publish-logins", "kinds"], 30)
 
@@ -3076,7 +3091,7 @@ def terminal_command(query):
             raise Refused(400, "agent is claude, codex or opencode")
         args = [agent]
         if query.get("name"):
-            args += ["--name", start_name(query["name"])]
+            args += ["--name", new_start_name(query["name"])]
         options = strings(json.loads(query.get("options") or "[]"), "options")
         if query.get("workspace"):
             workspace = query["workspace"]
@@ -3147,6 +3162,11 @@ def tool_command(kind, query):
         if logout:
             terminal_confirmed(query, "login-logout", agent)
         return ["login", *(["--logout"] if logout else []), agent]
+    if kind == "wizard":
+        # the project wizard, interactive in its terminal (review 5 W6): a new project file (it asks for the folder),
+        # or that of PATH changed; it shows what it writes and trusts and asks there
+        path = query.get("path") or ""
+        return ["wizard", "edit", clean_path(path, "path")] if path else ["wizard", "new"]
     if kind == "plugins":
         agent = query.get("agent") or "claude"
         if agent not in AGENTS:
@@ -3165,7 +3185,17 @@ def tool_command(kind, query):
         only = {"1": True, "0": False, None: False, "": False}.get(query.get("extension_only"), "bad")
         if only == "bad" or only and target in ("team", "vpn"):
             raise Refused(400, "extension_only is 1 or 0, and not for team or vpn")
-        return ["build", *(["--extension-only"] if only else []), target]
+        # --pin VERSION (one agent's own version), --uv TAG, --node IMAGE (the base images): as build checks them
+        pin, uv, node = (query.get(key) or "" for key in ("pin", "uv", "node"))
+        if pin and not (re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", pin) and target in AGENTS):
+            raise Refused(400, "pin is X.Y.Z, for one agent's image (claude, codex or opencode)")
+        if uv and not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._-]{0,127}", uv) or \
+                node and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9./:@_-]{0,255}", node):
+            raise Refused(400, "uv is an image tag, node an image name (with a tag or an @sha256 digest)")
+        if (uv or node) and target == "vpn":
+            raise Refused(400, "uv and node are for the agents' images, not vpn")
+        more = [*(["--pin", pin] if pin else []), *(["--uv", uv] if uv else []), *(["--node", node] if node else [])]
+        return ["build", *more, *(["--extension-only"] if only else []), target]
     if kind == "trust-hooks":
         kit = query.get("kit")
         if not (isinstance(kit, str) and KIT_NAME.fullmatch(kit)):

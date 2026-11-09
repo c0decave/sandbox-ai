@@ -837,7 +837,8 @@ function attachControls(s, starts) {
 // be asked, its rows stay as they were last seen, greyed, their buttons off (nothing is done on what may be gone).
 // The cards below it (network, resources, a review) stay open; one whose start stopped or went is switched off.
 const startsView = { main: null, host: null, body: null, rows: new Map(), loading: false, again: false, seen: {} };
-const START_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$/;
+const START_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$/;  // a start's name or id
+const NEW_START_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$/;  // a name given to a start (--name, rename): the launcher's
 const WORKSPACE_AS = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;  // workspace add --name NAME
 const MCP_SERVER_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
 
@@ -908,10 +909,10 @@ function startRow(s, starts, main, all) {
 // Another name for a start (sandbox-ai rename OLD NEW), asked in its row; the run id stays.
 function askRename(actions, s, main, trigger) {
   const id = `rename-${s.host}-${s.name}`.replace(/[^A-Za-z0-9_-]/g, "_");
-  const input = el("input", { id, class: "mono", value: s.name, size: 16, pattern: START_NAME.source.slice(1, -1) });
+  const input = el("input", { id, class: "mono", value: s.name, size: 16, pattern: NEW_START_NAME.source.slice(1, -1) });
   confirmIn(actions, el("span", {}, el("label", { for: id }, t("New name for {name} on {host}", { name: s.name, host: s.host })), " ", input), t("Rename"), async () => {
     const value = input.value.trim();
-    if (!START_NAME.test(value)) { toast("warning", t("Which name?"), t("1-48 letters, digits, '_', '.' or '-', starting with a letter or digit.")); return; }
+    if (!NEW_START_NAME.test(value)) { toast("warning", t("Which name?"), t("1-40 letters, digits, '_', '.' or '-', starting with a letter or digit.")); return; }
     if (value === s.name) return;
     try {
       const r = await api("POST", hostPath(`/starts/${encodeURIComponent(s.name)}/rename`, s.host), { new: value });
@@ -1662,7 +1663,7 @@ async function drawStartForm(card, heading, host) {
     api("GET", hostPath("/vpn", host)).then((list) => { for (const p of (Array.isArray(list) ? list : []).filter(x => x && typeof x.profile === "string")) profiles.push(p); }).catch(() => {}),
     api("GET", hostPath("/mcp", host)).then((list) => { for (const x of (Array.isArray(list) ? list : []).filter(x => x && typeof x.name === "string")) mcpNames.add(x.name); }).catch(() => {}),
   ];
-  const name = el("input", { id: "name", placeholder: t("automatic"), pattern: "[A-Za-z0-9][A-Za-z0-9_.-]{0,47}" });
+  const name = el("input", { id: "name", placeholder: t("automatic"), pattern: NEW_START_NAME.source.slice(1, -1) });
   const workspace = el("input", { id: "workspace", placeholder: "/home/you/src/project", class: "mono", required: true, "aria-describedby": "workspace-hint" });
   const options = el("textarea", { id: "options", rows: 3, class: "mono", placeholder: "--mode high\n--allow-pypi\n-mm sonnet", "aria-describedby": "options-hint" });
   const startStatus = el("div", { class: "wide", id: "start-status" });
@@ -1686,6 +1687,7 @@ async function drawStartForm(card, heading, host) {
       }
       presetArgs = ["--preset", id, ...Object.entries(values).flatMap(([key, value]) => ["--preset-value", `${key}=${value}`])];
     }
+    if (textOf(name) && !NEW_START_NAME.test(textOf(name))) { startStatus.append(notice(t("Which name? 1-40 letters, digits, '_', '.' or '-', starting with a letter or digit."), "error")); return; }
     // the folder the agent works on is named (the field, or --workspace in the options): with neither, the
     // launcher would take the directory it runs in (this service's own, or the SSH login's HOME)
     if (!textOf(workspace) && !namesWorkspace(list)) {
@@ -1742,7 +1744,7 @@ function withModel(list, choice, only) {
     const word = list[i];
     if (word === "--") { out.push(...list.slice(i)); break; }  // the agent's own arguments stay as they are
     if (["--model", "-mm", "--llm", "-lm"].includes(word)) { i++; continue; }
-    if (word.startsWith("--model=") || word.startsWith("--llm=") || word === "--no-provider-defaults" || word === "-nd") continue;
+    if (/^(--model|--llm|-mm|-lm)=/.test(word) || word === "--no-provider-defaults" || word === "-nd") continue;
     out.push(word);
   }
   const at = out.indexOf("--");
@@ -1899,7 +1901,7 @@ function networkCard(main, s) {
     for (const port of list(d.host_ports)) add(t("Port on the host"), `127.0.0.1:${port}`, t("through a relay"), { host_ports: [Number(port)] });
     if (list(d.dns).length) add(t("Real DNS"), list(d.dns).join(", "), t("every lookup logged"), { dns: true });
     for (const g of list(d.git)) add(t("Git login"), String(g && g.url), g && g.user ? t("user {user}", { user: g.user }) : "", { git_login: { url: String(g && g.url), kind: "env", ref: "REVOKE" } });
-    for (const n of list(d.all_ports)) add(t("All ports"), String(n), t("every protocol and port"), null);
+    for (const n of list(d.all_ports)) add(t("All ports"), String(n), t("every protocol and port"), { allow: [String(n)] });  // net revoke --allow
     let taint = null;
     if (d.taint && typeof d.taint === "object" && d.taint.tainted) {
       const holder = el("span", { class: "inline-ask" });
@@ -3569,6 +3571,7 @@ function fromHereButton(name, output, sudo) {
     onclick: (ev) => confirmIn(ev.target.parentNode, t("Put this machine's sandbox-ai on {host}, as the installation it has there? It runs there with the rights of that installation.", { host: name }), t("Yes, update from here"), async () => {
       output.append(notice(t("Updating {host}…", { host: name })));
       try { await updateHost(name, output, typeof sudo === "function" ? sudo() : sudo, "", true); } catch (e) { output.append(notice(`${name}: ${e.message}`, "error")); }
+      if (state.page === "hosts" && typeof state.reloadVersions === "function") state.reloadVersions();  // its version cell, as Update does
     }) }, t("Update from this machine's copy…"));
 }
 
@@ -3847,6 +3850,7 @@ pages.hosts = async (main) => {
     }
   };
   const afterInstall = () => { if (state.page === "hosts") loadVersions(true); };
+  state.reloadVersions = () => loadVersions(false);
   const loadVersions = async (refresh) => {
     try { showVersions(await api(refresh ? "POST" : "GET", "/api/hosts-status", refresh ? {} : undefined)); }
     catch (e) { for (const cell of Object.values(versionCells)) cell.textContent = "?"; output.append(notice(t("Versions: {error}", { error: e.message }), "error")); }
@@ -4213,8 +4217,13 @@ pages.projects = async (main) => {
       row.append(trust);
     }
   };
+  // the wizard (sandbox-ai wizard new | edit PATH) in a terminal of the page: it asks there, shows what it writes and
+  // trusts it there
+  const wizard = (where) => (terminalsHere() ? openTerminal(Object.assign({ host, kind: "wizard" }, where ? { path: where } : {}), t("wizard on {host}", { host }))
+    : toast("warning", t("No terminals here"), t("Run it in a terminal on {host}: {command}", { host, command: where ? `sandbox-ai wizard edit ${where}` : "sandbox-ai wizard" })));
   main.append(el("div", { class: "card" }, el("div", { class: "form" }, el("label", { for: "project-path" }, t("Configuration file")), path,
-    el("span"), el("button", { class: "primary", onclick: () => { if (path.value.trim()) review(path.value.trim()); } }, t("Review")))), reviewBox);
+    el("span"), el("div", { class: "row" }, el("button", { class: "primary", onclick: () => { if (path.value.trim()) review(path.value.trim()); } }, t("Review")),
+      el("button", { onclick: () => wizard(path.value.trim()) }, t("Edit in the wizard…")), el("button", { onclick: () => wizard("") }, t("New with the wizard…"))))), reviewBox);
   const STATES_OF = { trusted: N_("trusted as it is"), changed: N_("changed since it was trusted"), missing: N_("missing"), unreadable: N_("unreadable") };
   if (list instanceof Error) main.append(errorNotice(list));
   else main.append(el("h2", {}, t("Trusted")), table([t("Configuration file"), t("State"), ""], (Array.isArray(list) ? list : []).filter(x => x && typeof x.path === "string").map(x => {
@@ -4337,7 +4346,11 @@ pages.logins = async (main) => {
     return el("tr", {}, el("td", { class: "mono" }, agent), actions);
   });
   const update = el("input", { id: "plugins-update", type: "checkbox" }), pluginKits = el("input", { id: "plugins-kits", class: "mono", placeholder: "egm" });
+  const loginStatus = el("div");
   main.append(el("h2", {}, t("The agents' logins")), table([t("Agent"), ""], agentRows),
+    el("div", { class: "row" }, el("button", { onclick: (event) => busy(event.target, async () => {
+      try { clear(loginStatus).append(outputBlock(await api("GET", hostPath("/login-status", host)))); } catch (e) { clear(loginStatus).append(errorNotice(e)); }
+    }) }, t("Which login each agent's sandboxes get"))), loginStatus,
     el("div", { class: "card" }, el("h3", {}, t("Claude plugins")), el("div", { class: "form" },
       el("label", { for: "plugins-update" }, t("Also update them")), update, el("label", { for: "plugins-kits" }, t("Plugins of built-in kits")), pluginKits,
       el("span"), el("button", { onclick: () => openTerminal({ kind: "plugins", host, agent: "claude", update: update.checked ? "1" : "", kits: wordsOf(pluginKits.value.replace(/,/g, " ")).join(",") }, t("plugins on {host}", { host })) }, t("Install in a terminal")))));
@@ -4863,9 +4876,14 @@ pages.images = async (main) => {
   const variants = listed.filter(x => x.variant && !BUILD_TARGETS.includes(x.target)).map(x => x.target);
   const buildTarget = el("select", { id: "build-target" }, [...BUILD_TARGETS, ...new Set(variants)].map(v => el("option", { value: v }, v)));
   const only = el("input", { id: "build-only", type: "checkbox" });
+  const pin = el("input", { id: "build-pin", class: "mono", placeholder: "1.2.3", size: 10, value: "" });
+  const uv = el("input", { id: "build-uv", class: "mono", placeholder: t("latest"), size: 12, value: "" }), node = el("input", { id: "build-node", class: "mono", placeholder: "node@sha256:…", value: "" });
   main.append(el("h2", {}, t("Build")), el("div", { class: "card" }, el("div", { class: "form" },
     el("label", { for: "build-target" }, t("Image")), buildTarget, el("label", { for: "build-only" }, t("Only the extension layers")), only,
-    el("span"), el("button", { class: "primary", onclick: () => openTerminal({ kind: "build", host, target: buildTarget.value, extension_only: only.checked ? "1" : "" }, t("build {target}", { target: buildTarget.value })) }, t("Build in a terminal"))),
+    el("label", { for: "build-pin" }, t("Agent version (one agent only)")), pin,
+    el("label", { for: "build-uv" }, t("uv image tag")), uv, el("label", { for: "build-node" }, t("Node.js base image")), node,
+    el("span"), el("button", { class: "primary", onclick: () => openTerminal({ kind: "build", host, target: buildTarget.value, extension_only: only.checked ? "1" : "",
+      pin: textOf(pin), uv: textOf(uv), node: textOf(node) }, t("build {target}", { target: buildTarget.value })) }, t("Build in a terminal"))),
   el("p", { class: "hint" }, t("Each build takes the newest releases of the agent and its base images."))));
   // the demo device: an emulated serial device to practise hardware analysis on (demo_device.DEFAULT_PORT: 4000)
   const status = el("div"), port = el("input", { id: "demo-port", type: "number", min: 1024, max: 65535, placeholder: "4000" });
