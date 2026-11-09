@@ -171,7 +171,7 @@ AREA_TOURS = {
               "server or a helper agent now, without a restart, and keeps it for its later starts, offering the "
               "agent's restart where it needs one; Remove MCP server… takes one away.",
               "Für einen laufenden Start: Ziele, Geräte und Grenzen erlauben oder zurücknehmen, bis er endet; "
-              "Workspace hinzufügen… bindet einen Ordner oder eine einzelne Datei seines Hosts ein (mit eigenem "
+              "Arbeitsordner hinzufügen… bindet einen Ordner oder eine einzelne Datei seines Hosts ein (mit eigenem "
               "Namen); MCP-Server hinzufügen… gibt ihm sofort und ohne Neustart einen Server oder einen "
               "Helfer-Agenten, behält ihn für die späteren Starts und bietet den Neustart des Agenten an, wo er "
               "einen braucht; MCP-Server entfernen… nimmt einen weg."),
@@ -180,11 +180,11 @@ AREA_TOURS = {
         step("resume_with_button", ("Resume with", "Fortsetzen mit"),
              ("Starts a kept start again with workspaces, mounts or MCP servers added (kept for its later starts), "
               "or restarts a running one now; the agent continues its conversation.",
-              "Startet einen aufbewahrten Start erneut mit hinzugefügten Workspaces, Mounts oder MCP-Servern (für "
+              "Startet einen aufbewahrten Start erneut mit hinzugefügten Arbeitsordnern, Mounts oder MCP-Servern (für "
               "seine späteren Starts behalten) oder startet einen laufenden sofort neu; der Agent setzt sein "
               "Gespräch fort."),
              ("Resume a stopped session with one more workspace.",
-              "Setzen Sie eine gestoppte Sitzung mit einem weiteren Workspace fort.")),
+              "Setzen Sie eine gestoppte Sitzung mit einem weiteren Arbeitsordner fort.")),
         step("stop_button", ("Stop", "Stoppen"),
              ("Ends the selected sandbox; its launcher cleans up. A session can also be paused and resumed.",
               "Stoppt die gewählte Sandbox; ihr Launcher räumt auf. Eine Sitzung lässt sich auch pausieren und "
@@ -253,9 +253,9 @@ AREA_TOURS = {
              ("Fetch it if the page offers it.", "Laden Sie es, wenn die Seite es anbietet.")),
     ),
     "connections": (
-        step("directory", ("Which logs", "Welche Logs"),
+        step("directory", ("Which logs", "Welche Protokolle"),
              ("Every connection the proxy saw, from the log directory of a project or of all runs.",
-              "Jede Verbindung, die der Proxy sah, aus dem Log-Verzeichnis eines Projekts oder aller Läufe."),
+              "Jede Verbindung, die der Proxy sah, aus dem Protokollverzeichnis eines Projekts oder aller Läufe."),
              ("Pick the project you work on.", "Wählen Sie das Projekt, an dem Sie arbeiten.")),
         step("filter", ("Find a host", "Einen Host finden"),
              ("Filter by host, path or method; refused shows only what was not let through.",
@@ -293,13 +293,13 @@ AREA_TOURS = {
     "statistics": (
         step("directory", ("Tokens and calls", "Tokens und Aufrufe"),
              ("Tokens, requests and tool calls per run and per agent, from a project's logs.",
-              "Tokens, Anfragen und Werkzeugaufrufe pro Lauf und pro Agent, aus den Logs eines Projekts."),
+              "Tokens, Anfragen und Werkzeugaufrufe pro Lauf und pro Agent, aus den Protokollen eines Projekts."),
              ("Pick a project and compare two runs.", "Wählen Sie ein Projekt und vergleichen Sie zwei Läufe.")),
     ),
     "files": (
         step("roots", ("Whose files", "Wessen Dateien"),
              ("The HOME and workspaces of a sandbox: look into them without opening a shell in it.",
-              "HOME und Workspaces einer Sandbox: hineinsehen, ohne eine Shell darin zu öffnen."),
+              "HOME und Arbeitsordner einer Sandbox: hineinsehen, ohne eine Shell darin zu öffnen."),
              ("Pick a running sandbox.", "Wählen Sie eine laufende Sandbox.")),
         step("table", ("Two panes: copy in and out", "Zwei Bereiche: hinein- und herauskopieren"),
              ("The sandbox on the left, this machine on the right. Copy (F5) or Move (F6) takes what is selected in "
@@ -437,12 +437,12 @@ AREA_TOURS = {
              ("Keep this machine for now.", "Bleiben Sie vorerst bei diesem Rechner.")),
         step("table", ("The teams", "Die Teams"),
              ("Each team with its members and its workspace; select one to see its board.",
-              "Jedes Team mit seinen Mitgliedern und seinem Arbeitsbereich; wählen Sie eines, um seine Tafel zu "
+              "Jedes Team mit seinen Mitgliedern und seinem Arbeitsordner; wählen Sie eines, um seine Tafel zu "
               "sehen."),
              ("Select a team.", "Wählen Sie ein Team.")),
         step("start_button", ("Start one", "Eines starten"),
              ("Two or three agents on one workspace, the first leads; each member starts in a sandbox of its own.",
-              "Zwei oder drei Agenten auf einem Arbeitsbereich, der erste leitet; jedes Mitglied startet in einer "
+              "Zwei oder drei Agenten auf einem Arbeitsordner, der erste leitet; jedes Mitglied startet in einer "
               "eigenen Sandbox."),
              ("Start Claude Code with Codex on the current project.", "Starten Sie Claude Code mit Codex auf dem "
               "aktuellen Projekt.")),
@@ -461,8 +461,8 @@ AREA_TOURS = {
               "rote.")),
         step("theme", ("Look and language", "Aussehen und Sprache"),
              ("The app's theme and language; the theme also follows your desktop when set to system.",
-              "Thema und Sprache der App; das Thema folgt Ihrem Desktop, wenn es auf System steht."),
-             ("Try another theme.", "Probieren Sie ein anderes Thema.")),
+              "Farbschema und Sprache der App; das Farbschema folgt Ihrem Desktop, wenn es auf System steht."),
+             ("Try another theme.", "Probieren Sie ein anderes Farbschema.")),
         step("update_button", ("Update", "Aktualisieren"),
              ("Installs the newest sandbox-ai and the app; the old version stays until the new one works.",
               "Installiert das neueste sandbox-ai und die App; die alte Version bleibt, bis die neue funktioniert."),
@@ -503,8 +503,8 @@ AREA_TOURS = {
              ("Every page and feature of the app, and the ideas behind sandbox-ai: sandbox, network, proxy, "
               "approvals, presets, kits and more.",
               "Jede Seite und Funktion der App und die Ideen hinter sandbox-ai: Sandbox, Netzwerk, Proxy, "
-              "Freigaben, Presets, Kits und mehr."),
-             ("Select Presets under Concepts.", "Wählen Sie Presets unter Konzepte.")),
+              "Freigaben, Vorlagen, Kits und mehr."),
+             ("Select Presets under Concepts.", "Wählen Sie Vorlagen unter Konzepte.")),
         step("search", ("Search", "Suchen"),
              ("Finds every section that contains all the words you type, in English and German.",
               "Findet jeden Abschnitt, der alle eingegebenen Wörter enthält, auf Englisch und Deutsch."),
@@ -516,8 +516,8 @@ AREA_TOURS = {
         step("tours", ("Tours", "Touren"),
              ("Walks through whole tasks across pages: the first start, your own construct saved as a preset, "
               "approvals, the preset gallery, and this help.",
-              "Wege durch ganze Aufgaben über mehrere Seiten: der erste Start, ein eigenes Konstrukt als Preset, "
-              "Freigaben, die Preset-Galerie und diese Hilfe."),
+              "Wege durch ganze Aufgaben über mehrere Seiten: der erste Start, ein eigenes Konstrukt als Vorlage, "
+              "Freigaben, die Vorlagen-Galerie und diese Hilfe."),
              ("Start the tour of your own construct.", "Starten Sie die Tour zum eigenen Konstrukt.")),
     ),
 }
@@ -744,7 +744,7 @@ TASK_TOURS = {tour.id: tour for tour in (
         task("board", "gallery_button", ("Open the gallery", "Die Galerie öffnen"),
              ("New from preset… shows every preset as a card: simple and complex ones, sandbox-ai's own and yours. "
               "The search box filters (vpn, mcp, offline, llm, gpu).",
-              "Neu aus Vorlage… zeigt jede Vorlage als Karte: einfache und komplexe, die Presets von sandbox-ai und "
+              "Neu aus Vorlage… zeigt jede Vorlage als Karte: einfache und komplexe, die Vorlagen von sandbox-ai und "
               "Ihre eigenen. Das Suchfeld filtert (vpn, mcp, offline, llm, gpu)."),
              ("Open it and search for offline.", "Öffnen Sie sie und suchen Sie nach offline.")),
         task("board", "gallery_button", ("Import", "Importieren"),
@@ -774,10 +774,10 @@ TASK_TOURS = {tour.id: tour for tour in (
              ("Delete removes the selected preset, after asking; only your own can be deleted.",
               "Löschen entfernt die gewählte Vorlage nach Rückfrage; nur Ihre eigenen lassen sich löschen."),
              ("Delete a preset you no longer need.", "Löschen Sie eine Vorlage, die Sie nicht mehr brauchen.")),
-        task("board", "gallery_button", ("sandbox-ai's presets", "Die Presets von sandbox-ai"),
+        task("board", "gallery_button", ("sandbox-ai's presets", "Die Vorlagen von sandbox-ai"),
              ("The section sandbox-ai's presets lists the launcher's own presets (sandbox-ai presets list); on "
               "the command line a start uses one with --preset NAME.",
-              "Der Abschnitt mit den Presets von sandbox-ai zeigt die eigenen Presets des Launchers (sandbox-ai "
+              "Der Abschnitt mit den Vorlagen von sandbox-ai zeigt die eigenen Vorlagen des Launchers (sandbox-ai "
               "presets list); auf der Befehlszeile nutzt ein Start eines mit --preset NAME."),
              ("Look at one of them.", "Sehen Sie sich eines davon an.")),
     )),

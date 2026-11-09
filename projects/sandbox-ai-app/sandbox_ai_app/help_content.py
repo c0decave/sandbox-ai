@@ -64,16 +64,16 @@ SECTIONS = (
          "never kept, and agent arguments lose what looks like a secret. Press Dry run once before your first "
          "start.",
          "Die Seite Start startet einen Agenten in einer Sandbox. Der Ordner des aktuellen Projekts ist der erste "
-         "Workspace (`/work`). In der Zeile über dem Formular:\n\n"
+         "Arbeitsordner (`/work`). In der Zeile über dem Formular:\n\n"
          "- Host: dieser Rechner oder ein Host von `sandbox-ai hosts`. Auf einem anderen Host läuft der Start dort "
-         "über SSH (die Befehlszeile zeigt `sandbox-ai hosts run HOST -- …`): Workspace- und Mount-Pfade sind die "
+         "über SSH (die Befehlszeile zeigt `sandbox-ai hosts run HOST -- …`): Arbeitsordner- und Mount-Pfade sind die "
          "dieses Hosts und werden eingetippt. Die Optionen, die sein sandbox-ai nicht kennt, sind ausgegraut; ein "
          "Start, der eine davon braucht, wird mit ihren Namen abgelehnt, nie ohne sie gestartet.\n"
          "- Agent (Claude Code, Codex oder OpenCode) und Modell: der eigene Anbieter des Agenten oder ein auf dem "
          "gewählten Host registrierter Modellserver (`sandbox-ai llm list` dort), als NAME oder NAME:MODELL. Ein "
          "Server setzt `--llm` und lässt `--model` leer; nur dieser Server fügt `--no-provider-defaults` hinzu. "
          "Ein Server, den der Agent nicht nutzen kann, wird ausgegraut gezeigt.\n"
-         "- Vorlage, mit Galerie… daneben: die Vorlagen des gewählten Hosts in einer Liste - die Presets von "
+         "- Vorlage, mit Galerie… daneben: die Vorlagen des gewählten Hosts in einer Liste - die Vorlagen von "
          "sandbox-ai auf diesem Host (`sandbox-ai presets list --json` dort), die eigenen der App und Ihre. Haben "
          "die App und das sandbox-ai des Hosts eine Vorlage mit derselben ID, gilt die des Hosts. Galerie… zeigt "
          "jede mit einem Bild ihrer Tafel; was eine Vorlage auszufüllen lässt, fragt ein kurzes Formular ab, das "
@@ -81,7 +81,7 @@ SECTIONS = (
          "- Profil mit Laden und Als Profil speichern… bewahrt ein ganzes Formular (Host, Agent, Optionen, "
          "Argumente) unter einem Namen auf. Projektordner öffnen… prüft die `.sandbox-ai.json` eines Ordners, "
          "vertraut ihr, wenn Sie zustimmen, und startet in diesem Ordner.\n\n"
-         "Das Formular entsteht aus dem Optionsparser des Launchers, in Gruppen: Workspace, Netzwerk, Proxy und "
+         "Das Formular entsteht aus dem Optionsparser des Launchers, in Gruppen: Arbeitsordner, Netzwerk, Proxy und "
          "Datenschutz, Git, Agent, Anmeldung, Anzeige und Terminal, Hardware, Limits, Engine. Was die Richtlinie "
          "des Administrators verbietet, ist ausgegraut. `--vpn`, `--kit`, `--identity`, `--mcp` und "
          "`--image-variant` sind Auswahllisten, gefüllt aus den Listen des gewählten Hosts (`vpn list`, `kits "
@@ -95,7 +95,7 @@ SECTIONS = (
          "- In der App starten öffnet einen Terminal-Tab, In einem Terminalfenster starten nutzt Ihr "
          "Terminalprogramm, Als Sitzung starten startet eine Sitzung, die weiterläuft, wenn Sie die App "
          "schließen.\n\n"
-         "Als Projektkonfiguration speichern… schreibt `.sandbox-ai.json` in den ersten Workspace und vertraut "
+         "Als Projektkonfiguration speichern… schreibt `.sandbox-ai.json` in den ersten Arbeitsordner und vertraut "
          "ihr, nachdem es sie gezeigt und zuerst gefragt hat (Abbrechen ist die Vorgabe: Eine vertraute Datei gibt "
          "jedem späteren Start des Projekts ihre Optionen). Auf einem anderen Host ist es aus: Die Datei eines "
          "Projekts dort schreibt `sandbox-ai wizard`. Ist die Datei des Projekts nicht vertraut, zeigt Prüfen und "
@@ -134,9 +134,9 @@ SECTIONS = (
          "its own board, with changes not applied yet, the undo history and the zoom. After a crash such changes "
          "come back with a notice: Undo returns to the project's file, Discard drops them. The Devices and Limits "
          "parts of a project whose sandbox runs can be applied live. Empty the findings before you apply.",
-         "Die Tafel zeigt eine Sandbox als Teile, die Sie verbinden: Agent, Workspaces, Mounts, HOME und "
+         "Die Tafel zeigt eine Sandbox als Teile, die Sie verbinden: Agent, Arbeitsordner, Mounts, HOME und "
          "Anmeldung, Kits, Freigaben, Verbindungs-Proxy, Git, MCP-Server, LLM-Server, VPN, Regelwerke, Netzwerk, "
-         "Geräte, Limits, Anzeige, Sitzung, Logs und Engine. Sie schreibt die `.sandbox-ai.json` des Projekts; "
+         "Geräte, Limits, Anzeige, Sitzung, Protokolle und Engine. Sie schreibt die `.sandbox-ai.json` des Projekts; "
          "die Anordnung kommt in `.sandbox-ai.board.json` daneben.\n\n"
          "- Ziehen Sie ein Teil aus der Liste der Bausteine auf die Tafel: Es landet, wo Sie es ablegen (eine "
          "gestrichelte Karte zeigt, wo). Doppelklick oder Enter fügt es ebenfalls hinzu. Der Guide fragt dann das "
@@ -144,7 +144,7 @@ SECTIONS = (
          "ein Teil auf der Tafel erneut. Ein Teil, das eine Tafel nur einmal hat, ist ausgegraut, solange es da "
          "ist.\n"
          "- Ziehen Sie vom rechten Anschluss eines Teils auf ein anderes, um sie zu verbinden; die Teile, die die "
-         "Verbindung annehmen, werden umrandet, Esc bricht ab. Ein Workspace, Mount oder MCP-Server zählt nur, "
+         "Verbindung annehmen, werden umrandet, Esc bricht ab. Ein Arbeitsordner, Mount oder MCP-Server zählt nur, "
          "solange er mit dem Agenten verbunden ist.\n"
          "- Legen Sie Ordner oder Dateien aus Ihrem Dateimanager auf der Tafel ab: Ein Menü bietet Arbeitsordner, "
          "nur lesbare oder beschreibbare Einbindung oder den Ordner des Teils an, auf dem Sie abgelegt haben. "
@@ -228,24 +228,24 @@ SECTIONS = (
          "Die Schaltflächen wirken auf die gewählte Zeile eines Starts und folgen ihrer Art; ein Tooltip sagt, "
          "warum eine nicht passt.\n\n"
          "- Sitzung: Verbinden (in einem Fenster), In der App verbinden, Pausieren, Fortsetzen, Löschen. "
-         "Fortsetzen mit … startet einen aufbewahrten Start erneut mit hinzugefügten Workspaces, Mounts oder "
+         "Fortsetzen mit … startet einen aufbewahrten Start erneut mit hinzugefügten Arbeitsordnern, Mounts oder "
          "MCP-Servern (für seine späteren Starts behalten) oder startet einen laufenden sofort neu (`sandbox-ai "
          "resume`); ein Neustart und jede Erweiterung werden zuerst gefragt.\n"
          "- Während sie läuft: Erlauben… und Zurücknehmen… ändern, was die Sandbox erreichen darf, Während des "
          "Laufs erlaubt zeigt das Hinzugefügte (Taint aufheben… dort hebt den Taint des Laufs auf), Verbindungslog "
-         "öffnet ihr Log, Gerät hinzufügen…, Gerät entfernen und Grenzen… ändern Hardware und Limits, bis sie "
+         "öffnet ihr Protokoll, Gerät hinzufügen…, Gerät entfernen und Grenzen… ändern Hardware und Limits, bis sie "
          "endet.\n"
-         "- Workspace hinzufügen… bindet einen Ordner oder eine einzelne Datei des Hosts des Starts unter "
+         "- Arbeitsordner hinzufügen… bindet einen Ordner oder eine einzelne Datei des Hosts des Starts unter "
          "`/workspaces/NAME` ein (der Name ist freiwillig; geprüft wie `--name`), nur lesbar oder beschreibbar "
          "(ein beschreibbarer wird zuerst gefragt). Eine Sitzung behält einen Ordner für ihren Neustart, außer er "
-         "ist nur lesbar, eine Datei nur für diesen Lauf. Workspace entfernen… nimmt einen zurück.\n"
+         "ist nur lesbar, eine Datei nur für diesen Lauf. Arbeitsordner entfernen… nimmt einen zurück.\n"
          "- MCP-Server hinzufügen… gibt dem gewählten aufbewahrten Start einen Server aus `sandbox-ai mcp list` "
          "seines Hosts oder einen anderen Agenten als Helfer, sofort und ohne Neustart (`sandbox-ai mcp attach "
          "--live`), und behält ihn für die späteren Starts. Es fragt zuerst. Braucht der Agent einen Neustart, um "
          "den Server zu sehen (Codex und OpenCode immer, Claude Code, wenn /mcp ihn nicht listet), bietet die App "
          "an, ihn sofort neu zu starten: Der Agent setzt sein Gespräch fort. MCP-Server entfernen… nimmt einen "
          "Server sofort und für die späteren Starts weg (`sandbox-ai mcp detach --live`), nach Rückfrage.\n"
-         "- Auf einem anderen Host wird, was zurückgenommen wird (ein Gerät, ein Workspace, ein Server), aus dem "
+         "- Auf einem anderen Host wird, was zurückgenommen wird (ein Gerät, ein Arbeitsordner, ein Server), aus dem "
          "gewählt, was dieser Host für den Start auflistet.\n"
          "- Umbenennen… gibt einem Start einen anderen Namen (seine Lauf-ID bleibt, und mit ihr seine Zeile und "
          "sein Tab), Verlauf… zeigt seine Starts, Enden, Pausen und Umbenennungen. Aufräumen… entfernt Reste und "
@@ -373,8 +373,8 @@ SECTIONS = (
          "After a failed download, look here first, then widen only what the task needs: each suggested option "
          "opens the sandbox further. Texts from the sandbox (hosts, URLs) are shown escaped. Activity's Show in "
          "Connections opens a network event here, filtered to its host.",
-         "Verbindungen zeigt das Log des Verbindungs-Proxys eines Projekts und Laufs: jede Anfrage, jeden Push und "
-         "jede Abweisung. Wählen Sie das Log-Verzeichnis des Projekts, an dem Sie arbeiten; das Log läuft mit, "
+         "Verbindungen zeigt das Protokoll des Verbindungs-Proxys eines Projekts und Laufs: jede Anfrage, jeden Push und "
+         "jede Abweisung. Wählen Sie das Protokollverzeichnis des Projekts, an dem Sie arbeiten; das Protokoll läuft mit, "
          "solange die Sandbox läuft.\n\n"
          "- Filtern Sie nach Host, Pfad oder Methode. nur Abgelehntes und Fehler zeigt, was nicht durchgelassen "
          "wurde, in Rot.\n"
@@ -414,7 +414,7 @@ SECTIONS = (
          "- Wählen Sie den Lauf; mit mitlaufen erscheinen neue Ereignisse, sobald sie geschehen.\n"
          "- Filtern Sie nach Art und Text, etwa nur Befehle und Dateiänderungen. Abweisungen und Fehler sind "
          "rot.\n"
-         "- Wählen Sie ein Ereignis, um seinen ganzen Eintrag zu sehen. In Verbindungen zeigen öffnet das Log "
+         "- Wählen Sie ein Ereignis, um seinen ganzen Eintrag zu sehen. In Verbindungen zeigen öffnet das Protokoll "
          "eines Netzwerkereignisses, gefiltert auf seinen Host; In Dateien zeigen (oder ein Doppelklick) öffnet "
          "den Ordner eines Dateiereignisses.\n"
          "- Exportieren… schreibt, was die Filter zeigen, als JSON-Zeilen oder Text.\n"
@@ -423,7 +423,7 @@ SECTIONS = (
          "aufgeklappt den Werkzeugaufruf und die Prompt-Runde des Agenten in diesem Moment und die Anfragen an "
          "das Modell darum herum (`sandbox-ai canaries log`).\n\n"
          "Alles hier kann den Agenten zitieren und wird daher als reiner Text mit maskierten Steuerzeichen "
-         "gezeigt. Die Zeitleiste braucht ein Log-Verzeichnis; jeder Lauf mit Verbindungs-Proxy hat eines."),
+         "gezeigt. Die Zeitleiste braucht ein Protokollverzeichnis; jeder Lauf mit Verbindungs-Proxy hat eines."),
         cli=("sandbox-ai activity --follow", "sandbox-ai activity --project PATH", "sandbox-ai activity --json",
              "sandbox-ai canaries log [RUN] [--json]"),
         see=("logs", "taint", "page-connections", "page-files"),
@@ -437,11 +437,11 @@ SECTIONS = (
          "Pick a project's log directory, then compare two runs, for example before and after a change of "
          "options. A host you do not expect, or a credential header sent to it, is a reason to look at "
          "Connections. The tokens come from what the model APIs reported in their answers.",
-         "Statistik fasst das Log-Verzeichnis eines Projekts zusammen: Modellaufrufe und Tokens pro Lauf und pro "
+         "Statistik fasst das Protokollverzeichnis eines Projekts zusammen: Modellaufrufe und Tokens pro Lauf und pro "
          "Agent, HTTP-Anfragen pro Host, gesendete Anmelde-Header pro Host (nur Namen, nie Werte), geprüfte und "
          "abgewiesene Pushes, abgewiesene Verbindungen, gestartete Programme und die Werkzeugaufrufe der "
          "MCP-Server. Die Zahlen stehen in Tabellen mit einfachen Balken.\n\n"
-         "Wählen Sie das Log-Verzeichnis eines Projekts und vergleichen Sie zwei Läufe, etwa vor und nach einer "
+         "Wählen Sie das Protokollverzeichnis eines Projekts und vergleichen Sie zwei Läufe, etwa vor und nach einer "
          "Änderung der Optionen. Ein unerwarteter Host oder ein an ihn gesendeter Anmelde-Header ist ein Grund, "
          "auf Verbindungen nachzusehen. Die Tokens stammen aus dem, was die Modell-APIs in ihren Antworten "
          "meldeten."),
@@ -468,11 +468,11 @@ SECTIONS = (
          "complete, so nothing truncated is left behind. Files copied to the host lose their executable bits. "
          "Files that tools run or read as configuration (`.git/config`, hooks, `.envrc`) are listed with a "
          "warning after the copy: read them before you use git there.",
-         "Dateien lässt Sie in die Workspaces jeder laufenden Sandbox und Sitzung sehen, in ihr HOME, wenn es auf "
+         "Dateien lässt Sie in die Arbeitsordner jeder laufenden Sandbox und Sitzung sehen, in ihr HOME, wenn es auf "
          "dem Host liegt (das einer Sitzung oder das `--state-dir` eines Laufs), in das aktuelle Projekt und in "
          "jeden gewählten Ordner, ohne eine Shell in der Sandbox zu öffnen.\n\n"
          "- Zwei Bereiche wie in einem zweispaltigen Dateimanager: links der Ordner einer Sandbox, rechts dieser "
-         "Rechner. Die Auswahl des linken Bereichs listet die Workspaces und das HOME jeder Sandbox und Sitzung "
+         "Rechner. Die Auswahl des linken Bereichs listet die Arbeitsordner und das HOME jeder Sandbox und Sitzung "
          "(Neu laden sucht sie erneut, Anderer Ordner… fügt einen eigenen Ordner hinzu); der rechte Bereich "
          "beginnt in Ihrem HOME (Persönlicher Ordner führt dorthin zurück). Jeder Bereich hat Nach oben "
          "(Rücktaste), ein Pfadfeld und Neu laden (Strg+R).\n"
@@ -649,11 +649,11 @@ SECTIONS = (
          "- Stop… ends every member and the board; Delete… also removes the members' HOMEs and the board, for "
          "good. Both ask first; the workspace stays.",
          "Teams listet die Teams von `sandbox-ai team`: zwei oder drei Agenten, je eine Sandbox, auf einem "
-         "gemeinsamen Arbeitsbereich, zusammen gestartet und gestoppt. Der erste Agent leitet: Mit ihm sprechen Sie, "
+         "gemeinsamen Arbeitsordner, zusammen gestartet und gestoppt. Der erste Agent leitet: Mit ihm sprechen Sie, "
          "und er gibt den anderen Aufgaben auf der Tafel des Teams, einem MCP-Server des Teams in einer Sandbox ohne "
          "Netzwerk. Host wählt, wessen Teams es sind: die dieses Rechners oder die eines Hosts von `sandbox-ai "
          "hosts` (über SSH).\n\n"
-         "- Team starten… fragt nach Name, Leitung, Mitgliedern, Arbeitsbereich (ein Pfad auf jenem Host) und "
+         "- Team starten… fragt nach Name, Leitung, Mitgliedern, Arbeitsordner (ein Pfad auf jenem Host) und "
          "Startoptionen für jedes Mitglied und führt dann `sandbox-ai team start` in einem Terminal-Tab aus: Jedes "
          "Mitglied startet dort, eines nach dem anderen.\n"
          "- Wählen Sie ein Team, um seine Mitglieder (je eine Sitzung NAME-AGENT, mit ihrem Stand) und seine Tafel "
@@ -661,7 +661,7 @@ SECTIONS = (
          "- Mit der Leitung sprechen verbindet ein Terminal-Tab mit der Sitzung der Leitung. Aufgabe stellen… legt "
          "eine Aufgabe für ein Mitglied auf die Tafel, von Ihnen.\n"
          "- Stoppen… beendet jedes Mitglied und die Tafel; Löschen… entfernt auch die HOMEs der Mitglieder und die "
-         "Tafel, endgültig. Beides fragt zuerst; der Arbeitsbereich bleibt."),
+         "Tafel, endgültig. Beides fragt zuerst; der Arbeitsordner bleibt."),
         cli=("sandbox-ai team start NAME --agents claude,codex -w DIR", "sandbox-ai team list",
              "sandbox-ai team show NAME", "sandbox-ai team post NAME AGENT TASK", "sandbox-ai team stop NAME",
              "sandbox-ai team delete NAME --yes"),
@@ -772,7 +772,7 @@ SECTIONS = (
          "Fragen kommen von den Seiten Sandboxen und Freigaben, die ohnehin jeden Host lesen; Neu laden fragt "
          "jetzt jeden Host.\n\n"
          "- Starts zeigen öffnet Sandboxen & Sitzungen nur mit den Starts dieses Hosts, Fragen zeigen die Seite "
-         "Freigaben nur mit seinen Fragen: Verbinden, Pausieren, Beenden, Erlauben und Ablehnen geschehen dort, "
+         "Freigaben nur mit seinen Fragen: Verbinden, Pausieren, Stoppen, Erlauben und Ablehnen geschehen dort, "
          "wie für diesen Rechner.\n"
          "- Hinzufügen… fügt einen Host mit einem Namen und seiner SSH-Adresse (benutzer@host) hinzu. "
          "Bearbeiten… ändert, ob sein Update mit sudo läuft (`sandbox-ai hosts set NAME --update-sudo on|off`); "
@@ -903,7 +903,7 @@ SECTIONS = (
          "Die Vorlagen sind die des Hosts, für den die Tafel (oder der Start) ist, ein Katalog je Host:\n\n"
          "- Eingebaute Vorlagen der App: Einfach, Entwicklung, Recherche, Lokale und entfernte LLMs, "
          "Privatsphäre und VPN, Teams und Richtlinien.\n"
-         "- Die Presets von sandbox-ai: die der Kommandozeile auf diesem Host (`sandbox-ai presets list --json` "
+         "- Die Vorlagen von sandbox-ai: die der Kommandozeile auf diesem Host (`sandbox-ai presets list --json` "
          "dort), eingebaute, aus seinen zusätzlichen Vorlagen-Ordnern und die eigenen seines Benutzers. Haben die "
          "App und das sandbox-ai dieses Hosts eine Vorlage mit derselben ID (tor, local-api, development …), wird "
          "nur die von sandbox-ai gezeigt: Sie ist, was `--preset NAME` dort bedeutet. Ein Host, dessen sandbox-ai "
@@ -915,7 +915,7 @@ SECTIONS = (
          "nie die dieses Rechners. Später ausfüllen lässt ihn stehen: Er bleibt ein Problem auf der Tafel, und "
          "Übernehmen und Starten verweigern, bis er ausgefüllt ist.\n\n"
          "Tafel als Vorlage speichern… bewahrt die gezeigte Tafel als Ihre Vorlage auf (Name, Beschreibung, "
-         "Kategorie; ohne Workspaces) in `~/.config/sandbox-ai/app/presets.json`. Um Ihre Vorlage zu ändern, legen "
+         "Kategorie; ohne Arbeitsordner) in `~/.config/sandbox-ai/app/presets.json`. Um Ihre Vorlage zu ändern, legen "
          "Sie eine Tafel aus ihr an, ändern die Tafel und speichern sie wieder unter demselben Titel: Die Vorlage "
          "mit derselben ID wird ersetzt. Exportieren… und Importieren… geben Vorlagen als JSON-Dateien weiter; "
          "Löschen entfernt eine Ihrer Vorlagen nach Rückfrage. Eine Vorlage enthält nie ein Geheimnis: Eine "
@@ -951,7 +951,7 @@ SECTIONS = (
          "Zum Schluss fragt er zuerst (Abbrechen ist die Vorgabe: Eine vertraute Datei gibt jedem späteren Start "
          "des Projekts ihre Optionen), dann wird die Datei geschrieben und vertraut, und die Tafel öffnet sich. "
          "Die angebotenen Vorlagen sind der Katalog des Hosts, für den das Projekt eingerichtet wird: seine "
-         "Presets von sandbox-ai, die eigenen der App und Ihre (siehe die Vorlagen-Galerie).\n\n"
+         "Vorlagen von sandbox-ai, die eigenen der App und Ihre (siehe die Vorlagen-Galerie).\n\n"
          "- Ein hier getipptes Token kommt in eine private Datei (Modus 0600) unter `~/.config/sandbox-ai/tokens`; "
          "die Projektdatei nennt nur diese Datei.\n"
          "- Das origin-Remote des Projekts wird nie als Vorgabe angeboten: Seine `.git/config` darf der Agent "
@@ -1049,11 +1049,11 @@ SECTIONS = (
          "rootless Podman-Pod oder Bubblewrap und darin Firejail. Bevor der Agent startet, prüft ein Wächter, dass "
          "Firejail seine Namespaces angelegt, alle Capabilities abgelegt und NoNewPrivs und Seccomp eingeschaltet "
          "hat; jede fehlgeschlagene Prüfung bricht den Start ab.\n\n"
-         "- `/work` ist der erste Workspace, das Arbeitsverzeichnis des Agenten. Weitere Workspaces erscheinen "
+         "- `/work` ist der erste Arbeitsordner, das Arbeitsverzeichnis des Agenten. Weitere Arbeitsordner erscheinen "
          "unter `/workspaces/NAME`.\n"
          "- HOME ist `/root` der Sandbox: Unterhaltungen, Einstellungen, der kopierte Login. Es wird je Start "
          "aufbewahrt, außer mit `--no-keep`.\n"
-         "- Geteilt wird nur, was Sie nennen: Workspaces und Mounts, eine Kopie des Logins des Agenten, Ihre Kits "
+         "- Geteilt wird nur, was Sie nennen: Arbeitsordner und Mounts, eine Kopie des Logins des Agenten, Ihre Kits "
          "(nur lesbar) und das Memory des Projekts. Ihr eigenes `~/.ssh` oder `~/.config` bleiben draußen.\n"
          "- Das Netzwerk ist standardmäßig zu: Nur der Anbieter des Agenten ist erreichbar, solange Sie nicht "
          "erweitern.\n\n"
@@ -1085,9 +1085,9 @@ SECTIONS = (
          "- `lax`: jedes Ziel, jede Verbindung protokolliert, keine Fragen.\n"
          "- `low`: die Entwicklungs-Hosts (Anbieter, PyPI, npm, GitHub, die OpenAI- und Anthropic-APIs).\n"
          "- `medium` (Standard): nur der Anbieter des Agenten; genau ein Start ohne `--mode`.\n"
-         "- `high`: Optionen öffnen nichts, Antworten höchstens für den Lauf, weitere Workspaces nur lesbar, keine "
+         "- `high`: Optionen öffnen nichts, Antworten höchstens für den Lauf, weitere Arbeitsordner nur lesbar, keine "
          "rw-Mounts, Geräte oder GPU, Datenschutzprüfung jedes Pushs, kleinere Limits.\n"
-         "- `paranoid`: wie high, jeder Workspace nur lesbar, Antworten nur einmal, kein HOME bleibt.\n\n"
+         "- `paranoid`: wie high, jeder Arbeitsordner nur lesbar, Antworten nur einmal, kein HOME bleibt.\n\n"
          "Der Modus kommt aus `--mode`, sonst aus `\"mode\"` der Projektdatei, sonst aus "
          "`~/.config/sandbox-ai/defaults.json`, sonst `medium`. `min_mode` des Administrators ist eine Untergrenze. "
          "Der Modus gilt auch während des Laufs: `sandbox-ai net allow` öffnet nichts, was er ablehnt. Der "
@@ -1096,7 +1096,7 @@ SECTIONS = (
         see=("network", "approvals", "taint", "canaries", "policy"),
         tours=("first-start",)),
     section(
-        "workspaces-mounts", "concepts", ("Workspaces and mounts", "Workspaces und Mounts"),
+        "workspaces-mounts", "concepts", ("Workspaces and mounts", "Arbeitsordner und Mounts"),
         ("A workspace is a host folder the agent works in. `--workspace PATH` appears at `/work` and is writable "
          "unless `--workspace-ro`. Repeat the option for more: the first is always `/work`, every further one "
          "appears at `/workspaces/NAME`.\n\n"
@@ -1110,19 +1110,19 @@ SECTIONS = (
          "After a run, review a workspace's `.git/hooks` and `.git/config` before you use git there: they run "
          "code on the host. In the app the first workspace is the current project's folder; the Board shows "
          "workspaces and mounts as parts.",
-         "Ein Workspace ist ein Ordner des Hosts, in dem der Agent arbeitet. `--workspace PFAD` erscheint unter "
+         "Ein Arbeitsordner ist ein Ordner des Hosts, in dem der Agent arbeitet. `--workspace PFAD` erscheint unter "
          "`/work` und ist beschreibbar, außer mit `--workspace-ro`. Wiederholen Sie die Option für mehr: Der erste "
          "ist immer `/work`, jeder weitere erscheint unter `/workspaces/NAME`.\n\n"
          "- `--mount QUELLE:ZIEL:ro|rw` fügt einen Ordner anderswo hinzu; Ziele liegen unter `/work`, `/mnt` oder "
          "`/opt`. Sockets und Gerätedateien werden abgelehnt.\n"
-         "- Ein Workspace darf nicht Ihr HOME, `/`, `~/.config`, `~/.ssh`, `~/.local` und ähnliche Orte oder "
+         "- Ein Arbeitsordner darf nicht Ihr HOME, `/`, `~/.config`, `~/.ssh`, `~/.local` und ähnliche Orte oder "
          "sandbox-ai selbst sein oder enthalten.\n"
          "- sandbox-ai merkt sich jeden Baum, den eine Sandbox schreiben konnte; ein Pfad über einen Symlink in "
          "einem solchen Baum wird abgelehnt.\n\n"
-         "Die `.sandbox-ai.json` des Projekts liegt im ersten Workspace und wirkt erst, wenn Sie ihr vertrauen. "
-         "Prüfen Sie nach einem Lauf `.git/hooks` und `.git/config` eines Workspace, bevor Sie dort git benutzen: "
-         "Sie führen Code auf dem Host aus. In der App ist der erste Workspace (Arbeitsordner) der Ordner des "
-         "aktuellen Projekts; die Tafel zeigt Workspaces und Mounts als Teile."),
+         "Die `.sandbox-ai.json` des Projekts liegt im ersten Arbeitsordner und wirkt erst, wenn Sie ihr vertrauen. "
+         "Prüfen Sie nach einem Lauf `.git/hooks` und `.git/config` eines Arbeitsordners, bevor Sie dort git benutzen: "
+         "Sie führen Code auf dem Host aus. In der App ist der erste Arbeitsordner der Ordner des "
+         "aktuellen Projekts; die Tafel zeigt Arbeitsordner und Mounts als Teile."),
         cli=("--workspace", "--workspace-ro", "--mount", "--state-dir", "sandbox-ai wizard trust FILE"),
         see=("sandbox", "page-files", "page-board"),
         tours=()),
@@ -1147,11 +1147,11 @@ SECTIONS = (
          "- Strg-b d oder das Schließen des Terminals löst sich; der Agent arbeitet weiter. `sandbox-ai attach "
          "NAME` holt ihn zurück.\n"
          "- `pause` friert jeden Prozess ein, `resume` taut ihn auf.\n"
-         "- `stop` beendet ihn; HOME, Optionen und Logs bleiben. `resume` auf einem gestoppten Start legt eine "
+         "- `stop` beendet ihn; HOME, Optionen und Protokolle bleiben. `resume` auf einem gestoppten Start legt eine "
          "neue Sandbox mit demselben HOME an, und der Agent setzt seine letzte Unterhaltung fort.\n"
          "- `rename` ändert den Namen, die Run-ID bleibt. `delete` entfernt einen gestoppten Start samt HOME.\n\n"
          "Aufgaben (`-p`, `codex exec`, `opencode run`, ein Start ohne Terminal) laufen im Vordergrund und lassen "
-         "sich nicht verbinden. Laufende Prozesse werden nicht gesichert: Nur HOME und die Workspaces überstehen "
+         "sich nicht verbinden. Laufende Prozesse werden nicht gesichert: Nur HOME und die Arbeitsordner überstehen "
          "einen Stopp. Bevor ein aufbewahrtes HOME wiedergeboren wird, nennt der Launcher jede Änderung seiner "
          "Startdateien; sehen Sie hin, bevor Sie weitermachen. `--no-keep` verwirft das HOME am Ende."),
         cli=("sandbox-ai list", "sandbox-ai attach NAME", "sandbox-ai pause NAME", "sandbox-ai resume NAME",
@@ -1226,8 +1226,8 @@ SECTIONS = (
          "bekommt ein 403.\n"
          "- Tokens bleiben draußen: Mit `--token-proxy` gehen Git-Tokens nur an den Proxy, der sie in Gits eigene "
          "Anfragen einsetzt. `--api-key`, `--llm` und Publish-Logins funktionieren genauso.\n\n"
-         "Programme, die Zertifikate pinnen, lehnen die CA der Sitzung ab; das Log zeigt `tls-refused` mit einem "
-         "Hinweis. Ein entschlossener Agent kann Daten an jeder Musterprüfung vorbei kodieren, aber das Log hält "
+         "Programme, die Zertifikate pinnen, lehnen die CA der Sitzung ab; das Protokoll zeigt `tls-refused` mit einem "
+         "Hinweis. Ein entschlossener Agent kann Daten an jeder Musterprüfung vorbei kodieren, aber das Protokoll hält "
          "fest, was gesendet wurde."),
         cli=("--no-proxy", "--no-inspect", "--allow-http", "--token-proxy", "--api-key", "--log-dir"),
         see=("network", "privacy-check", "rulesets", "secrets", "logs", "page-connections"),
@@ -1315,7 +1315,7 @@ SECTIONS = (
          "- `credentials` (standardmäßig an): Dateien wie `~/.aws/credentials`, SSH-Schlüssel, `~/.netrc`, "
          "`~/.git-credentials` im HOME der Sandbox.\n"
          "- `home` (standardmäßig an): `~/Documents/passwords.txt`, `~/.kube/config`.\n"
-         "- `workspace` (aus): eine `.env` in jedem Workspace, da sie Ihren Projektordner ändert.\n\n"
+         "- `workspace` (aus): eine `.env` in jedem Arbeitsordner, da sie Ihren Projektordner ändert.\n\n"
          "Jeder Lauf bekommt eigene zufällige Tokens in der Form echter, die kein Dienst annimmt. Ein Lesen wird "
          "gemeldet (in `high` erfragt, die Sandbox solange pausiert); ein Token, das durch den Proxy hinaus will, "
          "wird im Standardmodus abgewiesen und stoppt den Lauf. `sandbox-ai canaries resume RUN` setzt eine "
@@ -1326,7 +1326,7 @@ SECTIONS = (
         see=("security-modes", "rulesets", "policy", "proxy", "page-activity"),
         tours=("area:activity",)),
     section(
-        "presets", "concepts", ("Presets of sandbox-ai", "Presets von sandbox-ai"),
+        "presets", "concepts", ("Presets of sandbox-ai", "Vorlagen von sandbox-ai"),
         ("A preset of sandbox-ai is a ready setup to start an agent with: launcher options, MCP servers, an "
          "optional ruleset and a first task, with placeholders for what only you know (a folder, a port, a "
          "device, an LLM server).\n\n"
@@ -1341,18 +1341,18 @@ SECTIONS = (
          "`~/.config/sandbox-ai/app/presets.json`. The gallery shows both kinds: sandbox-ai's presets in their own "
          "category, the app's in the others and under My presets. Neither kind ever holds a secret, and neither "
          "may copy a login in.",
-         "Ein Preset von sandbox-ai ist eine fertige Einrichtung, um einen Agenten zu starten: Optionen des "
+         "Eine Vorlage von sandbox-ai ist eine fertige Einrichtung, um einen Agenten zu starten: Optionen des "
          "Launchers, MCP-Server, ein optionales Regelwerk und eine erste Aufgabe, mit Platzhaltern für das, was "
          "nur Sie wissen (ein Ordner, ein Port, ein Gerät, ein LLM-Server).\n\n"
-         "- `sandbox-ai presets list` zeigt die eingebauten und Ihre eigenen Presets, `presets show NAME`, was "
+         "- `sandbox-ai presets list` zeigt die eingebauten und Ihre eigenen Vorlagen, `presets show NAME`, was "
          "eines setzt und erfragt, `presets check NAME`, was fehlt, bevor es starten kann.\n"
-         "- Starten Sie mit `--preset NAME --preset-value SCHLÜSSEL=WERT`. Die Kommandozeile gewinnt über das "
-         "Preset; Projektdatei, Ihre Vorgaben, Sicherheitsmodus und Richtlinie gelten wie immer. Das `--mode` "
-         "eines Presets ist eine Untergrenze.\n"
-         "- Eigene Presets sind JSON-Dateien in `~/.config/sandbox-ai/presets/`, außerhalb jedes Workspace. Eines "
+         "- Starten Sie mit `--preset NAME --preset-value SCHLÜSSEL=WERT`. Die Kommandozeile gewinnt über die "
+         "Vorlage; Projektdatei, Ihre Vorgaben, Sicherheitsmodus und Richtlinie gelten wie immer. Das `--mode` "
+         "einer Vorlage ist eine Untergrenze.\n"
+         "- Eigene Vorlagen sind JSON-Dateien in `~/.config/sandbox-ai/presets/`, außerhalb jedes Arbeitsordners. Eines "
          "mit der ID eines eingebauten ersetzt dieses.\n\n"
          "Die App hat eigene Vorlagen: fertige Tafeln und Ihre gespeicherten Tafeln in "
-         "`~/.config/sandbox-ai/app/presets.json`. Die Galerie zeigt beide Arten: die Presets von sandbox-ai in "
+         "`~/.config/sandbox-ai/app/presets.json`. Die Galerie zeigt beide Arten: die Vorlagen von sandbox-ai in "
          "einer eigenen Kategorie, die Vorlagen der App in den anderen und unter Meine Vorlagen. Keine der beiden "
          "enthält je ein Geheimnis, und keine darf eine Anmeldung hineinkopieren."),
         cli=("sandbox-ai presets list", "sandbox-ai presets show NAME", "sandbox-ai presets check NAME",
@@ -1417,7 +1417,7 @@ SECTIONS = (
          "Regelwerke kommen von fünf Stellen, jedes eine JSON-Datei im selben Format:\n\n"
          "- die Richtlinie des Administrators, Schlüssel `rules`;\n"
          "- `~/.config/sandbox-ai/rules.json`, bei jedem Start;\n"
-         "- `--rules DATEI`, für einen Start (außerhalb jedes Workspace);\n"
+         "- `--rules DATEI`, für einen Start (außerhalb jedes Arbeitsordners);\n"
          "- `--allow-http 'HOST METHODEN PFAD'`;\n"
          "- die vertraute Projektdatei, Schlüssel `rules`.\n\n"
          "Jedes Regelwerk entscheidet für sich, und die strengste Entscheidung gewinnt: deny vor ask vor allow. "
@@ -1518,7 +1518,7 @@ SECTIONS = (
          "Lautsprecher oder Mikrofone.\n\n"
          "X11-Durchreichung gibt es absichtlich nicht: X11 gibt Tastendrücke und Bildschirm jedes Fensters des "
          "Hosts preis. Browser sind nicht in den Images; Playwright lädt sie, dafür braucht es Netzwerk. Der "
-         "VNC-Ordner muss außerhalb der Workspaces liegen. Der Sicherheitsmodus `high` lehnt `--gui-wayland` ab, "
+         "VNC-Ordner muss außerhalb der Arbeitsordner liegen. Der Sicherheitsmodus `high` lehnt `--gui-wayland` ab, "
          "`paranoid` auch `--gui`."),
         cli=("--gui", "--gui-screen", "--gui-vnc DIR", "--gui-wayland", "--audio virtual"),
         see=("security-modes", "page-images"),
@@ -1603,7 +1603,7 @@ SECTIONS = (
          "audit log records logins, failures, changes and terminals. No sandbox can reach the service's port.",
          "`sandbox-ai web` ist das Gegenstück der Desktop-App im Browser, mit denselben Farbschemata. Ein Dienst "
          "auf einem Rechner verwaltet ihn und jeden Host von `sandbox-ai hosts` über SSH: Starts und Sitzungen mit "
-         "ihren Terminals, Freigaben, den doctor, die Logs, LLM-Server und die Vorgaben jedes Hosts.\n\n"
+         "ihren Terminals, Freigaben, den doctor, die Protokolle, LLM-Server und die Vorgaben jedes Hosts.\n\n"
          "- `sandbox-ai web user add NAME` legt eine Anmeldung mit Passwort (12 oder mehr Zeichen) und einer "
          "TOTP-App an.\n"
          "- `sandbox-ai web vendor` lädt xterm.js für die Terminals, festgelegt und geprüft.\n"
@@ -1660,7 +1660,7 @@ SECTIONS = (
          "its relay, so `mcp` rules and questions hold. The members share the workspace: nothing stops two "
          "agents from changing the same file. For a single helper, `--helper AGENT` gives an agent another one "
          "to hand tasks to, and `--with AGENT` puts another agent into the same sandbox.",
-         "`sandbox-ai team` startet eine Sandbox je Agent auf einem gemeinsamen Workspace, und sie arbeiten über "
+         "`sandbox-ai team` startet eine Sandbox je Agent auf einem gemeinsamen Arbeitsordner, und sie arbeiten über "
          "eine Aufgabentafel zusammen.\n\n"
          "- `sandbox-ai team start NAME --agents claude,codex,opencode -w DIR` startet das Team; Optionen nach "
          "`--` gelten für jedes Mitglied. Der erste Agent leitet.\n"
@@ -1670,7 +1670,7 @@ SECTIONS = (
          "Mitglied eine Aufgabe von Ihnen; `team stop` beendet alle Mitglieder und die Tafel, `team delete` "
          "entfernt auch ihre HOMEs.\n\n"
          "Die Aufgabentafel ist ein MCP-Server in einer eigenen Sandbox, ohne Netzwerk; jedes Mitglied erreicht "
-         "sie über sein Relay, daher gelten `mcp`-Regeln und Fragen. Die Mitglieder teilen den Workspace: Nichts "
+         "sie über sein Relay, daher gelten `mcp`-Regeln und Fragen. Die Mitglieder teilen den Arbeitsordner: Nichts "
          "hindert zwei Agenten daran, dieselbe Datei zu ändern. Für einen einzelnen Helfer gibt `--helper AGENT` "
          "einem Agenten einen weiteren, an den er Aufgaben abgibt, und `--with AGENT` holt einen weiteren Agenten "
          "in dieselbe Sandbox."),
@@ -1696,7 +1696,7 @@ SECTIONS = (
          "Ist das Speicherlimit einer Sandbox voll, beendet der Kernel einen Prozess, und ist das der Supervisor "
          "der Sandbox, endet der ganze Lauf. Deshalb beobachtet der Launcher den Speicher der Sandbox vom Host "
          "aus, solange sie läuft; die Sandbox sieht den Wächter nicht.\n\n"
-         "- Bei 85 % sagt er es Ihnen (Desktop-Benachrichtigung und `memory.jsonl` im Log-Verzeichnis) und dem "
+         "- Bei 85 % sagt er es Ihnen (Desktop-Benachrichtigung und `memory.jsonl` im Protokollverzeichnis) und dem "
          "Agenten: `/sandbox/session/memory.json` nennt Verbrauch und Limit, was die Dateien in `/tmp` und HOME "
          "belegen, und einen Rat.\n"
          "- Bei 95 % beendet er den Prozess mit dem meisten Speicher, der weder zu sandbox-ai gehört noch der "
@@ -1727,7 +1727,7 @@ SECTIONS = (
          "Ein Agent, der pushen darf, kann veröffentlichen, was Ihren Rechner nie verlassen sollte: Ihren "
          "HOME-Pfad, die Adresse Ihres LAN-Servers, einen Kontonamen, ein Token. sandbox-ai sucht danach, bevor es "
          "veröffentlicht wird, an drei Stellen.\n\n"
-         "- Nach jedem Lauf zeigt es für jeden beschreibbaren Workspace, der ein Git-Repository mit öffentlichem "
+         "- Nach jedem Lauf zeigt es für jeden beschreibbaren Arbeitsordner, der ein Git-Repository mit öffentlichem "
          "Remote ist, was der nächste Push veröffentlichen würde und privat bleiben sollte.\n"
          "- In der Sandbox warnen Git-Hooks beim Commit und weisen einen Push an ein öffentliches Remote mit "
          "blockierenden Funden ab; der Verbindungs-Proxy hält zudem jeden Push über HTTP(S) an, bis die Prüfung "
@@ -1736,7 +1736,7 @@ SECTIONS = (
          "Seite System bietet das als Datenschutzprüfung eines Repositorys….\n\n"
          "Die Regeln sind eingebaut (Schlüssel und Tokens), aus dem Lauf abgeleitet (Ihr HOME-Pfad, private "
          "Adressen, Ihre Tokens) und Ihre eigenen Dateien in `~/.config/sandbox-ai/privacy`. `--privacy-check "
-         "always` prüft jeden beschreibbaren Workspace, `off` schaltet die Prüfung ab. Sie verhindert Versehen, "
+         "always` prüft jeden beschreibbaren Arbeitsordner, `off` schaltet die Prüfung ab. Sie verhindert Versehen, "
          "keinen entschlossenen Agenten: Kodierte Daten passieren jedes Muster."),
         cli=("sandbox-ai privacy-check PATH", "sandbox-ai privacy-check --all", "--privacy-check public|always|off",
              "--privacy-rules DIR"),
@@ -1776,7 +1776,7 @@ SECTIONS = (
         see=("page-credentials", "proxy", "privacy-check", "vpn-tor"),
         tours=()),
     section(
-        "logs", "concepts", ("Logs, activity and telemetry", "Logs, Aktivität und Telemetrie"),
+        "logs", "concepts", ("Logs, activity and telemetry", "Protokolle, Aktivität und Telemetrie"),
         ("Every run with the connection proxy writes logs into a log directory: `--log-dir DIR`, else "
          "`~/.local/state/sandbox-ai/logs/PROJECT-HASH`. The directory is hidden from the agent.\n\n"
          "- The connection log: every request, push and refusal, credentials redacted.\n"
@@ -1790,12 +1790,12 @@ SECTIONS = (
          "each blocked target; every suggestion widens the sandbox. Telemetry of the agents to their makers is "
          "off by default (`--telemetry off`); `strict` allows nothing but the model's calls, `on` keeps the "
          "agents' own settings.",
-         "Jeder Lauf mit Verbindungs-Proxy schreibt Logs in ein Log-Verzeichnis: `--log-dir DIR`, sonst "
+         "Jeder Lauf mit Verbindungs-Proxy schreibt Protokolle in ein Protokollverzeichnis: `--log-dir DIR`, sonst "
          "`~/.local/state/sandbox-ai/logs/PROJEKT-HASH`. Das Verzeichnis ist vor dem Agenten verborgen.\n\n"
          "- Das Verbindungslog: jede Anfrage, jeder Push und jede Abweisung, Anmeldedaten geschwärzt.\n"
          "- `egress-denied.jsonl`: jedes verworfene Ziel und jede Auflösung eines nicht erlaubten Namens.\n"
          "- `processes.jsonl`: jeder Prozess mit seiner Befehlszeile, geschwärzt.\n"
-         "- `files.jsonl` (nur mit `--log-dir`): Lesen, Schreiben, Anlegen und Löschen unter den Workspaces, HOME, "
+         "- `files.jsonl` (nur mit `--log-dir`): Lesen, Schreiben, Anlegen und Löschen unter den Arbeitsordnern, HOME, "
          "`/tmp` und den Mounts.\n"
          "- `activity.jsonl`: die Zeitleiste dessen, was die Agenten taten.\n\n"
          "Jede Abweisung nennt den Prozess dahinter. `--log-debug` fügt die Bodies abgewiesener Anfragen und mehr "

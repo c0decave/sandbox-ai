@@ -214,7 +214,7 @@ AREA_TIPS = (
          ("A named sandbox that keeps running when you close the terminal or the app.",
           "Eine benannte Sandbox, die weiterläuft, wenn Sie das Terminal oder die App schließen."),
          ("Start as session starts it detached; attach, pause, resume and stop it on Sandboxes & sessions.",
-          "Als Sitzung starten startet sie losgelöst; Verbinden, Pausieren, Fortsetzen und Beenden auf Sandboxen & "
+          "Als Sitzung starten startet sie losgelöst; Verbinden, Pausieren, Fortsetzen und Stoppen auf Sandboxen & "
           "Sitzungen."),
          "--session NAME", "sessions"),
     # Board
@@ -282,7 +282,7 @@ AREA_TIPS = (
     _tip("board.presets", ("Presets and wizard", "Vorlagen und Assistent"),
          ("New from preset… opens the gallery: ready boards, sandbox-ai's presets and your own. Wizard… builds a "
           "new project step by step.",
-          "Neu aus Vorlage… öffnet die Galerie: fertige Tafeln, die Presets von sandbox-ai und Ihre eigenen Vorlagen."
+          "Neu aus Vorlage… öffnet die Galerie: fertige Tafeln, die Vorlagen von sandbox-ai und Ihre eigenen Vorlagen."
           " Assistent… baut ein neues Projekt Schritt für Schritt."),
          ("In the gallery, Save the board as a preset… keeps the board shown now as your own preset.",
           "In der Galerie speichert Tafel als Vorlage speichern… die gezeigte Tafel als Ihre eigene Vorlage."),
@@ -365,7 +365,7 @@ AREA_TIPS = (
           "its log, add or remove a workspace (a folder, a single file, with a name of its own) and add or remove "
           "an MCP server or a helper agent without a restart.",
           "Änderungen für eine laufende Sandbox: einen Host erlauben oder entziehen, ein Gerät geben, die Grenzen "
-          "ändern, ihr Log zeigen, einen Workspace (einen Ordner, eine einzelne Datei, mit eigenem Namen) "
+          "ändern, ihr Protokoll zeigen, einen Arbeitsordner (einen Ordner, eine einzelne Datei, mit eigenem Namen) "
           "hinzufügen oder entfernen und einen MCP-Server oder einen Helfer-Agenten ohne Neustart hinzufügen oder "
           "entfernen."),
          ("Allowed hosts, devices and limits last until the sandbox ends; a session keeps an added folder for its "
@@ -426,9 +426,9 @@ AREA_TIPS = (
           "beendet ihn."),
          "--tmux", "page-terminals"),
     # Connections
-    _tip("connections.directory", ("Log folder", "Log-Ordner"),
+    _tip("connections.directory", ("Log folder", "Protokollordner"),
          ("Which logs are read: the project's log folder, one of an earlier run, or one you choose.",
-          "Welche Logs gelesen werden: der Log-Ordner des Projekts, einer eines früheren Laufs oder einer Ihrer "
+          "Welche Protokolle gelesen werden: der Protokollordner des Projekts, einer eines früheren Laufs oder einer Ihrer "
           "Wahl."),
          None, "sandbox-ai logs, --log-dir", "logs"),
     _tip("connections.filter", ("Filter", "Filter"),
@@ -472,7 +472,7 @@ AREA_TIPS = (
     # Statistics
     _tip("statistics.directory", ("Which project", "Welches Projekt"),
          ("The log folder whose runs are counted: tokens, requests and tool calls per run and per agent.",
-          "Der Log-Ordner, dessen Läufe gezählt werden: Tokens, Anfragen und Werkzeugaufrufe pro Lauf und pro "
+          "Der Protokollordner, dessen Läufe gezählt werden: Tokens, Anfragen und Werkzeugaufrufe pro Lauf und pro "
           "Agent."),
          None, "--log-dir", "logs"),
     # Files
@@ -635,7 +635,7 @@ AREA_TIPS = (
     _tip("team.teams", ("The teams", "Die Teams"),
          ("Each team with its members and its shared workspace; every member is a session of its own "
           "(NAME-AGENT).",
-          "Jedes Team mit seinen Mitgliedern und seinem gemeinsamen Arbeitsbereich; jedes Mitglied ist eine eigene "
+          "Jedes Team mit seinen Mitgliedern und seinem gemeinsamen Arbeitsordner; jedes Mitglied ist eine eigene "
           "Sitzung (NAME-AGENT)."),
          None, "sandbox-ai team list", "teams"),
     _tip("team.board", ("The board", "Die Tafel"),
@@ -648,7 +648,7 @@ AREA_TIPS = (
     _tip("team.start", ("Start a team", "Ein Team starten"),
          ("Two or three agents on one workspace; the first leads. The members start in a terminal, one after "
           "the other.",
-          "Zwei oder drei Agenten auf einem Arbeitsbereich; der erste leitet. Die Mitglieder starten in einem "
+          "Zwei oder drei Agenten auf einem Arbeitsordner; der erste leitet. Die Mitglieder starten in einem "
           "Terminal, einer nach dem anderen."),
          ("Talk to the lead afterwards: it hands the others their tasks.",
           "Sprechen Sie danach mit der Leitung: Sie verteilt die Aufgaben an die anderen."),
@@ -664,9 +664,9 @@ AREA_TIPS = (
          "sandbox-ai doctor", "sandbox"),
     _tip("system.settings", ("Settings of the app", "Einstellungen der App"),
          ("Theme, language, the system tray and the terminal; All settings… has the rest.",
-          "Thema, Sprache, System-Tray und Terminal; Alle Einstellungen… hat den Rest."),
+          "Farbschema, Sprache, System-Tray und Terminal; Alle Einstellungen… hat den Rest."),
          ("The theme applies at once, a new language at the next start.",
-          "Das Thema gilt sofort, eine neue Sprache beim nächsten Start."),
+          "Das Farbschema gilt sofort, eine neue Sprache beim nächsten Start."),
          "", "app-settings"),
     _tip("system.update", ("Check for updates", "Auf Updates prüfen"),
          ("Looks for a newer sandbox-ai and app.", "Sucht nach einem neueren sandbox-ai und einer neueren App."),
@@ -696,7 +696,7 @@ AREA_TIPS = (
           "Starts zeigen öffnet Sandboxen & Sitzungen nur mit den Starts dieses Hosts, Fragen zeigen die Seite "
           "Freigaben nur mit seinen Fragen."),
          ("Attach, pause, stop, allow and deny happen there, as for this computer.",
-          "Verbinden, Pausieren, Beenden, Erlauben und Ablehnen geschehen dort, wie für diesen Rechner."),
+          "Verbinden, Pausieren, Stoppen, Erlauben und Ablehnen geschehen dort, wie für diesen Rechner."),
          "sandbox-ai hosts run HOST -- list", "page-hosts"),
     _tip("hosts.tabs", ("On the host", "Auf dem Host"),
          ("The chosen host's doctor, its updates, and its defaults for every start there: security mode, "
@@ -725,7 +725,7 @@ AREA_TIPS = (
     # Settings dialog: one per tab
     _tip("settings.appearance", ("Appearance", "Aussehen"),
          ("Theme and language, the guide for new board parts, the guided tour and the intro.",
-          "Thema und Sprache, der Guide für neue Teile der Tafel, die geführte Tour und das Intro."),
+          "Farbschema und Sprache, der Guide für neue Teile der Tafel, die geführte Tour und das Intro."),
          ("Each field is saved when it changes; a new language applies at the next start.",
           "Jedes Feld wird gespeichert, wenn es sich ändert; eine neue Sprache gilt beim nächsten Start."),
          "", "app-settings"),
@@ -767,7 +767,7 @@ AREA_TIPS = (
     _tip("gallery.cards", ("Presets", "Vorlagen"),
          ("Ready boards by category, sandbox-ai's own presets and yours (My presets), each with a picture of its "
           "parts, its security score and what is left to fill in.",
-          "Fertige Tafeln nach Kategorie, die eigenen Presets von sandbox-ai und Ihre (Meine Vorlagen), jede mit "
+          "Fertige Tafeln nach Kategorie, die eigenen Vorlagen von sandbox-ai und Ihre (Meine Vorlagen), jede mit "
           "einem Bild ihrer Teile, ihrer Sicherheitspunktzahl und dem, was noch auszufüllen ist."),
          ("Select one to see it on the right; Create (or Enter, or a double-click) makes it the board.",
           "Wählen Sie eine, um sie rechts zu sehen; Anlegen (oder Enter, oder ein Doppelklick) macht sie zur Tafel."),
