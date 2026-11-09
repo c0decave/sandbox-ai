@@ -63,6 +63,6 @@ def build_image():
     deprecated("sandbox-build-image", "sandbox-ai build")
     bash = shutil.which("bash")
     if not bash:
-        sys.exit("sandbox-build-image: bash is required")
+        sys.exit("sandbox-ai build: bash is required")
     os.environ["SANDBOX_AI_PYTHON"] = sys.executable  # the extension layers are built by images.py
     os.execv(bash, [bash, str(HERE / "build_image.sh"), *sys.argv[1:]])

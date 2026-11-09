@@ -57,8 +57,11 @@ while [[ $# -gt 0 ]]; do
     [a-z0-9]*)
       # A variant (sandbox-ai images new NAME --from AGENT): its agent's base, then the variant only.
       [[ "$1" =~ ^[a-z0-9][a-z0-9_.-]{0,29}$ ]] || die_usage
-      plan=$("${images[@]}" build-plan "$1") || {
-        echo "sandbox-build-image: $1 is neither codex, claude, opencode, all, vpn nor a usable variant" >&2; exit 2; }
+      # images.py's own refusal (no such variant, a damaged one) is said once, in this command's name
+      plan=$("${images[@]}" build-plan "$1" 2>/dev/null) || {
+        why=$("${images[@]}" build-plan "$1" 2>&1 >/dev/null | tail -n 1) || true
+        echo "sandbox-ai build: $1 is neither codex, claude, opencode, all, team, vpn nor a usable variant${why:+ (${why#sandbox-ai images: })}" >&2
+        exit 2; }
       agents=("${plan%% *}") variant=$1; shift; break ;;
     *) die_usage ;;
   esac
@@ -70,22 +73,22 @@ done
 # (macOS: podman is the client of podman machine's VM, which has its own systemd; never there.)
 if [[ -z "$podman_url" && "$(uname -s)" == Linux && ! -S "/run/user/$(id -u)/bus" ]]; then
   podman_cmd+=(--cgroup-manager=cgroupfs)
-  echo "sandbox-build-image: no systemd user session: building with --cgroup-manager=cgroupfs" \
+  echo "sandbox-ai build: no systemd user session: building with --cgroup-manager=cgroupfs" \
        "(sudo loginctl enable-linger $(id -un) gives one)" >&2
 fi
 if [[ -n "$vpn" ]]; then
   [[ -z "$pin$uv$node$extension_only" ]] || {
-    echo "sandbox-build-image: --pin, --uv, --node and --extension-only apply to the agent images, not vpn" >&2; exit 2; }
+    echo "sandbox-ai build: --pin, --uv, --node and --extension-only apply to the agent images, not vpn" >&2; exit 2; }
   exec "${podman_cmd[@]}" build --pull=newer --tag localhost/sandbox-ai-vpn:latest --label sandbox-ai.role=vpn \
     --file "$script_dir/Containerfile.vpn" "$@" "$script_dir"
 fi
 semver='^[0-9]+\.[0-9]+\.[0-9]+([.+-][0-9A-Za-z.+-]+)?$'
 if [[ -n "$pin" ]]; then
-  [[ ${#agents[@]} == 1 ]] || { echo "sandbox-build-image: --pin applies to one agent, not $([[ -n "$team" ]] && echo team || echo all)" >&2; exit 2; }
-  [[ "$pin" =~ $semver ]] || { echo "sandbox-build-image: --pin expects X.Y.Z: $pin" >&2; exit 2; }
+  [[ ${#agents[@]} == 1 ]] || { echo "sandbox-ai build: --pin applies to one agent, not $([[ -n "$team" ]] && echo team || echo all)" >&2; exit 2; }
+  [[ "$pin" =~ $semver ]] || { echo "sandbox-ai build: --pin expects X.Y.Z: $pin" >&2; exit 2; }
 fi
-[[ -z "$uv" || "$uv" =~ ^[0-9A-Za-z._-]+$ ]] || { echo "sandbox-build-image: --uv expects a tag: $uv" >&2; exit 2; }
-[[ -z "$node" || "$node" =~ ^[A-Za-z0-9./:@_-]+$ ]] || { echo "sandbox-build-image: --node expects an image: $node" >&2; exit 2; }
+[[ -z "$uv" || "$uv" =~ ^[0-9A-Za-z._-]+$ ]] || { echo "sandbox-ai build: --uv expects a tag: $uv" >&2; exit 2; }
+[[ -z "$node" || "$node" =~ ^[A-Za-z0-9./:@_-]+$ ]] || { echo "sandbox-ai build: --node expects an image: $node" >&2; exit 2; }
 
 package() {
   case "$1" in
@@ -99,17 +102,17 @@ team_build() {
   # Every agent at its newest release unless a --build-arg pins it; one image, no extensions.
   local extra=(--pull=newer) labels=() agent given version
   [[ -z "$pin$extension_only" ]] || {
-    echo "sandbox-build-image: --pin and --extension-only apply to one agent's image, not team" >&2; exit 2; }
+    echo "sandbox-ai build: --pin and --extension-only apply to one agent's image, not team" >&2; exit 2; }
   for agent in claude codex opencode; do
     given=$(explicit_version "$agent" "$@")
     if [[ -n "$given" ]]; then
       version=${given#set:}
-      [[ "$version" =~ $semver ]] || { echo "sandbox-build-image: ${agent^^}_VERSION expects X.Y.Z: '$version'" >&2; exit 2; }
+      [[ "$version" =~ $semver ]] || { echo "sandbox-ai build: ${agent^^}_VERSION expects X.Y.Z: '$version'" >&2; exit 2; }
     else
       version=$(latest_version "$(package "$agent")")
       extra+=(--build-arg "${agent^^}_VERSION=$version")
     fi
-    echo "sandbox-build-image: team: $agent -> $version" >&2
+    echo "sandbox-ai build: team: $agent -> $version" >&2
     labels+=(--label "sandbox-ai.$agent-version=$version")
   done
   [[ -z "$uv" ]] || extra+=(--build-arg "UV_VERSION=$uv")
@@ -128,7 +131,7 @@ print(json.load(urllib.request.urlopen(sys.argv[1], timeout=30))["version"])' "h
   fi
   # The value becomes a build argument; accept plain semver only.
   [[ "$version" =~ $semver ]] || {
-    echo "sandbox-build-image: unexpected version for $1: $version" >&2; exit 1; }
+    echo "sandbox-ai build: unexpected version for $1: $version" >&2; exit 1; }
   echo "$version"
 }
 
@@ -152,7 +155,7 @@ fi
 declare -A kinds=() variant_counts=()
 for agent in "${agents[@]}"; do
   plan=$("${images[@]}" build-plan "$agent") || {
-    echo "sandbox-build-image: fix the extension of $agent first (sandbox-ai images check $agent)" >&2; exit 1; }
+    echo "sandbox-ai build: fix the extension of $agent first (sandbox-ai images check $agent)" >&2; exit 1; }
   read -r _ kind count <<<"$plan"
   kinds[$agent]=$kind variant_counts[$agent]=$count
 done
@@ -163,10 +166,10 @@ for agent in "${agents[@]}"; do
   given_set=${given:+1}
   given=${given#set:}
   if [[ -n "$pin" && -n "$given" && "$given" != "$pin" ]]; then
-    echo "sandbox-build-image: --pin $pin conflicts with --build-arg ${agent^^}_VERSION=$given" >&2; exit 2
+    echo "sandbox-ai build: --pin $pin conflicts with --build-arg ${agent^^}_VERSION=$given" >&2; exit 2
   fi
   if [[ -n "$given_set" && ! "$given" =~ $semver ]]; then
-    echo "sandbox-build-image: ${agent^^}_VERSION expects X.Y.Z: '$given'" >&2; exit 2
+    echo "sandbox-ai build: ${agent^^}_VERSION expects X.Y.Z: '$given'" >&2; exit 2
   fi
   if [[ -n "$pin" ]]; then
     versions[$agent]=$pin pinned[$agent]=1
@@ -175,7 +178,7 @@ for agent in "${agents[@]}"; do
   else
     versions[$agent]=$(latest_version "$(package "$agent")")
   fi
-  echo "sandbox-build-image: $agent -> ${versions[$agent]}${pinned[$agent]:+ (pinned)}" >&2
+  echo "sandbox-ai build: $agent -> ${versions[$agent]}${pinned[$agent]:+ (pinned)}" >&2
 done
 
 status=0

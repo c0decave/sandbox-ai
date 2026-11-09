@@ -53,11 +53,17 @@ def test_dispatcher(scenario, tmp_path):
         # A checkout is updated with git, not with install.sh.
         update = sandbox_ai("update")
         assert update.returncode == 1 and "not installed by install.sh" in update.stderr
+        # Review 6 L7: its help is shown all the same, with how this copy is updated.
+        for flag in ("--help", "-h"):
+            helped = sandbox_ai("update", flag)
+            assert helped.returncode == 0 and helped.stdout.startswith("Usage: sandbox-ai update"), helped.stderr
+            assert "--check" in helped.stdout and "not installed by install.sh" in helped.stdout
     else:
         result = sandbox_ai("--help")
         assert result.returncode == 0
         for command in ("session", "mcp", "wizard", "build", "doctor", "logs", "update"):
             assert f"sandbox-ai {command}" in result.stdout
+        assert "hosts list|add|set|remove|test|update|install|run" in result.stdout  # review 6 N3
 
 
 def test_check_subids(scenario, tmp_path):
@@ -602,3 +608,12 @@ def test_check_pasta_needs_dev_net_tun(tmp_path):
         assert doctor.check_pasta(which=which, tun=Path("/dev/null"))[0] == "ok"
     assert doctor.check_pasta(which=lambda name: None)[2] == "not found"
     assert doctor.check_pasta("unix:///x")[0] == "skip"
+
+
+def test_readmes_name_the_update_paths_hosts_and_approvals_rely_on():
+    """Review 6 N3: `hosts update --from-here` (the only update path before a release is published) and
+    `approvals allow ID --no-open` were in neither README."""
+    for readme in ("README.md", "README_DE.md"):
+        text = (ROOT / readme).read_text()
+        assert "sandbox-ai hosts update ct1 --from-here" in text and "hosts update NAME --from-here" in text, readme
+        assert "sandbox-ai approvals allow ID --no-open" in text, readme

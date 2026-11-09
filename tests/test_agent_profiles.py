@@ -137,7 +137,10 @@ def test_builder_selects_one_recipe_and_image(agent, remote, fake_podman):
 def test_builder_rejects_missing_or_unknown_agent_before_podman(options, fake_podman):
     result = subprocess.run([str(ROOT / "sandbox-build-image"), *options], capture_output=True, text=True)
     assert result.returncode == 2
-    assert "Usage:" in result.stderr or "sandbox-build-image:" in result.stderr
+    assert "Usage:" in result.stderr or "sandbox-ai build:" in result.stderr
+    # review 6 L6: the errors name the command the user is told to type (only the old name's deprecation note keeps it)
+    assert not [line for line in result.stderr.splitlines()
+                if line.startswith("sandbox-build-image:") and "deprecated" not in line]
     assert not fake_podman.exists()
 
 

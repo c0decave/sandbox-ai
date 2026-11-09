@@ -1214,3 +1214,18 @@ def test_trust_refuses_what_every_start_would_refuse(tmp_path):
         assert why in json.loads(shown[0])["problem"]
     path.write_text('{"version": 1, "agent": "claude", "options": ["--allow-pypi"]}')
     assert w.trust(str(path), yes=True, out=[].append) == 0
+
+
+def test_wizard_errors_name_sandbox_ai_wizard_and_models_usage(tmp_path):
+    """Review 6 L6: `sandbox-ai wizard models` errors said sandbox-wizard:, and --url without --kind printed the usage
+    of the whole wizard instead of that of `wizard models`."""
+    env = {**os.environ, "XDG_CONFIG_HOME": str(tmp_path / "cfg"), "XDG_STATE_HOME": str(tmp_path / "state"),
+           "XDG_DATA_HOME": str(tmp_path / "data"), "HOME": str(tmp_path / "home")}
+    result = subprocess.run([sys.executable, str(ROOT / "sandbox/wizard.py"), "models", "--kind", "ollama", "--url",
+                             "https://127.0.0.1:9", "--ca-of", "nope"], capture_output=True, text=True, env=env, timeout=60)
+    assert result.returncode == 1 and "sandbox-wizard" not in result.stderr
+    assert result.stderr.startswith("sandbox-ai wizard: "), result.stderr
+    result = subprocess.run([sys.executable, str(ROOT / "sandbox/wizard.py"), "models", "--url", "http://127.0.0.1:9"],
+                            capture_output=True, text=True, env=env, timeout=60)
+    assert result.returncode == 2 and "usage: sandbox-ai wizard models" in result.stderr
+    assert "--url needs --kind" in result.stderr

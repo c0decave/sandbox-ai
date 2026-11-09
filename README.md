@@ -2473,6 +2473,7 @@ sandbox-ai hosts install ct1              # sandbox-ai onto ct1 (this machine's 
 sandbox-ai hosts install ct1 --system     # for every user there: as root over SSH, else with sudo
 sandbox-ai hosts update ct1               # sandbox-ai update on ct1: old -> new version
 sandbox-ai hosts update --all             # every host of the list, one after the other, and a summary
+sandbox-ai hosts update ct1 --from-here   # this machine's copy instead of the release (no release server needed)
 sandbox-ai hosts remove ct1
 ```
 
@@ -2522,6 +2523,13 @@ sudo`, where sudo asks; the app and the web interface open it in a terminal
 tab. A rule in sudoers (`NOPASSWD` for that one command) spares the
 question. This machine updates with `sandbox-ai update` (`--all` leaves it
 out).
+
+`sandbox-ai hosts update NAME --from-here` installs this machine's copy of
+sandbox-ai there instead of the signed release, as the same kind of
+installation (the user's own, or for every user under its prefix, with sudo as
+above): for a host that cannot reach the release server, or before a release
+is published. It takes no `--version` (it is this machine's version); `hosts
+install NAME --from-here` is the same for a host without sandbox-ai.
 
 ## Project configuration and wizard
 
@@ -3537,6 +3545,7 @@ block.
 ```sh
 sandbox-ai approvals list                     # ID  RUN  what is asked
 sandbox-ai approvals allow ID --scope run     # once (default), run, always
+sandbox-ai approvals allow ID --no-open       # a browser question: allowed, the page not opened on this host (open it where you are)
 sandbox-ai approvals deny ID [--scope once|always] # default: not asked again in this run; always: blocked for the project
 sandbox-ai approvals history [RUN]            # questions and their answers
 sandbox-ai approvals remembered [--json]      # what is allowed/blocked always, per project: name or address, how, when, from which question

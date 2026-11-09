@@ -2626,6 +2626,7 @@ sandbox-ai hosts install ct1              # sandbox-ai auf ct1 (die Kopie dieser
 sandbox-ai hosts install ct1 --system     # für alle Benutzer dort: als root über SSH, sonst mit sudo
 sandbox-ai hosts update ct1               # sandbox-ai update auf ct1: alte -> neue Version
 sandbox-ai hosts update --all             # jeder Host der Liste, einer nach dem anderen, und eine Zusammenfassung
+sandbox-ai hosts update ct1 --from-here   # die Kopie dieser Maschine statt des Releases (kein Release-Server nötig)
 sandbox-ai hosts remove ct1
 ```
 
@@ -2678,6 +2679,14 @@ update` das und führt das Update aus einem Terminal heraus dort mit `ssh -t
 einem Terminal-Tab. Eine Regel in sudoers (`NOPASSWD` für genau diesen
 Befehl) erspart die Frage. Dieser Rechner aktualisiert sich mit `sandbox-ai
 update` (`--all` lässt ihn aus).
+
+`sandbox-ai hosts update NAME --from-here` installiert dort die Kopie von
+sandbox-ai dieser Maschine statt des signierten Releases, als dieselbe Art
+Installation (die eigene des Benutzers, oder für alle Benutzer unter ihrem
+Präfix, mit sudo wie oben): für einen Host, der den Release-Server nicht
+erreicht, oder bevor ein Release veröffentlicht ist. Es nimmt kein
+`--version` (es ist die Version dieser Maschine); `hosts install NAME
+--from-here` tut dasselbe für einen Host ohne sandbox-ai.
 
 ## Projektkonfiguration und Wizard
 
@@ -3762,6 +3771,7 @@ immer erlaubt, hebt die Sperre auf.
 ```sh
 sandbox-ai approvals list                     # ID  LAUF  was gefragt wird
 sandbox-ai approvals allow ID --scope run     # once (Standard), run, always
+sandbox-ai approvals allow ID --no-open       # eine Browser-Frage: erlaubt, die Seite auf diesem Host nicht geöffnet (öffnen Sie sie dort, wo Sie sind)
 sandbox-ai approvals deny ID [--scope once|always] # Standard: in diesem Lauf nicht erneut gefragt; always: fürs Projekt blockiert
 sandbox-ai approvals history [LAUF]           # Fragen und ihre Antworten
 sandbox-ai approvals remembered [--json]      # was je Projekt immer erlaubt/blockiert ist: Name oder Adresse, wie, wann, aus welcher Frage

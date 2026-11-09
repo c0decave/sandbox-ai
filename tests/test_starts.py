@@ -457,6 +457,21 @@ def test_rename(scenario, tmp_path):
         assert st.rename("fix", "fix", lines.append) == 0 and lines[-1] == "fix: already its name"
 
 
+def test_resume_by_an_earlier_name_names_the_current_one(tmp_path, capsys):
+    """Review 6 N1: a start renamed twice is not 'discarded' under its middle name: the current name is said."""
+    make_start("s1")
+    st.rename("s1", "s1x", lambda line: None)
+    st.rename("s1x", "newname", lambda line: None)
+    for command in ("resume", "attach"):
+        assert st.main([command, "s1x"]) == 1
+        err = capsys.readouterr().err
+        assert f"s1x was renamed to newname: sandbox-ai {command} newname" in err and "discarded" not in err
+    # A name given away and then used by a start that ended: that one's own history speaks.
+    st.record("s1x", "exit", "other", "other", status=0)
+    assert st.main(["resume", "s1x"]) == 1
+    assert "has ended and its HOME was discarded" in capsys.readouterr().err
+
+
 def test_event_details(scenario):
     if scenario == "happy":
         assert st.event_details({"event": "exit", "status": 0}) == "status 0"

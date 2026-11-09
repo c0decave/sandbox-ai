@@ -689,6 +689,21 @@ def find(name, found=None):
     raise ValueError(f"nothing named {shown} runs or is kept (see: sandbox-ai list)")
 
 
+def renamed_since(name, found=None):
+    """The name a start that was called NAME has now (renamed once or more, its history says), else None."""
+    seen = set()
+    while valid_name(name) and name not in seen:
+        seen.add(name)
+        events = history(name)
+        if not events or events[-1].get("event") != "rename" or not isinstance(events[-1].get("to"), str):
+            return None
+        name = events[-1]["to"]
+        found = entries(True) if found is None else found
+        if any(entry.get("name") == name for entry in found):
+            return name
+    return None
+
+
 def rename(old, new=None, out=print):
     """Give the start OLD the name NEW (None: a fresh codename, codenames.py): its start directory and its running
     run's record say so, and its history moves along. The run id stays (sockets, logs, approvals)."""
@@ -731,6 +746,10 @@ def act(command, name, out=print, wait=None, yes=False, review=False, as_json=Fa
         pod = stray_pod(name) if command == "stop" else None
         if pod is not None:
             return stop_stray_pod(pod, module("net").STOP_WAIT if wait is None else wait, out)
+        current = renamed_since(name)
+        if current is not None:
+            raise ValueError(f"{printable(name)} was renamed to {printable(current)}: sandbox-ai {command} "
+                             f"{printable(current)}") from None
         if command == "resume" and valid_name(name) and history(name):
             raise ValueError(f"{printable(name)} has ended and its HOME was discarded; see: sandbox-ai list "
                              f"--history {printable(name)}") from None
@@ -798,7 +817,7 @@ def stray_pod(name):
 def stop_stray_pod(pod, wait, out=print):
     """End the running pod POD that no start knows, as asked by its name: stop it, then remove it."""
     printable = launcher().printable
-    print(f"agent-sandbox: warning: no start knows {printable(pod)} (its launcher is gone); stopping and removing the "
+    print(f"sandbox-ai: warning: no start knows {printable(pod)} (its launcher is gone); stopping and removing the "
           "Podman pod as you asked", file=sys.stderr)
     stopped, said = module("liveness").stop_pod(pod, None, wait)
     if not stopped:
@@ -837,7 +856,7 @@ def pause_run(entry, record_, freeze):
     pid, _ = module("net").launcher_process(record_)
     marker = Path(record_["directory"]) / "paused"
     if freeze == marker.exists():
-        print(f"agent-sandbox: {shown} is {'paused' if freeze else 'running'} already", file=sys.stderr)
+        print(f"sandbox-ai: {shown} is {'paused' if freeze else 'running'} already", file=sys.stderr)
         return 0
     if record_.get("backend") == "podman":
         pod = record_.get("pod")
@@ -854,7 +873,7 @@ def pause_run(entry, record_, freeze):
     else:
         marker.unlink(missing_ok=True)
     record(entry["name"], "pause" if freeze else "resume", entry["id"], entry["run"])
-    print(f"agent-sandbox: {shown} {'paused' if freeze else 'resumed'}", file=sys.stderr)
+    print(f"sandbox-ai: {shown} {'paused' if freeze else 'resumed'}", file=sys.stderr)
     return 0
 
 

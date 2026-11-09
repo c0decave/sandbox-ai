@@ -26,7 +26,7 @@
   sandbox-ai secrets list|set|delete|backend ...                     API keys and tokens in your keyring
   sandbox-ai llm add|list|show|remove|models|check ...                LLM servers, local or remote, for --llm
   sandbox-ai vpn add|list|show|remove|check ...                      VPN profiles for --vpn (WireGuard, OpenVPN, Mullvad, Tailscale)
-  sandbox-ai hosts list|add|set|remove|test|update|run ...            other machines (LXC containers) managed over SSH
+  sandbox-ai hosts list|add|set|remove|test|update|install|run ...    other machines (LXC containers) managed over SSH
   sandbox-ai team start|list|show|post|stop|delete ...                a team of agents, one sandbox each, with a task board
   sandbox-ai web [serve|user|vendor|cert] ...                         the web interface (HTTPS, password and TOTP)
   sandbox-ai presets list|show|check|dirs ...                         ready setups to start an agent with (--preset NAME)
@@ -154,6 +154,24 @@ def verbose_version():
 HOMES = ("/home/", "/root/", "/Users/", "/var/home/")
 
 
+UPDATE_HELP = """Usage: sandbox-ai update [--check] [--version X.Y.Z] [--source URL] [--force] [--allow-downgrade]
+                         [--user | --system [--prefix DIR]] [--uninstall] [install.sh's other options]
+
+Updates this installation to the newest signed release (install.sh, as the same kind of installation: a system
+one under its prefix, a user's own for that user).
+
+  --check            show the installed and the newest version and its signature; change nothing
+  --version X.Y.Z    this release instead of the newest
+  --source URL       the repository with the releases (Gitea, Forgejo or https://github.com/OWNER/REPO)
+  --force            reinstall the same version
+  --allow-downgrade  install a release older than the installed one
+  --uninstall        remove the installation, its command links and the PATH block
+  -h, --help         this help
+
+Other hosts: sandbox-ai hosts update NAME (their own signed update), or sandbox-ai hosts update NAME --from-here
+(this machine's copy, no release server needed)."""
+
+
 def installation_mode(rest, here=None, euid=None, writable=None):
     """`update` ARGS with the kind of installation this copy is (install.sh decides by who runs it: root makes a
     system installation, anyone else one of their own): a system one (PREFIX/lib/sandbox-ai/versions/X) is
@@ -223,6 +241,16 @@ def main(argv):
         bash(HERE / "build_image.sh", rest)
     if command == "update":
         package = packaging()
+        if rest[:1] in (["-h"], ["--help"]) or "--help" in rest:
+            # the help is shown whatever this copy is; only an update itself needs install.sh's installation
+            print(UPDATE_HELP)
+            installer = HERE.parent / "install.sh"
+            if package:
+                print(f"\nThis copy: {package_update_hint(package)}")
+            elif not installer.is_file() or (HERE.parent / ".git").exists():
+                print("\nThis copy was not installed by install.sh: update a checkout with git, a pip installation "
+                      "with: pip install -U sandbox-ai")
+            return 0
         if package and "--check" in rest:
             return package_update_check(package, [arg for arg in rest if arg != "--check"])
         if package:

@@ -1500,14 +1500,14 @@ def trusted_store(note=None):
     store = launcher().trusted_configs()
     note = note or (lambda line: print(line, file=sys.stderr))
     if not isinstance(store, dict):
-        note("sandbox-wizard: the trusted list is damaged (no JSON object); nothing in it is trusted")
+        note("sandbox-ai wizard: the trusted list is damaged (no JSON object); nothing in it is trusted")
         return {}
     found = {}
     for key, digest in store.items():
         if isinstance(key, str) and isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest):
             found[key] = digest
         else:
-            note(f"sandbox-wizard: skipped a damaged entry of the trusted list: {launcher().printable(key)}")
+            note(f"sandbox-ai wizard: skipped a damaged entry of the trusted list: {launcher().printable(key)}")
     return found
 
 
@@ -1650,11 +1650,11 @@ def cli(argv):
             # A server that is not registered yet, by its whole URL (https and a path prefix included): what the
             # app's and the web's "Test connection" asks before anything is stored.
             if not a.kind:
-                parser.error("--url needs --kind")
+                models.error("--url needs --kind")
             stored = None
             if a.ca_of:  # an edited server's own CA, which the form cannot send again (the front ends' edit)
                 if a.ca:
-                    parser.error("--ca-of goes without --ca")
+                    models.error("--ca-of goes without --ca")
                 stored = llm().ca_text(llm().endpoint(a.ca_of))
                 if stored is None:
                     raise ValueError(f"the LLM server {launcher().printable(a.ca_of)} has no CA of its own")
@@ -1662,7 +1662,7 @@ def cli(argv):
             if not url:  # --host with --status: the same server by its URL (the status reads /metrics as text too)
                 port = a.port or (SERVERS[a.kind][1] if a.kind in SERVERS else None)
                 if port is None:
-                    parser.error(f"--kind {a.kind} has no default port: give --port, or --url with the whole address")
+                    models.error(f"--kind {a.kind} has no default port: give --port, or --url with the whole address")
                 url = f"http://{url_host(a.host)}:{port}"
             found = llm().discover_url(a.kind, url, ca=a.ca, api_key_secret=a.api_key_secret,
                                        insecure_http=a.insecure_http, ca_text=stored, with_status=a.status)
@@ -1671,10 +1671,10 @@ def cli(argv):
         elif a.kind and a.host:
             port = a.port or (SERVERS[a.kind][1] if a.kind in SERVERS else None)
             if port is None:
-                parser.error(f"--kind {a.kind} has no default port: give --port, or --url with the whole address")
+                models.error(f"--kind {a.kind} has no default port: give --port, or --url with the whole address")
             found = discover(a.kind, a.host, port, fetch=fetch_json)
         else:
-            parser.error("models needs --kind with --host or --url, or --llm NAME")
+            models.error("models needs --kind with --host or --url, or --llm NAME")
         found = sort_models(found, a.sort)
         if a.json:
             print(json.dumps({"models": found, "status": status} if a.status else found, indent=2))
@@ -1696,7 +1696,7 @@ if __name__ == "__main__":
     try:
         sys.exit(cli(sys.argv[1:]))
     except (OSError, ValueError) as exc:
-        print(f"sandbox-wizard: {exc}", file=sys.stderr)
+        print(f"sandbox-ai wizard: {exc}", file=sys.stderr)
         sys.exit(1)
     except EOFError:  # Ctrl-D
         print("\nCancelled; nothing written.", file=sys.stderr)

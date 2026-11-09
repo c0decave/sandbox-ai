@@ -1004,7 +1004,7 @@ def stop(name, timeout=30):
 
 def stop_locked(name, timeout=30):
     if status(name) != "running":
-        print(f"agent-sandbox: MCP server {name} is not running", file=sys.stderr)
+        print(f"sandbox-ai mcp: MCP server {name} is not running", file=sys.stderr)
         return 0
     pid = load_state(name)["pid"]
     os.kill(pid, signal.SIGTERM)
@@ -1023,7 +1023,7 @@ def stop_locked(name, timeout=30):
             except (ValueError, subprocess.CalledProcessError) as exc:
                 print(f"agent-sandbox: {exc}", file=sys.stderr)
     (launcher().mcp_socket_dir(name) / "server.sock").unlink(missing_ok=True)
-    print(f"agent-sandbox: MCP server {name} stopped", file=sys.stderr)
+    print(f"sandbox-ai mcp: MCP server {name} stopped", file=sys.stderr)
     return 0
 
 

@@ -320,6 +320,10 @@ def test_stop_and_list(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(m.time, "sleep", lambda _: None)
     assert m.cli(["stop", "demo"]) == 0
     assert kills == [88] and m.status("demo") == "stopped"
+    assert "sandbox-ai mcp: MCP server demo stopped" in capsys.readouterr().err
+    # Review 6 L6: the command the user typed names itself, not agent-sandbox.
+    assert m.cli(["stop", "demo"]) == 0
+    assert "sandbox-ai mcp: MCP server demo is not running" in capsys.readouterr().err
 
 
 def test_wrapper_script(tmp_path):
