@@ -1076,8 +1076,11 @@ SECTIONS = (
          "- Task tours: a tour through one task across pages, such as a first start, your own board, approvals "
          "and the network, or the preset gallery. Start them from the Help page.\n"
          "- (?) buttons: every page, panel and component has one. It opens a short explanation that ends with "
-         "More in Help, which opens the matching section of the Help page.\n\n"
-         "Settings > Appearance turns off the help for new board parts and the tour at the first start.",
+         "More in Help, which opens the matching section of the Help page.\n"
+         "- Explanations on hover: a column title, a label or a setting with a help text shows a sentence about it "
+         "when the pointer rests on it, also with the (?) buttons switched off.\n\n"
+         "Settings > Appearance turns off the help for new board parts, the tour at the first start and the (?) "
+         "buttons.",
          "Die App erklärt sich auf mehreren Wegen.\n\n"
          "- Geführte Tour (Hilfe > Geführte Tour): ein Schritt je Seite in der Reihenfolge der Navigation, mit "
          "dem, wofür die Seite da ist, und was Sie dort probieren. Zurück, Weiter, Tour beenden (Esc). Sie wird "
@@ -1089,9 +1092,11 @@ SECTIONS = (
          "Tafel, Freigaben und Netzwerk oder die Vorlagen-Galerie. Starten Sie sie auf der Seite Hilfe.\n"
          "- (?)-Schaltflächen: Jede Seite, jeder Bereich und jedes Bauteil hat eine. Sie öffnet eine kurze "
          "Erklärung, die mit einem Verweis auf die Hilfe endet; er öffnet den passenden Abschnitt der Seite "
-         "Hilfe.\n\n"
-         "Einstellungen > Darstellung schaltet die Hilfe für neue Teile der Tafel und die Tour beim ersten Start "
-         "ab."),
+         "Hilfe.\n"
+         "- Erklärungen beim Zeigen: Ein Spaltentitel, eine Beschriftung oder eine Einstellung mit Hilfetext zeigt "
+         "einen Satz dazu, wenn der Mauszeiger darauf ruht, auch wenn die (?)-Schaltflächen ausgeschaltet sind.\n\n"
+         "Einstellungen > Darstellung schaltet die Hilfe für neue Teile der Tafel, die Tour beim ersten Start und die "
+         "(?)-Schaltflächen ab."),
         see=("page-help", "app-settings"),
         tours=("first-start", "help-and-tips")),
     # -- concepts of sandbox-ai --

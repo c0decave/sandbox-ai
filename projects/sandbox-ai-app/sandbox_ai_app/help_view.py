@@ -15,9 +15,10 @@ import weakref
 from PySide6.QtCore import QEvent, QObject, QPoint, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QPainter, QPen
 from PySide6.QtWidgets import (
-    QAbstractScrollArea, QBoxLayout, QComboBox, QDialog, QFrame, QGroupBox, QHBoxLayout, QLineEdit, QListWidget,
-    QListWidgetItem, QPushButton, QSplitter, QTabWidget, QTextBrowser, QToolButton, QVBoxLayout, QWidget,
-    QWidgetItem,
+    QAbstractItemView, QAbstractScrollArea, QBoxLayout, QComboBox, QDialog, QFormLayout, QFrame, QGroupBox,
+    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSplitter, QStyle,
+    QStyleOptionGroupBox, QTabWidget, QTableView, QTextBrowser, QToolButton, QToolTip, QTreeView, QVBoxLayout,
+    QWidget, QWidgetItem,
 )
 
 from . import help_texts as H
@@ -30,7 +31,7 @@ OPENED = []     # the ids of the explanations opened in this run (a tour step wa
 SIZE = 18
 _SHOWN = [True]  # the setting help_buttons: the (?)s are shown (the Help page, tours and F1 stay either way)
 _BUTTONS = weakref.WeakSet()  # every HelpButton made, to hide or show them when the setting changes
-_LISTENERS = []  # weakref.WeakMethod of callbacks (the board's (?) marks in its nodes)
+_LISTENERS = []  # weakref.WeakMethod of callbacks (what paints a (?) itself: the board's nodes and parts list)
 
 
 def buttons_shown():
@@ -94,6 +95,9 @@ class HelpButton(QToolButton):
                 self.setAttribute(Qt.WidgetAttribute.WA_WState_ExplicitShowHide, False)
             else:
                 QToolButton.setVisible(self, True)
+        corner = getattr(self, "corner", None)
+        if corner is not None:
+            corner.make_room()
 
     def set_tip(self, tip_id):
         self.tip_id = tip_id
@@ -221,10 +225,26 @@ class Corner(QObject):
     def __init__(self, target, button):
         super().__init__(target)
         self.target, self.button = target, button
+        self.header = header_of(target)
+        if self.header is not None:
+            # The (?) sits over the last column's title: that title keeps room for it ("Runnin(?)g" before), only
+            # while the (?)s are shown (the setting help_buttons).
+            self.header.setStyleSheet(self.header.styleSheet() + " QHeaderView[helpRoom=\"true\"]::section:last "
+                                      f"{{ padding-right: {HEADER_ROOM}px; }}")
         target.installEventFilter(self)
         if isinstance(target, QAbstractScrollArea):
             target.verticalScrollBar().rangeChanged.connect(lambda *_: self.place())
+        self.make_room()
         self.place()
+
+    def make_room(self):
+        header = self.header
+        if header is None or bool(header.property("helpRoom")) == _SHOWN[0]:
+            return
+        header.setProperty("helpRoom", _SHOWN[0])
+        header.style().unpolish(header)
+        header.style().polish(header)
+        header.viewport().update()
 
     def eventFilter(self, watched, event):  # noqa: N802
         if event.type() in (QEvent.Type.Resize, QEvent.Type.Show, QEvent.Type.LayoutRequest):
@@ -260,10 +280,6 @@ def header_of(target):
 def corner(target, tip_id):
     button = HelpButton(tip_id, target)
     button.corner = Corner(target, button)
-    header = header_of(target)
-    if header is not None:
-        # The (?) sits over the last column's title: that title keeps room for it ("Runnin(?)g" before).
-        header.setStyleSheet(header.styleSheet() + f" QHeaderView::section:last {{ padding-right: {HEADER_ROOM}px; }}")
     button.show()
     return button
 
@@ -326,8 +342,9 @@ def place(target, tip_id, how):
 
 
 def install(window):
-    """The (?)s of help_texts.PLACES on the window's pages; returns {page: [HelpButton]} and keeps what could not be
-    placed in window.help_missing (the tests want it empty)."""
+    """The (?)s of help_texts.PLACES on the window's pages, and the short explanations on hover (those stay when the
+    (?)s are off); returns {page: [HelpButton]} and keeps what could not be placed in window.help_missing (the tests
+    want it empty)."""
     placed, missing = {}, []
     for page, places in H.PLACES.items():
         widget = getattr(window, page, None)
@@ -338,8 +355,179 @@ def install(window):
                 missing.append((page, attribute))
             else:
                 placed.setdefault(page, []).append(button)
+                explain_place(target, tip_id, how)
+    explain_tree(window)  # the pages and the panels they put in docks of their own
     window.help_missing = missing
     return placed
+
+
+# -- short explanations on hover: a tooltip on the terms, labels and column titles that have a help text --
+# They do not depend on the setting help_buttons: switched off, the (?)s go and hovering still explains.
+
+HOVER_LIMIT = 230  # characters at most: one or two sentences
+
+
+def first_sentences(text, limit=HOVER_LIMIT):
+    """The first sentence of TEXT (the second too when the first is very short), at most LIMIT characters."""
+    text = " ".join(str(text).split())
+    sentences = re.split(r"(?<=[.!?])\s+(?=[^a-zäöü])", text)
+    short = sentences[0]
+    if len(short) < 40 and len(sentences) > 1:
+        short += " " + sentences[1]
+    if len(short) > limit:
+        short = short[:limit].rsplit(" ", 1)[0].rstrip(",;:") + " …"
+    return short
+
+
+def summary(tip_id, language=None):
+    """The short explanation of the (?) TIP_ID: the first sentence of what it is."""
+    return first_sentences(H.say(H.tip(tip_id).what, language))
+
+
+def term_text(label, language=None):
+    """The short explanation of a column title or form LABEL as shown (help_texts.TERMS), or ""."""
+    found = H.term(label, language)
+    return H.say(found, language) if found is not None else ""
+
+
+def hover(widget, text):
+    """TEXT as WIDGET's tooltip, unless it has one already (the control's own words win); True when set. A group
+    box explains itself only over its title (title_hover)."""
+    if not text or widget is None:
+        return False
+    if isinstance(widget, QGroupBox):
+        return title_hover(widget, text)
+    if widget.toolTip():
+        return False
+    widget.setToolTip(safe_tooltip(text))
+    return True
+
+
+class TitleTip(QObject):
+    """The explanation of a group box shown over its title only (not over everything inside the box)."""
+
+    def __init__(self, box, text):
+        super().__init__(box)
+        self.text = text
+        box.installEventFilter(self)
+
+    def eventFilter(self, box, event):  # noqa: N802
+        if event.type() == QEvent.Type.ToolTip and not box.toolTip() and title_rect(box).contains(event.pos()):
+            QToolTip.showText(event.globalPos(), safe_tooltip(self.text), box, title_rect(box))
+            return True
+        return False
+
+
+def title_rect(box):
+    """Where a group box's title is (its whole top band, so the words are easy to hit)."""
+    option = QStyleOptionGroupBox()
+    box.initStyleOption(option)
+    label = box.style().subControlRect(QStyle.ComplexControl.CC_GroupBox, option,
+                                       QStyle.SubControl.SC_GroupBoxLabel, box)
+    return label.adjusted(-4, -2, 4, 2) if label.isValid() and not label.isEmpty() else \
+        box.rect().adjusted(0, 0, 0, -max(0, box.height() - box.fontMetrics().height() - 6))
+
+
+def title_hover(box, text):
+    if not QGroupBox.title(box) or box.property("hoverTip"):
+        return False
+    box.setProperty("hoverTip", text)
+    TitleTip(box, text)
+    return True
+
+
+def hover_text(widget):
+    """What hovering WIDGET explains (its tooltip, or a group box's title explanation), "" for nothing."""
+    return widget.toolTip() or str(widget.property("hoverTip") or "")
+
+
+def label_of(widget):
+    """The label in front of WIDGET: its form label, or a QLabel just before it in its row; None."""
+    parent = widget.parentWidget()
+    if parent is None:
+        return None
+    for form in parent.findChildren(QFormLayout):
+        label = form.labelForField(widget)
+        if isinstance(label, QLabel):
+            return label
+    layout, index = layout_holding(parent.layout(), widget)
+    if layout is not None and index > 0:
+        before = layout.itemAt(index - 1).widget()
+        if isinstance(before, QLabel) and before.text():
+            return before
+    return None
+
+
+def explain_place(target, tip_id, how):
+    """The short explanation of a (?) of PLACES also on hover, where it can be shown without covering a whole area:
+    the control and its label ("after"), the title of the group box around it ("group"); a corner's table explains
+    its columns instead (explain_tree)."""
+    text = summary(tip_id)
+    if how == "after":
+        hover(target, text)
+        hover(label_of(target), text)
+    elif how == "group":
+        group = group_of(target)
+        if group is not None:
+            title_hover(group, text)
+    elif isinstance(target, QGroupBox):
+        title_hover(target, text)
+
+
+def explain_columns(view):
+    """The column titles of the table or tree VIEW that are terms of help_texts.TERMS explain themselves on hover
+    (the model's header tooltip, which a model of its own may give itself)."""
+    model = view.model()
+    if model is None:
+        return 0
+    count = 0
+    horizontal = Qt.Orientation.Horizontal
+    for section in range(model.columnCount()):
+        if model.headerData(section, horizontal, Qt.ItemDataRole.ToolTipRole):
+            continue
+        text = term_text(model.headerData(section, horizontal, Qt.ItemDataRole.DisplayRole) or "")
+        if text and model.setHeaderData(section, horizontal, safe_tooltip(text), Qt.ItemDataRole.ToolTipRole):
+            count += 1
+    return count
+
+
+def explain_tree(root):
+    """Short explanations on hover for everything in ROOT that has a help text: form labels (and their fields) and
+    group titles that are terms of help_texts.TERMS, a form label whose field explains itself, and the column
+    titles of tables and trees. What has a tooltip already keeps it; a second call adds only what is new."""
+    for form in root.findChildren(QFormLayout):
+        for row in range(form.rowCount()):
+            label_item = form.itemAt(row, QFormLayout.ItemRole.LabelRole)
+            field_item = form.itemAt(row, QFormLayout.ItemRole.FieldRole)
+            label = label_item.widget() if label_item is not None else None
+            field = field_item.widget() if field_item is not None else None
+            if not isinstance(label, QLabel) or not label.text():
+                continue
+            text = term_text(label.text())
+            if text:
+                hover(label, text)
+                hover(field, text)
+            elif field is not None and field.toolTip() and not label.toolTip():
+                tip = field.toolTip()  # the field's own words, made safe where they were set
+                label.setToolTip(tip)
+    for box in root.findChildren(QGroupBox):
+        hover(box, term_text(QGroupBox.title(box)))  # (a subclass may name something else title)
+    for view in root.findChildren(QAbstractItemView):
+        if isinstance(view, (QTableView, QTreeView)):
+            explain_columns(view)
+
+
+def explain_windows(app):
+    """Every dialog or window that gets the focus explains its terms on hover too (once per window): the dialogs
+    of the pages are made when they are opened."""
+    def focused(_old, new):
+        window = new.window() if new is not None else None
+        if window is not None and not window.property("hoverExplained"):
+            window.setProperty("hoverExplained", True)
+            explain_tree(window)
+    if not app.property("hoverExplains"):  # once per application, however many windows install it
+        app.setProperty("hoverExplains", True)
+        app.focusChanged.connect(focused)
 
 
 # -- the Help area --

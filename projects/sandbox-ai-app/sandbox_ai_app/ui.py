@@ -6,6 +6,7 @@ import os
 import re
 from pathlib import Path
 import shlex
+import textwrap
 import time
 
 from PySide6.QtCore import QByteArray, QEvent, QObject, QPoint, QProcess, QRect, QSize, Qt, QTimer, Signal, qVersion
@@ -5544,7 +5545,8 @@ class MainWindow(QMainWindow):
         self.make_docks()
         help_view.OPENER = self.show_help
         help_view.set_shown(backend.setting("help_buttons"))  # the setting; the Help page and F1 stay either way
-        self.help_buttons = help_view.install(self)  # the (?)s of the pages' areas and controls
+        self.help_buttons = help_view.install(self)  # the (?)s of the pages' areas and controls, hover explanations
+        help_view.explain_windows(QApplication.instance())  # and those of the dialogs, when they are opened
         self.statusBar().showMessage(tr("sandbox-ai {version} from {path}", version=sai.version(), path=sai.directory))
         self.make_busy_indicator()
         self.tray, self.tray_timer = None, None
@@ -5896,6 +5898,8 @@ class MainWindow(QMainWindow):
         self.show_project_tabs(key)
         if key in help_view.H.PAGE_SECTIONS and hasattr(self, "page_help"):
             self.page_help.set_tip(f"page.{key}")
+        if hasattr(self, "help_buttons") and isinstance(getattr(self, key, None), QWidget):
+            help_view.explain_tree(getattr(self, key))  # what the page made since (it fills some parts later)
         for name, keys in getattr(self, "terminal_keys", {}).items():
             self.actions[name].setShortcuts([] if key == "terminals" else keys)
 
@@ -6172,11 +6176,15 @@ class MainWindow(QMainWindow):
         return tr(next(title for _, pages in SECTIONS for k, title in pages if k == key))
 
     def nav_tooltip(self, key):
-        """The page's title (in the strip of icons), or its title and shortcut."""
+        """The page's title (in the strip of icons), or its title and shortcut; below it what the page is for, in a
+        sentence (its help text: it stays when the (?)s are off)."""
         index = self.keys.index(key)
         if self.compact_nav or index >= SHORTCUT_PAGES:
-            return self.nav_title(key)
-        return tr("{page} (Ctrl+{number})", page=self.nav_title(key), number=index + 1)
+            title = self.nav_title(key)
+        else:
+            title = tr("{page} (Ctrl+{number})", page=self.nav_title(key), number=index + 1)
+        about = help_view.summary(f"page.{key}") if f"page.{key}" in help_view.H.TIPS else ""
+        return "\n".join([title, *textwrap.wrap(about, 60)])
 
     def nav_menu(self, position):
         menu = QMenu(self)

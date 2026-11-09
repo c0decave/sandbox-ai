@@ -23,12 +23,12 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from . import backend, notifications, presets as PR, project_trust as PT, theme
+from . import backend, help_texts, help_view, notifications, presets as PR, project_trust as PT, theme
 from .board_view import PathEdit
 from .files import printable
 from .i18n import tr
 from .widgets import (
-    MONO, ask_first, background, inform, outcome, plain_label, warn, shown_as_text,
+    MONO, ask_first, background, inform, outcome, plain_label, safe_tooltip, warn, shown_as_text,
 )
 
 LOCAL = "local"
@@ -337,7 +337,6 @@ class SettingsDialog(QDialog):
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs, 1)
         # A (?) beside the tabs explains the tab shown (help_texts.SETTINGS_TABS, in the tabs' order).
-        from . import help_texts, help_view
         self.tab_help = help_view.HelpButton(help_texts.SETTINGS_TABS[0])
         corner = QWidget()
         corner_row = QHBoxLayout(corner)
@@ -491,6 +490,18 @@ class SettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         buttons.accepted.connect(self.accept)
         layout.addWidget(buttons)
+        self.explain()
+
+    def explain(self):
+        """A short explanation on hover for each tab and setting (they stay when the (?)s are off)."""
+        for index, ident in enumerate(help_texts.SETTINGS_TABS[:self.tabs.count()]):
+            self.tabs.setTabToolTip(index, safe_tooltip(help_view.summary(ident)))
+        for key, widget in {**self.fields, "autostart": self.autostart}.items():
+            text = help_texts.SETTING_TIPS.get(key)
+            if text is not None:
+                help_view.hover(widget, help_texts.say(text))
+                help_view.hover(help_view.label_of(widget), help_texts.say(text))
+        help_view.explain_tree(self)
 
     # -- fields --
 

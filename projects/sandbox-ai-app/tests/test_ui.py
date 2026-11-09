@@ -1860,14 +1860,14 @@ def test_the_navigation_folds_and_shrinks_to_save_room(window):
     margins = nav.contentsMargins()
     assert nav.width() == ui.COMPACT_NAV_WIDTH + margins.left() + margins.right()
     assert not window.brand.isVisibleTo(window)
-    assert nav.item(rows["files"]).text() == "" and nav.item(rows["files"]).toolTip() == "Files"
+    assert nav.item(rows["files"]).text() == "" and nav.item(rows["files"]).toolTip().split("\n")[0] == "Files"
     assert not nav.isRowHidden(rows["files"])  # the strip shows every page, folded or not
     assert all(nav.isRowHidden(header) for header, _ in window.section_rows.values())
     assert window.actions["nav-compact"].isChecked() and window.state.get("nav_compact") is True
     window.set_compact_nav(False)
     assert ui.NAV_WIDTH <= nav.width() <= ui.NAV_MAX_WIDTH and nav.item(rows["files"]).text() == "Files"
     assert nav.isRowHidden(rows["files"])  # its section is still folded
-    assert nav.item(rows["launch"]).toolTip() == "Start (Ctrl+1)"
+    assert nav.item(rows["launch"]).toolTip().split("\n")[0] == "Start (Ctrl+1)"  # then what the page is for
 
 
 def test_a_start_in_the_apps_terminal_opens_one_tab_not_two(window, env, monkeypatch, tmp_path):

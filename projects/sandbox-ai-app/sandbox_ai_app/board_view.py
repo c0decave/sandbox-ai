@@ -695,13 +695,19 @@ class PartsDelegate(QStyledItemDelegate):
         self.parts = parts
 
     def mark(self, rect):
-        """Where the (?) of the row in RECT is: at its right end, inside the visible part of the list."""
+        """Where the (?) of the row in RECT is: at its right end, inside the visible part of the list; an empty
+        rectangle while the (?)s are switched off (the setting help_buttons)."""
+        if not help_view.buttons_shown():
+            return QRect()
         size = help_view.SIZE
         right = min(rect.right(), self.parts.viewport().width() - 1)
         return QRect(right - size - 4, rect.center().y() - size // 2 + 1, size, size)
 
     def paint(self, painter, option, index):
         mark = self.mark(option.rect)
+        if mark.isNull():  # no (?): the title has the whole row
+            super().paint(painter, option, index)
+            return
         text_option = QStyleOptionViewItem(option)
         text_option.rect = QRect(option.rect.left(), option.rect.top(), max(0, mark.left() - 4 - option.rect.left()),
                                  option.rect.height())
@@ -766,6 +772,12 @@ class PartsList(QListWidget):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)  # long titles are elided
         self.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.setItemDelegate(PartsDelegate(self))
+        help_view.on_shown_changed(self.help_shown)
+
+    def help_shown(self, _shown):
+        """The (?) of each row follows the setting help_buttons: painted again with or without it."""
+        self.hovered = None
+        self.viewport().update()
 
     def kind_of(self, row):
         item = self.item(row)

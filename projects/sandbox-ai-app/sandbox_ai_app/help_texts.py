@@ -862,3 +862,207 @@ SETTINGS_TABS = ("settings.appearance", "settings.window", "settings.polling", "
 def tip(ident):
     """The Tip of IDENT (KeyError for an unknown one: every (?) is checked by the tests)."""
     return TIPS[ident]
+
+
+# -- short explanations on hover: they stay when the (?)s are switched off --
+# Column titles and form labels with a short explanation, by their English words (the tr() key of the label): a
+# table header or a form label showing these words, in either language, gets the explanation as its tooltip
+# (help_view.explain_tree). Only words that mean the same in every table and form of the app are listed.
+
+def _terms(*pairs):
+    return {key: Text(en, de) for key, en, de in pairs}
+
+
+TERMS = _terms(
+    # Approvals
+    ("Question", "What the sandbox asks to do.", "Was die Sandbox tun möchte."),
+    ("Asked", "When the sandbox asked.", "Wann die Sandbox gefragt hat."),
+    ("Refused in", "How long the sandbox still waits for your answer; then the request is refused.",
+     "Wie lange die Sandbox noch auf Ihre Antwort wartet; danach wird die Anfrage abgelehnt."),
+    ("Answer", "What was answered: allowed or blocked.", "Was geantwortet wurde: erlaubt oder blockiert."),
+    ("Scope", "How long an answer holds: once, for this run, or always for the project.",
+     "Wie lange eine Antwort gilt: einmal, für diesen Lauf oder immer für das Projekt."),
+    ("Allowed", "What is allowed or blocked for good in this project: a host, an address, a tool.",
+     "Was in diesem Projekt dauerhaft erlaubt oder blockiert ist: ein Host, eine Adresse, ein Werkzeug."),
+    # Sandboxes, connections, files
+    ("Backend", "What isolates the sandbox: Podman (a container) or Bubblewrap (namespaces, no service).",
+     "Was die Sandbox abschottet: Podman (ein Container) oder Bubblewrap (Namespaces, ohne Dienst)."),
+    ("Proxy", "Whether the connection proxy checks this start's network traffic.",
+     "Ob der Verbindungs-Proxy den Netzverkehr dieses Starts prüft."),
+    ("Method", "The HTTP method of the request (GET, POST …), or CONNECT for a tunnel.",
+     "Die HTTP-Methode der Anfrage (GET, POST …) oder CONNECT für einen Tunnel."),
+    ("Methods", "The HTTP methods allowed for this host and path.",
+     "Die HTTP-Methoden, die für diesen Host und Pfad erlaubt sind."),
+    ("Target", "Where the connection went: host and port, or the URL.",
+     "Wohin die Verbindung ging: Host und Port oder die URL."),
+    ("Bytes", "How much data went through.", "Wie viele Daten übertragen wurden."),
+    ("Points to (not followed)", "Where a link points; the app shows it but never follows it.",
+     "Wohin ein Link zeigt; die App zeigt es, folgt ihm aber nie."),
+    ("Owner", "The user and group the file belongs to.", "Benutzer und Gruppe, denen die Datei gehört."),
+    ("Workspace", "The project folder, mounted at /work.", "Der Projektordner, eingebunden unter /work."),
+    # Kits
+    ("Brings", "What the kit brings into the sandbox HOME: skills, agents, commands, hooks, plugins.",
+     "Was das Kit ins Sandbox-HOME mitbringt: Skills, Agenten, Befehle, Hooks, Plugins."),
+    ("This project", "Whether the current project uses this kit (--kit in its .sandbox-ai.json).",
+     "Ob das aktuelle Projekt dieses Kit nutzt (--kit in seiner .sandbox-ai.json)."),
+    ("Marketplace", "A plugin marketplace the agent knows: where its plugins come from.",
+     "Ein Plugin-Marktplatz, den der Agent kennt: woher seine Plugins kommen."),
+    ("This kit", "Whether the plugin is in the chosen kit.", "Ob das Plugin im gewählten Kit ist."),
+    ("Marketplace source", "Where the marketplace comes from: a GitHub repository (owner/repo), a Git URL or a "
+     "folder.", "Woher der Marktplatz kommt: ein GitHub-Repository (owner/repo), eine Git-URL oder ein Ordner."),
+    # MCP servers
+    ("Serves", "The agent starts this server is connected to.",
+     "Die Agent-Starts, mit denen dieser Server verbunden ist."),
+    ("Runs", "What the server runs: its image or its command.", "Was der Server ausführt: sein Image oder seinen Befehl."),
+    ("Catalog", "The catalog the server comes from (mcp: sandbox-ai-mcp, hub: axross-mcp-hub).",
+     "Der Katalog, aus dem der Server stammt (mcp: sandbox-ai-mcp, hub: axross-mcp-hub)."),
+    ("Entry", "The catalog's name for the server; adding it defines it under a name of yours.",
+     "Der Name des Servers im Katalog; Hinzufügen definiert ihn unter einem Namen Ihrer Wahl."),
+    ("Network", "The network the server gets: none, or only the hosts it needs.",
+     "Das Netz, das der Server bekommt: keines oder nur die Hosts, die er braucht."),
+    ("Published", "When the catalog published this entry.", "Wann der Katalog diesen Eintrag veröffentlicht hat."),
+    ("Signature", "Whether the entry's signature was checked against the catalog's key.",
+     "Ob die Signatur des Eintrags gegen den Schlüssel des Katalogs geprüft wurde."),
+    ("Name for --mcp", "The name a start uses for this server: --mcp NAME.",
+     "Der Name, mit dem ein Start diesen Server nutzt: --mcp NAME."),
+    ("Folders", "Folders of the host the server may read or write; nothing else of your files.",
+     "Ordner des Hosts, die der Server lesen oder schreiben darf; sonst nichts von Ihren Dateien."),
+    ("Variables", "Environment variables set for the server.", "Umgebungsvariablen, die für den Server gesetzt werden."),
+    ("Variables from your environment", "Variables copied by name from your own environment.",
+     "Variablen, die per Name aus Ihrer eigenen Umgebung übernommen werden."),
+    ("Processes", "The most processes it may run at once.", "Wie viele Prozesse es höchstens gleichzeitig ausführen darf."),
+    ("VPN", "The VPN profile it is reached through, if any.", "Das VPN-Profil, über das es erreicht wird, falls eines."),
+    # LLM servers
+    ("Agents", "The agents it is for.", "Die Agenten, für die es gedacht ist."),
+    ("Default model", "The model a start uses when it names only the server (--llm NAME).",
+     "Das Modell, das ein Start nutzt, wenn er nur den Server nennt (--llm NAME)."),
+    ("Secret for the API key (optional)", "The name of a secret that holds the key; the key never enters a sandbox.",
+     "Der Name eines Geheimnisses mit dem Schlüssel; der Schlüssel kommt nie in eine Sandbox."),
+    ("Headers from secrets", "Further HTTP headers whose values come from secrets, such as an organization ID.",
+     "Weitere HTTP-Header, deren Werte aus Geheimnissen kommen, etwa eine Organisations-ID."),
+    ("CA certificate", "The certificate authority of a server with a TLS certificate of its own.",
+     "Die Zertifizierungsstelle eines Servers mit eigenem TLS-Zertifikat."),
+    ("Loaded", "Whether the server holds the model in memory now.", "Ob der Server das Modell gerade im Speicher hält."),
+    ("Params", "The model's size in parameters (7B: seven billion).",
+     "Die Größe des Modells in Parametern (7B: sieben Milliarden)."),
+    ("Quant", "How coarsely the weights are stored: Q4 is smaller and faster, Q8 closer to the original.",
+     "Wie grob die Gewichte gespeichert sind: Q4 ist kleiner und schneller, Q8 näher am Original."),
+    ("Context", "How many tokens the model reads at once.", "Wie viele Tokens das Modell auf einmal liest."),
+    # VPN profiles
+    ("Provider", "The VPN service of the profile, if it uses one (Mullvad, Tailscale …).",
+     "Der VPN-Dienst des Profils, falls es einen nutzt (Mullvad, Tailscale …)."),
+    ("Resolvers", "The DNS servers the sandbox asks behind the VPN.",
+     "Die DNS-Server, die die Sandbox hinter dem VPN fragt."),
+    ("Check URLs", "Services that echo the address traffic leaves from: the start checks that it is the VPN's.",
+     "Dienste, die die Adresse nennen, von der der Verkehr ausgeht: Der Start prüft, dass es die des VPN ist."),
+    # Identities and credentials
+    ("Commits as", "The name and e-mail address in the agent's commits.",
+     "Der Name und die E-Mail-Adresse in den Commits des Agenten."),
+    ("Git servers", "The Git servers this identity logs in to, through the connection proxy.",
+     "Die Git-Server, bei denen sich diese Identität über den Verbindungs-Proxy anmeldet."),
+    ("Publishes to", "The registries and forges it may publish to (--publish).",
+     "Die Registries und Forges, in die sie veröffentlichen darf (--publish)."),
+    ("Git server", "The Git host the login is for, such as github.com.",
+     "Der Git-Host, für den die Anmeldung gilt, etwa github.com."),
+    ("Secret", "The name of the secret (sandbox-ai secrets) that holds the key or token.",
+     "Der Name des Geheimnisses (sandbox-ai secrets), das den Schlüssel oder Token enthält."),
+    ("Kept in", "Where the secret is stored: your keyring or a private file.",
+     "Wo das Geheimnis liegt: in Ihrem Schlüsselbund oder in einer privaten Datei."),
+    ("Used by", "The starts, servers and logins that name this secret.",
+     "Die Starts, Server und Anmeldungen, die dieses Geheimnis nennen."),
+    ("Where / used by", "Where it is kept, and which starts or servers use it.",
+     "Wo es aufbewahrt wird und welche Starts oder Server es nutzen."),
+    # Hosts
+    ("SSH", "The SSH address the app reaches the host at.", "Die SSH-Adresse, unter der die App den Host erreicht."),
+    ("Answers", "Whether the host answered the last time, or when it was last seen.",
+     "Ob der Host zuletzt geantwortet hat, oder wann er zuletzt gesehen wurde."),
+    ("Running", "How many starts run there now.", "Wie viele Starts dort gerade laufen."),
+    ("Questions", "How many questions of its sandboxes wait for an answer.",
+     "Wie viele Fragen seiner Sandboxen auf eine Antwort warten."),
+    # Images
+    ("Built", "Whether the image exists in Podman.", "Ob das Image in Podman vorhanden ist."),
+    ("Extension", "Whether your extension (packages and files on top of the base image) changed since the build.",
+     "Ob sich Ihre Erweiterung (Pakete und Dateien über dem Basis-Image) seit dem Bau geändert hat."),
+    ("Agent version", "The version of the agent inside the image.", "Die Version des Agenten im Image."),
+    ("Path in the image", "Where the file lands in the image.", "Wohin die Datei im Image kommt."),
+    # Teams
+    ("Members", "The agents of the team; the first one leads.", "Die Agenten des Teams; der erste leitet."),
+    ("Role", "Lead or member: the lead hands the others tasks.",
+     "Leitung oder Mitglied: Die Leitung gibt den anderen Aufgaben."),
+    # Privacy check and canaries
+    ("Severity", "How serious the finding is.", "Wie ernst der Fund ist."),
+    ("Rule", "The privacy rule that matched.", "Die Datenschutzregel, die angeschlagen hat."),
+    ("Canary", "The canary (a decoy file with a token) that was touched.",
+     "Der Canary (eine Köderdatei mit Token), der angefasst wurde."),
+    # Settings
+    ("Preset directories", "Folders with presets of your own; the gallery shows them too.",
+     "Ordner mit eigenen Vorlagen; die Galerie zeigt sie auch."),
+    ("Trusted projects", "Projects whose .sandbox-ai.json you trusted; a changed file is asked about again.",
+     "Projekte, deren .sandbox-ai.json Sie vertraut haben; nach einer Änderung wird wieder gefragt."),
+)
+
+# The settings of the Settings dialog, by their key (backend.SETTINGS).
+SETTING_TIPS = _terms(
+    ("theme", "The app's colours and shapes.", "Farben und Formen der App."),
+    ("language", "The language of the app; it applies at the next start.",
+     "Die Sprache der App; sie gilt ab dem nächsten Start."),
+    ("guide_nodes", "A new part of the board asks what matters for it, one question at a time.",
+     "Ein neues Teil der Tafel fragt nacheinander, worauf es ankommt."),
+    ("guide_tour", "At the first start the app offers a tour of its pages.",
+     "Beim ersten Start bietet die App eine Tour durch ihre Seiten an."),
+    ("help_buttons", "Off hides every (?); these short explanations on hover, the Help page, the tours and F1 stay.",
+     "Aus blendet jedes (?) aus; diese kurzen Erklärungen beim Zeigen, die Hilfe, die Touren und F1 bleiben."),
+    ("intro", "A short animation when the app starts; Esc skips it.",
+     "Eine kurze Animation beim Start der App; Esc überspringt sie."),
+    ("tray", "Closing the window keeps the app in the system tray, so questions are still answered.",
+     "Das Schließen des Fensters lässt die App im System-Tray, damit Fragen weiter beantwortet werden."),
+    ("autostart", "The app starts in the tray when you log in.", "Die App startet bei Ihrer Anmeldung im Tray."),
+    ("terminal", "Where builds, logins and other commands run: in a tab of the app or in a terminal window.",
+     "Wo Builds, Anmeldungen und andere Befehle laufen: in einem Tab der App oder in einem Terminalfenster."),
+    ("web_without_sandbox", "Terminal tabs work without free user namespaces then, but without Chromium's "
+     "protection.", "Terminal-Tabs funktionieren dann ohne freie User-Namespaces, aber ohne den Schutz von Chromium."),
+    ("notify", "A desktop notification for each new question of a sandbox.",
+     "Eine Desktop-Benachrichtigung für jede neue Frage einer Sandbox."),
+    ("auto_tabs", "Each session or sandbox that starts gets a terminal tab of its own.",
+     "Jede Sitzung oder Sandbox, die startet, bekommt einen eigenen Terminal-Tab."),
+    ("notify_seconds", "How long a notification stays on the screen.", "Wie lange eine Benachrichtigung zu sehen ist."),
+    ("notify_style", "In the app's colours at a corner of the screen, or as the desktop's own notification.",
+     "In den Farben der App an einer Ecke des Bildschirms oder als eigene Benachrichtigung des Desktops."),
+    ("debug", "Logs every step with its time and result, to find a problem.",
+     "Protokolliert jeden Schritt mit Zeit und Ergebnis, um einen Fehler zu finden."),
+    ("approvals_interval", "How often the app looks for new questions; a question without an answer is refused "
+     "after a while.", "Wie oft die App nach neuen Fragen sieht; eine Frage ohne Antwort wird nach einer Weile "
+     "abgelehnt."),
+    ("sandboxes_interval", "How often the list of running sandboxes is read again.",
+     "Wie oft die Liste der laufenden Sandboxen neu gelesen wird."),
+    ("connections_interval", "How often the connection log is read again.",
+     "Wie oft das Verbindungsprotokoll neu gelesen wird."),
+    ("sandbox_ai_home", "A sandbox-ai checkout to use instead of the sandbox-ai command; it applies at the next "
+     "start.", "Ein sandbox-ai-Checkout statt des Befehls sandbox-ai; er gilt ab dem nächsten Start."),
+    ("default_agent", "The agent a new board starts with.", "Der Agent, mit dem eine neue Tafel beginnt."),
+    ("default_backend", "What isolates a new project: Podman (containers) or Bubblewrap.",
+     "Was ein neues Projekt abschottet: Podman (Container) oder Bubblewrap."),
+    ("default_template", "The preset a new board starts from.", "Die Vorlage, mit der eine neue Tafel beginnt."),
+    ("board_grid", "Moved parts snap to a grid of this many pixels; 0 switches it off.",
+     "Verschobene Teile rasten in einem Raster dieser Pixelzahl ein; 0 schaltet es ab."),
+    ("telemetry", "Whether the agents send usage statistics, error reports and update checks; off is "
+     "recommended.", "Ob die Agenten Nutzungsstatistiken, Fehlerberichte und Update-Abfragen senden; aus wird "
+     "empfohlen."),
+)
+
+
+def term(label, language=None):
+    """The short explanation (a Text) of a column title or form LABEL shown in the app's language (or LANGUAGE),
+    or None. LABEL may end in a colon; & (a shortcut's mark) is ignored."""
+    words = " ".join(str(label).replace("&&", "\0").replace("&", "").replace("\0", "&").split()).rstrip(":").strip()
+    if not words:
+        return None
+    language = language or i18n.language()
+    found = _TERMS_SHOWN.get(language)
+    if found is None:
+        found = _TERMS_SHOWN[language] = {
+            ((i18n.TEXTS.get(key) or {}).get(language) or key): text for key, text in TERMS.items()}
+    return found.get(words) or TERMS.get(words)
+
+
+_TERMS_SHOWN = {}  # language: {a term as shown in it: its Text}
