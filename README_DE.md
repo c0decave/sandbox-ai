@@ -2831,11 +2831,11 @@ gestoppter Start später zurückkommen kann: eine neue Sandbox mit denselben
 Optionen und demselben HOME, in der der Agent sein letztes Gespräch fortsetzt.
 
 ```bash
-sandbox-ai claude -w ~/src/app                    # claude-app-3f9a: in tmux, dieses Terminal verbunden
+sandbox-ai claude -w ~/src/app                    # brisk-otter-lantern: in tmux, dieses Terminal verbunden
 # Ctrl-b d oder das Schließen des Terminals löst; der Agent arbeitet weiter.
 sandbox-ai list                                    # was läuft oder pausiert, und die aufbewahrten Starts (auch: ps)
-sandbox-ai attach claude-app-3f9a                  # wieder hinein
-sandbox-ai rename claude-app-3f9a app              # ein anderer Name; die Run-ID bleibt
+sandbox-ai attach brisk-otter-lantern              # wieder hinein
+sandbox-ai rename brisk-otter-lantern app          # ein anderer Name; die Run-ID bleibt
 sandbox-ai pause app                               # jeden Prozess einfrieren
 sandbox-ai resume app                              # wieder auftauen
 sandbox-ai stop app                                # beenden; HOME, Optionen und Logs bleiben
@@ -2915,6 +2915,12 @@ unbenutzt sind, und die Verläufe verschwundener Namen; `--dry-run` listet nur,
 `~/.config/sandbox-ai/defaults.json` verfallen aufbewahrte Starts: Jeder neue
 Start entfernt die gestoppten, die länger als N Tage unbenutzt sind (und sagt
 es), und `sandbox-ai gc` nimmt N, wenn kein `--older-than` angegeben ist.
+`gc` entfernt auch die eigenen Pods von sandbox-ai, in denen nichts mehr läuft (von einem abgebrochenen
+Starter oder einem Neustart des Rechners), und nennt die laufenden Pods, die kein Start kennt, mit dem Befehl,
+der sie beendet (`sandbox-ai stop POD`). Ein Start, dessen Supervisor weg ist, während sein Pod noch läuft, ist
+in `sandbox-ai list` **orphaned** (verwaist): Das Terminal einer Session lässt sich noch verbinden,
+`sandbox-ai stop NAME` stoppt und entfernt seinen Pod, und `sandbox-ai resume NAME` setzt ihn mit seinem HOME
+und seinem letzten Gespräch fort.
 
 **Wiedergeburt.** `sandbox-ai resume NAME` taut einen pausierten Start auf; bei
 einem gestoppten, aufbewahrten Start entsteht eine neue Sandbox mit denselben
@@ -2999,7 +3005,7 @@ mcp-demo                       mcp      -         running  -     2026-11-08 15:0
 
 Im Terminal ist die Tabelle farbig: die Überschriften fett, NAME und KIND nach
 Art (Session cyan, Lauf blau, MCP-Server magenta, Helfer violett), STATE nach
-Zustand (läuft grün, pausiert gelb, beschädigt rot, gestoppt grau).
+Zustand (läuft grün, pausiert gelb, verwaist und beschädigt rot, gestoppt grau).
 `--no-color` (`-nc`, oder `--color=never`) schaltet die Farbe ab,
 `--color=always` behält sie auch in einer Pipe; eine Pipe, `NO_COLOR`
 ([no-color.org](https://no-color.org)) und `TERM=dumb` bedeuten keine Farbe,

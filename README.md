@@ -2664,11 +2664,11 @@ later: a new sandbox with the same options and HOME, in which the agent
 continues its last conversation.
 
 ```bash
-sandbox-ai claude -w ~/src/app                    # claude-app-3f9a: in tmux, this terminal attached
+sandbox-ai claude -w ~/src/app                    # brisk-otter-lantern: in tmux, this terminal attached
 # Ctrl-b d or closing the terminal detaches; the agent works on.
 sandbox-ai list                                    # what runs or is paused, and the kept starts (also: ps)
-sandbox-ai attach claude-app-3f9a                  # back into it
-sandbox-ai rename claude-app-3f9a app              # another name; the run id stays
+sandbox-ai attach brisk-otter-lantern              # back into it
+sandbox-ai rename brisk-otter-lantern app          # another name; the run id stays
 sandbox-ai pause app                               # freeze every process
 sandbox-ai resume app                              # thaw it
 sandbox-ai stop app                                # end it; HOME, options and logs are kept
@@ -2742,6 +2742,11 @@ histories of names that are gone; `--dry-run` only lists, `--json` for
 programs. With `"keep_days": N` in `~/.config/sandbox-ai/defaults.json` kept
 starts expire: every new start removes the stopped ones unused for more than N
 days (and says so), and `sandbox-ai gc` uses N when no `--older-than` is given.
+`gc` also removes sandbox-ai's own pods that nothing runs in any more (left by a killed launcher or a
+reboot) and names the running pods no start knows, with the command that ends them
+(`sandbox-ai stop POD`). A start whose supervisor is gone while its pod still runs is **orphaned** in
+`sandbox-ai list`: a session's terminal can still be attached to, `sandbox-ai stop NAME` stops and removes
+its pod, and `sandbox-ai resume NAME` continues it with its HOME and its last conversation.
 
 **Rebirth.** `sandbox-ai resume NAME` thaws a paused start; on a stopped kept
 start it creates a new sandbox with the same options and HOME (a *rebirth*,
@@ -2822,7 +2827,7 @@ mcp-demo                       mcp      -         running  -     2026-11-08 15:0
 
 On a terminal the table is coloured: the headers bold, NAME and KIND by kind
 (session cyan, run blue, MCP server magenta, helper violet), STATE by state
-(running green, paused yellow, damaged red, stopped grey). `--no-color` (`-nc`,
+(running green, paused yellow, orphaned and damaged red, stopped grey). `--no-color` (`-nc`,
 or `--color=never`) turns colour off, `--color=always` keeps it when piped; a
 pipe, `NO_COLOR` ([no-color.org](https://no-color.org)) and `TERM=dumb` mean
 none, and `--json` is never coloured. A server records the start it was started
