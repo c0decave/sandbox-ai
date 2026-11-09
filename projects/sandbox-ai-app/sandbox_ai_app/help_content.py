@@ -953,7 +953,7 @@ SECTIONS = (
          "Werte noch auszufüllen sind. Suchen Sie im Suchfeld; Enter oder ein Doppelklick legt die Tafel an.\n\n"
          "Die Vorlagen sind die des Hosts, für den die Tafel (oder der Start) ist, ein Katalog je Host:\n\n"
          "- Eingebaute Vorlagen der App: Einfach, Entwicklung, Recherche, Lokale und entfernte LLMs, "
-         "Privatsphäre und VPN, Teams und Richtlinien.\n"
+         "Datenschutz und VPN, Teams und Richtlinien.\n"
          "- Die Vorlagen von sandbox-ai: die der Kommandozeile auf diesem Host (`sandbox-ai presets list --json` "
          "dort), eingebaute, aus seinen zusätzlichen Vorlagen-Ordnern und die eigenen seines Benutzers. Haben die "
          "App und das sandbox-ai dieses Hosts eine Vorlage mit derselben ID (tor, local-api, development …), wird "

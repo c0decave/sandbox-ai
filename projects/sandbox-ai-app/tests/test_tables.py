@@ -81,6 +81,8 @@ def findings(view, where):
     compact = getattr(view, "fit_compact", set())
     found = []
     for column in range(header.count()):
+        if header.isSectionHidden(column):
+            continue  # a column hidden while it has nothing to say (the Kits table's "This project": review 6)
         width = header.sectionSize(column)
         if width < title_text(view, column):
             found.append(f"{where}: column {column} {width} px, its title needs {title_text(view, column)}")

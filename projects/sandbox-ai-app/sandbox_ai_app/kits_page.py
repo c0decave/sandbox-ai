@@ -34,17 +34,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import backend, theme
+from . import backend, tables, theme
 from .files import printable
 from .host_choice import on_host
 from .state import choose_file, choose_folder
 from .i18n import N_, tr
 from .widgets import (
-    MessageText, Task, ask_first, background, busy, compact_combo, fill, flow, inform, outcome, plain_label, row_key,
+    MessageText, Task, ask_first, background, compact_combo, fill, flow, inform, outcome, plain_label, row_key,
     safe_tooltip, select_keys, selected_keys, selected_rows, set_enabled, show_text, table, warn,
 )
 
 LOCAL = "local"
+PROJECT_COLUMN = 4  # the Kits table's "This project" column (a check mark for the current project's kits)
 
 KIND_TITLES = {"always": N_("always (sandbox-ai)"), "default": N_("always (default kit)"), "builtin": N_("built-in"),
                "user": N_("yours")}
@@ -355,6 +356,7 @@ class KitsPage(QWidget):
         self.installed, self.kits_host = set(), None  # kits_host: whose kits the rows are
         # the marketplace browser: `plugins marketplaces --json` of market_host (None: nothing read)
         self.market_data, self.market_host, self.market_token, self.market_old = None, None, 0, False
+        self.market_reading = False  # a marketplaces read runs (what a disabled button says meanwhile)
         self.markets, self.market_kits = {}, {}
         layout = QVBoxLayout(self)
         from .host_choice import HostChooser
@@ -407,9 +409,12 @@ class KitsPage(QWidget):
         split = self.split = QSplitter(Qt.Orientation.Horizontal)
         kits_box = QGroupBox(tr("Kits"))
         kits_layout = QVBoxLayout(kits_box)
+        # The kit's name and kind whole; the agents give way first; "This project" only while it can say something
+        # (review 6: the names were cut to "b…n" and the empty project column took the width of "Brings").
         self.table = table([tr("Kit"), tr("Kind"), tr("Agents"), tr("Brings"), tr("This project")], stretch=3,
-                           compact=(1, 2, 4))
+                           compact=(0, 1, PROJECT_COLUMN))
         self.table.setAccessibleName(tr("Kits"))
+        self.table.setColumnHidden(PROJECT_COLUMN, True)  # shown with a project of this machine (show_inventory)
         self.table.itemSelectionChanged.connect(self.selection_changed)
         kits_layout.addWidget(self.table, 1)
         self.use_button = QPushButton(tr("Use in the current project…"))
@@ -624,6 +629,7 @@ class KitsPage(QWidget):
             self.clear_rows()  # this host's kits are not known: none of another's stay
             self.summary.setText(tr("Cannot list the kits: {error}", error=printable(error)))
             self.update_buttons()
+            self.update_market_buttons()  # Enable, Disable, Remove … as the marketplaces read say (review 6)
             return
         self.show_inventory(result, host)
         self.update_market_buttons()
@@ -654,7 +660,12 @@ class KitsPage(QWidget):
                          ", ".join(sorted(agents)), printable(" · ".join(brings)) or "–", self.use_text(kit)])
             colors.append("bad" if problem else "muted" if replaced else "warn" if waiting else None)
             keys.append(key)
+        project_shown = bool(self.project) and self.host() == LOCAL  # use_text says nothing otherwise
+        refit = self.table.isColumnHidden(PROJECT_COLUMN) == project_shown
+        self.table.setColumnHidden(PROJECT_COLUMN, not project_shown)
         fill(self.table, rows, colors, keys=keys)
+        if refit:
+            tables.fit_columns(self.table, force=True)
         store = printable(inventory.get("store") or "")
         listed = ", ".join(sorted(self.installed)) or tr("none")
         self.store_text = tr("Plugin store {path}: {list}", path=store, list=printable(listed))
@@ -750,8 +761,8 @@ class KitsPage(QWidget):
         self.update_buttons()
 
     def update_buttons(self):
-        if busy(self):
-            return
+        if self.task.running:
+            return  # a change runs: its buttons stay off until it ends (a read never holds them back)
         kit = self.current()
         kind = kit.get("kind") if kit else None
         none = tr("Select a kit first.")
@@ -800,6 +811,7 @@ class KitsPage(QWidget):
 
     def clear_markets(self, status=""):
         self.market_data, self.market_host, self.markets, self.market_kits = None, None, {}, {}
+        self.market_reading = False
         self.market_kit.blockSignals(True)
         self.market_kit.clear()
         self.market_kit.blockSignals(False)
@@ -823,6 +835,7 @@ class KitsPage(QWidget):
             self.update_market_buttons()
             return
         self.market_old = False
+        self.market_reading = True
         self.market_status.setText(tr("Reading the marketplaces of {host}…", host=self.hosts.label(host)))
         # (its owner is the browser, not the page: a read never holds back the kits' buttons, nor they it)
         background(lambda: self.sai.host_marketplaces(host), owner=self.market_split, timeout=150,
@@ -831,6 +844,7 @@ class KitsPage(QWidget):
     def markets_loaded(self, token, host, result, error):
         if token != self.market_token or host != self.host():
             return  # asked for another host (or before another refresh): never shown under this one
+        self.market_reading = False
         if isinstance(error, backend.HostTooOld):
             self.market_old = True
             self.clear_markets(tr("The sandbox-ai on {host} has no marketplace browser yet (it came with 0.1.78): "
@@ -1025,7 +1039,8 @@ class KitsPage(QWidget):
         if self.market_old:
             return self.market_status.text() or tr("This host has no marketplace browser yet: update it.")
         if self.market_data is None:
-            return tr("The marketplaces are not read yet: Refresh.")
+            return (tr("Reading the marketplaces of {host}…", host=self.hosts.label(self.host())) if self.market_reading
+                    else tr("The marketplaces are not read yet: Refresh."))
         if kit is None:
             return tr("Create a kit of yours first, or use the default kit.")
         if not kit.get("editable") or kit.get("kind") == "builtin":
@@ -1093,8 +1108,8 @@ class KitsPage(QWidget):
         }
 
     def update_market_buttons(self):
-        if busy(self):
-            return
+        if self.task.running:
+            return  # (as update_buttons: the kits read after a change must not keep the buttons as they were)
         market = self.picked()
         self.import_button.setText(tr("Import for Claude") if market and market.get("agent") == "codex" else
                                    tr("Import with Claude's plugins"))

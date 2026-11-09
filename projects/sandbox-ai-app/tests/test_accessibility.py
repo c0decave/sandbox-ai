@@ -59,8 +59,27 @@ def unnamed(top):
     return found
 
 
+def unnamed_in_tabs(page):
+    """unnamed() of every tab of every tab widget under PAGE (a later tab's widgets are hidden while the first is shown,
+    so the page's own scan skips them: review 6 found the Canaries tab, the Build tab and a secret's value unnamed).
+    Each tab widget's current tab comes back afterwards."""
+    found = []
+    for tabs in page.findChildren(QtWidgets.QTabWidget):
+        current = tabs.currentIndex()
+        for index in range(tabs.count()):
+            if not tabs.isTabEnabled(index):
+                continue
+            tabs.setCurrentIndex(index)
+            QtWidgets.QApplication.processEvents()
+            where = tabs.tabText(index).replace("&", "")
+            found += [f"tab {where}: {item}" for item in unnamed(tabs.widget(index))]
+        tabs.setCurrentIndex(current)
+    return list(dict.fromkeys(found))
+
+
 @pytest.mark.parametrize("language", ["en", "de"])
 def test_every_interactive_widget_of_every_page_has_a_name(qapp, env, monkeypatch, language):  # noqa: F811
+    """Every page, and every tab of it (not only the one shown first)."""
     monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
     i18n.set_language(language)
     try:
@@ -71,6 +90,7 @@ def test_every_interactive_widget_of_every_page_has_a_name(qapp, env, monkeypatc
             window.show_page(key, raise_window=False)
             qapp.processEvents()
             found += [f"page {key}: {item}" for item in unnamed(getattr(window, key))]
+            found += [f"page {key}: {item}" for item in unnamed_in_tabs(getattr(window, key))]
         window.shutdown()
         window.close()
         window.deleteLater()

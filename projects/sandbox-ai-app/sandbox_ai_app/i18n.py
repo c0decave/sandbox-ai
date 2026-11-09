@@ -797,7 +797,7 @@ TEXTS = {
         'de': 'Den Wert dauerhaft unter diesem Namen speichern (sandbox-ai secrets set, über die Standardeingabe); ein schon gespeicherter Name wird erst nach einem Ja ersetzt'},
     'Remove the selected secret (asked first): every start, VPN profile and Git login that names it goes without it': {
         'en': 'Remove the selected secret (asked first): every start, VPN profile and Git login that names it goes without it',
-        'de': 'Das gewählte Geheimnis entfernen (mit Rückfrage): Jeder Start, jedes VPN-Profil und jeder Git-Login, der es nennt, kommt dann ohne es aus'},
+        'de': 'Das gewählte Geheimnis entfernen (mit Rückfrage): Jeder Start, jedes VPN-Profil und jeder Git-Login, der es nennt, bekommt es dann nicht mehr'},
     'Remove secret': {
         'en': 'Remove secret',
         'de': 'Geheimnis entfernen'},
@@ -4021,6 +4021,9 @@ TEXTS = {
     '{path} changed since you trusted it.': {
         'en': '{path} changed since you trusted it.',
         'de': '{path} wurde geändert, seit ihr vertraut wurde.'},
+    '{path} is trusted as it is: nothing to review.': {
+        'en': '{path} is trusted as it is: nothing to review.',
+        'de': '{path} ist so, wie sie ist, bereits vertrauenswürdig: Es gibt nichts zu prüfen.'},
     '{path} is not trusted yet.': {
         'en': '{path} is not trusted yet.',
         'de': '{path} ist noch nicht vertrauenswürdig.'},
@@ -5251,6 +5254,19 @@ TEXTS = {
     'sandbox-ai did not save the extension.': {
         'en': 'sandbox-ai did not save the extension.',
         'de': 'sandbox-ai hat die Erweiterung nicht gespeichert.'},
+    # accessible names of fields and lists on later tabs (review 6: tests/test_accessibility.py walks every tab)
+    'Canary events': {
+        'en': 'Canary events',
+        'de': 'Canary-Ereignisse'},
+    'Details of the event': {
+        'en': 'Details of the event',
+        'de': 'Details zum Ereignis'},
+    'Findings of the check': {
+        'en': 'Findings of the check',
+        'de': 'Befunde der Prüfung'},
+    'Package to add': {
+        'en': 'Package to add',
+        'de': 'Paket zum Hinzufügen'},
     'search the list': {
         'en': 'search the list',
         'de': 'Liste durchsuchen'},

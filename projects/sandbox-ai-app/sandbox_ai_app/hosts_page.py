@@ -43,6 +43,7 @@ MODES = backend.MODE_ORDER
 DEFAULT_MODE = backend.DEFAULT_MODE
 DEFAULT_CANARIES = backend.DEFAULT_CANARIES  # canary.DEFAULT_CATEGORIES, when the host does not say
 CANARY_LIST = "list"  # the canaries choice "these categories"
+HOSTS_LIST_WIDTH, HOSTS_TABS_WIDTH = 550, 650  # px the hosts list and its tabs ask for (shared out pro rata)
 
 
 def is_remote(entry):
@@ -411,8 +412,12 @@ class WebPanel(QWidget):
         if token != self.token or host != self.host:
             return
         if error is not None:
+            # The logins are not known now: none of the old rows (nor Remove or New password for one) stay on screen
+            # as if they were current (review 6).
             self.loaded_for = None
+            fill(self.users, [])
             self.status.setText(tr("{host}: no answer", host=self.label()) + f" ({printable(str(error))[:300]})")
+            self.update_buttons()
             return
         fill(self.users, [[name, since] for name, since in result])
         self.status.setText(tr("{count} login(s) on {host}.", count=len(result), host=self.label()) if result else
@@ -645,7 +650,7 @@ class HostsPage(QWidget):
             self.update_sudo.addItem(text, value)
         self.versions_button = button(tr("Check versions"), tr("Ask every host for its sandbox-ai version now"),
                                       lambda: self.load_versions(refresh=True))
-        compact_combo(self.update_sudo, 18)
+        compact_combo(self.update_sudo, 24)  # (18 cut "sudo wie für den Host eingestellt" short)
         # Rows that wrap when the window is narrow: the page never makes the window wider than the screen.
         for group in ((self.starts_button, self.questions_button, self.refresh_button),
                       (self.add_button, self.edit_button, self.remove_button, self.test_button),
@@ -752,7 +757,13 @@ class HostsPage(QWidget):
         self.tabs.currentChanged.connect(lambda _index: self.web.set_host(
             self.host(), load=self.tabs.currentWidget() is self.web))
         split.addWidget(right)
-        split.setStretchFactor(1, 3)
+        # The list gets a share of its own, about as wide as the host's tabs beside it (review 6: at 1280 px it was
+        # 255 px wide and showed only "Host, SSH, An…"); both grow alike with the window.
+        split.setChildrenCollapsible(False)
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 1)
+        split.setSizes([HOSTS_LIST_WIDTH, HOSTS_TABS_WIDTH])
+        self.split = split
         layout.addWidget(split, 1)
         # An update or an installation (minutes each): a busy bar naming the host, Cancel, and what sandbox-ai says
         # meanwhile in the Updates tab, as it comes.

@@ -411,6 +411,7 @@ class CredentialsPage(QWidget):
         self.name.setPlaceholderText("API_TOKEN")
         self.value = QLineEdit()
         self.value.setPlaceholderText(tr("the value (passed on standard input; a kept one is never read back)"))
+        self.value.setAccessibleName(tr("Value"))  # its form label names the field's row, not the field itself
         form.addRow(tr("Name"), self.name)
         form.addRow(tr("Value"), widgets.secret_value(self.value))
         secrets_layout.addLayout(form)

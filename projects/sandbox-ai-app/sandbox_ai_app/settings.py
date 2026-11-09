@@ -373,7 +373,7 @@ class TrustedProjects(QWidget):
             return
         from .host_trust import review_and_trust
         review_and_trust(self, self.sai, host, target, source=[self.review_button, self.forget_button],
-                         done=lambda trusted, _document: self.reviewed(trusted))
+                         done=lambda trusted, _document: self.reviewed(trusted), say_trusted=True)
 
     def reviewed(self, trusted):
         if trusted:

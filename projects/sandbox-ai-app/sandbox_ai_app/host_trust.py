@@ -35,13 +35,21 @@ def intro(path, changed):
                                "afterwards.")
 
 
-def review_and_trust(parent, sai, host, path, done=None, source=None):
+def already_trusted(parent, host, path, content):
+    """Review and trust… of a file trusted as it is: said (nothing to ask, nothing written), its content as details
+    (review 6: before, nothing visible happened)."""
+    inform(parent, tr(TITLE), on_host(host, tr("{path} is trusted as it is: nothing to review.",
+                                               path=printable(path))), details=content, modal=False)
+
+
+def review_and_trust(parent, sai, host, path, done=None, source=None, say_trusted=False):
     """Review the project file PATH (absolute: a folder's .sandbox-ai.json) on HOST and trust it after a yes. DONE(
     trusted, document) once it is decided: trusted True when the file is trusted now (as it was, or after the yes),
-    DOCUMENT its settings (None when not read). SOURCE: the button(s) disabled meanwhile."""
+    DOCUMENT its settings (None when not read). SOURCE: the button(s) disabled meanwhile. SAY_TRUSTED: a file trusted
+    as it is already is said so (where DONE shows nothing of its own)."""
     done = done or (lambda trusted, document: None)
     if host in (None, LOCAL):
-        review_here(parent, sai, path, done, source)
+        review_here(parent, sai, path, done, source, say_trusted)
         return
     label = host_label(host)
 
@@ -75,6 +83,8 @@ def review_and_trust(parent, sai, host, path, done=None, source=None):
             done(False, None)
             return
         if shown.get("trusted"):
+            if say_trusted:
+                already_trusted(parent, host, shown["path"], backend.shown_text(document))
             done(True, document)
             return
         question, details = PT.host_question(sai, shown, intro(shown["path"], bool(shown.get("trusted_digest"))),
@@ -101,7 +111,7 @@ def review_and_trust(parent, sai, host, path, done=None, source=None):
     background(work, owner=parent, source=source, timeout=210, done=reviewed)
 
 
-def review_here(parent, sai, path, done, source=None):
+def review_here(parent, sai, path, done, source=None, say_trusted=False):
     """review_and_trust for a file of this machine: its bytes read once and trusted exactly (as the Start page's Open
     project folder does)."""
     directory = os.path.dirname(path)
@@ -122,6 +132,8 @@ def review_here(parent, sai, path, done, source=None):
             done(False, None)
             return
         if review.trusted:
+            if say_trusted:
+                already_trusted(parent, LOCAL, review.path, review.text())
             done(True, review.document)
             return
         question, details = PT.question(sai, directory, review.document, intro(review.path, review.changed),
