@@ -391,6 +391,8 @@ NEWER = (
     ((0, 1, 78), "wizard trust --list, --show and --digest", lambda a: a[:2] == ["wizard", "trust"] and any(
         x in ("--list", "--show") or x.startswith("--digest") for x in a)),
     ((0, 1, 78), "wizard models --url", lambda a: a[:2] == ["wizard", "models"] and any(x.startswith("--url") for x in a)),
+    ((0, 1, 79), "llm status", lambda a: a[:2] == ["llm", "status"]),
+    ((0, 1, 79), "wizard models --status", lambda a: a[:2] == ["wizard", "models"] and "--status" in a),
     ((0, 1, 78), "workspace add --name", lambda a: a[:2] == ["workspace", "add"] and any(x.startswith("--name") for x in a)),
     ((0, 1, 78), "limits --show", lambda a: a[:1] == ["limits"] and "--show" in a),
     ((0, 1, 78), "the default name_style", lambda a: a[:1] == ["defaults"] and a[1:3] in (["set", "name_style"],
@@ -1087,6 +1089,8 @@ class Api:
             ("GET", H + r"/logs", self.logs, ()),
             ("GET", H + r"/llm", self.llm, ()),
             ("GET", H + r"/llm/(?P<name>[^/]+)/models", self.llm_models, ()),
+            ("GET", H + r"/llm-status", self.llm_status, ()),
+            ("GET", H + r"/llm/(?P<name>[^/]+)/status", self.llm_status, ()),
             ("POST", H + r"/llm-models", self.llm_models_of_url, ("llm-insecure",)),
             ("POST", H + r"/llm", self.add_llm, ("llm-insecure", "llm-replace")),
             ("POST", H + r"/llm/(?P<name>[^/]+)/check", self.check_llm, ()),
@@ -2300,6 +2304,8 @@ class Api:
             if flag(body, "insecure_http"):
                 confirmed(body, "llm-insecure", printable(url)[:200])
                 args.append("--insecure-http")
+        if flag(body, "status"):  # what it has loaded and uses now too: {"models": [...], "status": {...}}
+            args.append("--status")
         return self.json_of(params["host"], [*args, "--json"], 60)
 
     def add_llm(self, params, body):
@@ -2335,6 +2341,14 @@ class Api:
             confirmed(body, "llm-insecure", f"{name} at {printable(url)[:200]}")
             args.append("--insecure-http")
         return self.done(params["host"], args, 60)
+
+    def llm_status(self, params, body):
+        """sandbox-ai llm status [NAME] --json on the host: what each server (or NAME) has loaded and uses now, as its
+        API reports it. It says 1 when a server did not answer and prints the JSON all the same: that JSON counts."""
+        name = params.get("name")
+        if name is not None and (name.startswith("-") or not MCP_NAME.fullmatch(name)):
+            raise Refused(400, "no such server")
+        return self.json_of(params["host"], ["llm", "status", *([name] if name else []), "--json"], 60)
 
     def llm_models(self, params, body):
         if params["name"].startswith("-"):

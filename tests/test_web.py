@@ -300,6 +300,11 @@ def logged_in():
     ("POST", "/api/hosts/ct1/llm/lmstudio/check", {"agent": "opencode"}, ["llm", "check", "lmstudio", "--agent",
                                                                            "opencode"]),
     ("GET", "/api/hosts/ct1/llm/lmstudio/models", None, ["llm", "models", "lmstudio", "--json"]),
+    # what the servers (or one) have loaded and use now: VRAM/RAM, KV cache, requests, as their APIs report it
+    ("GET", "/api/hosts/ct1/llm-status", None, ["llm", "status", "--json"]),
+    ("GET", "/api/hosts/ct1/llm/lmstudio/status", None, ["llm", "status", "lmstudio", "--json"]),
+    ("POST", "/api/hosts/ct1/llm-models", {"kind": "ollama", "url": "http://192.168.1.9:11434", "status": True},
+     ["wizard", "models", "--kind=ollama", "--url=http://192.168.1.9:11434", "--status", "--json"]),
     # "Test connection": the models of a server that is not registered, by its whole URL; nothing is stored
     ("POST", "/api/hosts/ct1/llm-models", {"kind": "ollama", "url": "http://192.168.1.9:11434"},
      ["wizard", "models", "--kind=ollama", "--url=http://192.168.1.9:11434", "--json"]),
@@ -678,6 +683,8 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     ("POST", "/api/hosts/ct1/llm-models", {"kind": "ollama", "url": "http://x.example.org",
                                             "api_key_secret": "sk-the-key-itself"}, 400),
     ("GET", "/api/hosts/ct1/llm-models", None, 405),
+    ("GET", "/api/hosts/ct1/llm/--json/status", None, 400),
+    ("POST", "/api/hosts/ct1/llm-models", {"kind": "ollama", "url": "http://x.example.org", "status": "yes"}, 400),
     ("POST", "/api/hosts/ct1/llm", {"name": "a", "kind": "lmstudio", "url": "http://x", "model": "-x"}, 400),
     ("POST", "/api/hosts/ct1/llm/a/check", {"agent": "bash"}, 400),
     ("POST", "/api/hosts/ct1/defaults", {"key": "--x", "value": 1}, 400),
@@ -5985,8 +5992,9 @@ def test_the_llm_page_models_edit_test_and_names(tmp_path):
                                     "api_key_secret": "GW_KEY", "header_secrets": [{"header": "X-Org", "secret": "ORG_KEY"}],
                                     "vpn": "home", "anthropic": True, "replace": True, "confirm": True}]]
     assert "It has a CA certificate of its own (lan.pem), which is kept" in result["caNote"]
-    assert result["caTest"] == [["/api/hosts/ct1/llm-models", {"kind": "openai-compatible", "url": "https://lan.example.org",
-                                 "ca_of": "lan"}]], "review 5 M7: the CA it keeps goes with the test"
+    assert result["caTest"] == [["/api/hosts/ct1/llm-models", {"status": True, "kind": "openai-compatible",
+                                 "url": "https://lan.example.org", "ca_of": "lan"}]], \
+        "review 5 M7: the CA it keeps goes with the test"
     assert "CA" not in result["caAsk"] and "Replace the LLM server lan on ct1?" in result["caAsk"]
     assert "CA" not in result["caUseAsk"] and result["caUseAsk"].startswith("Make only the default model of lan on ct1?")
     assert result["caUsePosts"] == [["/api/hosts/ct1/llm", {"name": "lan", "kind": "openai-compatible",
@@ -6003,13 +6011,14 @@ def test_the_llm_page_models_edit_test_and_names(tmp_path):
     assert result["badName"] == [0, "http://192.168.1.9:11434", "bad.name"], "nothing sent, nothing lost"
     assert result["refused"] == [True, "new1", "http://192.168.1.9:11434", "ollama"], "the CLI's message inline, the form kept"
     assert result["testCalls"] == ["POST /api/hosts/ct1/llm-models"], "nothing is saved to test"
-    assert result["testPost"] == ["/api/hosts/ct1/llm-models", {"kind": "ollama", "url": "http://192.168.1.9:11434"}]
+    assert result["testPost"] == ["/api/hosts/ct1/llm-models", {"status": True, "kind": "ollama",
+                                                                 "url": "http://192.168.1.9:11434"}]
     text, picks, hidden, title, kept, named = result["tested"]
     assert "http://192.168.1.9:11434 answers: 2 model(s) listed." in text and "m1" in text and "m2" in text
     assert picks == ["", "m1", "m2"] and not hidden, "loaded first, as the default-model list"
     assert title == "Add a server" and kept == "http://192.168.1.9:11434" and named == "new1", "the form as it was"
     sent, no_note = result["keyed"]
-    assert sent == ["/api/hosts/ct1/llm-models", {"kind": "ollama", "url": "http://192.168.1.9:11434",
+    assert sent == ["/api/hosts/ct1/llm-models", {"status": True, "kind": "ollama", "url": "http://192.168.1.9:11434",
                                                    "ca": "/home/you/ca.pem", "api_key_secret": "GW_KEY"}]
     assert not no_note, "a key and a CA do go with the test: nothing to warn about"
     assert result["partly"], "a VPN profile does not"
@@ -6027,6 +6036,107 @@ def test_the_llm_page_models_edit_test_and_names(tmp_path):
                                      ["POST", "/api/hosts/ct1/llm", server]], "a replaced secret is asked, and kept"
 
 
+LLM_STATUS_DRIVER = FAKE_DOM + r"""
+const byId = (id) => body.all().find(n => n.id === id);
+const buttonIn = (node, text) => node.all().find(n => n.tagName === "button" && n.textContent === text);
+const MANY = Array.from({ length: 120 }, (_, i) => `model-${String(i).padStart(3, "0")}`);
+(async () => {
+  const result = {};
+  vm.runInContext('state.me = { user: "admin", csrf: "c", terminals: true }; state.host = "ct1"; state.page = "llm"; state.hosts = [{ name: "local", kind: "local" }, { name: "ct1", kind: "ssh", ssh: "root@ct1", port: 22 }];', context);
+  const status = [{ name: "box", kind: "ollama", reachable: true, read_at: "2026-11-09T12:00:00Z", models: 12,
+    loaded: [{ name: "qwen2.5-coder:7b", size: 4683087332, memory_bytes: 6000000000, vram_bytes: 5000000000, ram_bytes: 1000000000, context: 8192, expires_at: "2026-11-09T12:05:00Z" }],
+    usage: { vram_bytes: 5000000000, ram_bytes: 1000000000 }, not_reported: ["kv_cache", "requests", "totals"] },
+    { name: "gpu", kind: "vllm", reachable: true, read_at: "2026-11-09T12:00:01Z", models: 1, loaded: [{ name: "Qwen/Qwen3-Coder-30B", context: 65536 }],
+      usage: { kv_cache_percent: 12.5, requests_running: 2, requests_waiting: 1 }, not_reported: ["memory", "totals"] },
+    { name: "cpp", kind: "llamacpp", reachable: false, error: "timed out", models: null, loaded: null, usage: {}, not_reported: ["loaded", "memory", "kv_cache", "requests", "totals"] }];
+  let modelsAnswer = (sent) => ({ models: [{ name: "m1", loaded: true, size: 4683087332 }], status: status[0] });
+  answer = (method, path, sent) => {
+    if (method === "GET" && path.endsWith("/llm")) return [{ name: "box", kind: "ollama", url: "http://192.168.1.9:11434" }, { name: "gpu", kind: "vllm", url: "http://100.64.0.7:8000" }, { name: "cpp", kind: "llamacpp", url: "http://10.0.0.5:8080" }];
+    if (path.endsWith("/llm-status")) return status;
+    if (path.endsWith("/llm/box/status")) return [status[0]];
+    if (path.endsWith("/llm-models")) return modelsAnswer(JSON.parse(sent));
+    if (path.endsWith("/llm/gpu/models")) return MANY.map((name, i) => ({ name, size: 1000000000 + i, loaded: i === 7 }));
+    if (path.endsWith("/starts") || path.endsWith("/presets") || path.endsWith("/vpn") || path.endsWith("/mcp") || path.endsWith("/secrets")) return [];
+    return { output: "ok" };
+  };
+  await vm.runInContext("pages.llm(__main)", context); await settle();
+  const box = byId("llm-status");
+  result.lines = box.children.map(n => n.textContent);
+  result.titles = box.children.map(n => n.attributes.title || "");
+  result.background = calls.filter(c => c.path.endsWith("/llm-status")).map(c => c.headers["X-Background"]);
+  // Test connection: the models and what the server has loaded and uses now
+  calls.length = 0;
+  for (const id of ["llm-key-secret", "llm-key-value", "llm-headers", "llm-ca", "llm-vpn", "llm-name", "llm-model"]) byId(id).value = "";
+  byId("llm-kind").value = "ollama"; byId("llm-url").value = "http://192.168.1.9:11434";
+  buttonIn(main, "Test connection").fire("click"); await settle();
+  result.testSent = calls.filter(c => c.path.endsWith("/llm-models")).map(c => JSON.parse(c.body));
+  result.testNow = (byId("llm-test-status") || { textContent: null }).textContent;
+  // a host whose sandbox-ai does not know --status yet: asked again without it, the models shown
+  calls.length = 0;
+  modelsAnswer = (sent) => (sent.status ? { __status: 409, __error: "too old", __code: "host-too-old", __params: { host: "ct1", version: "0.1.78", what: "wizard models --status" } }
+    : [{ name: "m1", loaded: true }]);
+  buttonIn(main, "Test connection").fire("click"); await settle();
+  result.olderSent = calls.filter(c => c.path.endsWith("/llm-models")).map(c => JSON.parse(c.body).status || false);
+  result.olderText = byId("llm-test-result").textContent;
+  result.olderNow = byId("llm-test-status") ? "shown" : "none";
+  // a start with --llm: its row says so and LLM status opens a card with that server's status
+  const row = vm.runInContext('startRow({ host: "ct1", name: "api", agent: "codex", kind: "session", state: "running", keep: true, workspace: "/srv/w", mcp: [], llm: "box:qwen2.5-coder:7b", directory: "/x" }, [], __main, [])', context);
+  main.append(row);
+  result.rowNote = row.textContent.includes("LLM: box:qwen2.5-coder:7b");
+  calls.length = 0;
+  buttonIn(row, "LLM status").fire("click"); await settle();
+  const card = byId("llm-status-card");
+  result.card = [card.children[0].textContent, card.textContent.includes("loaded: qwen2.5-coder:7b (6.0 GB in memory: VRAM 5.0 GB, RAM 1.0 GB; context 8192)"),
+    calls.map(c => [c.path, c.headers["X-Background"] || null])];
+  const plain = vm.runInContext('startRow({ host: "ct1", name: "web", agent: "codex", kind: "session", state: "running", keep: true, workspace: "/srv/w", mcp: [], llm: "--evil", directory: "/x" }, [], __main, [])', context);
+  result.noButton = !buttonIn(plain, "LLM status") && !plain.textContent.includes("LLM:");
+  // the model of a new start: every model of a server (120), with its size, and a filter
+  vm.runInContext('state.page = "starts"; state.startsHost = "ct1";', context);
+  clear_ = vm.runInContext("clear", context); clear_(main);
+  await vm.runInContext("pages.starts(__main)", context); await settle();
+  byId("agent").value = "codex"; byId("agent").fire("change"); await settle();
+  const select = byId("start-model");
+  const options = select.children.filter(o => o.value.startsWith("gpu:"));
+  result.many = [options.length, options[7].textContent, byId("start-model-filter").hidden];
+  byId("start-model-filter").value = "MODEL-11"; byId("start-model-filter").fire("input");
+  result.filtered = select.children.filter(o => o.value.startsWith("gpu:") && !o.hidden).map(o => o.value);
+  console.log(JSON.stringify(result));
+})().catch(e => { console.error(e.stack); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_the_llm_status_on_the_llm_page_the_test_and_a_start(tmp_path):
+    """In node: the LLM page has a line per server with what it has loaded (sizes, VRAM/RAM) and uses now (KV cache,
+    requests), read as a poll of the page's own; Test connection asks with --status and shows it, and a host too old
+    for it is asked again without; a start with --llm says so and LLM status opens a card with that server's status;
+    the model of a new start offers every model (120), with sizes, and a filter."""
+    result = run_driver(tmp_path, LLM_STATUS_DRIVER, "llm_status")
+    assert result["lines"] == [
+        "box: loaded: qwen2.5-coder:7b (6.0 GB in memory: VRAM 5.0 GB, RAM 1.0 GB; context 8192) · VRAM 5.0 GB · "
+        "RAM 1.0 GB · not reported: KV cache, requests",
+        "gpu: loaded: Qwen/Qwen3-Coder-30B (context 65536) · KV cache 12.5 % · requests: 2 running, 1 waiting · "
+        "not reported: VRAM/RAM use",
+        "cpp: not reachable: timed out"]
+    assert "unloaded at 2026-11-09T12:05:00Z" in result["titles"][0] and "read at 12:00:00 (UTC)" in result["titles"][0]
+    assert "Not reported by its API: VRAM/RAM use, the host's total RAM/VRAM" in result["titles"][1]
+    assert result["background"] == ["1"], "a poll of the page's own, not the user's activity"
+    assert result["testSent"] == [{"status": True, "kind": "ollama", "url": "http://192.168.1.9:11434"}]
+    assert result["testNow"].startswith("Now: loaded: qwen2.5-coder:7b (6.0 GB in memory")
+    assert result["olderSent"] == [True, False] and "1 model(s) listed" in result["olderText"]
+    assert result["olderNow"] == "none"
+    assert result["rowNote"]
+    title, shown, asked = result["card"]
+    assert title == "LLM server box:qwen2.5-coder:7b of api on ct1" and shown
+    assert asked == [["/api/hosts/ct1/llm/box/status", "1"]]
+    assert result["noButton"], "what is not --llm NAME[:MODEL] is not offered"
+    count, label, hidden = result["many"]
+    assert count == 120 and label == "gpu:model-007  (loaded, 1.0 GB)" and hidden is False
+    assert result["filtered"] == ["gpu:model-110", "gpu:model-111", "gpu:model-112", "gpu:model-113",
+                                  "gpu:model-114", "gpu:model-115", "gpu:model-116", "gpu:model-117",
+                                  "gpu:model-118", "gpu:model-119"]
+
+
 def test_name_style_is_a_default_that_lowers_nothing(logged_in):
     """How starts without --name are named (codename or project, agent_sandbox.NAME_STYLES): set and unset without a
     question and without reading the host's defaults first; any other value is refused before it reaches a host."""
@@ -6042,6 +6152,7 @@ def test_name_style_is_a_default_that_lowers_nothing(logged_in):
     assert any(test(["defaults", "set", "name_style", '"project"']) for _, _, test in w.NEWER), "an older host says so"
     script = (WEB / "app.js").read_text()
     assert '["name_style", N_(' in script and 't("empty: a codename like brisk-otter-lantern")' in script
+
 
 # -- the names of a host's secrets and VPN profiles offered where a field takes one (offerNames: a <datalist>) --
 

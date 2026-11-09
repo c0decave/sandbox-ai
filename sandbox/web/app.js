@@ -878,7 +878,7 @@ function startAsks(s) { return Boolean(s.run) && state.questions.some(q => q.hos
 
 function startSignature(s, starts) {
   const targets = s.kind === "mcp" ? starts.filter(other => other.kind !== "mcp" && other.host === s.host).map(other => [other.name, other.state, Boolean(other.directory)]) : null;
-  return JSON.stringify([s.host, s.name, s.agent, s.kind, s.state, s.workspace, s.home, s.keep, s.started, s.attachable, s.directory ? 1 : 0, s.mcp, s.serves, targets, startAsks(s), LANGUAGE]);
+  return JSON.stringify([s.host, s.name, s.agent, s.kind, s.state, s.workspace, s.home, s.keep, s.started, s.attachable, s.directory ? 1 : 0, s.mcp, s.llm, s.serves, targets, startAsks(s), LANGUAGE]);
 }
 
 // What failed when a start's button was pressed (its action: pause, resume, stop, delete).
@@ -922,13 +922,50 @@ function startRow(s, starts, main, all) {
   if (!mcp && (s.keep ? ["running", "paused", "stopped"].includes(s.state) : ["running", "paused"].includes(s.state)))
     actions.append(rowButton(t("More…"), s.name, host, { title: s.keep ? t("resume with directories, mounts or MCP servers added, restart, stop with a longer wait") : t("stop with a longer wait"), onclick: () => moreCard(main, s) }));
   actions.append(rowButton(t("History"), s.name, host, { onclick: () => historyCard(main, s) }));
+  // the LLM server it works with (--llm NAME[:MODEL]): what that server has loaded and uses now, while it runs
+  const llm = !mcp && typeof s.llm === "string" && LLM_CHOICE.test(s.llm) ? s.llm : null;
+  if (llm && ["running", "paused"].includes(s.state)) actions.append(rowButton(t("LLM status"), s.name, host, { title: t("what the LLM server {value} has loaded and uses now", { value: llm }), onclick: () => llmStatusCard(main, s) }));
   // which MCP servers a start reaches (or will at its next start), and whom a server serves
-  const mcpNote = mcp ? ((s.serves || []).length ? t("serves {starts}", { starts: s.serves.join(", ") }) : t("serves no start yet"))
-    : (s.mcp || []).length ? `MCP: ${s.mcp.join(", ")}` : "";
+  const mcpNote = [mcp ? ((s.serves || []).length ? t("serves {starts}", { starts: s.serves.join(", ") }) : t("serves no start yet"))
+    : (s.mcp || []).length ? `MCP: ${s.mcp.join(", ")}` : "", llm ? `LLM: ${llm}` : ""].filter(Boolean).join(" · ");
   const asks = startAsks(s) ? el("button", { class: "badge asking small", title: t("a question of this start waits in Approvals"), onclick: () => show("approvals") }, t("asking")) : null;
   return el("tr", { "data-name": s.name, "data-host": host }, hostMarkerCell(host),
     el("td", { class: "mono start-name" }, el("span", { class: "tree-slot" }), s.name, asks ? " " : null, asks, el("span", { class: "stale-note hint" })), el("td", {}, s.agent || s.kind || ""), statusCell(s.state),
     el("td", { class: "mono" }, s.workspace || "", mcpNote ? el("div", { class: "hint" }, mcpNote) : null), el("td", {}, s.home || ""), el("td", {}, (s.started || "").replace("T", " ").replace("Z", "")), actions);
+}
+
+// The LLM server start S works with (list --json's "llm": --llm NAME[:MODEL]): what it has loaded and uses now (llm
+// status NAME on the start's host), read again every LLM_STATUS_SECONDS while the card is open (a poll of the page's
+// own: not the user's activity). A host whose sandbox-ai does not know it yet says so, once.
+const LLM_CHOICE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}(:[\w.:/@+-]{1,200})?$/;
+function llmStatusCard(main, s) {
+  const value = String(s.llm), server = value.split(":")[0];
+  const old = document.getElementById("llm-status-card");
+  if (old) dropCard(old);
+  const body = el("div", {}, el("p", { class: "hint" }, t("Loading…")));
+  const card = el("div", { class: "card", id: "llm-status-card" }, el("h2", {}, t("LLM server {value} of {name} on {host}", { value, name: s.name, host: s.host })), body,
+    el("button", { onclick: () => dropCard(card) }, t("Close")));
+  openCard(main, card, s);
+  let timer = null;
+  const read = async () => {
+    clearTimeout(timer);
+    if (!card.isConnected) return;
+    let found;
+    try { found = await api("GET", hostPath(`/llm/${encodeURIComponent(server)}/status`, s.host), undefined, { background: true }); }
+    catch (e) {
+      if (!card.isConnected) return;
+      clear(body).append(errorNotice(e));
+      if (e && e.code !== "host-too-old") timer = setTimeout(read, LLM_STATUS_SECONDS * 1000);
+      return;
+    }
+    if (!card.isConnected) return;
+    const status = (Array.isArray(found) ? found : []).find(x => x && x.name === server);
+    clear(body).append(...(status ? [el("p", { class: "llm-now" }, llmStatusText(status)), el("pre", { class: "hint" }, llmStatusDetail(status))]
+      : [notice(t("No status of {name}.", { name: server }), "warn")]));
+    timer = setTimeout(read, LLM_STATUS_SECONDS * 1000);
+  };
+  read();
+  return card;
 }
 
 // Another name for a start (sandbox-ai rename OLD NEW), asked in its row; the run id stays.
@@ -1565,6 +1602,8 @@ async function drawStartForm(card, heading, host) {
   const agent = el("select", { id: "agent" }, AGENTS.map(a => el("option", { value: a }, a)));
   const agentOf = () => (AGENTS.includes(agent.value) ? agent.value : AGENTS[0]);  // a select shows its first until chosen
   const model = el("select", { id: "start-model" });
+  // a server may list 70 models or more: typing here shows only those whose name holds the text
+  const modelFilter = el("input", { type: "search", id: "start-model-filter", class: "mono", placeholder: t("Filter"), "aria-label": t("Filter the models"), autocomplete: "off", hidden: true });
   // as the app's wizard has it: a server chosen, nothing else (no cloud provider) unless unticked
   const onlyServer = el("input", { type: "checkbox", id: "start-only-server", checked: true });
   const modelHint = el("span", { class: "hint" });
@@ -1579,10 +1618,16 @@ async function drawStartForm(card, heading, host) {
       const why = modelProblem(server, agentOf());
       const label = `${server.name}${server.model ? ` (${server.model})` : ""}${why ? ` — ${why}` : ""}`;
       model.append(el("option", { value: server.name, disabled: Boolean(why), title: why || null }, label));
-      for (const m of server.models || []) model.append(el("option", { value: `${server.name}:${m}`, disabled: Boolean(why), title: why || null }, `${server.name}:${m}`));
+      for (const m of server.models || []) {
+        const about = (server.about || {})[m] || {};
+        const extra = [about.loaded === true ? t("loaded") : null, wholeNumber(about.size) ? gbText(about.size) : null].filter(Boolean);
+        model.append(el("option", { value: `${server.name}:${m}`, disabled: Boolean(why), title: why || null }, `${server.name}:${m}${extra.length ? `  (${extra.join(", ")})` : ""}`));
+      }
     }
     const still = [...model.children].find(o => o.value === was && !o.disabled);
     model.value = still ? was : "";
+    modelFilter.hidden = model.children.length <= 15;
+    filterModels();
     // a preset that names the LLM server itself: the model is its value
     const byPreset = fields.some(f => f.spec.kind === "llm");
     model.disabled = byPreset;
@@ -1592,6 +1637,11 @@ async function drawStartForm(card, heading, host) {
     for (const f of fields) if (f.spec.kind === "llm") f.redraw();
   };
   model.addEventListener("change", syncOnly);
+  function filterModels() {
+    const words = String(modelFilter.value || "").trim().toLowerCase();
+    for (const option of model.children) option.hidden = Boolean(words) && Boolean(option.value) && option.value !== model.value && !option.value.toLowerCase().includes(words);
+  }
+  modelFilter.addEventListener("input", filterModels);
   const preset = el("select", { id: "preset" });
   const presetHint = el("span", { class: "hint" }, "");
   const presetValues = el("div", { class: "form preset-values wide" });
@@ -1679,7 +1729,9 @@ async function drawStartForm(card, heading, host) {
       for (const server of (Array.isArray(list) ? list : []).filter(x => x && typeof x.name === "string")) {
         servers.push(server);
         api("GET", hostPath(`/llm/${encodeURIComponent(server.name)}/models`, host)).then((models) => {
-          server.models = (Array.isArray(models) ? models : []).map(m => m && m.name).filter(n => typeof n === "string" && n);
+          const listed = (Array.isArray(models) ? models : []).filter(m => m && typeof m.name === "string" && m.name);
+          server.models = listed.map(m => m.name);  // every one of them, however many
+          server.about = Object.fromEntries(listed.map(m => [m.name, { size: m.size, loaded: m.loaded }]));
           if (card.isConnected) drawModels();
         }).catch(() => {});
       }
@@ -1729,7 +1781,7 @@ async function drawStartForm(card, heading, host) {
     el("label", { for: "start-host" }, t("Host")), hostChoice,
     el("label", { for: "agent" }, t("Agent")), agent,
     el("label", { for: "start-model" }, t("Model")), el("div", { class: "row" }, model,
-      el("label", {}, onlyServer, " ", t("only this server")), el("button", { class: "small", onclick: () => { state.host = host; show("llm"); } }, t("Add a model server…")), modelHint),
+      modelFilter, el("label", {}, onlyServer, " ", t("only this server")), el("button", { class: "small", onclick: () => { state.host = host; show("llm"); } }, t("Add a model server…")), modelHint),
     el("label", { for: "name" }, t("Name")), name,
     el("label", { for: "workspace" }, t("Workspace")), el("div", {}, workspace,
       el("div", { class: "hint", id: "workspace-hint" }, t("Required: the folder on that host the agent works on, as /work (an absolute path, or ~/…). The folder this service runs in is never taken instead."))),
@@ -2964,6 +3016,61 @@ function modelsTable(server, models, actions) {
     table([t("Name"), ...columns.map(([, label]) => t(label)), ...(actions ? [""] : [])], rows, t("The server lists no models."), t("Models of {server}", { server })));
 }
 
+// What an LLM server has loaded and uses now (llm status --json; wizard models --status's "status"), as its API
+// reports it: the loaded models with the memory they take (VRAM, RAM) or their size, the server's VRAM/RAM, KV cache
+// and requests; what it does not report is said. The same words as the app's (wizard_llm.status_text).
+const LLM_STATUS_SECONDS = 20;  // between two readings while a page shows them
+const NOT_REPORTED = { loaded: N_("the loaded models"), memory: N_("VRAM/RAM use"), kv_cache: N_("KV cache"), requests: N_("requests"), totals: N_("the host's total RAM/VRAM") };
+const wholeNumber = (v) => typeof v === "number" && Number.isInteger(v) && v >= 0;
+function gbText(bytes) {  // as sandbox-ai llm and the app show sizes: decimal units, one place
+  for (const [unit, factor] of [["GB", 1e9], ["MB", 1e6], ["KB", 1e3]]) if (bytes >= factor) return `${(bytes / factor).toFixed(1)} ${unit}`;
+  return `${bytes} B`;
+}
+function usageParts(u) {
+  const usage = u && typeof u === "object" ? u : {}, parts = [];
+  if (wholeNumber(usage.vram_bytes)) parts.push(wholeNumber(usage.vram_total_bytes) ? t("VRAM {size} of {total}", { size: gbText(usage.vram_bytes), total: gbText(usage.vram_total_bytes) }) : t("VRAM {size}", { size: gbText(usage.vram_bytes) }));
+  if (wholeNumber(usage.ram_bytes)) parts.push(t("RAM {size}", { size: gbText(usage.ram_bytes) }));
+  if (wholeNumber(usage.vram_free_bytes)) parts.push(t("{size} VRAM free", { size: gbText(usage.vram_free_bytes) }));
+  if (typeof usage.kv_cache_percent === "number") parts.push(t("KV cache {percent} %", { percent: String(usage.kv_cache_percent) }));
+  if (typeof usage.cpu_kv_cache_percent === "number") parts.push(t("CPU KV cache {percent} %", { percent: String(usage.cpu_kv_cache_percent) }));
+  if (wholeNumber(usage.requests_running) || wholeNumber(usage.requests_waiting)) parts.push(t("requests: {running} running, {waiting} waiting", { running: wholeNumber(usage.requests_running) ? usage.requests_running : "?", waiting: wholeNumber(usage.requests_waiting) ? usage.requests_waiting : "?" }));
+  if (wholeNumber(usage.slots_total)) parts.push(t("{count} slots", { count: usage.slots_total }));
+  return parts;
+}
+function loadedText(m) {
+  const extra = [];
+  if (wholeNumber(m.memory_bytes)) {
+    const split = [wholeNumber(m.vram_bytes) ? t("VRAM {size}", { size: gbText(m.vram_bytes) }) : null, wholeNumber(m.ram_bytes) ? t("RAM {size}", { size: gbText(m.ram_bytes) }) : null].filter(Boolean);
+    extra.push(t("{size} in memory", { size: gbText(m.memory_bytes) }) + (split.length ? `: ${split.join(", ")}` : ""));
+  } else if (wholeNumber(m.size)) extra.push(gbText(m.size));
+  if (wholeNumber(m.context) && m.context > 0) extra.push(t("context {tokens}", { tokens: m.context }));
+  return `${m.name}${extra.length ? ` (${extra.join("; ")})` : ""}`;
+}
+const loadedOf = (s) => (Array.isArray(s.loaded) ? s.loaded.filter(m => m && typeof m.name === "string") : null);
+function llmStatusText(s) {
+  if (!s || typeof s !== "object") return "";
+  if (s.reachable === false) return t("not reachable: {error}", { error: String(s.error || "?") });
+  const loaded = loadedOf(s), parts = [];
+  if (loaded === null) parts.push(t("what is loaded is not reported"));
+  else if (!loaded.length) parts.push(t("no model loaded"));
+  else parts.push(t("loaded: {models}", { models: loaded.slice(0, 4).map(loadedText).join(", ") + (loaded.length > 4 ? " …" : "") }));
+  parts.push(...usageParts(s.usage));
+  const missing = (Array.isArray(s.not_reported) ? s.not_reported : []).filter(k => NOT_REPORTED[k] && k !== "loaded" && k !== "totals").map(k => t(NOT_REPORTED[k]));
+  if (missing.length) parts.push(t("not reported: {what}", { what: missing.join(", ") }));
+  return parts.join(" · ");
+}
+function llmStatusDetail(s) {
+  if (!s || typeof s !== "object") return "";
+  if (s.reachable === false) return t("not reachable: {error}", { error: String(s.error || "?") });
+  const lines = (loadedOf(s) || []).map(m => t("Loaded: {model}", { model: loadedText(m) }) + (typeof m.expires_at === "string" && m.expires_at ? ` · ${t("unloaded at {time}", { time: m.expires_at })}` : ""));
+  lines.push(...usageParts(s.usage));
+  if (typeof s.read_at === "string" && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(s.read_at)) lines.push(t("read at {time} (UTC)", { time: s.read_at.slice(11, 19) }));
+  const missing = (Array.isArray(s.not_reported) ? s.not_reported : []).filter(k => NOT_REPORTED[k]).map(k => t(NOT_REPORTED[k]));
+  if (missing.length) lines.push(t("Not reported by its API: {what}", { what: missing.join(", ") }));
+  if (s.kind === "llamacpp" && !(s.usage && wholeNumber(s.usage.requests_waiting))) lines.push(t("llama-server --metrics also reports the requests waiting."));
+  return lines.join("\n");
+}
+
 pages.llm = async (main) => {
   main.append(el("h1", {}, t("LLM servers on {host}", { host: state.host })));
   const live = pageLive();
@@ -3029,9 +3136,41 @@ pages.llm = async (main) => {
       return row;
     });
     clear(listBox).append(table([t("Name"), t("Kind"), "URL", t("Model"), ""], rows, t("No LLM server yet.")));
+    drawStatus();
+  };
+  // What each server has loaded and uses now (llm status --json on that host): read after the list and every
+  // LLM_STATUS_SECONDS while the page is shown (a poll of the page's own: not the user's activity); a host whose
+  // sandbox-ai does not know it yet says so once and is not asked again.
+  const statusBox = el("div", { id: "llm-status", class: "llm-status" });
+  let statuses = {}, statusTimer = null, statusAsked = false;
+  const drawStatus = () => {
+    const lines = servers.filter(e => statuses[e.name]).map(e => el("div", { class: "hint", "data-server": e.name, title: llmStatusDetail(statuses[e.name]) || null },
+      el("span", { class: "mono" }, e.name), ": ", llmStatusText(statuses[e.name])));
+    if (lines.length || Object.keys(statuses).length) clear(statusBox).append(...lines);
+  };
+  const readStatus = async () => {
+    clearTimeout(statusTimer);
+    if (!live() || !servers.length || statusAsked) return;
+    statusAsked = true;
+    let found;
+    try { found = await api("GET", hostPath("/llm-status", host), undefined, { background: true }); }
+    catch (e) {
+      statusAsked = false;
+      if (!live()) return;
+      clear(statusBox).append(errorNotice(e, t("What the servers have loaded now could not be read")));
+      if (e && e.code !== "host-too-old") statusTimer = setTimeout(readStatus, LLM_STATUS_SECONDS * 1000);
+      return;
+    }
+    statusAsked = false;
+    if (!live()) return;
+    statuses = {};
+    for (const s of Array.isArray(found) ? found : []) if (s && typeof s.name === "string") statuses[s.name] = s;
+    drawStatus();
+    statusTimer = setTimeout(readStatus, LLM_STATUS_SECONDS * 1000);
   };
   drawList(list);
-  main.append(listBox, output);
+  main.append(listBox, statusBox, output);
+  readStatus();
 
   // the form: a new server, or (Edit…) one of the list prefilled from llm show and saved with --replace
   const name = el("input", { id: "llm-name", placeholder: "lmstudio", autocomplete: "off", spellcheck: "false", "aria-describedby": "llm-name-problem" });
@@ -3169,18 +3308,25 @@ pages.llm = async (main) => {
     const sent = Object.assign({ kind: kind.value, url: address }, textOf(ca) ? { ca: textOf(ca) } : caOf, secret ? { api_key_secret: secret } : {},
       insecureConfirmed ? { insecure_http: true, confirm: true } : {});
     clear(testBox).append(el("p", { class: "hint" }, t("Testing {url}…", { url: address })));
-    let models;
-    try { models = await api("POST", hostPath("/llm-models", host), sent); }
-    catch (e) {
-      clear(testBox).append(errorNotice(e, t("{url} did not answer with a list of models", { url: address })),
-        ...(keyValue.value ? [el("p", { class: "hint" }, t("A key typed here is stored only with Add or Save: the test used the secret named, as that host has it now."))] : []));
-      fillModels([]); return;
+    let models, now = null;
+    // with what it has loaded and uses now (--status); a host whose sandbox-ai does not know it yet: the models alone
+    try { models = await api("POST", hostPath("/llm-models", host), Object.assign({ status: true }, sent)); }
+    catch (first) {
+      let e = first;
+      if (e && e.code === "host-too-old") { try { models = await api("POST", hostPath("/llm-models", host), sent); e = null; } catch (again) { e = again; } }
+      if (e) {
+        clear(testBox).append(errorNotice(e, t("{url} did not answer with a list of models", { url: address })),
+          ...(keyValue.value ? [el("p", { class: "hint" }, t("A key typed here is stored only with Add or Save: the test used the secret named, as that host has it now."))] : []));
+        fillModels([]); return;
+      }
     }
+    if (models && !Array.isArray(models) && typeof models === "object") { now = models.status && typeof models.status === "object" ? models.status : null; models = models.models; }
     const listed = (Array.isArray(models) ? models : []).filter(m => m && typeof m.name === "string");
     const partly = headerSecrets.value.trim() || vpn.value.trim();
     clear(testBox).append(notice(listed.length ? t("{url} answers: {count} model(s) listed.", { url: address, count: listed.length })
       : t("{url} answers, but lists no model: load or pull one there.", { url: address }), listed.length ? "ok" : "warn"),
-      ...[listed.length ? modelsTable(address, listed) : null,
+      ...[now ? el("p", { class: "hint", id: "llm-test-status", title: llmStatusDetail(now) || null }, t("Now: {status}", { status: llmStatusText(now) })) : null,
+        listed.length ? modelsTable(address, listed) : null,
         partly ? el("p", { class: "hint" }, t("The test sends no header secret and does not go through a VPN profile: a server that needs one can refuse it and still work for the starts. {check} checks it as the agents reach it, once it is saved.", { check: t("Check") })) : null].filter(Boolean));
     fillModels(listed);
   });
