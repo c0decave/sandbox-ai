@@ -1662,7 +1662,7 @@ async function drawStartForm(card, heading, host) {
     api("GET", hostPath("/mcp", host)).then((list) => { for (const x of (Array.isArray(list) ? list : []).filter(x => x && typeof x.name === "string")) mcpNames.add(x.name); }).catch(() => {}),
   ];
   const name = el("input", { id: "name", placeholder: t("automatic"), pattern: "[A-Za-z0-9][A-Za-z0-9_.-]{0,47}" });
-  const workspace = el("input", { id: "workspace", placeholder: "/home/you/src/project", class: "mono" });
+  const workspace = el("input", { id: "workspace", placeholder: "/home/you/src/project", class: "mono", required: true, "aria-describedby": "workspace-hint" });
   const options = el("textarea", { id: "options", rows: 3, class: "mono", placeholder: "--mode high\n--allow-pypi\n-mm sonnet", "aria-describedby": "options-hint" });
   const startStatus = el("div", { class: "wide", id: "start-status" });
   const start = el("button", { class: "primary", onclick: () => busy(start, async () => {
@@ -1685,6 +1685,13 @@ async function drawStartForm(card, heading, host) {
       }
       presetArgs = ["--preset", id, ...Object.entries(values).flatMap(([key, value]) => ["--preset-value", `${key}=${value}`])];
     }
+    // the folder the agent works on is named (the field, or --workspace in the options): with neither, the
+    // launcher would take the directory it runs in (this service's own, or the SSH login's HOME)
+    if (!textOf(workspace) && !namesWorkspace(list)) {
+      startStatus.append(notice(t("Which workspace? Name the folder on {host} the agent works on (its /work): nothing was started.", { host }), "error"));
+      if (typeof workspace.focus === "function") workspace.focus();
+      return;
+    }
     const server = model.disabled ? "" : model.value;  // "only this server" means nothing for the cloud
     list = withModel([...presetArgs, ...list], server, onlyServer.checked && Boolean(server));
     openTerminal({ kind: "start", host, agent: agentOf(), name: textOf(name), workspace: textOf(workspace), options: JSON.stringify(list) }, textOf(name) || t("new {agent}", { agent: agentOf() }));
@@ -1695,7 +1702,8 @@ async function drawStartForm(card, heading, host) {
     el("label", { for: "start-model" }, t("Model")), el("div", { class: "row" }, model,
       el("label", {}, onlyServer, " ", t("only this server")), el("button", { class: "small", onclick: () => { state.host = host; show("llm"); } }, t("Add a model server…")), modelHint),
     el("label", { for: "name" }, t("Name")), name,
-    el("label", { for: "workspace" }, t("Workspace")), workspace,
+    el("label", { for: "workspace" }, t("Workspace")), el("div", {}, workspace,
+      el("div", { class: "hint", id: "workspace-hint" }, t("Required: the folder on that host the agent works on, as /work (an absolute path, or ~/…). The folder this service runs in is never taken instead."))),
     el("label", { for: "preset" }, t("Preset")), el("div", {}, preset, " ", presetHint),
     presetValues, presetMcp,
     el("label", { for: "options" }, t("Options")), el("div", {}, options,
@@ -1706,6 +1714,15 @@ async function drawStartForm(card, heading, host) {
   await Promise.all(asked);
   if (!live() || !card.isConnected) return;
   drawModels(); drawPresets();
+}
+
+// Whether the options LIST (before a "--") name a workspace: --workspace DIR, --workspace=DIR, -w DIR, -wDIR.
+function namesWorkspace(list) {
+  for (const word of list) {
+    if (word === "--") return false;
+    if (word === "--workspace" || word.startsWith("--workspace=") || word === "-w" || (word.startsWith("-w") && !word.startsWith("-wa"))) return true;
+  }
+  return false;
 }
 
 // Why AGENT cannot use the LLM server SERVER (llm list --json: "agents" are those that can; llm.agent_problem), or "".

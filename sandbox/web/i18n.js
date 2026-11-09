@@ -158,6 +158,8 @@ const TEXTS = {
   "Agent": { "de": "Agent" },
   "State": { "de": "Zustand" },
   "Workspace": { "de": "Arbeitsordner" },
+  "Required: the folder on that host the agent works on, as /work (an absolute path, or ~/…). The folder this service runs in is never taken instead.": { "de": "Erforderlich: der Ordner auf diesem Host, an dem der Agent arbeitet, als /work (ein absoluter Pfad oder ~/…). Der Ordner, in dem dieser Dienst läuft, wird nie stattdessen genommen." },
+  "Which workspace? Name the folder on {host} the agent works on (its /work): nothing was started.": { "de": "Welcher Arbeitsordner? Geben Sie den Ordner auf {host} an, an dem der Agent arbeitet (sein /work): Es wurde nichts gestartet." },
   "Started": { "de": "Gestartet" },
   "Nothing runs or is kept on this host.": { "de": "Auf diesem Host läuft nichts, und nichts ist behalten." },
   "automatic": { "de": "automatisch" },

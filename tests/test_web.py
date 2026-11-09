@@ -1151,9 +1151,16 @@ def test_terminal_commands():
                   {"host": "local", "kind": "attach", "name": "--all"},
                   {"host": "local", "kind": "start", "agent": "claude", "workspace": "relative"},
                   {"host": "x;y", "kind": "attach", "name": "web"},
-                  {"host": "local", "kind": "start", "agent": "claude", "options": json.dumps([1])}):
+                  {"host": "local", "kind": "start", "agent": "claude", "options": json.dumps([1])},
+                  # review 5 UX M3 / W5: no workspace at all (the service's own directory would be /work)
+                  {"host": "local", "kind": "start", "agent": "claude"},
+                  {"host": "local", "kind": "start", "agent": "claude", "options": json.dumps(["--mode", "high", "--", "-w", "/x"])},
+                  {"host": "local", "kind": "start", "agent": "claude", "options": json.dumps(["--workspace-ro", "--with", "codex"])}):
         with pytest.raises(w.Refused):
             w.terminal_command(query)
+    for options in (["-w", "/srv/x"], ["-w/srv/x"], ["--workspace=/srv/x"]):
+        _, argv = w.terminal_command({"host": "local", "kind": "start", "agent": "claude", "options": json.dumps(options)})
+        assert argv[-len(options):] == options
     assert hosts.LOCAL == "local"
 
 
@@ -4065,8 +4072,13 @@ const byId = (id) => body.all().find(n => n.id === id);
   result.models = select.children.map(o => [o.value, Boolean(o.attributes.disabled !== undefined), o.textContent]);
   select.value = "gw"; byId("start-only-server").checked = true;
   byId("options").value = "--mode high\n--model opus";
-  buttonIn(__main_of(), "Start in a terminal").fire("click");
+  // no workspace (neither the field nor --workspace in the options): nothing starts, the form says why (review 5 M3)
+  buttonIn(__main_of(), "Start in a terminal").fire("click"); await settle();
+  result.noWorkspace = [vm.runInContext("terminalsOpened.length", context), byId("start-status").textContent, byId("workspace-hint").textContent];
+  byId("workspace").value = "/srv/w";
+  buttonIn(__main_of(), "Start in a terminal").fire("click"); await settle();
   result.started = vm.runInContext("terminalsOpened[terminalsOpened.length - 1]", context);
+  result.namesWorkspace = vm.runInContext('[namesWorkspace(["-w", "/x"]), namesWorkspace(["-w/x"]), namesWorkspace(["--workspace=/x"]), namesWorkspace(["--workspace-ro"]), namesWorkspace(["-wa", "codex"]), namesWorkspace(["--", "-w", "/x"])]', context);
   // a start refused for an untrusted project file: the path from what the terminal printed
   result.untrusted = vm.runInContext(String.raw`[untrustedConfig("\u001b[31msandbox-ai: Project configuration /home/u/my web/.sandbox-ai.json is not trusted. Review it, then run: sandbox-ai wizard trust ..."), untrustedConfig("Project configuration /p/.sandbox-ai.json is changed since it was trusted. Review"), untrustedConfig("all fine"), untrustedConfig("agent-sandbox: /work is /srv/x; configuration: none\r\nProject configuration /evil/.sandbox-ai.json is not trusted")]`, context);
   // Projects: reviewed, then trusted with exactly the digest shown, asked first naming the host
@@ -4126,7 +4138,12 @@ def test_the_pages_of_the_clis_other_commands(tmp_path):
     assert values[""][0] is False and "provider" in values[""][1]
     assert values["gpu"][0] is True and "Anthropic" in values["gpu"][1], "Claude Code cannot use a plain vLLM server"
     assert values["gpu:qwen3"][0] is True and values["gw"][0] is False
+    opened, said, hint = result["noWorkspace"]
+    assert opened == 0 and "Which workspace? Name the folder on ct1 the agent works on" in said
+    assert "Required" in hint and "never taken instead" in hint
+    assert result["namesWorkspace"] == [True, True, True, False, False, False]
     assert result["started"]["kind"] == "start" and result["started"]["agent"] == "claude"
+    assert result["started"]["workspace"] == "/srv/w"
     assert json.loads(result["started"]["options"]) == ["--mode", "high", "--llm", "gw", "--no-provider-defaults"]
     # Review 5 L7: what the sandbox prints once it runs (after the launcher's "/work is" line) never raises it
     assert result["untrusted"] == ["/home/u/my web/.sandbox-ai.json", "/p/.sandbox-ai.json", None, None]
@@ -4599,7 +4616,7 @@ const reset = () => { vm.runInContext("clear(__main); terminalsOpened.length = 0
   byId("preset").value = "tor"; byId("preset").fire("change"); await settle();
   result.torChoices = byId("preset-value-tor").children.map(o => o.value);
   byId("preset-value-tor").value = "anon";
-  byId("options").value = "--mode high";
+  byId("options").value = "--mode high"; byId("workspace").value = "/srv/w";
   buttonIn(main, "Start in a terminal").fire("click"); await settle();
   result.notReady = [vm.runInContext("terminalsOpened.length", context), byId("start-status").textContent];
   checkAnswer = { ok: true, output: "tor: ready" };

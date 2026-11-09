@@ -640,7 +640,8 @@ def test_a_terminal_query_that_is_not_one_is_refused_before_anything_runs(web, h
     sent = {"Host": HOST, "Origin": ORIGIN, **headers}
     import urllib.parse
     base = {"host": host, "csrf": web.csrf, "kind": "start", "agent": agent}
-    for change in ({"agent": "bash"}, {"name": "--all"}, {"workspace": "relative/path"},
+    base["workspace"] = "/srv/app"
+    for change in ({"agent": "bash"}, {"name": "--all"}, {"workspace": "relative/path"}, {"workspace": ""},
                    {"options": json.dumps({"--mode": "high"})}, {"options": json.dumps([1])}, {"options": "[not json"},
                    {"host": "nowhere"}, {"host": "Bad;id"}, {"kind": "shell"}, {"kind": "attach", "name": "-x"}):
         with pytest.raises(w.Refused) as refused:
@@ -665,8 +666,8 @@ TOOL_TERMINALS = [
     ({"kind": "team-start", "team": "review", "agents": "claude,codex", "workspace": "/srv/project",
       "options": json.dumps(["--mode", "high"])},
      ["team", "start", "review", "--agents=claude,codex", "--workspace=/srv/project", "--", "--mode", "high"]),
-    ({"kind": "team-start", "team": "duo", "agents": "opencode,claude,codex"},
-     ["team", "start", "duo", "--agents=opencode,claude,codex", "--"]),
+    ({"kind": "team-start", "team": "duo", "agents": "opencode,claude,codex", "workspace": "~/src/p"},
+     ["team", "start", "duo", "--agents=opencode,claude,codex", "--workspace=~/src/p", "--"]),
 ]
 
 
@@ -712,6 +713,7 @@ def test_a_tool_terminal_that_is_not_one_or_not_confirmed_is_refused(web, host):
                            ({"kind": "team-start", "team": "r", "agents": "claude,claude"}, None),
                            ({"kind": "team-start", "team": "r", "agents": "claude,bash"}, None),
                            ({"kind": "team-start", "team": "r", "agents": "claude,codex", "workspace": "rel"}, None),
+                           ({"kind": "team-start", "team": "r", "agents": "claude,codex"}, None),  # review 5 M3
                            ({"kind": "team-start", "team": "r", "agents": "claude,codex", "options": "[1]"}, None),
                            ({"kind": "team-start", "team": "r", "agents": "claude,codex", "options": "{"}, None)):
         with pytest.raises(w.Refused) as refused:
@@ -801,12 +803,12 @@ def test_a_start_its_question_answered_and_its_stop(web, host, agent):
     headers = web.headers("full")
     name = f"{agent}-web"
     query = {"host": host, "csrf": web.csrf, "kind": "start", "agent": agent, "name": name, "cols": "100",
-             "rows": "30", "options": json.dumps(["--allow-pypi"])}
+             "rows": "30", "workspace": "/srv/app", "options": json.dumps(["--allow-pypi"])}
     argv, _ = web.svc.websocket("/api/terminal?" + urllib.parse.urlencode(query), {"Host": HOST, "Origin": ORIGIN,
                                                                                     **headers}, "192.0.2.1")
-    # (on this machine the start is as given, the workspace field empty too: review 5 M5)
+    # (on this machine the start is as given: review 5 M5)
     given = ["--workspaces-as-given"] if host == "local" else []
-    assert sandbox_args(argv)[2] == [agent, "--name", name, *given, "--allow-pypi"]
+    assert sandbox_args(argv)[2] == [agent, "--name", name, "--workspace", "/srv/app", *given, "--allow-pypi"]
     web.processes.answers[("list",)] = (0, json.dumps([{"name": name, "agent": agent, "state": "running"}]), "")
     question = {"id": "1700000000-7-1", "run": name, "kind": "dns", "question": "look up pypi.org"}
     web.processes.answers[("approvals", "list")] = (0, json.dumps([question]), "")
