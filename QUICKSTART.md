@@ -168,7 +168,8 @@ untrusted file is never applied.
 You are now attached to tmux inside the sandbox: window `agent` runs Claude,
 window `shell` is a bash in the same sandbox (`Ctrl-b n` switches). Press
 `Ctrl-b d` to detach; the agent keeps working, even if you close the terminal.
-Every start works like this; without `--name` it is named `claude-sandbox-demo-xxxx`.
+Every start works like this; without `--name` it gets a codename such as `brisk-otter-lantern`
+(the start prints it, `sandbox-ai list` shows it with its workspace).
 
 ```bash
 ./sandbox-ai list                  # NAME  KIND  AGENT  STATE  HOME  STARTED  WORKSPACE

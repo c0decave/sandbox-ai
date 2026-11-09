@@ -216,7 +216,9 @@ SUBNET_RANGES = {4: [ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0
                                                        "100.64.0.0/10")],
                  6: [ipaddress.ip_network("fc00::/7")]}
 ROUTE_FILES = (Path("/proc/net/route"), Path("/proc/net/ipv6_route"))
-DEFAULTS_KEYS = {"version", "subnet", "subnet6", "mode", "canaries", "keep_days", "telemetry", "preset_dirs"}
+DEFAULTS_KEYS = {"version", "subnet", "subnet6", "mode", "canaries", "keep_days", "telemetry", "preset_dirs",
+                 "name_style"}
+NAME_STYLES = ("codename", "project")  # starts.NAME_STYLES: how a start without --name is named
 SESSION_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}"
 # The directory of a start: its first name, with a suffix when that directory is taken (sessions.new_key).
 START_ID = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}"
@@ -349,7 +351,7 @@ SHORT_OPTIONS = {
     "--copy": "-cp", "--state-dir": "-S", "--kit": "-k", "--kit-dir": "-K", "--no-default-kit": "-nk",
     "--no-memory": "-nm", "--no-plugins": "-np", "--env": "-e", "--log-dir": "-l", "--gui": "-gu",
     "--gui-screen": "-gs", "--audio": "-au", "--gui-vnc": "-gv", "--gui-wayland": "-gw", "--tmux": "-T", "--no-tmux": "-nt",
-    "--mcp": "-M", "--helper": "-hl", "--with": "-wa", "--session": "-s", "--name": "-N", "--project-name": "-pn", "--keep": "-kp",
+    "--mcp": "-M", "--helper": "-hl", "--with": "-wa", "--session": "-s", "--name": "-N", "--name-style": "-nv", "--project-name": "-pn", "--keep": "-kp",
     "--no-keep": "-nkp", "--config": "-c", "--no-config": "-nc", "--dry-run": "-n",
     "--probe": "-pb", "--memory": "-me", "--cpus": "-cu", "--pids": "-pi", "--ask": "-Q",
     "--secret-env": "-se", "--api-key": "-ky", "--model": "-mm", "--effort": "-ef", "--publish": "-pl", "--git-token-secret": "-gk", "--token-proxy": "-tp", "--git-logins": "-gn", "--rules": "-ru",
@@ -404,7 +406,7 @@ HELP_GROUPS = [  # --help: options by topic, in this order
                                   "--import-codex-auth", "--env", "--secret-env", "--api-key", "--publish", "--llm", "--local-config",
                                   "--mcp", "--helper", "--with"]),
     ("Kits, memory and plugins", ["--kit", "--kit-dir", "--no-default-kit", "--no-memory", "--no-plugins"]),
-    ("Sessions, terminal and display", ["--audio", "--name", "--project-name", "--keep", "--no-keep", "--session", "--tmux",
+    ("Sessions, terminal and display", ["--audio", "--name", "--name-style", "--project-name", "--keep", "--no-keep", "--session", "--tmux",
                                         "--no-tmux", "--gui", "--gui-screen", "--gui-vnc", "--gui-wayland"]),
     ("Hardware and limits", ["--device", "--gpu", "--memory", "--cpus", "--pids"]),
     ("Engine", ["--backend", "--image", "--image-variant", "--podman-url", "--binary", "--runtime"]),
@@ -719,11 +721,15 @@ def build_parser():
                    help="A kept, named session (the older form of --name NAME): a stopped one of that name comes back; manage "
                         "with sandbox-ai list|attach|pause|resume|stop|delete")
     p.add_argument("--name", metavar="NAME",
-                   help="Name of this start (default: AGENT-PROJECT-xxxx); sandbox-ai list shows it, rename changes "
-                        "it, and the other commands take it")
+                   help="Name of this start (default: a codename such as brisk-otter-lantern, see --name-style); "
+                        "sandbox-ai list shows it, rename changes it, and the other commands take it")
+    p.add_argument("--name-style", choices=NAME_STYLES, metavar="STYLE",
+                   help="How a start without --name is named: codename (three words such as brisk-otter-lantern) or "
+                        "project (AGENT-PROJECT-xxxx); default: \"name_style\" in "
+                        "~/.config/sandbox-ai/defaults.json, else codename")
     p.add_argument("--project-name", metavar="NAME",
-                   help="The PROJECT part of the automatic name (default: the main workspace's folder name; the "
-                        "project file's \"name\")")
+                   help="The PROJECT part of the names of --name-style project, AGENT-PROJECT-xxxx (default: the "
+                        "main workspace's folder name; the project file's \"name\")")
     p.add_argument("--keep", action="store_const", const=True, default=None,
                    help="Keep the sandbox HOME, the options and logs when the start ends, so that sandbox-ai resume "
                         "NAME can bring it back (the default)")
@@ -1960,6 +1966,8 @@ def load_user_defaults(a):
         load_canary_module().parse_categories(document["canaries"], f"{path}: canaries")
     if "telemetry" in document and document["telemetry"] not in TELEMETRY_LEVELS:
         raise ValueError(f"{path}: telemetry is one of {', '.join(TELEMETRY_LEVELS)}")
+    if "name_style" in document and document["name_style"] not in NAME_STYLES:
+        raise ValueError(f"{path}: name_style is one of {', '.join(NAME_STYLES)}")
     if "preset_dirs" in document:
         # Extra preset directories (presets.py): their shape here; where they lie when one is used (presets.py and
         # check_host_sources: never where an agent writes).
@@ -6747,8 +6755,9 @@ def project_label(a):
 
 
 def name_start(a):
-    """The name of this start: --session or --name as given (a --name in use is refused), else
-    AGENT-PROJECT-xxxx. None for an MCP server and a session's supervisor (its start is named already)."""
+    """The name of this start: --session or --name as given (a --name in use is refused), else a codename
+    (brisk-otter-lantern) or, with --name-style project (or "name_style" in your defaults), AGENT-PROJECT-xxxx.
+    None for an MCP server and a session's supervisor (its start is named already)."""
     if a.mcp_socket_dir or a.tmux_socket_dir:
         return None
     if a.session is not None:
@@ -6758,7 +6767,8 @@ def name_start(a):
         if not a.dry_run:
             starts.check_free(a.name)
         return a.name
-    return starts.auto_name(a.agent, project_label(a))
+    style = getattr(a, "name_style", None) or getattr(a, "name_style_default", None) or "codename"
+    return starts.default_name(a.agent, project_label(a), style)
 
 
 def history_event(a, event, status=None):
@@ -8280,6 +8290,7 @@ def launch(argv):
     apply_subnet_defaults(a, user_defaults, str(defaults_file()))
     a.canary_default = user_defaults.get("canaries")  # canary.categories(): after the options and the project file
     a.telemetry_default = user_defaults.get("telemetry")  # telemetry_level(): after the option
+    a.name_style_default = user_defaults.get("name_style")  # name_start(): after --name-style
     # The administrator's policy binds every way of choosing an option, the project file's and the mode's included.
     check_policy(a, policy)
     # Options may narrow the mode, never widen it; then what it enforces beyond options (approval scope ...).

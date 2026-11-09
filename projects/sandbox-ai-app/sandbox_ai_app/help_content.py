@@ -1146,35 +1146,42 @@ SECTIONS = (
         tours=()),
     section(
         "sessions", "concepts", ("Starts and sessions", "Starts und Sitzungen"),
-        ("Every start of an agent has a name, `AGENT-PROJECT-xxxx` or what `--name` gives, and is listed by "
-         "`sandbox-ai list`. An interactive start runs as a session: the agent runs in tmux inside the sandbox "
+        ("Every start of an agent has a name: what `--name` gives, else a codename of three words such as "
+         "`brisk-otter-lantern` (`--name-style project` or the default `name_style` `project` names it "
+         "`AGENT-PROJECT-xxxx` instead). `sandbox-ai list` lists it, with its workspace. An interactive start "
+         "runs as a session: the agent runs in tmux inside the sandbox "
          "(windows `agent` and `shell`) and your terminal attaches.\n\n"
          "- Ctrl-b d or closing the terminal detaches; the agent works on. `sandbox-ai attach NAME` brings it "
          "back.\n"
          "- `pause` freezes every process, `resume` thaws it.\n"
          "- `stop` ends it; HOME, options and logs are kept. `resume` on a stopped start creates a new sandbox "
          "with the same HOME, and the agent continues its last conversation.\n"
-         "- `rename` changes the name, the run id stays. `delete` removes a stopped start with its HOME.\n\n"
+         "- `rename` changes the name, the run id stays; without a new name it gives a fresh codename. `delete` "
+         "removes a stopped start with its HOME.\n\n"
          "Tasks (`-p`, `codex exec`, `opencode run`, a start without a terminal) run in the foreground and cannot "
          "be attached. Running processes are not saved: only HOME and the workspaces survive a stop. Before a "
          "kept HOME is reborn, the launcher names every change in its start files; look before you go on. "
          "`--no-keep` discards the HOME at the end.",
-         "Jeder Start eines Agenten hat einen Namen, `AGENT-PROJEKT-xxxx` oder was `--name` angibt, und wird von "
-         "`sandbox-ai list` gelistet. Ein interaktiver Start läuft als Sitzung: Der Agent läuft in tmux in der "
+         "Jeder Start eines Agenten hat einen Namen: was `--name` angibt, sonst einen Codenamen aus drei Wörtern "
+         "wie `brisk-otter-lantern` (`--name-style project` oder die Vorgabe `name_style` `project` nennt ihn "
+         "stattdessen `AGENT-PROJEKT-xxxx`). `sandbox-ai list` listet ihn mit seinem Arbeitsordner. Ein "
+         "interaktiver Start läuft als Sitzung: Der Agent läuft in tmux in der "
          "Sandbox (Fenster `agent` und `shell`), und Ihr Terminal verbindet sich.\n\n"
          "- Strg-b d oder das Schließen des Terminals löst sich; der Agent arbeitet weiter. `sandbox-ai attach "
          "NAME` holt ihn zurück.\n"
          "- `pause` friert jeden Prozess ein, `resume` taut ihn auf.\n"
          "- `stop` beendet ihn; HOME, Optionen und Protokolle bleiben. `resume` auf einem gestoppten Start legt eine "
          "neue Sandbox mit demselben HOME an, und der Agent setzt seine letzte Unterhaltung fort.\n"
-         "- `rename` ändert den Namen, die Run-ID bleibt. `delete` entfernt einen gestoppten Start samt HOME.\n\n"
+         "- `rename` ändert den Namen, die Run-ID bleibt; ohne neuen Namen gibt es einen frischen Codenamen. "
+         "`delete` entfernt einen gestoppten Start samt HOME.\n\n"
          "Aufgaben (`-p`, `codex exec`, `opencode run`, ein Start ohne Terminal) laufen im Vordergrund und lassen "
          "sich nicht verbinden. Laufende Prozesse werden nicht gesichert: Nur HOME und die Arbeitsordner überstehen "
          "einen Stopp. Bevor ein aufbewahrtes HOME wiedergeboren wird, nennt der Launcher jede Änderung seiner "
          "Startdateien; sehen Sie hin, bevor Sie weitermachen. `--no-keep` verwirft das HOME am Ende."),
         cli=("sandbox-ai list", "sandbox-ai attach NAME", "sandbox-ai pause NAME", "sandbox-ai resume NAME",
-             "sandbox-ai stop NAME", "sandbox-ai rename OLD NEW", "sandbox-ai delete NAME",
-             "sandbox-ai resume NAME --review-home", "sandbox-ai gc", "--name", "--no-keep"),
+             "sandbox-ai stop NAME", "sandbox-ai rename OLD NEW", "sandbox-ai rename OLD --codename",
+             "sandbox-ai delete NAME", "sandbox-ai resume NAME --review-home", "sandbox-ai gc", "--name",
+             "--name-style", "--no-keep"),
         see=("page-sandboxes", "page-terminals", "sandbox"),
         tours=()),
     section(

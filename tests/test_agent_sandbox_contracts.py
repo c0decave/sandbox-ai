@@ -9703,7 +9703,15 @@ def test_name_start(scenario, tmp_path, monkeypatch):
     workspace = str(tmp_path / "shop")
     if scenario == "happy":
         name = s.name_start(s.parse_args(["claude", "--workspace", workspace]))
+        assert re.fullmatch(r"[a-z]{3,8}-[a-z]{3,8}-[a-z]{3,8}", name)  # a codename (codenames.py)
+        name = s.name_start(s.parse_args(["claude", "--workspace", workspace, "--name-style", "project"]))
         assert re.fullmatch(r"claude-shop-[0-9a-f]{4}", name)
+        a = s.parse_args(["claude", "--workspace", workspace])
+        a.name_style_default = "project"  # "name_style" of your defaults; --name-style wins over it
+        assert re.fullmatch(r"claude-shop-[0-9a-f]{4}", s.name_start(a))
+        a = s.parse_args(["claude", "--workspace", workspace, "--name-style", "codename"])
+        a.name_style_default = "project"
+        assert not s.name_start(a).startswith("claude-")
         assert s.name_start(s.parse_args(["claude", "--workspace", workspace, "--name", "review"])) == "review"
         assert s.name_start(s.parse_args(["claude", "--session", "web"])) == "web"
     elif scenario == "sad":
@@ -9718,7 +9726,8 @@ def test_name_start(scenario, tmp_path, monkeypatch):
         # MCP servers and the supervisor of a session are named elsewhere.
         assert s.name_start(s.parse_args(["codex", "--mcp-socket-dir", str(tmp_path / "m")])) is None
         assert s.name_start(s.parse_args(["codex", "--tmux-socket-dir", str(tmp_path / "t")])) is None
-        long = s.name_start(s.parse_args(["opencode", "--workspace", str(tmp_path / ("x" * 60))]))
+        long = s.name_start(s.parse_args(["opencode", "--workspace", str(tmp_path / ("x" * 60)), "--name-style",
+                                          "project"]))
         assert len(long) == 40 and long.startswith("opencode-xxx")
 
 

@@ -393,6 +393,8 @@ NEWER = (
     ((0, 1, 78), "wizard models --url", lambda a: a[:2] == ["wizard", "models"] and any(x.startswith("--url") for x in a)),
     ((0, 1, 78), "workspace add --name", lambda a: a[:2] == ["workspace", "add"] and any(x.startswith("--name") for x in a)),
     ((0, 1, 78), "limits --show", lambda a: a[:1] == ["limits"] and "--show" in a),
+    ((0, 1, 78), "the default name_style", lambda a: a[:1] == ["defaults"] and a[1:3] in (["set", "name_style"],
+                                                                                         ["unset", "name_style"])),
     ((0, 1, 78), "net show --keep-all", lambda a: a[:2] == ["net", "show"] and "--keep-all" in a),
     ((0, 1, 78), "mcp attach --live and --helper", lambda a: a[:2] == ["mcp", "attach"] and (
         "--live" in a or any(x.startswith("--helper") for x in a))),
@@ -852,7 +854,8 @@ TELEMETRY_ORDER = ("on", "off", "strict")
 DEFAULT_MODE, DEFAULT_TELEMETRY = "medium", "off"
 # The keys of defaults.json (agent_sandbox.DEFAULTS_KEYS but "version"; tests/test_web.py checks they agree): any
 # other key is refused before anything reaches a host.
-DEFAULT_KEYS = ("canaries", "keep_days", "mode", "preset_dirs", "subnet", "subnet6", "telemetry")
+DEFAULT_KEYS = ("canaries", "keep_days", "mode", "name_style", "preset_dirs", "subnet", "subnet6", "telemetry")
+NAME_STYLES = ("codename", "project")  # agent_sandbox.NAME_STYLES: name_style's values
 
 
 def confirmed(body, action, detail=None):
@@ -2355,7 +2358,9 @@ class Api:
                 value is False or isinstance(value, str)
                 or isinstance(value, list) and all(isinstance(item, str) for item in value)):
             raise Refused(400, "canaries is false, a list of categories, all or none")
-        if body.get("confirm") is not True:
+        if key == "name_style" and value is not None and value not in NAME_STYLES:
+            raise Refused(400, f"name_style is {' or '.join(NAME_STYLES)}")
+        if body.get("confirm") is not True and key != "name_style":  # how starts are named protects nothing
             weakest = {"mode": MODE_ORDER[0], "telemetry": TELEMETRY_ORDER[0]}.get(key)
             if weakest is not None and value == weakest or key == "canaries" and no_canaries(value):
                 confirmed(body, "defaults-lower", f"{key} {json.dumps(value)}")  # the weakest there is: not read first

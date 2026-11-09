@@ -46,8 +46,8 @@ TERMINALS = (  # (program, arguments before the command)
 ONE_ARGUMENT_TERMINALS = {"tilix"}
 # Option groups of the launcher, in the order the app shows them.
 GROUPS = {
-    "Workspace": ["--workspace", "--workspace-ro", "--mount", "--state-dir", "--copy", "--name", "--project-name",
-                  "--keep", "--no-keep"],
+    "Workspace": ["--workspace", "--workspace-ro", "--mount", "--state-dir", "--copy", "--name", "--name-style",
+                  "--project-name", "--keep", "--no-keep"],
     "Network": ["--ask", "--profile", "--allow-host", "--allow-http", "--allow-pypi", "--allow-github", "--allow-gitlab",
                 "--allow-kernel-org", "--allow-duckduckgo", "--allow-npm", "--allow-tcp", "--allow", "--allow-host-port",
                 "--frontier", "--no-provider-defaults", "--dns", "--nameserver", "--egress-all-allow", "--offline",

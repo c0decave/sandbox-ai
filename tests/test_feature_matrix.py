@@ -938,14 +938,23 @@ def history(name):
 @starts_case
 def automatic_name(m):
     plan = m.plan()
-    assert re.fullmatch(rf"{m.agent}-work-[0-9a-f]{{4}}", plan["name"]) and plan["project_name"] == "work"
+    # A codename (codenames.py); the project part stays in the plan and the list's WORKSPACE.
+    assert re.fullmatch(r"[a-z]{3,8}-[a-z]{3,8}-[a-z]{3,8}", plan["name"]) and plan["project_name"] == "work"
+    assert re.fullmatch(rf"{m.agent}-work-[0-9a-f]{{4}}", m.plan("--name-style", "project")["name"])
     run = m.run()
     name = run.run_record["name"]
-    assert re.fullmatch(rf"{m.agent}-work-[0-9a-f]{{4}}", name) and run.config["sandbox"]["name"] == name
+    assert re.fullmatch(r"[a-z]{3,8}-[a-z]{3,8}-[a-z]{3,8}", name) and run.config["sandbox"]["name"] == name
     assert run.run_record["kind"] == "agent" and run.run_record["start"] == name  # kept: its own directory
     assert run.run_record["pod"] == (f"agent-{run.a.run_id}" if m.backend == "podman" else None)
     assert history(name) == [("start", None), ("exit", 0)]
     assert m.run().run_record["name"] != name  # every start its own
+    # "name_style": "project" in your defaults keeps AGENT-PROJECT-xxxx; --name-style wins over it.
+    defaults = Path.home() / ".config" / "sandbox-ai" / "defaults.json"
+    defaults.parent.mkdir(parents=True, exist_ok=True)
+    defaults.write_text(json.dumps({"version": 1, "name_style": "project"}))
+    assert re.fullmatch(rf"{m.agent}-work-[0-9a-f]{{4}}", m.plan()["name"])
+    assert not m.plan("--name-style", "codename")["name"].startswith(f"{m.agent}-")
+    defaults.unlink()
 
 
 @starts_case
@@ -1050,9 +1059,10 @@ def rebirth_and_the_home_review(m):
 
 @starts_case
 def project_name(m):
-    assert m.plan("--project-name", "shop")["name"].startswith(f"{m.agent}-shop-")
+    # The PROJECT part of the names of --name-style project (a codename by default).
+    assert m.plan("--project-name", "shop", "--name-style", "project")["name"].startswith(f"{m.agent}-shop-")
     m.project_file({"name": "store"})
-    assert m.plan()["project_name"] == "store" and m.plan()["name"].startswith(f"{m.agent}-store-")
+    assert m.plan()["project_name"] == "store" and m.plan("-nv", "project")["name"].startswith(f"{m.agent}-store-")
     assert m.plan("--project-name", "cli")["project_name"] == "cli"  # the command line wins
     m.project_file({"options": ["--name", "fixed"]})
     m.refused(match="option --name is not allowed in a project configuration")
@@ -1080,7 +1090,7 @@ def interactive_starts_detach(m):
     started = in_a_terminal(m)
     assert s.main(m.argv()) == 0
     a, argv = started[-1]
-    assert a.tmux is True and s.detachable(a) and re.fullmatch(rf"{m.agent}-work-[0-9a-f]{{4}}", a.start_name)
+    assert a.tmux is True and s.detachable(a) and re.fullmatch(r"[a-z]{3,8}-[a-z]{3,8}-[a-z]{3,8}", a.start_name)
     assert argv == m.argv()
     assert s.main(m.argv("--name", "web", agent_args=["--model", "x"])) == 0  # options for the agent: still its interface
     assert started[-1][0].start_name == "web"

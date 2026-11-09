@@ -173,8 +173,9 @@ bestätigen. Eine nicht vertraute Datei wird nie angewendet.
 Sie sind jetzt mit tmux in der Sandbox verbunden: Fenster `agent` führt Claude
 aus, Fenster `shell` ist eine bash in derselben Sandbox (`Ctrl-b n` wechselt).
 `Ctrl-b d` löst die Verbindung; der Agent arbeitet weiter, auch wenn Sie das
-Terminal schließen. Jeder Start funktioniert so; ohne `--name` heißt er
-`claude-sandbox-demo-xxxx`.
+Terminal schließen. Jeder Start funktioniert so; ohne `--name` bekommt er einen
+Codenamen wie `brisk-otter-lantern` (der Start gibt ihn aus, `sandbox-ai list`
+zeigt ihn mit seinem Arbeitsordner).
 
 ```bash
 ./sandbox-ai list                  # NAME  KIND  AGENT  STATE  HOME  STARTED  WORKSPACE

@@ -724,7 +724,7 @@ class SandboxTests(unittest.TestCase):
                 self.assertEqual(s.main(["claude", "--workspace", d + "/w", "--offline", "--no-auth", "--tmux"]), 0)
             a, argv = load.return_value.start.call_args.args
             self.assertTrue(a.tmux)
-            self.assertRegex(a.start_name, r"^claude-w-[0-9a-f]{4}$")
+            self.assertRegex(a.start_name, r"^[a-z]{3,8}-[a-z]{3,8}-[a-z]{3,8}$")  # a codename (codenames.py)
             seen = {}
             def inspect(a, session, home):
                 seen.update(json.loads((session / "config.json").read_text()))

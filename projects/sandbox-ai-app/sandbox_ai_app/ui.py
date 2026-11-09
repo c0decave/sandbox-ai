@@ -380,7 +380,9 @@ class OptionsForm(QTabWidget):
             widget.changed.connect(self.changed)
         else:
             widget = QLineEdit()
-            widget.setPlaceholderText(option.metavar or "")
+            # A start without a name gets a codename from the launcher (sandbox-ai list shows it).
+            widget.setPlaceholderText(tr("empty: a codename like brisk-otter-lantern") if option.long == "--name"
+                                      else option.metavar or "")
             widget.textChanged.connect(self.changed)
         return widget
 

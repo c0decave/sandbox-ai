@@ -366,7 +366,7 @@ und passen so immer zur installierten Version.
 |---|---|---|
 | `sandbox-ai claude\|codex\|opencode [Optionen] [-- Argumente]` | `claude-sandbox` … (veraltet) | einen Agenten starten |
 | `sandbox-ai list [--all] [--flat] [--no-color] [--json]` | `sandbox-ai ps` | eine Tabelle aller Starts: was läuft oder pausiert, die Starts mit aufbewahrtem HOME und die MCP-Server-Sandboxen, unter jedem Start seine MCP-Server und Helfer; `--flat` je eine Zeile; farbig im Terminal ([jeder Start](#jeder-start-namen-lösen-aufbewahren-fortsetzen)) |
-| `sandbox-ai list --history NAME [--json]`, `sandbox-ai rename ALT NEU` | | was mit einem Start geschah (Start, Ende mit Status, Pause, Fortsetzen, Stopp, Wiedergeburt, Umbenennung); einem Start einen anderen Namen geben (seine Run-ID bleibt) |
+| `sandbox-ai list --history NAME [--json]`, `sandbox-ai rename ALT [NEU]` | | was mit einem Start geschah (Start, Ende mit Status, Pause, Fortsetzen, Stopp, Wiedergeburt, Umbenennung); einem Start einen anderen Namen geben, ohne NEU einen frischen Codenamen (seine Run-ID bleibt) |
 | `sandbox-ai attach\|pause\|resume\|stop\|delete NAME` | `sandbox-ai session …` | jeden Start per Name oder Run-ID: dieses Terminal verbinden (lösen mit Ctrl-b d oder durch Schließen), einfrieren und auftauen, beenden, einen gestoppten samt HOME entfernen |
 | `sandbox-ai resume NAME [--restart] --workspace DIR` / `--mount QUELLE:ZIEL[:ro\|rw]` | | einen aufbewahrten Start (neu) mit einem weiteren Workspace oder Mount starten; die Pfade werden wie bei einem neuen Start geprüft, der Agent setzt sein Gespräch fort, und die Ergänzung bleibt für spätere Starts. `--restart` beendet eine laufende vorher; `sandbox-ai workspace add` fügt einen Workspace ohne Neustart hinzu |
 | `sandbox-ai resume NAME --review-home [--json]` | | was sich in den Startdateien eines aufbewahrten HOME (Shell, Git, SSH, Einstellungen, Hooks, Plugins des Agenten) seit seinem letzten Start geändert hat; startet nichts ([jeder Start](#jeder-start-namen-lösen-aufbewahren-fortsetzen)) |
@@ -1569,6 +1569,9 @@ entfernt die gestoppten, die länger als so viele Tage unbenutzt sind, und
 `sandbox-ai gc` nimmt den Wert, wenn kein `--older-than` angegeben ist. Ohne
 ihn bleiben aufbewahrte Starts, bis Sie sie entfernen
 ([jeder Start](#jeder-start-namen-lösen-aufbewahren-fortsetzen)).
+`"name_style": "project"` nennt Starts ohne `--name` wie vor 0.1.78
+`AGENT-PROJEKT-xxxx` statt mit einem Codenamen (`"codename"`, die Vorgabe;
+siehe Namen unten).
 
 Sie wird nur gelesen, wenn sie außerhalb aller Workspaces, rw-Mounts und
 `--state-dir` liegt, und gilt nicht mit `--offline` oder `--network`; unter
@@ -2764,15 +2767,26 @@ sandbox-ai gc --older-than 30 --dry-run            # aufbewahrte Starts, 30 Tage
 sandbox-ai claude --no-keep -- -p "review the diff"   # für Skripte: das HOME geht mit dem Ende
 ```
 
-**Namen.** Ein Start heißt `AGENT-PROJEKT-xxxx` (`claude-app-3f9a`): PROJEKT
-ist `--project-name`, sonst `"name"` aus der Projektdatei, sonst der
-Ordnername des Haupt-Workspace, passend gemacht; `xxxx` ist zufällig.
-`--name NAME` wählt den ganzen Namen. Namen haben 1-40 Buchstaben, Ziffern,
+**Namen.** Ein Start ohne `--name` bekommt einen Codenamen aus drei Wörtern,
+Adjektiv-Tier-Ding, etwa `brisk-otter-lantern` oder `calm-heron-tulip` (rund
+11 Millionen, gewählt mit Pythons `secrets`; einer, der läuft, aufbewahrt ist
+oder eine Historie hat, und der Name eines Teams werden übersprungen, und nach
+einigen Versuchen kommt ein kurzes `-xxxx` dazu). Der Arbeitsordner bleibt in
+`sandbox-ai list` sichtbar (Spalte WORKSPACE). `--name-style project` oder
+`"name_style": "project"` in `~/.config/sandbox-ai/defaults.json`
+(`sandbox-ai defaults set name_style project`) nennt ihn wie bisher
+`AGENT-PROJEKT-xxxx` (`claude-app-3f9a`): PROJEKT ist `--project-name`, sonst
+`"name"` aus der Projektdatei, sonst der Ordnername des Haupt-Workspace,
+passend gemacht; `xxxx` ist zufällig. Bestehende Starts behalten ihre Namen.
+`--name NAME` wählt den ganzen Namen. Team-Mitglieder behalten ihre Namen
+(`TEAM-AGENT`, den Namen des Teams wählen Sie), ebenso Helfer und
+MCP-Server. Namen haben 1-40 Buchstaben, Ziffern,
 `_`, `.` oder `-` und beginnen mit Buchstabe oder Ziffer; `mcp-…` gehört den
 MCP-Server-Sandboxen. Ein Name, unter dem ein Start läuft, pausiert oder
 aufbewahrt ist, wird mit Hinweis abgelehnt (`sandbox-ai resume NAME`,
 `delete` oder ein anderer Name). `sandbox-ai rename ALT NEU` ändert nur den
-Namen: Die Run-ID (`$SANDBOX_AI_RUN` der Sandbox, ihr Steuer-Socket,
+Namen (`sandbox-ai rename ALT` oder `--codename` gibt ihm einen frischen
+Codenamen): Die Run-ID (`$SANDBOX_AI_RUN` der Sandbox, ihr Steuer-Socket,
 Verbindungslogs, Freigaben und Aktivität) bleibt. Jeder Befehl nimmt den Namen
 oder die Run-ID, und alles, was einen Run zeigt, zeigt seinen Namen
 (`net list`, Freigaben, `activity`).
@@ -2938,7 +2952,7 @@ und Ihr Terminal verbindet sich. **Ctrl-b d oder das Schließen des Terminals
 löst die Verbindung**; der Agent arbeitet weiter, `sandbox-ai attach NAME` holt
 ihn zurück. Endet der Agent, bleibt die Shell; mit dem letzten Fenster endet die
 Sandbox, und der Befehl kehrt mit dem Exit-Status des Agenten zurück. Der Name
-des Starts (`AGENT-PROJEKT-xxxx` oder `--name`) wird beim Start ausgegeben und
+des Starts (ein Codename oder `--name`) wird beim Start ausgegeben und
 von `sandbox-ai list` gezeigt.
 
 tmux wird nur genutzt, wenn die Agent-Argumente reine Optionen sind (`claude`,
@@ -4594,7 +4608,7 @@ Version, `-j` JSON, `-y` Ja, `-b` Backend; siehe deren `--help`).
 | `-w`, `--workspace DIR` | Projekt unter `/work` (Standard: aktuelles Verzeichnis) |
 | `-mo`, `--mode MODE` | [Sicherheitsmodus](#sicherheitsmodi): `lax`, `low`, `medium` (Vorgabe), `high` oder `paranoid`; Optionen dürfen ihn nur enger machen |
 | `-ml`, `--mode-at-least MODE` | Eine Untergrenze: der Modus MODE nur, wenn er strenger ist als der aus den Vorgaben des Projekts oder deinen (das `--mode` eines Presets, die sandbox-ai-Presets der App) |
-| `-N`, `--name NAME`, `-nkp`, `--no-keep` | Den Start benennen (Vorgabe `AGENT-PROJEKT-xxxx`); sein HOME am Ende verwerfen statt aufbewahren |
+| `-N`, `--name NAME`, `-nkp`, `--no-keep` | Den Start benennen (Vorgabe: ein Codename wie `brisk-otter-lantern`); sein HOME am Ende verwerfen statt aufbewahren |
 | `-s`, `--session NAME` | Aufbewahrte, benannte Session; Verwaltung mit `sandbox-ai list\|attach\|stop\|resume` |
 | `-D`, `--dangerously-skip-permissions` | Agent ohne Rückfragen; die Sandbox bleibt in Kraft |
 | `-g`, `--allow-github`, `-y`, `--allow-pypi`, `-A`, `--allow-host HOST` | Einzelne HTTPS-Ziele öffnen |
@@ -4725,8 +4739,9 @@ Siehe [Agenten ohne Rückfragen](#agenten-ohne-rückfragen),
 
 | Option | Bedeutung |
 |---|---|
-| `-N`, `--name NAME` | Name dieses Starts (Vorgabe `AGENT-PROJEKT-xxxx`); `sandbox-ai list` zeigt ihn, die übrigen Befehle nehmen ihn; abgelehnt, solange ein anderer Start unter ihm läuft oder aufbewahrt ist |
-| `-pn`, `--project-name NAME` | Der PROJEKT-Teil des automatischen Namens (Vorgabe: der Ordnername des Haupt-Workspace; Schlüssel `"name"` der Projektdatei) |
+| `-N`, `--name NAME` | Name dieses Starts (Vorgabe: ein Codename wie `brisk-otter-lantern`); `sandbox-ai list` zeigt ihn, die übrigen Befehle nehmen ihn; abgelehnt, solange ein anderer Start unter ihm läuft oder aufbewahrt ist |
+| `-nv`, `--name-style STIL` | Wie ein Start ohne `--name` heißt: `codename` (die Vorgabe) oder `project`, `AGENT-PROJEKT-xxxx` (Vorgabe: `"name_style"` in Ihrer `defaults.json`) |
+| `-pn`, `--project-name NAME` | Der PROJEKT-Teil der Namen von `--name-style project` (Vorgabe: der Ordnername des Haupt-Workspace; Schlüssel `"name"` der Projektdatei) |
 | `-kp`, `--keep`, `-nkp`, `--no-keep` | HOME, Optionen und Logs beim Ende aufbewahren, damit `sandbox-ai resume NAME` den Start zurückholt (Standard); `--no-keep` verwirft das HOME (passt zu Skripten; Schlüssel `"keep"` der Projektdatei) |
 | `-s`, `--session NAME` | Eine aufbewahrte, benannte Session (die ältere Form von `--name`): eine gestoppte dieses Namens kommt zurück |
 | `-T`, `--tmux`, `-nt`, `--no-tmux` | tmux in der Sandbox (Fenster `agent` und `shell`) ist im Terminal Standard; `--tmux` besteht darauf, `--no-tmux` schaltet es ab |
@@ -4796,7 +4811,7 @@ Siehe [Projektkonfiguration](#projektkonfiguration-und-wizard) und
 | `sandbox-ai list [--all] [--flat] [--no-color] [--json]`, `list --history NAME` | Jeder Start: was läuft oder pausiert, die aufbewahrten Starts, MCP-Server (unter ihrem Start; `--flat` je eine Zeile); der Verlauf eines Namens |
 | `sandbox-ai attach\|pause\|resume\|stop NAME` | Verbinden (lösen mit `Ctrl-b d` oder durch Schließen des Terminals), einfrieren, auftauen bzw. einen gestoppten aufbewahrten Start zurückholen, stoppen |
 | `sandbox-ai resume NAME --review-home [--json]` | Was sich in den Startdateien des aufbewahrten HOME seit dem letzten Start geändert hat; startet nichts |
-| `sandbox-ai rename ALT NEU`, `sandbox-ai delete NAME [--yes]` | Ein anderer Name (die Run-ID bleibt); einen gestoppten Start samt HOME entfernen |
+| `sandbox-ai rename ALT [NEU]`, `sandbox-ai delete NAME [--yes]` | Ein anderer Name, ohne NEU (oder mit `--codename`) ein frischer Codename (die Run-ID bleibt); einen gestoppten Start samt HOME entfernen |
 | `sandbox-ai gc [--older-than TAGE] [--dry-run] [--json]` | Reste entfernen, und aufbewahrte Starts, die TAGE Tage unbenutzt sind |
 | `sandbox-ai session list\|attach\|pause\|resume\|stop\|delete` | Die ältere Form (`sandbox-session`, veraltet) |
 | `sandbox-ai mcp list` | Definierte MCP-Server und ihr Status |

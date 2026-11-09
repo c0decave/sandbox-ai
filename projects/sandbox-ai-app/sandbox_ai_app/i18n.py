@@ -3411,6 +3411,9 @@ TEXTS = {
     'session name': {
         'en': 'session name',
         'de': 'Sitzungsname'},
+    'empty: a codename like brisk-otter-lantern': {
+        'en': 'empty: a codename like brisk-otter-lantern',
+        'de': 'leer: ein Codename wie brisk-otter-lantern'},
     'Start as session': {
         'en': 'Start as session',
         'de': 'Als Sitzung starten'},

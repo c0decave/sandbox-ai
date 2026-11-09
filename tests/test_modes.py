@@ -67,8 +67,8 @@ def test_plan_medium_is_the_default(m):
     assert plain.pop("mode") == {"name": "medium", "origin": "default", "options": [], "approval_scope": "always",
                                  "other_workspaces_read_only": False, "rules": False}
     assert medium.pop("mode")["origin"] == "--mode"
-    # Every start gets a name of its own (AGENT-PROJECT-xxxx, starts.py).
-    assert re.fullmatch(rf"{m.agent}-work-[0-9a-f]{{4}}", plain.pop("name")) and medium.pop("name")
+    # Every start gets a name of its own (a codename such as brisk-otter-lantern, codenames.py).
+    assert re.fullmatch(r"[a-z]{3,8}-[a-z]{3,8}-[a-z]{3,8}", plain.pop("name")) and medium.pop("name")
     # The only ruleset: the proxy's part of --telemetry off (test_telemetry.py).
     assert plain == medium and plain["https_hosts"] == provider(m) and [r["name"] for r in plain["rulesets"]] == (
         ["telemetry"] if m.agent in s.TELEMETRY_PATHS else [])

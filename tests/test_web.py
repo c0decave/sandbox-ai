@@ -5958,3 +5958,20 @@ def test_the_llm_page_models_edit_test_and_names(tmp_path):
     assert result["keyReplaced"] == [["POST", "/api/hosts/ct1/secrets/K_KEY", {"secret": "sk-typed"}],
                                      ["POST", "/api/hosts/ct1/secrets/K_KEY", {"secret": "sk-typed", "confirm": True}],
                                      ["POST", "/api/hosts/ct1/llm", server]], "a replaced secret is asked, and kept"
+
+
+def test_name_style_is_a_default_that_lowers_nothing(logged_in):
+    """How starts without --name are named (codename or project, agent_sandbox.NAME_STYLES): set and unset without a
+    question and without reading the host's defaults first; any other value is refused before it reaches a host."""
+    assert w.NAME_STYLES == w.module("agent_sandbox").NAME_STYLES
+    status, out = logged_in("POST", "/api/hosts/ct1/defaults", {"key": "name_style", "value": "project"})
+    assert status == 200, out
+    assert logged_in.runner.calls == [("ct1", ["defaults", "set", "name_style", '"project"'])]
+    status, out = logged_in("POST", "/api/hosts/ct1/defaults", {"key": "name_style", "value": "monkey"})
+    assert status == 400 and "name_style is codename or project" in out["error"]
+    status, out = logged_in("POST", "/api/hosts/ct1/defaults", {"key": "name_style", "value": None})
+    assert status == 200 and logged_in.runner.calls[-1] == ("ct1", ["defaults", "unset", "name_style"])
+    assert len(logged_in.runner.calls) == 2
+    assert any(test(["defaults", "set", "name_style", '"project"']) for _, _, test in w.NEWER), "an older host says so"
+    script = (WEB / "app.js").read_text()
+    assert '["name_style", N_(' in script and 't("empty: a codename like brisk-otter-lantern")' in script

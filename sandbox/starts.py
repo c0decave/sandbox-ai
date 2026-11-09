@@ -5,6 +5,7 @@
                                          what runs and what is kept, grouped by start (also: sandbox-ai ps)
   sandbox-ai list --history NAME         what happened to NAME: start, exit, pause, resume, rebirth, rename
   sandbox-ai rename OLD NEW              another name for a start
+  sandbox-ai rename OLD [--codename]     a fresh codename for it, such as brisk-otter-lantern
   sandbox-ai attach NAME                 this terminal into a running start (detach: Ctrl-b d)
   sandbox-ai pause|resume NAME           freeze every process of a start, and thaw it again
   sandbox-ai resume NAME                 a stopped kept start: reborn with its HOME and options, the agent
@@ -33,11 +34,12 @@ scripts and the desktop app; "attachable" says whether attach can bring a start'
 why not (mcp, damaged, stopped, foreground, paused; null when it can); "listed_under" the start a row is shown
 below, an MCP server's "serves" the starts that use it (the one it was started for first, "started_for").
 
-Every start has a name: --name NAME, or AGENT-PROJECT-xxxx (PROJECT: --project-name, the project file's
-"name", else the main workspace's folder name). A name is 1-40 letters, digits, '_', '.' or '-' and unique
-among what runs and what is kept. rename changes the name only: the run's id (its sockets, logs and
-approvals) stays, and every command takes the name or the id. The history of each name is a small JSON
-lines file in $XDG_STATE_HOME/sandbox-ai/history/.
+Every start has a name: --name NAME, or a codename of three words such as brisk-otter-lantern (codenames.py),
+or with --name-style project or "name_style": "project" in defaults.json AGENT-PROJECT-xxxx (PROJECT:
+--project-name, the project file's "name", else the main workspace's folder name). A name is 1-40 letters,
+digits, '_', '.' or '-' and unique among what runs and what is kept. rename changes the name only: the run's id
+(its sockets, logs and approvals) stays, and every command takes the name or the id. The history of each name is
+a small JSON lines file in $XDG_STATE_HOME/sandbox-ai/history/.
 
 Sources: the run registry (run.json of every running launcher, see net.py), the start directories
 ($XDG_STATE_HOME/sandbox-ai/sessions/ID/session.json) and the MCP server state
@@ -121,6 +123,37 @@ def auto_name(agent, project, taken=None, token=secrets.token_hex):
         if name not in taken:
             return name
     raise ValueError("no free automatic name; choose one with --name")
+
+
+NAME_STYLES = ("codename", "project")  # the names of starts without --name: "name_style" in defaults.json
+
+
+def default_name(agent, project, style="codename", taken=None):
+    """The name of a start without --name: a codename such as brisk-otter-lantern (STYLE "codename", the default;
+    codenames.py) not in TAKEN (default: names_taken()), or AGENT-PROJECT-xxxx (STYLE "project", auto_name)."""
+    if style == "project":
+        return auto_name(agent, project, taken)
+    if style != "codename":
+        raise ValueError(f"name style: one of {', '.join(NAME_STYLES)}")
+    return module("codenames").free_codename(names_taken() if taken is None else taken)
+
+
+def names_taken(found=None):
+    """What a new codename must not be: the names and ids of what runs and what is kept (names_in_use), the
+    teams' names (sandbox-ai team) and every name with a history (an ended start's, list --history)."""
+    taken = set(names_in_use(found))
+    try:
+        teams = module("team").teams_dir()
+        if teams.is_dir():
+            taken.update(path.name for path in teams.iterdir())
+    except OSError:
+        pass
+    try:
+        if history_dir().is_dir():
+            taken.update(path.name[:-len(".jsonl")] for path in history_dir().iterdir() if path.name.endswith(".jsonl"))
+    except OSError:
+        pass
+    return taken
 
 
 def names_in_use(found=None):
@@ -595,12 +628,15 @@ def find(name, found=None):
     raise ValueError(f"nothing named {shown} runs or is kept (see: sandbox-ai list)")
 
 
-def rename(old, new, out=print):
-    """Give the start OLD the name NEW: its start directory and its running run's record say so, and its
-    history moves along. The run id stays (sockets, logs, approvals)."""
-    check_name(new, "rename NEW")
+def rename(old, new=None, out=print):
+    """Give the start OLD the name NEW (None: a fresh codename, codenames.py): its start directory and its running
+    run's record say so, and its history moves along. The run id stays (sockets, logs, approvals)."""
+    if new is not None:
+        check_name(new, "rename NEW")
     found = entries(True)
     entry = find(old, found)
+    if new is None:
+        new = module("codenames").free_codename(names_taken(found))
     printable = launcher().printable
     if entry["kind"] == "mcp":
         raise ValueError("MCP servers keep the name of their definition")
@@ -953,7 +989,9 @@ def parser():
                              help="without colour (the same as --color=never)")
     renamed = commands.add_parser("rename", help="another name for a start (its run id stays)")
     renamed.add_argument("old", metavar="OLD")
-    renamed.add_argument("new", metavar="NEW")
+    renamed.add_argument("new", metavar="NEW", nargs="?", help="its new name (default: a fresh codename)")
+    renamed.add_argument("-c", "--codename", action="store_true",
+                         help="a fresh codename such as brisk-otter-lantern (the same as giving no NEW)")
     collect = commands.add_parser("gc", help="remove leftovers, and kept starts unused for --older-than DAYS")
     collect.add_argument("-o", "--older-than", type=int, metavar="DAYS",
                          help="also the stopped kept starts (with their HOME) unused for more than DAYS days, and old "
@@ -993,6 +1031,8 @@ def main(argv, out=print):
     args = parser().parse_args(argv)
     try:
         if args.command == "rename":
+            if args.codename and args.new is not None:
+                raise ValueError("--codename chooses the new name: give NEW or --codename, not both")
             return rename(args.old, args.new, out)
         if args.command == "gc":
             if args.older_than is not None and args.older_than < 0:

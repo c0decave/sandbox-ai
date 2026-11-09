@@ -102,6 +102,7 @@ OPTION_LABELS = {
     "--no-tmux": ("Without tmux", "Ohne tmux"),
     "--helper": ("Other agents as helpers", "Andere Agenten als Helfer"),
     "--name": ("Name of the start", "Name des Starts"),
+    "--name-style": ("How starts without a name are named", "Wie Starts ohne Namen heißen"),
     "--project-name": ("Project part of the name", "Projektteil des Namens"),
     "--keep": ("Keep the HOME to resume it", "HOME zum Fortsetzen behalten"),
     "--no-keep": ("Discard the HOME at the end", "HOME am Ende verwerfen"),

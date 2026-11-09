@@ -1663,7 +1663,7 @@ async function drawStartForm(card, heading, host) {
     api("GET", hostPath("/vpn", host)).then((list) => { for (const p of (Array.isArray(list) ? list : []).filter(x => x && typeof x.profile === "string")) profiles.push(p); }).catch(() => {}),
     api("GET", hostPath("/mcp", host)).then((list) => { for (const x of (Array.isArray(list) ? list : []).filter(x => x && typeof x.name === "string")) mcpNames.add(x.name); }).catch(() => {}),
   ];
-  const name = el("input", { id: "name", placeholder: t("automatic"), pattern: NEW_START_NAME.source.slice(1, -1) });
+  const name = el("input", { id: "name", placeholder: t("empty: a codename like brisk-otter-lantern"), pattern: NEW_START_NAME.source.slice(1, -1) });
   const workspace = el("input", { id: "workspace", placeholder: "/home/you/src/project", class: "mono", required: true, "aria-describedby": "workspace-hint" });
   const options = el("textarea", { id: "options", rows: 3, class: "mono", placeholder: "--mode high\n--allow-pypi\n-mm sonnet", "aria-describedby": "options-hint" });
   const startStatus = el("div", { class: "wide", id: "start-status" });
@@ -3655,9 +3655,10 @@ pages.settings = async (main) => {
     el("span", {}, t("Canary files")), el("div", { class: "row" }, boxes.map((b, i) => el("label", {}, b, " ", categories[i]))), el("span"), canaryAsk),
     el("p", { class: "hint mono" }, data.path || ""),
     el("p", { class: "hint" }, t("For every start on this host; an option given at a start wins."))));
-  // keep_days, preset_dirs, subnet, subnet6: saved with Save; what lowers the protection the service asks first
+  // keep_days, preset_dirs, subnet, subnet6, name_style: saved with Save; what lowers the protection the service asks first
   const more = [["keep_days", N_("Kept starts unused this many days are removed (empty: never)"), "30"], ["preset_dirs", N_("Extra preset directories (one per line)"), "/home/you/presets"],
-    ["subnet", N_("Network of the starts (IPv4)"), "10.89.0.0/24"], ["subnet6", N_("Network of the starts (IPv6)"), "fd00:89::/64"]];
+    ["subnet", N_("Network of the starts (IPv4)"), "10.89.0.0/24"], ["subnet6", N_("Network of the starts (IPv6)"), "fd00:89::/64"],
+    ["name_style", N_("Names of new starts: codename or project (empty: codename)"), "project"]];
   const asking = el("div", { class: "row" });
   const fields = more.map(([key, label, example]) => {
     const now = values[key];

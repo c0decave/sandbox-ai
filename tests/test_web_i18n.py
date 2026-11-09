@@ -401,7 +401,7 @@ def test_the_page_in_german_and_back_to_english(tmp_path):
     assert {"Sprache", "Host", "Farbschema", "Seiten"} <= set(result["labels"]), result["labels"]
     assert result["asked"] == ("web auf local stoppen? Was darin läuft, endet; sein HOME bleibt erhalten: Fortsetzen "
                                "startet ihn wieder.Ja, stoppenAbbrechen")
-    assert "automatisch" in result["placeholders"]
+    assert "leer: ein Codename wie brisk-otter-lantern" in result["placeholders"]
     assert "--mode high\n--allow-pypi\n-mm sonnet" in result["placeholders"], \
         "options stay as typed (the model's flag is -mm: -m is --mount)"
     assert result["toast"] == "!Warnung: Fertig<b>x</b>×", "the level in German, the text as it is"
