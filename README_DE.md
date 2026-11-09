@@ -617,8 +617,11 @@ Eigene Presets sind JSON-Dateien in `~/.config/sandbox-ai/presets/` (außerhalb
 jedes Workspaces: Ein Agent darf nicht schreiben, womit er startet); eines mit
 der ID eines eingebauten ersetzt dieses. Ein Preset enthält nie ein Geheimnis
 (Optionen nennen sie nur) und darf keinen Login hineinkopieren (`--copy-auth`,
-`--auth-file`, ...), den Workspace wählen oder `--rules` tragen (eine
-`"rules"`-Datei daneben wird dafür übergeben). Das Format steht in
+`--auth-file`, ...) oder `--rules` tragen (eine `"rules"`-Datei daneben wird
+dafür übergeben). Nur Ihre eigenen Presets dürfen Workspaces nennen
+(`--workspace {ordner}`: sie gehören Ihnen allein und werden nicht
+weitergegeben); ein eingebautes Preset oder eines aus einem weiteren Ordner
+darf sie nicht wählen. Das Format steht in
 `sandbox-ai presets --help` und `sandbox/presets.py`.
 
 Weitere Preset-Ordner, eine private Sammlung oder der Checkout eines Teams,

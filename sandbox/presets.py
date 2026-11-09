@@ -62,6 +62,14 @@ REFUSED = ("--copy-auth", "--auth-file", "--import-codex-auth", "--git-credentia
            "--workspace", "--config", "--no-config", "--session", "--dry-run", "--tmux-socket-dir", "--pod-name",
            "--mcp-socket-dir", "--mcp-approvals-dir", "--helper-of", "--start-id", "--name", "--rules", "--preset",
            "--preset-value", "--")
+# Your own presets (~/.config/sandbox-ai/presets, outside every workspace) are yours alone and never passed on: in them
+# you may also name the folders a start gets. Built-in presets and those of an extra directory may not.
+OWN_ALLOWED = ("--workspace",)
+
+
+def refused_flags(origin=None):
+    """REFUSED for a preset from ORIGIN ("built-in", "extra", "yours"): yours may also set OWN_ALLOWED."""
+    return tuple(flag for flag in REFUSED if origin != "yours" or flag not in OWN_ALLOWED)
 # A value of these kinds is checked before it goes into an option.
 CHECKS = {"port": re.compile(r"[1-9][0-9]{0,4}"), "number": re.compile(r"[0-9]+(?:\.[0-9]+)?"),
           "host": re.compile(r"[A-Za-z0-9.:\[\]_-]{1,255}"), "secret": re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}"),
@@ -187,7 +195,7 @@ def directories(out_problems=None):
     return [(BUILTIN, "built-in"), *extra, (user_dir(), "yours")]
 
 
-def problems(document, where="preset"):
+def problems(document, where="preset", origin=None):
     """Why DOCUMENT is not a usable preset ([] when it is). Shape only; the launcher checks the options themselves."""
     found = []
     if not isinstance(document, dict):
@@ -229,8 +237,9 @@ def problems(document, where="preset"):
         if not isinstance(option, str):
             continue
         flag = option.split("=", 1)[0]
-        if flag in REFUSED:
-            found.append(f"{where}: {flag} is not allowed in a preset")
+        if flag in refused_flags(origin):
+            found.append(f"{where}: {flag} is not allowed in a preset"
+                         + (" (only in your own: ~/.config/sandbox-ai/presets)" if flag in OWN_ALLOWED else ""))
         for name in PLACEHOLDER.findall(option):
             if name not in values:
                 found.append(f"{where}: {{{name}}} is used but not declared in values")
@@ -269,7 +278,7 @@ def read_bytes(path, follow=True):
         os.close(fd)
 
 
-def read(path, follow=True):
+def read(path, follow=True, origin=None):
     data = read_bytes(path, follow)
     if len(data) > LIMIT:
         raise ValueError(f"{path}: larger than {LIMIT >> 10} KiB")
@@ -277,7 +286,7 @@ def read(path, follow=True):
         document = json.loads(data.decode("utf-8"))
     except (ValueError, UnicodeDecodeError, RecursionError):
         raise ValueError(f"{path}: not valid JSON") from None
-    found = problems(document, str(path))
+    found = problems(document, str(path), origin)
     if found:
         raise ValueError("; ".join(found))
     return document
@@ -297,7 +306,7 @@ def catalog(out_problems=None):
             if path.name.endswith(".rules.json"):
                 continue
             try:
-                document = read(path, follow=origin != "extra")
+                document = read(path, follow=origin != "extra", origin=origin)
                 if origin == "extra" and document.get("rules") and (path.parent / document["rules"]).is_symlink():
                     raise ValueError(f"{path}: its ruleset {document['rules']} is a symlink, not followed in an "
                                      "extra preset directory")
@@ -490,9 +499,11 @@ def registered_mcp():
         return set()
 
 
-def refused_in(options):
-    """The REFUSED flags among OPTIONS (long forms, as the launcher's canonical_options writes them)."""
-    return [token.split("=", 1)[0] for token in options if token.split("=", 1)[0] in REFUSED]
+def refused_in(options, origin=None):
+    """The refused flags among OPTIONS (long forms, as the launcher's canonical_options writes them) for a preset
+    from ORIGIN (refused_flags)."""
+    refused = refused_flags(origin)
+    return [token.split("=", 1)[0] for token in options if token.split("=", 1)[0] in refused]
 
 
 def split_mode(options):
@@ -549,7 +560,7 @@ def apply(argv, canonical=None, with_mode=False):
     # Checked as the launcher reads them: short forms (-ca for --copy-auth) and values that turned into flags too.
     if canonical:
         options = canonical(options)
-    found = refused_in(options)
+    found = refused_in(options, preset.get("_origin"))
     if found:
         raise ValueError(f"preset {name}: {', '.join(dict.fromkeys(found))} is not allowed in a preset")
     # The preset's --mode is taken out: the launcher applies it only where it is stricter than what the command

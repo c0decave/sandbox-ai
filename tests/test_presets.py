@@ -254,3 +254,28 @@ def test_the_cli(capsys, own_config):
         capsys.readouterr().out
     assert p.main(["show", "nope"]) == 1
     assert "no preset 'nope'" in capsys.readouterr().err
+
+
+def test_your_own_preset_may_name_workspaces_an_extra_or_built_in_one_may_not(own_config, tmp_path, no_sandboxes):
+    """A preset in ~/.config/sandbox-ai/presets is yours alone (outside every workspace, never passed on): it may give
+    a start its folders. One from an extra directory (shared, maybe someone else's) may not."""
+    own = minimal(id="all-mine", options=["--workspace", "{main}", "--workspace", "{other}", "--gui"],
+                  values={"main": {"label": "Main", "kind": "folder", "default": "/srv/main"},
+                          "other": {"label": "Other", "kind": "folder", "optional": True}})
+    assert p.problems(own, origin="yours") == []
+    assert any("--workspace is not allowed in a preset" in problem for problem in p.problems(own, origin="extra"))
+    assert any("only in your own" in problem for problem in p.problems(own))
+    own_config.mkdir(parents=True)
+    (own_config / "all-mine.json").write_text(json.dumps(own))
+    assert p.apply(["claude", "--preset", "all-mine"]) == ["claude", "--workspace", "/srv/main", "--gui"]
+    assert p.apply(["claude", "--preset", "all-mine", "--preset-value", "other=/srv/other"])[:5] == \
+        ["claude", "--workspace", "/srv/main", "--workspace", "/srv/other"]
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "theirs.json").write_text(json.dumps({**own, "id": "theirs"}))
+    write_defaults(own_config, preset_dirs=[str(shared)])
+    damaged = []
+    assert "theirs" not in p.catalog(damaged) and any("--workspace is not allowed" in d for d in damaged)
+    for flag in ("--copy-auth", "--git-credentials", "--name", "--session"):  # still refused in yours too
+        assert any(f"{flag} is not allowed" in problem for problem in
+                   p.problems(minimal(options=[flag, "x"]), origin="yours"))

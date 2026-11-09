@@ -598,9 +598,11 @@ that the agent cannot use).
 Your own presets are JSON files in `~/.config/sandbox-ai/presets/` (outside
 every workspace: an agent must not write what it starts with); one with the id
 of a built-in preset replaces it. A preset never holds a secret (options only
-name them) and may not copy a login in (`--copy-auth`, `--auth-file`, ...),
-choose the workspace or carry `--rules` (a `"rules"` file beside it is passed
-for it). The format is in `sandbox-ai presets --help` and `sandbox/presets.py`.
+name them) and may not copy a login in (`--copy-auth`, `--auth-file`, ...)
+or carry `--rules` (a `"rules"` file beside it is passed for it). Only your
+own presets may name workspaces (`--workspace {folder}`: they are yours alone
+and never passed on); a built-in preset or one from a further directory may not
+choose them. The format is in `sandbox-ai presets --help` and `sandbox/presets.py`.
 
 Further preset directories, a private collection or a team's checkout, are
 added with `sandbox-ai presets dirs add DIR` (listed with `presets dirs`,
