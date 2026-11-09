@@ -354,7 +354,7 @@ match the installed version.
 | Command | Older form | Does |
 |---|---|---|
 | `sandbox-ai claude\|codex\|opencode [options] [-- args]` | `claude-sandbox` … (deprecated) | start an agent |
-| `sandbox-ai list [--all] [--json]` | `sandbox-ai ps` | one table of every start: what runs or is paused, the starts whose HOME is kept, and the MCP server sandboxes ([every start](#every-start-names-detach-keep-resume)) |
+| `sandbox-ai list [--all] [--flat] [--no-color] [--json]` | `sandbox-ai ps` | one table of every start: what runs or is paused, the starts whose HOME is kept, and the MCP server sandboxes, each start with its MCP servers and helpers below it; `--flat` one row each; coloured on a terminal ([every start](#every-start-names-detach-keep-resume)) |
 | `sandbox-ai list --history NAME [--json]`, `sandbox-ai rename OLD NEW` | | what happened to a start (start, exit with status, pause, resume, stop, rebirth, rename); give a start another name (its run id stays) |
 | `sandbox-ai attach\|pause\|resume\|stop\|delete NAME` | `sandbox-ai session …` | any start by its name or run id: attach this terminal (detach with Ctrl-b d or by closing it), freeze and thaw, end, remove a stopped one with its HOME |
 | `sandbox-ai resume NAME [--restart] --workspace DIR` / `--mount SRC:DEST[:ro\|rw]` | | start a kept start (again) with another workspace or mount added; the paths get every check of a new start, the agent continues its conversation and the addition stays for later starts. `--restart` stops a running one first; `sandbox-ai workspace add` adds a workspace without a restart |
@@ -2592,7 +2592,7 @@ continues its last conversation.
 ```bash
 sandbox-ai claude -w ~/src/app                    # claude-app-3f9a: in tmux, this terminal attached
 # Ctrl-b d or closing the terminal detaches; the agent works on.
-sandbox-ai list                                    # what runs or is paused, and the kept starts
+sandbox-ai list                                    # what runs or is paused, and the kept starts (also: ps)
 sandbox-ai attach claude-app-3f9a                  # back into it
 sandbox-ai rename claude-app-3f9a app              # another name; the run id stays
 sandbox-ai pause app                               # freeze every process
@@ -2712,8 +2712,40 @@ error names the `podman pod rm --force` command.
 `~/.local/state/sandbox-ai/history/NAME.jsonl` (start, exit with status,
 pause, resume, stop, rebirth, rename, delete; time and run id each), shown by
 `sandbox-ai list --history NAME` (`--json` for programs). A rename moves the
-start's entries to the new name. `sandbox-ai list --all` adds the MCP servers
-that do not run.
+start's entries to the new name.
+
+**The listing.** `sandbox-ai list` (or `sandbox-ai ps`) shows what runs or is
+paused, every start whose HOME is kept (stopped ones too) and the running MCP
+server sandboxes; `--all` (`-a`) adds the MCP servers that do not run. Each
+start is followed by what belongs to it, indented with `├─`/`└─`: the MCP
+servers and helpers it was started with or reaches, and a helper's own run
+below its lead. A server several starts use is shown once, below the start it
+was started for (else the first that uses it), and names the others (`also
+serves NAME`); the MCP servers no listed start uses follow the starts.
+`--flat` (`-f`) lists every row on its own, in start order, as earlier
+versions did.
+
+```
+NAME                           KIND     AGENT     STATE    HOME  STARTED (UTC)     WORKSPACE
+claude-sandbox-ai-public-20c7  session  claude    running  kept  2026-11-07 17:00  ~/c0de/sandbox-ai-public
+opencode-tor-network-a3fb      session  opencode  running  kept  2026-11-08 14:24  ~/c0de/tor-network
+├─ mcp-search                  mcp      -         running  -     2026-11-08 14:24  ~/.local/state/sandbox-ai/mcp/search/work
+└─ mcp-fetch                   mcp      -         running  -     2026-11-08 14:24  ~/.local/state/sandbox-ai/mcp/fetch/work  (also serves claude-sandbox-ai-public-20c7)
+peers-ng-session               session  claude    stopped  kept  2026-11-01 09:27  ~/c0de/peers-ng
+└─ mcp-yara                    mcp      -         stopped  -     2026-11-04 19:58  -
+mcp-demo                       mcp      -         running  -     2026-11-08 15:00  ~/.local/state/sandbox-ai/mcp/demo/work
+```
+
+On a terminal the table is coloured: the headers bold, NAME and KIND by kind
+(session cyan, run blue, MCP server magenta, helper violet), STATE by state
+(running green, paused yellow, damaged red, stopped grey). `--no-color` (`-nc`,
+or `--color=never`) turns colour off, `--color=always` keeps it when piped; a
+pipe, `NO_COLOR` ([no-color.org](https://no-color.org)) and `TERM=dumb` mean
+none, and `--json` is never coloured. A server records the start it was started
+for in its `mcp.json` (`started_for`, since 0.1.78; older servers are placed by
+the starts that use them). `list --json` gives each row's `listed_under` (the
+start it is shown below, or `null`), and an MCP server's `serves` (the start it
+was started for first) and `started_for` (that start's name, or `null`).
 
 **The older forms** stay: `--session NAME` and `sandbox-ai session
 list|attach|pause|resume|stop|delete` work as before, on the same starts (the
@@ -4482,7 +4514,7 @@ See [Project configuration](#project-configuration-and-wizard) and
 | `sandbox-ai images [--json]`, `sandbox-ai images packages AGENT\|VARIANT [--json]` | Agent images and variants, current with their extensions or not, and their packages (read offline from the image) |
 | `sandbox-ai images extend\|check\|recipe\|new\|remove\|history …` | Extensions, ready-made recipes (`media`, `tor`) and variants (see [Extensions and variants](#extensions-and-variants)) |
 | `sandbox-ai build` | `[--podman-url URL] [--pin VERSION] [--uv VERSION] [--node IMAGE] [--extension-only] AGENT\|all\|VARIANT [podman build options]`; newest releases unless pinned; then the extension layers. `sandbox-ai build [--podman-url URL] team\|vpn` builds the team image or the VPN container |
-| `sandbox-ai list [--all] [--json]`, `list --history NAME` | Every start: what runs or is paused, the kept starts, MCP servers; the history of a name |
+| `sandbox-ai list [--all] [--flat] [--no-color] [--json]`, `list --history NAME` | Every start: what runs or is paused, the kept starts, MCP servers (grouped below their start; `--flat` one row each); the history of a name |
 | `sandbox-ai attach\|pause\|resume\|stop NAME` | Attach (detach with `Ctrl-b d` or by closing the terminal), freeze, thaw or bring a stopped kept start back, stop |
 | `sandbox-ai resume NAME --review-home [--json]` | What changed in the kept HOME's start files since its last start; starts nothing |
 | `sandbox-ai rename OLD NEW`, `sandbox-ai delete NAME [--yes]` | Another name (the run id stays); remove a stopped start and its HOME |

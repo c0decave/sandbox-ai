@@ -46,7 +46,10 @@ def home(tmp_path, monkeypatch):
     (["doctor", "--backend", ""], {"podman", "bwrap", "both"}, set()),
     (["llm", "add", "x", "--kind", ""], {"ollama", "lmstudio", "vllm"}, set()),
     (["kits", ""], {"show", "new", "add-skill", "trust-hooks"}, set()),
-    (["list", "--"], {"--all", "--json", "--history"}, set()),
+    (["list", "--"], {"--all", "--json", "--history", "--flat", "--no-color", "--color"}, set()),
+    (["ps", "--"], {"--all", "--json", "--history", "--flat", "--no-color", "--color"}, set()),
+    (["ps", "--color", ""], {"auto", "always", "never"}, set()),
+    (["list", "--color="], {"--color=auto", "--color=always", "--color=never"}, set()),
     (["completion", ""], {"bash", "zsh", "fish", "install"}, set()),
     (["nothing", ""], {c.FILES}, set()),
 ])

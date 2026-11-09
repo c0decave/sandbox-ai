@@ -2,7 +2,7 @@
 """sandbox-ai: one command for everything.
 
   sandbox-ai claude|codex|opencode [options] [-- agent arguments]   start an agent
-  sandbox-ai list|ps [--all] [--json] [--history NAME]               what runs and what is kept: every start
+  sandbox-ai list|ps [-a] [--flat] [--no-color] [--json] [-H NAME]   what runs and what is kept, grouped by start
   sandbox-ai rename OLD NEW                                          another name for a start
   sandbox-ai attach|pause|resume|stop|delete NAME                    any start by its name (detach: Ctrl-b d)
   sandbox-ai gc [--older-than DAYS] [--dry-run]                      remove leftovers and old kept starts
@@ -53,7 +53,7 @@ import sys
 HERE = Path(__file__).resolve().parent
 PYTHON_COMMANDS = {"claude": ("agent_sandbox.py", "claude"), "codex": ("agent_sandbox.py", "codex"),
                    "opencode": ("agent_sandbox.py", "opencode"), "session": ("sessions.py",),
-                   "list": ("starts.py", "list"), "ps": ("starts.py", "list"), "rename": ("starts.py", "rename"),
+                   "list": ("starts.py", "list"), "ps": ("starts.py", "ps"), "rename": ("starts.py", "rename"),
                    "attach": ("starts.py", "attach"), "pause": ("starts.py", "pause"),
                    "resume": ("starts.py", "resume"), "stop": ("starts.py", "stop"), "delete": ("starts.py", "delete"),
                    "gc": ("starts.py", "gc"),

@@ -4,7 +4,11 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
+import sys
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -74,10 +78,10 @@ def register(run, pid=None, **fields):
     return directory
 
 
-def make_mcp(tmp_path, name, pid=None):
+def make_mcp(tmp_path, name, pid=None, **fields):
     directory = st.state_root() / "mcp" / name
     (directory / "sock").mkdir(parents=True)
-    data = {"backend": "podman", "started": "2026-11-03T07:00:00Z", "command": ["x"]}
+    data = {"backend": "podman", "started": "2026-11-03T07:00:00Z", "command": ["x"], **fields}
     if pid:
         data["pid"] = pid
         fake_process(tmp_path, pid, ["python3", "agent_sandbox.py", "--mcp-socket-dir", launcher.mcp_socket_dir(name)])
@@ -899,3 +903,259 @@ def test_resume_takes_an_mcp_server(tmp_path, monkeypatch):
     monkeypatch.setattr(sessions, "review_home", lambda key, data: None)
     assert st.main(["resume", "web", "--mcp", "demo"], out=print) == 0
     assert launched == [["--backend", "podman", "--mcp", "demo"]]
+
+
+# --- list: colour, the grouped listing, --flat ---------------------------------------------------------------
+
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+class Terminal:
+    """sys.stdout as a terminal (or not: TTY False), with an encoding."""
+
+    def __init__(self, tty=True, encoding="utf-8"):
+        self.tty, self.encoding = tty, encoding
+
+    def isatty(self):
+        return self.tty
+
+    def write(self, text):
+        return len(text)
+
+    def flush(self):
+        pass
+
+
+@pytest.fixture
+def terminal(monkeypatch):
+    """No colour variables from the environment of the test run; sys.stdout a terminal (set .tty to change it)."""
+    for name in ("NO_COLOR", "FORCE_COLOR"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setenv("COLUMNS", "300")  # nothing wraps
+    stream = Terminal()
+    # starts.py's own sys with this stdout (pytest puts its capture back into the real sys.stdout for each phase)
+    monkeypatch.setattr(st, "sys", type("Sys", (), {"stdout": stream, "__getattr__": lambda self, name: getattr(
+        sys, name)})())
+    return stream
+
+
+def shown(argv):
+    lines = []
+    assert st.main(list(argv), out=lines.append) == 0
+    return lines
+
+
+def names_shown(lines):
+    """The NAME column of a plain table's rows (tree markers included)."""
+    return [line[:line.index("  ")] for line in lines[1:]]
+
+
+def old_show(found, out):
+    """sandbox-ai list's table before the grouped listing, uncoloured: what --flat must still print."""
+    t = st.module("textout")
+    printable = launcher.printable
+    rows = [[printable(e["name"]), e["kind"], printable(e.get("agent") or "-"),
+             e["state"] + (", expired" if e.get("expired") else ""), e.get("home") or "-",
+             st.shown_time(e.get("started")),
+             printable(e.get("workspace") or ("serves " + ", ".join(e["serves"]) if e.get("serves") else "-"))]
+            for e in found]
+    t.table(["NAME", "KIND", "AGENT", "STATE", "HOME", "STARTED (UTC)", "WORKSPACE"], rows, out, indent=0,
+            colour=False, empty="nothing runs and no start is kept; start one with: sandbox-ai claude|codex|opencode")
+
+
+def a_registry(tmp_path):
+    """Two running starts and a stopped one; MCP servers: search (web's), fetch (used by api and web, started for
+    web), legacy (api's, an mcp.json of an older version: no started_for), idle (started for a run that is gone, no
+    start uses it)."""
+    make_start("api", tmp_path, pid=41, options=["--backend", "podman", "--mcp", "fetch", "--mcp", "legacy"])
+    make_start("web", tmp_path, pid=42, options=["--backend", "podman", "--mcp", "search"])
+    register("session-web", session="agent-session-web", start="web", mcp_servers=["search", "fetch"])
+    make_start("old")
+    make_mcp(tmp_path, "search", pid=43, started_for={"start": "web", "run": "session-web"})
+    make_mcp(tmp_path, "fetch", pid=44, started_for={"start": "web", "run": None})
+    make_mcp(tmp_path, "legacy", pid=45)
+    make_mcp(tmp_path, "idle", pid=46, started_for={"start": None, "run": "claude-gone0000"})
+
+
+def test_list_colours_on_a_terminal_only(tmp_path, terminal, monkeypatch):
+    a_registry(tmp_path)
+    coloured = shown(["list"])
+    assert coloured[0].startswith("\x1b[1mNAME"), "the headers bold"
+    row = next(line for line in coloured if line.startswith("\x1b[36mweb"))
+    assert "\x1b[36msession\x1b[0m" in row and "\x1b[32mrunning\x1b[0m" in row, "a session cyan, running green"
+    server = next(line for line in coloured if "mcp-search" in line)
+    assert "\x1b[35mmcp\x1b[0m" in server and "\x1b[35mmcp-search\x1b[0m" in server, "an MCP server magenta"
+    assert "\x1b[90mstopped\x1b[0m" in next(line for line in coloured if line.startswith("\x1b[36mold"))
+    plain = [ANSI.sub("", line) for line in coloured]
+    assert plain != coloured
+    assert shown(["ps", "--no-color"]) == plain and shown(["list", "-nc"]) == plain
+    assert shown(["list", "--color=never"]) == plain and shown(["list", "--color", "always", "--no-color"]) == plain
+    terminal.tty = False  # piped: none, unless asked for
+    assert shown(["list"]) == plain and shown(["list", "--color=auto"]) == plain
+    assert shown(["list", "--color=always"]) == coloured and shown(["list", "-nc", "--color=always"]) == coloured
+    terminal.tty = True
+    monkeypatch.setenv("NO_COLOR", "1")  # no-color.org
+    assert shown(["list"]) == plain and shown(["list", "--color=always"]) == coloured
+    monkeypatch.delenv("NO_COLOR")
+    monkeypatch.setenv("TERM", "dumb")
+    assert shown(["list"]) == plain
+    monkeypatch.setenv("TERM", "xterm")
+    for argv in (["list", "--json"], ["ps", "--json", "--color=always"], ["list", "-a", "--json", "--flat"]):
+        text = "\n".join(shown(argv))
+        assert "\x1b" not in text and json.loads(text), "--json is never coloured"
+    st.record("web", "start", "web", "session-web")
+    assert shown(["list", "--history", "web", "--color=always"])[0].startswith("\x1b[1mTIME")
+    assert all("\x1b" not in line for line in shown(["list", "--history", "web", "--no-color"]))
+
+
+def test_a_helper_and_a_run_have_colours_of_their_own(tmp_path, terminal):
+    register("claude-1234abcd", name="quick", mcp_servers=["helper-codex-0a1b2c3d"])
+    make_mcp(tmp_path, "helper-codex-0a1b2c3d", pid=47, helper="codex")
+    coloured = shown(["list", "--color=always"])
+    assert "\x1b[34mrun\x1b[0m" in next(line for line in coloured if "quick" in line), "a run blue"
+    helper = next(line for line in coloured if "mcp-helper-codex" in line)
+    assert "\x1b[38;5;141mmcp\x1b[0m" in helper, "a helper violet"
+    assert names_shown(shown(["list", "-nc"])) == ["quick", "└─ mcp-helper-codex-0a1b2c3d"]
+
+
+def test_list_aligns_coloured_columns(tmp_path, terminal):
+    """The columns are padded on what is visible: with colour codes and the tree markers, each column starts at the
+    same place in every row, and the coloured table is the plain one with codes added."""
+    a_registry(tmp_path)
+    register("claude-1234abcd", name="quick")
+    make_mcp(tmp_path, "gone")
+    for argv in (["list"], ["list", "--flat"], ["list", "-a"]):
+        coloured = shown([*argv, "--color=always"])
+        plain = shown([*argv, "--no-color"])
+        assert [ANSI.sub("", line) for line in coloured] == plain
+        header = plain[0]
+        starts = [header.index(name) for name in ("KIND", "AGENT", "STATE", "HOME", "STARTED", "WORKSPACE")]
+        for line in plain[1:]:
+            for column in starts:
+                assert line[column - 2:column] == "  " and line[column] != " ", (line, column)
+
+
+def test_list_groups_what_belongs_to_a_start(tmp_path, terminal):
+    """Each start with its MCP servers below it; a server two starts use below the one it was started for, naming
+    the other; a server of an older version (no started_for) below the start that uses it; one no listed start uses
+    after the starts. --json says where each row is shown and what each server was started for."""
+    a_registry(tmp_path)
+    lines = shown(["ps", "--no-color"])
+    assert names_shown(lines) == ["api", "└─ mcp-legacy", "web", "├─ mcp-fetch", "└─ mcp-search", "old", "mcp-idle"]
+    fetch = next(line for line in lines if "mcp-fetch" in line)
+    assert fetch.endswith("  also serves api"), "no workspace of its own (its run is not listed): who else uses it"
+    terminal.encoding = "ascii"  # no box drawing where the output cannot carry it
+    assert names_shown(shown(["list", "-nc"]))[1:5] == ["`- mcp-legacy", "web", "|- mcp-fetch", "`- mcp-search"]
+    found = {e["name"]: e for e in listed()}
+    assert found["mcp-fetch"]["serves"] == ["web", "api"] and found["mcp-fetch"]["started_for"] == "web"
+    assert found["mcp-fetch"]["listed_under"] == "web" and found["mcp-search"]["listed_under"] == "web"
+    assert found["mcp-legacy"]["started_for"] is None and found["mcp-legacy"]["listed_under"] == "api"
+    assert found["mcp-idle"]["started_for"] is None and found["mcp-idle"]["listed_under"] is None
+    assert found["mcp-idle"]["serves"] == []
+    assert all(found[name]["listed_under"] is None for name in ("api", "web", "old"))
+    # The flat listing names every user, the one it was started for first.
+    assert next(line for line in shown(["list", "--flat", "-nc"]) if "mcp-fetch" in line).endswith("serves web, api")
+    # With a workspace of its own, the others in brackets after it.
+    entry = {**found["mcp-fetch"], "workspace": "/srv/fetch"}
+    assert st.row(entry, False, "", "web")[-1] == "/srv/fetch  (also serves api)"
+    assert st.row({**entry, "serves": ["web"]}, False, "", "web")[-1] == "/srv/fetch"
+
+
+def test_list_puts_a_helper_below_its_lead(tmp_path, terminal):
+    """A run that is another's helper (helper_of: the lead's run) below its lead, and the MCP servers of both below
+    the lead too: one level deep, as in the app and the web."""
+    make_mcp(tmp_path, "idle", pid=46)
+    make_mcp(tmp_path, "legacy", pid=45)
+    register("claude-lead0001", mcp_servers=["idle"])
+    register("codex-helper99", helper_of="claude-lead0001", mcp_servers=["legacy"], started="2026-11-03T09:00:00Z")
+    assert names_shown(shown(["list", "--no-color"])) == [  # below it in start order, as listed
+        "claude-lead0001", "├─ mcp-idle", "├─ mcp-legacy", "└─ codex-helper99"]
+    assert {e["name"]: e["listed_under"] for e in listed()} == {
+        "claude-lead0001": None, "codex-helper99": "claude-lead0001", "mcp-idle": "claude-lead0001",
+        "mcp-legacy": "claude-lead0001"}
+
+
+def test_list_flat_is_the_table_of_before(tmp_path, terminal):
+    """--flat: one row per entry in the listed order, exactly the table of earlier versions (colour aside)."""
+    a_registry(tmp_path)
+    register("claude-1234abcd", name="quick", workspace="/w/q")
+    make_mcp(tmp_path, "gone")  # stopped: --all
+    for argv in ([], ["--all"]):
+        expected = []
+        old_show(st.entries(bool(argv)), expected.append)
+        assert shown(["list", "--flat", "--no-color", *argv]) == expected
+        assert [ANSI.sub("", line) for line in shown(["list", "--flat", "--color=always", *argv])] == expected
+    assert names_shown(expected) != names_shown(shown(["list", "-nc", "--all"])), "grouped by default"
+    expected = []
+    old_show([], expected.append)
+    shutil.rmtree(sessions.root())
+    shutil.rmtree(st.state_root() / "mcp")
+    shutil.rmtree(launcher.runs_dir())
+    assert shown(["list", "--flat", "-nc"]) == expected == shown(["list", "-nc"])
+
+
+def test_parents_one_level_and_circles(scenario):
+    """parents(): below the top of the chain; a circle stays at the top; a reference to nothing listed is none."""
+    if scenario == "happy":
+        found = [{"name": "lead", "kind": "session", "run": "r1"},
+                 {"name": "helper", "kind": "run", "run": "r2", "helper_of": "r1"},
+                 {"name": "mcp-x", "kind": "mcp", "serves": ["helper"]}]
+        assert st.parents(found) == {1: 0, 2: 0}
+    elif scenario == "sad":
+        found = [{"name": "a", "kind": "run", "run": "ra", "helper_of": "rb"},
+                 {"name": "b", "kind": "run", "run": "rb", "helper_of": "ra"},
+                 {"name": "mcp-y", "kind": "mcp", "serves": ["nobody", 5]}]
+        assert st.parents(found) == {}
+    else:
+        found = [{"name": "mcp-z", "kind": "mcp", "serves": "web"}, {"name": "web", "kind": "session"},
+                 {"name": "mcp-w", "kind": "mcp", "serves": ["mcp-z", "web"]}]
+        assert st.parents(found) == {2: 1}, "an MCP server below a start only"
+
+
+def test_started_for_records(scenario):
+    """mcp.json's started_for: what mcp.py records (the launcher's run and start, or what mcp attach sets) and what
+    list reads back (anything else from disk: None)."""
+    if scenario == "happy":
+        assert mcp.started_for(SimpleNamespace(run_id="claude-12345678", start_key="web", start_id=None)) == {
+            "start": "web", "run": "claude-12345678"}
+        assert mcp.started_for(SimpleNamespace(started_for={"start": "web", "run": None}, run_id="x")) == {
+            "start": "web", "run": None}
+        assert st.started_for({"started_for": {"start": "web", "run": 5}}) == {"start": "web", "run": None}
+    elif scenario == "sad":
+        assert mcp.started_for(SimpleNamespace(backend="podman")) is None  # sandbox-ai mcp start on its own
+        assert st.started_for({}) is None and st.started_for({"started_for": "web"}) is None
+    else:
+        assert mcp.started_for(SimpleNamespace(started_for={"start": 3}, run_id="x")) is None
+        assert st.started_for({"started_for": {"start": "", "run": None}}) is None and st.started_for([]) is None
+
+
+def test_mcp_attach_records_what_it_starts_a_server_for(tmp_path, attaching, monkeypatch):
+    out, _ = attaching
+    kept("web", tmp_path)
+    seen = []
+    monkeypatch.setattr(mcp, "ensure_running", lambda name, a, vpn=None: seen.append(a.started_for) or "started")
+    mcp.attach("demo", "web", start_server=True, out=out)
+    assert seen == [{"start": "web", "run": None}]
+
+
+def shared_commands():
+    """The commands of main.py whose script another command runs too (ps and list, the starts.py commands, devices
+    and limits): each must name itself in its usage. The agents' own launcher has a usage of its own."""
+    spec = importlib.util.spec_from_file_location("sandbox_main_for_starts_test", ROOT / "sandbox/main.py")
+    main = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(main)
+    scripts = [script for script, *_ in main.PYTHON_COMMANDS.values()]
+    return sorted(command for command, (script, *_) in main.PYTHON_COMMANDS.items()
+                  if scripts.count(script) > 1 and script != "agent_sandbox.py" and not command.startswith("_"))
+
+
+@pytest.mark.parametrize("command", shared_commands())
+def test_every_alias_names_itself_in_its_help(command, tmp_path):
+    """sandbox-ai ps --help says "sandbox-ai ps", not the name of the command it shares its script with."""
+    env = {**os.environ, "XDG_STATE_HOME": str(tmp_path / "state"), "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
+           "XDG_CONFIG_HOME": str(tmp_path / "config")}
+    result = subprocess.run([str(ROOT / "sandbox-ai"), command, "--help"], capture_output=True, text=True, env=env,
+                            timeout=120)
+    assert result.returncode == 0 and result.stdout.startswith(f"usage: sandbox-ai {command} "), result.stdout[:200]
+    assert "ps" in shared_commands() and "list" in shared_commands()

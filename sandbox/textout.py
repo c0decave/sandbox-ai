@@ -11,7 +11,8 @@ import shutil
 import sys
 
 CODES = {"bold": "1", "dim": "2", "ok": "32", "warn": "33", "bad": "31", "accent": "36", "muted": "90",
-         "orange": "38;5;208"}  # 256 colours: every terminal of the last decades
+         "blue": "34", "magenta": "35",
+         "orange": "38;5;208", "violet": "38;5;141"}  # 256 colours: every terminal of the last decades
 
 
 def colour_enabled(stream=None):

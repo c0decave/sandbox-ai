@@ -737,6 +737,20 @@ def helper_command(name, definition, a, directory, sock, gateway, vpn=None):
             *gateway_arguments(gateway), "--", *serve]
 
 
+def started_for(a):
+    """The start an MCP server is started for, recorded in its mcp.json (sandbox-ai list shows the server below it):
+    {"start": the start directory's id or None, "run": the run id or None}, from the launcher's arguments A (its
+    run_id and start key) or from a.started_for (mcp attach sets it); None for a server started on its own."""
+    given = getattr(a, "started_for", None)
+    if isinstance(given, dict):
+        found = {key: given.get(key) if isinstance(given.get(key), str) else None for key in ("start", "run")}
+    else:
+        start = getattr(a, "start_key", None) or getattr(a, "start_id", None)
+        run = getattr(a, "run_id", None)
+        found = {"start": start if isinstance(start, str) else None, "run": run if isinstance(run, str) else None}
+    return found if any(found.values()) else None
+
+
 def ensure_running_locked(name, a, vpn=None):
     servers = {**definitions(getattr(a, "project_document", None)), **(getattr(a, "helper_definitions", None) or {})}
     if name not in servers:
@@ -822,7 +836,8 @@ def ensure_running_locked(name, a, vpn=None):
         save_state(name, {"pid": process.pid, "pid_start": launcher().process_start(process.pid, PROC),
                           "image": definition.get("image"), "backend": engine, "definition": digest,
                           **({"rootfs": definition["rootfs"]["sha256"]} if engine == "bwrap" else {}),
-                          "vpn": definition.get("vpn"), "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+                          "vpn": definition.get("vpn"), "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                          "started_for": started_for(a)})
         wait_for_socket(sock / "server.sock", log, process)
         form = (f"Bubblewrap, rootfs {definition['rootfs']['sha256'][:12]}" if engine == "bwrap"
                 else f"container {definition['image']}")
@@ -838,7 +853,8 @@ def ensure_running_locked(name, a, vpn=None):
                           "command": cmd[cmd.index("--", cmd.index("--internal-mcp-serve")) + 1:],
                           "helper": definition["helper"], "backend": a.backend, "podman_url": a.podman_url,
                           "definition": digest, "vpn": vpn,
-                          "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+                          "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                          "started_for": started_for(a)})
         wait_for_socket(sock / "server.sock", directory / "supervisor.log", process)
         print(f"agent-sandbox: helper {definition['helper']} ({name}) started in its own sandbox", file=sys.stderr)
         return "started"
@@ -858,7 +874,7 @@ def ensure_running_locked(name, a, vpn=None):
     save_state(name, {"pid": process.pid, "pid_start": launcher().process_start(process.pid, PROC),
                       "command": definition["command"], "backend": a.backend,
                       "podman_url": a.podman_url, "definition": digest, "vpn": used_vpn,
-                      "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+                      "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "started_for": started_for(a)})
     wait_for_socket(sock / "server.sock", log, process)
     print(f"agent-sandbox: MCP server {name} started in its own sandbox", file=sys.stderr)
     return "started"
@@ -1076,6 +1092,7 @@ def attach(name, start, restart=False, start_server=False, vpn=None, ask=None, o
         out(result["message"])
         return result
     if start_server:
+        a.started_for = {"start": key, "run": entry.get("run")}
         result["server_started"] = ensure_running(name, a, vpn) == "started"
     if running and not restart and ask is not None:
         restart = ask(f"{shown} runs; {LIVE}. Restart it now with {name}? The agent continues its conversation.")
@@ -1412,6 +1429,7 @@ def attach_live(name, start, helper=None, out=print):
     result = {"server": name, "start": entry["name"], "run": record.get("run"), "state": "running",
               "server_started": False, "agent": agent, "agent_config": None,
               "agent_restart": LIVE_AGENTS[agent]["restart"], "relay": f"{launcher().MCP_AGENT_DIR}/{name}/server.sock"}
+    a.started_for = {"start": entry.get("id") if entry.get("directory") else None, "run": record.get("run")}
     result["server_started"] = ensure_running(name, a) == "started"  # its own checks, as at a start
     with run_lock(record):
         # Read under the run's lock: another attach or detach may have changed it since the look above.

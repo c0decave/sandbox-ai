@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """sandbox-ai list|rename|attach|pause|resume|stop|delete: every start of an agent in one registry, by name.
 
-  sandbox-ai list [--all] [--json]       what runs and what is kept (alias: sandbox-ai ps)
+  sandbox-ai list [--all] [--flat] [--no-color] [--json]
+                                         what runs and what is kept, grouped by start (also: sandbox-ai ps)
   sandbox-ai list --history NAME         what happened to NAME: start, exit, pause, resume, rebirth, rename
   sandbox-ai rename OLD NEW              another name for a start
   sandbox-ai attach NAME                 this terminal into a running start (detach: Ctrl-b d)
@@ -26,9 +27,11 @@ their own: gc removes them on request, or every new start does with "keep_days" 
 
 One table for what runs and what is kept: the starts of agents (detachable sessions included), and the MCP
 server sandboxes. By default: what runs or is paused, and the starts whose HOME is kept; --all adds stopped
-MCP servers. --json writes the same as a list of objects, for scripts and the desktop app; "attachable" says
-whether attach can bring a start's terminal here, and "attach_why" why not (mcp, damaged, stopped, foreground,
-paused; null when it can).
+MCP servers. Each start is followed by what belongs to it (its MCP servers and helpers); --flat lists every row on
+its own. Colour on a terminal only (--no-color, NO_COLOR). --json writes the same as a list of objects, for
+scripts and the desktop app; "attachable" says whether attach can bring a start's terminal here, and "attach_why"
+why not (mcp, damaged, stopped, foreground, paused; null when it can); "listed_under" the start a row is shown
+below, an MCP server's "serves" the starts that use it (the one it was started for first, "started_for").
 
 Every start has a name: --name NAME, or AGENT-PROJECT-xxxx (PROJECT: --project-name, the project file's
 "name", else the main workspace's folder name). A name is 1-40 letters, digits, '_', '.' or '-' and unique
@@ -398,8 +401,22 @@ def mcp_entries(include_stopped=False):
                        "backend": text(data.get("backend")), "state": state, "home": None, "attachable": False,
                        "run": None, "pid": data.get("pid") if state == "running" else None,
                        "started": text(data.get("started")), "workspace": None, "directory": str(directory),
-                       "serves": []}
+                       "serves": [], "started_for": started_for(data)}
     return found
+
+
+def started_for(data):
+    """The start an MCP server was started for, as its mcp.json records it ({"start": its start directory's id or
+    None, "run": its run id or None}; mcp.py writes it when it starts the server), or None (started on its own, or
+    by a version before 0.1.78). Read from disk: anything else is None."""
+    value = data.get("started_for") if isinstance(data, dict) else None
+    if not isinstance(value, dict):
+        return None
+    found = {key: value.get(key) if isinstance(value.get(key), str) and value.get(key) else None
+             for key in ("start", "run")}
+    return found if any(found.values()) else None
+
+
 
 
 def attach_why(entry):
@@ -507,11 +524,61 @@ def entries(include_all=False, prune=True):
     for entry in found:
         entry.update(grouping(entry, records))
     break_helper_cycles(found)
-    # Whom each MCP server serves: the starts that reach it, or will at their next start (sandbox-ai mcp attach).
+    # Whom each MCP server serves: the starts that reach it, or will at their next start (sandbox-ai mcp attach); the
+    # start it was started for (its mcp.json says so) first, if it is one of them. That one is named in "started_for"
+    # (None: not recorded, or no longer listed).
     for name, server in servers.items():
-        server["serves"] = [entry["name"] for entry in found if entry.get("kind") != "mcp"
-                            and name in (entry.get("mcp") or []) + (entry.get("mcp_running") or [])]
-    return sorted(found, key=lambda e: (STATE_ORDER.get(e["state"], 9), e.get("started") or "", e["name"]))
+        users = [entry for entry in found if entry.get("kind") != "mcp"
+                 and name in (entry.get("mcp") or []) + (entry.get("mcp_running") or [])]
+        link = server.get("started_for") or {}
+        starter = next((entry for entry in found if entry.get("kind") != "mcp" and (
+            (link.get("start") and link["start"] == entry.get("id"))
+            or (link.get("run") and link["run"] in (entry.get("run"), entry.get("id"))))), None)
+        server["started_for"] = starter["name"] if starter is not None else None
+        if starter is not None and starter in users:
+            users = [starter] + [entry for entry in users if entry is not starter]
+        server["serves"] = [entry["name"] for entry in users]
+    found = sorted(found, key=lambda e: (STATE_ORDER.get(e["state"], 9), e.get("started") or "", e["name"]))
+    # Where the grouped listing (list without --flat; the app and the web group alike) shows each row: below this
+    # start's name, or at the top (None).
+    below = parents(found)
+    for index, entry in enumerate(found):
+        entry["listed_under"] = found[below[index]]["name"] if index in below else None
+    return found
+
+
+def parents(found):
+    """{index: index} of the rows of FOUND (entries, in their order) that the grouped listing shows below another
+    one: an MCP server below the first start it serves ("serves": the start it was started for comes first), a start
+    below its lead ("helper_of": the lead's run). One level deep, as in the app and the web: a row goes below the
+    top of its chain (a lead's helper's MCP server below the lead); rows that name each other round in a circle stay
+    at the top. Rows without such a link (an MCP server no listed start uses, older records) stay at the top."""
+    refs = {}
+    for index, entry in enumerate(found):
+        if entry.get("kind") != "mcp":
+            for ref in (entry.get("name"), entry.get("id"), entry.get("run")):
+                if isinstance(ref, str) and ref:
+                    refs.setdefault(ref, index)
+    direct = {}
+    for index, entry in enumerate(found):
+        named = entry.get("serves") if entry.get("kind") == "mcp" else [entry.get("helper_of")]
+        for ref in named if isinstance(named, list) else []:
+            parent = refs.get(ref) if isinstance(ref, str) else None
+            if parent is not None and parent != index:
+                direct[index] = parent
+                break
+    top = {}
+    for index in direct:
+        seen, at = {index}, index
+        while at in direct:
+            at = direct[at]
+            if at in seen:
+                at = index  # a circle: it stands on its own
+                break
+            seen.add(at)
+        if at != index:
+            top[index] = at
+    return top
 
 
 def find(name, found=None):
@@ -723,22 +790,91 @@ def shown_time(value):
     return value[:16].replace("T", " ")
 
 
-def show(found, out=print, as_json=False):
+HEADERS = ["NAME", "KIND", "AGENT", "STATE", "HOME", "STARTED (UTC)", "WORKSPACE"]
+STATE_STYLES = {"running": "ok", "paused": "warn", "damaged": "bad"}  # any other state (stopped, ended): muted
+KIND_STYLES = {"session": "accent", "run": "blue", "mcp": "magenta"}
+HELPER_PREFIX = "mcp-helper-"  # an MCP server that is another agent, a lead's helper (agent_sandbox.HELPER_PREFIX)
+TREE = ("├─ ", "└─ ")
+TREE_ASCII = ("|- ", "`- ")
+
+
+def colour_choice(when, stream=None):
+    """Whether list colours its table: WHEN is "always", "never" (--no-color) or "auto"/None: only on a terminal, and
+    not with NO_COLOR set or TERM=dumb (FORCE_COLOR forces it; textout.colour_enabled)."""
+    if when in ("always", "never"):
+        return when == "always"
+    return module("textout").colour_enabled(stream or sys.stdout)
+
+
+def tree_marks(stream=None):
+    """The tree markers of the grouped listing: box drawing where the output can carry it, else ASCII."""
+    encoding = str(getattr(stream or sys.stdout, "encoding", "") or "").lower().replace("-", "")
+    return TREE if encoding in ("utf8", "utf_8") else TREE_ASCII
+
+
+def kind_style(entry):
+    """The colour of a row's NAME and KIND: sessions cyan, runs blue, MCP servers magenta, helpers violet."""
+    if entry.get("kind") == "mcp" and str(entry.get("name", "")).startswith(HELPER_PREFIX):
+        return "violet"
+    return KIND_STYLES.get(entry.get("kind"), "muted")
+
+
+def row(entry, colour, mark="", under=None):
+    """One row of the table for ENTRY: MARK before its name (the tree marker of a row below another), UNDER the name
+    of the start it is shown below (its other users are named instead of all of them)."""
+    t = module("textout")
+    printable = launcher().printable
+    serves = entry.get("serves") or []
+    if under is None:
+        where = entry.get("workspace") or ("serves " + ", ".join(serves) if serves else "-")
+    else:
+        others = [name for name in serves if name != under]
+        also = "also serves " + ", ".join(others) if others else ""
+        where = entry.get("workspace") or also or "-"
+        where = f"{where}  ({also})" if entry.get("workspace") and also else where
+    return [t.style(mark, "muted", colour) + t.style(printable(entry["name"]), kind_style(entry), colour),
+            t.style(entry["kind"], kind_style(entry), colour),
+            printable(entry.get("agent") or "-"),
+            t.style(entry["state"] + (", expired" if entry.get("expired") else ""),
+                    STATE_STYLES.get(entry["state"], "muted"), colour),
+            entry.get("home") or "-",
+            shown_time(entry.get("started")),
+            printable(where)]
+
+
+def grouped(found, colour, marks=TREE):
+    """The rows of the grouped listing: each start (in the listed order) with what belongs to it below it (parents():
+    the MCP servers and helpers it started or uses, a helper's own below its lead), then the MCP servers no listed
+    start uses. A server several starts use is shown once, below the one it was started for (else the first), and
+    names the others ("also serves ...")."""
+    below = parents(found)
+    children = {}
+    for index in range(len(found)):
+        if index in below:
+            children.setdefault(below[index], []).append(index)
+    tops = [index for index in range(len(found)) if index not in below]
+    tops = [i for i in tops if found[i].get("kind") != "mcp"] + [i for i in tops if found[i].get("kind") == "mcp"]
+    rows = []
+    for index in tops:
+        rows.append(row(found[index], colour))
+        mine = children.get(index, [])
+        for position, child in enumerate(mine):
+            rows.append(row(found[child], colour, marks[position == len(mine) - 1], found[index]["name"]))
+    return rows
+
+
+def show(found, out=print, as_json=False, colour=None, flat=False, marks=None):
+    """The table of FOUND (entries()), or JSON (AS_JSON: never coloured). COLOUR: True, False, or None for
+    colour_choice("auto"). FLAT: one row per entry in the listed order; else grouped() (MARKS: the tree markers,
+    default tree_marks())."""
     if as_json:
         out(json.dumps(found, indent=2))
         return
-    t = module("textout")
-    printable = launcher().printable
-    colours = {"running": "ok", "paused": "warn", "damaged": "bad"}
-    rows = [[printable(e["name"]), e["kind"], printable(e.get("agent") or "-"),
-             t.style(e["state"] + (", expired" if e.get("expired") else ""), colours.get(e["state"], "muted")),
-             e.get("home") or "-",
-             shown_time(e.get("started")),
-             printable(e.get("workspace") or ("serves " + ", ".join(e["serves"]) if e.get("serves") else "-"))]
-            for e in found]
+    colour = colour_choice("auto") if colour is None else colour
+    rows = [row(entry, colour) for entry in found] if flat else grouped(found, colour, marks or tree_marks())
     # The workspace last: it is the longest and wraps at the terminal's width.
-    t.table(["NAME", "KIND", "AGENT", "STATE", "HOME", "STARTED (UTC)", "WORKSPACE"], rows, out, indent=0,
-            empty="nothing runs and no start is kept; start one with: sandbox-ai claude|codex|opencode")
+    module("textout").table(HEADERS, rows, out, indent=0, colour=colour,
+                            empty="nothing runs and no start is kept; start one with: sandbox-ai claude|codex|opencode")
 
 
 def event_details(entry):
@@ -756,7 +892,7 @@ def event_details(entry):
     return printable(str(entry.get("note") or ""))
 
 
-def show_history(name, out=print, as_json=False):
+def show_history(name, out=print, as_json=False, colour=None):
     """The history of NAME (a name, or a start's id or run id: then the history of its current name)."""
     found = history(name) if valid_name(name) else []
     if not found:
@@ -773,9 +909,23 @@ def show_history(name, out=print, as_json=False):
     printable = launcher().printable
     t.table(["TIME (UTC)", "EVENT", "RUN", "DETAILS"],
             [[shown_time(e.get("time")), printable(str(e.get("event"))), printable(str(e.get("run") or "-")),
-              event_details(e)] for e in found], out, indent=0,
+              event_details(e)] for e in found], out, indent=0, colour=colour,
             empty=f"no history of {printable(str(name))}")
     return 0
+
+
+LIST_COMMANDS = ("list", "ps")  # ps: another name for list, with its own parser (its usage and help name it)
+LIST_HELP = """What runs or is paused, the starts whose HOME is kept (stopped ones too) and the running MCP server
+sandboxes; --all adds the MCP servers that do not run.
+
+Grouped by default: each start with the MCP servers and helpers that belong to it below it (├─, └─): the servers
+it was started with or uses, a helper below its lead. A server several starts use is shown once, below the start it
+was started for (else the first that uses it), and names the others ("also serves ..."). The MCP servers no listed
+start uses follow the starts. --flat lists every row on its own, in start order (as earlier versions did).
+
+Colour on a terminal (not with NO_COLOR set or TERM=dumb; --color=always forces it, --no-color turns it off):
+KIND and NAME by kind (session cyan, run blue, MCP server magenta, helper violet), STATE by state (running green,
+paused yellow, damaged red, stopped grey)."""
 
 
 def parser():
@@ -783,10 +933,24 @@ def parser():
                                 formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False,
                                 epilog="\n\n".join(__doc__.split("\n\n")[1:4]))
     commands = p.add_subparsers(dest="command", required=True)
-    listing = commands.add_parser("list", aliases=["ps"], help="what runs and what is kept")
-    listing.add_argument("-a", "--all", action="store_true", help="also MCP servers that do not run")
-    listing.add_argument("-H", "--history", metavar="NAME", help="what happened to NAME instead")
-    listing.add_argument("-j", "--json", action="store_true", help="as JSON, for scripts and the desktop app")
+    for command in LIST_COMMANDS:
+        listing = commands.add_parser(command, help="what runs and what is kept" if command == "list"
+                                      else "the same as list", description=LIST_HELP,
+                                      formatter_class=argparse.RawDescriptionHelpFormatter)
+        listing.add_argument("-a", "--all", action="store_true",
+                             help="also the MCP servers that do not run (a start whose HOME is kept is always "
+                                  "listed, stopped or not)")
+        listing.add_argument("-H", "--history", metavar="NAME", help="what happened to NAME instead")
+        listing.add_argument("-j", "--json", action="store_true",
+                             help="as JSON, for scripts and the desktop app (never coloured)")
+        listing.add_argument("-f", "--flat", action="store_true",
+                             help="one row per start and MCP server in start order, nothing grouped below a start")
+        listing.add_argument("--color", dest="color", choices=["auto", "always", "never"], default="auto",
+                             metavar="WHEN",
+                             help="colour the table: auto (the default: on a terminal, not with NO_COLOR set), always or "
+                                  "never")
+        listing.add_argument("-nc", "--no-color", dest="color", action="store_const", const="never",
+                             help="without colour (the same as --color=never)")
     renamed = commands.add_parser("rename", help="another name for a start (its run id stays)")
     renamed.add_argument("old", metavar="OLD")
     renamed.add_argument("new", metavar="NEW")
@@ -846,9 +1010,10 @@ def main(argv, out=print):
                        review=getattr(args, "review_home", False), as_json=getattr(args, "json", False),
                        workspaces=getattr(args, "workspace", []), mounts=getattr(args, "mount", []),
                        restart=getattr(args, "restart", False), mcp=getattr(args, "mcp", []))
+        colour = colour_choice(args.color)
         if args.history:
-            return show_history(args.history, out, args.json)
-        show(entries(args.all), out, args.json)
+            return show_history(args.history, out, args.json, colour)
+        show(entries(args.all), out, args.json, colour, args.flat)
     except (ValueError, RuntimeError, OSError, subprocess.CalledProcessError) as exc:
         print(f"sandbox-ai {args.command}: {exc}", file=sys.stderr)
         return 1

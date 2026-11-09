@@ -172,7 +172,7 @@ NAMED = {
     ("attach", None, "name"): start_names, ("pause", None, "name"): start_names,
     ("resume", None, "name"): start_names, ("stop", None, "name"): start_names,
     ("delete", None, "name"): start_names, ("rename", None, "old"): start_names,
-    ("list", None, "history"): start_names,
+    ("list", None, "history"): start_names, ("ps", None, "history"): start_names,
     ("net", "*", "run"): run_names, ("devices", "*", "run"): run_names, ("workspace", "list", "run"): run_names,
     ("limits", None, "run"): run_names,
     ("canaries", "*", "run"): run_names, ("activity", None, "run"): run_names,
