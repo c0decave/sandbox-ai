@@ -502,11 +502,18 @@ class HostsPage(QWidget):
                 self.versions = self.sai.host_statuses(cached=True)  # what is kept: no SSH here
             except (OSError, ValueError):
                 self.versions = {}
+        before = [(e.get("name"), e.get("ssh")) for e in getattr(self, "entries", None) or [] if isinstance(e, dict)]
         try:
             self.entries = self.sai.host_entries()
         except (OSError, ValueError) as exc:
             self.status.setText(printable(str(exc)))
             self.entries = []
+        after = [(e.get("name"), e.get("ssh")) for e in self.entries if isinstance(e, dict)]
+        if getattr(self, "hosts_read", False) and after != before:
+            # Added, edited, renamed or removed (here or meanwhile): every host chooser of the app follows at once.
+            from .host_choice import hosts_changed
+            hosts_changed()
+        self.hosts_read = True
         current = select or self.host()
         self.show_hosts()
         if current is not None and current in self.table.row_keys:

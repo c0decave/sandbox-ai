@@ -764,6 +764,8 @@ class HostCombo(QComboBox):
         self.setToolTip(tr("Where it runs: this machine, or a host of sandbox-ai hosts (over SSH)"))
         self.currentIndexChanged.connect(lambda _index: self.chosen.emit(self.current()))
         self.reload()
+        from .host_choice import follow_hosts
+        follow_hosts(self, self.reload)  # a host added, renamed or removed: here at once
 
     def reload(self):
         current = self.current() if self.count() else LOCAL

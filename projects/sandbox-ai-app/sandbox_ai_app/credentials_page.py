@@ -547,14 +547,27 @@ class CredentialsPage(QWidget):
         self.show_overview()
 
     def fill_secret_hosts(self, hosts):
-        """Each host of `sandbox-ai hosts` the chooser does not list yet (its file is read when it is built); the
-        choice stays."""
-        self.secret_host.blockSignals(True)
-        for host in hosts:
-            from .host_choice import valid_host
-            if isinstance(host, str) and host != LOCAL and valid_host(host) and self.secret_host.findData(host) < 0:
-                self.secret_host.addItem(printable(host), host)
-        self.secret_host.blockSignals(False)
+        """The chooser as HOSTS (`sandbox-ai hosts` as just read) has it: a host removed leaves it, one added comes in;
+        the choice stays while its host does (one that left: this machine, said by the chooser)."""
+        from .host_choice import valid_host
+        wanted = [h for h in hosts if isinstance(h, str) and h != LOCAL and valid_host(h)]
+        box = self.secret_host
+        listed = [box.itemData(i) for i in range(box.count())]
+        if listed[1:] == wanted:
+            return
+        current = box.currentData()
+        box.blockSignals(True)
+        for index in reversed(range(1, box.count())):
+            if box.itemData(index) not in wanted:
+                box.removeItem(index)
+        for host in wanted:
+            if box.findData(host) < 0:
+                box.addItem(printable(host), host)
+        index = box.findData(current)
+        box.setCurrentIndex(max(index, 0))
+        box.blockSignals(False)
+        if index < 0:
+            self.hosts.changed.emit(self.hosts.host())  # its host left the list: this machine's credentials
 
     def secret_host_of(self):
         return self.host()

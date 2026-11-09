@@ -506,6 +506,7 @@ class LlmPage(QWidget):
         self.status.setAccessibleName(tr("Status"))
         layout.addWidget(self.status)
         self.load_hosts()
+        follow_hosts(self, self.load_hosts)  # a host added, renamed or removed on the Hosts page: here at once
         self.update_buttons()
 
     def build_models(self):
@@ -569,6 +570,8 @@ class LlmPage(QWidget):
         index = self.host_box.findData(current) if current else 0
         self.host_box.setCurrentIndex(max(index, 0))
         self.host_box.blockSignals(False)
+        if current and index < 0 and self.isVisible():
+            self.refresh()  # its host left the list: this machine's servers, never that host's rows
 
     def host(self):
         return self.host_box.currentData()

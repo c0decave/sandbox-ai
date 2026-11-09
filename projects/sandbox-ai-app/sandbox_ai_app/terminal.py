@@ -25,7 +25,7 @@ from .backend import setting as backend_setting
 from .files import printable
 from .i18n import N_, tr
 from .pty_bridge import PtyBridge
-from .widgets import ask_first, background, fill, plain_label, row_key, table, warn
+from .widgets import ask_first, background, fill, plain_label, row_key, safe_tooltip, table, warn
 
 WEB = Path(__file__).resolve().with_name("web")
 # The vendoring script next to the package (a checkout or sandbox-ai's installation; not in a wheel).
@@ -325,8 +325,11 @@ class TerminalsPage(QWidget):
         top = QHBoxLayout()
         self.host = QComboBox()
         self.host.setToolTip(tr("This machine, or a host of sandbox-ai hosts (over SSH)"))
+        self.host.setAccessibleName(tr("Host"))
         self.load_hosts()
         self.host.currentIndexChanged.connect(lambda _i: self.host_changed())
+        from .host_choice import follow_hosts
+        follow_hosts(self.host, self.hosts_changed)  # a host added, renamed or removed: here at once
         self.summary = plain_label(role="secondary")
         self.refresh_button = QPushButton(tr("Refresh"))
         self.refresh_button.setToolTip(tr("Read again now (it is read every few seconds anyway)"))
@@ -337,9 +340,17 @@ class TerminalsPage(QWidget):
         box_layout.addLayout(top)
         self.list = table([tr("Name"), tr("Agent"), tr("State"), tr("Workspace"), tr("Terminal")], stretch=4,
                           sortable=False)
+        self.list.setAccessibleName(tr("Running starts"))
         self.list.cellDoubleClicked.connect(lambda row, _column: self.attach_row(row))
         box_layout.addWidget(self.list, 1)
         return box
+
+    def hosts_changed(self):
+        """The hosts file changed: the chooser again; when its host left, this machine's starts."""
+        chosen = self.host.currentData()
+        self.load_hosts()
+        if chosen != self.host.currentData():
+            self.host_changed()
 
     def load_hosts(self):
         """This machine and the hosts of sandbox-ai hosts (read again when the page is shown: one may have been
@@ -449,8 +460,8 @@ class TerminalsPage(QWidget):
             if not entry.get("attachable"):
                 continue
             button = QPushButton(tr("Show its tab") if open_[row] else tr("Open terminal"))
-            button.setToolTip(tr("Attach to {name} in a terminal tab (detach with Ctrl-b d: it keeps running)",
-                                 name=printable(entry["name"])))
+            button.setToolTip(safe_tooltip(tr("Attach to {name} in a terminal tab (detach with Ctrl-b d: it keeps running)",
+                                 name=printable(entry["name"]))))
             button.clicked.connect(lambda _=False, name=entry["name"]: self.attach_start(name))
             cell = QWidget()
             cell_layout = QHBoxLayout(cell)
