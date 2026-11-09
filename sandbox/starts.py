@@ -398,30 +398,8 @@ def start_entries(prune=True):
                       "last_used": used or None, "expires": expires,
                       "expired": bool(expires and state == "stopped" and expires < now()),
                       "workspace": text(data.get("workspace")), "project": text(data.get("project")),
-                      "mcp": mcp_names(data["options"]), "llm": llm_choice(data["options"]),
-                      "directory": str(directory)}
+                      "mcp": mcp_names(data["options"]), "directory": str(directory)}
     return found
-
-
-LLM_CHOICE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}(?::[\w.:/@+-]{1,200})?", re.ASCII)  # llm.parse_choice
-
-
-def llm_choice(options):
-    """The LLM server OPTIONS (a start's saved options) name as --llm NAME[:MODEL] (the last one given), or None: the
-    app and the web show that server's status (sandbox-ai llm status NAME) beside the start."""
-    found = None
-    for index, token in enumerate(options if isinstance(options, list) else []):
-        if token in ("--llm", "-lm") and index + 1 < len(options) and isinstance(options[index + 1], str):
-            found = options[index + 1]
-        elif isinstance(token, str) and token.startswith(("--llm=", "-lm=")):
-            found = token.partition("=")[2]
-    return found if isinstance(found, str) and LLM_CHOICE.fullmatch(found) else None
-
-
-def record_llm(record_):
-    """The --llm NAME[:MODEL] a running sandbox records in its run.json (None: none, or an older version)."""
-    value = record_.get("llm") if isinstance(record_, dict) else None
-    return value if isinstance(value, str) and LLM_CHOICE.fullmatch(value) else None
 
 
 def mcp_names(options):
@@ -573,8 +551,7 @@ def entries(include_all=False, prune=True):
                       "home": "own" if record_.get("own_home") else "discarded", "keep": False,
                       "mode": mode_of(record_), "attachable": False, "run": run, "pid": None,
                       "started": text(record_.get("started")), "workspace": text(record_.get("workspace")),
-                      "mcp": record_mcp(record_) or [], "llm": record_llm(record_), "directory": None,
-                      "run_dir": record_.get("directory")})
+                      "mcp": record_mcp(record_) or [], "directory": None, "run_dir": record_.get("directory")})
     for run, record_ in records.items():
         if not isinstance(run, str) or not isinstance(record_, dict):
             continue  # a damaged run.json ("run": 5): not one of ours to list
@@ -584,8 +561,6 @@ def entries(include_all=False, prune=True):
             running_mcp = record_mcp(record_)
             if running_mcp is not None:  # what it reaches now; its options say what it starts with next time
                 session["mcp_running"] = running_mcp
-            if record_llm(record_):  # the server it works with now (its options may name another for its next start)
-                session["llm"] = record_llm(record_)
             continue
         server = by_pid.get(record_.get("pid"))
         if server is not None or record_.get("kind") == "mcp" or str(run).startswith("mcp-"):
@@ -600,8 +575,7 @@ def entries(include_all=False, prune=True):
                       "mode": mode_of(record_),
                       "attachable": False, "run": run, "pid": record_.get("pid"),
                       "started": text(record_.get("started")), "workspace": text(record_.get("workspace")),
-                      "mcp": record_mcp(record_) or [], "llm": record_llm(record_), "directory": None,
-                      "run_dir": record_.get("directory")})
+                      "mcp": record_mcp(record_) or [], "directory": None, "run_dir": record_.get("directory")})
     found = list(starts.values()) + plain + list(servers.values())
     for entry in found:
         entry["attach_why"] = attach_why(entry)

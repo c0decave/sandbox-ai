@@ -8,7 +8,6 @@
   sandbox-ai llm remove NAME
   sandbox-ai llm models NAME [--sort name|size|loaded] [--json]
   sandbox-ai llm check NAME [--agent claude|codex|opencode] [--model MODEL]
-  sandbox-ai llm status [NAME] [--json] [--watch SECONDS]
 
 KIND is ollama, lmstudio, llamacpp, vllm or openai-compatible. URL is the server's root, with a path
 prefix if a gateway puts one in front (https://gw.example.org/ollama); each agent gets the API path it
@@ -19,11 +18,6 @@ loopback (127.0.0.1 or localhost, reached with --allow-host-port), private, CGNA
 A start with --llm NAME[:MODEL] opens exactly that server's address and port and configures the agent
 for it. The key (a secret of sandbox-ai secrets, never stored here) is added by the connection proxy on
 the wire, so the agent only ever sees a placeholder. Endpoints are kept in ~/.config/sandbox-ai/llm.json.
-
-llm status shows what each server has loaded and uses now, as far as its API reports it: Ollama the loaded models
-with their VRAM and RAM, vLLM the KV cache and the requests running and waiting, llama.cpp its slots (and requests
-with --metrics; memory in router mode), LM Studio the loaded models. The host's total RAM and VRAM are not reported by
-these APIs (llama.cpp's router mode excepted).
 
 Standard library only.
 """
@@ -492,11 +486,7 @@ class Client:
             with exc:
                 return exc.code, exc.read(65536) if exc.fp else b""
 
-    def text(self, path):
-        """The text answer of GET PATH (Prometheus' /metrics); ValueError as json() says it."""
-        return self.json(path, parse=lambda data: data.decode("utf-8"))
-
-    def json(self, path, parse=json.loads):
+    def json(self, path):
         """The JSON answer of GET PATH; ValueError says what went wrong (never with a secret)."""
         try:
             status, data = self.call(path)
@@ -510,10 +500,9 @@ class Client:
         if status != 200:
             raise ValueError(f"{self.endpoint['url']}{path}: HTTP {status}")
         try:
-            return parse(data)
+            return json.loads(data)
         except (ValueError, RecursionError):
-            raise ValueError(f"{self.endpoint['url']}{path}: the answer is not "
-                             f"{'JSON' if parse is json.loads else 'text'}") from None
+            raise ValueError(f"{self.endpoint['url']}{path}: the answer is not JSON") from None
 
 
 def model_date(value):
@@ -530,24 +519,6 @@ def with_date(details, value):
     """DETAILS with the model's date (its version as the server knows it) appended."""
     date = model_date(value)
     return ", ".join(part for part in (details, date) if part)
-
-
-def lmstudio_native(fetch):
-    """{key: model} of LM Studio's own REST API (0.4 and later: GET /api/v1/models, {"models": [{key, type,
-    size_bytes, params_string, quantization: {name}, max_context_length, loaded_instances: [{id, config:
-    {context_length}}]}]}); {} where it has none (older, or behind a gateway)."""
-    try:
-        listed = fetch("/api/v1/models")["models"]
-    except (OSError, ValueError, KeyError, TypeError):
-        return {}
-    if not isinstance(listed, list):
-        return {}
-    return {m["key"]: m for m in listed if isinstance(m, dict) and isinstance(m.get("key"), str)}
-
-
-def lmstudio_quantization(model):
-    value = model.get("quantization")
-    return value.get("name") if isinstance(value, dict) else None
 
 
 def discover_raw(kind, fetch):
@@ -567,28 +538,16 @@ def discover_raw(kind, fetch):
                  "quantization": m.get("details", {}).get("quantization_level")}
                 for m in tags]
     if kind == "lmstudio":
-        # LM Studio 0.4's own REST API (/api/v1/models) has each model's size (size_bytes) and its loaded instances;
-        # the v0 API (state loaded/not-loaded, no size) names the models as before. Either may be missing.
-        native = lmstudio_native(fetch)
         try:
             data = fetch("/api/v0/models")["data"]
-            return [{"name": m["id"], "size": (native.get(m["id"]) or {}).get("size_bytes"),
-                     "loaded": m.get("state") == "loaded",
+            return [{"name": m["id"], "size": m.get("size_bytes"), "loaded": m.get("state") == "loaded",
                      "details": m.get("quantization", ""), "type": m.get("type"), "arch": m.get("arch"),
-                     "parameters": (native.get(m["id"]) or {}).get("params_string"),
                      "quantization": m.get("quantization"), "context": m.get("max_context_length")}
                     for m in data if m.get("type") in ("llm", "vlm")]
         except (OSError, ValueError, KeyError, TypeError):
-            pass
-        if native:
-            return [{"name": key, "size": m.get("size_bytes"), "loaded": bool(m.get("loaded_instances")),
-                     "details": "", "type": m.get("type"), "arch": m.get("architecture"),
-                     "parameters": m.get("params_string"), "quantization": lmstudio_quantization(m),
-                     "context": m.get("max_context_length")}
-                    for key, m in native.items() if m.get("type") == "llm"]
-        # Older LM Studio, or one behind a gateway: the OpenAI-compatible listing only.
-        return [{"name": m["id"], "size": None, "loaded": None, "details": with_date("", m.get("created"))}
-                for m in fetch("/v1/models")["data"]]
+            # Older LM Studio, or one behind a gateway: the OpenAI-compatible listing only.
+            return [{"name": m["id"], "size": None, "loaded": None, "details": with_date("", m.get("created"))}
+                    for m in fetch("/v1/models")["data"]]
     if kind == "vllm":
         # vLLM serves exactly the models it has loaded.
         return [{"name": m["id"], "size": None, "loaded": True,
@@ -645,334 +604,6 @@ def discover(kind, fetch):
         return clean_models(discover_raw(kind, fetch))
     except (OSError, KeyError, TypeError, AttributeError) as exc:
         raise ValueError(f"unexpected answer from the {KINDS[kind]['label']}: {printable(exc)}") from None
-
-
-# --- what a server has loaded and uses now (llm status, wizard models --status) -----------------------------------
-#
-# Only what each server's API reports, never a guess:
-#   Ollama     /api/ps: the loaded models, the memory each takes ("size") and how much of it is in VRAM ("size_vram"),
-#              their context ("context_length") and when they are unloaded ("expires_at"). No KV cache, no requests,
-#              no totals of the host.
-#   LM Studio  /api/v1/models (0.4 and later): the loaded instances with their context; /api/v0/models: loaded or
-#              not. No memory use, no KV cache, no requests.
-#   llama.cpp  /v1/models (its size; in router mode its status and the memory a loaded model allocated per device,
-#              with the devices' total and free memory), /props (slots, context), /slots (which slots process a
-#              request), /metrics with --metrics (requests processing and deferred). No KV cache use.
-#   vLLM       /v1/models (it serves what it has loaded), /metrics: KV cache use (kv_cache_usage_perc; before V1
-#              gpu_cache_usage_perc and cpu_cache_usage_perc), requests running and waiting. No memory, no sizes.
-#   any other OpenAI-compatible server: /v1/models only - what is loaded and what it uses is not reported.
-
-STATUS_TIMEOUT = 5  # seconds per request of a status read
-STATUS_BUDGET = 12  # seconds after which a status read asks nothing more (what it has is shown)
-USAGE_KEYS = ("vram_bytes", "ram_bytes", "vram_total_bytes", "vram_free_bytes", "kv_cache_percent",
-              "cpu_kv_cache_percent", "requests_running", "requests_waiting", "slots_total")
-# What a front end says "not reported" for, when the status lacks it.
-REPORTABLE = ("loaded", "memory", "kv_cache", "requests", "totals")
-METRIC = re.compile(r"([A-Za-z_:][A-Za-z0-9_:]*)(?:\{[^}\n]{0,2000}\})?[ \t]+([^ \t]+)")
-
-
-def parse_metrics(text, names):
-    """{name: [value, ...]} of the Prometheus text exposition TEXT, for NAMES only (one value per sample: labels set
-    apart engines and models); finite numbers only."""
-    found = {}
-    for line in str(text or "").splitlines()[:50000]:
-        if not line or line.startswith("#"):
-            continue
-        match = METRIC.match(line)
-        if not match or match[1] not in names:
-            continue
-        try:
-            value = float(match[2])
-        except ValueError:
-            continue
-        if value == value and abs(value) != float("inf"):
-            found.setdefault(match[1], []).append(value)
-    return found
-
-
-def count(value):
-    """VALUE if it is a whole number of bytes (or of anything) a server may report, else None."""
-    return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 1 << 62 else None
-
-
-class Remembered:
-    """FETCH(PATH), each path asked once (the listing and the status read share the answers), and after DEADLINE
-    (time.monotonic()) nothing more is asked: what the status has then is shown."""
-
-    def __init__(self, fetch, deadline=None):
-        self.fetch, self.deadline, self.kept = fetch, deadline, {}
-
-    def __call__(self, path):
-        if path not in self.kept:
-            if self.deadline is not None and time.monotonic() > self.deadline:
-                raise ValueError(f"{path}: not asked, the server took too long already")
-            try:
-                self.kept[path] = (True, self.fetch(path))
-            except Exception as exc:  # noqa: BLE001 - kept and raised again for every asker
-                self.kept[path] = (False, exc)
-        ok, value = self.kept[path]
-        if ok:
-            return value
-        raise value
-
-
-def optional(fetch, path, default=None):
-    """FETCH(PATH), or DEFAULT where the server does not answer it (an API it lacks, an option it was not started
-    with)."""
-    try:
-        return fetch(path)
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, UnicodeDecodeError):
-        return default
-
-
-def status_raw(kind, fetch, fetch_text, models):
-    """{"loaded": [{name, size?, memory_bytes?, vram_bytes?, ram_bytes?, context?, expires_at?}] or None (not
-    reported), "usage": {...}, "reported_by": [...]} of a server of KIND whose MODELS (clean_models) were just
-    listed with FETCH; FETCH_TEXT(PATH) reads a text answer (/metrics). Untrusted: see clean_status."""
-    sizes = {m["name"]: m["size"] for m in models}
-    usage, by = {}, []
-    loaded = None
-    if kind == "ollama":
-        running = optional(fetch, "/api/ps")
-        if isinstance(running, dict) and isinstance(running.get("models"), list):
-            loaded, by = [], ["Ollama /api/ps"]
-            for m in running["models"]:
-                if not isinstance(m, dict):
-                    continue
-                memory, vram = count(m.get("size")), count(m.get("size_vram"))
-                loaded.append({"name": m.get("name"), "size": sizes.get(m.get("name")), "memory_bytes": memory,
-                               "vram_bytes": vram, "ram_bytes": memory - vram if memory is not None and
-                               vram is not None and memory >= vram else None,
-                               "context": m.get("context_length"), "expires_at": m.get("expires_at")})
-            for key in ("vram_bytes", "ram_bytes"):
-                values = [entry[key] for entry in loaded if entry[key] is not None]
-                if values or not loaded:
-                    usage[key] = sum(values)
-    elif kind == "lmstudio":
-        native = lmstudio_native(fetch)
-        if native:
-            loaded, by = [], ["LM Studio /api/v1/models"]
-            for key, m in native.items():
-                for instance in m.get("loaded_instances") or []:
-                    if isinstance(instance, dict):
-                        config = instance.get("config") if isinstance(instance.get("config"), dict) else {}
-                        loaded.append({"name": instance.get("id") or key, "size": count(m.get("size_bytes")),
-                                       "context": config.get("context_length")})
-        elif any(m["loaded"] is not None for m in models):
-            loaded, by = [{"name": m["name"], "size": m["size"], "context": None} for m in models if m["loaded"]], \
-                ["LM Studio /api/v0/models"]
-    elif kind == "llamacpp":
-        listing = optional(fetch, "/v1/models", {})
-        raw = {m.get("id"): m for m in (listing.get("data") if isinstance(listing, dict) else None) or []
-               if isinstance(m, dict)}
-        loaded, by = [], ["llama.cpp /v1/models"]
-        devices = {}
-        for m in models:
-            if m["loaded"] is not True:
-                continue
-            entry = {"name": m["name"], "size": m["size"], "context": None}
-            memory = raw.get(m["name"], {}).get("memory")
-            effective = memory.get("effective") if isinstance(memory, dict) else None
-            if isinstance(effective, dict) and isinstance(effective.get("devices"), list):
-                # Router mode: what the instance allocated, per device (GPU) and on the host (RAM).
-                vram = ram = 0
-                for device in effective["devices"]:
-                    if not isinstance(device, dict):
-                        continue
-                    used = sum(count(device.get(k)) or 0 for k in ("model", "context", "compute"))
-                    if device.get("kind") == "host":
-                        ram += used
-                    else:
-                        vram += used
-                        if isinstance(device.get("name"), str) and count(device.get("total")) is not None:
-                            devices[device["name"]] = (count(device["total"]), count(device.get("free")))
-                entry.update(vram_bytes=vram, ram_bytes=ram, memory_bytes=vram + ram)
-                if isinstance(effective.get("n_ctx"), int):
-                    entry["context"] = effective["n_ctx"]
-            loaded.append(entry)
-        if any("vram_bytes" in entry for entry in loaded):
-            usage["vram_bytes"] = sum(entry.get("vram_bytes") or 0 for entry in loaded)
-            usage["ram_bytes"] = sum(entry.get("ram_bytes") or 0 for entry in loaded)
-        if devices:
-            usage["vram_total_bytes"] = sum(total for total, _ in devices.values())
-            if all(free is not None for _, free in devices.values()):
-                usage["vram_free_bytes"] = sum(free for _, free in devices.values())
-        props = optional(fetch, "/props")
-        if isinstance(props, dict):
-            by.append("llama.cpp /props")
-            if count(props.get("total_slots")):
-                usage["slots_total"] = props["total_slots"]
-            settings = props.get("default_generation_settings")
-            n_ctx = settings.get("n_ctx") if isinstance(settings, dict) else None
-            if len(loaded) == 1 and loaded[0]["context"] is None and isinstance(n_ctx, int):
-                loaded[0]["context"] = n_ctx
-        slots = optional(fetch, "/slots")
-        if isinstance(slots, list) and slots:
-            by.append("llama.cpp /slots")
-            usage["slots_total"] = len(slots)
-            usage["requests_running"] = sum(1 for s in slots if isinstance(s, dict) and s.get("is_processing") is True)
-        metrics = parse_metrics(optional(fetch_text, "/metrics", ""),
-                                {"llamacpp:requests_processing", "llamacpp:requests_deferred"})
-        if metrics:
-            by.append("llama.cpp /metrics")
-            for name, key in (("llamacpp:requests_processing", "requests_running"),
-                              ("llamacpp:requests_deferred", "requests_waiting")):
-                if name in metrics:
-                    usage[key] = int(sum(metrics[name]))
-    elif kind == "vllm":
-        listing = optional(fetch, "/v1/models", {})
-        raw = {m.get("id"): m for m in (listing.get("data") if isinstance(listing, dict) else None) or []
-               if isinstance(m, dict)}
-        loaded, by = [{"name": m["name"], "size": None, "context": raw.get(m["name"], {}).get("max_model_len")}
-                      for m in models], ["vLLM /v1/models"]
-        metrics = parse_metrics(optional(fetch_text, "/metrics", ""), {
-            "vllm:num_requests_running", "vllm:num_requests_waiting", "vllm:kv_cache_usage_perc",
-            "vllm:gpu_cache_usage_perc", "vllm:cpu_cache_usage_perc"})
-        if metrics:
-            by.append("vLLM /metrics")
-            for name, key in (("vllm:num_requests_running", "requests_running"),
-                              ("vllm:num_requests_waiting", "requests_waiting")):
-                if name in metrics:
-                    usage[key] = int(sum(metrics[name]))
-            # A fraction (1 is 100 %); with several engines the fullest one.
-            cache = metrics.get("vllm:kv_cache_usage_perc") or metrics.get("vllm:gpu_cache_usage_perc")
-            if cache:
-                usage["kv_cache_percent"] = round(100 * max(cache), 1)
-            if metrics.get("vllm:cpu_cache_usage_perc"):
-                usage["cpu_kv_cache_percent"] = round(100 * max(metrics["vllm:cpu_cache_usage_perc"]), 1)
-    return {"loaded": loaded, "usage": usage, "reported_by": by if loaded is not None or usage else []}
-
-
-def clean_status(status):
-    """A status_raw answer checked (a server's answer is untrusted): names as models are named, numbers only where
-    numbers belong, texts terminal-safe; "not_reported" names what the server's API does not tell (REPORTABLE)."""
-    loaded = None
-    if isinstance(status.get("loaded"), list):
-        loaded = []
-        for entry in status["loaded"][:200]:
-            name = entry.get("name") if isinstance(entry, dict) else None
-            if not isinstance(name, str) or not MODEL_NAME.fullmatch(name):
-                continue
-            item = {"name": name}
-            for key in ("size", "memory_bytes", "vram_bytes", "ram_bytes"):
-                if count(entry.get(key)) is not None:
-                    item[key] = entry[key]
-            context = entry.get("context")
-            if isinstance(context, int) and not isinstance(context, bool) and 0 < context < 1 << 31:
-                item["context"] = context
-            if isinstance(entry.get("expires_at"), str) and entry["expires_at"].strip():
-                item["expires_at"] = printable(entry["expires_at"].strip())[:40]
-            loaded.append(item)
-    usage = {}
-    raw = status.get("usage") if isinstance(status.get("usage"), dict) else {}
-    for key in USAGE_KEYS:
-        value = raw.get(key)
-        if key.endswith("_percent"):
-            if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 100:
-                usage[key] = round(float(value), 1)
-        elif count(value) is not None:
-            usage[key] = value
-    missing = []
-    if loaded is None:
-        missing.append("loaded")
-    if "vram_bytes" not in usage and "ram_bytes" not in usage:
-        missing.append("memory")
-    if "kv_cache_percent" not in usage:
-        missing.append("kv_cache")
-    if "requests_running" not in usage and "requests_waiting" not in usage:
-        missing.append("requests")
-    if "vram_total_bytes" not in usage:
-        missing.append("totals")
-    return {"loaded": loaded, "usage": usage,
-            "reported_by": [printable(v)[:60] for v in status.get("reported_by") or [] if isinstance(v, str)][:8],
-            "not_reported": missing}
-
-
-def now_text():
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-
-def discover_status(kind, fetch, fetch_text, budget=STATUS_BUDGET):
-    """(models, status) of a server of KIND: its models (as discover lists them; ValueError when it does not answer)
-    and what it has loaded and uses now (clean_status, with "read_at"). Each path is asked once; after BUDGET
-    seconds nothing more is asked."""
-    deadline = time.monotonic() + budget
-    fetch, fetch_text = Remembered(fetch, deadline), Remembered(fetch_text, deadline)
-    models = discover(kind, fetch)
-    try:
-        status = clean_status(status_raw(kind, fetch, fetch_text, models))
-    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
-        raise ValueError(f"unexpected answer from the {KINDS[kind]['label']}: {printable(exc)}") from None
-    return models, dict(status, read_at=now_text())
-
-
-def endpoint_status(endpoint, get=None, client=None):
-    """What the registered ENDPOINT has loaded and uses now, as `llm status --json` gives it per server: {name, kind,
-    url, reachable, error, read_at, models (how many it lists), loaded, usage, reported_by, not_reported}. Never
-    raises for the server: what went wrong is its "error". The models are not remembered (a watch reads often)."""
-    base = {"name": endpoint["name"], "kind": endpoint["kind"], "url": endpoint["url"]}
-    try:
-        client = client or Client(endpoint, get, timeout=STATUS_TIMEOUT)
-        models, status = discover_status(endpoint["kind"], client.json, client.text)
-    except (OSError, ValueError) as exc:
-        return {**base, "reachable": False, "error": printable(exc)[:600], "read_at": now_text(), "models": None,
-                "loaded": None, "usage": {}, "reported_by": [], "not_reported": list(REPORTABLE)}
-    return {**base, "reachable": True, "error": None, "models": len(models), **status}
-
-
-def status_lines(entry):
-    """`llm status` as text for one server (ENTRY: endpoint_status, or a status of wizard models --status)."""
-    head = f"{entry['name']}: {KINDS[entry['kind']]['label']} at {entry['url']}" if entry.get("name") else None
-    lines = [head] if head else []
-    when = f" (read {entry['read_at']})" if entry.get("read_at") else ""
-    if entry.get("reachable") is False:
-        return [printable(line) for line in lines + [f"  not reachable{when}: {entry.get('error') or '?'}"]]
-    loaded, usage = entry.get("loaded"), entry.get("usage") or {}
-    if entry.get("models") is not None:
-        shown = f"{len(loaded)} loaded" if loaded is not None else "what is loaded is not reported"
-        lines.append(f"  reachable{when}: {entry['models']} model(s), {shown}")
-    elif entry.get("read_at"):
-        lines.append(f"  read {entry['read_at']}")
-    for model in loaded or []:
-        parts = []
-        if model.get("memory_bytes") is not None:
-            split = [f"{format_size(model[k])} {label}" for k, label in (("vram_bytes", "VRAM"), ("ram_bytes", "RAM"))
-                     if model.get(k) is not None]
-            parts.append(f"{format_size(model['memory_bytes'])} in memory" + (f" ({', '.join(split)})" if split else ""))
-        elif model.get("size") is not None:
-            parts.append(f"size {format_size(model['size'])}")
-        if model.get("context"):
-            parts.append(f"context {model['context']}")
-        if model.get("expires_at"):
-            parts.append(f"unloaded at {model['expires_at']}")
-        lines.append(f"  loaded: {model['name']}" + (f"  {', '.join(parts)}" if parts else ""))
-    numbers = []
-    if "vram_bytes" in usage:
-        total = f" of {format_size(usage['vram_total_bytes'])}" if "vram_total_bytes" in usage else ""
-        numbers.append(f"VRAM {format_size(usage['vram_bytes'])}{total}")
-    if "ram_bytes" in usage:
-        numbers.append(f"RAM {format_size(usage['ram_bytes'])}")
-    if "vram_free_bytes" in usage:
-        numbers.append(f"{format_size(usage['vram_free_bytes'])} VRAM free")
-    if "kv_cache_percent" in usage:
-        numbers.append(f"KV cache {usage['kv_cache_percent']}%")
-    if "cpu_kv_cache_percent" in usage:
-        numbers.append(f"CPU KV cache {usage['cpu_kv_cache_percent']}%")
-    if "requests_running" in usage or "requests_waiting" in usage:
-        numbers.append("requests " + ", ".join(f"{usage[k]} {word}" for k, word in (
-            ("requests_running", "running"), ("requests_waiting", "waiting")) if k in usage))
-    if "slots_total" in usage:
-        numbers.append(f"{usage['slots_total']} slot(s)")
-    if numbers:
-        lines.append(f"  usage: {', '.join(numbers)}")
-    words = {"loaded": "loaded models", "memory": "VRAM/RAM use", "kv_cache": "KV cache", "requests": "requests",
-             "totals": "the host's total RAM/VRAM"}
-    missing = [words[k] for k in entry.get("not_reported") or [] if k in words]
-    if missing:
-        lines.append(f"  not reported by its API: {', '.join(missing)}")
-    if entry.get("kind") == "llamacpp" and "requests_waiting" not in usage:
-        lines.append("  (llama-server --metrics also reports the requests waiting)")
-    return [printable(line) for line in lines]
 
 
 def sort_models(models, key):
@@ -1035,13 +666,12 @@ def name_refusal(name):
 
 
 def discover_url(kind, url, get=None, client=None, ca=None, api_key_secret=None, insecure_http=False, resolver=None,
-                 ca_text=None, with_status=False):
+                 ca_text=None):
     """The models a server of KIND at URL lists, before it is registered anywhere (the "test connection" of the app
     and the web): the URL is checked as `llm add` checks it, nothing is stored. The key of API_KEY_SECRET is sent
     only where `llm add` would accept the URL: plain http to a public address (or a name that resolves to one)
     needs INSECURE_HTTP, as `llm add --insecure-http`. CA_TEXT: a CA's PEM text already checked (a registered
-    server's own, ca_text), in place of the file CA. WITH_STATUS: (models, what it has loaded and uses now:
-    discover_status), each request with STATUS_TIMEOUT."""
+    server's own, ca_text), in place of the file CA."""
     if kind not in KINDS:
         raise ValueError(f"Unknown server type: {printable(kind)}")
     parsed = parse_url(url)
@@ -1060,9 +690,6 @@ def discover_url(kind, url, get=None, client=None, ca=None, api_key_secret=None,
     endpoint = {"name": "test", "kind": kind, "url": parsed["url"], "parsed": parsed,
                 "api_key_secret": api_key_secret, "headers": {}, "ca": None, "ca_text": text, "vpn": None,
                 "model": None, "anthropic": False, "insecure_http": bool(insecure_http)}
-    if with_status:
-        client = client or Client(endpoint, get, timeout=STATUS_TIMEOUT)
-        return discover_status(kind, client.json, client.text)
     return discover(kind, (client or Client(endpoint, get)).json)
 
 
@@ -1566,66 +1193,6 @@ def check(endpoint, agent=None, model=None, get=None, out=print, connect=socket.
     return not failed
 
 
-# --- llm status ------------------------------------------------------------------------------------------------
-
-WATCH_MIN = 2
-
-
-def statuses(name=None, get=None, read=None):
-    """[endpoint_status] of the endpoint NAME (ValueError when there is none) or of every endpoint, read at the same
-    time (a server that does not answer holds up no other). An endpoint the store cannot use is listed with why."""
-    read = read or (lambda found: endpoint_status(found, get))
-    if name is not None:
-        found = [endpoint(name)]
-        broken = []
-    else:
-        store = load_store()
-        found, broken = [], []
-        for key in sorted(store["endpoints"]):
-            try:
-                found.append(check_record(key, store["endpoints"][key]))
-            except ValueError as exc:
-                record = store["endpoints"][key] if isinstance(store["endpoints"][key], dict) else {}
-                broken.append({"name": printable(key)[:32], "kind": record.get("kind") if record.get("kind") in KINDS
-                               else None, "url": None, "reachable": False, "error": f"unusable: {printable(exc)}"[:600],
-                               "read_at": now_text(), "models": None, "loaded": None, "usage": {}, "reported_by": [],
-                               "not_reported": list(REPORTABLE)})
-    if not found:
-        return broken
-    import concurrent.futures
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(found))) as pool:
-        read_all = list(pool.map(read, found))
-    return sorted(read_all + broken, key=lambda entry: entry["name"])
-
-
-def show_status(args, out, get=None, read=None):
-    """sandbox-ai llm status [NAME] [--json] [--watch SECONDS]."""
-    if args.watch is not None and args.watch < WATCH_MIN:
-        raise ValueError(f"--watch: at least {WATCH_MIN} seconds")
-    while True:
-        found = statuses(args.name, get, read)
-        if args.json:
-            out(json.dumps(found, separators=(",", ":")) if args.watch else json.dumps(found, indent=2))
-        else:
-            if args.watch and out is print and sys.stdout.isatty():
-                sys.stdout.write("\033[H\033[J")  # each reading in place of the one before
-            elif args.watch:
-                out(f"--- {now_text()}")
-            if not found:
-                out("no LLM endpoints; add one with: sandbox-ai llm add NAME --kind KIND --url URL")
-            for entry in found:
-                lines = status_lines(entry) if entry.get("kind") in KINDS else \
-                    [printable(f"{entry['name']}: {entry.get('error') or '?'}")]
-                for line in lines:
-                    out(line)
-        if not args.watch:
-            return 0 if all(entry.get("reachable") for entry in found) else 1
-        try:
-            time.sleep(args.watch)
-        except KeyboardInterrupt:
-            return 0
-
-
 # --- the command -----------------------------------------------------------------------------------------------
 
 def describe(endpoint):
@@ -1747,7 +1314,7 @@ def add(args, out=print, get=None):
 def main(argv, out=print, get=None):
     parser = argparse.ArgumentParser(prog="sandbox-ai llm", description=__doc__.split("\n\n")[0],
                                      formatter_class=argparse.RawDescriptionHelpFormatter,
-                                     epilog="\n\n".join(__doc__.split("\n\n")[1:5]))
+                                     epilog="\n\n".join(__doc__.split("\n\n")[1:4]))
     commands = parser.add_subparsers(dest="command", required=True)
     adding = commands.add_parser("add", help="add (or with --replace change) an endpoint")
     adding.add_argument("name")
@@ -1778,13 +1345,6 @@ def main(argv, out=print, get=None):
     models.add_argument("name")
     models.add_argument("-s", "--sort", choices=["name", "size", "loaded"], default="loaded")
     models.add_argument("-j", "--json", action="store_true")
-    watching = commands.add_parser("status", help="what the server has loaded and uses now (VRAM/RAM, KV cache, "
-                                                  "requests), as its API reports it; every server without NAME")
-    watching.add_argument("name", nargs="?")
-    watching.add_argument("-j", "--json", action="store_true")
-    watching.add_argument("-w", "--watch", type=float, metavar="SECONDS",
-                          help=f"read again every SECONDS (at least {WATCH_MIN}) until Ctrl-C; with --json one line "
-                               "per reading")
     checking = commands.add_parser("check", help="reachability, TLS, key, models and the agents' APIs")
     checking.add_argument("name")
     checking.add_argument("-a", "--agent", choices=["claude", "codex", "opencode"])
@@ -1835,11 +1395,6 @@ def main(argv, out=print, get=None):
             for line in [json.dumps(found, indent=2)] if args.json else model_table(found):
                 out(line)
             return 0
-        if args.command == "status":
-            try:
-                return show_status(args, out, get)
-            except KeyboardInterrupt:
-                return 0
         found = endpoint(args.name)
         if args.model and not MODEL_NAME.fullmatch(args.model):
             raise ValueError(f"--model: not a model name: {printable(args.model)!r}")

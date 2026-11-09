@@ -5681,9 +5681,6 @@ TEXTS = {
     'Board zoom': {
         'en': 'Board zoom',
         'de': 'Zoom der Tafel'},
-    'Board: inspector and findings': {
-        'en': 'Board: inspector and findings',
-        'de': 'Tafel: Eigenschaften und Befunde'},
     'Board: parts': {
         'en': 'Board: parts',
         'de': 'Tafel: Bausteine'},
@@ -9105,4 +9102,26 @@ TEXTS = {
     'Zoom 100 %': {
         'en': 'Zoom 100 %',
         'de': 'Zoom 100 %'},
+    # == the Board's panels: the inspector slides out or is a window of its own, the findings on request ==
+    'Board: properties': {
+        'en': 'Board: properties',
+        'de': 'Tafel: Eigenschaften'},
+    'Board: security score and findings': {
+        'en': 'Board: security score and findings',
+        'de': 'Tafel: Sicherheitswert und Befunde'},
+    'Properties as a separate window': {
+        'en': 'Properties as a separate window',
+        'de': 'Eigenschaften als eigenes Fenster'},
+    'Security score and findings': {
+        'en': 'Security score and findings',
+        'de': 'Sicherheitswert und Befunde'},
+    'Show or hide the security score and the findings': {
+        'en': 'Show or hide the security score and the findings',
+        'de': 'Sicherheitswert und Befunde zeigen oder ausblenden'},
+    'Show the properties': {
+        'en': 'Show the properties',
+        'de': 'Eigenschaften zeigen'},
+    'Hide the properties': {
+        'en': 'Hide the properties',
+        'de': 'Eigenschaften ausblenden'},
 }

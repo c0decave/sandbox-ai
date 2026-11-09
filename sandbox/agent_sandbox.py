@@ -6668,8 +6668,6 @@ def register_run(a, run, session):
         "host_relay": True,
         # The MCP servers this run reaches (--mcp, helpers included): sandbox-ai mcp list names whom each serves.
         "mcp_servers": [] if a.mcp_socket_dir else list(dict.fromkeys(a.mcp)),
-        # --llm NAME[:MODEL]: sandbox-ai list, the app and the web show that server's status beside the start.
-        "llm": getattr(a, "llm", None) or None,
         # `sandbox-ai mcp attach NAME START --live`: its supervisor opens relays during the run (control op mcp-open),
         # and the agent's HOME (host path) is where its MCP configuration is updated for it (mcp.py LIVE_AGENTS).
         "mcp_live": not (a.mcp_socket_dir or a.probe),

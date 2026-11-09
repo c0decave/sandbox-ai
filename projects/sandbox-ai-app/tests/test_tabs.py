@@ -296,38 +296,40 @@ def test_panels_follow_their_page_float_close_and_are_kept(window, monkeypatch, 
     docks = window.docks
     window.show_page("board")
     qapp.processEvents()
-    assert docks["parts"].isVisible() and docks["inspector"].isVisible() and not docks["questions"].isVisible()
+    assert docks["parts"].isVisible() and not docks["questions"].isVisible()
+    # The inspector slides out at the canvas's edge (no panel), the findings wait until asked for.
+    assert not docks["inspector"].isVisible() and not docks["findings"].isVisible()
     assert docks["parts"].widget() is window.board.parts_panel and docks["questions"].widget() is window.approvals.open_box
     window.show_page("approvals")
     qapp.processEvents()
     assert docks["questions"].isVisible() and not docks["parts"].isVisible()
-    # Floated, the questions stay on every page; closed, the inspector stays away until View > Panels.
+    # Floated, the questions stay on every page; closed, the parts stay away until View > Panels.
     docks["questions"].setFloating(True)
     window.show_page("board")
     qapp.processEvents()
     assert docks["questions"].isVisible()
-    docks["inspector"].close()
+    docks["parts"].close()
     qapp.processEvents()
-    assert not docks["inspector"].isVisible() and not window.panel_actions["inspector"].isChecked()
+    assert not docks["parts"].isVisible() and not window.panel_actions["parts"].isChecked()
     window.show_page("launch")
     window.show_page("board")
-    assert not docks["inspector"].isVisible(), "closed stays closed"
+    assert not docks["parts"].isVisible(), "closed stays closed"
     window.state.flush()
     saved = json.loads(state_file().read_text())["docks"]
-    assert saved["closed"] == ["inspector"] and saved["state"]
+    assert saved["closed"] == ["findings", "parts"] and saved["state"]
     again = make_window(monkeypatch)
     try:
         again.show()
         again.show_page("launch")
         qapp.processEvents()
         assert again.docks["questions"].isFloating() and again.docks["questions"].isVisible()
-        assert "inspector" in again.closed_docks and not again.panel_actions["inspector"].isChecked()
-        again.panel_actions["inspector"].trigger()  # View > Panels brings it back, on its page
+        assert "parts" in again.closed_docks and not again.panel_actions["parts"].isChecked()
+        again.panel_actions["parts"].trigger()  # View > Panels brings it back, on its page
         qapp.processEvents()
-        assert again.current_page() == "board" and again.docks["inspector"].isVisible()
+        assert again.current_page() == "board" and again.docks["parts"].isVisible()
         again.actions["panels-reset"].trigger()
         qapp.processEvents()
-        assert not again.docks["questions"].isFloating() and not again.closed_docks
+        assert not again.docks["questions"].isFloating() and again.closed_docks == {"findings"}
     finally:
         close(again)
 

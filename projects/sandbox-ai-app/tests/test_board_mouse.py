@@ -1,7 +1,8 @@
 """The Board's canvas and the mouse, offscreen: the right and the middle button drag the view (nothing on the board
 moves, nothing is selected, no step of Undo), a right click opens a context menu (the canvas's or the node's), the
 left button selects, moves and draws the rubber band; a node's text wraps to at most three lines inside the node;
-the inspector's panel comes back when a part is selected after it was closed."""
+the inspector slides out when a part is selected (or, as a window of its own, opens again); the score and the
+findings are shown only on request."""
 import gc
 import os
 
@@ -15,7 +16,7 @@ from PySide6.QtTest import QTest  # noqa: E402
 from sandbox_ai_app import backend, help_view, i18n, widgets  # noqa: E402
 from sandbox_ai_app.board_view import NODE_H, NODE_PAD, NODE_W, TEXT_LINES  # noqa: E402
 
-from test_projects import env, window  # noqa: E402,F401 - shared fixtures
+from test_projects import close, env, make_window, window  # noqa: E402,F401 - shared fixtures
 
 pytestmark = pytest.mark.skipif(not os.environ.get("SANDBOX_AI_HOME") and not backend.shutil.which("sandbox-ai"),
                                 reason="set SANDBOX_AI_HOME to a sandbox-ai checkout")
@@ -286,31 +287,114 @@ def test_a_node_paints_nothing_outside_itself(page, qapp, tmp_path):
     assert outside == []
 
 
-# -- the inspector's panel --
+# -- the inspector and the findings --
 
 
-@pytest.mark.parametrize("floating", [True, False])
-def test_selecting_a_part_shows_the_closed_inspector_again(window, qapp, wait, floating):
+def click(view, item, button=LEFT):
+    QTest.mouseClick(view.viewport(), button, NONE, view.mapFromScene(item.sceneBoundingRect().center()))
+
+
+def test_the_inspector_slides_out_on_a_click_and_back_on_esc_or_the_empty_canvas(page, qapp, wait):
+    slide = page.slide
+    assert not slide.expanded and slide.width() == slide.strip_width() and not slide.holder.isVisible()
+    assert page.side.parentWidget() is slide.holder and slide.arrow.accessibleName() == "Show the properties"
+    agent = page.items[page.board.first("agent").id]
+    click(page.view, agent)
+    assert slide.expanded and slide.arrow.accessibleName() == "Hide the properties"
+    assert wait(lambda: slide.width() == slide.WIDE, 3) and page.side.isVisible(), "it slides out"
+    QTest.keyClick(page.view, Qt.Key.Key_Escape)
+    assert not slide.expanded and wait(lambda: slide.width() == slide.strip_width() and not slide.holder.isVisible(), 3)
+    click(page.view, agent)
+    assert wait(lambda: slide.width() == slide.WIDE, 3)
+    QTest.mouseClick(page.view.viewport(), LEFT, NONE, empty_point(page))  # the empty canvas
+    assert not slide.expanded and wait(lambda: slide.width() == slide.strip_width(), 3)
+    slide.arrow.click()  # its arrow, both ways
+    assert slide.expanded
+    slide.arrow.click()
+    assert not slide.expanded
+    # The right button still pans and opens the menu; the strip does not move for it.
+    page.menus.clear()
+    QTest.mouseClick(page.view.viewport(), RIGHT, NONE, empty_point(page))
+    assert len(page.menus) == 1 and not slide.expanded
+
+
+def test_the_score_and_findings_are_shown_only_on_request_and_alone(page, qapp):
+    assert not page.findings_panel.isVisible() and not page.score_button.isChecked()
+    assert page.score_button.text().startswith("Security score:") and page.score_button.accessibleName()
+    page.score_button.click()
+    assert page.findings_panel.isVisible() and page.score_button.isChecked() and not page.slide.expanded
+    click(page.view, page.items[page.board.first("agent").id])
+    assert page.slide.expanded and page.findings_panel.isVisible()
+    QTest.keyClick(page.view, Qt.Key.Key_Escape)
+    assert not page.slide.expanded and page.findings_panel.isVisible(), "the inspector does not take the findings"
+    page.score_button.click()
+    assert not page.findings_panel.isVisible()
+
+
+def test_in_the_window_the_score_is_a_panel_of_its_own_closed_at_first_and_kept(window, qapp, monkeypatch):
     window.show()
     window.show_page("board")
     qapp.processEvents()
-    dock = window.docks["inspector"]
-    dock.setFloating(floating)
+    board, findings = window.board, window.docks["findings"]
+    assert not findings.isVisible() and not board.score_button.isChecked()
+    assert not window.panel_actions["findings"].isChecked()
+    assert window.workspace.dockWidgetArea(findings) != window.workspace.dockWidgetArea(window.docks["inspector"]) \
+        or window.docks["inspector"].isFloating()
+    board.score_button.click()
     qapp.processEvents()
-    dock.close()
+    assert findings.isVisible() and board.score_button.isChecked() and window.panel_actions["findings"].isChecked()
+    assert findings.widget() is board.findings_panel and not board.slide.expanded
+    click(board.view, board.items[board.board.first("agent").id])
+    QTest.keyClick(board.view, Qt.Key.Key_Escape)
     qapp.processEvents()
-    assert not dock.isVisible() and not window.panel_actions["inspector"].isChecked()
-    board = window.board
+    assert findings.isVisible(), "the inspector going back leaves the findings alone"
+    window.state.flush()
+    again = make_window(monkeypatch)
+    try:
+        again.show()
+        again.show_page("board")
+        qapp.processEvents()
+        assert again.docks["findings"].isVisible() and again.board.score_button.isChecked(), "kept open"
+    finally:
+        close(again)
+
+
+@pytest.mark.parametrize("closed", [False, True])
+def test_the_inspector_as_a_window_of_its_own_opens_on_a_click_and_is_kept(window, qapp, wait, monkeypatch,
+                                                                            closed):
+    window.show()
+    window.show_page("board")
+    qapp.processEvents()
+    board, dock = window.board, window.docks["inspector"]
+    assert board.inspector_mode == "slide" and not window.actions["inspector-window"].isChecked()
+    window.actions["inspector-window"].trigger()
+    qapp.processEvents()
+    assert board.inspector_mode == "window" and dock.widget() is board.side and dock.isFloating()
+    assert not board.slide.isVisible() and dock.allowedAreas() == Qt.DockWidgetArea.NoDockWidgetArea
+    if closed:
+        dock.close()
+        qapp.processEvents()
+        assert not dock.isVisible() and not window.panel_actions["inspector"].isChecked()
     window.activateWindow()
     board.view.setFocus()
     qapp.processEvents()
     focused = QApplication.focusWidget()
     agent = board.items[board.board.first("agent").id]
-    QTest.mouseClick(board.view.viewport(), LEFT, NONE, board.view.mapFromScene(agent.sceneBoundingRect().center()))
+    click(board.view, agent)
     qapp.processEvents()
-    assert agent.isSelected() and dock.isVisible() and dock.isFloating() == floating
+    assert agent.isSelected() and dock.isVisible() and dock.isFloating()
     assert window.panel_actions["inspector"].isChecked() and "inspector" not in window.closed_docks
     assert wait(lambda: QApplication.focusWidget() is focused, 2), "the keyboard stays where it was"
+    window.state.flush()
+    again = make_window(monkeypatch)
+    try:
+        assert again.board.inspector_mode == "window" and again.actions["inspector-window"].isChecked()
+        assert again.docks["inspector"].widget() is again.board.side, "the mode is kept"
+        again.actions["inspector-window"].trigger()  # back to the strip
+        assert again.board.inspector_mode == "slide" and again.board.side.parentWidget() is again.board.slide.holder
+        assert not again.docks["inspector"].isVisible()
+    finally:
+        close(again)
 
 
 def test_a_right_click_on_a_connection_offers_delete(page, qapp, tmp_path):

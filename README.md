@@ -1953,9 +1953,8 @@ by name; its key stays in `sandbox-ai secrets`:
 ```bash
 sandbox-ai secrets set GPU_KEY            # the server's API key, if it has one
 sandbox-ai llm add gpu --kind vllm --url https://gpu.example.org:8443 --api-key-secret GPU_KEY
-sandbox-ai llm models gpu                 # what it serves now (size, loaded)
+sandbox-ai llm models gpu                 # what it serves now
 sandbox-ai llm check gpu --agent codex    # address, TLS, key, model, the API Codex needs
-sandbox-ai llm status gpu                 # what it has loaded and uses now (KV cache, requests)
 sandbox-ai codex --llm gpu:Qwen/Qwen3-Coder-30B --no-provider-defaults
 ```
 
@@ -2048,13 +2047,12 @@ sandbox-ai llm show NAME [--json]
 sandbox-ai llm remove NAME              # the secrets stay in sandbox-ai secrets
 sandbox-ai llm models NAME [--sort name|size|loaded] [--json]
 sandbox-ai llm check NAME [--agent claude|codex|opencode] [--model MODEL]
-sandbox-ai llm status [NAME] [--json] [--watch SECONDS]
 ```
 
 | Server (`--kind`) | Default port | Models from | Size | Loaded |
 |---|---|---|---|---|
 | Ollama (`ollama`) | 11434 | `/api/tags`, `/api/ps` | yes | yes |
-| LM Studio (`lmstudio`) | 1234 | `/api/v0/models`, `/api/v1/models` (fallback `/v1/models`) | 0.4 and later | yes |
+| LM Studio (`lmstudio`) | 1234 | `/api/v0/models` (fallback `/v1/models`) | when reported | yes |
 | llama.cpp (`llamacpp`) | 8080 | `/v1/models` | yes | yes (router mode: per model) |
 | vLLM (`vllm`) | 8000 | `/v1/models` | no | always (served = loaded) |
 | other (`openai-compatible`) | none | `/v1/models` | no | unknown |
@@ -2063,29 +2061,6 @@ The listing sends the key as a Bearer token and the header secrets, uses the
 endpoint's CA, no HTTP proxy of the host, follows no redirect (it would carry
 the key elsewhere) and gives up after 10 seconds; the model names are kept for
 the next start.
-
-**What a server has loaded and uses now.** `sandbox-ai llm status [NAME]`
-reads every server (or NAME) at the same time, each request with a 5-second
-timeout, and shows per server whether it answered, the loaded models with their
-size and the memory they take, and the usage numbers its API reports, with the
-time they were read; `--json` for programs (`"loaded"`, `"usage"`,
-`"not_reported"`), `--watch SECONDS` reads again until Ctrl-C. It exits with
-1 when a server did not answer (the JSON lists it with its error). What an API
-does not report is said, never guessed; the host's total RAM and VRAM are not
-reported by these APIs (only llama.cpp's router mode gives its devices' total
-and free memory). `wizard models --status` adds the same to the test of a
-server that is not registered yet (the app's and the web's Test connection),
-and the app and the web show it on the LLM servers page (read again every 20
-seconds while it is shown) and beside a start with `--llm` (the app: below the
-Sandboxes table when it is selected; the web: LLM status in its row).
-
-| Server | Loaded models | VRAM / RAM | KV cache | Requests | Host totals |
-|---|---|---|---|---|---|
-| Ollama | `/api/ps`: memory, VRAM part, context, unload time | yes (sum of the loaded models) | not reported | not reported | not reported |
-| LM Studio | `/api/v1/models` (0.4+): instances, context; else `/api/v0/models` | not reported | not reported | not reported | not reported |
-| llama.cpp | `/v1/models`, context from `/props` | router mode: per device and host | not reported | `/slots`; running and waiting with `--metrics` | router mode: devices' total and free |
-| vLLM | `/v1/models` (served = loaded), `max_model_len` | not reported | `/metrics` (`kv_cache_usage_perc`) | `/metrics`: running, waiting | not reported |
-| other | not reported | not reported | not reported | not reported | not reported |
 
 ### OpenCode with a server in your LAN, without registering it
 

@@ -247,18 +247,25 @@ AREA_TIPS = (
          ("The settings of the selected part, built from the launcher's own options with their help texts.",
           "Die Einstellungen des gewählten Teils, aufgebaut aus den Optionen des Launchers mit ihren Hilfetexten."),
          ("A change applies to the board at once and is one step of Undo; Set up step by step… asks the "
-          "questions again.",
+          "questions again. It slides out at the right edge of the board when you click a part; Esc, a click on the "
+          "empty board or its arrow slide it back. View > Panels > Properties as a separate window makes it a window "
+          "of its own that opens when you click a part.",
           "Eine Änderung gilt sofort auf der Tafel und ist ein Schritt von Rückgängig; Schritt für Schritt "
-          "einrichten… stellt die Fragen erneut."),
+          "einrichten… stellt die Fragen erneut. Er fährt am rechten Rand der Tafel aus, wenn Sie ein Teil "
+          "anklicken; Esc, ein Klick auf die leere Tafel oder sein Pfeil fahren ihn wieder ein. Ansicht > Bereiche > "
+          "Eigenschaften als eigenes Fenster macht ihn zu einem eigenen Fenster, das sich beim Klick auf ein Teil "
+          "öffnet."),
          "", "page-board"),
     _tip("board.findings", ("Findings and score", "Befunde und Punktzahl"),
          ("What the launcher or the policy would refuse (✘), what makes little sense (!), and what weakens the "
           "sandbox, with a security score of 100.",
           "Was der Launcher oder die Richtlinie ablehnen würde (✘), was wenig Sinn ergibt (!) und was die Sandbox "
           "schwächt, mit einer Sicherheitspunktzahl von 100."),
-         ("Double-click a finding to select its part. Apply and Start refuse while there is an error.",
-          "Doppelklicken Sie einen Befund, um sein Teil zu wählen. Übernehmen und Starten verweigern, solange es "
-          "einen Fehler gibt."),
+         ("Shown when you ask for it: the score's button above the board, or View > Panels. Double-click a finding "
+          "to select its part. Apply and Start refuse while there is an error.",
+          "Wird gezeigt, wenn Sie danach fragen: die Schaltfläche des Sicherheitswerts über der Tafel oder Ansicht > "
+          "Bereiche. Doppelklicken Sie einen Befund, um sein Teil zu wählen. Übernehmen und Starten verweigern, "
+          "solange es einen Fehler gibt."),
          "", "page-board"),
     _tip("board.command", ("Command line and verdict", "Befehlszeile und Urteil"),
          ("The board as the launcher's command line, and below it the launcher's own verdict from a dry run in "
