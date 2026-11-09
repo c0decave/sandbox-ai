@@ -5018,10 +5018,12 @@ def test_every_secret_value_field_has_show_value_shown_by_default(tmp_path):
     assert result["drawnPages"] >= 15
     shown = ["Show value", "button", "true", "Hide value"]
     # every page drawn: the values typed in the page are a secret's (page Secrets) and a Git or publish login's
-    # token (page Logins, stored as a secret first); the LLM and VPN pages name a stored secret, never its value
+    # token (page Logins, stored as a secret first) and an LLM server's key (stored as its secret first, review 5
+    # L4); the VPN page names a stored secret, never its value
     field = lambda ident: {"id": ident, "type": "text", "autocomplete": "off", "spellcheck": "false", "value": "",
                            "toggle": shown + [ident]}
-    assert result["pages"] == {"secrets": [field("secret-value")], "logins": [field("git-token"), field("publish-token")]}
+    assert result["pages"] == {"secrets": [field("secret-value")], "logins": [field("git-token"), field("publish-token")],
+                               "llm": [field("llm-key-value")]}
     hidden = ["Show value", "button", "false", "Show value", "secret-value"]
     look, kept = result["pressed"]
     assert look["type"] == "password" and look["autocomplete"] == "new-password" and look["toggle"] == hidden
@@ -5366,7 +5368,7 @@ const LONG = "a-model-with-a-name-far-longer-than-the-table-shows-q8";
 (async () => {
   const result = {};
   vm.runInContext('state.me = { user: "admin", csrf: "c" }; state.host = "ct1"; state.page = "llm"; state.hosts = [{ name: "local", kind: "local" }, { name: "ct1", kind: "ssh", ssh: "root@ct1", port: 22 }];', context);
-  let addAnswer = () => ({ output: "ok" });
+  let addAnswer = () => ({ output: "ok" }), secretAnswer = () => ({ output: "kept" });
   let testAnswer = () => [{ name: "m2", loaded: false }, { name: "m1", loaded: true, size: 4294967296 }];
   const shows = {
     gw: { name: "gw", kind: "vllm", url: "https://gw.example.org", model: "qwen3", api_key_secret: "GW_KEY", headers: { "X-Org": "ORG_KEY" },
@@ -5380,6 +5382,7 @@ const LONG = "a-model-with-a-name-far-longer-than-the-table-shows-q8";
     if (path.endsWith("/llm/gw/models")) return [{ name: "zeta", loaded: false, size: 4294967296, type: "llm", arch: "qwen2", parameters: "7B", quantization: "Q4_K_M", context: 32768 },
       { name: LONG, loaded: false }, { name: "qwen3", loaded: true, size: 8589934592 }];
     if (path.endsWith("/llm-models")) return testAnswer();
+    if (path.includes("/secrets/")) return secretAnswer(method, path);
     if (method === "GET") { const name = path.split("/").pop(); return shows[name] || { __status: 404, __error: "no such server" }; }
     if (path.endsWith("/check")) return { ok: true, output: "fine" };
     return addAnswer();
@@ -5490,6 +5493,23 @@ const LONG = "a-model-with-a-name-far-longer-than-the-table-shows-q8";
   testAnswer = () => [];
   rowButtonIn(main, "Test connection").fire("click"); await settle();
   result.testEmpty = byId("llm-test-result").textContent.includes("lists no model");
+  // review 5 L4: the key typed here, stored as the secret named before the server is added
+  const fresh = () => { rowButtonIn(main, "Stop editing") && rowButtonIn(main, "Stop editing").fire("click");
+    for (const id of ["llm-model", "llm-headers", "llm-ca", "llm-vpn"]) byId(id).value = "";
+    byId("llm-name").value = "keyed"; byId("llm-name").fire("input"); byId("llm-kind").value = "vllm"; byId("llm-url").value = "https://k.example.org";
+    byId("llm-key-secret").value = "K_KEY"; byId("llm-key-value").value = "sk-typed"; byId("llm-replace").checked = false; byId("llm-insecure").checked = false; };
+  fresh(); calls.length = 0; addAnswer = () => ({ output: "ok" });
+  rowButtonIn(main, "Add").fire("click"); await settle();
+  result.keyStored = calls.filter(c => c.method !== "GET").map(c => [c.method, c.path, JSON.parse(c.body)]);
+  fresh(); calls.length = 0; addAnswer = () => ({ __status: 502, __error: "sandbox-ai llm on ct1: exit status 1: refused" });
+  rowButtonIn(main, "Add").fire("click"); await settle();
+  result.keyRemoved = [calls.filter(c => c.method !== "GET").map(c => [c.method, c.path]), main.textContent.includes("The secret K_KEY stored for it was removed again.")];
+  fresh(); calls.length = 0; addAnswer = () => ({ output: "ok" });
+  let once = true;
+  secretAnswer = () => { if (once) { once = false; return { __status: 400, __error: 'K_KEY: a secret of that name exists: its value is replaced: send {"confirm": true}', __confirm: "secret-replace" }; } return { output: "kept" }; };
+  rowButtonIn(main, "Add").fire("click"); await settle();
+  rowButtonIn(main, "Yes, do it").fire("click"); await settle();
+  result.keyReplaced = calls.filter(c => c.method !== "GET").map(c => [c.method, c.path, JSON.parse(c.body)]);
   console.log(JSON.stringify(result));
 })().catch(e => { console.error(e.stack); process.exit(1); });
 """
@@ -5561,3 +5581,11 @@ def test_the_llm_page_models_edit_test_and_names(tmp_path):
     assert result["noUrl"] == [0, True]
     assert result["testFailed"] == [True, "http://192.168.1.9:11434", True, 0], "what it said inline, nothing saved"
     assert result["testEmpty"]
+    server = {"name": "keyed", "kind": "vllm", "url": "https://k.example.org", "model": "", "api_key_secret": "K_KEY"}
+    assert result["keyStored"] == [["POST", "/api/hosts/ct1/secrets/K_KEY", {"secret": "sk-typed"}],
+                                   ["POST", "/api/hosts/ct1/llm", server]], "the key first, then the server"
+    assert result["keyRemoved"] == [[["POST", "/api/hosts/ct1/secrets/K_KEY"], ["POST", "/api/hosts/ct1/llm"],
+                                     ["DELETE", "/api/hosts/ct1/secrets/K_KEY"]], True]
+    assert result["keyReplaced"] == [["POST", "/api/hosts/ct1/secrets/K_KEY", {"secret": "sk-typed"}],
+                                     ["POST", "/api/hosts/ct1/secrets/K_KEY", {"secret": "sk-typed", "confirm": True}],
+                                     ["POST", "/api/hosts/ct1/llm", server]], "a replaced secret is asked, and kept"

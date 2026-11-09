@@ -3019,6 +3019,9 @@ pages.llm = async (main) => {
   modelPick.addEventListener("change", () => { if (modelPick.value) model.value = modelPick.value; });
   // the NAME of the secret that holds the API key (sandbox-ai secrets there), never the key
   const keySecret = el("input", { id: "llm-key-secret", class: "mono", placeholder: t("optional, e.g. {name}", { name: "LMSTUDIO_KEY" }), pattern: "[A-Za-z_][A-Za-z0-9_]{0,63}", autocomplete: "off", "aria-describedby": "llm-hint" });
+  // the key itself, typed here (review 5 L4): stored as that secret of the host first (secrets set, on its standard
+  // input), only on Add/Save, as the Logins page stores a token; never sent anywhere else
+  const [keyValue, keyField] = secretInput({ id: "llm-key-value", class: "mono", placeholder: t("optional: stored as that secret on Save"), value: "" });
   const status = el("div", { class: "wide" });
   const testBox = el("div", { class: "wide", id: "llm-test-result" });
   const headerSecrets = el("input", { id: "llm-headers", class: "mono", placeholder: "X-Gateway-Key=GW_KEY" }), ca = el("input", { id: "llm-ca", class: "mono", placeholder: "/home/you/ca.pem" });
@@ -3082,10 +3085,37 @@ pages.llm = async (main) => {
     modelPick.value = names.includes(model.value.trim()) ? model.value.trim() : "";
     modelPick.hidden = !names.length; modelPickLabel.hidden = !names.length;
   };
+  // a key typed: stored as the secret named first (a secret of that name there is asked about: the service's
+  // secret-replace), then the server added; when the add is refused, a secret made for it is removed again
+  const storeKey = async (body, replace) => {
+    const value = String(keyValue.value || "");
+    if (!value) return { stored: false, made: false };
+    try { await api("POST", hostPath(`/secrets/${encodeURIComponent(body.api_key_secret)}`, host), Object.assign({ secret: value }, replace ? { confirm: true } : {})); }
+    catch (e) {
+      if (!replace && confirmable(e)) return { ask: e };
+      throw e;
+    }
+    keyValue.value = "";
+    return { stored: true, made: !replace };
+  };
   const save = el("button", { class: "primary", onclick: (ev) => {
     const body = formBody();
     if (!body) return;
-    const send = (confirm) => busy(ev.target, async () => { try { await api("POST", hostPath("/llm", host), Object.assign({}, body, confirm ? { confirm: true } : {})); show("llm"); } catch (e) { status.append(errorNotice(e)); } });
+    if (keyValue.value && !body.api_key_secret) { status.append(notice(t("Name the secret the key is stored as (API key: secret)."), "error")); return; }
+    const add = (confirm, replaceKey) => busy(ev.target, async () => {
+      let key;
+      try { key = await storeKey(body, replaceKey); } catch (e) { status.append(errorNotice(e, t("The key was not stored; nothing was added"))); return; }
+      if (key.ask) { askRefused(addRow, key.ask, () => add(confirm, true), { trigger: ev.target }); return; }
+      try { await api("POST", hostPath("/llm", host), Object.assign({}, body, confirm ? { confirm: true } : {})); show("llm"); }
+      catch (e) {
+        status.append(errorNotice(e));
+        if (key.made) {
+          try { await api("DELETE", hostPath(`/secrets/${encodeURIComponent(body.api_key_secret)}`, host), { confirm: true }); status.append(el("p", { class: "hint" }, t("The secret {name} stored for it was removed again.", { name: body.api_key_secret }))); }
+          catch (err) { status.append(el("p", { class: "hint" }, t("The secret {name} stored for it stays: remove it on the page Secrets if it is not needed.", { name: body.api_key_secret }))); }
+        }
+      }
+    });
+    const send = (confirm) => add(confirm, false);
     const asks = asksOf(body);
     if (!asks.length) { send(false); return; }
     confirmIn(addRow, asks.join(" "), body.replace ? t("Yes, replace it") : t("Yes, add it"), () => send(true), { kind: "primary", trigger: ev.target });
@@ -3115,7 +3145,11 @@ pages.llm = async (main) => {
     clear(testBox).append(el("p", { class: "hint" }, t("Testing {url}…", { url: address })));
     let models;
     try { models = await api("POST", hostPath("/llm-models", host), sent); }
-    catch (e) { clear(testBox).append(errorNotice(e, t("{url} did not answer with a list of models", { url: address }))); fillModels([]); return; }
+    catch (e) {
+      clear(testBox).append(errorNotice(e, t("{url} did not answer with a list of models", { url: address })),
+        ...(keyValue.value ? [el("p", { class: "hint" }, t("A key typed here is stored only with Add or Save: the test used the secret named, as that host has it now."))] : []));
+      fillModels([]); return;
+    }
     const listed = (Array.isArray(models) ? models : []).filter(m => m && typeof m.name === "string");
     const partly = headerSecrets.value.trim() || vpn.value.trim();
     clear(testBox).append(notice(listed.length ? t("{url} answers: {count} model(s) listed.", { url: address, count: listed.length })
@@ -3125,7 +3159,7 @@ pages.llm = async (main) => {
     fillModels(listed);
   });
   const cancelEdit = el("button", { onclick: () => {
-    for (const input of [name, url, model, keySecret, headerSecrets, ca, vpn]) input.value = "";
+    for (const input of [name, url, model, keySecret, keyValue, headerSecrets, ca, vpn]) input.value = "";
     for (const box of [anthropic, replace, insecure]) box.checked = false;
     clear(status); clear(testBox); fillModels([]); checkName(); setEditing(null);
   } }, t("Stop editing"));
@@ -3135,11 +3169,12 @@ pages.llm = async (main) => {
     el("label", { for: "llm-name" }, t("Name")), name, nameProblem, el("label", { for: "llm-kind" }, t("Kind")), kind,
     el("label", { for: "llm-url" }, "URL"), url, el("label", { for: "llm-model" }, t("Model")), model, modelPickLabel, modelPick,
     el("label", { for: "llm-key-secret" }, t("API key: secret (its name)")), keySecret,
+    el("label", { for: "llm-key-value" }, t("API key (the value, optional)")), keyField,
     el("label", { for: "llm-headers" }, t("Headers from secrets (HEADER=SECRET)")), headerSecrets, el("label", { for: "llm-ca" }, t("CA certificate")), ca, caNote,
     el("label", { for: "llm-vpn" }, t("VPN profile")), vpn, el("label", { for: "llm-anthropic" }, t("Also the Anthropic Messages API")), anthropic,
     el("label", { for: "llm-replace" }, t("Replace one of that name")), replace, el("label", { for: "llm-insecure" }, t("Plain http outside the local networks")), insecure,
     el("span"), addRow, status, testBox),
-    el("p", { class: "hint", id: "llm-hint" }, t("Then start an agent with {option} (Options of a new start). A server that wants a key: keep it on the page Secrets of that host, and name that secret here.", { option: "--llm NAME" }), " ",
+    el("p", { class: "hint", id: "llm-hint" }, t("Then start an agent with {option} (Options of a new start). A server that wants a key: name the secret it is kept as, and type the key once here (or keep it on the page Secrets of that host).", { option: "--llm NAME" }), " ",
       el("button", { onclick: () => show("secrets") }, t("Open Secrets")))));
 };
 
