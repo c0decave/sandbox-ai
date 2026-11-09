@@ -499,8 +499,28 @@ class SandboxAI:
         steps = [(["secrets", "set", secret], value + "\n")] if value else []
         return steps + [([command, *add_args], None)]
 
-    def add_login(self, host, command, add_args, secret, value=None):
-        """login_steps on HOST, one after the other: (status, out, err) of the first that failed, or of the add."""
+    def login_url_problem(self, command, values):
+        """Why sandbox-ai would refuse the server of a Git or publish login (VALUES: {url, kind}), checked as its
+        `git-logins add` / `publish-logins add` check it, before anything is kept; None when it would take it. The
+        dialog says it and stays open: no token is stored for a login that is then refused."""
+        url = (values.get("url") or "").strip()
+        try:
+            if command == "git-logins":
+                if not url:
+                    return "give the server's address: https://HOST[:PORT]"
+                self.launcher.git_server(url, "the Git server")
+            elif command == "publish-logins" and url:
+                self.module("publish_logins").server_host(values.get("kind"), url)
+        except ValueError as exc:
+            return printable(str(exc))
+        except Exception:  # noqa: BLE001 - an older sandbox-ai without the check: its add says it
+            return None
+        return None
+
+    def add_login(self, host, command, add_args, secret, value=None, existed=None):
+        """login_steps on HOST, one after the other: (status, out, err) of the first that failed, or of the add. A
+        token typed for a secret that did not exist before (EXISTED False) is removed again when the add fails: no
+        orphan secret stays behind a login that was refused."""
         if command not in ("git-logins", "publish-logins") or not self.valid_secret(secret, value):
             return 2, "", "invalid login or secret"
         said, result = [], (0, "", "")
@@ -511,6 +531,8 @@ class SandboxAI:
                 result = self.host_run(host, *args, timeout=90)
             said.append(((result[1] or "") + (result[2] or "")).strip())
             if result[0] != 0:
+                if args[0] != "secrets" and value and existed is False and self.delete_secret(secret, host)[0] == 0:
+                    said.append(f"(the secret {secret} kept for it was removed again)")
                 return result[0], "", "\n".join(part for part in said if part)
         return 0, "\n".join(part for part in said if part), ""
 
@@ -765,7 +787,13 @@ class SandboxAI:
     def device_check(self, value):
         """(resolved path, notes) of a device for a running sandbox: the launcher's --device checks and the
         administrator's policy (devices.checked_device); ValueError says why it is refused."""
-        return self.module("devices").checked_device(value)
+        found = self.module("devices").checked_device(value)
+        if len(found) == 3:  # (entries, notes, USB device facts) since 0.1.76: the nodes it gives, then the notes
+            entries, notes, _device = found
+            paths = [str(entry.get("path")) for entry in entries if isinstance(entry, dict) and entry.get("path")]
+            shown = value if not paths or paths == [value] else f"{value} ({', '.join(paths)})"
+            return shown, list(notes)
+        return found
 
     def device_candidates(self, root=Path("/dev")):
         """[(path, refused: why or None, note or None)] of the devices under ROOT a sandbox could be given:
@@ -855,6 +883,10 @@ class SandboxAI:
             return 2, "", "invalid run or directory"
         if name and not valid_workspace_name(name):
             return 2, "", "invalid workspace name"
+        try:
+            self.require_options(host, ("workspace", "add"), ["--name"] if name else [])
+        except HostTooOld as exc:
+            return 2, "", str(exc)
         return self.host_run(host, "workspace", "add", run, str(directory), *(["--ro"] if read_only else []),
                              *([f"--name={name}"] if name else []), timeout=120)
 
@@ -1582,21 +1614,53 @@ class SandboxAI:
     def host_net_options(self, name, command="allow"):
         """The options `sandbox-ai net COMMAND` takes on host NAME (its --help there, parsed), kept per host and
         sandbox-ai version (for NET_OPTIONS_SECONDS without a known version). ValueError: no answer."""
+        return self.host_command_options(name, "net", command)
+
+    def host_command_options(self, name, *command):
+        """The options `sandbox-ai COMMAND... --help` lists on host NAME, kept per host, command and sandbox-ai version
+        (for NET_OPTIONS_SECONDS without a known version). ValueError: no answer."""
         try:
             version = (self.host_statuses(cached=True).get(name) or {}).get("version")
         except Exception:  # noqa: BLE001 - an older sandbox-ai, or no list of hosts: asked every NET_OPTIONS_SECONDS
             version = None
         cache = self.__dict__.setdefault("_net_options", {})
-        key = (name, command, version)
+        key = (name, *command, version)
         kept = cache.get(key)
         if kept is not None and (version or time.time() - kept[0] < NET_OPTIONS_SECONDS):
             return set(kept[1])
-        status, out, err = self.host_run(name, "net", command, "--help", timeout=60)
+        status, out, err = self.host_run(name, *command, "--help", timeout=60)
         found = set(re.findall(r"(?<![\w-])--[a-z0-9][a-z0-9-]*", out)) if status == 0 else set()
         if not found:
             raise ValueError((err or out).strip()[-300:] or f"exit status {status}")
         cache[key] = (time.time(), found)
         return found
+
+    def host_answer(self, host, argv, timeout=60):
+        """`sandbox-ai approvals allow|deny ID --scope S [--no-open]` (ARGV) on HOST: (status, out, err); --no-open only
+        where that host's sandbox-ai knows it (else said: update the host)."""
+        if len(argv) < 2 or argv[0] != "approvals" or argv[1] not in ("allow", "deny"):
+            return 2, "", "not an answer"
+        try:
+            self.require_options(host, ("approvals", argv[1]), [o for o in argv if o == "--no-open"])
+        except HostTooOld as exc:
+            return 2, "", str(exc)
+        return self.host_run(host, *argv, timeout=timeout)
+
+    def require_options(self, host, command, options):
+        """Before COMMAND (a tuple of words after sandbox-ai) with OPTIONS that newer sandbox-ai versions brought goes
+        to another HOST: HostTooOld when that host's `COMMAND --help` does not list them all - said plainly (update
+        the host) instead of its "unrecognized arguments". This machine's sandbox-ai is the app's own: no check.
+        When the host's help cannot be read, nothing is said here (the command's own error will be)."""
+        options = [o for o in options if o]
+        if host == "local" or not options:
+            return
+        try:
+            known = self.host_command_options(host, *command)
+        except Exception:  # noqa: BLE001 - not answered: the command itself goes, and says what is wrong
+            return
+        missing = [o for o in options if o not in known]
+        if missing:
+            raise HostTooOld(host, command, missing)
 
     def remote_hosts(self):
         """The names of the hosts of `sandbox-ai hosts` other than this machine ([] without hosts)."""
@@ -2262,6 +2326,7 @@ class SandboxAI:
     def trusted_projects(self, host="local"):
         """[{path, digest, state}] of `sandbox-ai wizard trust --list --json` on HOST (state trusted, changed,
         missing or unreadable)."""
+        self.require_options(host, ("wizard", "trust"), ["--list", "--json"])
         data = self.host_json(host, "wizard", "trust", "--list", "--json", timeout=60)
         if not isinstance(data, list):
             raise ValueError("not a list of trusted configurations")
@@ -2370,8 +2435,9 @@ class SandboxAI:
             raise ValueError("the workspace is an absolute path")
         if any(not isinstance(o, str) or "\0" in o for o in options):
             raise ValueError("invalid option")
-        if host == "local":  # each member's start: the team's workspace is the main one (see as_given)
-            options = self.as_given(["--workspace", workspace, *options])[2:]
+        # Each member's start: the team's workspace is the main one (see as_given; on another host where its launcher
+        # is known to take the option).
+        options = self.host_as_given(host, agents[0], ["--workspace", workspace, *options])[2:]
         return self.host_terminal(host, "team", "start", "--agents", ",".join(agents), "--workspace", workspace, name,
                                   *(["--", *options] if options else []))
 
@@ -2435,12 +2501,36 @@ class SandboxAI:
         if session is not None and not valid_run(session):
             raise ValueError("a session name is letters, digits, '_', '.' or '-'")
         extra = ["--session", session] if session else []
+        argv = self.host_as_given(name, agent, argv)
         return self.host_terminal(name, agent, *argv, *extra, *(["--", *agent_args] if agent_args else []))
+
+    def cached_launch_options(self, name, agent=None):
+        """The options host NAME's launcher takes for AGENT (any agent when None) as host_launch_options last read them,
+        or None when not read yet: never asked here (a start in the window's thread must not wait for SSH)."""
+        cache = self.__dict__.get("_launch_options", {})
+        found = [(kept[0], kept[1]) for key, kept in cache.items()
+                 if key[0] == name and (agent is None or key[1] == agent)]
+        return set(max(found, key=lambda item: item[0])[1]) if found else None
+
+    def host_as_given(self, name, agent, argv):
+        """ARGV for a start on host NAME with --workspaces-as-given when it names its workspace and that host's
+        launcher is known to take the option (its options read already: cached_launch_options): the workspace chosen
+        in the app is /work there too, never a project file in the SSH login's directory (sandbox-ai 0.1.78). An
+        older host, or one not read yet, gets ARGV as it is (its launcher has no such rule or would refuse it)."""
+        if name == "local":
+            return self.as_given(argv)
+        argv = list(argv)
+        names_workspace = any(word == "--workspace" or word.startswith("--workspace=") for word in argv)
+        known = self.cached_launch_options(name, agent)
+        if names_workspace and known and AS_GIVEN in known and AS_GIVEN not in argv:
+            argv.append(AS_GIVEN)
+        return argv
 
     def host_dry_run(self, name, agent, argv):
         """(plan or None, message) of `sandbox-ai AGENT ARGV --dry-run` on host NAME (nothing starts there)."""
         if name == "local":
             return self.dry_run(agent, argv)
+        argv = self.host_as_given(name, agent, argv)
         return parse_dry_run(*self.host_run(name, agent, *argv, "--dry-run", timeout=90))
 
     def host_mcp_servers(self, name):
@@ -2517,12 +2607,18 @@ class SandboxAI:
         """`sandbox-ai mcp detach NAME START --live --json` (or --helper AGENT START) on HOST (mcp_live)."""
         return self.mcp_live(host, start, server, helper, detach=True)
 
-    def mcp_live(self, host, start, server=None, helper=None, detach=False):
+    def host_mcp_detach(self, host, start, server=None, helper=None):
+        """`sandbox-ai mcp detach NAME START --json` (or --helper AGENT START) on HOST: the server out of a stopped or
+        paused start's options, for its later starts (mcp_live's answer)."""
+        return self.mcp_live(host, start, server, helper, detach=True, live=False)
+
+    def mcp_live(self, host, start, server=None, helper=None, detach=False, live=True):
         """`sandbox-ai mcp attach NAME START --live --json` (HELPER: --helper AGENT in place of NAME; DETACH: `mcp
         detach ... --live --json`) on HOST: the server into (or out of) the running sandbox of START now, without a
         restart. Its answer ({"server", "start", "attached" or "detached", "agent_restart", "message", ...}) with
         "notes": what it said besides on its error output. ValueError: refused, with sandbox-ai's reason."""
-        args = mcp_live_args(start, server, helper, detach)
+        args = mcp_live_args(start, server, helper, detach, live)
+        self.require_options(host, tuple(args[:2]), [o for o in args if o in ("--live", "--helper")])
         status, out, err = self.host_run(host, *args, timeout=600)
         data = None
         if status == 0:
@@ -2611,6 +2707,10 @@ class SandboxAI:
         project's later starts (into its trusted .sandbox-ai.json). (status, out, err)."""
         if not valid_run(run):
             return 2, "", "invalid run"
+        try:
+            self.require_options(name, ("net", "show"), ["--keep-all" if every else "--keep"])
+        except HostTooOld as exc:
+            return 2, "", str(exc)
         return self.host_run(name, "net", "show", run, "--keep-all" if every else "--keep", timeout=90)
 
     def privacy_check(self, name, paths, rules_dir=None, project=None, every=False):
@@ -2667,6 +2767,20 @@ WIDENING = {
 }
 
 
+class HostTooOld(ValueError):
+    """The sandbox-ai on HOST does not know OPTIONS of COMMAND yet (require_options): told as an update to do."""
+
+    def __init__(self, host, command, missing):
+        super().__init__(host, command, missing)
+        self.host, self.command, self.missing = host, tuple(command), list(missing)
+
+    def __str__(self):
+        from .i18n import tr
+        return tr("The sandbox-ai on {host} is too old for this: `sandbox-ai {command}` there does not know {options}. "
+                  "Update the host (Hosts › Update), then try again.", host=printable(self.host),
+                  command=" ".join(self.command), options=", ".join(self.missing))
+
+
 class ProjectReview:
     """What a project configuration holds, for the human to review before anything is applied."""
 
@@ -2718,9 +2832,15 @@ def valid_workspace_name(name):
     return isinstance(name, str) and bool(WORKSPACE_NAME.fullmatch(name)) and name not in (".", "..")
 
 
+USB_DEVICE = re.compile(r"usb:[0-9A-Fa-f]{4}:[0-9A-Fa-f]{4}(?::[!-~]{1,126})?")  # devices.SELECTOR
+
+
 def valid_device(path):
-    """A device path of one line under /dev (never read as an option)."""
+    """A device path of one line under /dev, or a USB device by identity, usb:VENDOR:PRODUCT[:SERIAL] (as
+    `sandbox-ai devices add` takes it); never read as an option."""
     path = str(path or "")
+    if USB_DEVICE.fullmatch(path):
+        return True
     return path.startswith("/dev/") and len(path) <= 4096 and path.isprintable() and ".." not in path.split("/")
 
 
@@ -2770,6 +2890,9 @@ NEEDS_CONFIRM = {
     'mcp-unsigned': 'an MCP server from a catalog no trusted key signed is taken without that check',
     'mcp-writable-mount': 'a writable mount lets the MCP server change that directory on the host',
     'git-login-add': 'a Git login is used by the connection proxy of every sandbox that reaches that server',
+    "login-replace": "a login for that server or kind exists: its token is replaced by this secret's for every later "
+                     "start that uses it",
+    "mcp-replace": "an MCP server of that name exists: its definition is replaced for every start that uses it",
     'login-remove': 'removing a login or an identity takes it from every later start that uses it',
     'net-keep': "keeping what the run was given writes it into the project's .sandbox-ai.json: every later start of that project gets it",
     'start-restart': 'restarting a running start ends what runs in it now (the agent continues its conversation)',
@@ -4157,10 +4280,10 @@ def helper_of(server):
     return match[1] if match else None
 
 
-def mcp_live_args(start, server=None, helper=None, detach=False):
+def mcp_live_args(start, server=None, helper=None, detach=False, live=True):
     """The words after `sandbox-ai` of `mcp attach NAME START --live --json` (HELPER: `--helper AGENT START`), or
-    with DETACH `mcp detach ... --live --json`: a server into (out of) a running start now. ValueError says what is
-    wrong."""
+    with DETACH `mcp detach ... --live --json`: a server into (out of) a running start now. Without LIVE (a detach
+    only): out of a stopped or paused start's options, for its later starts. ValueError says what is wrong."""
     if not valid_run(start):
         raise ValueError("not a start's name")
     if helper:
@@ -4171,7 +4294,9 @@ def mcp_live_args(start, server=None, helper=None, detach=False):
         named = [server]
     else:
         raise ValueError("an MCP server's name is 1-32 letters, digits, '_' or '-'")
-    return ["mcp", "detach" if detach else "attach", *named, start, "--live", "--json"]
+    if not live and not detach:
+        raise ValueError("an attach without --live is mcp_attach")
+    return ["mcp", "detach" if detach else "attach", *named, start, *(["--live"] if live else []), "--json"]
 
 
 def stop_args(name, wait=None):

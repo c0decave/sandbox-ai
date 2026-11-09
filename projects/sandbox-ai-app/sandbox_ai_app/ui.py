@@ -1095,6 +1095,26 @@ class LaunchPage(QWidget):
                              list=", ".join(dropped)))
         return True
 
+    def require_workspace(self, title):
+        """True when the start names its workspace. An empty field would make the launcher take the directory the
+        app (or, on another host, the SSH login) runs in - often HOME - as the writable /work: on this machine the
+        project folder chosen above fills it in (said), otherwise nothing starts until one is chosen."""
+        if self.workspace():
+            return True
+        widget = self.form.widgets.get("--workspace")
+        if self.host() == LOCAL and self.project and widget is not None and os.path.isdir(self.project):
+            widget.set_value([self.project])
+            self.update_preview()
+            self.project_note.setText(tr("The workspace was empty: the project folder {path} is the workspace.",
+                                         path=printable(self.project)))
+            return True
+        where = tr("a folder on {host}, typed in", host=printable(self.host())) if self.host() != LOCAL else \
+            tr("a folder of this machine, or open a project folder above")
+        warn(self, title, tr("Choose the workspace first (the tab Workspace of the options: {where}). Without one "
+                             "the sandbox would get the folder the app runs in - often your HOME - as its writable "
+                             "/work.", where=where))
+        return False
+
     def workspace(self):
         """The first workspace of the form, or None."""
         values = self.form.values().get("--workspace") or []
@@ -1207,7 +1227,7 @@ class LaunchPage(QWidget):
 
     def dry_run(self):
         """The launcher's plan, nothing started: on the chosen host by its own launcher."""
-        if self.refused_options(tr("Dry run")):
+        if self.refused_options(tr("Dry run")) or not self.require_workspace(tr("Dry run")):
             return
         background(self.sai.host_dry_run, self.host(), self.agent.currentText(), self.argv(), owner=self,
                    source=self.dry_button, timeout=120, done=self.dry_run_done)
@@ -1220,7 +1240,7 @@ class LaunchPage(QWidget):
         show_text(self, tr("Plan (dry run)"), (message + "\n\n" if message else "") + json.dumps(plan, indent=2))
 
     def start(self, session=None, embedded=False):
-        if self.refused_options(tr("Not started")):
+        if self.refused_options(tr("Not started")) or not self.require_workspace(tr("Not started")):
             return False
         try:
             host = self.host()
@@ -2240,7 +2260,9 @@ class SandboxesPage(QWidget):
 
     def host_row(self, host, starts):
         """{cells, color, tip, sort} of the row of HOST, above its STARTS: how many, how many run, whether it answers."""
-        running = sum(1 for i in starts if i.state in ACTIVE_STATES)
+        # Running and paused counted apart: a paused start does not run ("running: 3" with 2 running, 1 paused before).
+        running = sum(1 for i in starts if i.state in ("running", "starting"))
+        paused = sum(1 for i in starts if i.state == "paused")
         where = tr("this machine") if host == LOCAL else printable(host)
         problem = getattr(self, "remote_problems", {}).get(host)
         seen = getattr(self, "remote_seen", {}).get(host)
@@ -2258,6 +2280,8 @@ class SandboxesPage(QWidget):
         if host != LOCAL and tip is None:
             tip = tr("Its starts, read over SSH (sandbox-ai hosts)")
         cells = [tr("This machine") if host == LOCAL else printable(host),
+                 tr("Starts: {count}, running: {running}, paused: {paused}", count=len(starts), running=running,
+                    paused=paused) if paused else
                  tr("Starts: {count}, running: {running}", count=len(starts), running=running),
                  "", "", "", "", state, "", where, ""]
         order = ("0" if host == LOCAL else "1") + str(host).lower()  # this machine first, by the header too
@@ -2535,7 +2559,15 @@ class SandboxesPage(QWidget):
         rules = {"attach": state == "running", "attach-app": state == "running", "pause": state == "running",
                  "resume": state in ("paused", "stopped"), "delete": state == "stopped"}
         foreground = bool(instance is not None and getattr(instance, "foreground", False))
+        # A run without a kept start pauses and resumes too (sandbox-ai pause/resume NAME, as on another host); it
+        # keeps nothing to attach to or delete.
+        plain_run = kind == "run" and bool(instance is not None and instance.run)
         for action, button in self.session_buttons.items():
+            if plain_run and action in ("pause", "resume"):
+                allowed = state == "running" if action == "pause" else state == "paused"
+                why = None if allowed else tr("Not while it is {state}.", state=tr(STATE_TITLES.get(state, state)))
+                set_enabled(button, why is None, why)
+                continue
             why = (none if instance is None else tr("Only for sessions.") if kind != "session" else
                    tr("It runs in the foreground of its own terminal (started with --no-tmux or without a terminal): "
                       "there is nothing to attach to.") if foreground and action in ("attach", "attach-app") else
@@ -2571,8 +2603,12 @@ class SandboxesPage(QWidget):
                            "against.") if instance.kind != "session" else
                    tr("It is paused: resume it first.") if instance.state == "paused" else
                    None if instance.state == "running" else tr("Not while it is {state}.", state=state))
-        for key in ("add-mcp", "remove-mcp"):
-            set_enabled(self.run_named[key], why is None, why)
+        set_enabled(self.run_named["add-mcp"], why is None, why)
+        # Remove: a stopped or paused kept start too (mcp detach without --live: out of its later starts).
+        remove_why = why
+        if instance is not None and instance.kind == "session" and instance.state not in ("damaged",):
+            remove_why = None
+        set_enabled(self.run_named["remove-mcp"], remove_why is None, remove_why)
 
     def update_manage_buttons(self, instance, gone=None):
         """Rename… and History… follow the selected start; Clean up… acts on the host chosen above."""
@@ -2591,10 +2627,19 @@ class SandboxesPage(QWidget):
         if history_why is None and gone and self.stale(instance) is not None:
             history_why = gone
         set_enabled(self.manage_buttons["history"], history_why is None, history_why)
-        host = self.host_filter.currentData()
+        host = self.clean_host(instance)
         stale_host = host not in (None, LOCAL) and host in self.remote_problems
-        why = tr("{host} does not answer.", host=printable(host)) if stale_host else None
+        why = tr("Choose a host above (or select a start of the host to clean up on).") if host is None else \
+            tr("{host} does not answer.", host=printable(host)) if stale_host else None
         set_enabled(self.manage_buttons["clean"], why is None, why)
+
+    def clean_host(self, instance=None):
+        """The host Clean up… acts on: the one chosen above, else (All hosts) the selected start's; None: neither."""
+        chosen = self.host_filter.currentData()
+        if chosen is not None:
+            return chosen
+        instance = instance if instance is not None else self.current()
+        return getattr(instance, "host", LOCAL) if instance is not None else None
 
     def start_host(self, instance):
         """(host, name) as `sandbox-ai rename`, `list --history` take a start there."""
@@ -2647,10 +2692,18 @@ class SandboxesPage(QWidget):
                  for entry in found]
         show_text(self, title, "\n".join(lines) or tr("No history of {name}.", name=printable(name)), modal=False)
 
+    def host_title(self, host):
+        return tr("this machine") if host in (None, LOCAL) else printable(host)
+
     def clean_up(self):
-        """`sandbox-ai gc` on this machine or the host chosen above: what would go is shown first (--dry-run)."""
-        host = self.host_filter.currentData() or LOCAL
-        title = tr("Clean up on {host}", host=printable(host)) if host != LOCAL else tr("Clean up")
+        """`sandbox-ai gc` on the host chosen above (All hosts: the selected start's host): what would go is shown
+        first (--dry-run), the host named in the question."""
+        host = self.clean_host()
+        if host is None:
+            inform(self, tr("Clean up"), tr("Choose a host above (or select a start of the host to clean up on)."),
+                   modal=False)
+            return
+        title = tr("Clean up on {host}", host=self.host_title(host))
         background(self.sai.collect, host, True, owner=self, source=list(self.manage_buttons.values()), timeout=150,
                    done=lambda found, error: self.clean_previewed(host, title, found, error))
 
@@ -2663,9 +2716,8 @@ class SandboxesPage(QWidget):
         if not lines:
             inform(self, title, tr("Nothing to remove."), modal=False)
             return
-        text = tr("Remove these? Kept starts go with their HOME; this cannot be undone.") + "\n\n" + "\n".join(lines)
-        if host != LOCAL:
-            text = tr("On {host}: {text}", host=printable(host), text=text)
+        text = on_host(host, tr("Remove these? Kept starts are deleted with their HOME; this cannot be undone.")) + \
+            "\n\n" + "\n".join(lines)
         if not ask_first(self, "gc", title, text, tr("Remove")):
             return
 
@@ -2799,7 +2851,7 @@ class SandboxesPage(QWidget):
         path = dialog.path()
         if remote:
             if not backend.valid_device(path):
-                warn(self, tr("Not added"), tr("A device is a path under /dev/."))
+                warn(self, tr("Not added"), tr("A device is a path under /dev/, or usb:VENDOR:PRODUCT[:SERIAL]."))
                 return
             title = tr("Add device on {host}", host=printable(host))
             if ask_first(self, "device-add", title, tr("Give {path} of {host} to {run} until it ends? Devices weaken "
@@ -3051,6 +3103,16 @@ class SandboxesPage(QWidget):
     def remove_mcp(self):
         """Remove MCP server…: one of the servers the start reaches now (as its rows say; else as `sandbox-ai mcp
         list` there says whom each serves), taken out with `mcp detach … --live` - a helper as --helper AGENT."""
+        instance = self.current()
+        if instance is not None and instance.kind == "session" and instance.state != "running":
+            # Stopped or paused: out of its options, for its later starts (mcp detach without --live).
+            host, name = self.start_host(instance)
+            if not backend.valid_run(name):
+                warn(self, tr("Sandboxes"), tr("Not a start's name: {ident}", ident=printable(name)[:60]))
+                return
+            from .start_tree import reached
+            self.choose_detach(host, name, [server for server, _now in reached(instance)], None, live=False)
+            return
         target = self.live_start()
         if not target:
             return
@@ -3064,11 +3126,14 @@ class SandboxesPage(QWidget):
                        row[0] for row in rows or [] if name in [part.strip() for part in str(row[2]).split(",")]],
                        error))
 
-    def choose_detach(self, host, start, servers, error):
+    def choose_detach(self, host, start, servers, error, live=True):
         self.update_buttons()
         title = tr("Remove MCP server from {start} on {host}", start=printable(start), host=printable(host)) \
             if host != LOCAL else tr("Remove MCP server from {start}", start=printable(start))
         servers = [s for s in dict.fromkeys(servers) if re.fullmatch(backend.MCP_NAME, str(s))]
+        if not servers and not live:
+            inform(self, title, tr("{start} has no MCP server in its options.", start=printable(start)), modal=False)
+            return
         if not servers:
             inform(self, title, tr("{start} reaches no MCP server now.", start=printable(start)) + (
                 " " + tr("The servers there could not be read: {error}", error=printable(error)[:300])
@@ -3082,12 +3147,15 @@ class SandboxesPage(QWidget):
         server = servers[labels.index(choice)]
         helper = backend.helper_of(server)
         where = tr("On {host}: ", host=printable(host)) if host != LOCAL else ""
-        if not ask_first(self, "mcp-detach", title, where + tr(
-                "Take {name} from {start} now? Its relay closes at once: the agent's connections to it end and its "
-                "calls fail; its later starts go without it.", name=printable(choice), start=printable(start)),
-                tr("Remove")):
+        question = tr("Take {name} from {start} now? Its relay closes at once: the agent's connections to it end and "
+                      "its calls fail; its later starts go without it.", name=printable(choice),
+                      start=printable(start)) if live else \
+            tr("Take {name} out of {start}'s options? Its later starts go without it.", name=printable(choice),
+               start=printable(start))
+        if not ask_first(self, "mcp-detach", title, where + question, tr("Remove")):
             return
-        background(lambda: self.sai.host_mcp_detach_live(host, start, None if helper else server, helper),
+        call = self.sai.host_mcp_detach_live if live else self.sai.host_mcp_detach
+        background(lambda: call(host, start, None if helper else server, helper),
                    owner=self, source=self.run_buttons, timeout=630,
                    done=lambda result, error_: self.detached(host, title, result, error_))
 
@@ -3300,6 +3368,14 @@ class SandboxesPage(QWidget):
                 self.resume_checked(instance, lambda: self.remote_action(instance, "resume"))
                 return
             self.remote_action(instance, action)
+            return
+        if instance is not None and instance.kind == "run" and action in ("pause", "resume") and \
+                backend.valid_run(instance.name):
+            # A run without a kept start: sandbox-ai pause/resume NAME (starts.act), as for another host's.
+            title = tr(ACTION_TITLES.get(action, action))
+            background(self.sai.call, action, instance.name, owner=self,
+                       source=[self.stop_button, *self.session_buttons.values()], timeout=150,
+                       done=lambda result, error: self.command_done(title, result, error))
             return
         if instance is None or instance.kind != "session":
             QMessageBox.information(self, tr("Sessions"), tr("Select a session first."))
@@ -4301,6 +4377,11 @@ class McpPage(QWidget):
         if writable and not ask_first(self, "mcp-writable-mount", title, where + tr(
                 "Let the MCP server {name} change these folders of its host: {list}?", name=printable(key),
                 list=printable(", ".join(writable))), tr("Add")):
+            return
+        listed = [self.servers.item(r, 0).text() for r in range(self.servers.rowCount())] if host == self.host() else []
+        if values["name_as"] in listed and not ask_first(self, "mcp-replace", title, where + tr(
+                "An MCP server {name} is there already: replace its definition for every start that uses it?",
+                name=printable(values["name_as"])), tr("Replace")):
             return
         background(lambda: self.sai.host_run(host, *args, timeout=900), owner=self, source=self.add_button,
                    timeout=930, done=lambda result, error: self.added(result, error))
@@ -6351,7 +6432,10 @@ class MainWindow(QMainWindow):
     def projects(self):
         """The "current project" folders for the file browser: the current project (else the folder the app
         was started in) and the Start page's first workspace when it is another one."""
-        found = [("project", "", getattr(self, "project", None) or os.getcwd())]
+        project = getattr(self, "project", None)
+        # Without a project chosen the folder the app was started in, named as that (not "Current project": the
+        # window says it has none).
+        found = [("project", "", project) if project else ("started-in", "", os.getcwd())]
         workspace = self.launch.workspace()
         if workspace and not same_folder(workspace, found[0][2]):
             found.append(("project", "", workspace))

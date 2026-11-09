@@ -62,6 +62,10 @@ class LoginsBox(QGroupBox):
     def buttons(self):
         return [self.add_button, self.remove_button, self.check_button, *self.more_buttons()]
 
+    def replaces(self, values):
+        """The server or kind of an entry the login of VALUES replaces, or None."""
+        return None
+
     def show_entries(self, entries, secret_names, known=True):
         self.entries, self.secret_names, self.secrets_known = entries, secret_names, bool(known)
         fill(self.list, [self.row(e) for e in entries], ["ok" if e.get("secret") in secret_names else "warn"
@@ -102,6 +106,13 @@ class LoginsBox(QGroupBox):
         first as that secret (`secrets set NAME`, the value on standard input), asked first when a secret of that name
         is there or may be (the host's names not read)."""
         secret, value = values["secret"], values.get("value")
+        replaced = self.replaces(values)
+        if replaced and not ask_first(self, "login-replace", tr(self.title), on_host(self.host, tr(
+                "A login for {name} is there already: its token is replaced by the secret {secret}'s for every later "
+                "start that uses it. Replace it?", name=printable(replaced), secret=printable(secret))),
+                tr("Replace")):
+            self.message.setText(tr("Not added: the login for {name} stays as it is.", name=printable(replaced)))
+            return False
         if not value:  # a secret kept already: the add alone
             self.run(*add_args, what=what)
             return True
@@ -114,8 +125,18 @@ class LoginsBox(QGroupBox):
                 return False
         self.message.setText(tr("Working…"))
         host, command = self.host, self.command
-        background(lambda: self.sai.add_login(host, command, add_args, secret, value), owner=self, timeout=150,
-                   source=self.buttons(), done=lambda result, error: self.ran(what, result, error))
+        known = (secret in self.secret_names) if self.secrets_known else None
+
+        def work():
+            existed = known
+            if existed is None:  # the host's names not read: asked now, so a refused login leaves no new secret
+                try:
+                    existed = self.sai.secret_exists(secret, host)
+                except Exception:  # noqa: BLE001 - not answered: kept as it is whatever happens
+                    existed = None
+            return self.sai.add_login(host, command, add_args, secret, value, existed=existed)
+        background(work, owner=self, timeout=150, source=self.buttons(),
+                   done=lambda result, error: self.ran(what, result, error))
         return True
 
 
@@ -130,6 +151,10 @@ class GitLoginsBox(LoginsBox):
 
     def row(self, entry):
         return [entry.get("url", ""), entry.get("user", ""), entry.get("secret", ""), self.state(entry)]
+
+    def replaces(self, values):
+        url = (values.get("url") or "").strip().rstrip("/").lower()
+        return next((e.get("url") for e in self.entries if str(e.get("url", "")).rstrip("/").lower() == url), None)
 
     def add(self):
         dialog = LoginDialog(self, tr("New Git login"), self.secret_names,
@@ -175,6 +200,9 @@ class PublishLoginsBox(LoginsBox):
 
     def row(self, entry):
         return [entry.get("kind", ""), entry.get("host", ""), entry.get("secret", ""), self.state(entry)]
+
+    def replaces(self, values):
+        return values.get("kind") if any(e.get("kind") == values.get("kind") for e in self.entries) else None
 
     def add(self):
         dialog = LoginDialog(self, tr("New publish login"), self.secret_names,
@@ -291,6 +319,14 @@ class LoginDialog(QDialog):
             return
         if "url" in self.edits and self.kind is None and not values["url"]:
             self.problem.setText(tr("Give the server's address."))
+            return
+        # The address as sandbox-ai checks it, before anything is kept: refused here, the dialog stays open with
+        # everything typed (the token too) and no secret is stored for a login that would be refused.
+        command = getattr(self.parent(), "command", None)
+        check = getattr(getattr(self.parent(), "sai", None), "login_url_problem", None)
+        problem = check(command, values) if command and check else None
+        if problem:
+            self.problem.setText(tr("Not accepted: {reason}", reason=problem))
             return
         self.accept()
 
@@ -723,7 +759,6 @@ class CredentialsPage(QWidget):
         if not value:
             QMessageBox.warning(self, tr("Secret"), tr("Enter the value first."))
             return
-        self.value.clear()  # at once: the value goes on standard input of the command, and nowhere else
         # A secret of that name: its value is replaced, for everything that names it - asked first (not known: too).
         listed = self.remote_secrets.get(host)  # None: not read (yet), or the read failed
         exists = None if listed is None else any(found == name for found, _ in listed)
@@ -733,8 +768,10 @@ class CredentialsPage(QWidget):
         if host != "local":
             text = tr("On {host}: {text}", host=printable(host), text=text)
         if not ask_first(self, "secret-replace", tr("Secret"), text, tr("Replace"), detail={"exists": exists}):
+            # Cancel keeps what was typed (it is still the human's to send or clear).
             self.message.setText(tr("Not kept: the secret {name} stays as it is.", name=printable(name)))
             return
+        self.value.clear()  # after the yes: the value goes on standard input of the command, and nowhere else
         if host == "local":
             background(self.sai.set_secret, name, value, owner=self, source=self.secret_buttons, timeout=90,
                        done=self.secret_kept)

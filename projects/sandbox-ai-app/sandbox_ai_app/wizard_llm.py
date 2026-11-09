@@ -543,6 +543,8 @@ def server_argv(fields):
         if not ca.startswith("/") or "\0" in ca or not ca.isprintable():
             raise ValueError(tr("The CA is a file with its absolute path."))
         args.append(f"--ca={ca}")
+    elif fields.get("no_ca") and fields.get("replace"):
+        args.append("--no-ca")  # the CA an edited server has is dropped (--replace keeps it otherwise)
     if fields.get("insecure"):
         args.append("--insecure-http")
     if fields.get("replace"):
@@ -598,6 +600,8 @@ def changes(old, new):
             # The endpoint has a CA and `llm add --replace` keeps it: only a file named in the dialog replaces it.
             if (after or "").strip():
                 found.append(f"{tr(label)}: {tr('the CA kept now')} \u2192 {printable(str(after))}")
+            elif new.get("no_ca"):
+                found.append(f"{tr(label)}: {tr('the CA kept now')} \u2192 {tr('none')}")
             continue
         if isinstance(before, bool) or isinstance(after, bool):
             before, after = bool(before), bool(after)

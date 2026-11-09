@@ -228,7 +228,8 @@ def sai(qtenv, monkeypatch):
         sai.asked.append((name, args))
         return sai.answers.get((name, args), (0, "", ""))
     monkeypatch.setattr(sai, "host_run", host_run)
-    monkeypatch.setattr(sai, "set_secret", lambda name, value: sai.secrets_set.append((name, value)) or (0, "", ""))
+    monkeypatch.setattr(sai, "set_secret", lambda name, value, host="local": sai.secrets_set.append(
+        (name, value) if host == "local" else (name, value, host)) or (0, "", ""))
     monkeypatch.setattr(sai, "secret_exists", lambda name, host="local": False)
     return sai
 
@@ -474,7 +475,8 @@ def test_edit_is_prefilled_from_llm_show_and_saved_with_replace(qapp, sai, monke
     assert seen[0] == [("local", ("llm", "show", "gw", "--json"))], "one command: --replace keeps the CA itself"
     assert seen[1] == {"name": "gw", "kind": "openai-compatible", "url": "https://gw.example.org/llm", "model": "",
                        "vpn": "", "anthropic": True, "secret": "GW_KEY", "headers": "", "ca": "",
-                       "insecure": False, "replace": True, "title": "Edit the LLM server gw on local (this machine)",
+                       "insecure": False, "replace": True, "no_ca": False,
+                       "title": "Edit the LLM server gw on local (this machine)",
                        "read_only": True, "replace_shown": False,
                        "ca_hint": "a CA is kept and stays; name a PEM file of that host to replace it"}
     assert seen[2] == [("llm", "models", "gw", "--sort", "loaded", "--json")]

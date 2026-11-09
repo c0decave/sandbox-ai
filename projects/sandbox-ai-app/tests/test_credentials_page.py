@@ -174,7 +174,9 @@ def test_the_secrets_of_another_host_and_a_replace_asked_first(page, monkeypatch
     monkeypatch.setattr(widgets, "AUTO_ANSWER", False)  # Cancel
     page.set_secret()
     assert widgets.SHOWN[-1][0] == "Secret" and "GH_PUSH is kept already" in widgets.SHOWN[-1][1]
-    assert page.value.text() == "" and not [c for c in page.sai.calls if c[0] == "set"], "declined: nothing kept"
+    # Review 5 (L5): Cancel keeps what was typed; it is cleared only once it is sent.
+    assert page.value.text() == "ghp-new" and not [c for c in page.sai.calls if c[0] == "set"], "declined: kept typed"
+    page.value.clear()
     count = len(widgets.SHOWN)
     page.name.setText("NEW_TOKEN")
     page.value.setText("tok")

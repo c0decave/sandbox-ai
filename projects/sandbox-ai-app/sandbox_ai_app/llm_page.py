@@ -4,10 +4,9 @@ with Add, Edit, Check, Models and Remove, as the web interface's LLM page offers
 Every command runs in the background (`sandbox-ai llm ...` here, `sandbox-ai hosts run HOST -- llm ...` for a
 host), only while the page is shown or a button asks: no command at every start of the app.
 
-An API key typed in for this machine is kept as a secret of sandbox-ai first (`sandbox-ai secrets set NAME`, the
-value on standard input), and the endpoint only names that secret (--api-key-secret NAME): the key is never on a
-command line, in a file of the app or in sandbox-ai's llm.json. For another host the app has no way to hand a value
-to that host's secrets without a command line, so the dialog asks for the name of a secret kept there already.
+An API key typed in is kept as a secret of sandbox-ai on the server's host (`sandbox-ai secrets set NAME`, over SSH for
+another host, the value on standard input) after `llm add` accepted the server, and the endpoint only names that
+secret (--api-key-secret NAME): the key is never on a command line, in a file of the app or in sandbox-ai's llm.json.
 
 The dialog (new or Edit…, a double-click) checks the name as it is typed (the character that cannot be in it, a
 name to use instead; OK only for a valid one) and stays open with everything typed whatever goes wrong: a field the
@@ -212,8 +211,12 @@ class LlmDialog(QDialog):
         self.ca = QLineEdit()
         self.ca.setPlaceholderText(tr("a PEM file on that host (optional)"))
         self.ca.setToolTip(tr("The CA that signed the server's certificate (copied)"))
+        self.no_ca = QCheckBox(tr("Drop the CA it has"))
+        self.no_ca.setToolTip(tr("sandbox-ai llm add --replace --no-ca: the server is reached with the system's CAs "
+                                 "again"))
         if (existing or {}).get("has_ca"):
             self.ca.setPlaceholderText(tr("a CA is kept and stays; name a PEM file of that host to replace it"))
+            self.ca.textChanged.connect(lambda text: self.no_ca.setEnabled(not text.strip()))
         self.insecure = QCheckBox(tr("Allow plain http to an address outside the local networks (unencrypted)"))
         self.replace = QCheckBox(tr("Replace an LLM server of that name"))
         self.form.addRow(tr("Name"), self.name)
@@ -229,17 +232,15 @@ class LlmDialog(QDialog):
         self.form.addRow(tr("Its value"), self.value_row)
         self.form.addRow(tr("Headers from secrets"), self.headers)
         self.form.addRow(tr("CA certificate"), self.ca)
+        self.form.addRow("", self.no_ca)
+        self.form.setRowVisible(self.no_ca, bool((existing or {}).get("has_ca")))
         self.form.addRow("", self.insecure)
         self.form.addRow("", self.replace)
         layout.addLayout(self.form)
-        if remote:
-            note = tr("On another host the key is a secret of sandbox-ai there: keep it on that host first "
-                      "(Credentials › Secrets, with that host chosen), then name it here.")
-        else:
-            note = tr("A key typed here is kept as a secret of sandbox-ai (standard input, never a command line); the "
-                      "server's entry only names that secret, and the proxy adds the key on the wire.")
+        note = tr("A key typed here is kept as a secret of sandbox-ai on the server's host (standard input, over SSH "
+                  "for another host, never a command line); the server's entry only names that secret, and the proxy "
+                  "adds the key on the wire.")
         layout.addWidget(plain_label(note, role="secondary"))
-        self.form.setRowVisible(self.value_row, not remote)
         self.note = plain_label()
         self.note.setAccessibleName(tr("Status"))
         self.note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -290,8 +291,10 @@ class LlmDialog(QDialog):
                   "anthropic": self.anthropic.isChecked() and self.kind.currentData() == "openai-compatible",
                   "secret": self.secret.text().strip(), "headers": self.headers.text().strip(),
                   "ca": self.ca.text().strip(), "insecure": self.insecure.isChecked(),
-                  "replace": self.replace.isChecked() or self.existing is not None}
-        value = None if self.remote else (self.value.text() or None)
+                  "replace": self.replace.isChecked() or self.existing is not None,
+                  "no_ca": bool((self.existing or {}).get("has_ca")) and self.no_ca.isChecked()
+                  and not self.ca.text().strip()}
+        value = self.value.text() or None
         return fields, value
 
     # -- the name, as it is typed --
@@ -745,7 +748,7 @@ class LlmPage(QWidget):
             dialog.failed(tr("Not saved."), quiet=True)
             return
         check = dialog.check_after
-        if not value or host != "local":
+        if not value:
             self.start_add(host, fields, args, None, dialog=dialog, check=check)
             return
         # A typed key replaces the value of a secret of that name: whether there is one is looked at first.
@@ -777,7 +780,7 @@ class LlmPage(QWidget):
             status, out, err = self.sai.host_run(host, *args, timeout=ADD_SECONDS)
             if status != 0 or not value:
                 return (status, out, err), None
-            kept = self.sai.set_secret(secret, value)
+            kept = self.sai.set_secret(secret, value, host=host)
             return (status, out, err), None if kept[0] == 0 else (kept[2] or kept[1]).strip() or "?"
 
         self.status.setText(tr("Adding {name} on {host}…", name=fields["name"], host=self.host_label(host)))

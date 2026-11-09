@@ -264,7 +264,7 @@ MUTATIONS = {
     "team-delete": ["team_delete"],
     "image-remove": [("images", "remove")],
     "mcp-attach": ["mcp_attach", "host_mcp_attach_live"],
-    "mcp-detach": ["host_mcp_detach_live"],
+    "mcp-detach": ["host_mcp_detach_live", "host_mcp_detach"],
     "net-keep": ["net_keep"],
 }
 

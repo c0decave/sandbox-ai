@@ -1185,7 +1185,7 @@ class ApprovalsPage(QWidget):
             return
         else:
             argv = ["approvals", decision, ident, "--scope", scope] + (["--no-open"] if url is not None else [])
-            self.answers[key] = background(lambda: self.sai.host_run(host, *argv, timeout=REMOTE_ANSWER_WAIT - 30),
+            self.answers[key] = background(lambda: self.sai.host_answer(host, argv, timeout=REMOTE_ANSWER_WAIT - 30),
                                            timeout=REMOTE_ANSWER_WAIT, done=done)
         self.update_buttons()
 

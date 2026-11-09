@@ -416,6 +416,10 @@ def test_the_board_starts_on_a_host_and_the_gallery_starts_the_emulated_device(u
     page.check()
     assert not page.apply_button.isEnabled() and "ct1" in page.host_note.text()
     page.start(embedded=True)
+    assert any("Add a workspace first" in text for _, text, *_ in widgets.SHOWN), "no workspace: HOME there (M3)"
+    widgets.SHOWN.clear()
+    page.add_node("workspace", path="/srv/project")  # that host's folder, typed in
+    page.start(embedded=True)
     if started:  # the board's options are all known there
         assert started[-1][0][:3] == ["ssh", "-tt", "ct1"] and started[-1][2] is None
     else:  # an option that host's launcher does not know: said, not started

@@ -5,6 +5,7 @@ goes to set_secret (standard input) and never into an argv; for another host onl
 import argparse
 import json
 import os
+import time
 
 import pytest
 
@@ -87,7 +88,8 @@ def sai(env, monkeypatch):
         sai.asked.append((name, args))
         return sai.answers.get((name, args), (0, "", ""))
     monkeypatch.setattr(sai, "host_run", host_run)
-    monkeypatch.setattr(sai, "set_secret", lambda name, value: sai.secrets_set.append((name, value)) or (0, "", ""))
+    monkeypatch.setattr(sai, "set_secret", lambda name, value, host="local": sai.secrets_set.append(
+        (name, value) if host == "local" else (name, value, host)) or (0, "", ""))
     return sai
 
 
@@ -211,27 +213,34 @@ def test_the_dialogs_argv_for_every_field_fits_sandbox_ai_llm(qapp, sai):
             llm_page.add_argv({"name": "a", "kind": "ollama", "url": "http://127.0.0.1:11434", **fields})
 
 
-def test_adding_on_a_host_names_a_secret_kept_there(qapp, sai, monkeypatch):
+def test_adding_on_a_host_keeps_the_typed_key_as_a_secret_there(qapp, sai, monkeypatch):
+    """Review 5 (L4): the key of a server on another host is typed where the server is added, as on this machine: it is
+    kept as a secret of that host (`secrets set` over SSH, standard input) once `llm add` there took the server."""
     from PySide6.QtWidgets import QDialog
     page = llm_page.LlmPage(sai)
     page.show()
     page.host_box.setCurrentIndex(page.host_box.findData("ct1"))
+    monkeypatch.setattr(sai, "secret_exists", lambda name, host="local": False)
 
     def run(dialog):
-        assert dialog.remote and not dialog.form.isRowVisible(dialog.value_row), "no key is typed for another host"
+        assert dialog.remote and dialog.form.isRowVisible(dialog.value_row), "a key is typed for another host too"
         dialog.name.setText("gpu2")
         dialog.kind.setCurrentIndex(dialog.kind.findData("vllm"))
         dialog.url.setText("http://100.64.0.8:8000")
         dialog.vpn.setText("ts")
         dialog.secret.setText("REMOTE_KEY")
-        dialog.value.setText(KEY)  # hidden: never used
+        dialog.value.setText(KEY)
         return QDialog.DialogCode.Accepted
     monkeypatch.setattr(llm_page.LlmDialog, "exec", run)
     sai.asked.clear()
     page.add()
     add = ("llm", "add", "gpu2", "--kind", "vllm", "--url", "http://100.64.0.8:8000", "--vpn", "ts",
            "--api-key-secret", "REMOTE_KEY")
-    assert sai.asked[0] == ("ct1", add) and sai.secrets_set == []
+    deadline = time.monotonic() + 10
+    while not sai.secrets_set and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.02)
+    assert sai.asked[0] == ("ct1", add) and sai.secrets_set == [("REMOTE_KEY", KEY, "ct1")]
     assert KEY not in json.dumps(sai.asked)
     assert parsed(sai, list(add)).vpn == "ts"
     page.close()

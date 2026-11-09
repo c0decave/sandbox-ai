@@ -1519,7 +1519,8 @@ class BoardPage(QWidget):
             self.verdict.setText(tr("The launcher accepts these options."))
             self.verdict.setProperty("role", "notice-ok")
         else:
-            self.verdict.setText(tr("The launcher refuses: {message}", message=printable((message or "").strip()[-400:])))
+            said = " ".join(printable((message or "").strip()[-400:]).split())
+            self.verdict.setText(tr("The launcher refuses: {message}", message=said))
             self.verdict.setProperty("role", "notice-error")
         self.verdict.style().unpolish(self.verdict)
         self.verdict.style().polish(self.verdict)
@@ -2291,6 +2292,11 @@ class BoardPage(QWidget):
         errors = self.errors()
         if errors:
             warn(self, tr("Not started"), "\n".join(p.text for p in errors))
+            return False
+        if not any(n.props.get("path") for n in self.board.of_kind("workspace") if n in self.board.included()):
+            # Without one the launcher takes the folder the app (or the SSH login) runs in, often HOME, as /work.
+            warn(self, tr("Not started"), tr("Add a workspace first: without one the sandbox would get the folder the "
+                                             "app runs in - often your HOME - as its writable /work."))
             return False
         untrusted = self.untrusted.get(self.key_of(self.directory))
         if untrusted and self.host() != LOCAL:
