@@ -32,11 +32,11 @@ def stage(root, home=None):
     project = home / "src" / "shop"
     project.mkdir(parents=True)
     (project / "README.md").write_text("# shop\n")
-    run_dir = root / "runtime" / "sandbox-ai" / "runs" / "claude-shop-3f9a"
+    run_dir = root / "runtime" / "sandbox-ai" / "runs" / "claude-3f9a2b1c"
     (run_dir / "approvals").mkdir(parents=True)
     os.chmod(root / "runtime", 0o700)
     (run_dir / "run.json").write_text(json.dumps({
-        "run": "claude-shop-3f9a", "agent": "claude", "backend": "podman", "workspace": str(project),
+        "run": "claude-3f9a2b1c", "name": "brisk-otter-lantern", "agent": "claude", "backend": "podman", "workspace": str(project),
         "pid": os.getpid(), "session": None, "session_dir": str(root / "session"),
         "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 600)), "proxy": True}))
 
@@ -79,7 +79,8 @@ def capture(app_dir, out, lang, size):
 
     settle(1.5)
     window.approvals.poll()
-    window.sandboxes.refresh()
+    # the Sandboxes page reads in the background (refresh_soon since 0.1.80; refresh before)
+    (getattr(window.sandboxes, "refresh_soon", None) or window.sandboxes.refresh)()
     settle(3.0)
     window.statusBar().clearMessage()
     for key in PAGES:
