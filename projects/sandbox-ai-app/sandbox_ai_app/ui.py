@@ -28,7 +28,7 @@ from .state import choose_file, choose_folder
 from .i18n import N_, tr
 from .activity_page import ActivityPage
 from .board_view import BoardPage, HostCombo
-from . import help_view, labels
+from . import dock_fold, help_view, labels
 from . import presets as PR
 from . import project_trust as PT
 from .hosts_page import HostsPage
@@ -5498,8 +5498,8 @@ class PanelDock(QDockWidget):
 
 
 # (name, title, page, default area) of the panels that can be floated, docked elsewhere and closed.
-# The inspector's panel is used only when the inspector is a window of its own (View > Panels > Properties as a
-# separate window); otherwise it slides out at the right edge of the canvas. The findings are closed until asked for.
+# The inspector (properties) also folds to a strip while docked and unfolds when a part is clicked (dock_fold); the
+# findings are closed until asked for.
 DOCKS = (("parts", N_("Board: parts"), "board", Qt.DockWidgetArea.LeftDockWidgetArea),
          ("inspector", N_("Board: properties"), "board", Qt.DockWidgetArea.RightDockWidgetArea),
          ("findings", N_("Board: security score and findings"), "board", Qt.DockWidgetArea.BottomDockWidgetArea),
@@ -5831,9 +5831,6 @@ class MainWindow(QMainWindow):
             item.setChecked(True)
             self.panel_actions[name] = item
         panels.addSeparator()
-        action(panels, "inspector-window", tr("Properties as a separate window"),
-               lambda: self.set_inspector_window(self.actions["inspector-window"].isChecked()),
-               checkable=True).setChecked(self.board.inspector_mode == "window")
         action(panels, "panels-reset", tr("Reset the panels"), self.reset_docks)
         navigation = view.addMenu(tr("Navigation"))
         action(navigation, "nav-compact", tr("Only icons"), lambda: self.set_compact_nav(not self.compact_nav),
@@ -6003,7 +6000,8 @@ class MainWindow(QMainWindow):
             self.spotlight.follow(None)
             return
         for name, dock in getattr(self, "docks", {}).items():  # a control on a closed panel: the panel opens
-            if name in self.closed_docks and dock.widget() is not None and (
+            if (name in self.closed_docks or name == "inspector" and self.inspector_fold.is_folded()) \
+                    and dock.widget() is not None and (
                     dock.widget() is widget or dock.widget().isAncestorOf(widget)):
                 self.set_panel(name, True)
         child = widget
@@ -6361,7 +6359,7 @@ class MainWindow(QMainWindow):
     def make_docks(self):
         """The Board's parts and its inspector, and the open questions of the Approvals page, as panels of the
         page area: they can be floated (a floating one stays on every page), docked elsewhere and closed."""
-        widgets = {"parts": self.board.parts_panel, "findings": self.board.findings_panel,
+        widgets = {"parts": self.board.parts_panel, "inspector": self.board.side, "findings": self.board.findings_panel,
                    "questions": self.approvals.open_box}
         self.docks, self.closed_docks = {}, set(CLOSED_AT_FIRST)
         for name, title, _, area in DOCKS:
@@ -6380,53 +6378,33 @@ class MainWindow(QMainWindow):
             dock.dockLocationChanged.connect(lambda _area: self.docks_changed())
             self.docks[name] = dock
         self.board.palette.setMinimumWidth(150)
+        self.board.side.setMinimumWidth(240)
+        # The inspector: folded to a strip at first; a click on a part unfolds it (or shows it, closed), Esc or a
+        # click on the empty canvas fold it again while it is docked.
+        self.inspector_fold = dock_fold.DockFold(self.docks["inspector"], self.workspace, folded=True)
+        self.inspector_fold.changed.connect(lambda _folded: self.docks_changed())
+        self.board.fold_request = self.fold_inspector
         self.workspace.resizeDocks([self.docks["parts"]], [170], Qt.Orientation.Horizontal)
         self.default_docks = self.workspace.saveState()
-        self.board.slide.toggled.connect(lambda _shown: self.update_docks())
-        self.apply_inspector_mode(self.state.get("board_inspector", "slide"))
 
-    def apply_inspector_mode(self, mode):
-        """The Board's inspector: "slide" (a strip at the right edge of the canvas, sliding out when a part is
-        selected) or "window" (a floating panel of its own that opens when a part is selected)."""
-        mode = "window" if mode == "window" else "slide"
+    def fold_inspector(self):
+        """Esc or a click on the Board's empty canvas: its inspector folds if it is docked, shown and unfolded (never
+        a floating one). True if it folded."""
         dock = self.docks["inspector"]
-        if mode == "window":
-            dock.setWidget(self.board.side)
-            self.board.side.setMinimumWidth(300)
-            self.board.set_inspector_mode("window")
-            dock.setAllowedAreas(Qt.DockWidgetArea.NoDockWidgetArea)  # always a window of its own
-            if not dock.isFloating():
-                dock.setFloating(True)
-                dock.resize(360, 520)
-        else:
-            if dock.widget() is self.board.side:
-                dock.setWidget(QWidget())  # the inspector goes back to the strip
-            self.board.set_inspector_mode("slide")
-        if isinstance(getattr(self, "actions", None), dict) and "inspector-window" in self.actions:  # the menu
-            self.actions["inspector-window"].setChecked(mode == "window")
-        if self.state.get("board_inspector", "slide") != mode:
-            self.state.set("board_inspector", mode)
-        self.update_docks()
-
-    def set_inspector_window(self, window):
-        """View > Panels > Properties as a separate window (remembered)."""
-        if window:
-            self.closed_docks.discard("inspector")
-        self.apply_inspector_mode("window" if window else "slide")
-        self.save_docks()
+        if dock.isFloating() or not dock.isVisible() or self.inspector_fold.is_folded():
+            return False
+        self.inspector_fold.fold()
+        return True
 
     def update_docks(self):
         page = self.current_page()
-        slide = self.board.inspector_mode == "slide"
         for name, _, dock_page, _ in DOCKS:
             dock = self.docks[name]
-            wanted = name not in self.closed_docks and (dock.isFloating() or dock_page == page) \
-                and not (name == "inspector" and slide)
+            wanted = name not in self.closed_docks and (dock.isFloating() or dock_page == page)
             if dock.isHidden() == wanted:
                 dock.setVisible(wanted)
             if hasattr(self, "panel_actions"):
-                shown = self.board.slide.expanded if name == "inspector" and slide else name not in self.closed_docks
-                self.panel_actions[name].setChecked(shown)
+                self.panel_actions[name].setChecked(name not in self.closed_docks)
         self.board.score_button.setChecked("findings" not in self.closed_docks)
 
     def panel_closed(self, name):
@@ -6440,16 +6418,12 @@ class MainWindow(QMainWindow):
         self.set_panel(name, self.panel_actions[name].isChecked())
 
     def set_panel(self, name, shown):
-        """Show the panel NAME (on its page) or close it; the inspector in its strip slides out or back."""
+        """Show the panel NAME (on its page, unfolded) or close it."""
         page = dict((n, p) for n, _, p, _ in DOCKS)[name]
-        if name == "inspector" and self.board.inspector_mode == "slide":
-            if shown and self.current_page() != page:
-                self.show_page(page)
-            self.board.slide.move_to(shown)
-            self.update_docks()
-            return
         if shown:
             self.closed_docks.discard(name)
+            if name == "inspector":
+                self.inspector_fold.unfold()
             if not self.docks[name].isFloating() and self.current_page() != page:
                 self.show_page(page)
         else:
@@ -6474,6 +6448,8 @@ class MainWindow(QMainWindow):
             if focus is not None:  # also once the window system has shown (and maybe activated) a floating panel
                 self.keep_focus(focus)
                 QTimer.singleShot(50, lambda: self.keep_focus(focus))
+        if name == "inspector":
+            self.inspector_fold.unfold()
         if dock.isVisible():
             dock.raise_()
 
@@ -6495,15 +6471,21 @@ class MainWindow(QMainWindow):
         self.closed_docks.update(CLOSED_AT_FIRST)
         for dock in self.docks.values():
             dock.setFloating(False)
+        self.inspector_fold.folded = True  # (as at the first start)
         self.workspace.restoreState(self.default_docks)
-        self.apply_inspector_mode(self.board.inspector_mode)
+        self.inspector_fold.apply()
+        self.update_docks()
         self.save_docks()
 
     def save_docks(self):
         if getattr(self, "restoring_docks", False):
             return
+        fold = getattr(self, "inspector_fold", None)
+        if fold is None:  # (still being made)
+            return
         self.state.set("docks", {"state": bytes(self.workspace.saveState().toBase64()).decode(),
-                                 "closed": sorted(self.closed_docks), "known": sorted(self.docks)})
+                                 "closed": sorted(self.closed_docks), "known": sorted(self.docks),
+                                 "folded": ["inspector"] if fold.folded else [], "sizes": {"inspector": fold.sizes}})
 
     def restore_docks(self):
         """Where the panels were at the last start (QMainWindow.saveState, kept in the app's state file)."""
@@ -6516,7 +6498,15 @@ class MainWindow(QMainWindow):
             if isinstance(closed, list):
                 known = saved.get("known") if isinstance(saved.get("known"), list) else []
                 self.closed_docks = {n for n in closed if n in self.docks} | (CLOSED_AT_FIRST - set(known))
-            self.apply_inspector_mode(self.board.inspector_mode)  # a saved state may have docked it
+            fold, sizes = self.inspector_fold, saved.get("sizes")
+            if isinstance(saved.get("folded"), list):  # (else folded, as at the first start)
+                fold.folded = "inspector" in saved["folded"] and not self.docks["inspector"].isFloating()
+            if isinstance(sizes, dict) and isinstance(sizes.get("inspector"), dict):
+                for key in ("width", "height"):
+                    value = sizes["inspector"].get(key)
+                    if isinstance(value, int) and 80 <= value <= 4000:
+                        fold.sizes[key] = value
+            fold.apply()
         finally:
             self.restoring_docks = False
         self.update_docks()

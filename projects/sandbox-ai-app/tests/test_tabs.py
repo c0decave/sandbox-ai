@@ -299,8 +299,9 @@ def test_panels_follow_their_page_float_close_and_are_kept(window, monkeypatch, 
     window.show_page("board")
     qapp.processEvents()
     assert docks["parts"].isVisible() and not docks["questions"].isVisible()
-    # The inspector slides out at the canvas's edge (no panel), the findings wait until asked for.
-    assert not docks["inspector"].isVisible() and not docks["findings"].isVisible()
+    # The inspector is a panel folded to a strip at first, the findings wait until asked for.
+    assert docks["inspector"].isVisible() and window.inspector_fold.folded and not docks["findings"].isVisible()
+    assert docks["inspector"].widget() is window.board.side
     assert docks["parts"].widget() is window.board.parts_panel and docks["questions"].widget() is window.approvals.open_box
     window.show_page("approvals")
     qapp.processEvents()

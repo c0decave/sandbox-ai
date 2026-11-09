@@ -1,8 +1,8 @@
 """The Board's canvas and the mouse, offscreen: the right and the middle button drag the view (nothing on the board
 moves, nothing is selected, no step of Undo), a right click opens a context menu (the canvas's or the node's), the
 left button selects, moves and draws the rubber band; a node's text wraps to at most three lines inside the node;
-the inspector slides out when a part is selected (or, as a window of its own, opens again); the score and the
-findings are shown only on request."""
+the inspector is a panel that moves, undocks, folds to a strip and unfolds (or comes back) when a part is clicked;
+the score and the findings are shown only on request."""
 import gc
 import os
 
@@ -300,39 +300,30 @@ def click(view, item, button=LEFT):
     QTest.mouseClick(view.viewport(), button, NONE, view.mapFromScene(item.sceneBoundingRect().center()))
 
 
-def test_the_inspector_slides_out_on_a_click_and_back_on_esc_or_the_empty_canvas(page, qapp, wait):
-    slide = page.slide
-    assert not slide.expanded and slide.width() == slide.strip_width() and not slide.holder.isVisible()
-    assert page.side.parentWidget() is slide.holder and slide.arrow.accessibleName() == "Show the properties"
+def test_the_inspector_is_beside_the_canvas_on_a_page_alone(page, qapp):
+    """Without the window (no panel): beside the canvas, always there; Esc and the empty canvas change nothing."""
+    assert page.side.isVisible() and page.side.parentWidget() is page.view.parentWidget()
     agent = page.items[page.board.first("agent").id]
     click(page.view, agent)
-    assert slide.expanded and slide.arrow.accessibleName() == "Hide the properties"
-    assert wait(lambda: slide.width() == slide.WIDE, 3) and page.side.isVisible(), "it slides out"
+    assert agent.isSelected() and page.side.isVisible() and not page.fold_inspector()
     QTest.keyClick(page.view, Qt.Key.Key_Escape)
-    assert not slide.expanded and wait(lambda: slide.width() == slide.strip_width() and not slide.holder.isVisible(), 3)
-    click(page.view, agent)
-    assert wait(lambda: slide.width() == slide.WIDE, 3)
-    QTest.mouseClick(page.view.viewport(), LEFT, NONE, empty_point(page))  # the empty canvas
-    assert not slide.expanded and wait(lambda: slide.width() == slide.strip_width(), 3)
-    slide.arrow.click()  # its arrow, both ways
-    assert slide.expanded
-    slide.arrow.click()
-    assert not slide.expanded
-    # The right button still pans and opens the menu; the strip does not move for it.
+    QTest.mouseClick(page.view.viewport(), LEFT, NONE, empty_point(page))
+    assert page.side.isVisible() and not agent.isSelected()
+    # The right button still pans and opens the menu.
     page.menus.clear()
     QTest.mouseClick(page.view.viewport(), RIGHT, NONE, empty_point(page))
-    assert len(page.menus) == 1 and not slide.expanded
+    assert len(page.menus) == 1
 
 
 def test_the_score_and_findings_are_shown_only_on_request_and_alone(page, qapp):
     assert not page.findings_panel.isVisible() and not page.score_button.isChecked()
     assert page.score_button.text().startswith("Security score:") and page.score_button.accessibleName()
     page.score_button.click()
-    assert page.findings_panel.isVisible() and page.score_button.isChecked() and not page.slide.expanded
+    assert page.findings_panel.isVisible() and page.score_button.isChecked()
     click(page.view, page.items[page.board.first("agent").id])
-    assert page.slide.expanded and page.findings_panel.isVisible()
+    assert page.findings_panel.isVisible()
     QTest.keyClick(page.view, Qt.Key.Key_Escape)
-    assert not page.slide.expanded and page.findings_panel.isVisible(), "the inspector does not take the findings"
+    assert page.findings_panel.isVisible(), "the inspector does not take the findings"
     page.score_button.click()
     assert not page.findings_panel.isVisible()
 
@@ -349,11 +340,11 @@ def test_in_the_window_the_score_is_a_panel_of_its_own_closed_at_first_and_kept(
     board.score_button.click()
     qapp.processEvents()
     assert findings.isVisible() and board.score_button.isChecked() and window.panel_actions["findings"].isChecked()
-    assert findings.widget() is board.findings_panel and not board.slide.expanded
+    assert findings.widget() is board.findings_panel and window.inspector_fold.folded
     click(board.view, board.items[board.board.first("agent").id])
     QTest.keyClick(board.view, Qt.Key.Key_Escape)
     qapp.processEvents()
-    assert findings.isVisible(), "the inspector going back leaves the findings alone"
+    assert findings.isVisible(), "the inspector folding leaves the findings alone"
     window.state.flush()
     again = make_window(monkeypatch)
     try:
@@ -365,18 +356,122 @@ def test_in_the_window_the_score_is_a_panel_of_its_own_closed_at_first_and_kept(
         close(again)
 
 
-@pytest.mark.parametrize("closed", [False, True])
-def test_the_inspector_as_a_window_of_its_own_opens_on_a_click_and_is_kept(window, qapp, wait, monkeypatch,
-                                                                            closed):
+def board_window(window, qapp):
+    window.resize(1400, 900)
     window.show()
     window.show_page("board")
     qapp.processEvents()
-    board, dock = window.board, window.docks["inspector"]
-    assert board.inspector_mode == "slide" and not window.actions["inspector-window"].isChecked()
-    window.actions["inspector-window"].trigger()
+    return window.board, window.docks["inspector"], window.inspector_fold
+
+
+def strip_wide(dock, fold):
+    return dock.width() <= fold.bar.sizeHint().width() + 2
+
+
+def test_the_inspector_is_a_panel_that_moves_undocks_and_closes(window, qapp):
+    board, dock, fold = board_window(window, qapp)
+    QDock = QtWidgets.QDockWidget
+    for feature in (QDock.DockWidgetFeature.DockWidgetMovable, QDock.DockWidgetFeature.DockWidgetFloatable,
+                    QDock.DockWidgetFeature.DockWidgetClosable):
+        assert dock.features() & feature
+    assert dock.widget() is board.side and dock.titleBarWidget() is fold.bar
+    assert window.workspace.dockWidgetArea(dock) == Qt.DockWidgetArea.RightDockWidgetArea
+    assert dock.allowedAreas() == Qt.DockWidgetArea.AllDockWidgetAreas
+    assert dock.isVisible() and fold.folded and strip_wide(dock, fold) and not board.side.isVisible(), \
+        "at first a strip at the right edge"
+    width = window.width()
+    fold.bar.fold_button.click()  # its title bar's arrow unfolds it ...
     qapp.processEvents()
-    assert board.inspector_mode == "window" and dock.widget() is board.side and dock.isFloating()
-    assert not board.slide.isVisible() and dock.allowedAreas() == Qt.DockWidgetArea.NoDockWidgetArea
+    assert not fold.folded and board.side.isVisible() and dock.width() > 200
+    assert window.width() == width, "unfolding never widens the window"
+    for button in (fold.bar.fold_button, fold.bar.float_button, fold.bar.close_button):
+        assert button.isVisible() and button.accessibleName() and button.toolTip()
+    # ... to the left, below the parts: folded, it leaves them their width (its title bar alone) ...
+    parts = window.docks["parts"]
+    window.workspace.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
+    qapp.processEvents()
+    assert window.workspace.dockWidgetArea(dock) == Qt.DockWidgetArea.LeftDockWidgetArea and board.side.isVisible()
+    fold.fold()
+    qapp.processEvents()
+    assert dock.height() <= fold.bar.sizeHint().height() + 2 and parts.width() >= board.palette.minimumWidth()
+    assert not dock.features() & QDock.DockWidgetFeature.DockWidgetVerticalTitleBar
+    fold.unfold()
+    # ... beside the parts (a column of its own: folded, a strip at the left edge) and back to the right
+    window.workspace.splitDockWidget(parts, dock, Qt.Orientation.Horizontal)
+    qapp.processEvents()
+    fold.fold()
+    qapp.processEvents()
+    assert strip_wide(dock, fold) and dock.features() & QDock.DockWidgetFeature.DockWidgetVerticalTitleBar
+    assert fold.bar.fold_button.arrowType() == Qt.ArrowType.RightArrow, "it unfolds into the window"
+    fold.unfold()
+    window.workspace.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+    qapp.processEvents()
+    assert window.workspace.dockWidgetArea(dock) == Qt.DockWidgetArea.RightDockWidgetArea and board.side.isVisible()
+    assert not dock.features() & QDock.DockWidgetFeature.DockWidgetVerticalTitleBar
+    # at the bottom, folded, it is its title bar alone
+    window.workspace.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
+    fold.fold()
+    qapp.processEvents()
+    assert dock.height() <= fold.bar.sizeHint().height() + 2 and not board.side.isVisible()
+    fold.unfold()
+    window.workspace.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+    # Undocked by its button (a folded one unfolds as a window of its own) and docked again by it.
+    fold.fold()
+    qapp.processEvents()
+    fold.bar.float_button.click()
+    qapp.processEvents()
+    assert dock.isFloating() and not fold.folded and board.side.isVisible() and dock.width() >= 160
+    assert not fold.bar.fold_button.isVisible(), "a floating panel does not fold"
+    fold.fold()
+    assert not fold.folded and dock.isFloating()
+    fold.bar.float_button.click()
+    qapp.processEvents()
+    assert not dock.isFloating() and window.workspace.dockWidgetArea(dock) == Qt.DockWidgetArea.RightDockWidgetArea
+    # Closed by its button: View > Panels says so and brings it back.
+    fold.bar.close_button.click()
+    qapp.processEvents()
+    assert not dock.isVisible() and "inspector" in window.closed_docks
+    assert not window.panel_actions["inspector"].isChecked()
+    window.panel_actions["inspector"].trigger()
+    qapp.processEvents()
+    assert dock.isVisible() and window.panel_actions["inspector"].isChecked() and not fold.folded
+    assert not window.actions.get("inspector-window"), "no mode of its own any more: it is undocked like any panel"
+
+
+def test_a_click_on_a_part_unfolds_the_docked_inspector_and_esc_or_the_canvas_fold_it(window, qapp):
+    board, dock, fold = board_window(window, qapp)
+    window.activateWindow()
+    board.view.setFocus()
+    qapp.processEvents()
+    focused = QApplication.focusWidget()
+    agent = board.items[board.board.first("agent").id]
+    click(board.view, agent)
+    qapp.processEvents()
+    assert agent.isSelected() and not fold.folded and board.side.isVisible() and dock.width() > 200
+    assert QApplication.focusWidget() is focused, "the keyboard stays on the canvas"
+    QTest.keyClick(board.view, Qt.Key.Key_Escape)
+    qapp.processEvents()
+    assert fold.folded and strip_wide(dock, fold)
+    click(board.view, agent)  # the part selected already: unfolds again
+    qapp.processEvents()
+    assert not fold.folded
+    QTest.mouseClick(board.view.viewport(), LEFT, NONE, empty_point(board))  # the empty canvas
+    qapp.processEvents()
+    assert fold.folded and dock.isVisible()
+    # The right button opens the menu and leaves the panel alone.
+    board.menus = []
+    board.view.open_menu = lambda menu, point: board.menus.append(menu)
+    QTest.mouseClick(board.view.viewport(), RIGHT, NONE, empty_point(board))
+    assert len(board.menus) == 1 and fold.folded
+
+
+@pytest.mark.parametrize("closed", [False, True])
+def test_a_click_on_a_part_brings_a_floating_inspector_back_where_it_was(window, qapp, wait, closed):
+    board, dock, fold = board_window(window, qapp)
+    dock.setFloating(True)
+    dock.move(dock.x() + 37, dock.y() + 23)
+    qapp.processEvents()
+    where = dock.geometry()
     if closed:
         dock.close()
         qapp.processEvents()
@@ -388,17 +483,59 @@ def test_the_inspector_as_a_window_of_its_own_opens_on_a_click_and_is_kept(windo
     agent = board.items[board.board.first("agent").id]
     click(board.view, agent)
     qapp.processEvents()
-    assert agent.isSelected() and dock.isVisible() and dock.isFloating()
+    assert agent.isSelected() and dock.isVisible() and dock.isFloating() and dock.geometry() == where
     assert window.panel_actions["inspector"].isChecked() and "inspector" not in window.closed_docks
     assert wait(lambda: QApplication.focusWidget() is focused, 2), "the keyboard stays where it was"
+    QTest.keyClick(board.view, Qt.Key.Key_Escape)
+    QTest.mouseClick(board.view.viewport(), LEFT, NONE, empty_point(board))
+    qapp.processEvents()
+    assert dock.isVisible() and dock.isFloating() and not fold.folded, "Esc and the canvas never close a window"
+
+
+def test_a_click_on_a_part_shows_a_closed_docked_inspector(window, qapp):
+    board, dock, fold = board_window(window, qapp)
+    dock.close()
+    qapp.processEvents()
+    assert not dock.isVisible() and "inspector" in window.closed_docks
+    QTest.keyClick(board.view, Qt.Key.Key_Escape)
+    assert not dock.isVisible(), "Esc does not bring it back"
+    click(board.view, board.items[board.board.first("agent").id])
+    qapp.processEvents()
+    assert dock.isVisible() and not dock.isFloating() and not fold.folded and board.side.isVisible()
+    assert window.panel_actions["inspector"].isChecked()
+
+
+@pytest.mark.parametrize("floating", [False, True])
+def test_where_the_inspector_was_is_kept_for_the_next_start(window, qapp, monkeypatch, floating):
+    board, dock, fold = board_window(window, qapp)
+    window.workspace.splitDockWidget(window.docks["parts"], dock, Qt.Orientation.Horizontal)  # beside the parts
+    fold.unfold()
+    window.workspace.resizeDocks([dock], [301], Qt.Orientation.Horizontal)
+    qapp.processEvents()
+    fold.fold()  # remembers its width
+    if floating:
+        dock.setFloating(True)
+        dock.setGeometry(dock.x() + 11, dock.y() + 17, 333, 444)
+    qapp.processEvents()
+    window.save_docks()
     window.state.flush()
     again = make_window(monkeypatch)
     try:
-        assert again.board.inspector_mode == "window" and again.actions["inspector-window"].isChecked()
-        assert again.docks["inspector"].widget() is again.board.side, "the mode is kept"
-        again.actions["inspector-window"].trigger()  # back to the strip
-        assert again.board.inspector_mode == "slide" and again.board.side.parentWidget() is again.board.slide.holder
-        assert not again.docks["inspector"].isVisible()
+        again.resize(1400, 900)
+        again.show()
+        again.show_page("board")
+        qapp.processEvents()
+        dock2, fold2 = again.docks["inspector"], again.inspector_fold
+        assert dock2.isVisible() and dock2.widget() is again.board.side
+        if floating:
+            assert dock2.isFloating() and not fold2.folded and dock2.size() == dock.size()
+        else:
+            assert again.workspace.dockWidgetArea(dock2) == Qt.DockWidgetArea.LeftDockWidgetArea
+            assert fold2.folded and strip_wide(dock2, fold2) and not again.board.side.isVisible()
+            assert fold2.sizes["width"] == fold.sizes["width"] > 240, (fold.sizes, fold2.sizes)
+            fold2.unfold()
+            qapp.processEvents()
+            assert abs(dock2.width() - fold.sizes["width"]) <= 4, ("its width when it was unfolded", dock2.width())
     finally:
         close(again)
 

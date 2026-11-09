@@ -9255,28 +9255,35 @@ TEXTS = {
     'Zoom 100 %': {
         'en': 'Zoom 100 %',
         'de': 'Zoom 100 %'},
-    # == the Board's panels: the inspector slides out or is a window of its own, the findings on request ==
+    # == the Board's panels: the inspector can be moved, undocked, folded to a strip; the findings on request ==
     'Board: properties': {
         'en': 'Board: properties',
         'de': 'Tafel: Eigenschaften'},
     'Board: security score and findings': {
         'en': 'Board: security score and findings',
         'de': 'Tafel: Sicherheitswert und Befunde'},
-    'Properties as a separate window': {
-        'en': 'Properties as a separate window',
-        'de': 'Eigenschaften als eigenes Fenster'},
     'Security score and findings': {
         'en': 'Security score and findings',
         'de': 'Sicherheitswert und Befunde'},
     'Show or hide the security score and the findings': {
         'en': 'Show or hide the security score and the findings',
         'de': 'Sicherheitswert und Befunde zeigen oder ausblenden'},
-    'Show the properties': {
-        'en': 'Show the properties',
-        'de': 'Eigenschaften zeigen'},
-    'Hide the properties': {
-        'en': 'Hide the properties',
-        'de': 'Eigenschaften ausblenden'},
+    # the title bar of a panel that folds (dock_fold.py)
+    'Expand the panel': {
+        'en': 'Expand the panel',
+        'de': 'Bereich ausklappen'},
+    "Collapse the panel (a strip at the window's edge)": {
+        'en': "Collapse the panel (a strip at the window's edge)",
+        'de': 'Bereich einklappen (ein Streifen am Rand des Fensters)'},
+    'Dock the panel again (or drag its title to an edge of the window)': {
+        'en': 'Dock the panel again (or drag its title to an edge of the window)',
+        'de': 'Bereich wieder andocken (oder ziehen Sie seinen Titel an einen Rand des Fensters)'},
+    'Undock the panel as a window of its own (or drag its title out of the window)': {
+        'en': 'Undock the panel as a window of its own (or drag its title out of the window)',
+        'de': 'Bereich als eigenes Fenster abdocken (oder ziehen Sie seinen Titel aus dem Fenster)'},
+    'Close the panel (View > Panels brings it back)': {
+        'en': 'Close the panel (View > Panels brings it back)',
+        'de': 'Bereich schließen (Ansicht > Bereiche holt ihn zurück)'},
     # == the Board's Cut, Copy and Paste (a part's context menu, Ctrl+X/C/V) ==
     'Properties': {
         'en': 'Properties',

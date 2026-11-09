@@ -15,9 +15,7 @@ import os
 import re
 import time
 
-from PySide6.QtCore import (
-    QEasingCurve, QEvent, QMimeData, QPoint, QPointF, QRect, QRectF, Qt, QTimer, QVariantAnimation, Signal,
-)
+from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QBrush, QColor, QContextMenuEvent, QCursor, QDrag, QFont, QFontMetricsF, QKeySequence, QPainter, QPainterPath,
     QPainterPathStroker, QPen, QPixmap, QPolygonF, QTextLayout, QTextOption, QTransform, QUndoCommand, QUndoGroup,
@@ -405,7 +403,7 @@ class BoardScene(QGraphicsScene):
         super().mousePressEvent(event)
         nodes = [i for i in self.selectedItems() if isinstance(i, NodeItem)]
         if len(nodes) == 1 and nodes[0].sceneBoundingRect().contains(event.scenePos()):
-            self.page.show_inspector()  # also a click on the part selected already (its inspector slid back)
+            self.page.show_inspector()  # also a click on the part selected already (its panel folded)
 
     def mouseMoveEvent(self, event):  # noqa: N802
         if self.dragging is not None:
@@ -568,8 +566,7 @@ class BoardView(QGraphicsView):
         if event.key() == Qt.Key.Key_Escape and self.scene().cancel_connect():
             event.accept()
             return
-        if event.key() == Qt.Key.Key_Escape and self.page.inspector_mode == "slide" and self.page.slide.expanded:
-            self.page.slide.collapse()
+        if event.key() == Qt.Key.Key_Escape and self.page.fold_inspector():  # its docked panel folds
             event.accept()
             return
         if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
@@ -631,88 +628,6 @@ class BoardView(QGraphicsView):
         point = event.position().toPoint()
         # The drop's own event has to return before a menu or a dialog opens (the drag would hang otherwise).
         QTimer.singleShot(0, lambda: self.page.drop(what, self.mapToScene(point), self.viewport().mapToGlobal(point)))
-
-
-class SlidePanel(QWidget):
-    """The inspector at the right edge of the canvas: a narrow strip with an arrow while collapsed; selecting a part
-    slides it out, Esc, a click on the empty canvas or the arrow slide it back. Its width is fixed while it moves, so
-    it never asks the window to grow."""
-    STRIP, WIDE = 24, 340
-    toggled = Signal(bool)  # slid out (True) or back
-
-    def __init__(self):
-        super().__init__()
-        self.expanded = False
-        row = QHBoxLayout(self)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(0)
-        self.arrow = QToolButton()
-        self.arrow.setAutoRaise(True)
-        self.arrow.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
-        self.arrow.clicked.connect(lambda _=False: self.collapse() if self.expanded else self.expand())
-        row.addWidget(self.arrow)
-        self.holder = QWidget()
-        holder_layout = QVBoxLayout(self.holder)
-        holder_layout.setContentsMargins(4, 0, 0, 0)
-        self.holder.hide()
-        row.addWidget(self.holder, 1)
-        self.animation = QVariantAnimation(self)
-        self.animation.setDuration(160)
-        self.animation.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self.animation.valueChanged.connect(lambda width: self.setFixedWidth(int(width)))
-        self.animation.finished.connect(self.settled)
-        self.show_arrow()
-        self.setFixedWidth(self.strip_width())
-
-    def set_widget(self, widget):
-        if widget.parentWidget() is not self.holder:
-            self.holder.layout().addWidget(widget)
-        widget.setMinimumWidth(0)
-        widget.show()
-
-    def strip_width(self):
-        """The collapsed width: the arrow's whole (its size depends on the theme)."""
-        return max(self.STRIP, self.arrow.sizeHint().width())
-
-    def show_arrow(self):
-        self.arrow.setText("›" if self.expanded else "‹")
-        text = tr("Hide the properties") if self.expanded else tr("Show the properties")
-        self.arrow.setToolTip(safe_tooltip(text))
-        self.arrow.setAccessibleName(text)
-
-    def expand(self):
-        self.move_to(True)
-
-    def collapse(self, animated=True):
-        self.move_to(False, animated)
-
-    def move_to(self, expanded, animated=True):
-        if expanded == self.expanded:
-            return
-        self.expanded = expanded
-        self.show_arrow()
-        self.toggled.emit(expanded)
-        if expanded:
-            self.holder.show()
-        target = self.WIDE if expanded else self.strip_width()
-        self.animation.stop()
-        if animated and self.isVisible():
-            self.animation.setStartValue(self.width())
-            self.animation.setEndValue(target)
-            self.animation.start()
-        else:
-            self.setFixedWidth(target)
-            self.settled()
-
-    def settled(self):
-        if not self.expanded:
-            self.holder.hide()
-
-    def changeEvent(self, event):  # noqa: N802
-        super().changeEvent(event)
-        if event.type() in (QEvent.Type.StyleChange, QEvent.Type.FontChange) and not self.expanded \
-                and self.animation.state() != QVariantAnimation.State.Running:
-            self.setFixedWidth(self.strip_width())  # another theme: the arrow's size
 
 
 class PartsDelegate(QStyledItemDelegate):
@@ -1103,6 +1018,7 @@ class BoardPage(QWidget):
         self.ghost = None  # the drop indicator while something is dragged over the board
         self.project_request = None  # the window: open a folder dropped on the board as the project (in its tab)
         self.inspector_request = None  # the window: show the inspector's panel again (a part was selected)
+        self.fold_request = None  # the window: fold the inspector's docked panel (Esc, the empty canvas); True if so
         self.kit_inventory, self.kit_loading = None, False  # sandbox-ai kits list --json, once read
         self.llm_servers, self.llm_loading = None, False  # sandbox-ai llm list --json, for the agent's Model server
         self.state, self.saved_boards, self.restored = None, {}, set()  # drafts and zoom kept between starts
@@ -1205,8 +1121,8 @@ class BoardPage(QWidget):
         zoom_out.clicked.connect(lambda: self.view.zoom(1 / 1.2))
         fit.clicked.connect(self.fit)
         right = QWidget()
-        # The inspector: in a strip at the right edge of the canvas that slides out (self.slide), or a window of its
-        # own (the window's floating panel, inspector_mode "window").
+        # The inspector (the selected part's properties): beside the canvas; in the window a panel of its own that can
+        # be moved to another edge, undocked, folded to a strip and closed (ui.make_docks).
         self.side = right
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
@@ -1234,18 +1150,10 @@ class BoardPage(QWidget):
         findings_layout.addWidget(self.score)
         findings_layout.addWidget(self.findings, 1)
         self.findings_panel.hide()
-        self.inspector_mode = "slide"  # or "window" (the window's floating panel)
-        self.slide = SlidePanel()
-        self.slide.set_widget(right)
-        canvas = QWidget()
-        canvas_row = QHBoxLayout(canvas)
-        canvas_row.setContentsMargins(0, 0, 0, 0)
-        canvas_row.setSpacing(0)
-        canvas_row.addWidget(self.view, 1)
-        canvas_row.addWidget(self.slide)
         split.addWidget(self.parts_panel)
-        split.addWidget(canvas)
-        split.setSizes([170, 1080])
+        split.addWidget(self.view)
+        split.addWidget(right)
+        split.setSizes([170, 700, 380])
         layout.addWidget(split, 1)
         layout.addWidget(self.findings_panel)
         self.preview = QPlainTextEdit()
@@ -2048,15 +1956,19 @@ class BoardPage(QWidget):
         self.inspect_timer.start()
         if len(nodes) == 1:
             self.show_inspector()
-        elif not selected and self.inspector_mode == "slide":  # a click on the empty canvas: back to the strip
-            self.slide.collapse()
+        elif not selected:  # a click on the empty canvas: its docked panel folds
+            self.fold_inspector()
 
     def show_inspector(self):
-        """A part was selected or clicked: the strip slides out, or the inspector's window opens again."""
-        if self.inspector_mode == "slide":
-            self.slide.expand()
-        elif self.inspector_request is not None:
+        """A part was selected or clicked: the inspector's panel is shown (closed), unfolded (folded) or raised
+        (floating, where it was) - the keyboard stays on the canvas."""
+        if self.inspector_request is not None:
             self.inspector_request()
+
+    def fold_inspector(self):
+        """Esc or a click on the empty canvas: the inspector's panel folds to its strip if it is docked and unfolded
+        (a floating one stays as it is). True if it folded."""
+        return bool(self.fold_request is not None and self.fold_request())
 
     def show_findings(self, shown):
         """The score's button: the score and the findings shown (SHOWN) or hidden; in the window, its panel."""
@@ -2065,17 +1977,6 @@ class BoardPage(QWidget):
         else:
             self.findings_panel.setVisible(shown)
             self.score_button.setChecked(shown)
-
-    def set_inspector_mode(self, mode):
-        """"slide": the inspector in the strip at the right edge of the canvas; "window": the window takes it (its
-        floating panel) and the strip goes."""
-        self.inspector_mode = "window" if mode == "window" else "slide"
-        if self.inspector_mode == "slide":
-            self.slide.set_widget(self.side)
-            self.slide.show()
-        else:
-            self.slide.collapse(animated=False)
-            self.slide.hide()
 
     def clear_inspector(self):
         while self.inspector.rowCount():

@@ -248,14 +248,17 @@ AREA_TIPS = (
          ("The settings of the selected part, built from the launcher's own options with their help texts.",
           "Die Einstellungen des gewählten Teils, aufgebaut aus den Optionen des Launchers mit ihren Hilfetexten."),
          ("A change applies to the board at once and is one step of Undo; Set up step by step… asks the "
-          "questions again. It slides out at the right edge of the board when you click a part; Esc, a click on the "
-          "empty board or its arrow slide it back. View > Panels > Properties as a separate window makes it a window "
-          "of its own that opens when you click a part.",
+          "questions again. It is a panel: drag its title to another edge of the window, or out of it (or use the "
+          "undock button) to make it a window of its own; its arrow folds it to a strip at the edge. A click on a "
+          "part unfolds it (or shows it again, closed or floating where it was); Esc or a click on the empty board "
+          "fold it while it is docked. View > Panels shows or closes it; where it was is kept for the next start.",
           "Eine Änderung gilt sofort auf der Tafel und ist ein Schritt von Rückgängig; Schritt für Schritt "
-          "einrichten… stellt die Fragen erneut. Er fährt am rechten Rand der Tafel aus, wenn Sie ein Teil "
-          "anklicken; Esc, ein Klick auf die leere Tafel oder sein Pfeil fahren ihn wieder ein. Ansicht > Bereiche > "
-          "Eigenschaften als eigenes Fenster macht ihn zu einem eigenen Fenster, das sich beim Klick auf ein Teil "
-          "öffnet."),
+          "einrichten… stellt die Fragen erneut. Er ist ein Bereich: Ziehen Sie seinen Titel an einen anderen Rand "
+          "des Fensters oder aus ihm heraus (oder nutzen Sie die Schaltfläche zum Abdocken), um ihn zu einem eigenen "
+          "Fenster zu machen; sein Pfeil klappt ihn zu einem Streifen am Rand ein. Ein Klick auf ein Teil klappt ihn "
+          "aus (oder zeigt ihn wieder, geschlossen oder schwebend, wo er war); Esc oder ein Klick auf die leere Tafel "
+          "klappen ihn ein, solange er angedockt ist. Ansicht > Bereiche zeigt oder schließt ihn; wo er war, bleibt "
+          "für den nächsten Start."),
          "", "page-board"),
     _tip("board.findings", ("Findings and score", "Befunde und Punktzahl"),
          ("What the launcher or the policy would refuse (✘), what makes little sense (!), and what weakens the "
