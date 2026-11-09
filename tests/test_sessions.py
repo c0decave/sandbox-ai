@@ -864,6 +864,13 @@ def test_rebirth_gets_a_new_run_id(tmp_path, monkeypatch):
     cleared, seen = [], {}
     monkeypatch.setattr(m, "clear_stale_pod", lambda name, data: cleared.append(data["pod"]))
 
+    # Whether the last run's pod still runs is asked of Podman (subprocess.run, which the fake Popen below would
+    # answer): here there is no Podman, so no pod of it runs - on a machine with one too (a CI runner).
+    def no_podman(*args, **kwargs):
+        raise FileNotFoundError("podman")
+    monkeypatch.setattr(m.liveness(), "RUNNER", no_podman)
+    m.liveness()._cache.clear()
+
     def popen(cmd, **kwargs):
         seen["cmd"] = cmd
         (m.session_dir("web") / "tmux" / "attach.sock").touch()

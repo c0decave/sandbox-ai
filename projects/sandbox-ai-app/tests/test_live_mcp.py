@@ -37,7 +37,9 @@ def sai(env, monkeypatch):
     sai = backend.SandboxAI()
     sai.calls, sai.answers = [], {}
 
-    def call(*args, timeout=120, input=None):
+    def call(*args, timeout=120, input=None, argv=None):
+        # A host's command may come with the ssh command line `sandbox-ai hosts run HOST -- ARGS` runs (host_run).
+        assert argv is None or (args[:2] == ("hosts", "run") and argv[0] == "ssh"), (args, argv)
         sai.calls.append(args)
         words = args[len(REMOTE):] if args[:2] == ("hosts", "run") else args
         for length in range(len(words), 0, -1):
