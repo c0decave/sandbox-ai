@@ -5433,6 +5433,7 @@ class MainWindow(QMainWindow):
         self.board.opened.connect(self.project_opened)
         self.board.open_request = self.choose_project_folder
         self.board.project_request = self.set_project  # a project folder dropped on the board opens in its tab
+        self.board.inspector_request = lambda: self.reopen_panel("inspector")  # a part selected: its inspector
         self.launch.opened.connect(self.project_opened)
         panel = QWidget()
         panel.setObjectName("navPanel")
@@ -6207,6 +6208,35 @@ class MainWindow(QMainWindow):
             self.closed_docks.add(name)
         self.update_docks()
         self.save_docks()
+
+    def reopen_panel(self, name):
+        """Show the panel NAME again where it was (floating or docked) if it was closed, and raise it; the keyboard
+        focus stays where it is (the Board's canvas, when a part was selected there)."""
+        if not hasattr(self, "docks") or name not in self.docks:
+            return
+        dock, focus = self.docks[name], QApplication.focusWidget()
+        if name in self.closed_docks:
+            self.closed_docks.discard(name)
+            dock.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)  # a floating one: not activated
+            try:
+                self.update_docks()
+            finally:
+                dock.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
+            self.save_docks()
+            if focus is not None:  # also once the window system has shown (and maybe activated) a floating panel
+                self.keep_focus(focus)
+                QTimer.singleShot(50, lambda: self.keep_focus(focus))
+        if dock.isVisible():
+            dock.raise_()
+
+    @staticmethod
+    def keep_focus(widget):
+        try:
+            if QApplication.focusWidget() is not widget and widget.isVisible():
+                widget.activateWindow()
+                widget.setFocus(Qt.FocusReason.OtherFocusReason)
+        except RuntimeError:  # gone meanwhile
+            pass
 
     def docks_changed(self):
         self.update_docks()

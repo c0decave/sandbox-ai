@@ -9095,4 +9095,14 @@ TEXTS = {
     'unknown (added before 0.1.78)': {
         'en': 'unknown (added before 0.1.78)',
         'de': 'unbekannt (vor 0.1.78 hinzugefügt)'},
+    # == the Board's context menu (a right click on the canvas; board_view.py) ==
+    'Add a part here': {
+        'en': 'Add a part here',
+        'de': 'Teil hier hinzufügen'},
+    'Select all': {
+        'en': 'Select all',
+        'de': 'Alles auswählen'},
+    'Zoom 100 %': {
+        'en': 'Zoom 100 %',
+        'de': 'Zoom 100 %'},
 }

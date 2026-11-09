@@ -17,15 +17,15 @@ import time
 
 from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
-    QBrush, QColor, QDrag, QFont, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QTransform, QUndoCommand,
-    QUndoGroup, QUndoStack,
+    QBrush, QColor, QContextMenuEvent, QDrag, QFont, QFontMetricsF, QPainter, QPainterPath, QPainterPathStroker, QPen,
+    QPixmap, QPolygonF, QTextLayout, QTextOption, QTransform, QUndoCommand, QUndoGroup, QUndoStack,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QDialog, QFormLayout, QGraphicsEllipseItem, QGraphicsItem,
-    QGraphicsPathItem, QGraphicsRectItem, QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QPlainTextEdit, QPushButton, QScrollArea,
-    QSizePolicy, QSplitter, QStyledItemDelegate, QStyleOptionViewItem, QTableWidget, QTableWidgetItem, QToolButton,
-    QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QGraphicsEllipseItem,
+    QGraphicsItem, QGraphicsPathItem, QGraphicsRectItem, QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView,
+    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QPlainTextEdit, QPushButton,
+    QScrollArea, QSizePolicy, QSplitter, QStyledItemDelegate, QStyleOptionViewItem, QTableWidget, QTableWidgetItem,
+    QToolButton, QVBoxLayout, QWidget,
 )
 
 from . import backend, board as B
@@ -59,8 +59,40 @@ def same_folder(a, b):
         return False
     return os.path.realpath(os.path.expanduser(str(a))) == os.path.realpath(os.path.expanduser(str(b)))
 
-NODE_W, NODE_H, PORT_R = 210.0, 66.0, 6.0
-HEADER_H = 26.0  # the title band of a node
+NODE_W, NODE_H, PORT_R = 210.0, 66.0, 6.0  # NODE_H: the least height; a node with more text grows (NodeItem)
+HEADER_H = 26.0  # the title band of a node (a title of two lines makes it taller)
+NODE_PAD = 10.0  # the text's margin inside a node
+TEXT_LINES, TITLE_LINES = 3, 2  # a node shows at most 3 lines of text, at most 2 of them for its title
+
+
+def wrapped(text, font, width, lines):
+    """TEXT broken into at most LINES lines no wider than WIDTH in FONT (anywhere in a word too long for a line, a
+    path); the last one ends in "…" when more is left. [] for no text."""
+    text = " ".join(str(text).split())
+    if not text or lines < 1:
+        return []
+    layout = QTextLayout(text, font)
+    option = QTextOption()
+    option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+    layout.setTextOption(option)
+    layout.beginLayout()
+    starts = []
+    while True:
+        line = layout.createLine()
+        if not line.isValid():
+            break
+        line.setLineWidth(width)
+        starts.append((line.textStart(), line.textLength()))
+    layout.endLayout()
+    metrics = QFontMetricsF(font)
+    shown = [metrics.elidedText(text[start:start + length].strip(), Qt.TextElideMode.ElideRight, width)
+             for start, length in starts[:lines]]
+    if len(starts) > lines:  # the rest does not fit: the last line shown ends in "…"
+        rest = text[starts[lines - 1][0]:].strip()
+        shown[-1] = metrics.elidedText(rest, Qt.TextElideMode.ElideRight, width)
+        if not shown[-1].endswith("…"):
+            shown[-1] = metrics.elidedText(rest + " …", Qt.TextElideMode.ElideRight, width)
+    return shown
 MIME_PART = "application/x-sandbox-ai-part"  # a part dragged from the palette: its kind
 
 
@@ -136,37 +168,55 @@ class NodeHelpMark(QGraphicsItem):
 
 
 class NodeItem(QGraphicsRectItem):
+    """A part on the board: its title in the title band and what it sets below, wrapped to the node's width in at
+    most TEXT_LINES lines (the node grows for them, the last one shown ends in "…" when more is left); the whole
+    text is in its tooltip and in the inspector. The text is painted as plain text (paths and names may be the
+    agent's), never outside the node."""
+
     def __init__(self, page, node):
         super().__init__(0.0, 0.0, NODE_W, NODE_H)
         self.page, self.node_id, self.kind = page, node.id, node.kind
         self.hint = None  # while a connection is dragged: "target" (it can take it) or "hover" (it would)
+        self.titles, self.details, self.header_h = [], [], HEADER_H  # the lines shown, the title band's height
         self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsMovable | QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
                       | QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
-        colors = theme.colors()
-        self.setBrush(QBrush(QColor(colors["node"])))
-        self.title = QGraphicsSimpleTextItem(self)  # plain text: paths and names may be the agent's
-        font = QFont()
-        font.setBold(True)
-        self.title.setFont(font)
-        self.title.setBrush(QBrush(QColor(colors.get("node_title", colors["text"]))))
-        self.title.setPos(10.0, 5.0)
-        self.detail = QGraphicsSimpleTextItem(self)
-        self.detail.setBrush(QBrush(QColor(colors["secondary"])))
-        self.detail.setPos(10.0, HEADER_H + 9.0)
+        self.setBrush(QBrush(QColor(theme.colors()["node"])))
+        self.title_font = QFont()
+        self.title_font.setBold(True)
+        self.detail_font = QFont()
         has_in, has_out = B.ports(node.kind)
         self.inport = PortItem(self, "in") if has_in else None
         self.outport = PortItem(self, "out") if has_out else None
         self.help_mark = NodeHelpMark(self, node.kind)
-        self.setToolTip(tr(B.KINDS[node.kind].help))
         self.setPos(node.x, node.y)
         self.update_from(node, None, True)
 
     def update_from(self, node, level, included):
-        self.title.setText(elide(node.title(), 24))
-        self.detail.setText(elide(summary(node), 34))
+        self.set_text(node.title(), summary(node), tr(B.KINDS[node.kind].help))
         color = {"error": theme.color("bad"), "warning": theme.color("warn")}.get(level, theme.colors()["border"])
         self.setPen(QPen(QColor(color), 2.5 if level else 1.2))
         self.setOpacity(1.0 if included else 0.45)
+
+    def set_text(self, title, detail, help_text=""):
+        """The lines of TITLE (beside the (?)) and DETAIL in the node, its height for them, the ports at its middle
+        and the edges after them; the whole text in the tooltip."""
+        title_lines = QFontMetricsF(self.title_font).lineSpacing()
+        detail_lines = QFontMetricsF(self.detail_font).lineSpacing()
+        self.titles = wrapped(title, self.title_font, NODE_W - 2 * NODE_PAD - help_view.SIZE - 6, TITLE_LINES)
+        self.details = wrapped(detail, self.detail_font, NODE_W - 2 * NODE_PAD, TEXT_LINES - max(1, len(self.titles)))
+        self.header_h = max(HEADER_H, 10.0 + len(self.titles) * title_lines)
+        height = max(NODE_H, self.header_h + 9.0 + len(self.details) * detail_lines + 9.0)
+        if height != self.rect().height():
+            self.setRect(0.0, 0.0, NODE_W, height)
+            for port in (self.inport, self.outport):
+                if port is not None:
+                    port.setPos(port.pos().x(), height / 2)
+            for edge in getattr(self.page, "edges", []):
+                if self in (edge.source, edge.target):
+                    edge.update_path()
+        whole = "\n".join(" ".join(str(text).split()) for text in (title, detail) if str(text).strip())
+        self.setToolTip(safe_tooltip("\n\n".join(text for text in (whole, help_text) if text)))
+        self.update()
 
     def set_hint(self, hint):
         if hint != self.hint:
@@ -197,7 +247,7 @@ class NodeItem(QGraphicsRectItem):
         body.addRoundedRect(rect, radius, radius)
         painter.fillPath(body, self.brush())
         header = QPainterPath()
-        header.addRect(QRectF(rect.left(), rect.top(), rect.width(), HEADER_H))
+        header.addRect(QRectF(rect.left(), rect.top(), rect.width(), self.header_h))
         painter.fillPath(header.intersected(body), QColor(colors["node_header"]))
         pen = QPen(self.pen())
         if self.isSelected():
@@ -205,9 +255,11 @@ class NodeItem(QGraphicsRectItem):
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(body)
+        self.paint_text(painter, body, colors)
         if data.get("bevel"):  # Windows 3.11: a raised frame inside the black outline
             painter.setPen(QPen(QColor(colors.get("light_edge", "#ffffff")), 1.0))
-            painter.drawLine(QPointF(rect.left() + 2, rect.bottom() - 2), QPointF(rect.left() + 2, rect.top() + HEADER_H))
+            painter.drawLine(QPointF(rect.left() + 2, rect.bottom() - 2), QPointF(rect.left() + 2,
+                                                                                  rect.top() + self.header_h))
             painter.setPen(QPen(QColor(colors.get("dark_edge", "#808080")), 1.0))
             painter.drawLine(QPointF(rect.left() + 2, rect.bottom() - 2), QPointF(rect.right() - 2, rect.bottom() - 2))
         if self.hint:
@@ -216,6 +268,22 @@ class NodeItem(QGraphicsRectItem):
             painter.setPen(QPen(QColor(colors["accent"]), 3.0 if self.hint == "hover" else 1.6,
                                 Qt.PenStyle.SolidLine if self.hint == "hover" else Qt.PenStyle.DashLine))
             painter.drawPath(frame)
+
+    def paint_text(self, painter, body, colors):
+        """The title's and the detail's lines (wrapped by set_text), clipped to the node's shape."""
+        painter.save()
+        painter.setClipPath(body)
+        top = self.rect().top()
+        for font, color, lines, y in (
+                (self.title_font, colors.get("node_title", colors["text"]), self.titles, top + 5.0),
+                (self.detail_font, colors["secondary"], self.details, top + self.header_h + 9.0)):
+            metrics = QFontMetricsF(font)
+            painter.setFont(font)
+            painter.setPen(QColor(color))
+            for line in lines:
+                painter.drawText(QPointF(self.rect().left() + NODE_PAD, y + metrics.ascent()), line)
+                y += metrics.lineSpacing()
+        painter.restore()
 
 
 class EdgeItem(QGraphicsPathItem):
@@ -228,6 +296,12 @@ class EdgeItem(QGraphicsPathItem):
             self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
             self.setToolTip(tr("Select and press Delete to disconnect"))
         self.update_path()
+
+    def near(self, point):
+        """Whether the scene point POINT is on the line (its shape is the area under the curve too)."""
+        stroker = QPainterPathStroker()
+        stroker.setWidth(10.0)
+        return stroker.createStroke(self.path()).contains(self.mapFromScene(point))
 
     def update_path(self):
         start = self.source.outport.scenePos() if self.source.outport else self.source.sceneBoundingRect().center()
@@ -274,7 +348,8 @@ class DropGhost(QGraphicsPathItem):
 
 class BoardScene(QGraphicsScene):
     """Connecting by dragging from an output port onto a node that can take it (its input port or anywhere on it;
-    the nodes that can are framed while dragging, Esc cancels); one undo step per move (snapshot at press)."""
+    the nodes that can are framed while dragging, Esc cancels); one undo step per move (snapshot at the left
+    button's press: only the left button selects and moves nodes, BoardView keeps the others for itself)."""
 
     def __init__(self, page):
         super().__init__()
@@ -302,6 +377,9 @@ class BoardScene(QGraphicsScene):
                 node.set_hint("target" if self.page.board.can_connect(port.node_id, node.node_id) else None)
             event.accept()
             return
+        if event.button() != Qt.MouseButton.LeftButton:
+            event.accept()
+            return
         self.pressed = self.page.board.state()
         super().mousePressEvent(event)
 
@@ -326,6 +404,9 @@ class BoardScene(QGraphicsScene):
                 self.page.connect_nodes(source.node_id, target.node_id)
             event.accept()
             return
+        if event.button() != Qt.MouseButton.LeftButton:
+            event.accept()
+            return
         super().mouseReleaseEvent(event)
         before, self.pressed = self.pressed, None
         if before is not None:
@@ -345,9 +426,14 @@ class BoardScene(QGraphicsScene):
 
 
 class BoardView(QGraphicsView):
+    """The canvas. The left button selects, moves and connects nodes and draws the rubber band on the empty canvas;
+    the right or the middle button drags the view (pans; nothing on the board moves, nothing is selected, no step
+    of Undo); a right click without moving opens the context menu of the node or of the canvas there."""
+
     def __init__(self, scene, page):
         super().__init__(scene)
         self.page = page
+        self.pan = None  # while the right or middle button is down: {"button", "start", "last", "panning"}
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
         self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
@@ -383,14 +469,76 @@ class BoardView(QGraphicsView):
         if 0.2 <= current * factor <= 4.0:
             self.scale(factor, factor)
 
+    def zoom_reset(self):
+        """Zoom 100 %, the centre of the view staying where it is."""
+        center = self.mapToScene(self.viewport().rect().center())
+        self.setTransform(QTransform())
+        self.centerOn(center)
+
+    # -- the mouse: the left button for the nodes, the right and the middle one to pan, a right click for the menu --
+
     def mousePressEvent(self, event):  # noqa: N802
-        if event.button() == Qt.MouseButton.MiddleButton:  # pan with the middle button
-            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        if event.button() in (Qt.MouseButton.RightButton, Qt.MouseButton.MiddleButton):
+            if self.pan is None:
+                point = event.position().toPoint()
+                self.pan = {"button": event.button(), "start": point, "last": point,
+                            "panning": event.button() == Qt.MouseButton.MiddleButton}
+                if self.pan["panning"]:
+                    self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+        if self.pan is not None:  # another button while panning: ignored
+            event.accept()
+            return
         super().mousePressEvent(event)
 
+    def mouseMoveEvent(self, event):  # noqa: N802
+        if self.pan is None:
+            super().mouseMoveEvent(event)
+            return
+        point = event.position().toPoint()
+        if not self.pan["panning"] and \
+                (point - self.pan["start"]).manhattanLength() >= QApplication.startDragDistance():
+            self.pan["panning"] = True  # a drag, not a click: no menu at the release
+            self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+        if self.pan["panning"]:
+            delta = point - self.pan["last"]
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
+            self.pan["last"] = point
+        event.accept()
+
     def mouseReleaseEvent(self, event):  # noqa: N802
-        super().mouseReleaseEvent(event)
-        self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
+        if self.pan is None:
+            super().mouseReleaseEvent(event)
+            return
+        event.accept()
+        if event.button() != self.pan["button"]:
+            return
+        pan, self.pan = self.pan, None
+        self.viewport().unsetCursor()
+        if pan["button"] == Qt.MouseButton.RightButton and not pan["panning"]:
+            self.show_menu(event.position().toPoint())
+
+    def contextMenuEvent(self, event):  # noqa: N802
+        """The menu key (a right click opens the menu at its release, see mouseReleaseEvent: a press may start a
+        pan): at the selected node, else in the middle of the view."""
+        event.accept()
+        if event.reason() == QContextMenuEvent.Reason.Mouse:
+            return
+        nodes = [i for i in self.scene().selectedItems() if isinstance(i, NodeItem)]
+        point = self.mapFromScene(nodes[0].sceneBoundingRect().center()) if nodes else self.viewport().rect().center()
+        self.show_menu(point)
+
+    def show_menu(self, point):
+        """The context menu at POINT of the viewport: the node's or the edge's there, else the canvas's."""
+        menu = self.page.canvas_menu(self.mapToScene(point))
+        if menu is not None:
+            self.open_menu(menu, self.viewport().mapToGlobal(point))
+
+    def open_menu(self, menu, global_point):
+        menu.exec(global_point)
+        menu.deleteLater()
 
     def keyPressEvent(self, event):  # noqa: N802
         if event.key() == Qt.Key.Key_Escape and self.scene().cancel_connect():
@@ -817,6 +965,7 @@ class BoardPage(QWidget):
         self.reasked = None  # the notice of a draft asked about again (restore_saved), shown once the project is open
         self.ghost = None  # the drop indicator while something is dragged over the board
         self.project_request = None  # the window: open a folder dropped on the board as the project (in its tab)
+        self.inspector_request = None  # the window: show the inspector's panel again (a part was selected)
         self.kit_inventory, self.kit_loading = None, False  # sandbox-ai kits list --json, once read
         self.llm_servers, self.llm_loading = None, False  # sandbox-ai llm list --json, for the agent's Model server
         self.state, self.saved_boards, self.restored = None, {}, set()  # drafts and zoom kept between starts
@@ -1183,10 +1332,13 @@ class BoardPage(QWidget):
                 edge.update_path()
 
     def moved(self, before):
-        """After a drag: snap to the grid and keep it as one undo step."""
+        """After a drag with the left button: the nodes it moved snap to the grid, kept as one undo step. Nodes it did
+        not move stay where they are (off the grid of the setting, too): a click moves nothing."""
         grid = self.grid()
+        was = {n["id"]: (n["x"], n["y"]) for n in before["nodes"]}
         for node in self.board.nodes:
-            node.x, node.y = B.snap(node.x, grid), B.snap(node.y, grid)
+            if was.get(node.id) != (node.x, node.y):
+                node.x, node.y = B.snap(node.x, grid), B.snap(node.y, grid)
         after = self.board.state()
         if [(n["x"], n["y"]) for n in after["nodes"]] != [(n["x"], n["y"]) for n in before["nodes"]]:
             self.undo.push(Snapshot(self, tr("Move"), before, after))
@@ -1423,6 +1575,60 @@ class BoardPage(QWidget):
             self.fitted = True
             QTimer.singleShot(0, self.fit)
 
+    def canvas_menu(self, point):
+        """The context menu at the scene point POINT: a node's (Set up step by step…, What is this?, Delete), an
+        edge's (Delete), else the canvas's (add a part there, select all, fit, zoom 100 %, arrange, undo, redo, what
+        the board is). A node or edge right-clicked is selected first (alone, unless it already was)."""
+        menu = QMenu(self.view)
+        hit = None
+        for item in self.scene.items(point):
+            item = item.parentItem() if isinstance(item, (PortItem, NodeHelpMark)) else item
+            if isinstance(item, NodeItem) or (isinstance(item, EdgeItem) and item.near(point) and item.flags()
+                                              & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable):
+                hit = item
+                break
+        if hit is not None:
+            if not hit.isSelected():
+                self.scene.clearSelection()
+                hit.setSelected(True)
+            if isinstance(hit, NodeItem):
+                from . import guide
+                node_id, kind = hit.node_id, hit.kind
+                if guide.questions(kind):
+                    menu.addAction(tr("Set up step by step…"), lambda: self.guide_node(node_id))
+                menu.addAction(tr("What is this?"), lambda: hit.help_mark.explain())
+            removable = [i for i in self.scene.selectedItems() if isinstance(i, EdgeItem)
+                         or (isinstance(i, NodeItem) and not B.KINDS[i.kind].required)]
+            delete = menu.addAction(tr("Delete"), self.delete_selected)
+            delete.setEnabled(bool(removable))
+            return menu
+        parts = menu.addMenu(tr("Add a part here"))
+        for row in range(self.palette.count()):
+            entry = self.palette.item(row)
+            kind = entry.data(Qt.ItemDataRole.UserRole)
+            action = parts.addAction(entry.text(), lambda k=kind: self.add_node(k, guided=True, at=point))
+            action.setEnabled(bool(entry.flags() & Qt.ItemFlag.ItemIsEnabled))
+            action.setToolTip(entry.toolTip())
+        menu.addSeparator()
+        menu.addAction(tr("Select all"), self.select_all)
+        menu.addAction(tr("Fit the board"), self.fit)
+        menu.addAction(tr("Zoom 100 %"), self.view.zoom_reset)
+        menu.addAction(tr("Arrange"), self.arrange)
+        menu.addSeparator()
+        undo = menu.addAction(tr("Undo"), self.undo_group.undo)
+        undo.setEnabled(self.undo_group.canUndo())
+        redo = menu.addAction(tr("Redo"), self.undo_group.redo)
+        redo.setEnabled(self.undo_group.canRedo())
+        menu.addSeparator()
+        global_point = self.view.viewport().mapToGlobal(self.view.mapFromScene(point))
+        menu.addAction(tr("What is this?"), lambda: help_view.show_tip("board.canvas", self.view, global_point))
+        return menu
+
+    def select_all(self):
+        for item in self.scene.items():
+            if item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable:
+                item.setSelected(True)
+
     def fit(self):
         rect = self.scene.itemsBoundingRect()
         if not rect.isEmpty():
@@ -1549,6 +1755,8 @@ class BoardPage(QWidget):
         nodes = [i for i in selected if isinstance(i, NodeItem)]
         self.inspected = nodes[0].node_id if len(nodes) == 1 else None
         self.inspect_timer.start()
+        if len(nodes) == 1 and self.inspector_request is not None:  # its panel closed by the user: shown again
+            self.inspector_request()
 
     def clear_inspector(self):
         while self.inspector.rowCount():

@@ -234,11 +234,13 @@ AREA_TIPS = (
           "Eine Sandbox als Teile und Verbindungen. Ein Pfeil bedeutet Fluss: Ordner geben dem Agenten seine "
           "Dateien, seine Verbindungen laufen über den Proxy ins Netzwerk."),
          ("Drag a node to move it; drag from a node's right port onto another node to connect them; Delete removes "
-          "the selection. Drop folders here to add them as workspace or mount, a .sandbox-ai.json to open its "
+          "the selection. Drag with the right or the middle mouse button to move the view; a right click opens a "
+          "menu. Drop folders here to add them as workspace or mount, a .sandbox-ai.json to open its "
           "project, a preset file to import it. Every change is one step of Undo.",
           "Ziehen Sie einen Knoten, um ihn zu verschieben; ziehen Sie vom rechten Anschluss eines Knotens auf einen "
-          "anderen, um sie zu verbinden; Entf entfernt die Auswahl. Legen Sie hier Ordner ab, um sie als "
-          "Arbeitsordner oder Einbindung hinzuzufügen, eine .sandbox-ai.json, um ihr Projekt zu öffnen, eine "
+          "anderen, um sie zu verbinden; Entf entfernt die Auswahl. Ziehen Sie mit der rechten oder der mittleren "
+          "Maustaste, um die Ansicht zu verschieben; ein Rechtsklick öffnet ein Menü. Legen Sie hier Ordner ab, um "
+          "sie als Arbeitsordner oder Einbindung hinzuzufügen, eine .sandbox-ai.json, um ihr Projekt zu öffnen, eine "
           "Vorlagen-Datei, um sie zu importieren. Jede Änderung ist ein Schritt von Rückgängig."),
          ".sandbox-ai.json", "page-board"),
     _tip("board.inspector", ("Inspector", "Inspektor"),
@@ -292,8 +294,11 @@ AREA_TIPS = (
           "+, − and Fit zoom.",
           "Rückgängig und Wiederholen gehen durch jede Änderung an der Tafel dieses Projekts; Anordnen legt die Teile"
           " in Spalten; +, − und Einpassen zoomen."),
-         ("Ctrl and the mouse wheel zoom too; the middle mouse button pans.",
-          "Strg und das Mausrad zoomen ebenfalls; die mittlere Maustaste verschiebt."),
+         ("Ctrl and the mouse wheel zoom too. Drag with the right or the middle mouse button to move the view; a "
+          "right click opens a menu (add a part there, select all, fit, zoom 100 %, or the node's own actions).",
+          "Strg und das Mausrad zoomen ebenfalls. Ziehen Sie mit der rechten oder der mittleren Maustaste, um die "
+          "Ansicht zu verschieben; ein Rechtsklick öffnet ein Menü (ein Teil dort hinzufügen, alles auswählen, "
+          "einpassen, Zoom 100 % oder die Aktionen des Knotens)."),
          "", "page-board"),
     # Sandboxes & sessions
     _tip("sandboxes.table", ("Sandboxes, sessions, MCP servers", "Sandboxen, Sitzungen, MCP-Server"),
