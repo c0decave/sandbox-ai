@@ -699,12 +699,20 @@ class FakeResolver:
     """A DNS server on 127.0.0.1 (UDP, and TCP for truncated answers)."""
 
     def __init__(self, answers, truncate=False, stray_first=False):
-        self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.udp.bind(("127.0.0.1", 0))
-        self.port = self.udp.getsockname()[1]
-        self.tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.tcp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.tcp.bind(("127.0.0.1", self.port))
+        for _ in range(50):  # a free UDP port whose TCP twin may be taken by another test: try another
+            self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.udp.bind(("127.0.0.1", 0))
+            self.port = self.udp.getsockname()[1]
+            self.tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.tcp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                self.tcp.bind(("127.0.0.1", self.port))
+                break
+            except OSError:
+                self.udp.close()
+                self.tcp.close()
+        else:
+            raise OSError("no port free for both UDP and TCP")
         self.tcp.listen(1)
         self.answers, self.truncate, self.stray_first, self.queries = answers, truncate, stray_first, []
         threading.Thread(target=self.serve_udp, daemon=True).start()
