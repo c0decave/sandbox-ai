@@ -380,12 +380,12 @@ match the installed version.
 | `sandbox-ai git-logins add\|list\|remove\|check …` | | your Git servers' logins, added by the connection proxy, never inside a sandbox ([Git logins](#git-logins-in-the-proxy-sandbox-ai-git-logins)) |
 | `sandbox-ai publish-logins add\|list\|remove\|check\|kinds …` | | your logins for npm, PyPI, crates.io, GitLab and GitHub, for `--publish` ([publishing](#publishing-to-registries-and-forges-sandbox-ai-publish-logins---publish)) |
 | `sandbox-ai identities add\|set\|login\|logout\|publish\|unpublish\|list\|show\|check\|remove …` | | commit name and address, Git and publish logins under one name, for `--identity` ([identities](#identities-sandbox-ai-identities---identity)) |
-| `sandbox-ai presets list\|show\|check …`, `sandbox-ai demo-device start\|serve\|status\|stop` | | ready setups for `--preset`; an emulated serial device to practise on ([presets](#presets)) |
+| `sandbox-ai presets list\|show\|check\|dirs …`, `sandbox-ai demo-device start\|serve\|status\|stop` | | ready setups for `--preset`; an emulated serial device to practise on ([presets](#presets)) |
 | `sandbox-ai team start\|list\|show\|post\|stop\|delete …` | | a team of agents, one sandbox each, with a task board ([a team of agents](#a-team-of-agents)) |
-| `sandbox-ai hosts list\|add\|set\|remove\|test\|update\|run …` | | other machines (or LXC containers) whose sandbox-ai this one manages and updates over SSH ([other hosts](#other-hosts)) |
+| `sandbox-ai hosts list\|add\|set\|remove\|test\|install\|update\|run …` | | other machines (or LXC containers) whose sandbox-ai this one manages and updates over SSH ([other hosts](#other-hosts)) |
 | `sandbox-ai web user\|vendor\|serve\|cert …`, `sandbox-ai defaults show\|set\|unset …` | | the web interface; your defaults for every start in `~/.config/sandbox-ai/defaults.json` ([web interface](#web-interface)) |
 | `sandbox-ai completion bash\|zsh\|fish\|install` | | Tab completion (see above) |
-| `sandbox-ai llm add\|list\|show\|remove\|models\|check …` | | LLM servers, local or remote, for `--llm NAME[:MODEL]`; their keys stay with the connection proxy ([LLM servers](#llm-servers-local-and-remote)) |
+| `sandbox-ai llm add\|list\|show\|remove\|models\|status\|check …` | | LLM servers, local or remote, for `--llm NAME[:MODEL]`; their keys stay with the connection proxy ([LLM servers](#llm-servers-local-and-remote)) |
 | `sandbox-ai vpn add\|list\|show\|remove\|check …` | | VPN profiles for `--vpn` (WireGuard, OpenVPN, Mullvad, Tailscale, Tor); their keys stay in `sandbox-ai secrets` ([VPN](#vpn)) |
 | `sandbox-ai images [packages\|extend\|check\|recipe\|new\|remove\|history] [--json]` | | the agent images and variants with agent version, age, size and whether each is current with its extension; the packages in one; extensions, ready-made recipes (`media`, `tor`) and variants ([extensions](#extensions-and-variants)) |
 | `sandbox-ai update [--check] [--version X.Y.Z] [--allow-downgrade]` | `sandbox-ai-update` | update an installation made by `install.sh`; signed releases ([installation](#installation-and-updates)) |
@@ -720,8 +720,11 @@ first and then offers only what it allows.
 ## Workspaces and mounts
 
 `--workspace PATH` appears at `/work`, the agent's working directory, and is
-writable unless `--workspace-ro` is given. Relative paths resolve from the
-invocation directory; missing directories are created (an existing one gives a
+writable unless `--workspace-ro` is given. Without `--workspace` the directory
+you start in is `/work`; when that directory holds a `.sandbox-ai.json`, it is
+`/work` in any case and `--workspace` adds further workspaces (see
+[Project configuration](#project-configuration-and-wizard)). Every start prints
+which folder `/work` is. Relative paths resolve from the invocation directory; missing directories are created (an existing one gives a
 warning). Seeing `root:root` inside is expected: namespace UID 0 maps to your
 user, no `chmod 777` needed.
 
@@ -749,7 +752,7 @@ workspace's `.git/hooks` and `.git/config` run code when you use git on the
 host, so review them after a run.
 
 **Several workspaces.** Repeat `--workspace` or separate entries with commas.
-The **first entry is always `/work`**; every further one appears at
+The **first entry is `/work`** (unless the directory you start in is a project, see above); every further one appears at
 `/workspaces/<directory name>` (`-2`, `-3` … for repeated names). They stay out
 of `/work` so that no mount points appear inside the main repository on the
 host. Duplicate or nested workspaces are rejected; `--workspace-ro` applies to
@@ -1855,7 +1858,8 @@ for IPv4 and IPv6 separately, from inside the namespace:
 A failed check stops the start with the reasons; `--vpn-check warn` only
 warns. The results go to the terminal and to `vpn.jsonl` in the run's log
 directory (no keys). Choose the echo services per profile (`vpn add ...
---check-url URL`, `--no-dns-probe`) or for every profile in
+--check-url URL`, `--no-dns-probe`; `--provider mullvad` adds Mullvad's own check, and is guessed
+from a WireGuard file's resolver) or for every profile in
 `~/.config/sandbox-ai/vpn/checks.json` (`{"urls": [...], "dns_probe":
 "whoami.akamai.net", "timeout": 8}`). A VPN that ends where this host is (your
 own server at home, used from home) fails the address check by design; use
@@ -2048,7 +2052,7 @@ network.
 ```bash
 sandbox-ai llm add NAME --kind ollama|lmstudio|llamacpp|vllm|openai-compatible --url URL \
     [--api-key-secret SECRET] [--header-secret HEADER=SECRET] [--ca FILE] [--vpn PROFILE] \
-    [--model MODEL] [--anthropic] [--insecure-http] [--replace]
+    [--model MODEL] [--anthropic] [--insecure-http] [--replace [--no-ca]]
 sandbox-ai llm list [--json]
 sandbox-ai llm show NAME [--json]
 sandbox-ai llm remove NAME              # the secrets stay in sandbox-ai secrets
@@ -2069,6 +2073,11 @@ The listing sends the key as a Bearer token and the header secrets, uses the
 endpoint's CA, no HTTP proxy of the host, follows no redirect (it would carry
 the key elsewhere) and gives up after 10 seconds; the model names are kept for
 the next start.
+
+`llm add NAME ... --replace` changes the server of that name; the CA it has stays unless `--ca FILE`
+gives another or `--no-ca` drops it. `wizard models --kind KIND --url https://... --ca-of NAME` lists
+the models of an address with the CA stored for NAME, as the app's and the web's Test connection do
+while a server with its own CA is edited.
 
 **What a server has loaded and uses now.** `sandbox-ai llm status [NAME]`
 reads every server (or NAME) at the same time, each request with a 5-second
@@ -2275,6 +2284,9 @@ records the key that signed it (`signed_by`) and the catalog it came from
 `--json`: `catalog`, `catalog_source`, `signed`; a server added before 0.1.78
 says `unknown`). A catalog that is not signed (one of your own) needs
 `--unsigned`; a signature that does not verify is refused whatever you pass.
+`mcp catalog -c FILE|URL` and `mcp add NAME -c FILE|URL` read that catalog instead of the
+default ones (repeatable); `-a AS` names the server for `--mcp` (default: the entry's, `binwalk` for
+`hub:binwalk`), and `-N` (`--no-pull`) uses an image that is there already.
 The app and the web show such a refusal and offer to add the server anyway,
 asked first (`mcp-unsigned`).
 
@@ -2521,7 +2533,8 @@ minutes; `--refresh` asks now, `--cached` asks no host).
 update` says so and, from a terminal, runs the update there with `ssh -t ...
 sudo`, where sudo asks; the app and the web interface open it in a terminal
 tab. A rule in sudoers (`NOPASSWD` for that one command) spares the
-question. This machine updates with `sandbox-ai update` (`--all` leaves it
+question. `--no-sudo` never uses sudo, whatever the host's setting (`hosts update` skips it anyway when the SSH user is root), and
+`hosts install NAME --dry-run` only says what it would do: for the user or the system, as root or with sudo. This machine updates with `sandbox-ai update` (`--all` leaves it
 out).
 
 `sandbox-ai hosts update NAME --from-here` installs this machine's copy of
@@ -2611,7 +2624,9 @@ repository could otherwise widen the sandbox (`--egress-all-allow`,
 `--mount ~/.ssh:…`). The SHA-256 of each trusted file is kept in
 `~/.config/sandbox-ai/trusted.json`; the wizard trusts what it writes, and any
 change requires `sandbox-ai wizard trust` again, which trusts exactly the bytes it
-showed you. The file is hashed and parsed from a single read, must be a
+showed you. `wizard trust FILE --show [--json]` only shows the file and its SHA-256, `--digest SHA256`
+then trusts it without a question if it still has exactly that content (what the app and the web do
+after showing it), and `wizard trust --list [--json]` lists the trusted files. The file is hashed and parsed from a single read, must be a
 regular file and is refused if it is a symlink. Deleting a trusted file does
 not silently drop its restrictions: the launcher stops with an error until it is
 restored, `--no-config` is given, or `sandbox-ai wizard forget FILE` removes it from
@@ -2625,7 +2640,7 @@ rulesets allow. `--rules` cannot be set in a project file: a rules file
 elsewhere would not be covered by the hash. `"log_debug": true` is the same as
 `--log-debug`. `"mode": "high"` chooses the project's
 [security mode](#security-modes) (`--mode` on the command line wins). `"name": "shop"` is the PROJECT part of the automatic names
-(`claude-shop-1a2b`; default: the main workspace's folder name; `--project-name`
+of `--name-style project` (`claude-shop-1a2b`; default: the main workspace's folder name; `--project-name`
 on the command line wins); `--name` and `--project-name` cannot be set in
 `options`. `"keep": false` discards the HOME of the project's starts at the end
 (`--no-keep`; `--keep` on the command line wins).
@@ -4328,6 +4343,12 @@ sandbox-ai web serve               # https://localhost:8443/ (its certificate's 
 sandbox-ai web serve --listen 0.0.0.0:8443 --hostname box.lan   # reachable from your network
 ```
 
+`web user list` shows the logins, `web user reset NAME` gives one a new password and TOTP secret,
+`web user remove NAME` deletes it (its sessions end at their next request); `add` and `reset` read the
+password twice and the code from standard input with `--stdin` (the app and the web's Hosts page do
+that in a terminal). `web cert` prints the certificate's SHA-256 fingerprint, `web cert --renew` makes
+a new one (with the names of `--listen` and `--hostname`, as `serve` would).
+
 - **HTTPS only**, with a certificate of its own made at the first start (or
   `--cert`/`--key`); `127.0.0.1` unless `--listen` says otherwise. To reach it
   from elsewhere, prefer an SSH tunnel (`ssh -L 8443:localhost:8443 box`) or a
@@ -4598,7 +4619,7 @@ See [Project configuration](#project-configuration-and-wizard) and
 | `sandbox-ai net list\|show\|allow\|revoke [RUN] [--allow-host H] [--allow-tcp IP:PORT] [--allow NET] [--allow-PRESET] [--dns] [--nameserver IP] [--allow-host-port PORT] [--git-token-env\|--git-token-file\|--git-token-secret URL=REF]`, `allow ... --keep` | Change what a running sandbox may reach; `--keep` also writes it into the project's `.sandbox-ai.json` (see [Network policy](#changing-the-network-of-a-running-sandbox)) |
 | `sandbox-ai net stop RUN [--wait SECONDS]` | The older form of `sandbox-ai stop NAME` for a run: SIGTERM to its checked launcher, which cleans up |
 | `sandbox-ai net untaint [RUN]` | Take back the run's taint: the rules for tainted runs no longer hold, until untrusted content enters it again (see [Rulesets](#rulesets)) |
-| `sandbox-ai devices list\|add\|remove [RUN] PATH\|usb:VID:PID[:SERIAL]`, `sandbox-ai limits [RUN] [--memory SIZE] [--cpus N] [--pids N]` | Hand devices to a running sandbox, take them away; change its limits |
+| `sandbox-ai devices list\|add\|remove [RUN] PATH\|usb:VID:PID[:SERIAL]`, `sandbox-ai limits [RUN] [--memory SIZE] [--cpus N] [--pids N]`, `limits [RUN] --show [--json]` | Hand devices to a running sandbox, take them away; change its limits, or show the ones it runs with now |
 | `sandbox-ai workspace list [RUN] [--json]`, `add [RUN] DIR\|FILE [--ro] [--name NAME]`, `remove [RUN] DIR\|FILE\|NAME [--force]` | Mount a host directory (or a single file) into a running sandbox at `/workspaces/<name>` (or `/workspaces/NAME`; the checks of `--workspace`; a directory is kept for a session's next start, under its name), take it away again |
 | `sandbox-ai approvals list\|history [RUN]`, `allow ID [--scope once\|run\|always]`, `deny ID`, `remembered`, `forget PROJECT ENTRY` | Answer the questions of running sandboxes; what was allowed always, per project, and forget one |
 | `sandbox-ai canaries list [RUN] [--tokens] [--json]`, `canaries log [RUN] [--json]`, `canaries resume RUN` | The [canary files](#canary-files) of the runs and what happened to them; every event with its process, tool call and model requests; continue a sandbox a canary paused |
@@ -4606,11 +4627,12 @@ See [Project configuration](#project-configuration-and-wizard) and
 | `sandbox-ai git-logins add URL --secret NAME [--user USER]`, `list [--json]`, `remove URL`, `check [URL]` | Your Git servers' logins, added by the connection proxy (see [Git logins](#git-logins-in-the-proxy-sandbox-ai-git-logins)) |
 | `sandbox-ai publish-logins add KIND --secret NAME [--url URL]`, `list [--json]`, `remove KIND`, `check [KIND]`, `kinds` | Logins for `--publish` (see [Publishing](#publishing-to-registries-and-forges-sandbox-ai-publish-logins---publish)) |
 | `sandbox-ai identities add\|set NAME [--name NAME] [--email ADDRESS]`, `login NAME URL --secret SECRET`, `publish NAME KIND --secret SECRET`, `list\|show\|check\|remove …` | Identities for `--identity` (see [Identities](#identities-sandbox-ai-identities---identity)) |
-| `sandbox-ai presets list\|show NAME\|check NAME [--value KEY=VALUE]... [--json]` | Presets for `--preset` (see [Presets](#presets)) |
+| `sandbox-ai presets list\|show NAME\|check NAME [--value KEY=VALUE]... [--json]`, `presets dirs [list\|add DIR\|remove DIR] [--json]` | Presets for `--preset`; the folders your own presets are read from (see [Presets](#presets)) |
 | `sandbox-ai demo-device start\|serve\|status\|stop` | The emulated serial device for practice (see [Presets](#presets)) |
 | `sandbox-ai team start NAME --agents A,B[,C] [-w DIR] [-- options]`, `list\|show\|post\|stop\|delete …` | A team of agents (see [A team of agents](#a-team-of-agents)) |
 | `sandbox-ai hosts add NAME USER@HOST [--port PORT] [--identity FILE]`, `list\|remove\|test NAME`, `run NAME -- ARGS...` | Other machines managed over SSH (see [Other hosts](#other-hosts)) |
-| `sandbox-ai web user\|vendor\|serve\|cert …`, `sandbox-ai defaults show\|set\|unset …` | The web interface and your defaults (see [Web interface](#web-interface)) |
+| `sandbox-ai hosts install NAME [--user\|--system [--prefix DIR]] [--sudo\|--no-sudo] [--from-here\|--download [--version X.Y.Z]] [--dry-run]`, `hosts update NAME...\|--all [--version X.Y.Z\|--from-here] [--sudo\|--no-sudo] [--jobs N]` | Put sandbox-ai onto a host, update the hosts (see [Updating the hosts](#updating-the-hosts)) |
+| `sandbox-ai web user add\|reset NAME [--stdin]`, `web user list\|remove NAME`, `web vendor`, `web serve [--listen ADDRESS:PORT] [--hostname NAME]... [--cert FILE --key FILE]`, `web cert [--renew]`, `sandbox-ai defaults show\|set\|unset …` | The web interface and your defaults (see [Web interface](#web-interface)) |
 | `sandbox-ai completion bash\|zsh\|fish\|install` | Tab completion scripts, or set them up |
 | `sandbox-ai vpn add NAME --wireguard FILE\|--openvpn FILE\|--mullvad\|--tailscale\|--tor [...]`, `vpn list\|show NAME\|remove NAME\|check NAME [--json]` | VPN profiles for `--vpn` (see [VPN](#vpn)) |
 | `sandbox-ai images [--json]`, `sandbox-ai images packages AGENT\|VARIANT [--json]` | Agent images and variants, current with their extensions or not, and their packages (read offline from the image) |
@@ -4623,7 +4645,7 @@ See [Project configuration](#project-configuration-and-wizard) and
 | `sandbox-ai gc [--older-than DAYS] [--dry-run] [--json]` | Remove leftovers, and kept starts unused for DAYS days |
 | `sandbox-ai session list\|attach\|pause\|resume\|stop\|delete` | The older form (`sandbox-session`, deprecated) |
 | `sandbox-ai mcp list` | Defined MCP servers and their status |
-| `sandbox-ai mcp catalog`, `sandbox-ai mcp add NAME [-m TARGET=HOST[:ro\|rw]] [-e VAR] [-n none\|full] [-M SIZE] [-p N] [-v VPN]` | Servers of the MCP catalogs; add one as a container server (see [Local MCP servers](#servers-from-an-mcp-catalog)) |
+| `sandbox-ai mcp catalog [-c FILE\|URL]...`, `sandbox-ai mcp add NAME [-a AS] [-m TARGET=HOST[:ro\|rw]] [-e VAR] [-n none\|full] [-M SIZE] [-p N] [-v VPN] [-c FILE\|URL]... [-N] [--unsigned]` | Servers of the MCP catalogs; add one as a container server (see [Local MCP servers](#servers-from-an-mcp-catalog)) |
 | `sandbox-ai mcp start NAME [--backend podman\|bwrap] [--vpn PROFILE] [--for START [--restart]]`, `sandbox-ai mcp stop NAME` | Start or stop an MCP server sandbox (`--for`: for that start, attached to it) |
 | `sandbox-ai mcp attach NAME START [--restart \| --live] [--json]`, `--helper AGENT START --live` | Connect an MCP server (or a helper) to a kept agent start (a running one: restarted with it, or `--live`: now, without a restart) |
 | `sandbox-ai mcp detach NAME START [--live] [--json]`, `--helper AGENT START [--live]` | Take it from the start's options (`--live`: and close its relay in the running sandbox now) |
@@ -4640,10 +4662,10 @@ See [Project configuration](#project-configuration-and-wizard) and
 | `sandbox-ai kits remove-marketplace NAME MARKETPLACE [--with-plugins]`, `import-marketplace NAME MARKETPLACE [--from claude\|codex] [--with-plugins]` | Take a marketplace out of a kit; declare one Claude or Codex already knows on this machine, with the source it has there |
 | `sandbox-ai kits add-hook NAME FILE [--agent A]... [--event E] [--matcher M] [--timeout S] [--as FILE]`, `remove-hook NAME FILE [--agent A]...` | Add a hook to a kit (a script, a `hooks.json`, an OpenCode plugin) or remove one ([hooks in kits](#hooks-in-kits)) |
 | `sandbox-ai kits trust-hooks KIT [--agent A]... [--yes\|--revoke]` | Review a kit's hooks (every hook and file shown) and approve exactly that content, or take the approval back |
-| `sandbox-ai wizard trust FILE [--yes]`, `sandbox-ai wizard forget FILE` | Trust a project configuration, or remove it from the trusted list |
-| `sandbox-ai llm add NAME --kind KIND --url URL [...]`, `list`, `show NAME`, `remove NAME`, `models NAME`, `check NAME [--agent AGENT]` | LLM servers, local or remote, for `--llm` (see [LLM servers](#llm-servers-local-and-remote)) |
+| `sandbox-ai wizard trust FILE [--yes\|--show [--json]\|--digest SHA256]`, `wizard trust --list [--json]`, `sandbox-ai wizard forget FILE` | Trust a project configuration (review it first; `--digest`: only the content reviewed), list the trusted ones, or remove one from the list |
+| `sandbox-ai llm add NAME --kind KIND --url URL [...] [--replace [--no-ca]]`, `list`, `show NAME`, `remove NAME`, `models NAME`, `check NAME [--agent AGENT]`, `status [NAME] [--watch SECONDS]` | LLM servers, local or remote, for `--llm` (see [LLM servers](#llm-servers-local-and-remote)) |
 | `sandbox-ai wizard models --kind ollama\|lmstudio\|llamacpp\|vllm --host HOST [--port PORT] [--sort name\|size\|loaded]`, `sandbox-ai wizard models --llm NAME` | List the models of a local LLM server, or of a registered one |
-| `sandbox-ai wizard models --kind KIND --url URL [--ca FILE] [--api-key-secret NAME] [--insecure-http]` | The models of a server not registered yet (the app's and the web's Test connection); a key goes over plain http only to local addresses, elsewhere only with `--insecure-http`, as `llm add` |
+| `sandbox-ai wizard models --kind KIND --url URL [--ca FILE\|--ca-of NAME] [--api-key-secret NAME] [--insecure-http] [--status]` | The models of a server not registered yet (the app's and the web's Test connection); a key goes over plain http only to local addresses, elsewhere only with `--insecure-http`, as `llm add` |
 
 ## Testing
 

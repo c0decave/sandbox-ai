@@ -24,7 +24,7 @@
   sandbox-ai approvals list|allow|deny|history|remembered|forget ... answer what running sandboxes ask
   sandbox-ai canaries list [RUN] | resume RUN                        decoy files of the runs, and what happened to them
   sandbox-ai secrets list|set|delete|backend ...                     API keys and tokens in your keyring
-  sandbox-ai llm add|list|show|remove|models|check ...                LLM servers, local or remote, for --llm
+  sandbox-ai llm add|list|show|remove|models|status|check ...         LLM servers, local or remote, for --llm
   sandbox-ai vpn add|list|show|remove|check ...                      VPN profiles for --vpn (WireGuard, OpenVPN, Mullvad, Tailscale)
   sandbox-ai hosts list|add|set|remove|test|update|install|run ...    other machines (LXC containers) managed over SSH
   sandbox-ai team start|list|show|post|stop|delete ...                a team of agents, one sandbox each, with a task board
