@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QRect, QSize, Qt, Signal
+from PySide6.QtGui import QGuiApplication, QPalette
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout, QListWidget, QListWidgetItem,
-    QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
+    QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QStyle, QStyleOptionButton, QStylePainter,
+    QTabWidget, QVBoxLayout, QWidget,
 )
 
 from . import backend, help_texts, help_view, notifications, presets as PR, project_trust as PT, theme
@@ -28,10 +30,91 @@ from .board_view import PathEdit
 from .files import printable
 from .i18n import tr
 from .widgets import (
-    MONO, ask_first, background, inform, outcome, plain_label, safe_tooltip, warn, shown_as_text,
+    MONO, ask_first, background, inform, outcome, plain_label, safe_tooltip, tame_combos, warn, shown_as_text,
 )
 
 LOCAL = "local"
+SIZE = QSize(760, 600)  # the dialog's size at first, when the screen has the room
+LOWEST = 420  # the lowest it may become (each tab scrolls)
+
+
+def screen_room(widget):
+    """The room of the screen WIDGET is on (tests: a small laptop's)."""
+    screen = widget.screen() or QGuiApplication.primaryScreen()
+    return screen.availableGeometry().size() if screen is not None else QSize(1366, 728)
+
+
+def breakable(path):
+    """PATH (shown in a wrapping label) that may break after each "/": a long path does not widen the dialog."""
+    return str(path).replace("/", "/\u200b")
+
+
+class WrapCheckBox(QCheckBox):
+    """A check box whose text wraps to the room it has (a QCheckBox keeps its text on one line and makes the dialog
+    as wide as that line). Its text, accessible name and click stay those of a check box: the whole box toggles."""
+    wraps = True  # tests/test_layout.py: measured as a wrapping text
+    FLAGS = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextWordWrap
+
+    def __init__(self, text="", parent=None, about=60):
+        super().__init__(text, parent)
+        self.about = about  # characters on one line at most when there is room
+        self.laid_width = 0  # the width it was given last: its height is the one for that width (resizeEvent)
+        policy = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)  # (its height: for its width)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+
+    def option(self):
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        return option
+
+    def text_width(self, width):
+        """The room for the text in a box WIDTH wide (what the indicator and the spacing leave)."""
+        lead = super().sizeHint().width() - self.fontMetrics().horizontalAdvance(self.text())
+        return max(1, width - lead)
+
+    def hasHeightForWidth(self):  # noqa: N802
+        return True
+
+    def heightForWidth(self, width):  # noqa: N802
+        line = super().sizeHint().height()
+        rect = self.fontMetrics().boundingRect(QRect(0, 0, self.text_width(width), 100000), int(self.FLAGS),
+                                               self.text())
+        return max(line, line - self.fontMetrics().height() + rect.height())
+
+    def sizeHint(self):  # noqa: N802
+        whole = super().sizeHint().width()
+        width = min(whole, whole - self.fontMetrics().horizontalAdvance(self.text())
+                    + self.fontMetrics().averageCharWidth() * self.about)
+        return QSize(width, self.heightForWidth(self.laid_width or width))  # (a form asks this, not heightForWidth)
+
+    def resizeEvent(self, event):  # noqa: N802
+        super().resizeEvent(event)
+        if event.size().width() != self.laid_width:
+            before = self.heightForWidth(self.laid_width) if self.laid_width else None
+            self.laid_width = event.size().width()
+            if self.heightForWidth(self.laid_width) != before:
+                self.updateGeometry()  # the lines it needs at this width
+
+    def minimumSizeHint(self):  # noqa: N802
+        words = self.text().split() or [""]
+        widest = max(self.fontMetrics().horizontalAdvance(word) for word in words)
+        lead = super().sizeHint().width() - self.fontMetrics().horizontalAdvance(self.text())
+        width = lead + max(widest, self.fontMetrics().averageCharWidth() * 12)
+        return QSize(width, super().minimumSizeHint().height())  # its height for a width: heightForWidth
+
+    def hitButton(self, pos):  # noqa: N802
+        return self.rect().contains(pos)
+
+    def paintEvent(self, _event):  # noqa: N802
+        painter = QStylePainter(self)
+        option = self.option()
+        text, option.text = option.text, ""
+        painter.drawControl(QStyle.ControlElement.CE_CheckBox, option)  # the indicator (and the focus)
+        option.text = text
+        room = self.style().subElementRect(QStyle.SubElement.SE_CheckBoxContents, option, self)
+        self.style().drawItemText(painter, room, int(self.FLAGS), option.palette, self.isEnabled(), text,
+                                  QPalette.ColorRole.WindowText)
 
 
 def host_row(sai, owner):
@@ -122,7 +205,7 @@ class PresetDirs(QWidget):
             self.list.addItem(item)
         self.status.setText(tr("Presets are read from your folder {yours} first, then from these in their order, then "
                                "the built-in ones. A folder sandboxes can write is refused.",
-                               yours=printable(str(result.get("yours") or ""))))
+                               yours=breakable(printable(str(result.get("yours") or "")))))
         self.update_buttons()
 
     def update_buttons(self):
@@ -332,9 +415,10 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.sai = sai
         self.setWindowTitle(tr("Settings"))
-        self.resize(720, 560)
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
+        self.tabs.setUsesScrollButtons(True)  # a screen narrower than the titles: they scroll, whole
+        self.tabs.setElideMode(Qt.TextElideMode.ElideNone)
         layout.addWidget(self.tabs, 1)
         # A (?) beside the tabs explains the tab shown (help_texts.SETTINGS_TABS, in the tabs' order).
         self.tab_help = help_view.HelpButton(help_texts.SETTINGS_TABS[0])
@@ -366,7 +450,7 @@ class SettingsDialog(QDialog):
         # window and notifications
         page, form = self.tab(tr("Window"))
         self.check(form, "tray", tr("Keep answering in the system tray when the window is closed"), current)
-        self.autostart = QCheckBox(tr("Start at login, in the tray"))
+        self.autostart = WrapCheckBox(tr("Start at login, in the tray"))
         self.autostart.setChecked(backend.autostart_enabled())
         self.autostart.toggled.connect(self.choose_autostart)
         form.addRow("", self.autostart)
@@ -392,7 +476,7 @@ class SettingsDialog(QDialog):
                                    "is used."), role="secondary"))
         self.check(form, "debug", tr("Debug mode: log every step (pages, commands, their times and results)"), current)
         from . import applog
-        form.addRow(plain_label(tr("The log: {path} (Help > Show the log)", path=str(applog.log_path())),
+        form.addRow(plain_label(tr("The log: {path} (Help > Show the log)", path=breakable(applog.log_path())),
                                 role="secondary"))
 
         # polling
@@ -405,7 +489,7 @@ class SettingsDialog(QDialog):
 
         # sandbox-ai
         page, form = self.tab(tr("sandbox-ai"))
-        form.addRow(tr("In use"), plain_label(printable(sai.directory)))
+        form.addRow(tr("In use"), plain_label(breakable(printable(sai.directory))))
         home = PathEdit(backend.setting("sandbox_ai_home", current))
         home.changed.connect(lambda text: self.save("sandbox_ai_home", text.strip()))
         self.fields["sandbox_ai_home"] = home
@@ -460,12 +544,12 @@ class SettingsDialog(QDialog):
                                     role="notice-error"))
         form.addRow(plain_label(tr("For every start, in {path}; --telemetry on the command line wins, the security "
                                    "modes high and paranoid allow no less than off and strict.",
-                                   path=printable(str(sai.sandbox_defaults_file()))), role="secondary"))
+                                   path=breakable(printable(str(sai.sandbox_defaults_file())))), role="secondary"))
 
         # policy
         self.policy_page, form = self.tab(tr("Administrator policy"))
         policy, problem, text, path = sai.policy()
-        form.addRow(tr("File"), plain_label(printable(path)))
+        form.addRow(tr("File"), plain_label(breakable(printable(path))))
         if text is None:
             form.addRow(plain_label(tr("There is no administrator policy on this machine.")))
         else:
@@ -487,10 +571,30 @@ class SettingsDialog(QDialog):
         form.addRow(plain_label(tr("Only root can change it. What it forbids is greyed out in the app."),
                                 role="secondary"))
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.button(QDialogButtonBox.StandardButton.Close).setText(tr("Close"))
         buttons.rejected.connect(self.reject)
         buttons.accepted.connect(self.accept)
         layout.addWidget(buttons)
+        tame_combos(self)  # a long choice (the telemetry's) does not widen the dialog; the list shows it whole
+        self.fit()
         self.explain()
+
+    def fit(self):
+        """Wide enough for every tab title (they scroll only on a screen narrower than that), never wider or
+        higher than the screen; each tab scrolls when the dialog is lower than its content."""
+        room, bar = screen_room(self), self.tabs.tabBar()
+        current, widest = bar.currentIndex(), 0
+        bar.blockSignals(True)  # the chosen tab's title is bold in some themes: the widest of the bar with each
+        for index in range(bar.count()):
+            bar.setCurrentIndex(index)
+            widest = max(widest, bar.sizeHint().width())
+        bar.setCurrentIndex(current)
+        bar.blockSignals(False)
+        margins = self.layout().contentsMargins()
+        titles = widest + self.tabs.cornerWidget().sizeHint().width() + margins.left() + margins.right() + 4
+        width = min(max(titles, self.minimumSizeHint().width()), room.width())
+        self.setMinimumSize(width, min(LOWEST, room.height()))
+        self.resize(min(max(SIZE.width(), width), room.width()), min(SIZE.height(), room.height()))
 
     def explain(self):
         """A short explanation on hover for each tab and setting (they stay when the (?)s are off)."""
@@ -514,6 +618,7 @@ class SettingsDialog(QDialog):
         """A tab with a form; it scrolls when the dialog is lower than the form (every setting stays reachable)."""
         page = QWidget()
         form = QFormLayout(page)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)  # a long label above its field, not beside it
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -544,7 +649,7 @@ class SettingsDialog(QDialog):
         return widget
 
     def check(self, form, key, label, current):
-        widget = QCheckBox(label)
+        widget = WrapCheckBox(label)
         widget.setChecked(bool(backend.setting(key, current)))
         widget.toggled.connect(lambda on: self.save(key, bool(on)))
         form.addRow("", widget)
