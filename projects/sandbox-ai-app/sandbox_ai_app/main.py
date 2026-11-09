@@ -133,10 +133,12 @@ def main(argv=None):
         return 1
     # Built without the style sheet and styled once at the end: Qt polishes each new widget under an
     # application style sheet as it is added, which made building the window about a third slower.
+    # Lazy: the first page and what the window needs at once now, the other pages after the first paint (in idle
+    # time, or when first shown); the self-test builds every page.
     sheet = app.styleSheet()
     app.setStyleSheet("")
     try:
-        window = MainWindow(sai, risk=risk)
+        window = MainWindow(sai, risk=risk, lazy=not self_test)
     finally:
         app.setStyleSheet(sheet)
     if self_test:

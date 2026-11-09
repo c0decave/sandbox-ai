@@ -78,6 +78,7 @@ NET_OPTIONS_SECONDS = 600  # how long a host's `net allow --help` is kept when i
 BASE_NET_OPTIONS = frozenset({"--allow-host", "--allow-tcp", "--allow"})  # what every sandbox-ai since 0.1.70 takes
 RECENT_PROJECTS = 12  # projects the app's own list keeps
 RECENT_FOLDERS = 10  # recent project folders the wizard offers
+MASTER_TRUSTED = 30  # seconds a host's shared SSH connection that carried a command is used without `ssh -O check`
 PODS_CACHE_SECONDS = 10  # how long the app keeps a Podman listing (sandbox-ai's own: 2 s); forget_pods() drops it
 KIT_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"  # kits.KIT_NAME
 SKILL_NAME = r"[a-z0-9][a-z0-9-]{0,63}"  # a new skill's name, as Claude wants it
@@ -195,6 +196,7 @@ class SandboxAI:
         self._questions_lock = threading.Lock()  # the window scans in a thread and, after an answer, directly
         self._canonical = {}  # canonical_options(): {tuple of tokens: their canonical form}
         self._canonical_parser, self._canonical_lock = None, threading.Lock()  # (launcher, its parser), built once
+        self._masters, self._masters_lock = {}, threading.Lock()  # control socket -> when it last carried a command
 
     # -- modules and commands --
 
@@ -1675,25 +1677,84 @@ class SandboxAI:
 
     def host_run(self, name, *args, timeout=120, input=None):
         """(status, out, err) of `sandbox-ai ARGS` on host NAME (this machine for "local"). INPUT, if given, is its
-        standard input (a secret's value: never an argument); `sandbox-ai hosts run` hands its own on to ssh."""
+        standard input (a secret's value: never an argument); `sandbox-ai hosts run` hands its own on to ssh.
+        Through the host's shared SSH connection, as `sandbox-ai hosts run` does it (shared_connection)."""
         extra = {} if input is None else {"input": input}
         if name == "local":
             return self.call(*args, timeout=timeout, **extra)
-        return self.call("hosts", "run", name, "--", *args, timeout=timeout, argv=self.ssh_argv(name, args), **extra)
+        deadline = time.monotonic() + timeout
+        shared = self.shared_connection(name, deadline)
+        argv = self.ssh_argv(name, args, control=shared[1] if shared else None)
+        if argv is None:
+            shared = None
+        left = max(1, deadline - time.monotonic()) if shared else timeout
+        status, out, err = self.call("hosts", "run", name, "--", *args, timeout=left, argv=argv, **extra)
+        if shared is None:
+            return status, out, err
+        hosts, (entry, control) = self.module("hosts"), shared
+        if status == 255 or (status == 124 and not out):
+            # As sandbox-ai's own hosts.run: the master may be dead (it still answers -O check): it takes no new
+            # sessions, the next command makes a new one; run once more on a connection of its own only when the
+            # command never reached the host (the master refused the session) - never a command that may have run.
+            self.forget_master(control)
+            with contextlib.suppress(Exception):
+                hosts.stop_master(entry, control, how="stop")
+            if status == 255 and hosts.mux_refused(out, err):
+                argv = self.ssh_argv(name, args)
+                status, out, err = self.call("hosts", "run", name, "--", *args, argv=argv, timeout=max(
+                    deadline - time.monotonic(), min(timeout, getattr(hosts, "CONNECT_TIMEOUT", 10) + 5)), **extra)
+        elif "Control socket connect(" in (err or ""):
+            self.forget_master(control)  # a socket nobody answers: checked (and cleaned up) at the next command
+        elif status not in (124, 127, CANCELLED):
+            with self._masters_lock:  # it carried this command: used without a check for MASTER_TRUSTED seconds
+                self._masters[str(control)] = time.monotonic()
+        return status, out, err
 
-    def ssh_argv(self, name, args):
+    def shared_connection(self, name, deadline):
+        """(entry, control socket) of host NAME's shared SSH connection (sandbox-ai's hosts module: one ssh master per
+        host, ControlPersist), started when needed, or None (switched off, an older sandbox-ai, it could not start:
+        the command connects on its own). A read through it costs a session on an open connection - not a TCP
+        connection, a key exchange and a login on the host every few seconds. A connection that carried a command
+        in the last MASTER_TRUSTED seconds is used without asking it first (`ssh -O check`, a process each time)."""
+        if self.run is not subprocess.run:
+            return None
+        try:
+            hosts = self.module("hosts")
+            if not all(callable(getattr(hosts, n, None)) for n in
+                       ("load", "control_path", "ensure_master", "stop_master", "mux_refused", "argv")) or \
+                    "control" not in inspect.signature(hosts.argv).parameters:
+                return None
+            entry = hosts.load().get(name)
+            control = hosts.control_path(entry) if isinstance(entry, dict) else None
+            if control is None:
+                return None
+            with self._masters_lock:
+                used = self._masters.get(str(control))
+            if used is not None and time.monotonic() - used < MASTER_TRUSTED and control.exists():
+                return entry, control
+            if not hosts.ensure_master(entry, control, deadline=deadline):
+                return None
+        except Exception:  # noqa: BLE001 - the command connects on its own (and says what is wrong)
+            return None
+        return entry, control
+
+    def forget_master(self, control):
+        with self._masters_lock:
+            self._masters.pop(str(control), None)
+
+    def ssh_argv(self, name, args, control=None):
         """The command line `sandbox-ai hosts run NAME -- ARGS` runs (hosts.argv: ssh with the host's settings and the
-        remote command), built here with sandbox-ai's own hosts module: a read of another host - the polls ask each
-        host every few seconds - costs an ssh, not two Python starts (main.py, hosts.py: about 0.1 s of CPU) on top.
-        None - the command itself runs then - with a runner of the tests, an older sandbox-ai, or a host it does not
-        know (its own message says so)."""
+        remote command; CONTROL: through that shared connection), built here with sandbox-ai's own hosts module: a
+        read of another host - the polls ask each host every few seconds - costs an ssh, not two Python starts
+        (main.py, hosts.py: about 0.1 s of CPU) on top. None - the command itself runs then - with a runner of the
+        tests, an older sandbox-ai, or a host it does not know (its own message says so)."""
         if self.run is not subprocess.run:
             return None
         try:
             hosts = self.module("hosts")
             if not callable(getattr(hosts, "argv", None)):
                 return None
-            argv = hosts.argv(name, [str(arg) for arg in args])
+            argv = hosts.argv(name, [str(arg) for arg in args], **({"control": control} if control else {}))
         except Exception:  # noqa: BLE001 - sandbox-ai's own command reports it
             return None
         return list(argv) if argv and isinstance(argv, (list, tuple)) and all(isinstance(a, str) for a in argv) \

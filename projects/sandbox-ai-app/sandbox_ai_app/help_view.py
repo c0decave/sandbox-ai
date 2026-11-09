@@ -341,13 +341,16 @@ def place(target, tip_id, how):
     return corner(target, tip_id)
 
 
-def install(window):
-    """The (?)s of help_texts.PLACES on the window's pages, and the short explanations on hover (those stay when the
-    (?)s are off); returns {page: [HelpButton]} and keeps what could not be placed in window.help_missing (the tests
-    want it empty)."""
+def install(window, pages=None, tree=None):
+    """The (?)s of help_texts.PLACES on the window's pages (PAGES: {key: page}, those only - a window that makes its
+    pages later installs each then), and the short explanations on hover in TREE (default: the whole window; those stay
+    when the (?)s are off); returns {page: [HelpButton]} and keeps what could not be placed in window.help_missing (the
+    tests want it empty)."""
     placed, missing = {}, []
     for page, places in H.PLACES.items():
-        widget = getattr(window, page, None)
+        if pages is not None and page not in pages:
+            continue
+        widget = getattr(window, page, None) if pages is None else pages[page]
         for attribute, tip_id, how in places:
             target = getattr(widget, attribute, None) if widget is not None else None
             button = place(target, tip_id, how) if isinstance(target, QWidget) else None
@@ -356,8 +359,9 @@ def install(window):
             else:
                 placed.setdefault(page, []).append(button)
                 explain_place(target, tip_id, how)
-    explain_tree(window)  # the pages and the panels they put in docks of their own
-    window.help_missing = missing
+    explain_tree(window if tree is None else tree)  # the pages and the panels they put in docks of their own
+    window.help_missing = missing if pages is None else \
+        [entry for entry in getattr(window, "help_missing", []) if entry[0] not in pages] + missing
     return placed
 
 

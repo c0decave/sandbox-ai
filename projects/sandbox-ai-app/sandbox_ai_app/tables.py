@@ -125,22 +125,28 @@ def _measure(view, header, model, columns):
     holders = set()  # columns with a widget in their cells (a combo box, a button)
     widths = {column: 0 for column in columns}
     sample = _sample(model, tree)
+    # A model of Python rows (widgets.RowModel) says a cell's text without an index made for it (an index of a Python
+    # model asks it for its size twice: most of the time of a long table's fit); the index is made for the longest.
+    shown = getattr(model, "display_text", None) if not tree else None
     for position, (first, depth) in enumerate(sample):
         if tree and view.isFirstColumnSpanned(first.row(), first.parent()):
             continue  # one text over the whole row (a canary's lines): no column's width
         for column in columns:
-            index = first if column == 0 else first.siblingAtColumn(column)
-            if position == 0 and view.indexWidget(index) is not None:
-                holders.add(column)
-            if column in holders:
-                widget = view.indexWidget(index)
-                if widget is not None:
-                    widths[column] = max(widths[column], widget.sizeHint().width())
-                continue
-            text = model.data(index, display)
+            if position and shown is not None and column not in holders:
+                text = shown(first.row(), column)
+            else:
+                index = first if column == 0 else first.siblingAtColumn(column)
+                if position == 0 and view.indexWidget(index) is not None:
+                    holders.add(column)
+                if column in holders:
+                    widget = view.indexWidget(index)
+                    if widget is not None:
+                        widths[column] = max(widths[column], widget.sizeHint().width())
+                    continue
+                text = model.data(index, display)
             text = "" if text is None else str(text)
             if text and text not in found[column]:
-                found[column][text] = (index, depth)
+                found[column][text] = (first, depth)
     for column, texts in found.items():
         if not texts:
             continue
@@ -148,7 +154,8 @@ def _measure(view, header, model, columns):
         longest = sorted(texts, key=lambda t: len(t) + (texts[t][1] * 4 if indented else 0), reverse=True)[:LONGEST]
         padding = None
         for text in longest:
-            index, depth = texts[text]
+            first, depth = texts[text]
+            index = first if column == 0 else first.siblingAtColumn(column)
             font = model.data(index, Qt.ItemDataRole.FontRole)
             key = font.key() if isinstance(font, QFont) else None
             if key not in metrics:

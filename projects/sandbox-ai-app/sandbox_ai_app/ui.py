@@ -5409,6 +5409,16 @@ class ProjectTabs(QTabBar):
 
 # Pages with a canvas or terminal of their own that fills the page: never in a scroll area.
 UNSCROLLED_PAGES = ("board", "terminals")
+# The order the pages are made in. A lazy window (the app's start) makes FIRST_PAGES with itself - the first page, the
+# Board and the open questions (their panels are the window's), what runs (the tabs follow it) - and the others after
+# the first paint (LAZY_START ms after it: the first moments are the human's; in the tray: after LAZY_FALLBACK ms), or
+# when they are first asked for: one at a time, LAZY_STEP ms apart, each once the mouse and the keyboard rested LAZY_QUIET ms and the other threads used less than LAZY_BUSY of
+# a processor (waited for LAZY_PATIENCE steps at most).
+BUILD_ORDER = ("launch", "board", "sandboxes", "activity", "approvals", "connections", "statistics", "files", "kits",
+               "mcp", "llm", "team", "images", "credentials", "terminals", "system", "hosts", "help")
+FIRST_PAGES = ("launch", "board", "sandboxes", "approvals")
+LAZY_START, LAZY_STEP, LAZY_FALLBACK, LAZY_QUIET, LAZY_BUSY, LAZY_PATIENCE = 1000, 50, 3000, 400, 0.25, 20
+PROJECT_PAGES = ("launch", "files", "approvals", "sandboxes", "kits", "statistics", "team")  # (set_project)
 # The pages the current project (the tab chosen) changes - MainWindow.apply_project: the Start page's workspace, the
 # Board, Sandboxes and Approvals (its rows and questions marked), Connections and Statistics (its logs), Files (its
 # folder), Kits (what it uses), Teams (the workspace a new team is offered). On the others the tabs are hidden.
@@ -5419,26 +5429,39 @@ SCROLL_MIN_HEIGHT = 220  # the height a scrolled page may shrink to before the w
 SCROLL_MIN_WIDTH = 640
 
 
+def make_llm_page(sai):
+    from .llm_page import LlmPage
+    return LlmPage(sai)
+
+
+def make_team_page(sai, in_terminal):
+    from .team_page import TeamPage
+    return TeamPage(sai, in_terminal)
+
+
 class PageScroll(QScrollArea):
     """A page that scrolls when the window is lower or narrower than the page needs, instead of squeezing its
     sections (Settings, Credentials, long forms) or cutting text off; it asks the window for at most
     SCROLL_MIN_HEIGHT x SCROLL_MIN_WIDTH, so that no page makes the window larger than the screen."""
 
-    def __init__(self, page):
+    def __init__(self, page=None):
         super().__init__()
         self.setObjectName("pageScroll")
         self.setWidgetResizable(True)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.setWidget(page)
+        if page is not None:  # (a page made later is put in when it is made: MainWindow.build_page)
+            self.setWidget(page)
 
     def minimumSizeHint(self):  # noqa: N802
+        if self.widget() is None:
+            return super().minimumSizeHint()
         hint = self.widget().minimumSizeHint()
         bar = self.verticalScrollBar().sizeHint().width()
         return QSize(min(hint.width() + bar, SCROLL_MIN_WIDTH), min(hint.height(), SCROLL_MIN_HEIGHT))
 
     def sizeHint(self):  # noqa: N802
-        return self.widget().sizeHint()
+        return self.widget().sizeHint() if self.widget() is not None else super().sizeHint()
 
 
 class PageStack(QStackedWidget):
@@ -5461,6 +5484,22 @@ class PageStack(QStackedWidget):
 
     def add_page(self, page, scroll=True):
         return self.addWidget(PageScroll(page) if scroll else page)
+
+    def add_holder(self, key):
+        """An empty place for page KEY, made later (MainWindow.build_page): replace_holder puts it there."""
+        holder = QWidget()
+        holder.setObjectName(f"pageHolder-{key}")
+        self.addWidget(holder)
+        return holder
+
+    def replace_holder(self, holder, frame):
+        """FRAME (a page, or the PageScroll it is put in) in the place of HOLDER."""
+        index = self.indexOf(holder)
+        self.insertWidget(index, frame)
+        if QStackedWidget.currentWidget(self) is holder:
+            QStackedWidget.setCurrentWidget(self, frame)
+        self.removeWidget(holder)
+        holder.deleteLater()
 
     def frame_of(self, page):
         for index in range(self.count()):
@@ -5485,6 +5524,36 @@ class PageStack(QStackedWidget):
     def sizeHint(self):  # noqa: N802
         frame = super().currentWidget()
         return frame.sizeHint() if frame is not None else super().sizeHint()
+
+
+class InputWatch(QObject):
+    """When the human last used the mouse or the keyboard anywhere in the app (last: time.monotonic()), while it is
+    installed (MainWindow.build_later: until every page is made)."""
+    KINDS = {QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease, QEvent.Type.MouseMove, QEvent.Type.Wheel,
+             QEvent.Type.KeyPress, QEvent.Type.KeyRelease, QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate}
+
+    def __init__(self, app):
+        super().__init__()
+        self.app, self.last = app, 0.0
+        app.installEventFilter(self)
+
+    def eventFilter(self, _watched, event):  # noqa: N802
+        if event.type() in self.KINDS:
+            self.last = time.monotonic()
+        return False
+
+    def pause(self):
+        if self.app is not None:
+            self.app.removeEventFilter(self)
+
+    def resume(self):
+        if self.app is not None:
+            self.app.installEventFilter(self)
+
+    def stop(self):
+        if self.app is not None:
+            self.app.removeEventFilter(self)
+            self.app = None
 
 
 class PanelDock(QDockWidget):
@@ -5512,7 +5581,7 @@ class MainWindow(QMainWindow):
     are still polled and announced; Quit in the tray menu ends the app (with the usual questions)."""
     closed = Signal()  # the window really closed: the app ends (main connects it to quit)
 
-    def __init__(self, sai, check_updates=True, approvals_interval=1000, risk=None):
+    def __init__(self, sai, check_updates=True, approvals_interval=1000, risk=None, lazy=False):
         super().__init__()
         labels.set_flags_shown(backend.setting("show_flags"))  # before the forms that show them are made
         # quitting: SIGTERM or logout (no questions); leaving: a confirmed quit from the tray menu (no hiding);
@@ -5550,27 +5619,34 @@ class MainWindow(QMainWindow):
         self.own_starts = []  # (agent, project folder, when) of sandboxes started in the app's terminal
         self.pages = PageStack()
         self.project = None
-        self.launch = LaunchPage(sai, self.in_terminal)
-        self.board = BoardPage(sai, self.in_terminal, sai.settings)
-        self.sandboxes = SandboxesPage(sai, self.in_terminal)
-        self.activity = ActivityPage(sai, self)
-        self.approvals = ApprovalsPage(sai, interval=approvals_interval and backend.setting("approvals_interval"))
-        self.connections = ConnectionsPage(sai)
-        self.statistics = StatisticsPage(sai)
-        self.files = FilesPage(sai, self.projects)
-        self.kits = KitsPage(sai, self.in_terminal)
-        self.mcp = McpPage(sai)
-        from .llm_page import LlmPage
-        self.llm = LlmPage(sai)  # the LLM servers of `sandbox-ai llm`, on this machine or a host
-        from .team_page import TeamPage
-        self.team = TeamPage(sai, self.in_terminal)  # the teams of `sandbox-ai team`, on this machine or a host
-        self.images = ImagesPage(sai, self.in_terminal)
-        self.credentials = CredentialsPage(sai, self.in_terminal)
-        self.terminals = terminal.TerminalsPage(sai=sai, in_terminal=self.in_terminal)
-        self.system = SystemPage(sai, self.in_terminal)
-        self.hosts = HostsPage(sai, self.in_terminal)
-        self.help = help_view.HelpPage()  # the Help area; every (?) of the app leads here
-        self.help.tour_requested.connect(self.start_any_tour)
+        # The pages: made by PAGE_MAKERS. Lazy (the app's start): the first page, the Board and the open questions
+        # (their panels) and what runs (the tabs follow it) with the window, every other page after the first paint,
+        # one at a time in idle time (build_later) - or at once, when anything asks for it first (__getattr__: the
+        # window's self.PAGE builds PAGE). Not lazy (the tests): every page now, as always.
+        self.lazy, self.ready, self.page_holders, self.idle_build = bool(lazy), False, {}, None
+        self.page_makers = {
+            "launch": lambda: LaunchPage(sai, self.in_terminal),
+            "board": lambda: BoardPage(sai, self.in_terminal, sai.settings),
+            "sandboxes": lambda: SandboxesPage(sai, self.in_terminal),
+            "activity": lambda: ActivityPage(sai, self),
+            "approvals": lambda: ApprovalsPage(sai, interval=approvals_interval
+                                               and backend.setting("approvals_interval")),
+            "connections": lambda: ConnectionsPage(sai),
+            "statistics": lambda: StatisticsPage(sai),
+            "files": lambda: FilesPage(sai, self.projects),
+            "kits": lambda: KitsPage(sai, self.in_terminal),
+            "mcp": lambda: McpPage(sai),
+            "llm": lambda: make_llm_page(sai),  # the LLM servers of `sandbox-ai llm`, on this machine or a host
+            "team": lambda: make_team_page(sai, self.in_terminal),  # the teams of `sandbox-ai team`, here or a host
+            "images": lambda: ImagesPage(sai, self.in_terminal),
+            "credentials": lambda: CredentialsPage(sai, self.in_terminal),
+            "terminals": lambda: terminal.TerminalsPage(sai=sai, in_terminal=self.in_terminal),
+            "system": lambda: SystemPage(sai, self.in_terminal),
+            "hosts": lambda: HostsPage(sai, self.in_terminal),
+            "help": lambda: help_view.HelpPage(),  # the Help area; every (?) of the app leads here
+        }
+        for key in FIRST_PAGES if self.lazy else BUILD_ORDER:
+            self.build_page(key)
         # The navigation: a header per section (not selectable), then its pages; rows are found by page key.
         self.keys, self.nav_rows, self.section_rows, self.collapsed = [], {}, {}, set()
         for section, pages in SECTIONS:
@@ -5588,7 +5664,11 @@ class MainWindow(QMainWindow):
                 item.setData(Qt.ItemDataRole.AccessibleTextRole, tr(title))  # also in the strip of icons
                 self.nav_rows[key] = self.nav.count()
                 self.nav.addItem(item)
-                self.pages.add_page(getattr(self, key), scroll=key not in UNSCROLLED_PAGES)
+                page = self.built(key)
+                if page is not None:
+                    self.pages.add_page(page, scroll=key not in UNSCROLLED_PAGES)
+                else:  # made when it is first shown, or in idle time after the first paint
+                    self.page_holders[key] = self.pages.add_holder(key)
                 self.keys.append(key)
                 if len(self.keys) <= SHORTCUT_PAGES:
                     item.setToolTip(tr("{page} (Ctrl+{number})", page=tr(title), number=len(self.keys)))
@@ -5596,27 +5676,9 @@ class MainWindow(QMainWindow):
         self.nav.viewport().installEventFilter(self)  # a click on a section's header folds it
         self.nav.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.nav.customContextMenuRequested.connect(self.nav_menu)
-        self.sandboxes.open_log.connect(self.show_log)
-        self.sandboxes.open_remote_log.connect(self.show_remote_log)
-        self.sandboxes.counted.connect(lambda running, here: self.update_activity(sandboxes=here))
-        self.sandboxes.updated.connect(self.sync_tabs)
-        self.approvals.pending_changed.connect(self.questions_changed)
-        # The fleet: the Hosts page lists what the Sandboxes and Approvals pages last saw of every host, and leads to
-        # them filtered by a host; a host removed there leaves both at once.
-        self.sandboxes.fleet_changed.connect(self.hosts.set_fleet)
-        self.hosts.host_removed.connect(self.sandboxes.forget_host)
-        self.hosts.host_removed.connect(self.approvals.forget_host)
-        self.hosts.show_starts.connect(lambda host: (self.sandboxes.show_host(host), self.show_page("sandboxes")))
-        self.hosts.show_questions.connect(lambda host: (self.approvals.show_host(host), self.show_page("approvals")))
-        self.hosts.refresh_requested.connect(lambda: (self.sandboxes.refresh_remote(), self.approvals.poll_remote()))
-        self.kits.enable_kit.connect(self.enable_kit)
-        self.kits.inventory_loaded.connect(self.board.set_kit_inventory)
-        self.board.opened.connect(self.project_opened)
-        self.board.open_request = self.choose_project_folder
-        self.board.project_request = self.set_project  # a project folder dropped on the board opens in its tab
-        self.board.inspector_request = lambda: self.reopen_panel("inspector")  # a part selected: its inspector
-        self.board.score_request = lambda shown: self.set_panel("findings", shown)  # the score's button
-        self.launch.opened.connect(self.project_opened)
+        for key in BUILD_ORDER:  # the pages' signals to the window and to each other
+            if self.built(key) is not None:
+                self.link_page(key)
         panel = QWidget()
         panel.setObjectName("navPanel")
         side = QVBoxLayout(panel)
@@ -5697,7 +5759,9 @@ class MainWindow(QMainWindow):
         self.make_docks()
         help_view.OPENER = self.show_help
         help_view.set_shown(backend.setting("help_buttons"))  # the setting; the Help page and F1 stay either way
-        self.help_buttons = help_view.install(self)  # the (?)s of the pages' areas and controls, hover explanations
+        # The (?)s of the pages' areas and controls, hover explanations (a page made later gets its own then).
+        self.help_buttons = help_view.install(self, {key: page for key in BUILD_ORDER
+                                                     if (page := self.built(key)) is not None})
         help_view.explain_windows(QApplication.instance())  # and those of the dialogs, when they are opened
         self.statusBar().showMessage(tr("sandbox-ai {version} from {path}", version=sai.version(), path=sai.directory))
         self.make_busy_indicator()
@@ -5710,16 +5774,11 @@ class MainWindow(QMainWindow):
         if QSystemTrayIcon.isSystemTrayAvailable():
             self.make_tray()
         else:
-            self.system.tray_box.setEnabled(False)
-            self.system.tray_box.setToolTip(tr("There is no system tray here"))
+            self.show_tray_state()
         self.notifier = notifications.Notifier(self, self.tray)
         self.update_window_controls()
         self.update_check = AsyncCommand(timeout=60, parent=self)
         self.update_check.finished.connect(self.update_checked)
-        self.system.update_button.clicked.connect(self.check_updates)
-        self.system.settings_button.clicked.connect(lambda: self.open_settings())
-        self.system.policy_button.clicked.connect(lambda: self.open_settings(policy=True))
-        self.system.theme_changed.connect(lambda _mode: self.check_theme_action())
         if check_updates:
             QTimer.singleShot(1500, self.check_updates)
         self.sandboxes_here = 0
@@ -5729,15 +5788,181 @@ class MainWindow(QMainWindow):
         # opens a tab of its own (setting auto_tabs); what ran already at the first read does not (sync_tabs).
         self.seen_running = None
         self.register_state()
+        self.ready = True  # a page made from now on is linked, explained and kept at once (page_ready)
         self.restore_tabs()
         self.restore_docks()
         self.restore_window()
         self.show_project_tabs(self.current_page())
+        if self.lazy:  # the other pages: after the first paint (eventFilter), else (a start in the tray) after a while
+            QTimer.singleShot(LAZY_FALLBACK, self.build_later)
 
     # -- pages --
 
     def nav_item(self, key):
         return self.nav.item(self.nav_rows[key])
+
+    def built(self, key):
+        """Page KEY if it was made already, else None (never makes it: for what only concerns the pages that exist)."""
+        return self.__dict__.get(key)
+
+    def __getattr__(self, name):
+        """self.PAGE: the page, made now if it was not made yet (lazy start); every other unknown name is an error."""
+        makers = self.__dict__.get("page_makers")
+        if makers is None or name not in makers:
+            raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
+        return self.build_page(name)
+
+    def build_page(self, key):
+        """Make page KEY (once): in its place in the stack of pages, and - once the window is ready - linked with the
+        window and the other pages, its (?)s placed, its tables and filters kept, the current project shown."""
+        page = self.built(key)
+        if page is not None:
+            return page
+        begin = time.perf_counter()
+        holder = self.page_holders.get(key)
+        if holder is not None and key not in UNSCROLLED_PAGES and not isinstance(holder, PageScroll):
+            # Its frame in its place first: under the app's style sheet a widget is styled again each time it is put
+            # into another, so the page is put in once, into its place in the window.
+            frame = PageScroll()
+            self.pages.replace_holder(holder, frame)
+            holder = self.page_holders[key] = frame
+        try:
+            page = self.page_makers[key]()
+        except AttributeError as exc:  # (not "no such page", which __getattr__ would make of it)
+            raise RuntimeError(f"page {key}: {exc}") from exc
+        setattr(self, key, page)
+        self.page_holders.pop(key, None)
+        if isinstance(holder, PageScroll):
+            holder.setWidget(page)
+        elif holder is not None:
+            self.pages.replace_holder(holder, page)
+        if self.ready:
+            self.page_ready(key)
+        applog.debug("page built", key=key, ms=round((time.perf_counter() - begin) * 1000))
+        return page
+
+    def page_ready(self, key):
+        """A page made after the window: what the window did for the pages it was made with."""
+        page = getattr(self, key)
+        self.link_page(key, late=True)
+        self.help_buttons.update(help_view.install(self, {key: page}, tree=page))
+        self.register_page_state(key)
+        if self.project:
+            self.show_project_in(key, self.project)
+
+    def build_later(self):
+        """Lazy start: the pages not made yet, one at a time (in BUILD_ORDER), each when the human has not used the
+        mouse or the keyboard for LAZY_QUIET ms (a page takes up to about a tenth of a second: never under the hand)."""
+        if self.idle_build or not self.lazy or getattr(self, "shut_down", False):
+            return
+        self.idle_build, self.idle_waits = QTimer(self), 0
+        self.idle_build.setSingleShot(True)
+        self.idle_build.setInterval(LAZY_STEP)
+        self.idle_build.timeout.connect(self.build_next)
+        self.input_watch = InputWatch(QApplication.instance())
+        self.idle_build.start()
+
+    def build_next(self):
+        key = next((key for key in BUILD_ORDER if self.built(key) is None), None)
+        if key is None or getattr(self, "shut_down", False):
+            self.input_watch.stop()
+            return
+        now = time.monotonic()
+        if now - self.input_watch.last < LAZY_QUIET / 1000:
+            self.idle_build.start()
+            return
+        # And while the rest of the app idles: the reads of the pages made so far (other threads) would share Python
+        # with the build and lengthen it; they are waited for LAZY_PATIENCE steps at most.
+        others = time.process_time() - time.thread_time()
+        mark, self.idle_mark = getattr(self, "idle_mark", None), (others, now)
+        if mark is not None and now > mark[1] and (others - mark[0]) / (now - mark[1]) > LAZY_BUSY \
+                and self.idle_waits < LAZY_PATIENCE:
+            self.idle_waits += 1
+            self.idle_build.start()
+            return
+        self.idle_waits = 0
+        # (Not watched while it is made: the thousands of events a page's widgets get as they are made, each through
+        # a filter in Python, made it take about twice as long - and no input is handled meanwhile anyway.)
+        self.input_watch.pause()
+        try:
+            self.build_page(key)
+        finally:
+            self.input_watch.resume()
+        if all(self.built(key) is not None for key in BUILD_ORDER):
+            self.input_watch.stop()  # (the last one: nothing more to wait for)
+            return
+        self.idle_mark = (time.process_time() - time.thread_time(), time.monotonic())
+        self.idle_build.start()
+
+    def build_pages(self):
+        """Every page now (a test of a lazy window that needs them all)."""
+        for key in BUILD_ORDER:
+            self.build_page(key)
+
+    def link_page(self, key, late=False):
+        """The signals of page KEY to the window and to the other pages; LATE (made after the window): what the
+        others said meanwhile, too."""
+        page = getattr(self, key)
+        if key == "help":
+            page.tour_requested.connect(self.start_any_tour)
+        elif key == "launch":
+            page.opened.connect(self.project_opened)
+        elif key == "sandboxes":
+            page.open_log.connect(self.show_log)
+            page.open_remote_log.connect(self.show_remote_log)
+            page.counted.connect(lambda running, here: self.update_activity(sandboxes=here))
+            page.updated.connect(self.sync_tabs)
+            # The fleet: the Hosts page lists what the Sandboxes and Approvals pages last saw of every host.
+            page.fleet_changed.connect(self.fleet_changed)
+        elif key == "approvals":
+            page.pending_changed.connect(self.questions_changed)
+        elif key == "hosts":
+            # ... and leads to them filtered by a host; a host removed there leaves both at once.
+            page.host_removed.connect(lambda name: self.sandboxes.forget_host(name))
+            page.host_removed.connect(lambda name: self.approvals.forget_host(name))
+            page.show_starts.connect(lambda host: (self.sandboxes.show_host(host), self.show_page("sandboxes")))
+            page.show_questions.connect(lambda host: (self.approvals.show_host(host), self.show_page("approvals")))
+            page.refresh_requested.connect(lambda: (self.sandboxes.refresh_remote(), self.approvals.poll_remote()))
+            if late and getattr(self.sandboxes, "loaded", False):
+                page.set_fleet(self.sandboxes.fleet())
+            if late:
+                self.show_asking()
+        elif key == "kits":
+            page.enable_kit.connect(self.enable_kit)
+            page.inventory_loaded.connect(lambda *found: self.board.set_kit_inventory(*found))
+        elif key == "board":
+            page.opened.connect(self.project_opened)
+            page.open_request = self.choose_project_folder
+            page.project_request = self.set_project  # a project folder dropped on the board opens in its tab
+            page.inspector_request = lambda: self.reopen_panel("inspector")  # a part selected: its inspector
+            page.score_request = lambda shown: self.set_panel("findings", shown)  # the score's button
+        elif key == "system":
+            page.update_button.clicked.connect(self.check_updates)
+            page.settings_button.clicked.connect(lambda: self.open_settings())
+            page.policy_button.clicked.connect(lambda: self.open_settings(policy=True))
+            page.theme_changed.connect(lambda _mode: self.check_theme_action())
+            if late:
+                self.show_tray_state()
+                self.check_theme_action()
+                if getattr(self, "update_said", None):
+                    page.update_text.setText(self.update_said)
+
+    def fleet_changed(self, fleet):
+        hosts = self.built("hosts")  # (one made later asks the Sandboxes page then)
+        if hosts is not None:
+            hosts.set_fleet(fleet)
+
+    def show_project_in(self, key, path):
+        """The current project PATH on page KEY (apply_project, and a page made later)."""
+        page = self.built(key)
+        if page is None:
+            return
+        if key == "board":
+            page.activate(path)
+        elif key == "connections":
+            page.open_for_workspace(path)
+        elif key in PROJECT_PAGES:
+            page.set_project(path)
 
     def nav_changed(self, row):
         item = self.nav.item(row)
@@ -5750,7 +5975,7 @@ class MainWindow(QMainWindow):
 
     def current_page(self):
         widget = self.pages.currentWidget()
-        return next((key for key in self.keys if getattr(self, key) is widget), None)
+        return next((key for key in self.keys if self.built(key) is widget and widget is not None), None)
 
     def show_page(self, key, raise_window=True, unfold=True):
         section = self.section_of(key)
@@ -6118,7 +6343,12 @@ class MainWindow(QMainWindow):
         self.check_theme_action()
 
     def check_theme_action(self):
-        current = self.system.theme.currentData()
+        system = self.built("system")
+        if system is not None:
+            current = system.theme.currentData()
+        else:  # (as the System page will choose it)
+            current, keys = self.sai.settings().get("theme", "system"), [key for key, _ in theme.choices()]
+            current = current if current in keys else keys[0]
         for key, item in getattr(self, "theme_actions", {}).items():
             item.setChecked(key == current)
 
@@ -6170,46 +6400,59 @@ class MainWindow(QMainWindow):
     def register_state(self):
         """The tables (sort order, widths the human gave), splitters, filters and check boxes of the pages, the
         Start page's form per agent, the Board's drafts and zoom, the Sandboxes page's selection, the log folders,
-        the window itself: all come back at the next start."""
+        the window itself: all come back at the next start (a page made later: register_page_state, then)."""
         s = self.state
-        tables = [("sandboxes", self.sandboxes.table), ("connections", self.connections.table),
-                  ("approvals-open", self.approvals.open), ("approvals-history", self.approvals.history),
-                  ("approvals-always", self.approvals.always), ("files", self.files.table),
-                  ("kits", self.kits.table), ("kits-marketplaces", self.kits.market),
-                  ("kits-plugins", self.kits.plugins), ("mcp", self.mcp.servers),
-                  ("mcp-catalog", self.mcp.catalog), ("images", self.images.images),
-                  ("images-packages", self.images.packages), ("credentials-logins", self.credentials.logins),
-                  ("credentials-secrets", self.credentials.secrets)]
-        tables += [(f"statistics-{key}", widget) for key, widget in self.statistics.tables.items()]
-        for key, widget in tables:
-            s.table(key, widget)
-        from . import tables as fitted
-        fitted.keep_tables(s, {key: getattr(self, key, None) for key, _ in PAGES})  # every other table, as PAGE-NAME
-        saved = s.section("splitters").get("files")
-        self.files.keep_split = isinstance(saved, list) and len(saved) == self.files.split.count()  # kept: it wins
-        for key, splitter in (("approvals", self.approvals.split), ("connections", self.connections.split),
-                              ("kits", self.kits.split), ("kits-marketplaces", self.kits.market_split),
-                              ("files", self.files.split)):
-            s.splitter(key, splitter)
-        s.text("connections-filter", self.connections.filter)
-        s.check("connections-refused", self.connections.refused)
-        s.check("connections-follow", self.connections.follow)
-        s.text("images-filter", self.images.filter)
-        s.check("sandboxes-only-project", self.sandboxes.only_project)
-        for key, page in (("connections-folder", self.connections), ("statistics-folder", self.statistics)):
-            folder = s.get(key, "")
-            if folder and os.path.isabs(folder):
-                page.refresh_directories(select=folder)
-            page.directory.currentIndexChanged.connect(
-                lambda _i, k=key, p=page: s.set(k, p.directory.currentData() or ""))
-        self.launch.attach_state(s)
-        self.sandboxes.attach_state(s)
-        self.board.attach_state(s)
+        for key in BUILD_ORDER:
+            if self.built(key) is not None:
+                self.register_page_state(key)
         for section in s.get("nav_collapsed", []):
             if section in self.section_rows:
                 self.toggle_section(section, True)
         self.set_compact_nav(s.get("nav_compact", False) is True)
         s.collect(self.keep_window)
+
+    def register_page_state(self, key):
+        """What register_state keeps of page KEY."""
+        s, page = self.state, getattr(self, key)
+        tables = {"sandboxes": [("sandboxes", "table")], "connections": [("connections", "table")],
+                  "approvals": [("approvals-open", "open"), ("approvals-history", "history"),
+                                ("approvals-always", "always")],
+                  "files": [("files", "table")],
+                  "kits": [("kits", "table"), ("kits-marketplaces", "market"), ("kits-plugins", "plugins")],
+                  "mcp": [("mcp", "servers"), ("mcp-catalog", "catalog")],
+                  "images": [("images", "images"), ("images-packages", "packages")],
+                  "credentials": [("credentials-logins", "logins"), ("credentials-secrets", "secrets")]}
+        kept = [(name, getattr(page, attribute)) for name, attribute in tables.get(key, ())]
+        if key == "statistics":
+            kept += [(f"statistics-{name}", widget) for name, widget in page.tables.items()]
+        for name, widget in kept:
+            s.table(name, widget)
+        from . import tables as fitted
+        fitted.keep_tables(s, {key: page})  # every other table, as PAGE-NAME
+        if key == "files":
+            saved = s.section("splitters").get("files")
+            page.keep_split = isinstance(saved, list) and len(saved) == page.split.count()  # kept: it wins
+        splitters = {"approvals": [("approvals", "split")], "connections": [("connections", "split")],
+                     "kits": [("kits", "split"), ("kits-marketplaces", "market_split")], "files": [("files", "split")]}
+        for name, attribute in splitters.get(key, ()):
+            s.splitter(name, getattr(page, attribute))
+        if key == "connections":
+            s.text("connections-filter", page.filter)
+            s.check("connections-refused", page.refused)
+            s.check("connections-follow", page.follow)
+        elif key == "images":
+            s.text("images-filter", page.filter)
+        elif key == "sandboxes":
+            s.check("sandboxes-only-project", page.only_project)
+        if key in ("connections", "statistics"):
+            name = f"{key}-folder"
+            folder = s.get(name, "")
+            if folder and os.path.isabs(folder):
+                page.refresh_directories(select=folder)
+            page.directory.currentIndexChanged.connect(
+                lambda _i, k=name, p=page: s.set(k, p.directory.currentData() or ""))
+        if key in ("launch", "sandboxes", "board"):
+            page.attach_state(s)
 
     def keep_window(self):
         full, maximized = self.isFullScreen(), self.isMaximized()
@@ -6232,6 +6475,11 @@ class MainWindow(QMainWindow):
         self.update_window_controls()
 
     def eventFilter(self, watched, event):  # noqa: N802
+        if event.type() == QEvent.Type.Paint and self.__dict__.get("idle_build", 0) is None and self.lazy \
+                and self.ready:
+            # The window's first paint (the navigation is part of it): the other pages are made from a moment on.
+            self.idle_build = False
+            QTimer.singleShot(LAZY_START, self.build_later)
         if (event.type() == QEvent.Type.MouseButtonRelease and getattr(self, "nav", None) is not None
                 and watched is self.nav.viewport()):
             item = self.nav.itemAt(event.position().toPoint())
@@ -6432,8 +6680,8 @@ class MainWindow(QMainWindow):
         self.save_docks()
 
     def reopen_panel(self, name):
-        """Show the panel NAME again where it was (floating or docked) if it was closed, and raise it; the keyboard
-        focus stays where it is (the Board's canvas, when a part was selected there)."""
+        """Show the panel NAME again where it was (floating or docked) if it was closed, unfold it if it was folded,
+        and raise it; the keyboard focus stays where it is (the Board's canvas, when a part was selected there)."""
         if not hasattr(self, "docks") or name not in self.docks:
             return
         dock, focus = self.docks[name], QApplication.focusWidget()
@@ -6536,10 +6784,11 @@ class MainWindow(QMainWindow):
                 form.show_flags()
             self.board.inspect_timer.start()  # its inspector is made again
             return
-        timers = {"approvals_interval": self.approvals.timer, "sandboxes_interval": self.sandboxes.timer,
-                  "connections_interval": self.connections.timer}
-        if key in timers and timers[key].isActive():
-            timers[key].setInterval(backend.setting(key))
+        pages = {"approvals_interval": "approvals", "sandboxes_interval": "sandboxes",
+                 "connections_interval": "connections"}
+        page = self.built(pages.get(key, ""))  # (one made later reads the setting then)
+        if page is not None and page.timer.isActive():
+            page.timer.setInterval(backend.setting(key))
 
     def show_board(self, board, directory):
         """Open BOARD for the project DIRECTORY on the Board page (the wizard ends here)."""
@@ -6567,7 +6816,7 @@ class MainWindow(QMainWindow):
         else:
             self.show_project_state()
             self.launch.show_project_note()
-            self.kits.set_project(self.project)
+            self.show_project_in("kits", self.project)  # (one made later shows it then)
 
     def set_project(self, path):
         """Open the project PATH in its tab (made the current tab; an open one is reused). False if PATH is not a
@@ -6587,10 +6836,8 @@ class MainWindow(QMainWindow):
             self.project = self.sai.remember_project(path)
         except OSError:  # a read-only configuration folder: the project is used, not kept
             self.project = path
-        self.board.activate(path)
-        for page in (self.launch, self.files, self.approvals, self.sandboxes, self.kits, self.statistics, self.team):
-            page.set_project(path)
-        self.connections.open_for_workspace(path)
+        for key in ("board", *PROJECT_PAGES, "connections"):  # those made yet; one made later shows it then
+            self.show_project_in(key, path)
         self.show_project_state()
         self.setWindowTitle(" — ".join([printable(Path(path).name or path), f"sandbox-ai {self.sai.version()}"]))
 
@@ -6917,15 +7164,7 @@ class MainWindow(QMainWindow):
             self.show_question_count()
         if hasattr(self, "project_bar"):
             self.update_activity()
-        # Which starts ask (marked on the Sandboxes page), and how many questions wait on each host (Hosts page).
-        keys = list(getattr(getattr(self, "approvals", None), "questions", {}) or {})
-        if hasattr(self, "sandboxes"):
-            self.sandboxes.set_asking({(host, run) for host, run, _ in keys})
-        if hasattr(self, "hosts"):
-            counts = {}
-            for host, _, _ in keys:
-                counts[host] = counts.get(host, 0) + 1
-            self.hosts.set_questions(counts)
+        self.show_asking()
         if new and backend.setting("notify"):
             from .pages import describe
             entries = [(entry[0], entry[1], entry[2] if len(entry) > 2 else None) for entry in new]
@@ -6943,6 +7182,19 @@ class MainWindow(QMainWindow):
                 self.notify(tr("sandbox-ai asks: {count} more questions", count=len(rest)),
                             tr("They wait on the Approvals page."), level="warning",
                             action=(tr("Open approvals"), lambda: self.show_page("approvals")))
+
+    def show_asking(self):
+        """Which starts ask (marked on the Sandboxes page), and how many questions wait on each host (Hosts page)."""
+        approvals = self.built("approvals")
+        keys = list(getattr(approvals, "questions", {}) or {})
+        sandboxes, hosts = self.built("sandboxes"), self.built("hosts")
+        if sandboxes is not None:
+            sandboxes.set_asking({(host, run) for host, run, _ in keys})
+        if hosts is not None:
+            counts = {}
+            for host, _, _ in keys:
+                counts[host] = counts.get(host, 0) + 1
+            hosts.set_questions(counts)
 
     def open_question(self, key):
         """A notification's action: the Approvals page with its question selected (when it is still open)."""
@@ -6989,12 +7241,12 @@ class MainWindow(QMainWindow):
 
     def check_updates(self):
         if self.update_check.start(self.sai.command("update", "--check")):
-            self.system.update_text.setText(tr("Checking for a newer sandbox-ai…"))
+            self.show_update_text(tr("Checking for a newer sandbox-ai…"))
 
     def update_checked(self, status, out, err):
         versions = backend.parse_update_check(status, out)
         if versions is None:  # offline, or not an installation of install.sh: quietly nothing
-            self.system.update_text.setText(tr("No update information (offline, or not installed with install.sh)."))
+            self.show_update_text(tr("No update information (offline, or not installed with install.sh)."))
             return
         installed, available = versions
         if backend.newer(available, installed):
@@ -7003,7 +7255,14 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(text)
         else:
             text = tr("sandbox-ai {installed} is up to date.", installed=installed)
-        self.system.update_text.setText(text)
+        self.show_update_text(text)
+
+    def show_update_text(self, text):
+        """What the update check says, on the System page (one made later shows it then)."""
+        self.update_said = text
+        system = self.built("system")
+        if system is not None:
+            system.update_text.setText(text)
 
     # -- terminals --
 
@@ -7076,7 +7335,7 @@ class MainWindow(QMainWindow):
     def running_work(self):
         """The titles of the pages with work in the background that a human started (commands, copies, an answer
         being sent). Reads and polls are not work: never shown as running, never asked about when quitting."""
-        found = [key for key, _ in PAGES if working(getattr(self, key))]  # its work=True calls and its Task's job
+        found = [key for key, _ in PAGES if working(self.built(key))]  # its work=True calls and its Task's job
         if self.approvals.answering is not None:
             found.append("approvals")
         return [tr(title) for key, title in PAGES if key in found]
@@ -7088,7 +7347,8 @@ class MainWindow(QMainWindow):
         still running. Blocking: for SIGTERM and logout (nobody looks at the window); "Stop and quit" uses
         stop_work_and_quit()."""
         self.stopped = True
-        self.files.task.cancel()
+        if self.built("files") is not None:
+            self.files.task.cancel()
         self.sai.stop_commands()  # on the GUI thread on purpose: quitting, bounded by one grace period
         return ThreadCall.wait_all(QUIT_WAIT if timeout is None else timeout, work_only=True)
 
@@ -7096,7 +7356,8 @@ class MainWindow(QMainWindow):
         """"Stop and quit": what stop_work() does, in a thread - the window stays painted and says that it stops the
         work (up to a grace period and QUIT_WAIT seconds), takes no more input, and closes when that is done."""
         self.stopped = self.stopping = True
-        self.files.task.cancel()
+        if self.built("files") is not None:
+            self.files.task.cancel()
         self.setEnabled(False)
         self.busy_label.setText(tr("Stopping the work that runs, then quitting…"))
         self.busy_label.setVisible(True)
@@ -7130,9 +7391,17 @@ class MainWindow(QMainWindow):
         self.tray_menu.addAction(tr("Quit"), self.quit_app)
         self.tray.setContextMenu(self.tray_menu)
         self.tray.show()
-        self.system.tray_box.setEnabled(True)
-        self.system.tray_box.setToolTip("")
+        self.show_tray_state()
         self.show_question_count()  # the open questions in its tooltip
+
+    def show_tray_state(self):
+        """The System page's tray setting: off without a system tray (a System page made later shows it then)."""
+        system = self.built("system")
+        if system is None:
+            return
+        tray = getattr(self, "tray", None) is not None
+        system.tray_box.setEnabled(tray)
+        system.tray_box.setToolTip("" if tray else tr("There is no system tray here"))
 
     def start_hidden(self, seconds=TRAY_WAIT, interval=1000, available=QSystemTrayIcon.isSystemTrayAvailable):
         """A start at login (--hidden): stay in the tray. The panel may come up after the app, so without a
@@ -7220,14 +7489,15 @@ class MainWindow(QMainWindow):
             return
         # Tabs of sessions and attached starts only detach (the sandbox and its agent run on): no question for
         # them. Asked only for commands that really end with the app, by name.
-        ending = self.terminals.ending()
+        terminals = self.built("terminals")
+        ending = terminals.ending() if terminals is not None else []
         if ending and not ask_first(self, "app-quit", tr("Quit"),
                                     tr("These end with the app: {list}. Sessions keep running (attach again from "
                                        "Terminals or with sandbox-ai attach NAME). Quit?", list=", ".join(ending)),
                                     tr("End them and quit"), reject=tr("Keep the window")):
             event.ignore()
             return
-        if self.terminals.detaching():
+        if terminals is not None and terminals.detaching():
             applog.write(f"{applog.header('INFO', 'quit')}\n  sessions keep running; attach again from Terminals or "
                          f"with sandbox-ai attach NAME\n")
         work = self.running_work()
@@ -7262,17 +7532,24 @@ class MainWindow(QMainWindow):
         # period, with what they started, so that no `sandbox-ai hosts run`, ssh or podman outlives the app.
         self.sai.stop_commands(grace=0)
         widgets.end_worker_processes()
+        if self.idle_build:
+            self.idle_build.stop()
+            self.input_watch.stop()
         self.approvals.timer.stop()
-        self.connections.timer.stop()
+        if self.built("connections") is not None:
+            self.connections.timer.stop()
         self.sandboxes.timer.stop()
         self.sandboxes.remote_timer.stop()
         self.update_check.stop()
         if getattr(self, "notifier", None) is not None:
             self.notifier.close_all()  # the popups are windows of their own
-        self.images.list_command.stop()
-        self.images.package_command.stop()
+        if self.built("images") is not None:
+            self.images.list_command.stop()
+            self.images.package_command.stop()
         AsyncCommand.end_stopped()  # the timers that would SIGKILL them do not fire any more
-        self.activity.shutdown()
-        self.terminals.close_all()
+        if self.built("activity") is not None:
+            self.activity.shutdown()
+        if self.built("terminals") is not None:
+            self.terminals.close_all()
         if self.tray is not None:
             self.tray.hide()

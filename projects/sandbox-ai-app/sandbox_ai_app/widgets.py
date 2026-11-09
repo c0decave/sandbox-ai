@@ -1343,6 +1343,10 @@ class RowModel(QAbstractTableModel):
             return row.sort[column]
         return self.text(row, column).lower()
 
+    def display_text(self, row, column):
+        """What row ROW shows in COLUMN (data's DisplayRole, without an index: tables.fit_columns measures with it)."""
+        return elide(self.text(self.rows[row], column)) if 0 <= row < len(self.rows) else None
+
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid() or not 0 <= index.row() < len(self.rows):
             return None

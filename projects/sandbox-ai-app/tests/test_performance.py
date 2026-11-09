@@ -1,8 +1,10 @@
 """What the app costs while it only sits there (user report: "enormous losses in places"): no Python start for a
-look at another host (ssh directly, as `sandbox-ai hosts run` would), one Podman listing kept a while for every look
-at what runs, a run's folder of answered questions listed again only when it changed, the Sandboxes tree updated in
-place (not built again at every look), the navigation not repainted at every scan of the questions; an idle window
-starts no `sandbox-ai` command, and every page shows within a bound generous enough for CI."""
+look at another host (ssh directly, as `sandbox-ai hosts run` would, through the host's shared connection), one Podman
+listing kept a while for every look at what runs, a run's folder of answered questions listed again only when it
+changed, the Sandboxes tree updated in place (not built again at every look), the navigation not repainted at every
+scan of the questions; an idle window starts no `sandbox-ai` command, and every page shows within a bound generous
+enough for CI. At the start (a lazy window, as the app makes it): only the first pages, the others when shown or in
+idle time - and then the window is the same as one made at once."""
 import json
 import os
 import subprocess
@@ -70,6 +72,7 @@ def python_starts(seen):
 def test_another_host_is_read_through_ssh_without_a_python_start(env, monkeypatch, started):
     bin_dir, notes = fake_programs(env)
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("SANDBOX_AI_SSH_MULTIPLEX", "0")  # one ssh per read here; the shared connection: below
     add_host(env)
     sai = backend.SandboxAI()
     assert sai.host_questions("h1") == []
@@ -81,6 +84,174 @@ def test_another_host_is_read_through_ssh_without_a_python_start(env, monkeypatc
     # A host it does not know: sandbox-ai's own command answers (in its own words).
     status, _, err = sai.host_run("nowhere", "approvals", "list", "--json", timeout=60)
     assert status != 0 and "nowhere" in err and python_starts(started)
+
+
+def shared_ssh(env, monkeypatch, refuse=False):
+    """A fake ssh that notes each call; with REFUSE it says what ssh says when a shared connection refuses a session
+    (exit status 255, nothing reached the host) to every call through one. The hosts module's shared connection is
+    faked around it: (sai, notes, what ensure_master and stop_master were asked)."""
+    bin_dir, notes = env / "bin", env / "notes"
+    bin_dir.mkdir(exist_ok=True)
+    notes.mkdir(exist_ok=True)
+    refusal = "case \"$*\" in *ControlPath=*) echo 'mux_client_request_session: session request failed: Session " \
+        "open refused by peer' >&2; exit 255;; esac\n" if refuse else ""
+    (bin_dir / "ssh").write_text(f"#!/bin/sh\necho \"$*\" >> {notes}/ssh\n{refusal}echo '[]'\nexit 0\n")
+    (bin_dir / "ssh").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
+    add_host(env)
+    sai = backend.SandboxAI()
+    hosts = sai.module("hosts")
+    socket = env / "control"
+    socket.write_text("")  # (stands for the socket: it exists)
+    asked = {"ensure": 0, "stop": []}
+
+    def ensure(entry, path, runner=None, deadline=None):
+        asked["ensure"] += 1
+        return True
+    monkeypatch.setattr(hosts, "control_path", lambda entry, platform=None: socket)
+    monkeypatch.setattr(hosts, "ensure_master", ensure)
+    monkeypatch.setattr(hosts, "stop_master", lambda entry, path=None, runner=None, timeout=5, how="exit":
+                        asked["stop"].append(how))
+    return sai, notes, socket, asked
+
+
+def test_a_host_is_read_through_its_shared_connection(env, monkeypatch, started):
+    """Every read of a host goes through its shared SSH connection (no new connection, key exchange and login on the
+    host every few seconds); the connection is checked or started once, then trusted while it carries the reads."""
+    sai, notes, socket, asked = shared_ssh(env, monkeypatch)
+    for _ in range(5):
+        assert sai.host_questions("h1") == []
+        assert sai.host_instances("h1") == []
+    assert asked["ensure"] == 1 and asked["stop"] == []
+    lines = calls(notes, "ssh")
+    assert len(lines) == 10 and all(f"ControlPath={socket}" in line and "ControlMaster=no" in line for line in lines)
+    assert started[-1] == sai.module("hosts").argv("h1", ["list", "--json"], control=socket)
+    assert not python_starts(started)
+    # Older than MASTER_TRUSTED: asked again once.
+    monkeypatch.setattr(backend, "MASTER_TRUSTED", 0)
+    sai.host_questions("h1")
+    assert asked["ensure"] == 2
+
+
+def test_a_shared_connection_that_refuses_is_left_and_the_read_runs_on_its_own(env, monkeypatch):
+    sai, notes, socket, asked = shared_ssh(env, monkeypatch, refuse=True)
+    assert sai.host_questions("h1") == []  # answered all the same, on a connection of its own
+    lines = calls(notes, "ssh")
+    assert len(lines) == 2 and "ControlPath" in lines[0] and "ControlPath" not in lines[1]
+    assert asked["stop"] == ["stop"]  # the master takes no new sessions; the next read starts a new one
+    sai.host_questions("h1")
+    assert asked["ensure"] == 2
+
+
+def make_lazy(monkeypatch, **kw):
+    from sandbox_ai_app import terminal
+    from sandbox_ai_app.ui import MainWindow
+    monkeypatch.setattr(terminal, "available", lambda web=None: (False, "not in this test"))
+    w = MainWindow(backend.SandboxAI(), check_updates=False, approvals_interval=0, lazy=True, **kw)
+    if w.tray is not None:
+        w.tray.hide()
+        w.tray = None
+    return w
+
+
+def window_facts(w):
+    """What must be the same in a window made at once and in a lazy one once every page is made."""
+    from sandbox_ai_app.ui import PAGES
+    tips = {key: sorted(button.tip_id for button in buttons) for key, buttons in w.help_buttons.items()}
+    kept = sorted(view.state_key for view in w.findChildren(QtWidgets.QAbstractItemView)
+                  if getattr(view, "state_key", None))
+    frames = [type(w.pages.widget(index)).__name__ for index in range(w.pages.count())]
+    shown = [w.pages.frame_of(w.built(key)) is not None for key, _ in PAGES]
+    return tips, kept, frames, shown, sorted(w.help_missing)
+
+
+def test_a_lazy_window_makes_only_its_first_pages_and_the_others_when_shown(qapp, env, monkeypatch):
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    from sandbox_ai_app import ui
+    w = make_lazy(monkeypatch)
+    try:
+        built = [key for key, _ in ui.PAGES if w.built(key) is not None]
+        assert sorted(built) == sorted(ui.FIRST_PAGES), built
+        assert w.pages.count() == len(ui.PAGES)  # every page has its place (an empty one until it is made)
+        assert w.current_page() == "launch" and w.built("kits") is None
+        w.show_page("kits")  # shown: made, in its place, linked
+        assert w.built("kits") is not None and w.pages.currentWidget() is w.kits and w.current_page() == "kits"
+        assert w.pages.frame_of(w.kits) is not None and "kits" in w.help_buttons
+        assert getattr(w.kits.table, "state_key", None) == "kits"
+        assert w.built("images") is None
+        w.images.filter.setText("x")  # asked for by name: made at once
+        assert w.built("images") is not None and w.state.section("texts").get("images-filter") == "x"
+    finally:
+        close(w)
+
+
+def test_a_lazy_window_ends_as_one_made_at_once(qapp, env, monkeypatch):
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    from test_projects import make_window
+    eager = make_window(monkeypatch)
+    try:
+        facts = window_facts(eager)
+    finally:
+        close(eager)
+    w = make_lazy(monkeypatch)
+    try:
+        w.build_pages()
+        assert window_facts(w) == facts
+        assert w.help_missing == []
+        # The links between pages made at different times: a host removed on the Hosts page leaves the others.
+        w.sandboxes.remote_names = ["gone"]
+        w.sandboxes.remote["gone"] = []
+        w.hosts.host_removed.emit("gone")
+        assert "gone" not in w.sandboxes.remote
+    finally:
+        close(w)
+
+
+def test_a_page_made_later_shows_the_current_project(qapp, env, monkeypatch):
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    folder = project(env, "p")
+    w = make_lazy(monkeypatch)
+    try:
+        assert w.set_project(str(folder))
+        assert w.built("kits") is None
+        assert w.kits.project == os.path.realpath(folder)
+    finally:
+        close(w)
+
+
+def test_the_other_pages_are_made_in_idle_time_and_never_under_the_hand(qapp, env, monkeypatch):
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    from sandbox_ai_app import ui
+    monkeypatch.setattr(ui, "LAZY_START", 0)
+    monkeypatch.setattr(ui, "LAZY_STEP", 1)
+    monkeypatch.setattr(ui, "LAZY_BUSY", 100.0)  # (the reads of this test's pages never hold the build up)
+    w = make_lazy(monkeypatch)
+    try:
+        w.resize(1200, 800)
+        w.show()
+        deadline = time.monotonic() + 5
+        while w.idle_build is None and time.monotonic() < deadline:  # the first paint starts it
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert w.idle_build is not None
+        # Someone works with the window: nothing is made meanwhile.
+        before = [key for key, _ in ui.PAGES if w.built(key) is not None]
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            if getattr(w, "input_watch", None) is not None:
+                w.input_watch.last = time.monotonic()
+            qapp.processEvents()
+            time.sleep(0.005)
+        assert [key for key, _ in ui.PAGES if w.built(key) is not None] == before
+        deadline = time.monotonic() + 30
+        while any(w.built(key) is None for key, _ in ui.PAGES) and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.005)
+        assert all(w.built(key) is not None for key, _ in ui.PAGES)
+        assert w.input_watch.app is None  # the watch of the mouse and keyboard ends with the last page
+        assert w.help_missing == []
+    finally:
+        close(w)
 
 
 def test_one_podman_listing_serves_runs_and_sessions_for_a_while(env, monkeypatch):

@@ -85,8 +85,11 @@ class Cancelled(Refused):
 
 def printable(text):
     """Text for the screen: names are chosen by the agent, so control characters are shown escaped."""
+    text = str(text)
+    if text.isprintable():  # (most texts: as they are, without a look at each character in Python)
+        return text
     return "".join(c if c.isprintable() else f"\\x{ord(c):02x}" if ord(c) < 256 else f"\\u{ord(c):04x}"
-                   for c in str(text))
+                   for c in text)
 
 
 def printable_text(text):
