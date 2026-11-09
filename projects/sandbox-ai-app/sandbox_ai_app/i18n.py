@@ -9351,4 +9351,10 @@ TEXTS = {
     '(no rules of their own)': {
         'en': '(no rules of their own)',
         'de': '(keine eigenen Regeln)'},
+    'Reading what runs on this account…': {
+        'en': 'Reading what runs on this account…',
+        'de': 'Lese, was in diesem Konto läuft…'},
+    'Stopping the work that runs, then quitting…': {
+        'en': 'Stopping the work that runs, then quitting…',
+        'de': 'Die laufende Arbeit wird beendet, dann endet die App…'},
 }

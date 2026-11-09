@@ -22,6 +22,7 @@ from sandbox_ai_app import backend, widgets  # noqa: E402
 
 from test_projects import env, project, window  # noqa: E402,F401 - shared fixtures
 from test_kits_page import INVENTORY, MARKETPLACES  # noqa: E402
+from conftest import open_tab  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 SLOW = 2.0  # seconds a faked slow call takes
@@ -177,7 +178,7 @@ def test_what_runs_in_a_terminal_tab_leaves_the_window_free(qapp, window, env, m
     command = window.sai.command
     monkeypatch.setattr(window.sai, "command", lambda *args: sleeper if args[:1] == ("build",) else command(*args))
     window.sai.save_setting("terminal", "app")
-    window.terminals.open([sys.executable, "-c", "pass"], "warm up")  # the first web view (Chromium) once
+    open_tab(window.terminals, [sys.executable, "-c", "pass"], "warm up")  # the first web view (Chromium) once
     before = window.terminals.tabs.count()
     ended = []
     if action == "install plugins":
@@ -283,6 +284,7 @@ def test_a_copy_on_the_files_page_runs_in_the_background(qapp, tmp_path, monkeyp
     page = files_page.FilesPage(FakeSai([("run", "claude-abc", str(ws.resolve()))]))
     assert wait(lambda: page.roots.count() > 0 and not page.roots_reading)
     page.right.go_path(str(host))
+    assert wait(lambda: page.left.listing is None and page.right.listing is None and page.left.table.rowCount())
     copied = slow(files.copy_entry)
     monkeypatch.setattr(files_page.files, "copy_entry", copied)
     widgets.select_keys(page.left.table, ["a.txt"])

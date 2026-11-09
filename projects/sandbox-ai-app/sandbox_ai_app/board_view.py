@@ -37,7 +37,7 @@ from .files import printable
 from .name_fields import NameButton, NameField, add_line
 from .state import choose_file, choose_folder
 from .i18n import tr
-from .widgets import MONO, ElidedLabel, ask_first, background, flow, inform, plain_label, safe_tooltip, warn
+from .widgets import MONO, ElidedLabel, ask_first, background, disclosure, flow, inform, plain_label, safe_tooltip, warn
 
 NF_OPTIONS = ("--secret-env", "--api-key", "--git-token-secret")  # their lines name a secret (name_fields)
 
@@ -1157,8 +1157,8 @@ class BoardPage(QWidget):
         fit.setText(tr("Fit"))
         # A row that wraps when the window is narrow (the folder's name is shortened, in full in its tooltip).
         # The security score, also the switch of its panel with the findings (closed until asked for).
-        self.score_button = QToolButton()
-        self.score_button.setCheckable(True)
+        # A disclosure (an arrow: right folded, down open): its checked state never looks like a button stuck pressed.
+        self.score_button = disclosure(QToolButton())
         self.score_button.setAccessibleName(tr("Security score and findings"))
         self.score_button.setToolTip(tr("Show or hide the security score and the findings"))
         self.score_button.clicked.connect(lambda on: self.show_findings(on))
@@ -1970,19 +1970,20 @@ class BoardPage(QWidget):
         self.check_timer.start(self.check_delay())
 
     def check(self):
-        """The launcher's own verdict: a dry run of the board (no side effects), in the background. On another host
-        (a dry run over SSH, seconds each) one runs at a time: an edit meanwhile asks for one more after it, with the
-        board as it is then; an answer for an older board or another host is dropped (the token)."""
+        """The launcher's own verdict: a dry run of the board (no side effects), in the background. One runs at a time,
+        here too (a Python process each; on another host a dry run over SSH, seconds each): an edit meanwhile asks for
+        one more after it, with the board as it is then; an answer for an older board or another host is dropped
+        (the token)."""
         agent, _, _ = B.values(self.board)
         host = self.host()
         if host != LOCAL:
             self.read_host_options(host, agent)
-            if self.check_running:
-                self.check_pending = True
-                return
+        if self.check_running:
+            self.check_pending = True
+            return
         self.check_token += 1
         token = self.check_token
-        self.check_running, self.check_pending = host != LOCAL, False
+        self.check_running, self.check_pending = True, False
         background(self.sai.host_dry_run, host, agent, B.launcher_argv(self.sai, self.board, local=host == LOCAL),
                    timeout=120,
                    done=lambda result, error: self.checked(token, result, error, host))
@@ -2007,12 +2008,11 @@ class BoardPage(QWidget):
                    done=lambda found, error: self.host_options_read(host, agent, found, error))
 
     def checked(self, token, result, error, host=None):
-        if host is not None and host != LOCAL:
-            self.check_running = False
-            if self.check_pending:  # edited meanwhile: the verdict of the board as it is now
-                self.check_pending = False
-                self.check_timer.start(0)
-                return
+        self.check_running = False
+        if self.check_pending:  # edited meanwhile: the verdict of the board as it is now
+            self.check_pending = False
+            self.check_timer.start(0)
+            return
         if token != self.check_token or (host is not None and host != self.host()):
             return
         plan, message = result if error is None else (None, str(error))
@@ -2310,7 +2310,7 @@ class BoardPage(QWidget):
                 list=", ".join(map(printable, devices)), run=printable(run)), tr("Add")):
             return
         background(lambda: [self.sai.add_device(run, d) for d in devices], owner=self, source=button, timeout=300,
-                   done=lambda results, error: self.live_done(tr("Add device"), results, error))
+                   work=True, done=lambda results, error: self.live_done(tr("Add device"), results, error))
 
     def live_limits(self, run, props, button):
         values = [props.get(o) for o in ("--memory", "--cpus", "--pids")]
@@ -2335,7 +2335,7 @@ class BoardPage(QWidget):
         if not ask_first(self, "limits-raise", tr("Limits"), text, tr("Raise"),
                          detail={"current": current, "values": wanted}):
             return
-        background(lambda: [self.sai.set_limits(run, *values)], owner=self, source=button, timeout=150,
+        background(lambda: [self.sai.set_limits(run, *values)], owner=self, work=True, source=button, timeout=150,
                    done=lambda results, error: self.live_done(tr("Limits"), results, error))
 
     def live_done(self, title, results, error):
@@ -2867,7 +2867,7 @@ class BoardPage(QWidget):
         # Trusted, the file's options apply at every later start of the project: asked first (Cancel the default).
         if not ask_first(self, "project-trust", tr("Write and trust"), question, tr("Write and trust"), details=details):
             return False
-        background(self.sai.write_project, main, document, owner=self, source=self.apply_button, timeout=60,
+        background(self.sai.write_project, main, document, owner=self, work=True, source=self.apply_button, timeout=60,
                    done=lambda result, error: self.applied(main, result, error, then))
         return True
 

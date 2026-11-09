@@ -189,7 +189,8 @@ def test_jumps_to_connections_and_files(window, env, wait):
     assert page.host_path(page.current()) == (str(workspace), "src/a.py")
     assert page.show_file()
     files = window.files
-    assert wait(lambda: files.relative == "src"), "its folder is listed once the roots are read (in the background)"
+    assert wait(lambda: files.relative == "src" and files.left.listing is None and widgets.selected_rows(files.table)), \
+        "its folder is listed (in the background) once the roots are read, the file selected then"
     assert window.pages.currentWidget() is files
     assert [files.entry_at(r).name for r in widgets.selected_rows(files.table)] == ["a.py"]
     # A path outside the workspaces, or one that climbs out, has no place in the file browser.

@@ -265,7 +265,7 @@ class CanariesView(QWidget):
                 "Resume {run}? A canary paused it: something opened a decoy or sent a token away. Look at the log "
                 "first; resumed, the sandbox goes on with what it holds.", run=printable(run)), tr("Resume")):
             return
-        background(lambda: self.sai.canary_resume(host, run), owner=self, source=self.resume_button,
+        background(lambda: self.sai.canary_resume(host, run), owner=self, work=True, source=self.resume_button,
                    timeout=RESUME_SECONDS + 15, done=lambda result, error: self.resumed(run, result, error))
 
     def resumed(self, run, result, error):

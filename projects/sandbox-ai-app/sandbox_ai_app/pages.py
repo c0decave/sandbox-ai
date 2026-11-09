@@ -27,6 +27,7 @@ from .widgets import (
 ANSWER_WAIT = 90  # seconds an answer may take (sandbox-ai approvals: up to 60)
 REMOTE_ANSWER_WAIT = 130  # an answer on another host: SSH on top (and "always" waits for the certificate check)
 REMOTE_POLL = 5000  # ms between two looks at the other hosts' open questions (one look per host at a time)
+REMOTE_BACKOFF = 30  # s at most between two looks at a host that does not answer (REMOTE_POLL, doubled each time)
 REMOTE_GRACE = 60  # seconds the questions of a host that stopped answering stay listed after its last answer
 LOCAL = "local"  # the host of this machine's own questions
 SNAPSHOT_WAIT = 30  # seconds a scan of the questions may take before the next one is tried
@@ -445,6 +446,7 @@ class ApprovalsPage(QWidget):
         # The other hosts: {host: [RemoteQuestion]} as last read, why a host did not answer, the reads running
         # ({host: ThreadCall}) and the hosts to read once more when their read is done (after an answer).
         self.remote, self.remote_problems, self.remote_reading, self.remote_again = {}, {}, {}, set()
+        self.remote_failures, self.remote_next = {}, {}  # hosts that do not answer: how often, when to ask again
         # When each host answered last (time.monotonic() when that read began), and the questions answered there
         # ({(host, run, id): time.monotonic() of the answer}) that a read begun after the answer still listed.
         self.remote_seen, self.answered_there = {}, {}
@@ -472,7 +474,7 @@ class ApprovalsPage(QWidget):
         if interval:
             self.timer.start(interval)
         self.remote_timer = QTimer(self)
-        self.remote_timer.timeout.connect(lambda: self.poll_remote())
+        self.remote_timer.timeout.connect(lambda: self.poll_remote(polled=True))
         remote_interval = (REMOTE_POLL if interval else 0) if remote_interval is None else remote_interval
         if remote_interval:
             self.remote_timer.start(remote_interval)
@@ -545,7 +547,7 @@ class ApprovalsPage(QWidget):
 
     # -- the other hosts --
 
-    def poll_remote(self, hosts=None):
+    def poll_remote(self, hosts=None, polled=False):
         """Read the open questions of the other hosts in threads, one read per host at a time: HOSTS (after an answer
         there; read once more when a read of it runs already), or every host of `sandbox-ai hosts`."""
         if hosts is not None:
@@ -561,6 +563,7 @@ class ApprovalsPage(QWidget):
         if self.hosts_reading is not None:
             self.hosts_again = True
             return
+        self.hosts_polled = polled  # (the timer: hosts that did not answer wait; a refresh asks every host)
         self.hosts_reading = background(self.sai.remote_hosts, timeout=30, done=self.hosts_listed)
 
     def forget_host(self, name):
@@ -574,7 +577,7 @@ class ApprovalsPage(QWidget):
         self.show_all()
 
     def drop_host(self, name):
-        for store in (self.remote, self.remote_problems, self.remote_seen):
+        for store in (self.remote, self.remote_problems, self.remote_seen, self.remote_failures, self.remote_next):
             store.pop(name, None)
         for key in [key for key in self.answered_there if key[0] == name]:
             del self.answered_there[key]
@@ -632,8 +635,12 @@ class ApprovalsPage(QWidget):
         self.fill_hosts(sorted(hosts))
         for gone in (set(self.remote) | set(self.remote_problems)) - set(hosts):
             self.drop_host(gone)
+        now = time.monotonic()
         for host in hosts:
-            if host not in self.remote_reading:
+            # A host that did not answer is asked again after a while (remote_next), not every REMOTE_POLL: each look
+            # is a Python process and an ssh that waits for its timeout.
+            if host not in self.remote_reading and (not getattr(self, "hosts_polled", False)
+                                                    or now >= self.remote_next.get(host, 0)):
                 self.read_host(host)
         if self.hosts_again:
             self.hosts_again = False
@@ -656,6 +663,8 @@ class ApprovalsPage(QWidget):
         if error is None:
             self.remote[host] = list(result or [])
             self.remote_problems.pop(host, None)
+            self.remote_next.pop(host, None)
+            self.remote_failures.pop(host, None)
             self.remote_seen[host] = started
             # An answer there counts until a read that began after it no longer lists the question.
             listed = {(host, q.get("run", ""), q.get("id")) for q in self.remote[host]}
@@ -668,6 +677,8 @@ class ApprovalsPage(QWidget):
             # them, a page to open with no deadline included, for ever).
             self.remote_problems[host] = printable(error)[:200]
             self.expire_remote(host)
+            failures = self.remote_failures[host] = self.remote_failures.get(host, 0) + 1
+            self.remote_next[host] = time.monotonic() + min(REMOTE_BACKOFF, REMOTE_POLL / 1000 * 2 ** failures)
         if host in self.remote_again:
             self.remote_again.discard(host)
             self.read_host(host)
@@ -1112,9 +1123,9 @@ class ApprovalsPage(QWidget):
             return
         if host == LOCAL:
             background(self.sai.forget_remembered, project, entry, owner=self, source=self.forget_button, timeout=90,
-                       done=self.forgotten)
+                       work=True, done=self.forgotten)
         else:
-            background(lambda: self.sai.forget_remembered(project, entry, host=host), owner=self,
+            background(lambda: self.sai.forget_remembered(project, entry, host=host), owner=self, work=True,
                        source=self.forget_button, timeout=120, done=self.forgotten)
 
     def forgotten(self, result, error):
@@ -1183,7 +1194,8 @@ class ApprovalsPage(QWidget):
         done = lambda result, error: self.answered(result, error, decision, scope, host, url, key)  # noqa: E731
         if host == LOCAL:
             # sandbox-ai answers within 60 s; a call that hangs past that (e.g. on a stuck pipe) frees the buttons.
-            self.answers[key] = background(self.sai.answer, ident, decision, scope, timeout=ANSWER_WAIT, done=done)
+            self.answers[key] = background(self.sai.answer, ident, decision, scope, timeout=ANSWER_WAIT, work=True,
+                                           done=done)
         elif not self.sai.question_id.fullmatch(str(ident)):
             self.message.setText(tr("Not a question of sandbox-ai: {ident}", ident=printable(ident)[:60]))
             return

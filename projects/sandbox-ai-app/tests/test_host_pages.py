@@ -210,10 +210,14 @@ def test_kits_of_a_host(qapp, sai, monkeypatch):
     page.table.selectRow(0)
     assert not page.use_button.isEnabled(), "the current project is on this machine"
     monkeypatch.setattr(QtWidgets.QInputDialog, "getText", lambda *a, **k: ("/srv/skills/review", True))
+    from conftest import wait_until
     page.add_skill()
+    # A kit change runs in the page's Task (a thread), one at a time: the next waits until it has ended.
+    assert wait_until(qapp, lambda: not page.task.running, 30)
     assert ("kits", "add-skill", "--", "mine", "/srv/skills/review") in asked(sai)
     assert any(text.startswith("On ct1: Add /srv/skills/review to the kit mine?") for _, text, _ in widgets.SHOWN)
     page.revoke_button.click()
+    assert wait_until(qapp, lambda: not page.task.running, 30)
     assert ("kits", "trust-hooks", "--revoke", "--", "mine") in asked(sai)
     page.trust_hooks()
     assert opened[-1] == (["ssh", "-tt", "ct1", "sandbox-ai", "kits", "trust-hooks", "--", "mine"],
@@ -394,7 +398,7 @@ def test_images_of_a_host(qapp, sai, monkeypatch):
     opened, started, tasks = [], [], []
     page = ImagesPage(sai, lambda argv, title, **kw: opened.append((argv, title)))
     monkeypatch.setattr(page.list_command, "start", lambda argv, input=None: started.append(argv) or True)
-    monkeypatch.setattr(page.task, "run", lambda argv, done, text, source=None, input=None: tasks.append((argv, input)))
+    monkeypatch.setattr(page.task, "run", lambda argv, done, text, source=None, input=None, **kw: tasks.append((argv, input)))
     choose(page.hosts)
     page.loaded = True
     page.refresh()

@@ -244,7 +244,9 @@ class ActivityPage(QWidget):
         super().__init__()
         self.sai, self.window = sai, window
         self.process, self.buffer, self.errors, self.starts = None, b"", "", {}
-        self.seen, self.remote_token, self.remote_busy = set(), 0, False
+        # One look at a host at a time: remote_busy stays until the look running has come back, also when its result
+        # no longer counts (stop(), a new filter: remote_token); remote_again: one more look then, with what is chosen.
+        self.seen, self.remote_token, self.remote_busy, self.remote_again = set(), 0, False, False
         self.listing_token = 0  # the newest listing of a host's sources (its own counter: a poll never drops it)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -254,7 +256,7 @@ class ActivityPage(QWidget):
         outer.addWidget(self.hosts)
         self.poll = QTimer(self)
         self.poll.setInterval(REMOTE_POLL)
-        self.poll.timeout.connect(self.look_again)
+        self.poll.timeout.connect(lambda: self.isVisible() and self.look_again())  # not while the page is hidden
         self.refilter = QTimer(self)  # a host's timeline is filtered by the command: asked again once typing stops
         self.refilter.setSingleShot(True)
         self.refilter.setInterval(700)
@@ -494,6 +496,8 @@ class ActivityPage(QWidget):
 
     def showEvent(self, event):  # noqa: N802
         super().showEvent(event)
+        if self.poll.isActive():  # followed while hidden: a look now, not after the next interval
+            self.look_again()
         if not self.started:
             self.started = True
             self.refresh_sources()
@@ -564,9 +568,14 @@ class ActivityPage(QWidget):
             self.poll.start()
 
     def look_again(self):
-        """One look at the host's timeline (one at a time); what is new is added."""
-        if self.remote_busy or self.host() == LOCAL:
+        """One look at the host's timeline (one at a time: asked again while one runs, it follows that one); what is
+        new is added."""
+        if self.host() == LOCAL:
             return
+        if self.remote_busy:
+            self.remote_again = True
+            return
+        self.remote_again = False
         host, token = self.host(), self.remote_token
         source, kinds, grep = self.remote_query()
         since = self.since_value()
@@ -579,9 +588,14 @@ class ActivityPage(QWidget):
                            done=lambda result, error: self.remote_read(host, token, result, error))
 
     def remote_read(self, host, token, result, error):
-        if token != self.remote_token or host != self.host():
-            return  # a look from before (stop() let another begin): it neither shows nor frees the newer one
         self.remote_busy = False
+        if token != self.remote_token or host != self.host():
+            # A look from before (stop(), another filter or host): not shown; the look asked for meanwhile follows.
+            if self.remote_again:
+                self.look_again()
+            return
+        if self.remote_again:
+            self.look_again()
         if error is not None:
             self.status.setText(printable(str(error).removeprefix("sandbox-ai activity: "))[:500])
             return
@@ -600,8 +614,8 @@ class ActivityPage(QWidget):
         """Kill the command, without waiting for it (the GUI thread): deleted once it has ended (deleting a
         running QProcess would wait for it). Another host's looks stop too."""
         self.poll.stop()
-        self.remote_token += 1
-        self.remote_busy = False
+        self.remote_token += 1  # the look running (remote_busy until it is back) is no longer shown
+        self.remote_again = False
         process, self.process = self.process, None
         if process is None:
             return
@@ -822,9 +836,8 @@ class ActivityPage(QWidget):
 
         def go():
             page.roots.setCurrentIndex(page.roots.findData(real))
-            page.go("/".join(folder))
-            if name and Path(real, *folder, name).exists():
-                widgets.select_keys(page.table, [name])
+            selected = name if name and Path(real, *folder, name).exists() else None
+            page.go("/".join(folder), then=lambda _listed: selected and widgets.select_keys(page.table, [selected]))
         if page.roots.findData(real) < 0:  # its folder is listed once the roots are read again (in the background)
             page.others.append(("other", "", root))
             page.refresh_roots(select=real, then=go)

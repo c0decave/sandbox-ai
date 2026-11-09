@@ -13,6 +13,7 @@ from PySide6.QtCore import Signal  # noqa: E402
 from PySide6.QtWidgets import QWidget  # noqa: E402
 
 from sandbox_ai_app import applog, backend, chromium, i18n, widgets  # noqa: E402
+from conftest import open_tab  # noqa: E402
 
 FAILED = chromium.Probe(False, True, "ENOMEM", "unshare: ENOMEM")
 FINE = chromium.Probe(True, True, "", "namespaces created")
@@ -208,10 +209,10 @@ def test_a_failed_check_makes_no_web_view(terminal, monkeypatch):
     monkeypatch.setattr(chromium, "probe", lambda timeout=10, **_: FAILED)
     page = terminal.TerminalsPage()
     try:
-        assert page.open(["true"], "build") is None and page.tabs.count() == 0
+        assert open_tab(page, ["true"], "build") is None and page.tabs.count() == 0
         assert "user.max_user_namespaces" in page.hint.text() and "terminal window" in page.hint.text()
         assert len(widgets.SHOWN) == 1 and widgets.SHOWN[0][0] == "A terminal window instead of a tab"
-        assert page.open(["true"], "again") is None
+        assert open_tab(page, ["true"], "again") is None
         assert len(widgets.SHOWN) == 1, "the dialog once per run; the page keeps saying it"
     finally:
         page.deleteLater()
@@ -224,8 +225,8 @@ def test_the_check_runs_again_for_the_next_terminal(terminal, monkeypatch):
     monkeypatch.setattr(terminal, "TerminalView", FakeView)
     page = terminal.TerminalsPage()
     try:
-        assert page.open(["true"], "first") is None
-        view = page.open(["true"], "second")
+        assert open_tab(page, ["true"], "first") is None
+        view = open_tab(page, ["true"], "second")
         assert view is FakeView.made[0] and len(calls) == 2
         assert "user.max_user_namespaces" not in page.hint.text(), "the reason goes once a tab works again"
     finally:
@@ -243,12 +244,13 @@ def test_the_window_opens_a_terminal_window_instead(qapp, monkeypatch):
     window = SimpleNamespace(
         sai=SimpleNamespace(settings=lambda: {"terminal": "app"},
                             in_terminal=lambda argv, title: ["xterm", "-e", *argv]),
-        terminals=SimpleNamespace(open=lambda argv, title, directory: None),
+        terminals=SimpleNamespace(open=lambda argv, title, directory, done: done(None)),
         show_page=shown.append, own_starts=[], project=None)
+    window.terminal_window = lambda argv, title: ui.MainWindow.terminal_window(window, argv, title)
     assert ui.MainWindow.in_terminal(window, ["sandbox-ai", "plugins", "claude"], "plugins") is True
     assert started == [["xterm", "-e", "sandbox-ai", "plugins", "claude"]] and shown == []
     # A tab when the check passes: no terminal window.
-    window.terminals = SimpleNamespace(open=lambda argv, title, directory: object())
+    window.terminals = SimpleNamespace(open=lambda argv, title, directory, done: done(object()))
     started.clear()
     assert ui.MainWindow.in_terminal(window, ["sandbox-ai", "plugins", "claude"], "plugins") is True
     assert started == [] and shown == ["terminals"]

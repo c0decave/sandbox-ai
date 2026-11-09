@@ -568,7 +568,7 @@ def from_document(sai, document):
            N_("The agent arguments hold what may be a secret."))
     options = B._options(sai)
     values, unknown = backend.values_from_argv(list(options.values()), list(lists["options"]),
-                                               sai.launcher.canonical_options)
+                                               backend.canonical_of(sai))
     _check(not unknown, N_("Options this sandbox-ai does not know: {options}."),
            options=" ".join(map(str, unknown))[:200])
     refused = [o for o in REFUSED if values.get(o)]

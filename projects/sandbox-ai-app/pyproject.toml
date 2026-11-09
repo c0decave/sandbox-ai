@@ -9,8 +9,9 @@ description = "Graphical front end for sandbox-ai: every option, approvals, stat
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.9"
-# PySide6 6.12.0 releases a reference to None too many in every call without a result; below Python 3.12
-# (where None is not immortal) the app aborts after a while ("deallocating None").
+# PySide6 6.12.0 releases a reference to None too many in every call without a result, and to True/False in every
+# signal emitted (two per emit); below Python 3.12 (where None, True and False are not immortal) the app aborts after a
+# while ("deallocating None", "bool_dealloc").
 dependencies = ["PySide6-Essentials>=6.6,!=6.12.0; python_version < '3.12'",
                 "PySide6-Essentials>=6.6; python_version >= '3.12'"]
 

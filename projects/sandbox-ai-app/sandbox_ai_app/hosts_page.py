@@ -459,7 +459,8 @@ class WebPanel(QWidget):
                 "Remove the login {name} of the web interface? Its sessions end at their next request.",
                 name=printable(name))), tr("Remove")):
             return
-        background(self.sai.host_web_user_remove, host, name, owner=self, source=[self.remove_button], timeout=90,
+        background(self.sai.host_web_user_remove, host, name, owner=self, work=True, source=[self.remove_button],
+                   timeout=90,
                    done=lambda result, error: self.answered(tr("Remove…").rstrip("…"), result, error, again=True))
 
     def listen_value(self):
@@ -481,7 +482,7 @@ class WebPanel(QWidget):
                 "Make a new certificate for the web interface? Its fingerprint changes: every browser that trusted "
                 "the old one asks again, and the running service uses it after its restart.")), tr("Renew")):
             return
-        background(lambda: self.sai.host_web_cert(host, listen, renew), owner=self,
+        background(lambda: self.sai.host_web_cert(host, listen, renew), owner=self, work=True,
                    source=[self.cert_button, self.renew_button], timeout=150,
                    done=lambda result, error: self.certified(host, title, result, error))
 
@@ -872,7 +873,7 @@ class HostsPage(QWidget):
                                                                                                     "connection:"))]
             if said:
                 self.status.setText(printable("\n".join([name, *said])))
-        background(lambda: self.sai.host_add(name, ssh, port, identity, description, **extra), owner=self,
+        background(lambda: self.sai.host_add(name, ssh, port, identity, description, **extra), owner=self, work=True,
                    source=self.add_button, timeout=60, done=done)
 
     def edit(self):
@@ -889,7 +890,7 @@ class HostsPage(QWidget):
                 "Update sandbox-ai on {host} with sudo from now on?", host=self.label(name)) if sudo else tr(
                 "Update sandbox-ai on {host} without sudo from now on?", host=self.label(name)), tr("Change")):
             return
-        background(self.sai.host_set, name, sudo, owner=self, source=self.edit_button, timeout=60,
+        background(self.sai.host_set, name, sudo, owner=self, work=True, source=self.edit_button, timeout=60,
                    done=lambda result, error: warn(self, tr("Edit {host}", host=name), printable(str(error)))
                    if error else self.load_hosts(name))
 
@@ -911,7 +912,7 @@ class HostsPage(QWidget):
             self.question_counts.pop(name, None)
             self.host_removed.emit(name)  # its starts and questions leave the other pages at once
             self.load_hosts()
-        background(self.sai.host_remove, name, owner=self, source=self.remove_button, timeout=60, done=done)
+        background(self.sai.host_remove, name, owner=self, work=True, source=self.remove_button, timeout=60, done=done)
 
     def test(self):
         name = self.host()
@@ -929,7 +930,7 @@ class HostsPage(QWidget):
             else:
                 self.status.setText(printable("\n".join([f"{name}: {result.get('version')}", *keys])))
             self.show_doctor(result.get("doctor") or [], name)
-        background(self.sai.host_test, name, owner=self, source=self.test_button, timeout=180, done=done)
+        background(self.sai.host_test, name, owner=self, work=True, source=self.test_button, timeout=180, done=done)
 
     def check_host(self):
         """sandbox-ai doctor --backend B --json on the chosen host (this machine too), shown on the Doctor tab."""
@@ -945,7 +946,8 @@ class HostsPage(QWidget):
                 return
             self.status.setText(tr("{host}: checked for {backend}", host=name, backend=engine))
             self.show_doctor(result, name)
-        background(self.sai.host_doctor, name, engine, owner=self, source=self.doctor_button, timeout=330, done=done)
+        background(self.sai.host_doctor, name, engine, owner=self, work=True, source=self.doctor_button, timeout=330,
+                   done=done)
 
     # -- the chosen host's defaults --
 
@@ -1083,7 +1085,8 @@ class HostsPage(QWidget):
                         modal=False)
             self.defaults_host = None
             self.load_defaults()
-        background(work, owner=self, source=self.save_defaults_button, timeout=60 * len(argv) + 30, done=done)
+        background(work, owner=self, work=True, source=self.save_defaults_button, timeout=60 * len(argv) + 30,
+                   done=done)
 
     # -- versions and updates --
 

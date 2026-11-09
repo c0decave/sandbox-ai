@@ -16,7 +16,7 @@ import shlex
 import sys
 import weakref
 
-from PySide6.QtCore import QCoreApplication, QEvent, QEventLoop, QTimer, QUrl, Qt, Signal
+from PySide6.QtCore import QCoreApplication, QEvent, QTimer, QUrl, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox, QGroupBox, QHBoxLayout, QLabel, QPushButton, QSplitter, QTabWidget, QVBoxLayout, QWidget,
 )
@@ -26,7 +26,7 @@ from .backend import setting as backend_setting
 from .files import printable
 from .i18n import N_, tr
 from .pty_bridge import PtyBridge
-from .widgets import ThreadCall, ask_first, background, fill, fit_columns, inform, plain_label, row_key, safe_tooltip, table, warn
+from .widgets import ask_first, background, fill, fit_columns, inform, plain_label, row_key, safe_tooltip, table, warn
 
 WEB = Path(__file__).resolve().with_name("web")
 # The vendoring script next to the package (a checkout or sandbox-ai's installation; not in a wheel).
@@ -160,18 +160,31 @@ class TerminalView(QWidget):
 
 
 def shutdown():
-    """End every terminal and release QtWebEngine in the order it needs: pages before their profile
-    (else Chromium aborts at exit). Called when the application quits."""
-    for view in list(_views):
+    """End every terminal and release QtWebEngine in the order it needs, while the application still runs: the pages
+    first, then the web views, then the profiles (else Chromium aborts at exit, or Python's own cleanup at the end of
+    the interpreter deletes a web view whose QtWebEngine is gone: "shared QObject was deleted directly", a crash).
+    Called when the application quits; a second call does nothing."""
+    from shiboken6 import isValid
+    views = [view for view in list(_views) if isValid(view)]
+    for view in views:
         view.close_terminal()
-        view.view.setPage(None)
-        view.page.deleteLater()
+        if isValid(view.view):
+            view.view.setPage(None)
+        if isValid(view.page):
+            view.page.deleteLater()
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    for view in views:  # the web views before their profile (no page of theirs is made again meanwhile)
+        if isValid(view):
+            view.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    _views.clear()
     for bridge in list(_ending):
-        bridge.pty.kill()
+        if isValid(bridge):
+            bridge.pty.kill()
     if not MISSING and _profiles:
         for created in _profiles.values():
-            created.deleteLater()
+            if isValid(created):
+                created.deleteLater()
         _profiles.clear()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
@@ -299,6 +312,7 @@ class TerminalsPage(QWidget):
         layout.addLayout(bar)
         self.command = None
         self.sandbox_problem = ""  # why the last terminal could not be a tab (Chromium's sandbox), until one can
+        self.waiting, self.checking = [], False  # tabs asked for while Chromium's sandbox is checked (open())
         self.show_state()
         self.tabs = QTabWidget()
         self.tabs.setTabsClosable(True)
@@ -539,12 +553,11 @@ class TerminalsPage(QWidget):
 
     told = False  # the dialog about Chromium's sandbox: once per run of the app (the page's text stays)
 
-    def chromium_ready(self):
-        """Before a new web view: can Chromium's sandbox start now? Checked in a short-lived child process
-        (chromium.check, logged) every time, as namespaces come and go. If not, no web view is made (Chromium would
-        end the whole app): why and what to do are shown on this page, in the status bar and, the first time, in a
-        message; the caller opens a terminal window instead."""
-        result = self.checked_off_thread()
+    def chromium_ready(self, result):
+        """Before a new web view: can Chromium's sandbox start now? RESULT: chromium.check() (a short-lived child
+        process, run in a thread before every new tab, as namespaces come and go; logged). If not, no web view is made
+        (Chromium would end the whole app): why and what to do are shown on this page, in the status bar and, the
+        first time, in a message; the caller opens a terminal window instead."""
         if result.ok:
             if self.sandbox_problem:
                 self.sandbox_problem = ""
@@ -561,33 +574,41 @@ class TerminalsPage(QWidget):
             inform(window, tr("A terminal window instead of a tab"), self.sandbox_problem, warning=True, modal=False)
         return False
 
-    @staticmethod
-    def checked_off_thread():
-        """chromium.check() in a thread (it starts a child process: up to its timeout), waited for in a local event
-        loop that goes on with everything but the human's input: the window keeps painting, its timers (the
-        approvals) keep running, and no second click starts a second terminal meanwhile."""
-        box = {}
-        loop = QEventLoop()
-        call = ThreadCall(chromium.check)
-        call.finished.connect(lambda result, error: (box.update(result=result, error=error), loop.quit()))
-        call.start()
-        if not box:
-            loop.exec(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
-        if box.get("error") is not None:
-            raise box["error"]
-        return box["result"]
-
-    def open(self, argv, title, cwd=None):
-        """A tab running ARGV (or the tab attached to that start already); None when Chromium's sandbox cannot start
-        now (chromium_ready): the caller then uses a terminal window."""
+    def open(self, argv, title, cwd=None, done=None):
+        """A tab running ARGV, or the tab attached to that start already (returned, and DONE(it) at once). A new tab
+        waits for Chromium's sandbox check (chromium.check, in a thread: no local event loop, the window goes on as
+        always); DONE(view) then - None when Chromium's sandbox cannot start now (chromium_ready): the caller uses a
+        terminal window. Returns None while it waits. The same command asked for again while it waits (a double
+        click) opens one tab."""
         # One tab per start: attaching again (here, from Sandboxes & sessions or the Hosts page) shows its tab.
         view = self.open_view(attach_key(argv))
         if view is not None:
             self.tabs.setCurrentWidget(view)
             view.view.setFocus()
+            if done is not None:
+                done(view)
             return view
-        if not self.chromium_ready():
+        if any(list(argv) == waiting[0] and title == waiting[1] for waiting in self.waiting):
             return None
+        self.waiting.append((list(argv), title, cwd, done))
+        if not self.checking:
+            self.checking = True
+            background(chromium.check, done=self.checked)
+        return None
+
+    def checked(self, result, error):
+        """Chromium's sandbox check is back: the tabs asked for meanwhile are made (or, if it cannot start, none)."""
+        self.checking = False
+        waiting, self.waiting = self.waiting, []
+        if error is not None:
+            result = chromium.Probe(False, False, "error", f"the check failed: {error}")
+        ready = self.chromium_ready(result)
+        for argv, title, cwd, done in waiting:
+            view = self.make_tab(argv, title, cwd) if ready else None
+            if done is not None:
+                done(view)
+
+    def make_tab(self, argv, title, cwd=None):
         view = TerminalView(argv, self.web, cwd, self)
         index = self.tabs.addTab(view, title)
         self.tabs.setTabToolTip(index, shlex.join(argv))

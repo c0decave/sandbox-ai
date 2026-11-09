@@ -719,7 +719,8 @@ def add_server(parent, sai, agent=None, taken=(), done=None, source=None, fields
         def work():
             keep = (lambda: sai.set_secret(fields["secret"], value)) if value else None
             return WL.add_and_check(sai, fields, agent, keep)
-        background(work, owner=parent, source=source, timeout=WL.ADD_SECONDS + WL.CHECK_SECONDS + 90, done=finished)
+        background(work, owner=parent, work=True, source=source, timeout=WL.ADD_SECONDS + WL.CHECK_SECONDS + 90,
+                   done=finished)
     if not value:
         go()
         return
@@ -1458,7 +1459,7 @@ class SandboxWizard(QWizard):
             return False
         # The folder may be slow (a network file system): written in a thread; the wizard closes when it is.
         self.set_write_state("writing")
-        background(self.sai.write_project, main, document, owner=self, timeout=60,
+        background(self.sai.write_project, main, document, owner=self, work=True, timeout=60,
                    done=lambda result, error: self.wrote(main, error))
         return False
 

@@ -86,11 +86,15 @@ def main(argv=None):
 
     from . import applog, i18n, terminal, theme
     applog.install()  # every later entry of the log says when, where and in which versions
+    from .widgets import track_worker_processes
+    track_worker_processes()  # what the background reads start ends with the app (MainWindow.shutdown)
     applog.write(f"{applog.header('INFO', 'webengine')}\n  QTWEBENGINE_CHROMIUM_FLAGS="
                  f"{os.environ.get('QTWEBENGINE_CHROMIUM_FLAGS', '')!r}, Chromium's sandbox "
                  f"{'off (QTWEBENGINE_DISABLE_SANDBOX)' if no_sandbox else 'on (checked before each terminal tab)'}\n")
 
     app = QApplication.instance() or QApplication([arg for arg in arguments if arg != "--self-test"])
+    from .widgets import collect_on_gui_thread
+    collect_on_gui_thread()  # never a Qt object deleted by the cycle collector in a worker thread
     app.setApplicationName("sandbox-ai")
     override = backend.sandbox_ai_home_override()  # the Settings dialog's choice; $SANDBOX_AI_HOME wins
     if override:
@@ -175,7 +179,26 @@ def main(argv=None):
     # loop ends and Python's exit handlers run (they remove what unfinished copies created). The approvals
     # timer gives Python a moment every second to handle the signal.
     signal.signal(signal.SIGTERM, lambda *_: window.terminate())
-    return app.exec()
+    code = app.exec()
+    end_widgets(app, window)
+    return code
+
+
+def end_widgets(app, window):
+    """After the event loop, while the QApplication still lives: the terminals (pages, web views, profiles: in
+    QtWebEngine's order), then the window and every other top-level widget deleted by Qt. Left to Python's cleanup
+    at the end of the interpreter, they were deleted after QtWebEngine had gone: "QObject: shared QObject was deleted
+    directly", then a segmentation fault (exit status 139 instead of 0)."""
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from . import terminal
+    window.shutdown()
+    terminal.shutdown()
+    for widget in [window, *app.topLevelWidgets()]:
+        try:
+            widget.deleteLater()
+        except RuntimeError:  # deleted with the window
+            pass
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 if __name__ == "__main__":

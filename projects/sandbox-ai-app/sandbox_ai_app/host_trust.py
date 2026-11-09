@@ -84,7 +84,7 @@ def review_and_trust(parent, sai, host, path, done=None, source=None):
             done(False, document)
             return
         background(lambda: sai.host_project_trust(host, shown["path"], shown["digest"], document), owner=parent,
-                   source=source, timeout=150,
+                   work=True, source=source, timeout=150,
                    done=lambda result, error: trusted(shown["path"], document, result, error))
 
     def trusted(where, document, result, error):

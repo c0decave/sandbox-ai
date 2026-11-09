@@ -86,7 +86,7 @@ class LoginsBox(QGroupBox):
             if host == LOCAL:
                 return self.sai.call(self.command, *args, timeout=60)
             return self.sai.host_run(host, self.command, *args, timeout=90)
-        background(work, owner=self, timeout=120, source=self.buttons(),
+        background(work, owner=self, work=True, timeout=120, source=self.buttons(),
                    done=lambda result, error: self.ran(what, result, error))
 
     def ran(self, what, result, error):
@@ -137,7 +137,7 @@ class LoginsBox(QGroupBox):
                 except Exception:  # noqa: BLE001 - not answered: kept as it is whatever happens
                     existed = None
             return self.sai.add_login(host, command, add_args, secret, value, existed=existed)
-        background(work, owner=self, timeout=150, source=self.buttons(),
+        background(work, owner=self, work=True, timeout=150, source=self.buttons(),
                    done=lambda result, error: self.ran(what, result, error))
         return True
 
@@ -783,11 +783,11 @@ class CredentialsPage(QWidget):
             return
         self.value.clear()  # after the yes: the value goes on standard input of the command, and nowhere else
         if host == "local":
-            background(self.sai.set_secret, name, value, owner=self, source=self.secret_buttons, timeout=90,
+            background(self.sai.set_secret, name, value, owner=self, work=True, source=self.secret_buttons, timeout=90,
                        done=self.secret_kept)
         else:
             background(lambda: self.sai.set_secret(name, value, host=host), owner=self, source=self.secret_buttons,
-                       timeout=120, done=self.secret_kept)
+                       work=True, timeout=120, done=self.secret_kept)
         value = None  # noqa: F841 - not kept
 
     def secret_kept(self, result, error):
@@ -811,11 +811,11 @@ class CredentialsPage(QWidget):
         if not ask_first(self, "secret-delete", tr("Remove secret"), text, tr("Remove")):
             return
         if host == "local":
-            background(self.sai.delete_secret, name, owner=self, source=self.secret_buttons, timeout=90,
+            background(self.sai.delete_secret, name, owner=self, work=True, source=self.secret_buttons, timeout=90,
                        done=self.secret_deleted)
         else:
             background(lambda: self.sai.delete_secret(name, host=host), owner=self, source=self.secret_buttons,
-                       timeout=120, done=self.secret_deleted)
+                       work=True, timeout=120, done=self.secret_deleted)
 
     def secret_deleted(self, result, error):
         status, out, err = outcome(result, error)

@@ -330,7 +330,7 @@ def from_argv(sai, agent, argv, agent_args=(), workspaces=()):
     """The board of a launcher command line (short forms included): every option goes to the node that owns
     it; what no node owns stays in Board.extra."""
     options = _options(sai)
-    values, unknown = backend.values_from_argv(list(options.values()), list(argv), sai.launcher.canonical_options)
+    values, unknown = backend.values_from_argv(list(options.values()), list(argv), backend.canonical_of(sai))
     board = Board()
     model, arguments = _split_agent_args(agent_args)
     model = str(values.pop("--model", "") or "") or model  # the launcher's option, else the agent's own

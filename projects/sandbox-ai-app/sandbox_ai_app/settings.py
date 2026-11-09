@@ -247,11 +247,11 @@ class PresetDirs(QWidget):
         host = self.host()
         PR.HOST_DOCUMENTS.pop(host, None)  # the presets that host offers change: read again where they are shown
         if host == LOCAL:
-            background(lambda: self.sai.preset_dir_command(action, path), owner=self,
+            background(lambda: self.sai.preset_dir_command(action, path), owner=self, work=True,
                        source=[self.add_button, self.remove_button], timeout=90,
                        done=lambda result, error: self.done(result, error))
         else:
-            background(lambda: self.sai.host_preset_dir_command(host, action, path), owner=self,
+            background(lambda: self.sai.host_preset_dir_command(host, action, path), owner=self, work=True,
                        source=[self.add_button, self.remove_button], timeout=120,
                        done=lambda result, error: self.done(result, error))
 
@@ -391,7 +391,7 @@ class TrustedProjects(QWidget):
                 "No longer trust {path} on {host}? Starts of that project stop until its configuration is trusted "
                 "again.", path=printable(path), host=self.hosts.label(host)), tr("Forget")):
             return
-        background(lambda: self.sai.forget_trusted(host, path), owner=self,
+        background(lambda: self.sai.forget_trusted(host, path), owner=self, work=True,
                    source=[self.refresh_button, self.forget_button], timeout=90,
                    done=lambda result, error: self.forgotten(result, error))
 

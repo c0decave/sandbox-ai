@@ -14,12 +14,15 @@ import sys
 import threading
 import time
 
-from PySide6.QtCore import QItemSelectionModel, QObject, QProcess, QRect, QSize, Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QColor, QFont, QPainter, QPalette, QTextDocument, QTextOption
+from PySide6.QtCore import (
+    QAbstractTableModel, QItemSelection, QItemSelectionModel, QModelIndex, QObject, QProcess, QRect,
+    QSize, Qt, QTimer, Signal, Slot,
+)
+from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPalette, QTextDocument, QTextOption
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QLabel, QLayout,
     QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QStyle, QStyledItemDelegate,
-    QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget, QWidgetItem,
+    QTableView, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget, QWidgetItem,
 )
 
 from . import i18n, tables, theme
@@ -33,6 +36,7 @@ TOOLTIP_LIMIT = 2000
 SORT_ROLE = Qt.ItemDataRole.UserRole + 7
 BAR_ROLE = Qt.ItemDataRole.UserRole + 8
 BADGE_ROLE = Qt.ItemDataRole.UserRole + 9
+SAMPLED_ROWS = 300  # rows a ModelTable's column widths are measured on
 # Tests set this to True or False: confirm() then answers at once, and messages are collected in SHOWN.
 AUTO_ANSWER = None
 SHOWN = []
@@ -748,23 +752,42 @@ class AsyncCommand(QObject):
                 pass
 
 
+_keepers = []
+
+
+def _keeper():
+    """The parent of every ThreadCall (made on the GUI thread with the first call)."""
+    if not _keepers:
+        _keepers.append(QObject())
+    return _keepers[0]
+
+
 class ThreadCall(QObject):
     """FUNCTION(*args) in a daemon thread; finished(result, error) is emitted on the GUI thread (the thread
-    that made the ThreadCall), so whatever is connected to it, a lambda too, may touch widgets.
+    that made the ThreadCall), so whatever is connected to it, a lambda too, may touch widgets. Whatever the
+    function raises - SystemExit and KeyboardInterrupt too - comes back as ERROR: a call always reports.
 
-    An abandoned call (abandon_all() when the window closes, or a background() timeout) emits nothing: the
-    check and the emit happen under one lock, so no result reaches a receiver after it was given up."""
+    An abandoned call (abandon_all() when the window closes) emits nothing: the check and the emit happen under
+    one lock, so no result reaches a receiver after it was given up. Once it has reported (or was abandoned and
+    its thread has ended), its connections are cut and the Qt object is deleted, so nothing it held stays alive:
+    a page that polls makes thousands of calls a day. WORK: what a human started (an install, a copy), not a read;
+    wait_all(work_only=True) waits for those alone."""
     finished = Signal(object, object)
     _result = Signal(object, object)  # from the worker thread to this object's (the GUI) thread: queued
+    _disposed = Signal()  # from the worker thread, for an abandoned call: let go of it on the GUI thread
     _alive = set()
     _lock = threading.Lock()
 
-    def __init__(self, function, *args):
-        super().__init__()
-        self.function, self.args, self.abandoned, self.thread = function, args, False, None
+    def __init__(self, function, *args, work=True):
+        # A child of the keeper: Qt owns it, so the Python object going (on whatever thread drops it last) never
+        # deletes it - deleteLater() does, on the GUI thread, once it has reported (never inside its own event).
+        super().__init__(_keeper())
+        self.function, self.args, self.abandoned, self.thread, self.work = function, args, False, None, work
+        self.reported, self.state = False, None  # state: what background() keeps for the call (see _dispose)
         with ThreadCall._lock:
             ThreadCall._alive.add(self)
         self._result.connect(self._deliver)
+        self._disposed.connect(self._dispose)
 
     def start(self):
         self.thread = threading.Thread(target=self._run, daemon=True)
@@ -772,13 +795,22 @@ class ThreadCall(QObject):
         return self
 
     def _run(self):
+        _worker.call = self
         try:
             result, error = self.function(*self.args), None
-        except Exception as exc:  # noqa: BLE001 - reported to the page
+        except BaseException as exc:  # noqa: BLE001 - reported to the page; SystemExit too (argparse, sys.exit)
             result, error = None, exc
+        finally:
+            _worker.call = None
+            if _worker_processes:
+                _forget_reaped()
         with ThreadCall._lock:
             if self.abandoned:
                 ThreadCall._alive.discard(self)
+                try:
+                    self._disposed.emit()
+                except RuntimeError:  # the Qt object is gone already (the app is closing)
+                    pass
                 return
             try:
                 self._result.emit(result, error)
@@ -789,26 +821,52 @@ class ThreadCall(QObject):
     def _deliver(self, result, error):
         with ThreadCall._lock:
             ThreadCall._alive.discard(self)
-            if self.abandoned:
-                return
-        self.finished.emit(result, error)
+            abandoned = self.abandoned
+        if not abandoned:
+            self.reported = True
+            self.finished.emit(result, error)
+        self._dispose()
+
+    @Slot()
+    def _dispose(self):
+        """On the GUI thread, once the call has reported or was abandoned and its thread is done: everything it holds
+        is let go of here (the function, background()'s state: pages, buttons, timers - Qt objects must never be
+        deleted by the worker thread dropping the last reference), every connection is cut (a receiver that refers to
+        this call would keep both alive for good: the connection is held by the Qt object), and the Qt object is
+        deleted later, on this thread. Python attributes (abandoned, thread, work) stay readable for whoever still
+        holds the call."""
+        self.function, self.args, self.state = None, (), None
+        import warnings
+        with warnings.catch_warnings():  # PySide warns (RuntimeWarning) about a signal with nothing connected
+            warnings.simplefilter("ignore", RuntimeWarning)
+            for signal_ in (self.finished, self._result, self._disposed):
+                try:
+                    signal_.disconnect()
+                except (RuntimeError, TypeError):  # nothing connected
+                    pass
+        try:
+            self.deleteLater()
+        except RuntimeError:
+            pass
 
     def abandon(self):
         with ThreadCall._lock:
             self.abandoned = True
 
     @classmethod
-    def running(cls):
+    def running(cls, work_only=False):
         with cls._lock:
-            return [call for call in cls._alive if call.thread is not None and call.thread.is_alive()]
+            return [call for call in cls._alive if call.thread is not None and call.thread.is_alive()
+                    and (call.work or not work_only)]
 
     @classmethod
-    def wait_all(cls, timeout):
-        """Wait up to TIMEOUT seconds for every running call to end; the calls still running."""
+    def wait_all(cls, timeout, work_only=False):
+        """Wait up to TIMEOUT seconds for every running call (WORK_ONLY: every running call that is work) to
+        end; the calls still running."""
         deadline = time.monotonic() + timeout
-        for call in cls.running():
+        for call in cls.running(work_only):
             call.thread.join(max(0.0, deadline - time.monotonic()))
-        return cls.running()
+        return cls.running(work_only)
 
     @classmethod
     def abandon_all(cls):
@@ -817,63 +875,215 @@ class ThreadCall(QObject):
                 call.abandoned = True
 
 
-def background(function, *args, done, source=None, owner=None, timeout=None, work=True):
+# -- garbage collection on the GUI thread only --
+
+_collectors = []
+
+
+def collect_on_gui_thread(interval=250):
+    """Python's cycle collector runs in whatever thread happens to allocate: in a worker thread it may delete a Qt
+    object (a dialog or page that went, held in a reference cycle), which crashes. From this call on it runs only
+    here, on the GUI thread (a QTimer every INTERVAL ms, as often as Python's own thresholds would); the app's start
+    and the tests call it once."""
+    if _collectors:
+        return _collectors[0]
+    import gc
+    thresholds = gc.get_threshold()
+    gc.disable()
+    timer = QTimer()
+
+    def check():
+        counts = gc.get_count()
+        if counts[0] > thresholds[0]:
+            generation = 2 if counts[1] > thresholds[1] and counts[2] > thresholds[2] else \
+                1 if counts[1] > thresholds[1] else 0
+            gc.collect(generation)
+    timer.timeout.connect(check)
+    timer.start(interval)
+    _collectors.append(timer)
+    return timer
+
+
+# -- the processes background work starts --
+
+_worker = threading.local()  # .call: the ThreadCall whose function runs on this thread
+_worker_processes = set()  # subprocess.Popen objects started on a ThreadCall's thread (track_worker_processes)
+_worker_lock = threading.Lock()
+
+
+def track_worker_processes():
+    """From now on every subprocess.Popen started on a ThreadCall's thread - also deep inside sandbox-ai's modules
+    (`podman pod ps` of the registry read, ssh) - is remembered until it is reaped, so that end_worker_processes()
+    can end what still runs when the app quits (otherwise it outlives the app). The app's start calls it once (it
+    changes subprocess.Popen for the whole process); returns a function that undoes it (tests)."""
+    import subprocess
+    original = subprocess.Popen.__init__
+    if getattr(original, "_tracks_workers", False):
+        return lambda: None
+
+    def init(popen, *args, **kwargs):
+        original(popen, *args, **kwargs)
+        if getattr(_worker, "call", None) is not None:
+            with _worker_lock:
+                _worker_processes.add(popen)
+    init._tracks_workers = True
+    subprocess.Popen.__init__ = init
+
+    def undo():
+        subprocess.Popen.__init__ = original
+    return undo
+
+
+def end_worker_processes():
+    """SIGKILL to every process a ThreadCall's thread started that has not been reaped yet (an unreaped process keeps
+    its number: no other process can be hit), to its whole process group when it leads one (a command and the ssh it
+    started); the number signalled. When the app quits: what reads still run is ended without a question (the work
+    was asked about and stopped before)."""
+    with _worker_lock:
+        found = [popen for popen in _worker_processes if popen.returncode is None]
+        _worker_processes.clear()
+    ended = 0
+    for popen in found:
+        try:
+            if os.getpgid(popen.pid) == popen.pid:
+                os.killpg(popen.pid, signal.SIGKILL)
+            else:
+                os.kill(popen.pid, signal.SIGKILL)
+            ended += 1
+        except (ProcessLookupError, PermissionError):
+            pass
+    return ended
+
+
+def _forget_reaped():
+    with _worker_lock:
+        for popen in [p for p in _worker_processes if p.returncode is not None]:
+            _worker_processes.discard(popen)
+
+
+def _hold(widget):
+    """Disable WIDGET while a background() call that started from it runs; calls with the same widget are counted,
+    so the first one to end does not enable it while another still runs. What it was before the first comes back."""
+    try:
+        held = widget.property("_background_held") or 0
+        if not held:
+            widget.setProperty("_background_enabled", widget.isEnabled())
+        widget.setProperty("_background_held", held + 1)
+        widget.setEnabled(False)
+    except RuntimeError:  # deleted meanwhile
+        pass
+
+
+def _release(widget):
+    try:
+        held = (widget.property("_background_held") or 1) - 1
+        widget.setProperty("_background_held", held)
+        if not held:
+            widget.setEnabled(widget.property("_background_enabled") is not False)
+    except RuntimeError:  # deleted meanwhile
+        pass
+
+
+def held(widget):
+    """True while a background() call started from WIDGET runs."""
+    return bool(widget.property("_background_held"))
+
+
+class _Call:
+    """What one background() call keeps: never the ThreadCall itself, so nothing connected to the call refers
+    back to it (see ThreadCall._dispose)."""
+
+    def __init__(self, done, sources, owner, counted, work, name, timeout):
+        self.done, self.sources, self.owner, self.counted, self.work = done, sources, owner, counted, work
+        self.name, self.began, self.answered, self.timer, self.timeout = name, time.monotonic(), False, None, timeout
+
+    def owner_alive(self):
+        if self.owner is None:
+            return True
+        try:
+            from shiboken6 import isValid
+            return isValid(self.owner)
+        except ImportError:  # pragma: no cover
+            return True
+
+    def ended(self, result, error):
+        """The thread's result (on the GUI thread): the sources work again, the owner's count goes down, and DONE
+        gets it - unless DONE got a TimeoutError already (the late result is dropped)."""
+        if self.timer is not None:  # (dropped here, not in expired(): never inside its own signal)
+            self.timer.stop()
+            self.timer = None
+        applog.debug("background done", call=self.name, seconds=round(time.monotonic() - self.began, 2),
+                     error=f"{type(error).__name__}: {error}"[:300] if error is not None else "")
+        for widget in self.sources:
+            _release(widget)
+        alive = self.owner_alive()
+        if self.counted and alive:  # a late result (after the window's end) never reaches a deleted page
+            self.owner._background -= 1
+            if self.work:
+                self.owner._work -= 1
+            activity().changed.emit()
+        if alive:
+            self.answer(result, error)
+
+    def expired(self):
+        """No result within TIMEOUT: DONE gets a TimeoutError now. The thread cannot be stopped: its buttons stay
+        disabled and its owner busy until it really ends (a second start of the same action meanwhile would run
+        it twice)."""
+        if self.owner_alive():
+            self.answer(None, TimeoutError(tr("No answer within {seconds} s.", seconds=int(self.timeout))))
+
+    def answer(self, result, error):
+        if self.answered:
+            return
+        self.answered = True
+        done, self.done = self.done, None
+        done(result, error)
+
+
+def background(function, *args, done, source=None, owner=None, timeout=None, work=False):
     """Run FUNCTION(*args) in a thread, never on the GUI thread (which must keep answering approvals);
     DONE(result, error) runs on the GUI thread, once. SOURCE (a widget or a list of them, e.g. the button
-    that started it) is disabled meanwhile; OWNER (a page) counts its running calls for busy(). After
-    TIMEOUT seconds without a result, DONE gets a TimeoutError and the buttons work again (a late result is
-    dropped). Returns the ThreadCall."""
+    that started it) is disabled until the thread ends; OWNER (a page) counts its running calls for busy(), and
+    a late result never reaches it once it is deleted. WORK (True for what a human started that changes
+    something: an install, a start, a write) also counts for working(): the window's busy bar and the question
+    when it is closed. A read or a poll (the default) shows as neither, and quitting ends it without a question.
+    After TIMEOUT seconds without a result, DONE gets a TimeoutError (a late result is dropped). Returns the
+    ThreadCall."""
     sources = [w for w in (source if isinstance(source, (list, tuple)) else [source]) if w is not None]
     for widget in sources:
-        widget.setEnabled(False)
-    counted = owner is not None and work  # not WORK: a read, only dropped when OWNER is gone (not "work running")
+        _hold(widget)
+    counted = owner is not None
     if counted:
         owner._background = getattr(owner, "_background", 0) + 1
+        owner._work = getattr(owner, "_work", 0) + (1 if work else 0)
         activity().changed.emit()  # the window's busy indicator: which pages have work running
-    call = ThreadCall(function, *args)
-    timer = None
-    began, name = time.monotonic(), getattr(function, "__qualname__", None) or repr(function)
+    name = getattr(function, "__qualname__", None) or repr(function)
+    state = _Call(done, sources, owner, counted, work, name, timeout)
+    call = ThreadCall(function, *args, work=work)
     applog.debug("background", call=name, timeout=timeout)
-
-    def finish(result, error):
-        try:  # a late result (after a timeout or the window's end) never reaches a deleted page or button
-            from shiboken6 import isValid
-            if owner is not None and not isValid(owner):
-                return
-        except ImportError:  # pragma: no cover
-            pass
-        applog.debug("background done", call=name, seconds=round(time.monotonic() - began, 2),
-                     error=f"{type(error).__name__}: {error}"[:300] if error is not None else "")
-        if call.abandoned and not isinstance(error, TimeoutError):
-            return
-        if timer is not None:
-            timer.stop()
-        for widget in sources:
-            try:
-                widget.setEnabled(True)
-            except RuntimeError:  # deleted meanwhile
-                pass
-        if counted:
-            owner._background -= 1
-            activity().changed.emit()
-        done(result, error)
-    call.finished.connect(finish)
+    # PySide holds a connected method of a plain Python object only weakly: the call keeps STATE (STATE never
+    # refers to the call, so nothing is held in a circle; both go once the call has reported).
+    call.state = state
+    call.finished.connect(state.ended)
     if timeout:
-        timer = QTimer(call)
-        timer.setSingleShot(True)
-
-        def expired():
-            call.abandon()
-            finish(None, TimeoutError(tr("No answer within {seconds} s.", seconds=int(timeout))))
-        timer.timeout.connect(expired)
-        timer.start(int(timeout * 1000))
+        state.timer = QTimer()
+        state.timer.setSingleShot(True)
+        state.timer.timeout.connect(state.expired)
+        state.timer.start(int(timeout * 1000))
     return call.start()
 
 
 def busy(owner):
-    """True while background() calls of OWNER run (or its Task runs)."""
+    """True while background() calls of OWNER run (reads too), or its Task runs."""
     task = getattr(owner, "task", None)
     return getattr(owner, "_background", 0) > 0 or (isinstance(task, Task) and task.running)
+
+
+def working(owner):
+    """True while OWNER has work running that a human started (background(work=True), a Task's job that is work):
+    what the window's busy bar shows and closing the window asks about. Reads and polls never count."""
+    task = getattr(owner, "task", None)
+    return getattr(owner, "_work", 0) > 0 or (isinstance(task, Task) and task.running and task.work)
 
 
 class Activity(QObject):
@@ -947,6 +1157,7 @@ class Task(QWidget):
             outer.addWidget(self.output)
         self._fed.connect(self._append)
         self.command, self.call, self.source, self.done = None, None, [], None
+        self.work = True  # the job that runs is work (an install, a copy), not a read: see working()
         self.cancel_event = threading.Event()
         self.cancelled = False
         self.hide()
@@ -1005,9 +1216,12 @@ class Task(QWidget):
         self.output.setTextCursor(cursor)
         self.output.ensureCursorVisible()
 
-    def run(self, argv, done, text, source=None, timeout=120, input=None):
+    def run(self, argv, done, text, source=None, timeout=120, input=None, work=True):
+        """ARGV as an AsyncCommand; WORK False: a read (a history, a check), which the window's busy bar and its
+        question when it is closed leave out."""
         if self.running:
             return False
+        self.work = work
         self.command = AsyncCommand(timeout, self)
         self.done = done
         self.command.finished.connect(self._command_done)
@@ -1021,12 +1235,13 @@ class Task(QWidget):
         if done:
             done(-2 if cancelled else status, out, err)
 
-    def thread(self, function, done, text, source=None, cancellable=False):
+    def thread(self, function, done, text, source=None, cancellable=False, work=True):
         """FUNCTION(cancelled) in a thread; Cancel sets the event it gets (copies stop at the next chunk)."""
         if self.running:
             return False
+        self.work = work
         self.cancel_event = threading.Event()
-        self.call = ThreadCall(function, self.cancel_event.is_set)
+        self.call = ThreadCall(function, self.cancel_event.is_set, work=work)
         self.done = done
         self.call.finished.connect(self._thread_done)
         self._begin(text, source, cancellable)
@@ -1062,6 +1277,200 @@ class Task(QWidget):
 
 # -- tables --
 
+class _Row:
+    """One row of a RowModel: the values as given (formatted only when Qt shows them) and what fill() gave with it."""
+    __slots__ = ("values", "color", "tip", "icon", "sort", "index")
+
+    def __init__(self, values, color, tip, icon, sort, index):
+        self.values, self.color, self.tip, self.icon, self.sort, self.index = values, color, tip, icon, sort, index
+
+
+class RowModel(QAbstractTableModel):
+    """The rows of a ModelTable as Python lists: Qt asks only for the cells it paints, so 20,000 rows cost one model
+    reset instead of 140,000 QTableWidgetItems made on the GUI thread (seconds). The same roles as fill() gives
+    a QTableWidget's items: the text (cut at CELL_LIMIT), the tooltip, the colour, the dot, UserRole (the row's
+    index in row_keys) and SORT_ROLE."""
+
+    def __init__(self, headers, numeric=(), stretch=None, parent=None):
+        super().__init__(parent)
+        self.headers, self.numeric, self.stretch, self.rows = list(headers), set(numeric), stretch, []
+        self.sorted_by = (-1, Qt.SortOrder.AscendingOrder)
+
+    def rowCount(self, parent=QModelIndex()):  # noqa: N802
+        return 0 if parent.isValid() else len(self.rows)
+
+    def columnCount(self, parent=QModelIndex()):  # noqa: N802
+        return 0 if parent.isValid() else len(self.headers)
+
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):  # noqa: N802
+        if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole and \
+                0 <= section < len(self.headers):
+            return self.headers[section]
+        return None
+
+    def flags(self, index):
+        return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+
+    def text(self, row, column):
+        value = row.values[column] if column < len(row.values) else None
+        if column in self.numeric and isinstance(value, (int, float)) and not isinstance(value, bool):
+            return number(value)
+        return "" if value is None else str(value)
+
+    def sort_value(self, row, column):
+        value = row.values[column] if column < len(row.values) else None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return value
+        if row.sort and column < len(row.sort) and row.sort[column] is not None:
+            return row.sort[column]
+        return self.text(row, column).lower()
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid() or not 0 <= index.row() < len(self.rows):
+            return None
+        row, column = self.rows[index.row()], index.column()
+        if role == Qt.ItemDataRole.DisplayRole:
+            return elide(self.text(row, column))
+        if role == Qt.ItemDataRole.ToolTipRole:
+            text = self.text(row, column)
+            if len(text) > CELL_LIMIT or column == self.stretch or row.tip:
+                return safe_tooltip(row.tip if row.tip and column == 0 else text)
+            return None
+        if role == Qt.ItemDataRole.ForegroundRole:
+            return QColor(theme.color(row.color)) if row.color else None
+        if role == Qt.ItemDataRole.DecorationRole:
+            return theme.dot(row.icon) if column == 0 and row.icon else None
+        if role == Qt.ItemDataRole.TextAlignmentRole:
+            return int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter) if column in self.numeric else None
+        if role == Qt.ItemDataRole.UserRole:
+            return row.index if column == 0 else None
+        if role == SORT_ROLE:
+            return self.sort_value(row, column)
+        return None
+
+    @staticmethod
+    def make_rows(rows, colors=None, tooltips=None, icons=None, sort=None, first=0):
+        return [_Row(values, colors[r] if colors else None, tooltips[r] if tooltips else None,
+                     icons[r] if icons else None, sort[r] if sort else None, first + r) for r, values in enumerate(rows)]
+
+    def set_rows(self, rows):
+        """All rows new (one reset: the selection is gone, fill() selects again by keys), in the order sorted by."""
+        self.beginResetModel()
+        self.rows = self.ordered(rows, *self.sorted_by)
+        self.endResetModel()
+
+    def ordered(self, rows, column, order):
+        if column < 0 or column >= len(self.headers):
+            return sorted(rows, key=lambda row: row.index)  # the order given to fill()
+
+        def key(row):
+            value = self.sort_value(row, column)
+            return (0, value, "") if isinstance(value, (int, float)) else (1, 0, str(value))
+        return sorted(rows, key=key, reverse=order == Qt.SortOrder.DescendingOrder)
+
+    def sort(self, column, order=Qt.SortOrder.AscendingOrder):
+        """Sorted in Python (a header click, sortByColumn): the selection and the current row stay on their rows."""
+        self.sorted_by = (column, order)
+        self.layoutAboutToBeChanged.emit()
+        before = self.rows
+        self.rows = self.ordered(before, column, order)
+        self._move_persistent(before)
+        self.layoutChanged.emit()
+
+    def _move_persistent(self, before):
+        where = {id(row): position for position, row in enumerate(self.rows)}
+        old = self.persistentIndexList()
+        new = []
+        for index in old:
+            position = where.get(id(before[index.row()])) if 0 <= index.row() < len(before) else None
+            new.append(self.index(position, index.column()) if position is not None else QModelIndex())
+        self.changePersistentIndexList(old, new)
+
+    def remove_where(self, gone):
+        """Remove the rows for which GONE(row) is true, block by block (the others keep selection and place)."""
+        positions = [position for position, row in enumerate(self.rows) if gone(row)]
+        while positions:
+            last = positions.pop()
+            first = last
+            while positions and positions[-1] == first - 1:
+                first = positions.pop()
+            self.beginRemoveRows(QModelIndex(), first, last)
+            del self.rows[first:last + 1]
+            self.endRemoveRows()
+
+    def append(self, rows):
+        """ROWS at the end (then in the order sorted by, if a column was chosen)."""
+        if not rows:
+            return
+        self.beginInsertRows(QModelIndex(), len(self.rows), len(self.rows) + len(rows) - 1)
+        self.rows.extend(rows)
+        self.endInsertRows()
+        if self.sorted_by[0] >= 0:
+            self.sort(*self.sorted_by)
+
+
+class _Cell:
+    """What QTableWidget.item() gives, for a ModelTable's cell: its text and roles (read-only)."""
+
+    def __init__(self, model, row, column):
+        self.model, self.index = model, model.index(row, column)
+
+    def text(self):
+        return self.model.data(self.index) or ""
+
+    def data(self, role):
+        return self.model.data(self.index, role)
+
+    def toolTip(self):  # noqa: N802
+        return self.model.data(self.index, Qt.ItemDataRole.ToolTipRole) or ""
+
+    def foreground(self):
+        color = self.model.data(self.index, Qt.ItemDataRole.ForegroundRole)
+        return QBrush(color) if color is not None else QBrush()
+
+
+class ModelTable(QTableView):
+    """A read-only table for many rows (a folder's 20,000 entries, 5,000 log records): what table() makes, on a
+    RowModel. fill(), append_rows(), row_key(), selected_rows(), select_keys() and find_row() work on it as on a
+    QTableWidget, and the parts of QTableWidget's interface the pages use (rowCount, item, currentRow,
+    setCurrentCell, cellDoubleClicked, itemSelectionChanged) are here too."""
+    cellDoubleClicked = Signal(int, int)
+    itemSelectionChanged = Signal()
+
+    def __init__(self, headers, numeric=(), stretch=None):
+        super().__init__()
+        self.rows_model = RowModel(headers, numeric, stretch, self)
+        self.setModel(self.rows_model)
+        self.doubleClicked.connect(lambda index: self.cellDoubleClicked.emit(index.row(), index.column()))
+        self.selectionModel().selectionChanged.connect(lambda *_: self.itemSelectionChanged.emit())
+        # Column widths from the first rows only (resizeColumnToContents asks the model for every row it samples).
+        self.verticalHeader().setResizeContentsPrecision(SAMPLED_ROWS)
+        self.horizontalHeader().setResizeContentsPrecision(SAMPLED_ROWS)
+
+    def rowCount(self):  # noqa: N802
+        return self.rows_model.rowCount()
+
+    def columnCount(self):  # noqa: N802
+        return self.rows_model.columnCount()
+
+    def item(self, row, column):
+        if 0 <= row < self.rowCount() and 0 <= column < self.columnCount():
+            return _Cell(self.rows_model, row, column)
+        return None
+
+    def currentRow(self):  # noqa: N802
+        index = self.currentIndex()
+        return index.row() if index.isValid() else -1
+
+    def setCurrentCell(self, row, column):  # noqa: N802
+        self.setCurrentIndex(self.rows_model.index(row, column))
+
+    def setSortingEnabled(self, enabled):  # noqa: N802
+        """As QTableView's, which sorts again at every call with True: only when it is switched on."""
+        if enabled != self.isSortingEnabled():
+            super().setSortingEnabled(enabled)
+
+
 class SortItem(QTableWidgetItem):
     """A cell that sorts by its SORT_ROLE value (numbers as numbers, times as times)."""
 
@@ -1075,13 +1484,17 @@ class SortItem(QTableWidgetItem):
         return super().__lt__(other)
 
 
-def table(headers, multi=False, stretch=None, numeric=(), sortable=True, compact=()):
+def table(headers, multi=False, stretch=None, numeric=(), sortable=True, compact=(), many=False):
     """A read-only table; STRETCH is the column that takes the free width, NUMERIC columns are right-aligned;
     NUMERIC and COMPACT columns are as wide as their content (tables.py fits the columns at every fill()).
     A SORTABLE table keeps the order fill() was given until the user clicks a column header; rows may then
-    be in any order, so pages find what a row stands for with row_key(), never from its position."""
-    widget = QTableWidget(0, len(headers))
-    widget.setHorizontalHeaderLabels(headers)
+    be in any order, so pages find what a row stands for with row_key(), never from its position. MANY: for
+    thousands of rows (a ModelTable: filled in one step, whatever the number)."""
+    if many:
+        widget = ModelTable(headers, numeric, stretch)
+    else:
+        widget = QTableWidget(0, len(headers))
+        widget.setHorizontalHeaderLabels(headers)
     widget.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
     widget.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection if multi
                             else QAbstractItemView.SelectionMode.SingleSelection)
@@ -1114,6 +1527,16 @@ def fill(widget, rows, colors=None, tooltips=None, icons=None, sort=None, keys=N
     keys = list(keys) if keys is not None else ["" if not row or row[0] is None else str(row[0]) for row in rows]
     if len(keys) != len(rows):
         raise ValueError("fill: one key per row")
+    if isinstance(widget, ModelTable):
+        previous = selected_keys(widget)
+        widget.row_keys = keys
+        widget.rows_model.set_rows(RowModel.make_rows(rows, colors, tooltips, icons, sort))
+        if getattr(widget, "sortable", False):
+            widget.setSortingEnabled(True)
+        if previous:
+            select_keys(widget, previous)
+        fit_columns(widget)
+        return
     previous = selected_keys(widget)
     widget.clearSelection()
     sorting = widget.isSortingEnabled()
@@ -1166,6 +1589,13 @@ def append_rows(widget, rows, colors=None, keys=(), drop=None):
     known = getattr(widget, "row_keys", None)
     if known is None or len(known) + len(keys) > 2 * (widget.rowCount() + len(keys)) + 1000:
         return False
+    if isinstance(widget, ModelTable):
+        model = widget.rows_model
+        if drop is not None:
+            model.remove_where(lambda row: drop(known[row.index]))
+        model.append(RowModel.make_rows(rows, colors, first=len(known)))
+        known.extend(keys)
+        return True
     sorting = widget.isSortingEnabled()
     widget.setSortingEnabled(False)
     if drop is not None:
@@ -1213,7 +1643,11 @@ def row_data(widget, row, column=0):
 
 def row_index(widget, row):
     """The index in the ROWS given to fill() of the visual ROW, or None."""
-    index = row_data(widget, row)
+    if isinstance(widget, ModelTable):
+        rows = widget.rows_model.rows
+        index = rows[row].index if 0 <= row < len(rows) else None
+    else:
+        index = row_data(widget, row)
     return index if isinstance(index, int) and 0 <= index < len(getattr(widget, "row_keys", [])) else None
 
 
@@ -1231,6 +1665,8 @@ def selected_keys(widget):
 
 def find_row(widget, key):
     """The visual row whose key is KEY, or -1."""
+    if isinstance(widget, ModelTable):
+        return next((row for row, entry in enumerate(widget.rows_model.rows) if widget.row_keys[entry.index] == key), -1)
     return next((row for row in range(widget.rowCount()) if row_key(widget, row) == key), -1)
 
 
@@ -1241,6 +1677,20 @@ def select_keys(widget, keys):
         return
     multi = widget.selectionMode() != QAbstractItemView.SelectionMode.SingleSelection
     flags = QItemSelectionModel.SelectionFlag
+    if isinstance(widget, ModelTable):  # one selection of row ranges (selecting 20,000 rows one by one takes long)
+        wanted, keys_of, last = set(wanted), widget.row_keys, widget.columnCount() - 1
+        rows = [row for row, entry in enumerate(widget.rows_model.rows) if keys_of[entry.index] in wanted]
+        rows = rows[:1] if not multi else rows
+        if not rows:
+            return
+        selection, start = QItemSelection(), None
+        for position, row in enumerate(rows):
+            start = row if start is None else start
+            if position + 1 == len(rows) or rows[position + 1] != row + 1:
+                selection.select(widget.model().index(start, 0), widget.model().index(row, last))
+                start = None
+        model.select(selection, flags.ClearAndSelect | flags.Rows)
+        return
     first = True
     for row in range(widget.rowCount()):
         if row_key(widget, row) in wanted:

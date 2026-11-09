@@ -12,6 +12,7 @@ import pytest
 QtWidgets = pytest.importorskip("PySide6.QtWidgets", reason="PySide6 is not installed")
 from PySide6 import QtCore  # noqa: E402
 from sandbox_ai_app import backend, theme, widgets  # noqa: E402
+from conftest import read_now  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not os.environ.get("SANDBOX_AI_HOME") and not backend.shutil.which("sandbox-ai"),
                                 reason="set SANDBOX_AI_HOME to a sandbox-ai checkout")
@@ -283,7 +284,7 @@ def test_every_instance_of_the_account_is_listed_with_its_kind(window, env, slee
     assert not [i for i in found if i.kind == "unregistered" and i.agent == "claude"], "dry runs are left out"
     page = window.sandboxes
     window.set_project(one)
-    page.refresh()
+    read_now(page)
     kinds = {widgets.row_key(page.table, r): page.table.item(r, 0).text() for r in range(page.table.rowCount())}
     assert kinds["run:claude-abc"] == "Run" and kinds["session:work"] == "Session"
     assert kinds["mcp:demo"] == "MCP server" and kinds[f"pid:{unregistered.pid}"] == "Not registered"
@@ -308,7 +309,7 @@ def test_buttons_follow_the_kind_and_say_why_not(window, env, sleepers):
     fake_run(env, "claude-abc", folder)
     fake_session(env, "work", folder)
     loose = sleepers("/x/agent_sandbox.py", "claude", "--workspace", folder)
-    page.refresh()
+    read_now(page)
     page.table.selectRow(widgets.find_row(page.table, "run:claude-abc"))
     live_mcp = [page.run_named[key] for key in ("add-mcp", "remove-mcp")]
     assert all(b.isEnabled() for b in page.run_buttons if b not in live_mcp)
@@ -335,7 +336,7 @@ def test_stop_runs_the_command_of_its_kind(window, env, monkeypatch, sleepers, w
     calls = []
     monkeypatch.setattr(window.sai, "call", lambda *args, timeout=120, input=None: calls.append(args) or (0, "", ""))
     page.stoppable = True
-    page.refresh()
+    read_now(page)
     page.table.selectRow(widgets.find_row(page.table, "run:claude-abc"))
     page.stop()
     assert wait(lambda: ("net", "stop", "claude-abc") in calls, 10)
@@ -353,7 +354,7 @@ def test_stop_runs_the_command_of_its_kind(window, env, monkeypatch, sleepers, w
     data.update(pid=supervisor.pid, pid_start=window.sai.launcher.process_start(supervisor.pid))
     (session_dir / "session.json").write_text(json.dumps(data))
     assert wait(lambda: not widgets.busy(page), 10)  # the stop before has finished (its button waits until then)
-    page.refresh()
+    read_now(page)
     page.table.selectRow(widgets.find_row(page.table, "session:work"))
     assert page.current().state == "running" and page.stop_button.isEnabled(), page.stop_button.toolTip()
     page.stop()
@@ -372,7 +373,7 @@ def test_a_foreground_start_has_nothing_to_attach_to(window, env, sleepers):
     (session_dir / "session.json").write_text(json.dumps(data))
     found, _ = window.sai.instances()
     assert [(i.key, i.foreground) for i in found if i.kind == "session"] == [("session:work", True)]
-    page.refresh()
+    read_now(page)
     page.table.selectRow(widgets.find_row(page.table, "session:work"))
     if page.current().state != "running":
         pytest.skip("this sandbox-ai does not see the fake supervisor as running")

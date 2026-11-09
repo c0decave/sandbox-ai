@@ -1154,7 +1154,7 @@ class ImagesPage(QWidget):
         target = self.agent()
         self.task.run(self.run_argv("images", "history", *([target] if target else [])),
                       lambda status, out, err: self.history_shown(status, out, err, target),
-                      tr("Reading the history…"), self.more_button)
+                      tr("Reading the history…"), self.more_button, work=False)
 
     def history_shown(self, status, out, err, target):
         if status == -2:
@@ -1174,7 +1174,7 @@ class ImagesPage(QWidget):
         stdin = fragment.encode() if fragment.strip() else None
         argv = self.run_argv("images", "check", self.target, *(["--fragment", "-"] if stdin else []), "--json")
         self.task.run(argv, self.checked, tr("Checking the extension of {name}…", name=self.target),
-                      self.more_button, input=stdin)
+                      self.more_button, input=stdin, work=False)
 
     def checked(self, status, out, err):
         if status == -2:

@@ -14,6 +14,7 @@ QtWidgets = pytest.importorskip("PySide6.QtWidgets", reason="PySide6 is not inst
 from PySide6 import QtCore, QtGui  # noqa: E402
 from PySide6.QtCore import Qt  # noqa: E402
 from sandbox_ai_app import backend, i18n, theme, widgets  # noqa: E402
+from conftest import read_now, settle_files  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not os.environ.get("SANDBOX_AI_HOME") and not backend.shutil.which("sandbox-ai"),
                                 reason="set SANDBOX_AI_HOME to a sandbox-ai checkout")
@@ -290,11 +291,12 @@ def test_connections_follow_reads_at_its_interval_and_appends_what_came(window, 
     assert page.record_of(303) == {"time": "half a line"}
     assert page.record_of(widgets.selected_rows(page.table)[0])["time"] == "n1", "the selection stays"
     page.filter.setText("n1")
-    assert page.table.rowCount() == 1, "a filter change fills the table again"
+    assert page.table.rowCount() == 304, "typing filters after a pause (FILTER_PAUSE), not at every key"
+    assert wait(lambda: page.table.rowCount() == 1, 5), "a filter change fills the table again"
 
 
 def test_sandboxes_and_system_pages_build(window, wait):
-    window.sandboxes.refresh()
+    read_now(window.sandboxes)
     assert window.sandboxes.table.rowCount() == 0
     window.mcp.refresh()  # read in the background
     assert wait(lambda: window.mcp.servers.rowCount() >= 1, 15)
@@ -341,7 +343,7 @@ def test_sandboxes_lists_and_manages_the_other_hosts_starts(window, wait, monkey
     assert wait(lambda: ("ct1", ("pause", "web")) in ran, 15)
     page.stop()
     assert wait(lambda: ("ct1", ("stop", "web")) in ran, 15)
-    page.refresh()  # this account's own read again: the other hosts' rows stay
+    read_now(page)  # this account's own read again: the other hosts' rows stay
     assert page.table.rowCount() == 1 and page.table.item(0, 8).text() == "ct1"
 
 
@@ -571,6 +573,7 @@ def copy(page, wait, start):
     """Start a copy of the Files page and wait for its report."""
     assert start() is True
     assert wait(lambda: not page.task.running, 60)
+    settle_files(page)  # (the panes are listed again, in a thread)
     return page.last_report
 
 
@@ -593,6 +596,7 @@ def test_files_page_browses_copies_and_never_follows_links(window, env, tmp_path
     assert titles[0].startswith("Running sandbox claude-abc: workspace")
     assert any(t.startswith(("Current project", "Folder the app was started in")) for t in titles)
     left.roots.setCurrentIndex(0)
+    settle_files(page)
     names = {left.table.item(r, 0).text(): left.table.item(r, 1).text() for r in range(left.table.rowCount())}
     assert names == {"src": "folder", "notes.txt": "file", "outside": "symbolic link"}
     link_row = row_of(left.table, "outside")
@@ -600,11 +604,14 @@ def test_files_page_browses_copies_and_never_follows_links(window, env, tmp_path
     left.open_row(link_row)
     assert "not followed" in page.message.text() and left.relative == ""
     left.open_row(row_of(left.table, "src"))
+    settle_files(page)
     assert left.relative == "src" and left.table.item(0, 0).text() == "main.py"
     left.up()
+    settle_files(page)
     assert left.relative == ""
     # This machine's pane shows the sandbox's folder too: its link is not followed there either.
     right.go(host_relative(os.path.realpath(project)))
+    settle_files(page)
     assert right.untrusted()
     page.message.clear()
     right.open_row(row_of(right.table, "outside"))
@@ -613,6 +620,7 @@ def test_files_page_browses_copies_and_never_follows_links(window, env, tmp_path
     host = tmp_path / "download"
     host.mkdir()
     right.go(host_relative(os.path.realpath(host)))
+    settle_files(page)
     assert right.path_text() == os.path.realpath(host) and not right.untrusted()
     left.select(["src", "outside", "notes.txt"])
     assert {e.name for e in left.chosen()} == {"src", "outside", "notes.txt"}
@@ -626,7 +634,9 @@ def test_files_page_browses_copies_and_never_follows_links(window, env, tmp_path
     upload = outbox / "upload.txt"
     upload.write_text("from the host")
     right.go(host_relative(os.path.realpath(outbox)))
+    settle_files(page)
     left.go("src")
+    settle_files(page)
     right.select(["upload.txt"])
     copy(page, wait, lambda: page.copy_selected(right))
     assert (project / "src" / "upload.txt").read_text() == "from the host"
@@ -643,6 +653,7 @@ def test_files_page_browses_copies_and_never_follows_links(window, env, tmp_path
         left.go("../..")
     # Sorted by name (descending), rows still stand for their own entries.
     left.go("")
+    settle_files(page)
     left.table.sortByColumn(0, Qt.SortOrder.DescendingOrder)
     assert [left.table.item(r, 0).text() for r in range(3)] == ["src", "outside", "notes.txt"]
     assert [e.name for e in left.entries][1] == "notes.txt"
@@ -666,6 +677,7 @@ def test_files_page_warns_about_copied_files_that_tools_run(window, env, tmp_pat
     page.refresh_roots()
     assert wait(lambda: not page.roots_reading)
     page.roots.setCurrentIndex(0)
+    settle_files(page)
     host = tmp_path / "out"
     host.mkdir()
     report = copy(page, wait, lambda: page.download([e for e in page.entries if e.name == "repo"], host))
@@ -692,13 +704,17 @@ def test_files_selection_does_not_follow_a_name_into_a_subfolder(window, env, wa
     page.refresh_roots()
     assert wait(lambda: not page.roots_reading)
     page.roots.setCurrentIndex(0)
+    settle_files(page)
     page.table.selectRow(row_of(page.table, "src"))
     page.open_row(row_of(page.table, "src"))
+    settle_files(page)
     assert page.relative == "src" and page.chosen() == [], "src/src must not be selected (and copied) by its name"
     page.table.selectRow(row_of(page.table, "other.txt"))
     page.list()  # a refresh of the same folder keeps the selection
+    settle_files(page)
     assert [e.name for e in page.chosen()] == ["other.txt"]
     page.up()
+    settle_files(page)
     assert page.chosen() == []
 
 
@@ -1005,8 +1021,8 @@ def test_terminal_tabs_or_the_terminal_window(window, env, monkeypatch, tmp_path
     window.terminals.web = web
     window.launch.agent.setCurrentText("codex")
     count = len(window.started)
-    window.launch.start_in_app()
-    assert len(window.started) == count and window.terminals.tabs.count() == 1
+    window.launch.start_in_app()  # the tab follows Chromium's sandbox check, in a thread
+    assert wait(lambda: window.terminals.tabs.count() == 1, 30) and len(window.started) == count
     view = window.terminals.views()[0]
     assert view.argv[-4:] == ["codex", "--workspace", str(env), "--workspaces-as-given"]
     assert window.pages.currentWidget() is window.terminals
@@ -1016,10 +1032,11 @@ def test_terminal_tabs_or_the_terminal_window(window, env, monkeypatch, tmp_path
     (session / "home").mkdir(parents=True)
     (session / "session.json").write_text(json.dumps({"agent": "claude", "options": [], "backend": "podman",
                                                       "workspace": str(env), "cwd": str(env), "created": "x"}))
-    window.sandboxes.refresh()
+    read_now(window.sandboxes)
     window.sandboxes.table.selectRow(widgets.find_row(window.sandboxes.table, "session:work"))
     window.sandboxes.session("attach-app")
-    assert window.terminals.tabs.count() == 2 and window.terminals.views()[1].argv[-3:] == ["session", "attach", "work"]
+    assert wait(lambda: window.terminals.tabs.count() == 2, 30)
+    assert window.terminals.views()[1].argv[-3:] == ["session", "attach", "work"]
     # Commands such as builds follow the setting.
     window.sai.save_setting("terminal", "window")
     window.system.tool(("build", "all"))
@@ -1053,7 +1070,7 @@ def test_slow_commands_do_not_block_the_window(window, env, monkeypatch, wait):
     window.system.check()
     window.launch.dry_run()
     window.mcp.load_catalog()
-    window.sandboxes.refresh()
+    read_now(window.sandboxes)
     window.sandboxes.table.selectRow(0)
     window.sandboxes.show_allowed()
     assert time.monotonic() - began < 3, "the commands run in the background"
@@ -1074,19 +1091,93 @@ def test_slow_commands_do_not_block_the_window(window, env, monkeypatch, wait):
     assert "Plan (dry run)" in titles and any(t.startswith("Privacy check") for t in titles) and "claude-abc" in titles
 
 
-def test_background_timeout_frees_the_button_and_drops_the_late_result(qapp, wait):
+def test_background_timeout_answers_at_once_but_keeps_the_button_until_the_thread_ends(qapp, wait):
+    """A timeout tells DONE at once; the thread cannot be stopped, so its button stays disabled (and its owner busy)
+    until it really ends - a second click meanwhile would run the same action twice. The late result is dropped."""
     import threading
     release, results = threading.Event(), []
     button = QtWidgets.QPushButton("x")
     owner = QtWidgets.QWidget()
-    widgets.background(lambda: release.wait(30) and "late", owner=owner, source=button, timeout=0.2,
-                       done=lambda result, error: results.append((result, error)))
-    assert not button.isEnabled() and widgets.busy(owner)
-    assert wait(lambda: results, 10)
-    assert results[0][0] is None and isinstance(results[0][1], TimeoutError)
-    assert button.isEnabled() and not widgets.busy(owner)
-    release.set()
-    assert not wait(lambda: len(results) > 1, 1), "the late result is dropped, done runs once"
+    try:
+        widgets.background(lambda: release.wait(30) and "late", owner=owner, source=button, timeout=0.2, work=True,
+                           done=lambda result, error: results.append((result, error)))
+        assert not button.isEnabled() and widgets.busy(owner) and widgets.working(owner)
+        assert wait(lambda: results, 10)
+        assert results[0][0] is None and isinstance(results[0][1], TimeoutError)
+        assert not button.isEnabled() and widgets.busy(owner), "the thread still runs"
+    finally:
+        release.set()
+    assert wait(lambda: button.isEnabled() and not widgets.busy(owner) and not widgets.working(owner), 10)
+    assert not wait(lambda: len(results) > 1, 0.5), "the late result is dropped, done runs once"
+
+
+def test_a_button_shared_by_two_calls_works_again_when_both_ended(qapp, wait):
+    import threading
+    first, second, done = threading.Event(), threading.Event(), []
+    button = QtWidgets.QPushButton("x")
+    disabled = QtWidgets.QPushButton("off")
+    disabled.setEnabled(False)  # (nothing selected, say): stays as it was
+    try:
+        for event in (first, second):
+            widgets.background(lambda e=event: e.wait(30), source=[button, disabled], done=lambda *r: done.append(r))
+        first.set()
+        assert wait(lambda: len(done) == 1, 10) and not button.isEnabled(), "the second call still runs"
+    finally:
+        first.set()
+        second.set()
+    assert wait(lambda: len(done) == 2, 10) and button.isEnabled() and not disabled.isEnabled()
+
+
+def test_canonical_options_build_the_launchers_parser_once(monkeypatch):
+    """A preset catalogue asks for the canonical form of every preset's options (the gallery: about 50); the launcher
+    built its whole option parser at each call (0.6 s for the gallery). Remembered per option list, the parser once."""
+    sai = backend.SandboxAI()
+    launcher, built = sai.launcher, []
+    real = launcher.build_parser
+    monkeypatch.setattr(launcher, "build_parser", lambda: built.append(1) or real())
+    first, second = ["-w", "/srv/a", "--allow-github"], ["--allow-pypi", "--workspace=/srv/b"]
+    found = [sai.canonical_options(first), sai.canonical_options(second), sai.canonical_options(first)]
+    assert len(built) == 1, "the parser is built once"
+    assert found == [launcher.canonical_options(first), launcher.canonical_options(second),
+                     launcher.canonical_options(first)], "the same as the launcher's own"
+    assert launcher.build_parser is not real and len(built) == 4, "the launcher's own is left as it was"
+
+
+def test_a_worker_that_exits_reports_back(qapp, wait):
+    """SystemExit (argparse, sys.exit in a module) in a worker: an error for DONE, not a thread that ends silently."""
+    import sys
+    results, owner = [], QtWidgets.QWidget()
+    widgets.background(lambda: sys.exit(2), owner=owner, work=True, done=lambda r, e: results.append(e))
+    assert wait(lambda: results, 10) and isinstance(results[0], SystemExit) and not widgets.busy(owner)
+
+
+def test_background_calls_leave_nothing_alive(qapp, wait):
+    """A page that polls makes thousands of calls a day: once delivered, a call, its closures and what they hold are
+    gone (a connected closure that refers to its call used to keep both alive for good)."""
+    import gc
+    import weakref
+    owner, button, done, refs = QtWidgets.QWidget(), QtWidgets.QPushButton("x"), [], []
+
+    class Held:  # what a done callback refers to (a page's data, say)
+        pass
+    held = []
+    for index in range(1000):
+        thing = Held()
+        held.append(weakref.ref(thing))
+        call = widgets.background(lambda i=index: i, owner=owner, source=button, timeout=30,
+                                  done=lambda result, error, t=thing: done.append(result))
+        refs.append(weakref.ref(call))
+        del call, thing
+        if index % 100 == 99:
+            assert wait(lambda: len(done) > index - 50, 10)
+    assert wait(lambda: len(done) == 1000, 30)
+    loop = QtCore.QEventLoop()  # deleteLater() runs in an event loop
+    QtCore.QTimer.singleShot(100, loop.quit)
+    loop.exec()
+    gc.collect()
+    assert sum(1 for ref in refs if ref() is not None) == 0, "ThreadCalls still alive"
+    assert sum(1 for ref in held if ref() is not None) == 0, "what the callbacks held is still alive"
+    assert not widgets.busy(owner) and button.isEnabled() and not widgets._keeper().children()
 
 
 def test_an_abandoned_call_emits_nothing(qapp, wait):
@@ -1105,7 +1196,8 @@ def test_closing_while_work_runs_asks_and_stops_copies(window, monkeypatch, wait
     import threading
     from PySide6.QtGui import QCloseEvent
     release = threading.Event()
-    widgets.background(lambda: release.wait(30), owner=window.system, done=lambda *r: None)
+    widgets.background(lambda: release.wait(30), owner=window.system, work=True, done=lambda *r: None)
+    widgets.background(lambda: release.wait(30), owner=window.kits, done=lambda *r: None)  # a read: never asked about
     stopped = []
 
     def copy(cancelled):  # a long copy: runs until it is cancelled
@@ -1125,8 +1217,10 @@ def test_closing_while_work_runs_asks_and_stops_copies(window, monkeypatch, wait
     release.set()
     event = QCloseEvent()
     window.closeEvent(event)
-    assert event.isAccepted() and stopped == [True], "the copy was cancelled and waited for"
-    assert widgets.ThreadCall.running() == []
+    # Stopped in a thread (the window keeps painting and says so), then closed for good.
+    assert not event.isAccepted() and not window.isEnabled() and "Stopping" in window.busy_label.text()
+    assert wait(lambda: window.finished, 10) and stopped == [True], "the copy was cancelled and waited for"
+    assert widgets.ThreadCall.running(work_only=True) == []
 
 
 def test_pages_scroll_instead_of_squeezing_when_the_window_is_low(window, qapp):
@@ -1361,7 +1455,7 @@ def test_sigterm_quits_without_questions(window, monkeypatch):
     import threading
     from PySide6.QtGui import QCloseEvent
     release = threading.Event()
-    widgets.background(lambda: release.wait(30), owner=window.system, done=lambda *r: None)
+    widgets.background(lambda: release.wait(30), owner=window.system, work=True, done=lambda *r: None)
     quit_called = []
     monkeypatch.setattr(QtWidgets.QApplication, "quit", staticmethod(lambda: quit_called.append(True)))
     monkeypatch.setattr("sandbox_ai_app.ui.QUIT_WAIT", 0.5)
@@ -1680,7 +1774,7 @@ def test_devices_and_limits_of_a_running_sandbox(window, env, monkeypatch, wait)
     run = fake_run(env)
     (run / "devices.json").write_text(json.dumps(["/dev/video0"]))
     page = window.sandboxes
-    page.refresh()
+    read_now(page)
     page.table.selectRow(0)
     if not (window.sai.directory / "devices.py").is_file():
         pytest.skip("this sandbox-ai has no devices command")
@@ -1737,7 +1831,7 @@ def test_workspaces_of_a_running_sandbox(window, env, monkeypatch, wait):
     entries = [{"host": "/home/me/project", "sandbox": "/work", "mode": "rw", "source": "start"},
                {"host": "/home/me/docs", "sandbox": "/workspaces/docs", "mode": "ro", "source": "added"}]
     monkeypatch.setattr(window.sai, "workspaces", lambda run: entries)
-    page.refresh()
+    read_now(page)
     page.table.selectRow(0)
     assert wait(lambda: "/workspaces/docs" in page.workspaces_label.text(), 20), page.workspaces_label.text()
     assert "/work " not in page.workspaces_label.text(), "only the added ones"
@@ -1873,12 +1967,13 @@ def test_the_navigation_folds_and_shrinks_to_save_room(window):
 def test_a_start_in_the_apps_terminal_opens_one_tab_not_two(window, env, monkeypatch, tmp_path):
     """Regression: a start opened its terminal tab ("claude") and, once its run showed up, a second tab for the
     same sandbox (claude-PROJECT-xxxx, auto_tabs). A run started elsewhere still gets its tab."""
+    read_now(window.sandboxes)  # the first read (in the background): what runs then gets no tab of its own
     from sandbox_ai_app import terminal, ui
     project = tmp_path / "not-public"
     project.mkdir()
     opened = []
     monkeypatch.setattr(terminal, "available", lambda: (True, ""))
-    monkeypatch.setattr(window.terminals, "open", lambda argv, title, directory=None: opened.append(title) or True)
+    monkeypatch.setattr(window.terminals, "open", lambda argv, title, directory=None, done=None: (opened.append(title), done(True)))
     real_setting = backend.setting
     monkeypatch.setattr(backend, "setting", lambda name, *a, **k: True if name == "auto_tabs" else real_setting(name, *a, **k))
     assert ui.started_agent(window.sai.launch_argv("claude", ["--allow-pypi"])) == "claude"
@@ -1941,11 +2036,12 @@ def test_a_theme_from_its_combo_box_is_applied_after_the_event_and_keeps_the_sty
 def test_a_session_started_in_the_app_leaves_the_tab_of_a_run_started_elsewhere(window, env, monkeypatch, tmp_path):
     """Regression: a session started in the app's terminal counted as the app's own one-off run, so the next run of
     the same agent and project started on the command line (within two minutes) got no tab."""
+    read_now(window.sandboxes)  # the first read (in the background): what runs then gets no tab of its own
     from sandbox_ai_app import terminal
     project = tmp_path / "proj"
     project.mkdir()
     monkeypatch.setattr(terminal, "available", lambda: (True, ""))
-    monkeypatch.setattr(window.terminals, "open", lambda argv, title, directory=None: True)  # a tab
+    monkeypatch.setattr(window.terminals, "open", lambda argv, title, directory=None, done=None: done(True))  # a tab
     real_setting = backend.setting
     monkeypatch.setattr(backend, "setting", lambda name, *a, **k: True if name == "auto_tabs" else real_setting(name, *a, **k))
     window.in_terminal(window.sai.launch_argv("claude", [], session="work"), "claude (work)", embedded=True,
@@ -2312,7 +2408,7 @@ def test_resuming_a_stopped_kept_start_shows_what_changed_in_its_home(window, mo
     monkeypatch.setattr(window.sai, "review_home", review_home)
     monkeypatch.setattr(window.sai, "call", lambda *args, timeout=120, input=None: calls.append(args) or (0, "", ""))
     monkeypatch.setattr(window.sai, "host_run", lambda name, *args, timeout=120: ran.append((name, args)) or (0, "", ""))
-    page.refresh()
+    read_now(page)
     page.refresh_remote()
     assert wait(lambda: page.table.rowCount() == 2, 15)
     page.table.selectRow(widgets.find_row(page.table, "session:work"))
@@ -2349,7 +2445,7 @@ def test_deleting_a_session_asks_with_cancel_as_the_default(window, monkeypatch,
     monkeypatch.setattr(window.sai, "instances", lambda: ([stopped], []))
     calls = []
     monkeypatch.setattr(window.sai, "call", lambda *args, timeout=120, input=None: calls.append(args) or (0, "", ""))
-    page.refresh()
+    read_now(page)
     page.table.selectRow(0)
     monkeypatch.setattr(widgets, "AUTO_ANSWER", False)
     page.session("delete")
@@ -2812,7 +2908,7 @@ def test_rename_history_clean_up_and_untaint(window, monkeypatch, wait):
                 "leftovers": [], "histories": list(histories), "skipped": [], "damaged": [], "dry_run": dry_run,
                 "days": 30}
     monkeypatch.setattr(window.sai, "collect", collect)
-    page.refresh()
+    read_now(page)
     page.table.selectRow(0)
     monkeypatch.setattr(QtWidgets.QInputDialog, "getText", lambda *a, **k: ("work-2", True))
     page.rename()
@@ -2861,7 +2957,7 @@ def test_ended_starts_and_the_asking_marker(window, env, monkeypatch, wait):
     run = fake_run(env)
     ended = backend.Instance("mcp", "ended:local:fetch", "fetch", mcp="fetch", state="stopped", host="local")
     monkeypatch.setattr(window.sai, "ended_starts", lambda name="local": [ended])
-    page.refresh()
+    read_now(page)
     rows = page.table.rowCount()
     page.show_ended.setChecked(True)
     assert wait(lambda: page.table.rowCount() == rows + 1, 15)
@@ -2906,7 +3002,7 @@ def sandboxes_tree(window, monkeypatch):
     monkeypatch.setattr(window.sai, "host_instances", lambda name, timeout=60: [web, docs] if name == "ct1" else (
         _ for _ in ()).throw(ValueError("ssh: connection timed out")))
     page = window.sandboxes
-    page.refresh()
+    read_now(page)
     page.refresh_remote()
     return page
 
@@ -2985,7 +3081,7 @@ def test_the_sandboxes_tree_keeps_its_folds_and_selection_across_reads(window, m
     work.setExpanded(True)
     tree_item(page, "ct1").setExpanded(False)
     page.table.select_item(work.child(2))  # a part of a start: kept selected too
-    page.refresh()
+    read_now(page)
     page.refresh_remote()
     assert wait(lambda: page.remote_reading is None, 15)
     assert tree_item(page, "local", "session:work").isExpanded() and not tree_item(page, "ct1").isExpanded()
@@ -3002,16 +3098,16 @@ def test_the_sandboxes_tree_keeps_its_folds_and_selection_across_reads(window, m
     assert tree_item(page, "ct1").isExpanded(), "selecting a start opens its host"
     page.refresh_remote()
     assert wait(lambda: page.remote_reading is None, 15)
-    page.refresh()
+    read_now(page)
     assert page.current().key == backend.remote_key("ct1", "web")
     # View › Fold all / Unfold all act on the tree, and are kept.
     window.show_page("sandboxes")
     window.fold_all(True)
-    page.refresh()
+    read_now(page)
     tops = [page.table.topLevelItem(i) for i in range(page.table.topLevelItemCount())]
     assert not any(t.isExpanded() for t in tops) and window.state.data["sandboxes-groups"]["hosts"] is False
     window.fold_all(False)
-    page.refresh()
+    read_now(page)
     assert all(item.isExpanded() for item in page.table.every_item() if item.childCount())
     assert window.state.data["sandboxes-groups"] == {"open": {}, "hosts": True, "starts": True}
     assert page.current().key == backend.remote_key("ct1", "web")

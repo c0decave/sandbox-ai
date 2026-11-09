@@ -118,7 +118,7 @@ class IdentitiesBox(QGroupBox):
             if host == LOCAL:
                 return self.sai.save_identity(target, old, new)
             return self.sai.host_save_identity(host, target, old, new)
-        background(work, owner=self, timeout=300, source=self.buttons(),
+        background(work, owner=self, work=True, timeout=300, source=self.buttons(),
                    done=lambda result, error: self.saved(target, result, error))
 
     def saved(self, name, result, error):
@@ -138,7 +138,7 @@ class IdentitiesBox(QGroupBox):
             if host == LOCAL:
                 return self.sai.call("identities", "remove", "--", name, timeout=60)
             return self.sai.host_run(host, "identities", "remove", "--", name, timeout=90)
-        background(work, owner=self, timeout=120,
+        background(work, owner=self, work=True, timeout=120,
                    done=lambda result, error: self.saved(name, (result[0], result[1] + result[2]) if error is None
                                                          else (1, str(error)), None))
 
@@ -148,7 +148,7 @@ class IdentitiesBox(QGroupBox):
         if name is not None and not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", name):
             return
         background(lambda: self.sai.host_run(host, "identities", "check", *(["--", name] if name else []), timeout=90),
-                   owner=self, source=self.buttons(), timeout=120,
+                   owner=self, work=True, source=self.buttons(), timeout=120,
                    done=lambda result, error: self.checked(name, result, error))
 
     def checked(self, name, result, error):

@@ -66,6 +66,8 @@ def pytest_make_collect_report(collector):
 def qapp():
     QtWidgets = pytest.importorskip("PySide6.QtWidgets", reason="PySide6 is not installed")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    from sandbox_ai_app import widgets
+    widgets.collect_on_gui_thread()  # as the app does: the cycle collector never deletes a Qt object in a worker
     yield app
     if "sandbox_ai_app.terminal" in sys.modules:  # web pages before their profile, or Chromium aborts
         sys.modules["sandbox_ai_app.terminal"].shutdown()
@@ -122,3 +124,37 @@ def pytest_unconfigure(config):
         sys.stderr.flush()
         os._exit(config.qt_exit_status)
 
+
+
+def read_now(page, timeout=60):
+    """The Sandboxes page's read (in the background in the app, the first one too) done and shown at once: after the
+    read already running, if any, has come back (its late result would otherwise replace this one)."""
+    import time
+    from PySide6 import QtWidgets
+    deadline = time.monotonic() + timeout
+    while page.reading is not None and time.monotonic() < deadline:
+        QtWidgets.QApplication.processEvents()
+        time.sleep(0.005)
+    try:
+        result, error = page.sai.instances(), None
+    except Exception as exc:  # noqa: BLE001 - shown on the page, as the app does
+        result, error = None, exc
+    page.apply(result, error)
+
+
+def open_tab(page, argv, title, cwd=None, timeout=30):
+    """TerminalsPage.open(), waited for: the tab (or None when Chromium's sandbox cannot start now). A new tab
+    waits for Chromium's sandbox check, which runs in a thread."""
+    from PySide6 import QtWidgets
+    got = []
+    page.open(argv, title, cwd, done=got.append)
+    assert wait_until(QtWidgets.QApplication.instance(), lambda: got, timeout), "the terminal tab never came"
+    return got[0]
+
+
+def settle_files(page, timeout=30):
+    """The Files page lists its folders in a thread: until every listing on its way is shown."""
+    from PySide6 import QtWidgets
+    panes = [pane for pane in (getattr(page, "left", None), getattr(page, "right", None)) if pane is not None]
+    assert wait_until(QtWidgets.QApplication.instance(), lambda: all(pane.listing is None for pane in panes or [page]),
+                      timeout), "a folder's listing never came"

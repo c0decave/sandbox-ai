@@ -42,10 +42,11 @@ from . import wizard_llm as WL
 from .widgets import (
     MONO, AsyncCommand, MessageText, ThreadCall, append_rows, ask_first, background, busy, fill, find_row, fit_columns,
     flow, inform, local_time, outcome, plain_label, row_key, safe_tooltip, selected, selected_rows, set_enabled,
-    show_text, table, warn, shown_as_text, tame_combos,
+    show_text, table, warn, shown_as_text, tame_combos, working,
 )
 
 CONNECTIONS_LIMIT = 5000  # records the Connections page keeps (backend.read_connections reads as many)
+FILTER_PAUSE = 200  # ms after the last key before a filter of the Connections page is applied
 REMOTE_LOG_SECONDS = 5  # between two reads of another host's connections while the Connections page follows
 STATE_WAIT = 30  # seconds a look at a project folder (its state, whether it exists) may take
 QUIT_WAIT = 10  # seconds the window waits, when it is closed, for the work still running
@@ -748,14 +749,24 @@ class LaunchPage(QWidget):
 
     def refresh_presets(self):
         """The preset chooser: the chosen host's catalogue (presets.catalogue), the same as the gallery's and the
-        wizard's. Another host's sandbox-ai presets are read in the background (meanwhile what it said last)."""
-        from .preset_gallery import fill_preset_combo
+        wizard's, made in the background (each of sandbox-ai's presets is checked against its options: tenths of a
+        second, at the first show of the page too). Another host's sandbox-ai presets are read in the background as
+        well (meanwhile what it said last)."""
         host = self.host()
         self.presets_host = host
-        try:
-            self.preset_catalogue = PR.catalogue(self.sai, host)
-        except Exception as exc:  # noqa: BLE001 - a broken store of yours: the app's own still offered
-            self.preset_catalogue = PR.catalogue(self.sai, host, mine=[], problems=[str(exc)])
+        self.presets_token = token = getattr(self, "presets_token", 0) + 1
+
+        def make():
+            try:
+                return PR.catalogue(self.sai, host)
+            except Exception as exc:  # noqa: BLE001 - a broken store of yours: the app's own still offered
+                return PR.catalogue(self.sai, host, mine=[], problems=[str(exc)])
+        background(make, timeout=90, done=lambda catalogue, error: alive(self) and token == self.presets_token
+                   and error is None and self.show_presets(host, catalogue))
+
+    def show_presets(self, host, catalogue):
+        from .preset_gallery import fill_preset_combo
+        self.preset_catalogue = catalogue
         current = self.preset_choice.currentData()
         fill_preset_combo(self.preset_choice, self.preset_catalogue, current)
         self.preset_choice.insertItem(0, tr("(none)"), "")
@@ -882,7 +893,7 @@ class LaunchPage(QWidget):
             board = PR.build(self.sai, preset, None, agent=self.agent.currentText(), values=values)
             kept = self.form.values().get("--workspace") or []
             parsed, _ = backend.values_from_argv(self.options, B.to_argv(self.sai, board, workspaces=False),
-                                                 self.sai.launcher.canonical_options)
+                                                 backend.canonical_of(self.sai))
             parsed["--workspace"] = kept
             self.form.set_values(parsed)
             left = [marker for marker, _ in B.placeholders(board)]
@@ -1099,7 +1110,7 @@ class LaunchPage(QWidget):
             saved.get("options"), list) else []
         arguments = [str(a) for a in saved.get("arguments", []) if isinstance(a, str)] if isinstance(
             saved.get("arguments"), list) else []
-        values, _ = backend.values_from_argv(self.options, options, self.sai.launcher.canonical_options)
+        values, _ = backend.values_from_argv(self.options, options, backend.canonical_of(self.sai))
         values["--workspace"] = self.form.values().get("--workspace") or []
         self.form.set_values(values)
         self.agent_args.setText(shlex.join(scrub_arguments(arguments)))
@@ -1207,7 +1218,7 @@ class LaunchPage(QWidget):
         self.profile.addItems(sorted(self.sai.profiles()))
 
     def set_from_argv(self, agent, argv, agent_args=()):
-        values, unknown = backend.values_from_argv(self.options, argv, self.sai.launcher.canonical_options)
+        values, unknown = backend.values_from_argv(self.options, argv, backend.canonical_of(self.sai))
         self.agent.setCurrentText(agent)
         self.form.set_values(values)
         self.agent_args.setText(shlex.join(agent_args))
@@ -1389,7 +1400,8 @@ class LaunchPage(QWidget):
         # project-trust), Cancel the default.
         if ask_first(self, "project-trust", tr("Write and trust"), question, tr("Write and trust"),
                      details=details):  # the folder may be slow (a network file system): in a thread
-            background(self.sai.write_project, main, document, owner=self, timeout=60, done=self.project_written)
+            background(self.sai.write_project, main, document, owner=self, work=True, timeout=60,
+                       done=self.project_written)
 
     def project_written(self, path, error):
         if error is not None:
@@ -1767,6 +1779,8 @@ DEMO_PORT = 4000  # the emulated device's port unless --port says otherwise (san
 STOP_WAIT = 30  # seconds sandbox-ai stop waits for a start to end unless --wait says otherwise
 REMOTE_SECONDS = 60  # between two looks at the other hosts' starts (over SSH) while the page is hidden
 REMOTE_SHOWN_SECONDS = 10  # the same while the page is shown: the fleet at a glance
+HIDDEN_EVERY = 4  # the Sandboxes page hidden: this account's starts are read every 4th tick of sandboxes_interval
+REMOTE_BACKOFF = 300  # seconds at most between two looks at a host that does not answer (doubled each time)
 START_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}"  # a start's name as sandbox-ai takes it (rename NEW)
 ENDED_STATES = ("stopped", "ended")
 ACTIVE_STATES = ("running", "paused", "starting")
@@ -1895,6 +1909,7 @@ class SandboxesPage(QWidget):
         self.sai, self.terminal = sai, terminal
         self.project, self.instances, self.problems, self.stoppable = None, {}, [], None
         self.reading, self.read_again, self.added, self.devices_token = None, False, [], 0
+        self.loaded = False  # the first read has come back (until then the summary says it reads)
         self.added_workspaces = []
         # (host, run) of the starts with an open question (the Approvals page's poller): marked "asking".
         self.asking = set()
@@ -2042,9 +2057,13 @@ class SandboxesPage(QWidget):
         boxes.addWidget(session_box, 2)
         boxes.addWidget(run_box, 5)
         layout.addLayout(boxes)
+        # This account's starts every sandboxes_interval while the page is shown; hidden, every HIDDEN_EVERY-th time
+        # (the window's tabs and counts follow them); with the window in the tray or minimised, not at all (read again
+        # when it is shown).
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self.refresh_soon)
+        self.timer.timeout.connect(self.tick)
         self.timer.start(backend.setting("sandboxes_interval"))
+        self.ticks = 0
         # The other hosts' starts (sandbox-ai hosts), over SSH: read now and then in the background, never on the
         # GUI thread, each host apart (a slow one holds up no other); a host that does not answer is said in the
         # summary and keeps its last rows, greyed out with when it was seen last, their buttons off.
@@ -2055,32 +2074,48 @@ class SandboxesPage(QWidget):
         self.remote, self.remote_problems, self.remote_flight, self.remote_again = {}, {}, {}, set()
         self.remote_seen, self.hosts_problem, self.remote_names = {}, None, []
         self.hosts_reading, self.hosts_again, self.ended_flight, self.flights = False, False, {}, 0
+        self.hosts_polled = False
         self.remote_timer = QTimer(self)
-        self.remote_timer.timeout.connect(self.refresh_remote)
+        self.remote_timer.timeout.connect(lambda: self.window_shown() and self.refresh_remote(polled=True))
         self.remote_timer.start(REMOTE_SECONDS * 1000)
-        self.refresh()
+        self.remote_failures, self.remote_next = {}, {}  # a host that does not answer is asked less often (backoff)
+        # The first look too runs in the background: what runs here may ask Podman (a run whose launcher is gone, a
+        # stopped Podman session), which can take its whole timeout - the window shows at once, "Reading…" until then.
+        self.show_instances()
+        self.refresh_soon()
         QTimer.singleShot(0, self.refresh_remote)
 
     # -- reading --
 
-    def refresh(self):
-        """Read now, on this thread: only for the first look, before the window is shown (and tests). Everything
-        else reads with refresh_soon(): sandbox-ai's registry read also prunes what ended (it removes files), and
-        a disk that hangs must not hang the window."""
-        try:
-            result, error = self.sai.instances(), None  # on the GUI thread on purpose: the first look (see above)
-        except Exception as exc:  # noqa: BLE001 - shown, read again
-            result, error = None, exc
-        self.apply(result, error)
+    def window_shown(self):
+        """False while the window is in the tray or minimised (its polls pause; the page alone: always True)."""
+        window = self.window()
+        return window is self or (window.isVisible() and not window.isMinimized())
+
+    def tick(self):
+        self.ticks += 1
+        if self.window_shown() and (self.isVisible() or self.ticks % HIDDEN_EVERY == 0):
+            self.refresh_soon()
 
     def refresh_soon(self, again=False):
-        """Read in a thread, one read at a time (the timer's way). AGAIN (after an action, the Refresh button): when
-        a read runs already, one more once it is done - what the action changed is shown."""
+        """Read in a thread, one read at a time (the timer's way, the first look too): sandbox-ai's registry read also
+        prunes what ended (it removes files), may ask Podman, and a disk that hangs must not hang the window. AGAIN
+        (after an action, the Refresh button): when a read runs already, one more once it is done - what the action
+        changed is shown."""
         if self.reading is not None:
             self.read_again = self.read_again or again
             return
         self.read_again = False
-        self.reading = background(self.sai.instances, timeout=60, done=self.read_done)
+        self.reading = background(self.read_instances, timeout=60, done=self.read_done)
+
+    def read_instances(self):
+        """In the reading thread: (instances, problems), and once whether `sandbox-ai net stop` exists."""
+        if self.stoppable is None:
+            try:
+                self.stoppable = "stop" in self.sai.net_commands()
+            except Exception:  # noqa: BLE001
+                self.stoppable = False
+        return self.sai.instances()
 
     def read_done(self, result, error):
         self.reading = None
@@ -2091,6 +2126,7 @@ class SandboxesPage(QWidget):
     def showEvent(self, event):  # noqa: N802
         """Shown: the hosts are looked at every REMOTE_SHOWN_SECONDS (hidden: every REMOTE_SECONDS)."""
         super().showEvent(event)
+        self.refresh_soon()  # hidden, it was read less often
         if self.remote_timer.interval() != REMOTE_SHOWN_SECONDS * 1000:
             self.remote_timer.start(REMOTE_SHOWN_SECONDS * 1000)
             self.refresh_remote()
@@ -2105,7 +2141,7 @@ class SandboxesPage(QWidget):
         reading = set(self.remote_flight) | ({""} if self.hosts_reading else set())
         return reading or None
 
-    def refresh_remote(self, hosts=None):
+    def refresh_remote(self, hosts=None, polled=False):
         """Read the other hosts' starts in the background: the list of hosts, then every host that has no read open,
         each in its own thread with its own timeout; each host's rows are shown as soon as it answered. HOSTS (after
         an action there): those hosts now, or once more when their read is done - what the action changed is shown,
@@ -2122,7 +2158,7 @@ class SandboxesPage(QWidget):
         if self.hosts_reading:
             self.hosts_again = True
             return
-        self.hosts_reading = True
+        self.hosts_reading, self.hosts_polled = True, polled  # POLLED (the timer): hosts that did not answer wait
         # Reads, not work: no owner, so they neither grey out the buttons (busy()) nor hold up closing the window.
         background(self.sai.remote_hosts, timeout=30,
                    done=lambda hosts_, error: alive(self) and self.hosts_listed(hosts_, error))
@@ -2140,8 +2176,10 @@ class SandboxesPage(QWidget):
         else:
             self.hosts_problem = printable(error)[:200]
             hosts = list(self.remote_names)
+        now = time.monotonic()
         for name in hosts:
-            if name not in self.remote_flight:  # one that still answers the last look is not asked on top
+            # One that still answers the last look is not asked on top; one that did not answer waits (remote_next).
+            if name not in self.remote_flight and (not self.hosts_polled or now >= self.remote_next.get(name, 0)):
                 self.read_host(name)
         self.merge_remote()
         if self.hosts_again:
@@ -2175,8 +2213,14 @@ class SandboxesPage(QWidget):
                 self.remote[name] = list(result)
                 self.remote_seen[name] = time.time()
                 self.remote_problems.pop(name, None)
+                self.remote_failures.pop(name, None)
+                self.remote_next.pop(name, None)
             else:
                 self.remote_problems[name] = printable(error)[:300]
+                # Not asked again by the timer before REMOTE_SHOWN_SECONDS * 2^failures (at most REMOTE_BACKOFF): a
+                # host that does not answer costs a Python process and an ssh that waits for its timeout each time.
+                failures = self.remote_failures[name] = self.remote_failures.get(name, 0) + 1
+                self.remote_next[name] = time.monotonic() + min(REMOTE_BACKOFF, REMOTE_SHOWN_SECONDS * 2 ** failures)
         if name in self.remote_again:  # asked again meanwhile (an action there): a fresh read
             self.remote_again.discard(name)
             self.read_host(name)
@@ -2210,7 +2254,7 @@ class SandboxesPage(QWidget):
     def drop_host(self, name):
         """Everything of host NAME goes, its reads running too (their answers, when they come, are ignored)."""
         for store in (self.remote, self.remote_seen, self.remote_problems, self.ended, self.remote_flight,
-                      self.ended_flight):
+                      self.ended_flight, self.remote_failures, self.remote_next):
             store.pop(name, None)
         self.remote_again.discard(name)
 
@@ -2293,6 +2337,7 @@ class SandboxesPage(QWidget):
         self.host_filter.setVisible(bool(self.remote_names))
 
     def apply(self, result, error):
+        self.loaded = True
         if self.stoppable is None:
             try:
                 self.stoppable = "stop" in self.sai.net_commands()
@@ -2495,6 +2540,8 @@ class SandboxesPage(QWidget):
             text += " · " + tr("{count} in the current project", count=len(here))
         if self.problems:
             text += " · " + tr("not all could be read: {problems}", problems=printable("; ".join(self.problems))[:300])
+        if not self.loaded:
+            text = tr("Reading what runs on this account…")
         self.summary.setText(text)
         self.counted.emit(len(running), len(here))
         self.selection_changed()
@@ -2638,7 +2685,7 @@ class SandboxesPage(QWidget):
             self.command_done(title, result, error)
             self.refresh_remote([instance.host])  # a fresh read of that host, also when one runs already
         seconds = 180 + (wait or 0)
-        background(lambda: self.sai.host_run(instance.host, *args, timeout=seconds), owner=self,
+        background(lambda: self.sai.host_run(instance.host, *args, timeout=seconds), owner=self, work=True,
                    source=[self.stop_button, *self.session_buttons.values()], timeout=seconds + 30, done=done)
 
     def update_buttons(self):
@@ -2786,7 +2833,7 @@ class SandboxesPage(QWidget):
             self.command_done(title, result, error, quiet_success=False)
             if host != LOCAL:
                 self.refresh_remote([host])
-        background(lambda: self.sai.host_run(host, "rename", old, new, timeout=60), owner=self,
+        background(lambda: self.sai.host_run(host, "rename", old, new, timeout=60), owner=self, work=True,
                    source=list(self.manage_buttons.values()), timeout=90, done=done)
 
     def history(self):
@@ -2855,7 +2902,7 @@ class SandboxesPage(QWidget):
                 self.refresh_remote([host])
         # The same --older-than as the list shown, and only if a dry run still lists exactly that (GcChanged).
         background(self.sai.collect_as_shown, host, found, owner=self, source=list(self.manage_buttons.values()),
-                   timeout=630, done=done)
+                   work=True, timeout=630, done=done)
 
     def stop(self, instance=None):
         instance = instance or self.current()
@@ -2884,7 +2931,7 @@ class SandboxesPage(QWidget):
         if instance.kind == "session" and wait != STOP_WAIT:  # sandbox-ai stop NAME --wait SECONDS
             stop = backend.stop_args(instance.name, wait)
             background(lambda: self.sai.call(*stop, timeout=wait + 60), owner=self, source=sources, timeout=wait + 90,
-                       done=lambda result, error: self.command_done(tr("Stop"), result, error))
+                       work=True, done=lambda result, error: self.command_done(tr("Stop"), result, error))
             return
         if instance.kind == "session":
             call = (self.sai.call, "session", "stop", instance.name)
@@ -2892,7 +2939,7 @@ class SandboxesPage(QWidget):
             call = (self.sai.stop_mcp, instance.mcp)
         else:
             call = (self.sai.stop_run, instance.run)
-        background(*call, owner=self, source=sources, timeout=330,
+        background(*call, owner=self, work=True, source=sources, timeout=330,
                    done=lambda result, error: self.command_done(tr("Stop"), result, error))
 
     def command_done(self, title, result, error, quiet_success=True):
@@ -2978,7 +3025,7 @@ class SandboxesPage(QWidget):
                                                        "start.", path=printable(path), host=printable(host),
                                                        run=printable(run)), tr("Add")):
                 background(self.on_host(host, self.sai.add_device, run, path), owner=self, source=self.run_buttons,
-                           timeout=150, done=lambda result, error: self.device_done(title, result, error))
+                           work=True, timeout=150, done=lambda result, error: self.device_done(title, result, error))
             return
         background(self.sai.device_check, path, owner=self, source=self.run_buttons, timeout=30,
                    done=lambda result, error: self.confirm_device(run, path, result, error))
@@ -2993,7 +3040,7 @@ class SandboxesPage(QWidget):
         text = "\n".join([tr("Give {path} to {run} until it ends? Devices weaken the isolation.",
                              path=printable(resolved), run=printable(run)), ""] + [printable(n) for n in notes])
         if ask_first(self, "device-add", tr("Add device"), text, tr("Add")):
-            background(self.sai.add_device, run, path, owner=self, source=self.run_buttons, timeout=150,
+            background(self.sai.add_device, run, path, owner=self, work=True, source=self.run_buttons, timeout=150,
                        done=lambda result, error: self.device_done(tr("Add device"), result, error))
 
     def remove_device(self):
@@ -3015,7 +3062,7 @@ class SandboxesPage(QWidget):
             path, ok = QInputDialog.getItem(self, tr("Remove device"), tr("Device"), self.added, 0, False)
             if not ok:
                 return
-        background(self.sai.remove_device, run, path, owner=self, source=self.run_buttons, timeout=150,
+        background(self.sai.remove_device, run, path, owner=self, work=True, source=self.run_buttons, timeout=150,
                    done=lambda result, error: self.device_done(tr("Remove device"), result, error))
 
     def remote_devices_listed(self, host, run, title, found, error):
@@ -3038,7 +3085,7 @@ class SandboxesPage(QWidget):
                 return
             ident = found[labels.index(choice)][0]
         background(self.on_host(host, self.sai.remove_device, run, ident), owner=self, source=self.run_buttons,
-                   timeout=150, done=lambda result, error_: self.device_done(title, result, error_))
+                   work=True, timeout=150, done=lambda result, error_: self.device_done(title, result, error_))
 
     def device_done(self, title, result, error):
         report(self, title, result, error)
@@ -3070,7 +3117,7 @@ class SandboxesPage(QWidget):
                 run=printable(run), path=printable(directory)), tr("Add"), detail={"read_only": read_only}):
             return
         background(self.on_host(host, self.sai.add_workspace, run, directory, read_only, *([name] if name else [])),
-                   owner=self, source=self.run_buttons, timeout=150,
+                   owner=self, work=True, source=self.run_buttons, timeout=150,
                    done=lambda result, error: self.device_done(title, result, error))
 
     def remove_workspace(self):
@@ -3125,11 +3172,11 @@ class SandboxesPage(QWidget):
                                                        "it is closed; a restart takes it away for sure.",
                                                        path=printable(target), run=printable(run), reason=refusal),
                     tr("Detach")):
-                background(self.on_host(host, self.sai.remove_workspace, run, target, True), owner=self,
+                background(self.on_host(host, self.sai.remove_workspace, run, target, True), owner=self, work=True,
                            source=self.run_buttons, timeout=150, done=lambda r, e: self.device_done(title, r, e))
                 return
             self.device_done(title, result, error)
-        background(self.on_host(host, self.sai.remove_workspace, run, target, False), owner=self,
+        background(self.on_host(host, self.sai.remove_workspace, run, target, False), owner=self, work=True,
                    source=self.run_buttons, timeout=150, done=done)
 
     # -- MCP servers while it runs (sandbox-ai mcp attach|detach … --live) --
@@ -3179,7 +3226,7 @@ class SandboxesPage(QWidget):
                 "Give {start} the tools of {what} now, while it runs, and at its later starts?", start=printable(start),
                 what=what), tr("Attach")):
             return
-        background(lambda: self.sai.host_mcp_attach_live(host, start, server, helper), owner=self,
+        background(lambda: self.sai.host_mcp_attach_live(host, start, server, helper), owner=self, work=True,
                    source=self.run_buttons,
                    timeout=630, done=lambda result, error_: self.live_mcp_done(host, start, title, result, error_))
 
@@ -3204,7 +3251,7 @@ class SandboxesPage(QWidget):
 
     def restart_agent(self, host, start, title):
         args = backend.resume_args(start, restart=True)
-        background(lambda: self.sai.host_run(host, *args, timeout=300), owner=self, source=self.run_buttons,
+        background(lambda: self.sai.host_run(host, *args, timeout=300), owner=self, work=True, source=self.run_buttons,
                    timeout=330, done=lambda result, error: (self.command_done(title, result, error),
                                                             self.after_live_change(host)))
 
@@ -3275,7 +3322,7 @@ class SandboxesPage(QWidget):
             return
         call = self.sai.host_mcp_detach_live if live else self.sai.host_mcp_detach
         background(lambda: call(host, start, None if helper else server, helper),
-                   owner=self, source=self.run_buttons, timeout=630,
+                   owner=self, work=True, source=self.run_buttons, timeout=630,
                    done=lambda result, error_: self.detached(host, title, result, error_))
 
     def detached(self, host, title, result, error):
@@ -3324,7 +3371,7 @@ class SandboxesPage(QWidget):
             text += " " + tr("The limits it has now are not known: this may be more than now.")
         if not ask_first(self, "limits-raise", title, text, tr("Raise"), detail={"current": known, "values": values}):
             return
-        background(self.on_host(host, self.sai.set_limits, run, memory, cpus, pids), owner=self,
+        background(self.on_host(host, self.sai.set_limits, run, memory, cpus, pids), owner=self, work=True,
                    source=self.run_buttons, timeout=150, done=lambda result, error: self.reported(title, result, error))
 
     def reported(self, title, result, error):
@@ -3381,7 +3428,7 @@ class SandboxesPage(QWidget):
         keep = dialog.kept()
         done = lambda result, error_: self.reported(title, result, error_)  # noqa: E731
         if op != "allow":  # a revoke narrows: sent at once
-            background(self.sai.host_run, host, "net", "revoke", run, *arguments, owner=self,
+            background(self.sai.host_run, host, "net", "revoke", run, *arguments, owner=self, work=True,
                        source=self.run_buttons, timeout=150, done=done)
             return
         where = tr("on {host}", host=printable(host)) if host != LOCAL else tr("on this machine")
@@ -3393,7 +3440,7 @@ class SandboxesPage(QWidget):
         if not ask_first(self, "net-allow", title, question, tr("Allow")):
             return
         background(self.sai.host_run, host, "net", "allow", run, *arguments, *(["--keep"] if keep else []),
-                   owner=self, source=self.run_buttons, timeout=150, done=done)
+                   owner=self, work=True, source=self.run_buttons, timeout=150, done=done)
 
     def show_allowed(self):
         target = self.target()
@@ -3440,7 +3487,7 @@ class SandboxesPage(QWidget):
             text = tr("On {host}: {text}", host=printable(host), text=text)
         if not backend.valid_run(run) or not ask_first(self, "net-keep", title, text, tr("Keep")):
             return
-        background(self.sai.net_keep, host, run, every, owner=self, source=self.run_buttons, timeout=120,
+        background(self.sai.net_keep, host, run, every, owner=self, work=True, source=self.run_buttons, timeout=120,
                    done=lambda result, error: self.reported(title, result, error))
 
     def untaint(self, host, run):
@@ -3453,7 +3500,7 @@ class SandboxesPage(QWidget):
                 "came in.", run=printable(run)), tr("Untaint")):
             return
         background(self.sai.host_run, host, "net", "untaint", run, owner=self, source=self.run_buttons, timeout=90,
-                   done=lambda result, error: self.reported(title, result, error))
+                   work=True, done=lambda result, error: self.reported(title, result, error))
 
     def log(self):
         instance = self.current()
@@ -3492,7 +3539,7 @@ class SandboxesPage(QWidget):
                 backend.valid_run(instance.name):
             # A run without a kept start: sandbox-ai pause/resume NAME (starts.act), as for another host's.
             title = tr(ACTION_TITLES.get(action, action))
-            background(self.sai.call, action, instance.name, owner=self,
+            background(self.sai.call, action, instance.name, owner=self, work=True,
                        source=[self.stop_button, *self.session_buttons.values()], timeout=150,
                        done=lambda result, error: self.command_done(title, result, error))
             return
@@ -3515,7 +3562,7 @@ class SandboxesPage(QWidget):
 
         def go():
             background(self.sai.call, "session", action, name, *(["--yes"] if action == "delete" else []), owner=self,
-                       source=[self.stop_button, *self.session_buttons.values()], timeout=150,
+                       work=True, source=[self.stop_button, *self.session_buttons.values()], timeout=150,
                        done=lambda result, error: self.command_done(title, result, error))
         if action == "resume" and instance.state == "stopped":
             self.resume_checked(instance, go)
@@ -3568,7 +3615,7 @@ class SandboxesPage(QWidget):
                 self.command_done(title, result, error, quiet_success=False)
                 if host != LOCAL:
                     self.refresh_remote([host])
-            background(lambda: self.sai.host_run(host, *args, timeout=300), owner=self,
+            background(lambda: self.sai.host_run(host, *args, timeout=300), owner=self, work=True,
                        source=[self.stop_button, *self.session_buttons.values(), self.resume_with_button],
                        timeout=330, done=done)
         if instance.state == "stopped":
@@ -3636,7 +3683,12 @@ class ConnectionsPage(QWidget):
         self.filter = QLineEdit()
         self.filter.setPlaceholderText(tr("filter (host, URL, event)"))
         self.filter.setMinimumWidth(220)
-        self.filter.textChanged.connect(lambda _="": self.show_records())
+        # Typing filters after a pause (FILTER_PAUSE ms), not at every key: up to CONNECTIONS_LIMIT records each time.
+        self.filter_timer = QTimer(self)
+        self.filter_timer.setSingleShot(True)
+        self.filter_timer.setInterval(FILTER_PAUSE)
+        self.filter_timer.timeout.connect(self.show_records)
+        self.filter.textChanged.connect(lambda _="": self.filter_timer.start())
         self.refused = QCheckBox(tr("only refused and errors"))
         self.refused.toggled.connect(lambda _=False: self.show_records())
         self.follow = QCheckBox(tr("follow"))
@@ -3652,7 +3704,8 @@ class ConnectionsPage(QWidget):
         self.remote_note.hide()
         layout.addWidget(self.remote_note)
         split = self.split = QSplitter(Qt.Orientation.Vertical)
-        self.table = table([tr("Time"), tr("Event"), tr("Method"), tr("Status"), tr("Target"), tr("Bytes")],
+        # A ModelTable: thousands of records are shown in one step (a filter applied again, a new log).
+        self.table = table([tr("Time"), tr("Event"), tr("Method"), tr("Status"), tr("Target"), tr("Bytes")], many=True,
                            stretch=4, compact=(0, 1, 2, 3, 5))
         self.table.setAccessibleName(tr("Connections"))
         self.table.itemSelectionChanged.connect(self.details)
@@ -3666,6 +3719,7 @@ class ConnectionsPage(QWidget):
         layout.addWidget(split, 1)
         # base: the key of records[0]; keys stay with their records when old ones drop out of the window read.
         self.records, self.shown, self.state, self.base = [], [], None, 0
+        self.row_cache = {}  # {key: (record, row, bad, its text in lower case)}: rows()
         self.position = None  # (path, (inode, offset)) where the last read ended: a follow reads only what came
         self.reading = None  # the path being looked at in a thread (log_state, then up to 16 MiB of log)
         self.read_token = 0  # the newest read (a host switch makes every older one late: its answer is dropped)
@@ -4003,17 +4057,27 @@ class ConnectionsPage(QWidget):
         self.show_records()
 
     def rows(self, records, first):
-        """[(row, record, bad, key)] of the RECORDS the filters let through; FIRST: the key of records[0]."""
+        """[(row, record, bad, key)] of the RECORDS the filters let through; FIRST: the key of records[0]. Each record's
+        row is made once (row_cache, by key): filtering again only compares texts."""
         text = self.filter.text().lower()
+        refused = self.refused.isChecked()
+        cache = self.row_cache
+        if len(cache) > 3 * CONNECTIONS_LIMIT:  # keys of records that dropped out of the window read
+            self.row_cache = cache = {key: value for key, value in cache.items() if key >= self.base}
         shown = []
         for index, record in enumerate(records):
-            row = tuple(printable(value) for value in backend.summary(record))
-            bad = row[1] in ("denied", "error", "tls-refused", "tls-upstream-failed", "push REFUSED")
-            if self.refused.isChecked() and not bad:
+            key = first + index
+            made = cache.get(key)
+            if made is None or made[0] is not record:
+                row = tuple(printable(value) for value in backend.summary(record))
+                bad = row[1] in ("denied", "error", "tls-refused", "tls-upstream-failed", "push REFUSED")
+                made = cache[key] = (record, row, bad, " ".join(row).lower())
+            _, row, bad, lowered = made
+            if refused and not bad:
                 continue
-            if text and text not in " ".join(row).lower():
+            if text and text not in lowered:
                 continue
-            shown.append((row, record, bad, first + index))
+            shown.append((row, record, bad, key))
         return shown
 
     def show_records(self):
@@ -4388,7 +4452,7 @@ class McpPage(QWidget):
                          tr("Attach")):
             return
         background(lambda: self.sai.host_mcp_attach(host, name, start, restart), owner=self, source=self.server_buttons,
-                   timeout=630, done=lambda result, error: self.attached(name, result, error))
+                   work=True, timeout=630, done=lambda result, error: self.attached(name, result, error))
 
     def attached(self, name, result, error):
         if error is not None:
@@ -4412,7 +4476,7 @@ class McpPage(QWidget):
             text = tr("On {host}: {text}", host=printable(host), text=text)
         if action == "stop" and not ask_first(self, "start-stop", tr("Stop"), text, tr("Stop")):
             return
-        background(lambda: self.sai.host_run(host, "mcp", action, name, timeout=300), owner=self,
+        background(lambda: self.sai.host_run(host, "mcp", action, name, timeout=300), owner=self, work=True,
                    source=self.server_buttons, timeout=330, done=lambda result, error: self.server_done(action, result,
                                                                                                        error))
 
@@ -4440,7 +4504,8 @@ class McpPage(QWidget):
                 tr("Attach")):
             return
         background(lambda: self.sai.host_run(host, *args, timeout=300), owner=self, source=self.server_buttons,
-                   timeout=330, done=lambda result, error: self.server_done("start", result, error, quiet=not start))
+                   work=True, timeout=330,
+                   done=lambda result, error: self.server_done("start", result, error, quiet=not start))
 
     def server_done(self, action, result, error, quiet=True):
         status, out, err = outcome(result, error)
@@ -4532,7 +4597,7 @@ class McpPage(QWidget):
 
     def run_add(self, host, key, values, args):
         self.catalog_status.setText(tr("Adding {name}…", name=printable(key)))
-        background(lambda: self.sai.host_run(host, *args, timeout=900), owner=self, source=self.add_button,
+        background(lambda: self.sai.host_run(host, *args, timeout=900), owner=self, work=True, source=self.add_button,
                    timeout=930, done=lambda result, error: self.added(host, key, values, result, error))
 
     def added(self, host, key, values, result, error):
@@ -4855,7 +4920,7 @@ class SystemPage(QWidget):
         QMessageBox.information(self, tr("Language"), tr("The language changes when the app is started again."))
 
     def check(self):
-        background(self.sai.doctor, self.backend.currentText(), owner=self, source=self.check_button,
+        background(self.sai.doctor, self.backend.currentText(), owner=self, work=True, source=self.check_button,
                    timeout=300, done=self.checked)
 
     def checked(self, results, error):
@@ -4895,7 +4960,7 @@ class SystemPage(QWidget):
         """sandbox-ai demo-device start|status|stop on the host chosen, in the background."""
         host, port = self.demo_host.current(), self.demo_port.value()
         background(self.sai.demo_device, host, action, port if action == "start" and port != DEMO_PORT else None,
-                   owner=self, source=list(self.demo_buttons.values()), timeout=90,
+                   owner=self, work=True, source=list(self.demo_buttons.values()), timeout=90,
                    done=lambda result, error: self.demo_done(host, result, error))
 
     def demo_done(self, host, result, error):
@@ -4917,7 +4982,7 @@ class SystemPage(QWidget):
             return
         title = tr("Privacy check: {path}", path=printable(", ".join(paths))[:200]) if host == LOCAL else \
             tr("Privacy check on {host}: {path}", host=printable(host), path=printable(", ".join(paths))[:200])
-        background(self.sai.privacy_check, host, paths, rules or None, project or None, every, owner=self,
+        background(self.sai.privacy_check, host, paths, rules or None, project or None, every, owner=self, work=True,
                    timeout=660, source=self.privacy_button,
                    done=lambda result, error: self.privacy_checked(title, result, error))
 
@@ -5635,8 +5700,9 @@ class MainWindow(QMainWindow):
         self.sandboxes_here = 0
         self.questions_changed(self.approvals.open.rowCount(), [])
         self.nav.setCurrentRow(self.nav_rows["launch"])
-        # What runs now is known; what starts from here on opens a tab of its own (setting auto_tabs).
-        self.seen_running = {key for key, i in self.sandboxes.instances.items() if i.state == "running"}
+        # What runs is known with the first read of the Sandboxes page (in the background): what starts after that
+        # opens a tab of its own (setting auto_tabs); what ran already at the first read does not (sync_tabs).
+        self.seen_running = None
         self.register_state()
         self.restore_tabs()
         self.restore_docks()
@@ -6617,19 +6683,24 @@ class MainWindow(QMainWindow):
 
     def sync_tabs(self, instances, open_new=True):
         """Session and sandbox tabs show their state (a sandbox that ended stays, stopped, until its tab is
-        closed); a session or sandbox that started since the last look opens a tab (setting auto_tabs)."""
+        closed); a session or sandbox that started since the last look opens a tab (setting auto_tabs). Before the
+        Sandboxes page's first read (in the background) nothing is known: no tab counts as stopped yet."""
+        loaded = getattr(self.sandboxes, "loaded", True)
         for index in range(self.tabs.count()):
             entry = self.tabs.entry(index)
             if entry and entry["kind"] in ("session", "run"):
                 instance = instances.get(entry["key"])
                 if instance is not None:
                     entry.update(instance_entry(instance))
-                else:
+                elif loaded:
                     entry["state"] = "stopped"
                 self.tabs.set_entry(index, entry)
+        if not loaded:
+            return
         running = {key for key, i in instances.items() if i.kind in ("session", "run") and i.state == "running"}
-        if open_new and backend.setting("auto_tabs"):
-            for key in sorted(running - getattr(self, "seen_running", set())):
+        seen = getattr(self, "seen_running", set())
+        if open_new and seen is not None and backend.setting("auto_tabs"):  # (None: the first read, what ran already)
+            for key in sorted(running - seen):
                 if self.tabs.find(key) < 0 and not self.own_start(instances[key]):
                     self.open_tab(instance_entry(instances[key]), activate=False)
         self.seen_running = running
@@ -6919,22 +6990,32 @@ class MainWindow(QMainWindow):
 
     def in_terminal(self, argv, title, embedded=None, cwd=None):
         """Run ARGV in a terminal: a tab of the app (EMBEDDED True, or None and the setting says so, QtWebEngine with
-        xterm.js is there and Chromium's sandbox can start now: TerminalsPage.chromium_ready), else a terminal
-        window."""
+        xterm.js is there and Chromium's sandbox can start now: TerminalsPage.chromium_ready, checked in a thread),
+        else a terminal window. True when it runs or will (the tab or, if Chromium's sandbox cannot start, the
+        window follows the check), False when no terminal window could be started."""
         if embedded is None:
             embedded = self.sai.settings().get("terminal", "app") == "app"
         directory = cwd if cwd and os.path.isdir(cwd) else None
-        if embedded and terminal.available()[0] and self.terminals.open(argv, title, directory) is not None:
-            self.show_page("terminals")
-            started = started_agent(argv)
-            options = argv[:argv.index("--")] if "--" in argv else argv  # not the agent's own arguments
-            if started and "--dry-run" not in options and "--session" not in options:
-                # Its terminal tab shows this sandbox: no second tab for its run when it shows up (sync_tabs). A
-                # session is not a one-off run (it gets its session tab): counted, it would swallow the tab of
-                # the next run of the same agent and project started elsewhere.
-                self.own_starts.append((started, os.path.realpath(directory or self.project or ""),
-                                        time.monotonic()))
+        if embedded and terminal.available()[0]:
+            def opened(view):
+                if view is None:  # Chromium's sandbox cannot start now: a terminal window instead
+                    self.terminal_window(argv, title)
+                    return
+                self.show_page("terminals")
+                started = started_agent(argv)
+                options = argv[:argv.index("--")] if "--" in argv else argv  # not the agent's own arguments
+                if started and "--dry-run" not in options and "--session" not in options:
+                    # Its terminal tab shows this sandbox: no second tab for its run when it shows up (sync_tabs). A
+                    # session is not a one-off run (it gets its session tab): counted, it would swallow the tab of
+                    # the next run of the same agent and project started elsewhere.
+                    self.own_starts.append((started, os.path.realpath(directory or self.project or ""),
+                                            time.monotonic()))
+            self.terminals.open(argv, title, directory, done=opened)
             return True
+        return self.terminal_window(argv, title)
+
+    def terminal_window(self, argv, title):
+        """ARGV in a terminal window of the desktop (SANDBOX_AI_TERMINAL, or one found); False if none starts."""
         command = self.sai.in_terminal(argv, title)
         if command is None:
             QMessageBox.warning(self, tr("No terminal"), shown_as_text(tr(
@@ -6963,6 +7044,8 @@ class MainWindow(QMainWindow):
         self.show_busy()
 
     def show_busy(self):
+        if getattr(self, "stopping", False):  # "Stop and quit": says that, until the window closes
+            return
         try:
             pages = self.running_work()
         except (AttributeError, RuntimeError):  # still being built, or closing
@@ -6972,8 +7055,9 @@ class MainWindow(QMainWindow):
         self.busy_bar.setVisible(bool(pages))
 
     def running_work(self):
-        """The titles of the pages with work in the background (commands, copies, an answer being sent)."""
-        found = [key for key, _ in PAGES if busy(getattr(self, key))]  # busy(): its background calls and its Task
+        """The titles of the pages with work in the background that a human started (commands, copies, an answer
+        being sent). Reads and polls are not work: never shown as running, never asked about when quitting."""
+        found = [key for key, _ in PAGES if working(getattr(self, key))]  # its work=True calls and its Task's job
         if self.approvals.answering is not None:
             found.append("approvals")
         return [tr(title) for key, title in PAGES if key in found]
@@ -6981,11 +7065,35 @@ class MainWindow(QMainWindow):
     def stop_work(self, timeout=None):
         """Cancel the copies (they stop at their next chunk and remove what they created), stop the
         sandbox-ai commands that run (their whole process groups), and wait up to TIMEOUT (QUIT_WAIT)
-        seconds for the background threads to end; the calls still running."""
+        seconds for the background work to end (reads are not waited for: shutdown() ends them); the work
+        still running. Blocking: for SIGTERM and logout (nobody looks at the window); "Stop and quit" uses
+        stop_work_and_quit()."""
         self.stopped = True
         self.files.task.cancel()
         self.sai.stop_commands()  # on the GUI thread on purpose: quitting, bounded by one grace period
-        return ThreadCall.wait_all(QUIT_WAIT if timeout is None else timeout)
+        return ThreadCall.wait_all(QUIT_WAIT if timeout is None else timeout, work_only=True)
+
+    def stop_work_and_quit(self):
+        """"Stop and quit": what stop_work() does, in a thread - the window stays painted and says that it stops the
+        work (up to a grace period and QUIT_WAIT seconds), takes no more input, and closes when that is done."""
+        self.stopped = self.stopping = True
+        self.files.task.cancel()
+        self.setEnabled(False)
+        self.busy_label.setText(tr("Stopping the work that runs, then quitting…"))
+        self.busy_label.setVisible(True)
+        self.busy_bar.setVisible(True)
+
+        def stop():
+            self.sai.stop_commands()
+            return ThreadCall.wait_all(QUIT_WAIT, work_only=True)
+        background(stop, owner=self, done=lambda *_: self.quit_now())
+
+    def quit_now(self):
+        """Close for good, without another question (everything was asked)."""
+        self.quitting, self.leaving, self.close_seen = True, True, False
+        self.close()
+        if not self.close_seen:  # never shown (in the tray): no close event was sent
+            self.closeEvent(QCloseEvent())
 
     def terminate(self):
         """SIGTERM (logout, systemctl stop): no question, the work is stopped (bounded), the app quits."""
@@ -7111,7 +7219,9 @@ class MainWindow(QMainWindow):
                              tr("Stop and quit"), reject=tr("Keep working")):
                 event.ignore()
                 return
-            self.stop_work()
+            event.ignore()  # closed once the work has stopped (in a thread: the window keeps painting)
+            self.stop_work_and_quit()
+            return
         self.finish(event)
 
     def finish(self, event):
@@ -7129,6 +7239,10 @@ class MainWindow(QMainWindow):
         self.state.flush()
         self.shut_down = True
         ThreadCall.abandon_all()  # no result reaches a page after this
+        # What still runs is reads and polls (the work was asked about and stopped before): ended without a grace
+        # period, with what they started, so that no `sandbox-ai hosts run`, ssh or podman outlives the app.
+        self.sai.stop_commands(grace=0)
+        widgets.end_worker_processes()
         self.approvals.timer.stop()
         self.connections.timer.stop()
         self.sandboxes.timer.stop()

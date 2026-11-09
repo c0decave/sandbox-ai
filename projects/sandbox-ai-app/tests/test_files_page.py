@@ -42,21 +42,32 @@ def setup(qapp, tmp_path, monkeypatch, wait):
     page = files_page.FilesPage(sai)
     assert wait(lambda: page.roots.count() > 0 and not page.roots_reading), "the roots are read in the background"
     page.right.go_path(str(host))
+    settle(page.left, page.right)
     return page, ws.resolve(), host.resolve(), outside
 
 
+def settle(*panes):
+    """The folders are listed in a thread: until every listing on its way is shown."""
+    from conftest import wait_until
+    assert wait_until(QtWidgets.QApplication.instance(), lambda: all(pane.listing is None for pane in panes), 30)
+
+
 def names(pane):
+    settle(pane)
     return sorted(pane.table.item(r, 0).text() for r in range(pane.table.rowCount()))
 
 
 def select(pane, *wanted):
+    settle(pane)
     pane.table.clearSelection()
     widgets.select_keys(pane.table, list(wanted))
 
 
 def press(pane, key, modifiers=Qt.KeyboardModifier.NoModifier):
+    settle(pane.page.left, pane.page.right)
     event = QKeyEvent(QEvent.Type.KeyPress, key, modifiers)
     QtWidgets.QApplication.sendEvent(pane.table, event)
+    settle(pane.page.left, pane.page.right)
     return event
 
 
@@ -86,15 +97,22 @@ def test_links_are_never_opened_in_the_sandbox_pane_and_paths_stay_below_it(setu
     page, ws, _, outside = setup
     page.left.open_row(widgets.find_row(page.left.table, "escape"))
     assert "not followed" in page.message.text() and page.left.relative == ""
-    assert not page.left.go_path("escape") and page.left.relative == ""
+    listed = []
+    page.left.go("escape", then=listed.append)  # (listed in a thread: whether it could be, once it is shown)
+    settle(page.left)
+    assert listed == [False] and page.left.relative == ""
     assert not page.left.go_path("../") and not page.left.go_path(str(outside))
     assert page.left.go_path(str(ws / "sub")) and page.left.relative == "sub"
+    page.left.go("sub", then=listed.append)
+    settle(page.left)
+    assert listed == [False, True] and names(page.left) == ["b.txt"]
 
 
 def test_a_host_folder_in_a_sandbox_is_treated_as_the_agents(setup):
     page, ws, host, _ = setup
     assert not page.right.untrusted()
     page.right.go_path(str(ws))
+    settle(page.right)
     assert page.right.untrusted() and "belongs to a sandbox" in page.right.note.text()
     page.right.open_row(widgets.find_row(page.right.table, "escape"))
     assert "not followed" in page.message.text() and page.right.path_text() == str(ws)
@@ -108,6 +126,7 @@ def test_keys(setup, wait, monkeypatch):
     assert page.active is left
     press(left, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
     assert len(left.chosen()) == 4
+    settle(left)
     left.table.setCurrentCell(widgets.find_row(left.table, "sub"), 0)
     press(left, Qt.Key.Key_Return)
     assert left.relative == "sub"

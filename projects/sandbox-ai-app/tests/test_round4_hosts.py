@@ -394,6 +394,9 @@ def test_files_keys_are_refused_during_a_copy_and_folders_are_listed_in_a_thread
         return real(root, relative)
     monkeypatch.setattr(files.Root, "list", listing)
     page = files_page.FilesPage(Sai())
+    from conftest import wait_until
+    assert wait_until(qapp, lambda: page.left.table.rowCount() and page.left.listing is None
+                      and page.right.listing is None, 30)
     assert threads and not any(threads), "every folder is listed off the GUI thread"
     assert sorted(page.left.table.item(r, 0).text() for r in range(page.left.table.rowCount())) == ["a.txt"]
     monkeypatch.setattr(type(page.task), "running", property(lambda self: True))
@@ -404,14 +407,15 @@ def test_files_keys_are_refused_during_a_copy_and_folders_are_listed_in_a_thread
         QtWidgets.QApplication.sendEvent(page.left.table, event)
     assert asked == [] and not (ws / "x").exists() and "Wait until" in page.message.text()
 
-    # A slow listing: list() stops waiting after LIST_WAIT (the window answering meanwhile) and says so; when it
+    # A slow listing: list() returns at once (no local event loop), the pane says it lists after LIST_WAIT; when it
     # comes back after another listing began, it is dropped.
     pending = []
     monkeypatch.setattr(files_page, "background", lambda function, *a, done, **k: pending.append((function, done)))
     monkeypatch.setattr(files_page, "LIST_WAIT", 50)
-    assert page.left.list() is None and "Listing" in page.message.text()
+    assert page.left.list() is True and page.left.listing is not None
+    assert wait_until(qapp, lambda: "Listing" in page.message.text(), 5)
     (ws / "b.txt").write_text("b")
-    assert page.left.list() is None
+    assert page.left.list() is True
     (late_work, late_done), (work, done) = pending
     done(work(), None)
     assert sorted(page.left.table.item(r, 0).text() for r in range(page.left.table.rowCount())) == ["a.txt", "b.txt"]

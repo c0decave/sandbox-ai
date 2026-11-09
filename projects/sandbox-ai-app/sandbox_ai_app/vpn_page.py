@@ -361,7 +361,7 @@ def add_profile(parent, sai, done=None, host=LOCAL, host_label=""):
         return (status, out, err), None if kept[0] == 0 else (kept[2] or kept[1]).strip() or "?"
 
     def go():
-        background(work, owner=parent, timeout=ADD_SECONDS + 90, done=added)
+        background(work, owner=parent, work=True, timeout=ADD_SECONDS + 90, done=added)
     if not value:
         go()
         return
@@ -458,7 +458,7 @@ class VpnBox(QGroupBox):
             if host == LOCAL:
                 return self.sai.vpn_check(name)
             return self.sai.host_run(host, "vpn", "check", name, timeout=CHECK_SECONDS)
-        background(work, owner=self, timeout=CHECK_SECONDS + 30,
+        background(work, owner=self, work=True, timeout=CHECK_SECONDS + 30,
                    done=lambda result, error: self.message.setText(printable("\n".join(
                        part for part in outcome(result, error)[1:] if part).strip()[-1500:])))
 
@@ -488,4 +488,4 @@ class VpnBox(QGroupBox):
             if host == LOCAL:
                 return self.sai.vpn_remove(name)
             return self.sai.host_run(host, "vpn", "remove", name, timeout=REMOVE_SECONDS)
-        background(work, owner=self, timeout=REMOVE_SECONDS, done=lambda *_: self.refresh())
+        background(work, owner=self, work=True, timeout=REMOVE_SECONDS, done=lambda *_: self.refresh())

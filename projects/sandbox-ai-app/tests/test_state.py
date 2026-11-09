@@ -13,6 +13,7 @@ from PySide6 import QtCore  # noqa: E402
 from sandbox_ai_app import backend, state, widgets  # noqa: E402
 
 from test_projects import close, env, fake_run, make_window, project, window  # noqa: E402,F401
+from conftest import read_now  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not os.environ.get("SANDBOX_AI_HOME") and not backend.shutil.which("sandbox-ai"),
                                 reason="set SANDBOX_AI_HOME to a sandbox-ai checkout")
@@ -262,12 +263,13 @@ def test_the_folds_of_the_sandboxes_tree_come_back(window, env, monkeypatch):
     record = json.loads((run / "run.json").read_text())
     (run / "run.json").write_text(json.dumps({**record, "pod": "sandbox-claude-one", "mcp_servers": ["fetch"]}))
     page = window.sandboxes
-    page.refresh()
+    read_now(page)
     start = page.table.find_item(row_id("local", "run:claude-one"))
     assert start.childCount() == 2 and not start.isExpanded()
     start.setExpanded(True)
     page.table.find_item(row_id("local")).setExpanded(False)
     again = restart(window, monkeypatch)
+    read_now(again.sandboxes)
     try:
         tree = again.sandboxes.table
         assert tree.find_item(row_id("local", "run:claude-one")).isExpanded()
@@ -281,10 +283,11 @@ def test_the_selected_sandbox_comes_back(window, env, monkeypatch):
     fake_run(env, "claude-one", folder)
     fake_run(env, "claude-two", folder)
     page = window.sandboxes
-    page.refresh()
+    read_now(page)
     page.table.selectRow(widgets.find_row(page.table, "run:claude-two"))
     page.only_project.setChecked(True)
     again = restart(window, monkeypatch)
+    read_now(again.sandboxes)
     try:
         assert again.sandboxes.current().key == "run:claude-two" and again.sandboxes.only_project.isChecked()
     finally:

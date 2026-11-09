@@ -192,6 +192,8 @@ class SandboxAI:
         self._modules_lock = threading.RLock()  # pages load modules from several threads at once
         self._processes, self._signal_lock = set(), threading.RLock()  # commands of call() not yet reaped
         self._questions_lock = threading.Lock()  # the window scans in a thread and, after an answer, directly
+        self._canonical = {}  # canonical_options(): {tuple of tokens: their canonical form}
+        self._canonical_parser, self._canonical_lock = None, threading.Lock()  # (launcher, its parser), built once
 
     # -- modules and commands --
 
@@ -212,6 +214,33 @@ class SandboxAI:
     @property
     def launcher(self):
         return self.module("agent_sandbox")
+
+    CANONICAL_KEPT = 4000  # option lists canonical_options() remembers
+
+    def canonical_options(self, tokens):
+        """The launcher's canonical_options(TOKENS) (short forms as long ones), remembered per TOKENS: the launcher
+        builds its whole option parser at every call, and a catalogue of presets asks once per preset - on the GUI
+        thread too (the gallery, the settings, the wizard), each time it is shown."""
+        key = tuple(tokens)
+        found = self._canonical.get(key)
+        if found is None:
+            launcher = self.launcher
+            # The launcher's parser built once: canonical_options() only reads its options, and asks for it by
+            # build_parser() - here, for that call, the one built before (the app's own copy of the module; one
+            # call at a time).
+            with self._canonical_lock:
+                if self._canonical_parser is None or self._canonical_parser[0] is not launcher:
+                    self._canonical_parser = (launcher, launcher.build_parser())
+                parser, original = self._canonical_parser[1], launcher.build_parser
+                launcher.build_parser = lambda: parser
+                try:
+                    found = tuple(launcher.canonical_options(list(key)))
+                finally:
+                    launcher.build_parser = original
+            if len(self._canonical) >= self.CANONICAL_KEPT:
+                self._canonical.clear()
+            self._canonical[key] = found
+        return list(found)
 
     def command(self, *args):
         """argv of a sandbox-ai command, run with this Python like the installed entry points."""
@@ -3942,6 +3971,11 @@ def argv_from_values(options, values):
         if option.long in values:
             argv += option.tokens(values[option.long])
     return argv
+
+
+def canonical_of(sai):
+    """SAI's canonical_options (remembered per option list), or its launcher's own (a stand-in without it)."""
+    return getattr(sai, "canonical_options", None) or sai.launcher.canonical_options
 
 
 def values_from_argv(options, argv, canonical=None):

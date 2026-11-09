@@ -392,7 +392,7 @@ class LlmDialog(QDialog):
             now = run(*WL.status_argv(fields["name"]), timeout=WL.STATUS_SECONDS) if answer[0] == 0 else None
             return answer, sent, now
 
-        background(work, owner=self, source=self.test_button, timeout=WL.PROBE_SECONDS + 75,
+        background(work, owner=self, work=True, source=self.test_button, timeout=WL.PROBE_SECONDS + 75,
                    done=lambda result, error: self.tested(ticket, probe, fields, result, error, insecure))
 
     def tested(self, ticket, probe, fields, result, error, insecure=False):
@@ -933,7 +933,7 @@ class LlmPage(QWidget):
         if dialog is not None and self.dialog is dialog:
             dialog.busy(self.status.text())
             sources.append(dialog.test_button)
-        background(work, owner=self, source=sources, timeout=ADD_SECONDS + 90,
+        background(work, owner=self, work=True, source=sources, timeout=ADD_SECONDS + 90,
                    done=lambda result, error: self.added(host, fields["name"], result, error, secret, dialog, check))
 
     def added(self, host, name, result, error, secret="", dialog=None, check=False):
@@ -975,7 +975,7 @@ class LlmPage(QWidget):
     def run_check(self, host, name, agent):
         args = ["llm", "check", name] + (["--agent", agent] if agent in AGENTS else [])
         self.status.setText(tr("Checking {name}…", name=name))
-        background(lambda: self.sai.host_run(host, *args, timeout=CHECK_SECONDS), owner=self,
+        background(lambda: self.sai.host_run(host, *args, timeout=CHECK_SECONDS), owner=self, work=True,
                    source=self.check_button, timeout=CHECK_SECONDS + 30,
                    done=lambda result, error: self.checked(host, name, result, error))
 
@@ -1100,7 +1100,7 @@ class LlmPage(QWidget):
             self.status.setText(tr("Not changed."))
             return
         self.status.setText(tr("Changing {name}…", name=name))
-        background(lambda: self.sai.host_run(host, *args, timeout=ADD_SECONDS), owner=self,
+        background(lambda: self.sai.host_run(host, *args, timeout=ADD_SECONDS), owner=self, work=True,
                    source=[self.default_button, self.edit_button], timeout=ADD_SECONDS + 15,
                    done=lambda result, error: self.default_set(host, name, model, result, error))
 
@@ -1143,7 +1143,7 @@ class LlmPage(QWidget):
                 name=name, host=self.host_label(host), option=f"--llm {name}"), tr("Remove")):
             return
         background(lambda: self.sai.host_run(host, "llm", "remove", name, timeout=REMOVE_SECONDS), owner=self,
-                   source=self.remove_button, timeout=REMOVE_SECONDS + 15,
+                   work=True, source=self.remove_button, timeout=REMOVE_SECONDS + 15,
                    done=lambda result, error: self.removed(host, name, result, error))
 
     def removed(self, host, name, result, error):

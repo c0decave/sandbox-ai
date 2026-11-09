@@ -13,6 +13,7 @@ from sandbox_ai_app.state import state_file  # noqa: E402
 from test_projects import (  # noqa: E402,F401 - shared fixtures and fakes
     close, env, fake_run, fake_session, make_window, project, sleepers, window,
 )
+from conftest import read_now  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not os.environ.get("SANDBOX_AI_HOME") and not backend.shutil.which("sandbox-ai"),
                                 reason="set SANDBOX_AI_HOME to a sandbox-ai checkout")
@@ -97,7 +98,7 @@ def test_tabs_are_moved_and_kept_for_the_next_start(window, env, monkeypatch):
     fake_session(env, "work", two)
     for folder in (one, two, three):
         window.set_project(folder)
-    window.sandboxes.refresh()
+    read_now(window.sandboxes)
     from sandbox_ai_app.ui import instance_entry
     window.open_tab(instance_entry(window.sandboxes.instances["session:work"]), activate=False)
     window.tabs.moveTab(2, 0)
@@ -108,6 +109,7 @@ def test_tabs_are_moved_and_kept_for_the_next_start(window, env, monkeypatch):
     assert saved["tab_current"] == f"project:{two}"
     (three / "gone").mkdir()
     again = make_window(monkeypatch)
+    read_now(again.sandboxes)  # the first read (in the background): the session's tab gets its state from it
     try:
         assert keys(again) == [f"project:{three}", f"project:{one}", f"project:{two}", "session:work"]
         assert current(again) == f"project:{two}" and again.project == str(two)
@@ -129,14 +131,14 @@ def test_a_session_that_starts_opens_a_tab_and_its_state_follows(window, env, sl
     folder = project(env, "p")
     window.set_project(folder)
     session_dir = fake_session(env, "night", folder)
-    window.sandboxes.refresh()
+    read_now(window.sandboxes)
     assert window.tabs.count() == 1, "a stopped session does not open a tab by itself"
     # It starts: its supervisor runs (a sleeper with the session's arguments).
     supervisor = sleepers("/x/agent_sandbox.py", "codex", "--tmux-socket-dir", session_dir / "tmux")
     data = json.loads((session_dir / "session.json").read_text())
     data.update(pid=supervisor.pid, pid_start=window.sai.launcher.process_start(supervisor.pid))
     (session_dir / "session.json").write_text(json.dumps(data))
-    window.sandboxes.refresh()
+    read_now(window.sandboxes)
     index = window.tabs.find("session:night")
     assert index >= 0 and window.tabs.currentIndex() == 0, "opened, not jumped to"
     entry = window.tabs.entry(index)
@@ -146,18 +148,18 @@ def test_a_session_that_starts_opens_a_tab_and_its_state_follows(window, env, sl
     # It ends: the tab stays, stopped, until it is closed.
     supervisor.kill()
     supervisor.wait()
-    window.sandboxes.refresh()
+    read_now(window.sandboxes)
     assert window.tabs.entry(window.tabs.find("session:night"))["state"] == "stopped"
     # A one-off run too; with the setting off, nothing opens.
     fake_run(env, "claude-new", folder)
-    window.sandboxes.refresh()
+    read_now(window.sandboxes)
     assert window.tabs.find("run:claude-new") >= 0
     (env / "runtime" / "sandbox-ai" / "runs" / "claude-new" / "run.json").unlink()
-    window.sandboxes.refresh()
+    read_now(window.sandboxes)
     assert window.tabs.entry(window.tabs.find("run:claude-new"))["state"] == "stopped", "a sandbox that ended stays"
     window.sai.save_setting("auto_tabs", False)
     fake_run(env, "claude-other", folder)
-    window.sandboxes.refresh()
+    read_now(window.sandboxes)
     assert window.tabs.find("run:claude-other") < 0
 
 
@@ -166,7 +168,7 @@ def test_the_plus_menu_and_a_tabs_context_menu(window, env, monkeypatch, wait):
     window.set_project(one)
     window.sai.remember_project(two)
     fake_session(env, "work", two)
-    window.sandboxes.refresh()
+    read_now(window.sandboxes)
     window.fill_add_tab_menu()
     assert wait(lambda: window.project_bar.known.reading is None)  # the projects are read in the background
     window.fill_add_tab_menu(read=False)

@@ -423,7 +423,7 @@ class PresetGallery(QDialog):
         self.demo_status.setText(tr("Starting the emulated device on {host}…", host=printable(host)) if host != "local"
                                  else tr("Starting the emulated device…"))
         self.demo_status.show()
-        background(self.sai.demo_device, host, "start", owner=self, source=self.demo_button, timeout=90,
+        background(self.sai.demo_device, host, "start", owner=self, work=True, source=self.demo_button, timeout=90,
                    done=lambda result, error: self.demo_started(host, result, error))
 
     def demo_started(self, host, result, error):

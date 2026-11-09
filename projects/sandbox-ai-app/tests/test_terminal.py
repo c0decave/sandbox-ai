@@ -3,11 +3,13 @@
 The page is tested with a small stand-in for xterm.js (tests/fake_xterm) wherever QtWebEngine runs;
 the end-to-end test with the real, vendored xterm.js runs when scripts/vendor_xterm.py has been run."""
 import http.server
+import os
 from pathlib import Path
 import shutil
 import threading
 
 import pytest
+from conftest import open_tab  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 
@@ -140,7 +142,7 @@ def test_the_page_reaches_nothing_remote(terminal, stub_web, wait):
 def test_terminals_page_tabs_and_close(terminal, stub_web, wait, monkeypatch):
     monkeypatch.setattr(terminal, "available", lambda web=None: (True, ""))
     page = terminal.TerminalsPage(stub_web)
-    view = page.open(["sh", "-c", "trap '' HUP; sleep 60"], "agent")
+    view = open_tab(page, ["sh", "-c", "trap '' HUP; sleep 60"], "agent")
     assert page.tabs.count() == 1 and page.tabs.tabText(0) == "agent" and page.running() == [view]
     pid = view.bridge.pty.pid
     view.bridge.killer.setInterval(300)
@@ -165,11 +167,11 @@ def test_one_tab_per_attached_start(terminal, stub_web, tmp_path, monkeypatch):
     command.write_text("#!/bin/sh\nsleep 60\n")
     command.chmod(0o755)
     page = terminal.TerminalsPage(stub_web)
-    view = page.open([str(command), "attach", "web"], "web")
-    page.open(["sh", "-c", "sleep 60"], "other")
-    assert page.open([str(command), "session", "attach", "web"], "session web") is view
+    view = open_tab(page, [str(command), "attach", "web"], "web")
+    open_tab(page, ["sh", "-c", "sleep 60"], "other")
+    assert page.open([str(command), "session", "attach", "web"], "session web") is view, "at once: its tab"
     assert page.tabs.count() == 2 and page.tabs.currentWidget() is view
-    assert page.open([str(command), "attach", "db"], "db") is not view and page.tabs.count() == 3
+    assert open_tab(page, [str(command), "attach", "db"], "db") is not view and page.tabs.count() == 3
     page.close_all()
     page.deleteLater()
 
@@ -211,3 +213,73 @@ def test_the_quit_question_names_only_what_really_ends(terminal, stub_web, monke
     monkeypatch.setattr(page.tabs, "tabText", lambda index: list(views)[index])
     assert page.ending() == ["doctor"] and page.detaching() == [views["session s1"]]
     page.deleteLater()
+
+
+def test_quitting_releases_pages_then_views_then_profiles(terminal, stub_web, monkeypatch):
+    """User report: a segmentation fault at the very end ("QObject: shared QObject was deleted directly"): Python's
+    cleanup deleted web views after QtWebEngine had gone. terminal.shutdown() deletes them first, in QtWebEngine's
+    order, while the application runs; a second call does nothing."""
+    from shiboken6 import isValid
+    monkeypatch.setattr(terminal, "available", lambda web=None: (True, ""))
+    page = terminal.TerminalsPage(stub_web)
+    views = [open_tab(page, ["sh", "-c", "sleep 60"], f"t{index}") for index in range(2)]
+    pages = [view.page for view in views]
+    web_views = [view.view for view in views]
+    profiles = list(terminal._profiles.values())
+    order = []
+    for name, objects in (("page", pages), ("view", web_views), ("profile", profiles)):
+        for item in objects:
+            item.destroyed.connect(lambda *_, n=name: order.append(n))
+    terminal.shutdown()
+    assert not any(isValid(item) for item in pages + web_views + profiles), "deleted while the application runs"
+    assert order == sorted(order, key=["page", "view", "profile"].index), order
+    assert not terminal._profiles and not list(terminal._views)
+    terminal.shutdown()  # again (closing, app.aboutToQuit): nothing left, no error
+    page.deleteLater()
+
+
+QUIT_DRIVER = r"""
+import os, shutil, sys
+sys.path.insert(0, sys.argv[1])
+from sandbox_ai_app import main as app_main, intro, terminal, ui, widgets
+web = sys.argv[2]
+widgets.AUTO_ANSWER = True
+intro.play = lambda window, settings: None
+show = ui.MainWindow.show
+
+def shown(window):
+    from PySide6.QtCore import QTimer
+    show(window)
+    window.terminals.web = web
+    terminal.available = lambda w=None: (True, "")
+    opened = []
+    for index in range(2):
+        window.terminals.open([sys.executable, "-c", "import time; time.sleep(60)"], f"t{index}", done=opened.append)
+
+    def leave():
+        if len(opened) < 2:
+            QTimer.singleShot(100, leave)
+            return
+        print(f"tabs: {sum(view is not None for view in opened)}", file=sys.stderr, flush=True)
+        window.sai.save_setting("tray", False)
+        QTimer.singleShot(500, window.quit_app)
+    QTimer.singleShot(200, leave)
+ui.MainWindow.show = shown
+sys.exit(app_main.main(["sandbox-ai-app"]))
+"""
+
+
+def test_the_app_quits_cleanly_with_terminal_tabs_open(terminal, stub_web, tmp_path):
+    """The whole app in a process of its own: two terminal tabs open, Quit; it must end with status 0, without
+    "shared QObject was deleted directly" or a fatal error at the end of the interpreter."""
+    import subprocess
+    import sys
+    script = tmp_path / "quit_driver.py"
+    script.write_text(QUIT_DRIVER)
+    env = {**os.environ, "SANDBOX_AI_APP_NO_TOUR": "1", "QT_QPA_PLATFORM": "offscreen",
+           "QTWEBENGINE_CHROMIUM_FLAGS": "--no-sandbox --disable-gpu", "QTWEBENGINE_DISABLE_SANDBOX": "1"}
+    result = subprocess.run([sys.executable, str(script), str(HERE.parent), str(stub_web)], capture_output=True,
+                            text=True, timeout=180, env=env, stdin=subprocess.DEVNULL)
+    assert "tabs: 2" in result.stderr, result.stderr[-3000:]
+    assert result.returncode == 0, result.stderr[-3000:]
+    assert "shared QObject was deleted directly" not in result.stderr and "Fatal Python error" not in result.stderr

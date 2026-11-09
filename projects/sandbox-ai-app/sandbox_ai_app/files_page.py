@@ -20,7 +20,7 @@ import pwd
 import stat
 import time
 
-from PySide6.QtCore import QEvent, QEventLoop, Qt, QTimer
+from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
     QSplitter, QVBoxLayout, QWidget,
@@ -46,8 +46,8 @@ COLUMNS = (N_("Name"), N_("Type"), N_("Size"), N_("Modified"), N_("Points to (no
            N_("Mode"))
 LINK_COLUMN = 4
 PROGRESS_INTERVAL = 250  # ms
-# A folder is listed in a thread (a slow or hung file system never holds up the window); the pane waits up to
-# LIST_WAIT ms for it, the window answering meanwhile, so a fast folder shows at once - a slow one fills in later.
+# A folder is listed in a thread (a slow or hung file system never holds up the window), its rows made there too; it
+# shows when it comes (a fast folder at once). Still on its way after LIST_WAIT ms: the pane says so.
 LIST_WAIT = 1500
 LIST_TIMEOUT = 120  # s: a listing that never comes back is given up (the pane says so)
 
@@ -92,6 +92,21 @@ def owner_text(entry, ranges):
     return f"{printable(who)}:{printable(group_name(entry.gid))}"
 
 
+def entry_rows(entries, ranges, untrusted):
+    """(rows, colours) of the Files table for ENTRIES (in the listing's thread: a folder may have 20,000); UNTRUSTED:
+    an agent may have written there (special mode bits are marked)."""
+    rows, colors = [], []
+    for entry in entries:
+        rows.append([printable(entry.name), tr(KINDS[entry.kind]),
+                     files.size_text(entry.size) if entry.kind == "file" else "",
+                     time.strftime("%Y-%m-%d %H:%M", time.localtime(entry.mtime)),
+                     "→ " + printable(entry.target) if entry.kind == "link" else "",
+                     owner_text(entry, ranges), mode_text(entry.mode)])
+        colors.append("warn" if entry.kind == "link" or entry.mode & files.SPECIAL_BITS and untrusted
+                      else "muted" if entry.kind == "other" else None)
+    return rows, colors
+
+
 def mode_text(mode):
     return f"{stat.filemode(mode)} {stat.S_IMODE(mode):04o}" if mode else ""
 
@@ -114,8 +129,9 @@ class Pane(QWidget):
     def __init__(self, page, side):
         super().__init__()
         self.page, self.side = page, side
-        self.root, self.relative, self.entries = None, "", []
+        self.root, self.relative, self.entries, self.by_name = None, "", [], {}
         self.list_token = 0  # the newest listing: one that comes back after another began is dropped
+        self.listing = None  # the token of the listing on its way, or None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         top = QHBoxLayout()
@@ -146,7 +162,8 @@ class Pane(QWidget):
         where.addWidget(self.path, 1)
         where.addWidget(nav_button(tr("Refresh"), tr("List the folder again (Ctrl+R)"), self.list))
         layout.addLayout(where)
-        self.table = table([tr(column) for column in COLUMNS], multi=True, stretch=0,  # the Name takes the room
+        # The Name takes the room. A ModelTable: a folder of 20,000 entries is shown in one step.
+        self.table = table([tr(column) for column in COLUMNS], multi=True, stretch=0, many=True,
                            compact=(1, 2, 3, 5, 6))
         self.table.setAccessibleName(tr("Files of the sandbox") if side == "sandbox" else tr("Files of this machine"))
         self.table.setTabKeyNavigation(False)
@@ -170,12 +187,12 @@ class Pane(QWidget):
         """True if an agent may have written what is shown: a sandbox root, or a host folder in one."""
         return self.side == "sandbox" or self.page.below_sandbox(self.path_text())
 
-    def go(self, relative):
+    def go(self, relative, then=None):
         relative = "/".join(files.parts(relative))
         if relative != self.relative:
             self.table.clearSelection()  # names selected in another folder mean other files here
         self.relative = relative
-        return self.list()
+        return self.list(then)
 
     def up(self):
         if self.root is not None:
@@ -269,81 +286,71 @@ class Pane(QWidget):
 
     # -- the list --
 
-    def list(self):
-        """List the folder shown, in a thread; True when it was listed, False if it could not be (the root's own
-        folder, or HOME, is shown then), None while a slow one is still on its way (shown when it comes)."""
+    def list(self, then=None):
+        """List the folder shown, in a thread, its rows made there too (a folder of 20,000 entries); shown when it comes
+        (the newest listing only). True when the listing began, False without a root (nothing to list). THEN(listed)
+        once it is shown: listed is False when the folder could not be listed (the root's own folder, or HOME, is
+        shown then). No local event loop: a click during a listing is handled as any other, in turn."""
         self.list_token += 1
         token = self.list_token
-        self.entries = []
         if self.root is None:
+            self.entries, self.by_name, self.listing = [], {}, None
             self.path.setText("")
             fill(self.table, [])
+            if then is not None:
+                then(False)
             return False
         root, relative = self.root, self.relative
         fallback = "" if self.side == "sandbox" else host_relative(os.path.realpath(os.path.expanduser("~")))
+        ranges, side = self.page.ranges, self.side
+        folders = [] if side == "sandbox" else self.page.sandbox_folders()  # (widgets: read here, not in the thread)
 
         def work():
             try:
-                return root.list(relative), relative, None
+                entries, shown, problem = root.list(relative), relative, None
             except (OSError, ValueError) as exc:
                 try:
-                    return root.list(fallback), fallback, exc
+                    entries, shown, problem = root.list(fallback), fallback, exc
                 except (OSError, ValueError):
-                    return [], fallback, exc
-        outcome, waiting = {}, []
+                    entries, shown, problem = [], fallback, exc
+            # Whether an agent may have written there (Pane.untrusted), for the folder actually listed.
+            inside = side == "sandbox" or any(below("/" + shown, folder) for folder in folders)
+            return entries, shown, problem, entry_rows(entries, ranges, inside), inside
+        self.listing = token
+        QTimer.singleShot(LIST_WAIT, self, lambda: self.listing == token and self.page.message.setText(
+            tr("Listing {path}…", path=printable(self.path_text()))))
+        background(work, timeout=LIST_TIMEOUT, done=lambda result, error: self.listed(token, root, result, error, then))
+        return True
 
-        def done(result, error):
-            outcome["listed"] = self.listed(token, root, result, error)
-            if waiting:  # only while list() still waits for it (a late answer never touches the loop)
-                waiting[0].quit()
-        background(work, timeout=LIST_TIMEOUT, done=done)
-        if "listed" not in outcome:
-            loop = QEventLoop()
-            timer = QTimer()
-            timer.setSingleShot(True)
-            timer.timeout.connect(loop.quit)
-            waiting.append(loop)
-            timer.start(LIST_WAIT)
-            loop.exec()
-            waiting.clear()
-            timer.stop()
-        if "listed" not in outcome:
-            self.page.message.setText(tr("Listing {path}…", path=printable(self.path_text())))
-            return None
-        return outcome["listed"]
-
-    def listed(self, token, root, result, error):
+    def listed(self, token, root, result, error, then=None):
         """Show what the listing of TOKEN found (dropped when another began since, or another root was chosen)."""
         if token != self.list_token or root is not self.root:
             return None
+        self.listing = None
         if error is not None:  # the thread itself failed (or never came back)
             self.page.message.setText(printable(error))
-            self.entries = []
+            self.entries, self.by_name = [], {}
             fill(self.table, [])
+            if then is not None:
+                then(False)
             return False
-        self.entries, relative, problem = result
+        self.entries, relative, problem, (rows, colors), inside = result
+        self.by_name = {entry.name: entry for entry in self.entries}
         listed = problem is None
         if not listed:
             self.page.message.setText(printable(problem))
             self.relative = relative
             self.table.clearSelection()
+        elif self.page.message.text().startswith(tr("Listing {path}…", path="").rstrip("…")):
+            self.page.message.setText("")
         self.path.setText(printable(self.path_text()))
-        ranges = self.page.ranges
-        rows, colors = [], []
-        for entry in self.entries:
-            rows.append([printable(entry.name), tr(KINDS[entry.kind]),
-                         files.size_text(entry.size) if entry.kind == "file" else "",
-                         time.strftime("%Y-%m-%d %H:%M", time.localtime(entry.mtime)),
-                         "→ " + printable(entry.target) if entry.kind == "link" else "",
-                         owner_text(entry, ranges), mode_text(entry.mode)])
-            colors.append("warn" if entry.kind == "link" or entry.mode & files.SPECIAL_BITS and self.untrusted()
-                          else "muted" if entry.kind == "other" else None)
         fill(self.table, rows, colors, keys=[entry.name for entry in self.entries])
         if self.side == "host":
-            inside = self.untrusted()
             self.note.setText(tr("This folder belongs to a sandbox: what is copied from here is treated like the "
                                  "agent's files (never executable, links not followed).") if inside else "")
             self.note.setVisible(inside)
+        if then is not None:
+            then(listed)
         return listed
 
     def path_of(self, entry):
@@ -351,8 +358,7 @@ class Pane(QWidget):
 
     def entry_at(self, row):
         """The entry shown in the visual ROW (found by its name: the table may be sorted), or None."""
-        name = row_key(self.table, row)
-        return next((entry for entry in self.entries if entry.name == name), None)
+        return self.by_name.get(row_key(self.table, row))
 
     def chosen(self):
         return [entry for entry in (self.entry_at(row) for row in selected_rows(self.table)) if entry is not None]
@@ -502,14 +508,14 @@ class FilesPage(QWidget):
     def entries(self):
         return self.left.entries
 
-    def go(self, relative):
-        return self.left.go(relative)
+    def go(self, relative, then=None):
+        return self.left.go(relative, then)
 
     def up(self):
         self.left.up()
 
-    def list(self):
-        return self.left.list()
+    def list(self, then=None):
+        return self.left.list(then)
 
     def open_row(self, row, column=0):
         self.left.open_row(row, column)
@@ -629,9 +635,10 @@ class FilesPage(QWidget):
             return False
         return True
 
-    def refresh_panes(self):
-        for pane in (self.left, self.right):
-            pane.list()
+    def refresh_panes(self, pane=None, select=()):
+        """List both panes again; SELECT (names) in PANE once its listing is shown."""
+        for side in (self.left, self.right):
+            side.list(then=(lambda _listed, side=side: side.select(select)) if side is pane and select else None)
 
     # -- background work --
 
@@ -904,8 +911,7 @@ class FilesPage(QWidget):
         except (OSError, ValueError) as exc:
             self.message.setText(printable(exc))
             return False
-        self.refresh_panes()
-        pane.select([new_name])
+        self.refresh_panes(pane, [new_name])
         self.message.setText(tr("{name} renamed to {new}.", name=printable(entry.name), new=printable(new_name)))
         return True
 
@@ -923,8 +929,7 @@ class FilesPage(QWidget):
         except (OSError, ValueError) as exc:
             self.message.setText(printable(exc))
             return False
-        self.refresh_panes()
-        pane.select([name])
+        self.refresh_panes(pane, [name])
         self.message.setText(tr("Folder {name} created.", name=printable(name)))
         return True
 

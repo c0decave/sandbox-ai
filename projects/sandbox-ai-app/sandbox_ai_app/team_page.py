@@ -415,7 +415,7 @@ class TeamPage(QWidget):
         if len(task) > TASK_LIMIT or "\0" in task:
             warn(self, tr("Post a task"), tr("A task is at most {count} characters of text.", count=TASK_LIMIT))
             return
-        background(lambda: self.sai.team_post(host, name, agent, task), owner=self, source=self.post_button,
+        background(lambda: self.sai.team_post(host, name, agent, task), owner=self, work=True, source=self.post_button,
                    timeout=POST_SECONDS + 15, done=lambda result, error: self.done(name, result, error))
 
     def stop(self):
@@ -428,7 +428,7 @@ class TeamPage(QWidget):
             return
         self.status.setText(tr("Stopping {name}…", name=name))
         background(lambda: self.sai.team_stop(host, name), owner=self, source=[self.stop_button, self.delete_button],
-                   timeout=STOP_SECONDS + 30, done=lambda result, error: self.done(name, result, error))
+                   work=True, timeout=STOP_SECONDS + 30, done=lambda result, error: self.done(name, result, error))
 
     def delete(self):
         name, host = self.chosen(), self.acting_host()
@@ -439,7 +439,7 @@ class TeamPage(QWidget):
                 "for good; the workspace stays.", name=name, host=self.hosts.label(host)), tr("Delete")):
             return
         self.status.setText(tr("Deleting {name}…", name=name))
-        background(lambda: self.sai.team_delete(host, name), owner=self, source=[self.stop_button,
+        background(lambda: self.sai.team_delete(host, name), owner=self, work=True, source=[self.stop_button,
                                                                                  self.delete_button],
                    timeout=STOP_SECONDS + 30, done=lambda result, error: self.done(name, result, error))
 

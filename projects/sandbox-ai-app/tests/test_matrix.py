@@ -18,6 +18,7 @@ import pytest
 QtWidgets = pytest.importorskip("PySide6.QtWidgets", reason="PySide6 is not installed")
 from PySide6 import QtCore  # noqa: E402
 from sandbox_ai_app import backend, board as B, i18n, theme, widgets  # noqa: E402
+from conftest import read_now, settle_files  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not os.environ.get("SANDBOX_AI_HOME") and not backend.shutil.which("sandbox-ai"),
                                 reason="set SANDBOX_AI_HOME to a sandbox-ai checkout")
@@ -89,7 +90,8 @@ def make_window(qapp, monkeypatch, language="en", mode=None):
     w.commands = Commands()
     w.sai.run = w.commands
     monkeypatch.setattr(w.terminals, "open",  # a tab (None: no tab, Chromium's sandbox cannot start)
-                        lambda argv, title, cwd=None: w.opened.append((list(argv), title, cwd)) or True)
+                        lambda argv, title, cwd=None, done=None: (w.opened.append((list(argv), title, cwd)),
+                                                                   done is not None and done(True)))
     w.sai.in_terminal = lambda argv, title="": ["term", *argv]
     monkeypatch.setattr("sandbox_ai_app.ui.QProcess.startDetached",
                         lambda program, args: w.started.append([program, *args]) or True)
@@ -213,7 +215,7 @@ def test_start_page_workflow(qapp, env, monkeypatch, wait, agent, engine, langua
         monkeypatch.setattr(sai, "instances", lambda: ([run], []))
         monkeypatch.setattr(sai, "net_commands", lambda: {"allow", "revoke", "show", "stop"})
         w.sandboxes.stoppable = None
-        w.sandboxes.refresh()
+        read_now(w.sandboxes)
         assert w.tabs.count() == tabs, "its terminal tab shows it"
         table = w.sandboxes.table
         assert table.rowCount() == 1
@@ -533,7 +535,7 @@ def test_session_lifecycle_and_tab_states(qapp, env, monkeypatch, wait, agent, e
         def refresh(state=None):
             if state:
                 registry["session"] = instance("session", "work", project, agent, engine, state)
-            page.refresh()
+            read_now(page)
 
         def tab(key):
             index = w.tabs.find(key)
@@ -584,7 +586,7 @@ def test_session_lifecycle_and_tab_states(qapp, env, monkeypatch, wait, agent, e
         page.session("delete")
         done("session", "delete")
         del registry["session"]
-        page.refresh()
+        read_now(page)
         assert tab("session:work")[0]["state"] == "stopped", "a session that is gone stays as a stopped tab"
         assert [args for args, _ in sai.run.log if args[0] == "session"] == [
             ["session", "pause", "work"], ["session", "resume", "work"], ["session", "stop", "work"],
@@ -707,6 +709,7 @@ def fake_session_home(env, name="work", agent="claude"):
 def copy(page, wait, start):
     assert start() is True
     assert wait(lambda: not page.task.running, 10)
+    settle_files(page)  # (the panes are listed again, in a thread)
     return page.last_report
 
 
@@ -730,6 +733,7 @@ def test_files_in_and_out_of_a_sandbox(window, env, tmp_path, wait, where, repla
     assert titles[str(env / "project")].startswith(f"Running sandbox {run}: workspace")
     assert titles[str(home)].startswith("Session work: HOME")
     page.roots.setCurrentIndex(page.roots.findData(str(root)))
+    settle_files(page)
     kinds = {page.table.item(r, 0).text(): page.table.item(r, 1).text() for r in range(page.table.rowCount())}
     assert kinds == {"src": "folder", "notes.txt": "file", "outside": "symbolic link", "planted": "symbolic link"}
     page.open_row(widgets.find_row(page.table, "planted"))
@@ -881,7 +885,8 @@ def changed_settings(env):
             "notify_seconds": 30, "notify_style": "system", "approvals_interval": 500, "sandboxes_interval": 5000, "connections_interval": 4000,
             "sandbox_ai_home": str(env / "checkout"), "default_agent": "codex", "default_backend": "bwrap",
             "default_template": "research", "board_grid": 40, "auto_tabs": False, "guide_nodes": False,
-            "guide_tour": False, "intro": False, "debug": True, "help_buttons": False, "web_without_sandbox": True}
+            "guide_tour": False, "intro": False, "debug": True, "help_buttons": False, "web_without_sandbox": True,
+            "show_flags": True}
 
 
 def field_value(widget):
